@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope } from "@loom/shared";
+import { resolveIdPrefix } from "../id-prefix.js";
+import type { Db } from "../db.js";
 
 /**
  * `question_ask`'s Requests-object input shape (card 695ebab0), shared verbatim by the manager
@@ -43,14 +45,32 @@ export interface QuestionAskInput {
  * `action` — there is nothing for the human to authorize/deny without one). Per-type fields NOT relevant
  * to the resolved `type` are silently dropped rather than rejected, so an agent that always passes every
  * field it knows about (harmless extras) never gets a spurious error.
+ *
+ * `taskId` (card 9be9784a) is resolved to a FULL task id here — via the same `resolveIdPrefix` the
+ * `loom-tasks` tools use, scoped to `ctx.projectId`'s own tasks — and the RESOLVED id is what's stored.
+ * Every other `loom-tasks` tool accepts an unambiguous 8-char id-prefix (the form Loom displays), so a
+ * manager naturally passes one here too; storing it verbatim used to orphan the Request from its card
+ * (the connected-requests read matches on the full id). An ambiguous or unknown `taskId` is now rejected
+ * outright rather than silently stored as a dead link.
  */
 export function buildQuestionAsk(
   input: QuestionAskInput,
-  ctx: { sessionId: string; projectId: string },
+  ctx: { sessionId: string; projectId: string; db: Db },
 ): { question: Question } | { error: string } {
   const type: QuestionType = input.type ?? "decision";
   if (type === "permission" && !input.action?.trim()) {
     return { error: 'type:"permission" requires a non-empty `action` describing what you want authorized' };
+  }
+  let taskId: string | null = null;
+  if (input.taskId) {
+    const r = resolveIdPrefix(ctx.db.listTasks(ctx.projectId), input.taskId);
+    if (r.kind === "ambiguous") {
+      return { error: `ambiguous task id-prefix '${input.taskId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
+    }
+    if (r.kind === "none") {
+      return { error: `taskId '${input.taskId}' does not match any task on this project's board — pass a full task id, an unambiguous 8-char prefix, or omit taskId` };
+    }
+    taskId = r.record.id;
   }
   const now = new Date().toISOString();
   return {
@@ -63,7 +83,7 @@ export function buildQuestionAsk(
       body: input.body,
       options: type === "decision" && input.options && input.options.length > 0 ? input.options : null,
       recommendation: type === "decision" ? (input.recommendation ?? null) : null,
-      taskId: input.taskId ?? null,
+      taskId,
       permissionAction: type === "permission" ? (input.action as string) : null,
       permissionScope: type === "permission" ? (input.scope ?? null) : null,
       permissionExpiresAt: type === "permission" ? (input.expiresAt ?? null) : null,

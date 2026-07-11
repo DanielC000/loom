@@ -83,6 +83,12 @@ try {
   db.insertTask({ id: T, projectId: projId, title: "card with requests", body: "b", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
   const emptyTaskId = "cccccccc-0000-4000-8000-000000000002";
   db.insertTask({ id: emptyTaskId, projectId: projId, title: "card with NO requests", body: "b", columnKey: "backlog", position: 2, priority: "p2", createdAt: now, updatedAt: now });
+  // A same-prefix pair, distinct from T/emptyTaskId, purely to exercise question_ask's AMBIGUOUS
+  // taskId-prefix rejection (card 9be9784a part H) without disturbing section (G)'s use of T's prefix.
+  const ambigA = "dddddddd-0000-4000-8000-000000000003";
+  const ambigB = "dddddddd-0000-4000-8000-000000000004";
+  db.insertTask({ id: ambigA, projectId: projId, title: "ambiguous prefix A", body: "b", columnKey: "backlog", position: 3, priority: "p2", createdAt: now, updatedAt: now });
+  db.insertTask({ id: ambigB, projectId: projId, title: "ambiguous prefix B", body: "b", columnKey: "backlog", position: 4, priority: "p2", createdAt: now, updatedAt: now });
 
   const wakes = new WakeService({ db, pty: { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getActiveTurnOrigin: () => null }, resume: () => {} });
   const taskRouter = new TaskMcpRouter(db, wakes);
@@ -192,31 +198,48 @@ try {
   const unknownTaskList = await tCallList("task_requests_list", { taskId: "not-a-real-task-id" });
   check("(F) task_requests_list on an unknown taskId errors (task not found), not an empty list", typeof unknownTaskList.error === "string");
 
-  // CR follow-up: the EXACT leak scenario — `question_ask`'s `taskId` is agent-supplied and NEVER
-  // validated against the asking session's own project (questionTool.ts's buildQuestionAsk), so a
-  // manager in a DIFFERENT project can file a request that carries THIS project's task id, T. Before the
-  // fix, `db.listQuestionsForTask` filtered ONLY on task_id — this foreign-project row would leak into
-  // both the list and the tasks_get summary (metadata only, never the secret — but still a cross-project
-  // trust-boundary asymmetry vs. task_request_get's own projectId guard).
+  // CR follow-up, now closed by card 9be9784a: `question_ask`'s `taskId` USED to be agent-supplied and
+  // NEVER validated against the asking session's own project (questionTool.ts's buildQuestionAsk), so a
+  // manager in a DIFFERENT project could file a request that carried THIS project's task id, T — a
+  // foreign-project row that would leak (metadata only, never the secret) into both the list and the
+  // tasks_get summary if the READ side ever slipped. Since 9be9784a, `buildQuestionAsk` resolves `taskId`
+  // via `resolveIdPrefix` scoped to the CALLER's OWN project tasks (`ctx.db.listTasks(ctx.projectId)`) —
+  // the same scoping `resolveProjectTaskId` uses for every other `loom-tasks` tool — so a taskId from
+  // another project no longer resolves at all: the write itself is now rejected, closing the gap at the
+  // source instead of relying solely on the read-side project guard below.
   const beforeLeakCounts = await tCall("tasks_get", { id: T });
   const foreignSameTaskId = askParse(await otherServer._registeredTools["question_ask"].handler({
     title: "Foreign-project ask carrying THIS project's task id", body: "b", taskId: T,
   }));
-  check("(F) the foreign question_ask succeeded (proves taskId truly is unvalidated — the real vector)", typeof foreignSameTaskId.questionId === "string");
-  check("(F) the foreign row really is stamped with project pB's projectId + project pA's task id (the exact leak setup)", db.getQuestion(foreignSameTaskId.questionId).projectId === otherProjId && db.getQuestion(foreignSameTaskId.questionId).taskId === T);
-
-  const listAfterForeign = await tCallList("task_requests_list", { taskId: T });
-  check("(F) task_requests_list from pA does NOT surface the foreign pB request, despite matching task_id", !listAfterForeign.some((r) => r.id === foreignSameTaskId.questionId));
+  check("(F) the foreign question_ask is REJECTED — taskId no longer resolves outside the caller's own project", typeof foreignSameTaskId.error === "string");
   const summaryAfterForeign = await tCall("tasks_get", { id: T });
-  check("(F) tasks_get's requests summary total is UNCHANGED by the foreign request (not double-counted)", summaryAfterForeign.requests.total === beforeLeakCounts.requests.total);
-  check("(F) tasks_get's requests.items does NOT list the foreign request's id", !summaryAfterForeign.requests.items.some((it) => it.id === foreignSameTaskId.questionId));
-  const foreignRequestGet = await tCall("task_request_get", { id: foreignSameTaskId.questionId, taskId: T });
-  check("(F) task_request_get from pA still refuses the foreign request even when taskId=T is passed", typeof foreignRequestGet.error === "string");
+  check("(F) tasks_get's requests summary total is UNCHANGED (the foreign ask never created a row)", summaryAfterForeign.requests.total === beforeLeakCounts.requests.total);
 
   // ============================ (G) taskId accepts an unambiguous 8-char id-prefix =======================
   const prefix = T.slice(0, 8);
   const byPrefix = await tCallList("task_requests_list", { taskId: prefix });
   check("(G) task_requests_list resolves an 8-char taskId prefix", Array.isArray(byPrefix) && byPrefix.length >= 1);
+
+  // ============================ (H) card 9be9784a: question_ask resolves an 8-char taskId PREFIX ========
+  // Before the fix, `taskId` was stored VERBATIM (the raw prefix), so the connected-requests read (which
+  // matches on the FULL task id) never found it — a silent no-op that LOOKED like it worked (question_ask
+  // still returned a questionId, no error).
+  const prefixAsk = await ask({ title: "Prefix-linked ask", body: "b", taskId: prefix });
+  check("(H) question_ask with an 8-char taskId PREFIX returns a questionId (no error)", typeof prefixAsk.questionId === "string");
+  check("(H) the stored row's taskId is the RESOLVED FULL id, not the raw prefix", db.getQuestion(prefixAsk.questionId).taskId === T);
+  const taskAfterPrefixAsk = await tCall("tasks_get", { id: T });
+  check("(H) the Request now appears in tasks_get's connected-requests summary for the full-id task", taskAfterPrefixAsk.requests.items.some((it) => it.id === prefixAsk.questionId));
+  const prefixLinkedList = await tCallList("task_requests_list", { taskId: T });
+  check("(H) the Request appears in the task-scoped task_requests_list read too", prefixLinkedList.some((r) => r.id === prefixAsk.questionId));
+
+  // Ambiguous prefix → clean rejection (does NOT silently pick one, does NOT store a dead link).
+  const ambigPrefix = ambigA.slice(0, 8);
+  const ambigAsk = await ask({ title: "Ambiguous prefix ask", body: "b", taskId: ambigPrefix });
+  check("(H) an AMBIGUOUS taskId prefix is cleanly rejected, not silently stored", typeof ambigAsk.error === "string" && ambigAsk.error.includes("ambiguous"));
+
+  // Unknown (well-formed, 8+ char) prefix → clean rejection, not silently stored as a dead link.
+  const unknownAsk = await ask({ title: "Unknown taskId ask", body: "b", taskId: "ffffffff" });
+  check("(H) an UNKNOWN taskId is cleanly rejected", typeof unknownAsk.error === "string");
 
   await tClient.close();
 } finally {
@@ -225,6 +248,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a REAL question_ask call stamps task_id end-to-end; tasks_get's connected-requests summary ({total,answered,pending,items}) is correct before/after an answer (real-agent MCP tool calls, not just unit tests); task_requests_list/task_request_get are NON-CONSUMING (re-readable across repeated calls AND after the asking agent's own question_pull has drained+consumed the row, whose own semantics stay unchanged); task_request_get never returns secret_blob/secret for a credential request (only a non-secret ack, null while pending); a pending permission reads approved:null rather than a misleading false; project/task scoping rejects a mismatched taskId and a cross-project request id — INCLUDING a foreign-project question_ask carrying THIS project's task id (taskId is agent-supplied + unvalidated against the asker's own project), which does NOT leak into task_requests_list or tasks_get's summary (symmetric with task_request_get's own project guard); and taskId resolution accepts an unambiguous 8-char id-prefix."
+  ? "\n✅ ALL PASS — a REAL question_ask call stamps task_id end-to-end; tasks_get's connected-requests summary ({total,answered,pending,items}) is correct before/after an answer (real-agent MCP tool calls, not just unit tests); task_requests_list/task_request_get are NON-CONSUMING (re-readable across repeated calls AND after the asking agent's own question_pull has drained+consumed the row, whose own semantics stay unchanged); task_request_get never returns secret_blob/secret for a credential request (only a non-secret ack, null while pending); a pending permission reads approved:null rather than a misleading false; project/task scoping rejects a mismatched taskId and a cross-project request id — INCLUDING a foreign-project question_ask carrying another project's task id, now REJECTED OUTRIGHT at write time (card 9be9784a: taskId resolution is scoped to the caller's own project); task_requests_list resolves an unambiguous 8-char taskId prefix; AND (card 9be9784a) question_ask itself now resolves an 8-char taskId PREFIX to the full id and stores THAT — so the soft-link actually connects — while an ambiguous or unknown prefix is cleanly rejected instead of silently stored as a dead link."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

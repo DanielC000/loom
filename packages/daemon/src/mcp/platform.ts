@@ -1474,7 +1474,7 @@ export class PlatformMcpRouter {
         if (!callerSessionId) return ok({ error: "no caller session" });
         const projectId = db.getSession(callerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId });
+        const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId, db });
         if ("error" in built) return ok({ error: built.error });
         db.insertQuestion(built.question);
         return ok({ questionId: built.question.id });
