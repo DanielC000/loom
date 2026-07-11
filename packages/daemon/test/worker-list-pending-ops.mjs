@@ -48,6 +48,7 @@ const PENDING_SPAWN = { opId: "op-spawn-1", kind: "spawn", key: "spawn:task-spaw
 const sessionsStub = {
   peekPendingMerge(workerSessionId) { return workerSessionId === "w-merging" ? PENDING_MERGE_VIEW : undefined; },
   listPendingSpawns(managerSessionId) { return managerSessionId === "mgr" ? [PENDING_SPAWN] : []; },
+  listCapQueuedSpawns() { return []; }, // no cap-queued markers in this stub's scenario — exercised for real in worker-spawn-cap-queue.mjs
 };
 
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));

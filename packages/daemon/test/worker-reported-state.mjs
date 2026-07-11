@@ -98,6 +98,7 @@ ev("w-other", "MGR2", "worker_report", at(10), { status: "done", summary: "not y
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ ({
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
+  listCapQueuedSpawns() { return []; },
 }));
 const server = router.buildServer("MGR", "manager");
 const [clientT, serverT] = InMemoryTransport.createLinkedPair();

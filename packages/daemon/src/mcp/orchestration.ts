@@ -12,6 +12,7 @@ import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
+import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
@@ -697,12 +698,36 @@ export class OrchestrationMcpRouter {
         reportedState: null,
         awaitingReview: false,
       }));
-      return [...workers, ...pendingSpawns];
+      // A worker_spawn REJECTED purely because the concurrency cap was full gets its own ADDITIVE
+      // placeholder row — distinct from `pendingSpawn` above (which is an IN-FLIGHT spawn still
+      // provisioning): this one never started at all. `workerSessionId:null`,
+      // `processState:"cap-queued"` (a value no real worker row ever has), `reportedState:null`,
+      // `awaitingReview:false` — so an existing "count live workers" / "find one awaiting review"
+      // consumer skips it exactly like a pendingSpawn row. See CapQueueRegistry's class doc: this is a
+      // VISIBILITY marker only — nothing auto-dispatches it; the manager re-drives it via worker_spawn.
+      const capQueued = sessions.listCapQueuedSpawns(managerSessionId).map((e) => ({
+        workerSessionId: null,
+        taskId: e.taskId,
+        processState: "cap-queued" as const,
+        busy: false,
+        branch: null,
+        ctxInputTokens: null,
+        model: null,
+        lastActivity: e.queuedAt,
+        lastEngineOutputAt: null,
+        pendingMerge: null,
+        rateLimitedUntil: null,
+        rateLimitDeadline: null,
+        capQueued: { opId: e.opId, agentId: e.agentId, taskId: e.taskId, kickoffLabel: e.kickoffLabel, queuedAt: e.queuedAt },
+        reportedState: null,
+        awaitingReview: false,
+      }));
+      return [...workers, ...pendingSpawns, ...capQueued];
     };
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result.", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is still running its gate in the background — poll here or re-call worker_merge_confirm to fetch the result once ready. `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all, it's just a VISIBILITY marker so you don't forget to re-drive it; nothing auto-dispatches it, and it clears itself once you successfully worker_spawn the same taskId (or, for a taskless spawn, the same agentId) again. Never count either placeholder as live or awaiting review.", inputSchema: {} },
       async () => ok(fleetView()),
     );
 
@@ -795,7 +820,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_spawn",
       {
-        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker (e.g. a read-only Code Reviewer pointed at another worker's branch via its kickoffPrompt) that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (so a read-only reviewer can run alongside a live author on the SAME logical work without a throwaway vehicle card, and two taskless spawns never collide with each other). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath} exactly as before; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape (byte-identical to before).",
+        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker (e.g. a read-only Code Reviewer pointed at another worker's branch via its kickoffPrompt) that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (so a read-only reviewer can run alongside a live author on the SAME logical work without a throwaway vehicle card, and two taskless spawns never collide with each other). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath} exactly as before; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape (byte-identical to before). CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` exactly as before, PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost; re-call worker_spawn with the same args once a slot frees (nothing auto-dispatches it for you).",
         inputSchema: {
           taskId: z.string().optional(),
           agentId: z.string(),
@@ -805,11 +830,15 @@ export class OrchestrationMcpRouter {
       async ({ taskId, agentId, kickoffPrompt }) => {
         // A usage-limit refusal carries a STRUCTURED retry-after deadline (PL Auditor finding #7) so the
         // manager can schedule a wake to it instead of guessing (and the daemon also auto-wakes it on
-        // hold-clear). Surface `retryAfter` alongside the message — NOT a bare string. spawnWorkerTracked
-        // never throws it synchronously (a slow/attached call resolves through the registry instead), so
-        // this is checked on BOTH the settled-failed result AND a defensive catch below.
+        // hold-clear). Surface `retryAfter` alongside the message — NOT a bare string. A concurrency-cap
+        // refusal similarly carries the recorded cap-queued marker — surface `capQueued` alongside the
+        // message so the caller knows the intent is now visible in worker_list, not lost. Neither
+        // spawnWorkerTracked throws synchronously (a slow/attached call resolves through the registry
+        // instead), so both are checked on BOTH the settled-failed result AND a defensive catch below.
         const asUsageLimitOrMessage = (e: unknown) =>
-          e instanceof UsageLimitError ? { error: e.message, retryAfter: e.retryAfter } : { error: e instanceof Error ? e.message : String(e) };
+          e instanceof UsageLimitError ? { error: e.message, retryAfter: e.retryAfter }
+          : e instanceof CapQueueRejectedError ? { error: e.message, capQueued: e.capQueued }
+          : { error: e instanceof Error ? e.message : String(e) };
         try {
           const r = await sessions.spawnWorkerTracked(managerSessionId, { taskId, agentId, kickoffPrompt });
           if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: "still spawning — poll worker_list (a pendingSpawn placeholder row) or re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt to fetch the result once ready." });

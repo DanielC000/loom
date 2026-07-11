@@ -86,6 +86,7 @@ db.insertSession({ id: "w-not-in-pty", projectId: projId, agentId, engineSession
 const sessionsStub = {
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
+  listCapQueuedSpawns() { return []; },
 };
 
 const host = new TestPtyHost(events);

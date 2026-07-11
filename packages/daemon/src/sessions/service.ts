@@ -40,6 +40,7 @@ import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult } from "../orchestration/gate-runner.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
+import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
@@ -446,6 +447,14 @@ export class SessionService {
    * finally once the row is live (the liveHolder guard then owns exclusion) or on any failure.
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
+  /**
+   * BOUNDED visibility marker for a worker_spawn REJECTED purely because the concurrency cap was at
+   * capacity (a distinct failure mode from {@link inFlightSpawnTaskIds}, which guards a live in-flight
+   * spawn against a same-taskId race — this records an intent that never even started). See
+   * {@link CapQueueRegistry} for the full contract; surfaced via {@link listCapQueuedSpawns} as a
+   * worker_list placeholder row, and NEVER auto-dispatched — the manager re-drives it itself.
+   */
+  private readonly capQueue = new CapQueueRegistry();
   /**
    * CLIENT-TIMEOUT RESILIENCE registry (card fb8df559 Part 1) — a THIN OUTER layer around
    * spawnWorker/confirmWorkerMerge (via {@link spawnWorkerTracked}/{@link confirmWorkerMergeTracked}),
@@ -2818,7 +2827,13 @@ export class SessionService {
     // so a sibling manager's in-flight spawn can only make this check reject EARLIER — never let the fleet overshoot.)
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
-    if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) throw new Error(`concurrency cap reached (${cap})`);
+    if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) {
+      // Record the rejected intent so it stays VISIBLE via worker_list instead of silently
+      // disappearing — see CapQueueRegistry's class doc. Purely additive: the thrown error's
+      // `.message` is byte-identical to before; only CapQueueRejectedError.capQueued is new.
+      const capQueued = this.capQueue.record(managerSessionId, workerAgent.id, taskId, opts.kickoffPrompt);
+      throw new CapQueueRejectedError(cap, capQueued);
+    }
     this.inFlightSpawnTaskIds.add(claimKey);
     try {
       // A noCommit/read-only rig (Code Reviewer, Docs & Vault, …) never runs a build gate, so skip the
@@ -2913,6 +2928,11 @@ export class SessionService {
       // actual start — only the point at which this call's result resolves. Tasked spawns only; taskless
       // has no card title to check against.
       const shippedMatch = taskId && taskTitle ? await findShippedCardMatch(project.repoPath, taskTitle) : null;
+      // The "I re-drove it" signal: a successful spawn clears any cap-queued marker for
+      // the same taskId (tasked) or the same agentId (taskless, no stable per-call key) so the
+      // worker_list placeholder doesn't linger alongside the now-real worker row.
+      if (taskId) this.capQueue.clearForTask(taskId);
+      else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
       return { ...worker, processState: "live", shippedMatch };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
@@ -2970,6 +2990,13 @@ export class SessionService {
       const raw = op.key.slice("spawn:".length);
       return { ...op, taskId: raw.startsWith("taskless:") ? null : raw };
     });
+  }
+
+  /** Read-only listing of cap-rejected spawn intents for worker_list's cap-queued placeholder rows —
+   *  see {@link CapQueueRegistry}. Distinct from {@link listPendingSpawns}: a pending spawn is
+   *  IN-FLIGHT (still provisioning); a cap-queued entry never started at all. */
+  listCapQueuedSpawns(managerSessionId: string): CapQueuedSpawn[] {
+    return this.capQueue.listByManager(managerSessionId);
   }
 
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it). */
