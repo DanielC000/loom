@@ -1,14 +1,16 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Agent-tooling P4 follow-on (board card 3b0c4aef): the FIRST real credential-tied catalog capability
 // (GitHub MCP) — end-to-end proof of the requiresConnection connection-bind path with a REAL registered
-// row, not just the fake capability capability-registry.mjs already covers generically. DETERMINISTIC +
-// CLAUDE-FREE + NETWORK-FREE: isolated LOOM_HOME, a real (temp) Db + the real P1 connection store (a real
-// encrypted connection row, decrypted through the real getSecretForUse seam), and a fixture "echo-env"
-// script standing in for the real npx-resolved GitHub MCP server so the test never touches the network.
+// row, not just the fake capability capability-registry.mjs already covers generically. Migrated off the
+// archived `@modelcontextprotocol/server-github` (npx) onto the Loom-managed `github-binary` provision kind
+// — see github-binary-provision.mjs / github-binary-download.mjs for that download/verify/extract pipeline
+// itself; THIS test's job is the credential-tie plumbing, proven via a fixture "echo-env" script standing
+// in for the real github-mcp-server binary so it stays DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE
+// (LOOM_GITHUB_MCP_NO_PROVISION=1 disables any real download of the actually-seeded row too).
 //
 // Proves:
 //   (a) seedDefaultCapabilities seeds exactly one "github" row, seed-if-absent (idempotent), with the
-//       documented shape: requiresConnection, secretEnvVar, a non-blank resolved "npx"-style command, and
+//       documented shape: requiresConnection, secretEnvVar, provision {kind:"github-binary", version}, and
 //       an "mcp__github" tool allow entry.
 //   (b) resolveCapabilityServer resolves the seeded row generically (the SAME dispatch an owner-added row
 //       gets — github is a plain capability_defs row, not a 4th hardcoded builtin slug).
@@ -20,11 +22,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) a REAL child_process spawn (not a mocked exec call) of the resolved {command,args,env} proves the
 //       secret arrives through the OS process env and is ABSENT from the spawned process's own argv — the
 //       "throwaway echo-env MCP" the task's stub-verify path calls for.
-//   (f) CODE-REVIEW FIX: the seeded row stores the BARE "npx" command, never a path pre-resolved at seed
-//       time — resolveCapabilityServer's bundled branch re-resolves it live at EVERY call (self-heal, like
-//       the three hardcoded builtins), so a capability that's unresolvable on ONE call (a stripped-PATH
-//       boot, npm not yet installed) resolves cleanly on a LATER call once the binary becomes reachable —
-//       never permanently frozen to whatever PATH looked like at seed time.
+//   (f) CODE-REVIEW FIX (generic "bundled"-kind self-heal, unrelated to github's own seed shape): a bare
+//       command stored in a "bundled" provision is never pre-resolved at seed time — resolveCapabilityServer's
+//       bundled branch re-resolves it live at EVERY call (self-heal, like the three hardcoded builtins), so a
+//       capability that's unresolvable on ONE call (a stripped-PATH boot, the binary not yet installed)
+//       resolves cleanly on a LATER call once it becomes reachable — never permanently frozen to whatever
+//       PATH looked like at seed time.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/github-capability.mjs
 import fs from "node:fs";
@@ -41,6 +44,10 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-gh-cap-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// The seeded row now provisions via github-binary (a download), NOT npx — disable real provisioning so a
+// cold resolve of the REAL seeded row never kicks a real network download in this NETWORK-FREE test (the
+// download/checksum/extract pipeline itself is covered separately in github-binary-download.mjs).
+process.env.LOOM_GITHUB_MCP_NO_PROVISION = "1";
 
 const { Db } = await import("../dist/db.js");
 const { seedDefaultCapabilities, bundledCapabilities } = await import("../dist/capabilities/seed.js");
@@ -73,10 +80,10 @@ check("(seed) secretEnvVar is a non-blank string", typeof ghRow.secretEnvVar ===
 check("(seed) tool allowlist grants the whole 'mcp__github' server (mirrors the mcp__playwright convention)",
   JSON.parse(ghRow.toolAllowlistJson).includes("mcp__github"));
 const ghProvision = JSON.parse(ghRow.provisionJson);
-check("(seed) provision kind is 'bundled' (no save-time resolvability requirement — must never fail boot)", ghProvision.kind === "bundled");
-check("(seed) provision.command is the BARE literal 'npx' (CODE-REVIEW FIX: never pre-resolved/frozen at seed time)",
-  ghProvision.command === "npx");
-check("(seed) provision.args reference '-y' (npx non-interactive auto-install)", ghProvision.args?.includes("-y"));
+check("(seed) provision kind is 'github-binary' (the Loom-managed downloaded Go binary, replacing the archived npx package)", ghProvision.kind === "github-binary");
+check("(seed) row.kind (top-level) matches provisionJson.kind", ghRow.kind === "github-binary");
+check("(seed) provision.version is a non-blank string (the pinned github-mcp-server release)",
+  typeof ghProvision.version === "string" && ghProvision.version.length > 0);
 check("(seed) description names the bound PAT's own scopes as the containment boundary for the granted tool surface",
   ghRow.description.toLowerCase().includes("scope"));
 
@@ -92,7 +99,7 @@ check("(seed) bundledCapabilities() returns the same single 'github' definition"
 // github is a PLAIN capability_defs row — it must go through the exact same generic dispatch an owner-added
 // row would (unlike the three hardcoded builtin slugs, which never see resolveConnectionSecret at all).
 const resolvedNoSecret = resolveCapabilityServer(ghRow, {});
-check("(resolve) with no connectionSecret, mounts WITHOUT an env block (or unresolved if npx truly absent on this host)",
+check("(resolve) with no connectionSecret, mounts WITHOUT an env block (or unresolved — provisioning is disabled in this network-free test)",
   resolvedNoSecret === null || resolvedNoSecret.env === undefined);
 
 // ===================== (c) end-to-end through buildMcpServers with a REAL P1 connection =====================
@@ -106,21 +113,21 @@ const withGithub = buildMcpServers({
   capabilityCatalog: catalog,
   resolveConnectionSecret: (id) => getSecretForUse(db, id),
 });
-// The real npx-resolved command may or may not exist on THIS test host — if it resolved, the capability
-// mounts and we assert the credential tie; if npx genuinely isn't on PATH here, it gracefully log-and-skips
-// (proven generically by capability-registry.mjs) — this test's job is the credential tie specifically, so
-// skip that half gracefully rather than fail the whole suite on an environment quirk.
+// Real github-binary provisioning is DISABLED in this network-free test (LOOM_GITHUB_MCP_NO_PROVISION=1),
+// so the real seeded row never actually downloads/mounts here — that graceful cold-skip is proven
+// generically by github-binary-provision.mjs. This test's job is the credential tie specifically, so it
+// skips that half gracefully and proves it instead via the fixture-forced resolution below.
 if (withGithub.github) {
   check("(e2e) the real stub token rides the mounted 'github' server's OWN env under secretEnvVar",
     withGithub.github.env?.[ghRow.secretEnvVar] === STUB_TOKEN);
   check("(e2e) the stub token NEVER lands in the mounted server's args", !(withGithub.github.args ?? []).includes(STUB_TOKEN));
 } else {
-  console.log("SKIP  (e2e) 'github' capability did not resolve on this host (npx unresolvable) — credential-tie assertions skipped, covered instead via the fixture-forced resolution below");
+  console.log("SKIP  (e2e) 'github' capability did not resolve (github-binary provisioning disabled in this network-free test) — credential-tie assertions skipped, covered instead via the fixture-forced resolution below");
 }
 
 // ===================== (d) HARD DoD: the secret never rides claude's argv or the redacted spawn log =====================
-// Force resolution via the fixture (bypassing any real-npx dependency) so this DoD-critical assertion is
-// NEVER environment-dependent — the whole point is proving the plumbing, independent of whether npx exists
+// Force resolution via the fixture (bypassing any real download dependency) so this DoD-critical assertion is
+// NEVER environment-dependent — the whole point is proving the plumbing, independent of whether the binary exists
 // on the machine running this test.
 const ghRowFixture = { ...ghRow, provisionJson: JSON.stringify({ kind: "bundled", command: process.execPath, args: [ECHO_ENV_FIXTURE] }) };
 const withGithubFixture = buildMcpServers({
@@ -205,6 +212,6 @@ db.close();
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GitHub capability (agent-tooling P4 follow-on 3b0c4aef): seed-if-absent seeding of a BARE 'npx' command (never pre-resolved), generic resolveCapabilityServer/buildMcpServers dispatch (no bespoke host.ts path), a REAL P1 connection's token injected ONLY into the mounted server's env, secret-free claude argv + redacted spawn log, a REAL child_process spawn proving OS-level env-only delivery with an argv-free subprocess, and spawn-time self-heal re-resolution (never frozen to seed-time PATH) — claude-free, network-free."
+  ? "\n✅ ALL PASS — GitHub capability (agent-tooling P4 follow-on 3b0c4aef, migrated off npx to github-binary): seed-if-absent seeding of the github-binary/version provision shape, generic resolveCapabilityServer/buildMcpServers dispatch (no bespoke host.ts path), a REAL P1 connection's token injected ONLY into the mounted server's env, secret-free claude argv + redacted spawn log, a REAL child_process spawn proving OS-level env-only delivery with an argv-free subprocess, and spawn-time self-heal re-resolution of a generic bare 'bundled' command (never frozen to seed-time PATH) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

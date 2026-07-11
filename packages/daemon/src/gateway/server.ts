@@ -36,7 +36,7 @@ import { COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES } from "../companion/capab
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
-import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef } from "../capabilities/registry.js";
+import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
 import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
@@ -573,6 +573,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/python/provisioning/retry", async () => {
     prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
     return getMarkitdownProvisionStatus();
+  });
+
+  // --- github-mcp-server (Loom-managed downloaded Go binary) provisioning status + retry. HUMAN/REST-ONLY
+  // (loopback), NOT an MCP tool — same trust posture as the markitdown pair above (provisioning downloads +
+  // executes a host binary). GET is read-only (idle when the row/status doesn't exist yet — e.g. before the
+  // first spawn that granted the "github" capability ever cold-resolved it); POST re-kicks resolution OFF
+  // the event loop by re-running resolveCapabilityServer against the live row (a pure delegation — the kick
+  // itself is retryable, deduped only while genuinely in-flight, per resolveGithubBinary in registry.ts).
+  app.get("/api/github-mcp/provisioning", async () => getCapabilityProvisionStatus("github") ?? { state: "idle" });
+  app.post("/api/github-mcp/provisioning/retry", async () => {
+    const row = deps.db.getCapabilityDefBySlug("github");
+    if (row) resolveCapabilityServer(row, {});
+    return getCapabilityProvisionStatus("github") ?? { state: "idle" };
   });
 
   // --- Deja capture status (card 1c0c1a2c): the count of mockups ever captured into Deja's global

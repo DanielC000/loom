@@ -4,8 +4,10 @@
  * OWNER-ADDED half only: CRUD against the `capability_defs` table, input validation, the GENERIC
  * provisioning dispatch (node-package | python-venv | bundled | command — the fourth kind, an
  * owner-typed arbitrary `command`, is OWNER-APPROVED as owner-typed-therefore-trusted, the same trust
- * model as `gateCommand`: trust is about who-can-set, not sandboxing what's set), and a PER-SLUG
- * python-venv provisioning tracker (so N owner-added python-venv capabilities provision independently,
+ * model as `gateCommand`: trust is about who-can-set, not sandboxing what's set — PLUS `github-binary`, a
+ * SEED-ONLY fifth kind for the bundled "github" capability's Loom-managed downloaded binary, never
+ * owner-typeable via `validateCapabilityDefInput`), and a PER-SLUG provisioning tracker shared by
+ * python-venv AND github-binary (so N provisioning capabilities — of either kind — provision independently,
  * never sharing one in-flight flag).
  *
  * The three BUILTIN capabilities (browser-testing/document-conversion/deja-corpus) are NOT rows in this
@@ -35,6 +37,8 @@ import { createRequire } from "node:module";
 import type { CapabilityProvisionKind, CapabilitySummary } from "@loom/shared";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
+import { loomGithubMcpBin, ensureGithubMcpBinaryAsync } from "./github-binary.js";
+import type { EnsureGithubBinaryOpts, EnsureGithubBinaryResult, GithubBinaryProvisionOutcome } from "./github-binary.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
 import { isLoomDev } from "../paths.js";
 
@@ -69,7 +73,8 @@ export type CapabilityProvision =
   | { kind: "node-package"; package: string; binRelativeToPackageJson: string }
   | { kind: "python-venv"; packages: string[]; binary: string; probeImport?: string }
   | { kind: "bundled"; command: string; args?: string[] }
-  | { kind: "command"; command: string; args?: string[] };
+  | { kind: "command"; command: string; args?: string[] }
+  | { kind: "github-binary"; version: string };
 
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
@@ -243,14 +248,18 @@ export interface ResolveCapabilityCtx {
 }
 export type CapabilityMcpServer = { type: "stdio"; command: string; args: string[]; env?: Record<string, string> };
 
-/** Per-slug provisioning state (mirrors host.ts's markitdown globals, generalized to N independent slugs). */
+/** Per-slug provisioning state (mirrors host.ts's markitdown globals, generalized to N independent slugs
+ *  AND to more than one provisioning kind — python-venv and github-binary share this ONE tracker, keyed
+ *  by slug, since slugs are unique across the whole catalog). */
 export type CapabilityProvisionState = "idle" | "installing" | "ready" | "failed";
-export interface CapabilityProvisionStatus { state: CapabilityProvisionState; reason?: ProvisionOutcome; errorTail?: string; binary?: string; lastAttemptAt?: number }
+export interface CapabilityProvisionStatus { state: CapabilityProvisionState; reason?: ProvisionOutcome | GithubBinaryProvisionOutcome; errorTail?: string; binary?: string; lastAttemptAt?: number }
 const provisionStatus = new Map<string, CapabilityProvisionStatus>();
 const provisionInFlight = new Map<string, Promise<void>>();
 const resolvedBinCache = new Map<string, string>();
 type CapabilityProvisioner = (opts: EnsurePythonPackageOpts) => Promise<EnsurePythonResult>;
 let provisioner: CapabilityProvisioner = ensurePythonPackageAsync;
+type GithubBinaryProvisioner = (opts: EnsureGithubBinaryOpts) => Promise<EnsureGithubBinaryResult>;
+let githubBinaryProvisioner: GithubBinaryProvisioner = ensureGithubMcpBinaryAsync;
 
 /** Current per-slug provisioning status (a copy), or undefined if never attempted for this slug. */
 export function getCapabilityProvisionStatus(slug: string): CapabilityProvisionStatus | undefined {
@@ -258,9 +267,17 @@ export function getCapabilityProvisionStatus(slug: string): CapabilityProvisionS
   return s ? { ...s } : undefined;
 }
 
-/** TEST-ONLY: swap the provisioner + reset ALL per-slug state (mirrors __setMarkitdownProvisionerForTest). */
+/** TEST-ONLY: swap the python-venv provisioner + reset ALL per-slug state (mirrors __setMarkitdownProvisionerForTest). */
 export function __setCapabilityProvisionerForTest(fn?: CapabilityProvisioner): void {
   provisioner = fn ?? ensurePythonPackageAsync;
+  provisionStatus.clear();
+  provisionInFlight.clear();
+  resolvedBinCache.clear();
+}
+
+/** TEST-ONLY: swap the github-binary provisioner + reset ALL per-slug state (same shared tracker as above). */
+export function __setGithubBinaryProvisionerForTest(fn?: GithubBinaryProvisioner): void {
+  githubBinaryProvisioner = fn ?? ensureGithubMcpBinaryAsync;
   provisionStatus.clear();
   provisionInFlight.clear();
   resolvedBinCache.clear();
@@ -269,14 +286,19 @@ export function __setCapabilityProvisionerForTest(fn?: CapabilityProvisioner): v
 // Mirrors MARKITDOWN_PIP_TIMEOUT_MS (host.ts) — a heavy first pip install needs headroom, still bounded.
 const CAPABILITY_PIP_TIMEOUT_MS = 900_000;
 
-function kickCapabilityProvision(slug: string, provision: Extract<CapabilityProvision, { kind: "python-venv" }>, pythonInterpreterPath?: string): void {
+/** One provisioning job's result — the shape every kind-specific provisioner (python-venv, github-binary,
+ *  future kinds) normalizes to before handing it to the ONE shared kick/status machinery below. */
+interface CapabilityProvisionJobResult { binary: string | null; outcome: ProvisionOutcome | GithubBinaryProvisionOutcome; errorTail?: string }
+
+/** Kick a per-slug BACKGROUND provisioning job — kind-agnostic (the caller's `run` closure does the actual
+ *  kind-specific work: pip install, or download+verify+extract). Dedupes ONLY a genuinely in-flight job
+ *  (retryable after a terminal outcome); never downgrades an already-`ready` status (a concurrent resolve
+ *  may have proven the binary present first). */
+function kickCapabilityProvision(slug: string, run: () => Promise<CapabilityProvisionJobResult>): void {
   if (provisionInFlight.get(slug)) return; // dedupe ONLY a genuinely in-flight install (retryable after terminal)
   const attemptAt = Date.now();
   provisionStatus.set(slug, { state: "installing", lastAttemptAt: attemptAt });
-  const job = provisioner({
-    package: provision.packages, binary: provision.binary, probeImport: provision.probeImport,
-    timeoutMs: CAPABILITY_PIP_TIMEOUT_MS, interpreterOverride: pythonInterpreterPath,
-  })
+  const job = run()
     .then((res) => {
       if (res.outcome === "ready" && res.binary) {
         resolvedBinCache.set(slug, res.binary);
@@ -312,7 +334,42 @@ function resolvePythonVenv(slug: string, provision: Extract<CapabilityProvision,
     provisionStatus.set(slug, { state: "ready", binary: bin, lastAttemptAt: Date.now() });
     return bin;
   }
-  kickCapabilityProvision(slug, provision, pythonInterpreterPath); // cold → provision in the BACKGROUND; skip this spawn
+  // cold → provision in the BACKGROUND; skip this spawn
+  kickCapabilityProvision(slug, () => provisioner({
+    package: provision.packages, binary: provision.binary, probeImport: provision.probeImport,
+    timeoutMs: CAPABILITY_PIP_TIMEOUT_MS, interpreterOverride: pythonInterpreterPath,
+  }));
+  return null;
+}
+
+/**
+ * Resolve the github-mcp-server binary for one capability_defs row — mirrors {@link resolvePythonVenv}'s
+ * shape exactly: a per-slug cache short-circuit, then a fast `fs.existsSync` on the resolved absolute path,
+ * and a background kick on a cold miss (never blocks the spawn hot path). `LOOM_GITHUB_MCP_BIN` is a
+ * HUMAN-only override (mirrors `LOOM_MARKITDOWN_BIN`) — an already-installed binary, and the fast TEST seam
+ * so CI never downloads a real release asset.
+ */
+function resolveGithubBinary(slug: string, provision: Extract<CapabilityProvision, { kind: "github-binary" }>): string | null {
+  const cached = resolvedBinCache.get(slug);
+  if (cached) return cached;
+  const override = process.env.LOOM_GITHUB_MCP_BIN;
+  if (override) {
+    const resolved = resolveExecutable(override);
+    if (path.isAbsolute(resolved) && fs.existsSync(resolved)) {
+      resolvedBinCache.set(slug, resolved);
+      provisionStatus.set(slug, { state: "ready", binary: resolved, lastAttemptAt: Date.now() });
+      return resolved;
+    }
+    return null; // human pointed the override somewhere unresolvable — respect it, don't auto-provision
+  }
+  const bin = loomGithubMcpBin(provision.version);
+  if (fs.existsSync(bin)) {
+    resolvedBinCache.set(slug, bin);
+    provisionStatus.set(slug, { state: "ready", binary: bin, lastAttemptAt: Date.now() });
+    return bin;
+  }
+  // cold → download+verify+extract in the BACKGROUND; skip this spawn
+  kickCapabilityProvision(slug, () => githubBinaryProvisioner({ version: provision.version }));
   return null;
 }
 
@@ -369,6 +426,9 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     // who-can-set, not sandboxing what's set).
     const resolvedCommand = resolveExecutable(provision.command);
     if (fs.existsSync(resolvedCommand)) server = { command: resolvedCommand, args: provision.args ?? [] };
+  } else if (provision.kind === "github-binary") {
+    const bin = resolveGithubBinary(row.slug, provision);
+    if (bin) server = { command: bin, args: ["stdio"] };
   }
   if (!server) return null;
   const env = row.requiresConnection && ctx.connectionSecret

@@ -2455,6 +2455,13 @@ export class Db {
   deleteCapabilityDef(id: string): void {
     this.db.prepare("DELETE FROM capability_defs WHERE id = ?").run(id);
   }
+  /** Rewrite an EXISTING capability_defs row's kind + provisioning recipe in place (id/slug/name/description/
+   *  transport/toolAllowlistJson/wantsScratchDir/requiresConnection/secretEnvVar all UNCHANGED). Narrow surface
+   *  for `capabilities/seed.ts`'s boot migrations (e.g. the github npx→github-binary rewrite) — not a general
+   *  capability editor (there is none; owner-added rows are create/delete only). */
+  updateCapabilityDefProvision(id: string, kind: CapabilityProvisionKind, provisionJson: string): void {
+    this.db.prepare("UPDATE capability_defs SET kind = ?, provision_json = ? WHERE id = ?").run(kind, provisionJson, id);
+  }
 
   // --- project_links (owner-declared symmetric project link, cross-project peer_message gate) ---
   // GLOBAL / daemon-wide, HUMAN-managed only over the loopback REST surface — NO MCP path (same trust

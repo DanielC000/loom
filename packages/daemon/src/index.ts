@@ -14,7 +14,7 @@ import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
 import { deriveCrashOrphanedWorkers, deriveCrashOrphanedManagers } from "./orchestration/crash-orphaned-workers.js";
 import { seedGlobalSkills } from "./skills/seed.js";
 import { seedDefaultProfiles, seedProfileBaseSnapshots } from "./profiles/seed.js";
-import { seedDefaultCapabilities } from "./capabilities/seed.js";
+import { seedDefaultCapabilities, migrateGithubCapabilityToBinary } from "./capabilities/seed.js";
 import { seedPlatformHome, migratePlatformPrompts } from "./platform/seed.js";
 import { seedSetupHome, seedSetupProjectRename, seedSetupAgentRename, seedSetupAuditorAgent, seedCompanionAgent } from "./setup/seed.js";
 import { maybeAutoLaunchSetup } from "./setup/first-run.js";
@@ -94,6 +94,16 @@ async function main(): Promise<void> {
     if (seededCapabilities.length) console.log(`[boot] seeded capability catalog row(s): ${seededCapabilities.join(", ")}`);
   } catch (err) {
     console.warn(`[boot] capability catalog seed failed (continuing boot): ${(err as Error).message}`);
+  }
+  // Agent-tooling P4 follow-on: rewrite an EXISTING install's "github" capability row off the archived
+  // npx/@modelcontextprotocol/server-github shape onto the new Loom-managed github-binary provisioning
+  // (a fresh install's seed above already lands the new shape directly — this only touches a pre-migration
+  // row, and it's a no-op once migrated). Narrow + idempotent (see migrateGithubCapabilityToBinary's doc).
+  // Best-effort: a throw here must never gate boot — the row just stays on its old (still-working) shape.
+  try {
+    if (migrateGithubCapabilityToBinary(db)) console.log("[boot] migrated the 'github' capability off the archived npx package to the Loom-managed github-mcp-server binary");
+  } catch (err) {
+    console.warn(`[boot] github capability provisioning migration failed (continuing boot): ${(err as Error).message}`);
   }
   // "Getting Started" → "Platform" home rename backfill — rename an EXISTING install's reserved setup-home
   // ROW before seedSetupHome runs. seedSetupHome is seed-if-absent keyed on the NEW name, so if it ran first

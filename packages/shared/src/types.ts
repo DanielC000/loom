@@ -201,8 +201,12 @@ export interface CapabilityGrant {
  *  - `bundled`       — ships inside Loom's own assets, no install/resolve step.
  *  - `command`       — an owner-typed arbitrary executable + args, resolved to an ABSOLUTE path at
  *                      catalog-save time (`resolveExecutable`); a host process the owner explicitly typed in.
+ *  - `github-binary` — a Loom-managed, checksum-verified Go binary downloaded to
+ *                      `<LOOM_HOME>/bin/github-mcp-server/<version>/`, mirroring `python-venv`'s
+ *                      fs.existsSync-fast-path + background-provision pattern. SEED-ONLY (not owner-typeable
+ *                      via `validateCapabilityDefInput`) — today just the bundled "github" capability.
  */
-export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled" | "command";
+export type CapabilityProvisionKind = "node-package" | "python-venv" | "bundled" | "command" | "github-binary";
 
 /**
  * REST-facing summary of one catalog capability (builtin or owner-added) — never carries the raw
