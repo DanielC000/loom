@@ -4388,10 +4388,27 @@ export class Db {
    * never surface here — this is the list/summary path's project-scoping guard, symmetric with
    * `getProjectTaskRequest`'s own `q.projectId !== projectId` check on the single-request get path. Uses
    * `idx_questions_task` (task_id-leading, so the extra project_id filter is applied post-index-lookup).
+   *
+   * **Legacy prefix-linked rows (bug fixed post-`a3f1319f`):** a question created BEFORE that commit
+   * stored `task_id` as an 8-char id-PREFIX (e.g. `369dde3c`), not the full 36-char task UUID that every
+   * caller here resolves to before calling in. A plain `task_id = ?` equality never matches those legacy
+   * rows, so a manager reading a card's connected requests would see none even though the owner already
+   * answered one — invisible decisions. Board.tsx already tolerates this UI-side
+   * (`task.id.startsWith(q.taskId + "-")`); this mirrors that same prefix match server-side so the DB
+   * query behind `tasks_get`/`task_requests_list` stops being the one un-fixed path. The `length(task_id)
+   * = 8` guard cleanly distinguishes a legacy prefix from a full id (a UUID's first block is always
+   * exactly 8 hex chars) so an empty/short `task_id` can't accidentally match everything, and the
+   * trailing `-` in the LIKE pattern requires the match land on a UUID block boundary, not just a byte
+   * prefix. Non-sargable for the prefix branch (the column, not the literal, carries the wildcard), but
+   * the questions table is small enough that correctness wins over the index here.
    */
   listQuestionsForTask(projectId: string, taskId: string): Question[] {
-    return (this.db.prepare("SELECT * FROM questions WHERE task_id = ? AND project_id = ? ORDER BY created_at")
-      .all(taskId, projectId) as Row[]).map(toQuestion);
+    return (this.db.prepare(
+      `SELECT * FROM questions
+       WHERE project_id = ?
+         AND (task_id = ? OR (length(task_id) = 8 AND ? LIKE task_id || '-%'))
+       ORDER BY created_at`,
+    ).all(projectId, taskId, taskId) as Row[]).map(toQuestion);
   }
   /**
    * Every request (any state), ACROSS ALL PROJECTS, newest-first — the backing read for the Platform
