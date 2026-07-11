@@ -349,6 +349,17 @@ const connectionsOverride = z.object({
   rateLimitMax: z.number().int().min(1).max(10000).optional(),
   rateLimitWindowMs: z.number().int().min(1000).max(3600000).optional(),
 }).strict();
+// Access-story Phase A (card 766f8b50): the remote-bind block. HUMAN-only by construction — like every
+// other `platform` sub-group, there is no agent-facing platform-config surface at all (see the function
+// doc below), so `remoteAccess` reaches an agent no differently than gateCommand reaches one via the
+// project schema: it simply isn't reachable. `.strict()` rejects unknown keys; the token itself is never
+// part of this shape (Phase B stores it in a keyed table, not config).
+const remoteAccessOverride = z.object({
+  enabled: z.boolean().optional(),
+  bindHost: z.string().min(1).optional(),
+  tls: z.object({ certPath: z.string().min(1), keyPath: z.string().min(1) }).strict().optional(),
+  rateLimit: z.object({ max: z.number().int().min(1), windowMs: z.number().int().min(1000) }).strict().optional(),
+}).strict();
 const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),
   watchers: watchersOverride.optional(),
@@ -356,6 +367,7 @@ const platformConfigOverrideSchema = z.object({
   connections: connectionsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
   companionVoiceEnabled: z.boolean().optional(),
+  remoteAccess: remoteAccessOverride.optional(),
 }).strict();
 
 /**

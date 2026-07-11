@@ -63,6 +63,7 @@ import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME } from "../setup/seed.js";
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
+import { routeTier, isTrustTierHookActive } from "./trust-tier.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -127,6 +128,14 @@ export interface GatewayDeps {
    *  by index.ts; reached ONLY via the loopback, packaged-gated POST /internal/update (never an MCP tool —
    *  same trust boundary as requestShutdown / the vault+git writers). Optional for the same reason as above. */
   beginSelfUpdate?: () => void;
+  /**
+   * Access-story Phase A (card 766f8b50) — Phase B stub: verifies a Bearer gateway token presented on a
+   * REMOTE (non-loopback) Tier-1 request. Absent ⇒ always-false (no token mechanism exists yet, so every
+   * Tier-1 remote request 401s until Phase B mints/verifies real tokens). Test-injectable so a daemon test
+   * can simulate a "stubbed-valid" token without a real implementation. Only ever consulted when the
+   * trust-tier hook is LIVE (remoteAccess.enabled + a non-loopback bindHost) — inert otherwise.
+   */
+  verifyGatewayToken?: (token: string | undefined) => boolean;
 }
 
 /** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
@@ -208,6 +217,27 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(403).send({ error: "host header not allowed" });
     }
   });
+
+  // --- Trust-tier wall (access-story Phase A, card 766f8b50; see gateway/trust-tier.ts). Registered
+  // right after the CSRF hook above (same inheritance reasoning — Fastify only inherits a parent hook
+  // into children registered AFTER it) so coverage is uniform once live. SHIPS INERT: resolved ONCE at
+  // boot (daemon-global, like gitWriteTimeouts below — a config change needs a daemon restart), and the
+  // hook is only ever REGISTERED when a non-loopback bind is actually configured — off by default, so
+  // today's daemon never even allocates it (byte-identical, not just a no-op check).
+  const remoteAccessConfig = resolveConfig(undefined, deps.db.getPlatformConfig()).remoteAccess;
+  if (isTrustTierHookActive(remoteAccessConfig)) {
+    const verifyGatewayToken = deps.verifyGatewayToken ?? (() => false);
+    app.addHook("onRequest", async (req, reply) => {
+      if (LOOPBACK.has(req.ip)) return; // arrived via the loopback interface — pass through unchanged
+      const tier = routeTier(req.method, req.routeOptions.url ?? req.url);
+      if (tier === 0) return reply.code(403).send({ error: "forbidden" });
+      // Tier 1: require a valid gateway token on a remote request. Real minting/verification is Phase B —
+      // `verifyGatewayToken` is the injected stub it fills; absent, every Tier-1 remote request 401s.
+      const auth = req.headers.authorization;
+      const token = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;
+      if (!verifyGatewayToken(token)) return reply.code(401).send({ error: "unauthorized" });
+    });
+  }
 
   await app.register(websocket);
 
@@ -2769,7 +2799,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // & webhook timeouts resolve live — see the epic's restart-split.)
   app.get("/api/platform/config", async () => {
     const override = deps.db.getPlatformConfig();
-    return { override, resolved: resolveConfig(undefined, override).platform };
+    const resolved = resolveConfig(undefined, override);
+    return { override, resolved: { ...resolved.platform, remoteAccess: resolved.remoteAccess } };
   });
   app.patch("/api/platform/config", async (req, reply) => {
     const v = validatePlatformConfigOverride((req.body as { config?: unknown })?.config ?? req.body);

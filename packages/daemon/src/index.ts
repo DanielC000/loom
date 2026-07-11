@@ -7,6 +7,7 @@ import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
+import { canOpenRemoteListener, isTrustTierHookActive } from "./gateway/trust-tier.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
@@ -620,6 +621,16 @@ async function main(): Promise<void> {
   };
 
   const app = await buildServer({ db, pty, sessions, mcp, orchMcp, platformMcp, auditMcp, userAuditMcp, setupMcp, runMcp, control, usageStatus, companion: companionController, inApp: inAppChannel, requestShutdown: () => gracefulShutdown?.("POST /internal/shutdown"), updateStatus: () => updateCheck.current(), beginSelfUpdate });
+  // Access-story Phase A (card 766f8b50) fail-closed boot check: if a non-loopback bind is requested but
+  // no gateway token exists yet (Phase B mints/stores the real token — there is no mechanism for one to
+  // exist today), NEVER bind-and-warn. This phase's `.listen()` below stays hardcoded loopback-only
+  // regardless (the actual bind switch is Phase C) — this only surfaces the refusal now, so Phase C has a
+  // guard (`canOpenRemoteListener`) to consult instead of building one under deadline pressure.
+  const remoteAccessConfig = resolveConfig(undefined, db.getPlatformConfig()).remoteAccess;
+  const gatewayTokenExists = (): boolean => false; // Phase B stub — no token table exists yet
+  if (isTrustTierHookActive(remoteAccessConfig) && !canOpenRemoteListener(remoteAccessConfig, gatewayTokenExists())) {
+    console.warn(`[gateway] remoteAccess.enabled with bindHost=${remoteAccessConfig.bindHost} but no gateway token exists yet — refusing to open a remote listener; staying on loopback (127.0.0.1). (Phase B adds gateway-token minting.)`);
+  }
   const boundAddress = await app.listen({ port: PORT, host: "127.0.0.1" }); // local-first: loopback only
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0

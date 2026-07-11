@@ -449,6 +449,27 @@ export interface PlatformConfig {
  *  default is a one-line change. OFF: companion voice provisioning is explicit human opt-in. */
 export const COMPANION_VOICE_ENABLED_DEFAULT = false;
 
+/**
+ * Access-story Phase A (card 766f8b50) — daemon-global remote-bind config. NOT per-project — like
+ * `backup`/`platform`, the daemon shares ONE of these. Ships INERT: `enabled:false` + `bindHost:
+ * "127.0.0.1"` by default, so today's loopback-only bind is byte-identical. `enabled` is the master
+ * switch a future phase reads before ever attempting a non-loopback `.listen()`; `bindHost` is the
+ * interface that later bind targets (still ignored while a boot-time token guard refuses it — see
+ * gateway/trust-tier.ts `canOpenRemoteListener`). `tls`/`rateLimit` are Phase C concerns (TLS material +
+ * a remote-request limiter) carried here now so the config shape doesn't need to change again. The
+ * gateway TOKEN itself does NOT live here — Phase B stores it in a keyed table, never in config.
+ */
+export interface RemoteAccessConfig {
+  /** Master switch — a non-loopback bind is only ever attempted when true. Default false. */
+  enabled: boolean;
+  /** Interface a later phase binds when `enabled`. Default "127.0.0.1" (loopback — no-op today). */
+  bindHost: string;
+  /** Optional TLS material for the remote listener (Phase C). Absent = no TLS. */
+  tls?: { certPath: string; keyPath: string };
+  /** Optional remote-request rate limiting (Phase C). Absent = no extra limiting beyond existing guards. */
+  rateLimit?: { max: number; windowMs: number };
+}
+
 /** The fully-resolved, effective config for a project. */
 export interface ResolvedConfig {
   kanbanColumns: KanbanColumn[];
@@ -464,6 +485,11 @@ export interface ResolvedConfig {
    * per-project; resolved from the optional global override (2nd arg) ?? LOOM_* env ?? defaults.
    */
   platform: PlatformConfig;
+  /**
+   * Daemon-global remote-bind config (access-story Phase A). Not per-project — resolved from the
+   * optional global override (2nd arg, same as `platform`), no per-project layer. See RemoteAccessConfig.
+   */
+  remoteAccess: RemoteAccessConfig;
   /**
    * Pillar D: wire the mechanical vault-lint PostToolUse hook into this project's sessions
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
@@ -535,6 +561,8 @@ export interface PlatformConfigOverride {
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
   companionVoiceEnabled?: boolean;
+  /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
+  remoteAccess?: Partial<RemoteAccessConfig>;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -589,6 +617,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
     companionVoiceEnabled: COMPANION_VOICE_ENABLED_DEFAULT,
   },
+  // Access-story Phase A: OFF + loopback by default — ships inert (see RemoteAccessConfig).
+  remoteAccess: { enabled: false, bindHost: "127.0.0.1" },
   docLint: true, // Pillar D vault-lint hook on by default
   dejaCapture: false, // opt-in Deja capture hook (card b3bd4841) — off by default
   codescape: { enabled: false }, // opt-in Codescape MCP wiring (card C2) — off by default
@@ -841,6 +871,23 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
 }
 
 /**
+ * Resolve the daemon-global `remoteAccess` block. Mirrors `resolvePlatform`: global override ?? default,
+ * no per-project layer, no env layer (this is a fresh Phase A surface with no legacy env var to honor).
+ */
+function resolveRemoteAccess(po: PlatformConfigOverride | undefined): RemoteAccessConfig {
+  const d = PLATFORM_DEFAULTS.remoteAccess;
+  const resolved: RemoteAccessConfig = {
+    enabled: po?.remoteAccess?.enabled ?? d.enabled,
+    bindHost: po?.remoteAccess?.bindHost ?? d.bindHost,
+  };
+  const tls = po?.remoteAccess?.tls ?? d.tls;
+  if (tls !== undefined) resolved.tls = tls;
+  const rateLimit = po?.remoteAccess?.rateLimit ?? d.rateLimit;
+  if (rateLimit !== undefined) resolved.rateLimit = rateLimit;
+  return resolved;
+}
+
+/**
  * The single config-resolution mechanism, reused everywhere. The optional 2nd arg `platformOverride`
  * is the daemon-GLOBAL tuning override (the daemon's SQLite singleton blob); absent → platform defaults
  * + LOOM_* env = today's behavior, so every existing single-arg caller is byte-identical.
@@ -864,6 +911,7 @@ export function resolveConfig(
     // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
     // (2nd arg) + LOOM_* watcher env layer beneath, so `resolveConfig(undefined, po)` honors them.
     base.platform = resolvePlatform(platformOverride);
+    base.remoteAccess = resolveRemoteAccess(platformOverride);
     return base;
   }
   // Resolve the obsidian field (autoStart + optional path override), then derive its session-env so the
@@ -933,6 +981,8 @@ export function resolveConfig(
     },
     // Daemon-global (no per-project layer): global override (2nd arg) ?? LOOM_* watcher env ?? default.
     platform: resolvePlatform(platformOverride),
+    // Daemon-global (no per-project layer): global override (2nd arg) ?? default. See RemoteAccessConfig.
+    remoteAccess: resolveRemoteAccess(platformOverride),
     docLint: override.docLint ?? d.docLint,
     dejaCapture: override.dejaCapture ?? d.dejaCapture,
     codescape: { enabled: override.codescape?.enabled ?? d.codescape.enabled },
