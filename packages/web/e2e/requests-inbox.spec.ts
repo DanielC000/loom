@@ -9,7 +9,7 @@
 //      never-echo banner + env-var render; Store securely resolves it (readout never shows a value).
 //   5. input — a free-text answer is required before Submit enables.
 //   6. History — the search box filters the consumed rows.
-//   7. Task drawer — the "Linked requests" section lists a request soft-linked to the card + opens its modal.
+//   7. Task drawer — the "Connected requests" rail lists a request soft-linked to the card + opens its modal.
 //
 // Seeding (the no-real-claude invariant): a live manager is a `processState:"live"` DB row via the seed
 // endpoint; each request is a seeded row via loomDaemon.seedQuestion (deps.db.insertQuestion — the writer
@@ -208,14 +208,21 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await page.goto(`${loomDaemon.baseURL}/board`);
     // Open the card's drawer.
     await page.locator("main").getByText(cardTitle, { exact: true }).click();
-    // The "Linked requests" section lists the request soft-linked to this card. Exact match: the same title
-    // also appears (as a substring) in the global attention toast rendered outside the drawer.
-    await expect(page.getByText(/Linked requests \(1\)/)).toBeVisible();
+    // The "Connected requests" rail (Dossier right rail, card 8c1f27f0) lists the request soft-linked to
+    // this card and its count. Exact match on the title: the same title also appears (as a substring) in
+    // the global attention toast rendered outside the drawer.
+    const rail = page.getByTestId("task-requests-rail");
+    const railHeader = rail.locator("div").first();
+    await expect(railHeader).toContainText("Connected requests");
+    await expect(railHeader).toContainText("1");
     await expect(page.getByText(reqTitle, { exact: true })).toBeVisible();
 
-    // "view ↗" opens the SAME Request detail modal in place.
-    await page.getByRole("button", { name: "view ↗" }).first().click();
-    const dialog = page.getByRole("dialog");
+    // Expand the row, then "Open request ↗" opens the SAME Request detail modal in place.
+    await rail.getByText(reqTitle, { exact: true }).click();
+    await rail.getByRole("button", { name: "Open request ↗" }).click();
+    // Two dialogs now stack (the task drawer underneath, the request modal above it per Board.tsx's
+    // zIndex ordering) — the request modal is the one that opened last.
+    const dialog = page.getByRole("dialog").last();
     await expect(dialog).toBeVisible();
     await expect(dialog.getByText(reqTitle, { exact: true })).toBeVisible();
     // The reverse link renders: the request header shows the linked-task chip.
