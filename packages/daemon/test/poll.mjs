@@ -15,6 +15,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import { Db } from "../dist/db.js";
 import { PollService, MIN_POLL_INTERVAL_MS } from "../dist/orchestration/poll.js";
+import { OrchestrationControl } from "../dist/orchestration/control.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -67,14 +68,17 @@ function makeEnv(opts = {}) {
     return next;
   };
 
+  const control = new OrchestrationControl();
+  if (opts.globalPaused) control.pause("global");
+
   const poll = new PollService({
-    db, pty, resume, spawn, request,
+    db, pty, control, resume, spawn, request,
     isUsageLimited: () => !!opts.usageLimited,
   });
 
   return {
     dbFile, db, projId, wakeAgentId, spawnAgentId, sessId, conn, alive, enqueued, resumed, spawned, requestCalls,
-    poll,
+    control, poll,
     setResponses: (r) => { responses = r; },
   };
 }
@@ -305,6 +309,34 @@ const seedSpawnJob = (e, id, over = {}) => seedWakeJob(e, id, { mode: "spawn", s
   await e.poll.tick(new Date());
   check("usage-limit: no fetch attempted while limited", e.requestCalls.length === 0);
   check("usage-limit: the job stays due (next_poll_at untouched) for a later tick", new Date(e.db.getPollJob("job-limited").nextPollAt).getTime() < Date.now());
+  cleanupEnv(e);
+}
+
+// --- §17a GLOBAL PAUSE kill switch gates the whole tick too, mirroring Scheduler.tick()/
+// EventTriggerService.tick(): a poll fire can wake/spawn a claude session exactly like a worker_spawn, so
+// it must stop under a global pause too. ---
+{
+  const e = makeEnv({ globalPaused: true });
+  seedWakeJob(e, "job-paused");
+  await e.poll.tick(new Date());
+  check("global-pause: no fetch attempted while globally paused", e.requestCalls.length === 0);
+  check("global-pause: the job stays due (next_poll_at untouched) for a later tick", new Date(e.db.getPollJob("job-paused").nextPollAt).getTime() < Date.now());
+  // Resume the global scope — the SAME due job now fires (baseline-seeds) normally.
+  e.control.resume("global");
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n1" }] }) }]);
+  await e.poll.tick(new Date());
+  check("global-pause: once resumed, the previously-paused-over job polls normally", e.requestCalls.length === 1);
+  cleanupEnv(e);
+}
+
+// --- The global pause gate is genuinely SCOPED to "global" — a paused non-"global" scope never affects
+// the poll tick (mirrors Scheduler/EventTriggerService's own pausedScopes().includes("global") check). ---
+{
+  const e = makeEnv();
+  e.control.pause("some-manager-session-id"); // a non-global scope
+  seedWakeJob(e, "job-not-globally-paused");
+  await e.poll.tick(new Date());
+  check("global-pause-scope: a non-'global' paused scope never blocks the poll tick", e.requestCalls.length === 1);
   cleanupEnv(e);
 }
 

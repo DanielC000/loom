@@ -3,6 +3,7 @@ import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { PollJob } from "@loom/shared";
 import type { AuthenticatedRequestResult } from "../connections/request.js";
+import type { OrchestrationControl } from "./control.js";
 import { isLikelyNearClaudeUsageLimit } from "./usage-awareness.js";
 import { formatPollItemsBlock } from "./poll-format.js";
 
@@ -35,6 +36,10 @@ export interface PollServiceDeps {
    */
   request: (job: PollJob) => Promise<AuthenticatedRequestResult>;
   pty: PollPty;
+  /** §17a safety rails: the SAME global pause/kill switch Scheduler/EventTriggerService gate on — a poll
+   *  fire can spawn/wake a claude session exactly like a worker_spawn, so it MUST stop under a global
+   *  pause too. */
+  control: OrchestrationControl;
   /** Re-spawn a stopped-but-resumable wake-mode target. Prod-wired to SessionService.resume. */
   resume: (sessionId: string) => unknown;
   /**
@@ -117,6 +122,9 @@ export class PollService {
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDuePollJobs(now.toISOString());
     if (due.length === 0) return;
+    // Pause gate (§17a global kill/pause switch, mirrors Scheduler.tick()/EventTriggerService.tick()):
+    // hold everything while globally paused — every job's next_poll_at stays put, re-checked next tick.
+    if (this.deps.control.pausedScopes().includes("global")) return;
     const recencyWindowMs = resolveConfig(undefined, this.deps.db.getPlatformConfig()).platform.rateLimit.recencyWindowMs;
     if ((this.deps.isUsageLimited ?? isLikelyNearClaudeUsageLimit)(now, recencyWindowMs)) return;
 

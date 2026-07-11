@@ -427,7 +427,7 @@ async function main(): Promise<void> {
   // profile-resolution — the poll job's target agent's OWN profile decides its role, nothing hardcoded.
   const pollIntervalMs = watchers.pollMs;
   const polls = new PollService({
-    db, pty,
+    db, pty, control,
     request: (job) => performAuthenticatedRequest(
       { db },
       [job.connectionId],
