@@ -5,7 +5,10 @@ import { z } from "zod";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
-import { listProjectTasks, getProjectTask, createProjectTask, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
+import {
+  listProjectTasks, getProjectTask, createProjectTask, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
+  listProjectTaskRequests, getProjectTaskRequest,
+} from "./tasks.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -71,7 +74,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project.",
+        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns a `requests` summary ({total, answered, pending, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list.",
         inputSchema: { id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() },
       },
       async ({ id, taskId }) => {
@@ -79,6 +82,39 @@ export class TaskMcpRouter {
         if (!resolvedId) return ok({ error: "id (or taskId) is required" });
         return ok(getProjectTask(db, projectId, resolvedId));
       },
+    );
+    server.registerTool(
+      "task_requests_list",
+      {
+        description:
+          "List every Request (from question_ask) connected to ONE task — pending + answered + consumed " +
+          "alike — as lightweight NEWLINE-DELIMITED JSON rows: {id,type,title,state,answeredAt}. " +
+          "NON-CONSUMING: unlike question_pull (which drains + consumes), this is a stable, re-readable " +
+          "reference you can call again later or from a different agent/turn and still see the same " +
+          "requests. Use task_request_get(id) for the full body/options/recommendation + answer. taskId " +
+          "accepts the full id OR an unambiguous 8-char id-prefix (mirrors tasks_get).",
+        inputSchema: { taskId: z.string() },
+      },
+      async ({ taskId }) => {
+        const rows = listProjectTaskRequests(db, projectId, taskId);
+        return "error" in rows ? ok(rows) : okLines(rows);
+      },
+    );
+    server.registerTool(
+      "task_request_get",
+      {
+        description:
+          "Read ONE Request connected to a task, IN FULL: {id,type,title,body,options,recommendation," +
+          "state,taskId,createdAt,answeredAt} plus its answer by type — `chosenOption`+`note` for " +
+          "\"decision\"/\"input\", `approved`+`note` for \"permission\" (all null until answered), `ack` " +
+          "ONLY (never the secret) for \"credential\" (null until provided). NON-CONSUMING: unlike " +
+          "question_pull, reading this never flips the request's state — re-readable across turns/agents. " +
+          "`id` is the request id (from tasks_get's `requests.items`/task_requests_list). Optional `taskId` " +
+          "(full id or an unambiguous 8-char id-prefix) further scopes the lookup — if given, the request " +
+          "must be connected to THAT task or this errors.",
+        inputSchema: { id: z.string(), taskId: z.string().optional(), projectId: z.string().optional() },
+      },
+      async ({ id, taskId }) => ok(getProjectTaskRequest(db, projectId, id, taskId)),
     );
     server.registerTool(
       "tasks_create",

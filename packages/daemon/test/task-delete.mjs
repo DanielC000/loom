@@ -78,8 +78,8 @@ try {
 
   // ════════ D. TRUST BOUNDARY — no delete tool / no delete export on the loom-tasks MCP surface ════════
   const toolNames = tasksMod.TASK_TOOL_DESCRIPTORS.map((d) => d.name);
-  check("D: TASK_TOOL_DESCRIPTORS is exactly the 4 known tools (create/get/list/update)",
-    JSON.stringify([...toolNames].sort()) === JSON.stringify(["tasks_create", "tasks_get", "tasks_list", "tasks_update"]));
+  check("D: TASK_TOOL_DESCRIPTORS is exactly the 6 known tools (create/get/list/update + the task_request_* read pair, card 988bb585)",
+    JSON.stringify([...toolNames].sort()) === JSON.stringify(["task_request_get", "task_requests_list", "tasks_create", "tasks_get", "tasks_list", "tasks_update"]));
   check("D: NO task tool name mentions delete/remove/destroy", !toolNames.some((n) => /delete|remove|destroy/i.test(n)));
   check("D: tasks MCP module exports NO delete function",
     Object.keys(tasksMod).every((k) => !/delete/i.test(k)));

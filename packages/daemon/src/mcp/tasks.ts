@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
-import type { Task, TaskPriority } from "@loom/shared";
+import type { Task, TaskPriority, Question, QuestionType, QuestionState } from "@loom/shared";
 import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
+import { taskRequestGetItem } from "./questionTool.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -120,12 +121,86 @@ function resolveProjectTaskId(db: Db, projectId: string, taskId: string): Task |
 }
 
 /**
+ * The connected-requests summary {@link getProjectTask}/tasks_get attaches to a task (card 988bb585) —
+ * lets an agent working a card see AT A GLANCE whether it has prior owner Requests (pending or already
+ * answered) it should read via task_requests_list/task_request_get before proceeding, instead of missing
+ * them entirely (the root problem: the read side used to ignore `task_id` altogether). `answered` counts
+ * BOTH 'answered' and 'consumed' rows — both already carry the human's answer; 'consumed' only means the
+ * ASKING agent already drained it via question_pull, not that the answer is unavailable here.
+ */
+export interface TaskRequestsSummary {
+  total: number;
+  answered: number;
+  pending: number;
+  items: Array<{ id: string; type: QuestionType; title: string; state: QuestionState }>;
+}
+
+/** A task extended with its connected-requests summary — what getProjectTask/tasks_get returns. */
+export type TaskWithRequests = Task & { requests: TaskRequestsSummary };
+
+function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
+  const pending = questions.filter((q) => q.state === "pending").length;
+  return {
+    total: questions.length,
+    pending,
+    answered: questions.length - pending,
+    items: questions.map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state })),
+  };
+}
+
+/**
  * Read ONE full task (title + body) by id, project-scoped: a cross-project id resolves to
  * not-found (same server-side guard posture as updateProjectTask). `taskId` accepts the full id
- * OR an unambiguous 8-char id-prefix (mirrors project_get / worker_spawn's agentId).
+ * OR an unambiguous 8-char id-prefix (mirrors project_get / worker_spawn's agentId). Includes the
+ * task's connected-requests summary (card 988bb585) — every Request whose `task_id` matches this task
+ * AND whose own `project_id` matches THIS project (CR follow-up: `question_ask`'s `taskId` is
+ * agent-supplied and unvalidated against the asking session's project, so a foreign-project question
+ * that happens to carry this project's task id must never surface here — see `db.listQuestionsForTask`).
  */
-export function getProjectTask(db: Db, projectId: string, taskId: string): Task | { error: string } {
-  return resolveProjectTaskId(db, projectId, taskId);
+export function getProjectTask(db: Db, projectId: string, taskId: string): TaskWithRequests | { error: string } {
+  const found = resolveProjectTaskId(db, projectId, taskId);
+  if ("error" in found) return found;
+  return { ...found, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
+}
+
+/** The lightweight row {@link listProjectTaskRequests} returns per connected request — title-altitude, not
+ *  the full body/answer (use {@link getProjectTaskRequest} for that). */
+export interface TaskRequestSummaryRow {
+  id: string; type: QuestionType; title: string; state: QuestionState; answeredAt: string | null;
+}
+
+/**
+ * List every request connected to ONE task (pending + answered + consumed alike), NON-CONSUMING — a
+ * stable, re-readable reference distinct from `question_pull`'s agent-scoped drain-and-consume (card
+ * 988bb585). `taskId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors getProjectTask).
+ * Project-scoped symmetrically with {@link getProjectTaskRequest}'s single-request get — a foreign-
+ * project question carrying this project's task id is filtered out (see `db.listQuestionsForTask`).
+ */
+export function listProjectTaskRequests(db: Db, projectId: string, taskId: string): TaskRequestSummaryRow[] | { error: string } {
+  const owned = resolveProjectTaskId(db, projectId, taskId);
+  if ("error" in owned) return owned;
+  return db.listQuestionsForTask(projectId, owned.id).map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state, answeredAt: q.answeredAt }));
+}
+
+/**
+ * Read ONE connected request in full (body/options/recommendation/state + its answer-by-type),
+ * project-scoped — the get-side sibling of {@link listProjectTaskRequests}. NON-CONSUMING: never flips
+ * `state`, unlike `question_pull`. NEVER returns `secret_blob` for a "credential" request — see
+ * {@link taskRequestGetItem} (mirrors `questionPullItem`'s credential branch exactly). An optional
+ * `taskId` further scopes the lookup — if given (full id or an unambiguous prefix), the request must be
+ * connected to THAT task or this errors instead of silently returning a request tied to a different one.
+ */
+export function getProjectTaskRequest(
+  db: Db, projectId: string, id: string, taskId?: string,
+): Record<string, unknown> | { error: string } {
+  const q = db.getQuestion(id);
+  if (!q || q.projectId !== projectId) return { error: "request not found in this project" };
+  if (taskId) {
+    const owned = resolveProjectTaskId(db, projectId, taskId);
+    if ("error" in owned) return owned;
+    if (q.taskId !== owned.id) return { error: "request is not connected to that task" };
+  }
+  return taskRequestGetItem(q);
 }
 
 export function createProjectTask(
@@ -185,7 +260,9 @@ export function updateProjectTask(
 /** Tool descriptors (name/description/input shape) for wiring to the MCP SDK. */
 export const TASK_TOOL_DESCRIPTORS = [
   { name: "tasks_list", description: "List the current project's board tasks. Defaults to a lightweight summary (no body) with done cards excluded; pass includeBody:true or use tasks_get(id) for bodies." },
-  { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get)." },
+  { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Also returns a `requests` summary ({total, answered, pending, items:[{id,type,title,state}]}) of any Requests connected to this task (via taskId at question_ask time) — a task may carry prior owner decisions you'd otherwise miss; read them in full with task_requests_list/task_request_get." },
   { name: "tasks_create", description: "Create a task on the current project's board (title, body?, columnKey?, priority?). priority is p0|p1|p2|p3 (low number = higher priority), default p2." },
   { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?, deferred?) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts; deferred=true is YOUR OWN (manager) sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but unlike held it never blocks worker_spawn." },
+  { name: "task_requests_list", description: "List every Request connected to a task (pending + answered + consumed alike), title-altitude only: {id,type,title,state,answeredAt}. NON-CONSUMING — re-readable across turns/agents, unlike question_pull's drain-and-consume. taskId accepts the full id OR an unambiguous 8-char id-prefix." },
+  { name: "task_request_get", description: "Read ONE connected Request in full (body, options, recommendation, type, state) plus its answer by type — chosenOption/note for decision|input, approved/note for permission, ack ONLY (never the secret) for credential. NON-CONSUMING. id is the request id; an optional taskId further scopes the lookup." },
 ] as const;

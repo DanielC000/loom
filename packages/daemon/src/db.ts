@@ -4136,6 +4136,22 @@ export class Db {
     })();
   }
   /**
+   * Every request (any state) connected to ONE task via `task_id`, chronological (created_at) — the
+   * backing read for tasks_get's connected-requests summary and the task_requests_list/task_request_get
+   * pair (card 988bb585). Deliberately NON-CONSUMING (never touches `state`/`consumed_at`) — the durable,
+   * re-readable sibling of pullAnsweredQuestions / pullAnsweredQuestionsForAgent, which drain-and-flip.
+   * ALSO filters on `project_id = ?` (CR follow-up, not just `task_id`): `question_ask`'s `taskId` is
+   * agent-supplied and never validated against the asking session's own project (questionTool.ts's
+   * `buildQuestionAsk`), so a foreign-project question that happens to carry THIS project's task id must
+   * never surface here — this is the list/summary path's project-scoping guard, symmetric with
+   * `getProjectTaskRequest`'s own `q.projectId !== projectId` check on the single-request get path. Uses
+   * `idx_questions_task` (task_id-leading, so the extra project_id filter is applied post-index-lookup).
+   */
+  listQuestionsForTask(projectId: string, taskId: string): Question[] {
+    return (this.db.prepare("SELECT * FROM questions WHERE task_id = ? AND project_id = ? ORDER BY created_at")
+      .all(taskId, projectId) as Row[]).map(toQuestion);
+  }
+  /**
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
    * ALL projects/sessions, enriched with the asking agent/project display names + whether the asking
    * session is still live (for the jump/nudge affordances). By default only the human-actionable states

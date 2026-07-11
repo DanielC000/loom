@@ -79,6 +79,19 @@ export function buildQuestionAsk(
 }
 
 /**
+ * The `type:"credential"` ack text — factored out of `questionPullItem` (card 988bb585) so
+ * `taskRequestGetItem`'s full-detail read can share the EXACT same never-echo phrasing without
+ * duplicating it and risking drift. Never touches `secret_blob` — it only ever reads `credentialEnvVar`,
+ * the ask-time hint (not the answer).
+ */
+function credentialAck(q: Question): string {
+  return q.credentialEnvVar
+    ? `Provided and stored securely — not returned via this tool. Expect it under ${q.credentialEnvVar} ` +
+      "once your environment/project config is provisioned with it."
+    : "Provided and stored securely — not returned via this tool. Ask your operator how it's made available to you.";
+}
+
+/**
  * Shape ONE pulled-and-consumed `Question` into `question_pull`'s agent-facing payload (card 695ebab0),
  * branching by `type`. A "credential" answer NEVER surfaces a secret here — there is none to surface: the
  * `Question` object itself never carries it (db.ts's `toQuestion` deliberately never maps `secret_blob`)
@@ -89,18 +102,46 @@ export function buildQuestionAsk(
  */
 export function questionPullItem(q: Question): Record<string, unknown> {
   if (q.type === "credential") {
-    return {
-      questionId: q.id,
-      title: q.title,
-      type: q.type,
-      ack: q.credentialEnvVar
-        ? `Provided and stored securely — not returned via this tool. Expect it under ${q.credentialEnvVar} ` +
-          "once your environment/project config is provisioned with it."
-        : "Provided and stored securely — not returned via this tool. Ask your operator how it's made available to you.",
-    };
+    return { questionId: q.id, title: q.title, type: q.type, ack: credentialAck(q) };
   }
   if (q.type === "permission") {
     return { questionId: q.id, title: q.title, type: q.type, approved: q.chosenOption === PERMISSION_ANSWERS[0], note: q.note };
   }
   return { questionId: q.id, title: q.title, type: q.type, chosenOption: q.chosenOption, note: q.note };
+}
+
+/**
+ * The per-type ANSWER shape shared by `taskRequestGetItem` — same branching/fields as `questionPullItem`,
+ * but safe to call on a row in ANY state (not just a freshly-answered one `question_pull` just drained):
+ * a still-`pending` row's answer fields all read `null` instead of a misleading false-ish derivation (e.g.
+ * a pending permission would otherwise wrongly read `approved:false`, indistinguishable from "denied").
+ * Same credential never-echo guarantee as `questionPullItem` — see `credentialAck`.
+ */
+function questionAnswerByType(q: Question): Record<string, unknown> {
+  if (q.type === "credential") {
+    return { ack: q.state === "pending" ? null : credentialAck(q) };
+  }
+  if (q.type === "permission") {
+    return { approved: q.state === "pending" ? null : q.chosenOption === PERMISSION_ANSWERS[0], note: q.note };
+  }
+  return { chosenOption: q.chosenOption, note: q.note };
+}
+
+/**
+ * Shape ONE `Question` (any state) into `task_request_get`'s full-detail agent-facing payload (card
+ * 988bb585) — the FULL ask (body/options/recommendation/type/state) plus its answer-by-type (see
+ * `questionAnswerByType`). Distinct from `questionPullItem`: this is a NON-CONSUMING read reachable for
+ * a request in ANY state, not just a freshly-pulled 'answered' one. NEVER returns `secret_blob` for a
+ * "credential" request — mirrors `questionPullItem`'s credential branch exactly (shared `credentialAck`);
+ * structurally guaranteed too, since the `Question` object this reads never carries it in the first place
+ * (db.ts's `toQuestion` deliberately never maps `secret_blob`).
+ */
+export function taskRequestGetItem(q: Question): Record<string, unknown> {
+  return {
+    id: q.id, type: q.type, title: q.title, body: q.body,
+    options: q.options, recommendation: q.recommendation,
+    state: q.state, taskId: q.taskId,
+    createdAt: q.createdAt, answeredAt: q.answeredAt,
+    ...questionAnswerByType(q),
+  };
 }
