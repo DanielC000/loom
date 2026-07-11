@@ -19,6 +19,15 @@
  * CLI argument — argv is visible in process listings; never reaching the `claude` process or a tool
  * argument). `secretEnvVar` names which env var the owner's chosen MCP server expects the credential
  * under (e.g. "GITHUB_TOKEN"); it defaults to `LOOM_CAPABILITY_SECRET` when unset.
+ *
+ * P4↔P5a interaction (oauth2): this static env-injection tie is fundamentally incompatible with an
+ * `oauth2` connection — `getSecretForUse` (connections/store.ts) returns undefined for an oauth2 row BY
+ * DESIGN (oauth2 must flow through refresh-on-use via the P2 `authenticated_request` tool, never a
+ * static token that goes stale with no refresh path), so `resolveCapabilityServer` below correctly mounts
+ * with NO env block when the resolved `connectionSecret` is undefined. That's the intended fail-closed
+ * runtime behavior; the human-facing guard against it happening BY ACCIDENT (an owner binding an oauth2
+ * connection to a `requiresConnection` grant and expecting it to work) lives at bind time instead —
+ * `profiles/validate.ts` › `capabilityGrantBindingError`, enforced in the profile REST handlers.
  */
 import fs from "node:fs";
 import path from "node:path";

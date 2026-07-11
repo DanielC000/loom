@@ -851,6 +851,11 @@ export function buildMcpServers(o: {
     // connection's secret (if it requiresConnection and a connectionId was granted), and dispatch
     // through the generic node-package/python-venv/bundled resolver. Unknown slug / unresolvable
     // provisioning ⇒ log-and-skip, exactly like the two legacy capabilities above — never crashes the spawn.
+    // P4↔P5a: if the bound connection is `oauth2`, `resolveConnectionSecret` resolves to undefined by
+    // design (see connections/store.ts getSecretForUse) — this spawn mounts the server with NO env
+    // injected, correctly fail-closed. That binding is rejected earlier, at profile-save time
+    // (profiles/validate.ts › capabilityGrantBindingError), so reaching a spawn with one bound here would
+    // mean an already-existing profile predates the guard — still handled safely, just silently.
     const def = catalog.find((c) => c.slug === grant.slug);
     if (!def) {
       // eslint-disable-next-line no-console

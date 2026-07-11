@@ -51,7 +51,7 @@ import { listProjectLinks, createProjectLink, deleteProjectLink } from "../proje
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff } from "../skills/store.js";
-import { validateProfile } from "../profiles/validate.js";
+import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { cloneAgentCore } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
@@ -2421,6 +2421,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/profiles", async (req, reply) => {
     const v = validateProfile(req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
+    // P4↔P5a guard: reject a requiresConnection grant bound to an oauth2 connection (it can't be
+    // statically injected — see capabilityGrantBindingError's doc) BEFORE the profile is persisted.
+    const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);
+    if (bindingError) return reply.code(400).send({ error: bindingError });
     const profile = { id: randomUUID(), ...v.value };
     deps.db.insertProfile(profile);
     // Pre-warm the shared markitdown venv NOW (off the event loop, best-effort) so the first session under
@@ -2441,6 +2445,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const { id: _eid, ...base } = existing;
     const v = validateProfile({ ...base, ...patch });
     if (!v.ok) return reply.code(400).send({ error: `invalid profile: ${v.error}` });
+    // Same P4↔P5a guard as POST — see capabilityGrantBindingError's doc.
+    const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);
+    if (bindingError) return reply.code(400).send({ error: bindingError });
     deps.db.updateProfile(id, v.value);
     // Same cold-skip-window pre-warm as POST: if this save turns documentConversion ON, kick the shared
     // markitdown venv now (deduped async background job; no-op when already warm).

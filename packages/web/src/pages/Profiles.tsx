@@ -414,14 +414,26 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
                   {c.description}
                 </span>
                 {checked && c.requiresConnection && !isLegacy && (
-                  <Select
-                    value={capabilityConnectionId(c.slug)}
-                    onChange={(e) => setCapabilityConnectionId(c.slug, e.target.value)}
-                    style={{ marginTop: 4, maxWidth: 260 }}
-                  >
-                    <option value="">— pick a connection —</option>
-                    {availableConnections.map((conn) => <option key={conn.id} value={conn.id}>{conn.name}</option>)}
-                  </Select>
+                  <>
+                    <Select
+                      value={capabilityConnectionId(c.slug)}
+                      onChange={(e) => setCapabilityConnectionId(c.slug, e.target.value)}
+                      style={{ marginTop: 4, maxWidth: 260 }}
+                    >
+                      <option value="">— pick a connection —</option>
+                      {/* oauth2 connections are excluded here (and rejected server-side if forced via a raw
+                          PUT): a requiresConnection grant statically injects a secret at spawn, which oauth2
+                          doesn't support — it refreshes on use via the authenticated_request tool instead. */}
+                      {availableConnections.filter((conn) => conn.authScheme !== "oauth2").map((conn) => (
+                        <option key={conn.id} value={conn.id}>{conn.name}</option>
+                      ))}
+                    </Select>
+                    {availableConnections.some((conn) => conn.authScheme === "oauth2") && (
+                      <span style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono }}>
+                        oauth2 connections aren't listed — they can't be statically injected here. Use the authenticated_request tool for oauth2 access instead.
+                      </span>
+                    )}
+                  </>
                 )}
               </span>
             </label>

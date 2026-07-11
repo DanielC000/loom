@@ -51,7 +51,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const { Db } = await import("../dist/db.js");
 const { resolveProfile } = await import("@loom/shared");
 const { seedDefaultProfiles, BUNDLED_PROFILES } = await import("../dist/profiles/seed.js");
-const { validateProfile } = await import("../dist/profiles/validate.js");
+const { validateProfile, capabilityGrantBindingError } = await import("../dist/profiles/validate.js");
+const { createCapabilityDef } = await import("../dist/capabilities/registry.js");
+const { createConnection, createOAuthConnection } = await import("../dist/connections/store.js");
 
 const db = new Db(); // uses LOOM_HOME/loom.db
 
@@ -185,6 +187,38 @@ check("(validator) accepts noCommit + normalizes the default to false", (() => {
   const off = validateProfile({ name: "X" });
   return on.ok && on.value.noCommit === true && off.ok && off.value.noCommit === false;
 })());
+
+// --- (guard) P4↔P5a: capabilityGrantBindingError rejects an oauth2 connection bound to a
+// requiresConnection capability grant (the "binds fine, spawns silently credential-less" bug this task
+// closes) — real capability_defs + connections rows through the real stores, not fakes. ---------------
+createCapabilityDef(db3, {
+  slug: "guard-test-cap", name: "Guard Test", description: "test cap", transport: "stdio", kind: "bundled",
+  provision: { command: process.execPath, args: [] }, toolAllowlist: [], wantsScratchDir: false,
+  requiresConnection: true, secretEnvVar: "GUARD_TEST_TOKEN",
+});
+createCapabilityDef(db3, {
+  slug: "guard-test-nocred", name: "Guard No-Cred", description: "test cap", transport: "stdio", kind: "bundled",
+  provision: { command: process.execPath, args: [] }, toolAllowlist: [], wantsScratchDir: false,
+  requiresConnection: false,
+});
+const oauthConn = createOAuthConnection(db3, {
+  name: "Guard OAuth", host: "example.com", provider: "custom",
+  clientId: "cid", clientSecret: "csecret", authUrl: "https://example.com/auth", tokenUrl: "https://example.com/token", scopes: ["read"],
+});
+const apiKeyConn = createConnection(db3, { name: "Guard API Key", host: "example.com", authScheme: "api-key", secret: "sek" });
+
+const oauthBoundError = capabilityGrantBindingError([{ slug: "guard-test-cap", connectionId: oauthConn.id }], db3);
+check("(guard) an oauth2 connection bound to a requiresConnection grant is rejected", oauthBoundError !== null);
+check("(guard) the rejection explains the authenticated_request refresh-on-use path",
+  typeof oauthBoundError === "string" && oauthBoundError.includes("authenticated_request"));
+check("(guard) an api-key connection bound to the same grant is accepted (null)",
+  capabilityGrantBindingError([{ slug: "guard-test-cap", connectionId: apiKeyConn.id }], db3) === null);
+check("(guard) a grant with no connectionId at all is unaffected",
+  capabilityGrantBindingError([{ slug: "guard-test-cap" }], db3) === null);
+check("(guard) an oauth2 connection bound to a NON-requiresConnection grant is unaffected (not this guard's concern)",
+  capabilityGrantBindingError([{ slug: "guard-test-nocred", connectionId: oauthConn.id }], db3) === null);
+check("(guard) an oauth2 connection bound to an unknown slug is unaffected (unknown-slug handling belongs to buildMcpServers, not this guard)",
+  capabilityGrantBindingError([{ slug: "no-such-slug", connectionId: oauthConn.id }], db3) === null);
 
 db3.close(); // free the WAL file handle before removing the temp dir (Windows)
 try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort */ }

@@ -140,6 +140,12 @@ export function deleteConnection(db: ConnectionsDbStore, id: string): void {
  * unknown id OR an `oauth2` row (its secret_blob is a JSON token bundle, not a raw secret — callers that
  * need an oauth2 access token must go through `ensureFreshOAuthToken`, which also handles refresh); throws
  * if the stored blob fails to decrypt (corrupt / wrong key), mirroring `decryptSecret`.
+ *
+ * P4↔P5a interaction: this is also the seam `index.ts`'s `resolveConnectionSecret` calls for a P4
+ * capability grant's static env injection — the `undefined` returned for an `oauth2` row here is what
+ * makes that injection correctly no-op for oauth2 (fail-closed, never a stale static token). The
+ * human-facing guard against binding an oauth2 connection to such a grant in the first place lives at
+ * profile-save time: `profiles/validate.ts` › `capabilityGrantBindingError`.
  */
 export function getSecretForUse(db: ConnectionsDbStore, id: string, keyPath?: string): string | undefined {
   const row = db.getConnection(id);

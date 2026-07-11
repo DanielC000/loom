@@ -58,6 +58,9 @@ const profileSchema = z
     // those are exclusively conferred via the browserTesting/documentConversion booleans (the bridge in
     // resolveProfileCapabilities); a profile-array entry naming one would double-mount it and silently
     // drop any connectionId (the two legacy capabilities never consult a connection).
+    // P4↔P5a interaction: a grant naming a `requiresConnection` slug bound to an OAUTH2 connectionId is
+    // rejected at bind time by `capabilityGrantBindingError` below (called by the REST handler after this
+    // schema passes) — oauth2 connections statically inject nothing (see that function's doc).
     capabilities: z.array(z.object({ slug: z.string(), connectionId: z.string().optional() }))
       .refine((grants) => grants.every((g) => !(RESERVED_CAPABILITY_SLUGS as readonly string[]).includes(g.slug)), {
         message: `capabilities may not name a reserved builtin slug (${RESERVED_CAPABILITY_SLUGS.join(", ")}) — use the browserTesting/documentConversion booleans instead`,
@@ -94,6 +97,44 @@ export function agentProfileKeyError(raw: unknown): string | null {
       if (key in (raw as Record<string, unknown>)) {
         return `${key} may not be set via an agent MCP tool — it grants access to real external secrets (human-only, via the Profiles UI / REST)`;
       }
+    }
+  }
+  return null;
+}
+
+/** The narrow db surface `capabilityGrantBindingError` needs — mirrors the read-only slice of
+ *  CapabilitiesDbStore/ConnectionsDbStore (capabilities/registry.ts, connections/store.ts) it consults. */
+export interface CapabilityGrantBindingDbStore {
+  getCapabilityDefBySlug(slug: string): { requiresConnection: boolean } | undefined;
+  getConnection(id: string): { authScheme: string } | undefined;
+}
+
+/**
+ * Guard the P4 capability-grant ↔ P1 connection binding at bind time — the human-facing REST surface
+ * (POST/PUT /api/profiles, gateway/server.ts), called AFTER `validateProfile` on its already-normalized
+ * `capabilities` array. A `requiresConnection` capability injects its bound connection's secret as a
+ * STATIC env var at spawn (`capabilities/registry.ts` › `resolveCapabilityServer`) — but an `oauth2`
+ * connection's secret never resolves that way: `getSecretForUse` (`connections/store.ts`) returns
+ * undefined for an `oauth2` row BY DESIGN, since oauth2 must flow through refresh-on-use via the P2
+ * `authenticated_request` tool, never a static token that would go stale with no refresh path
+ * (`resolveConnectionSecret` in `index.ts` / the grant loop in `pty/host.ts` › `buildMcpServers` then
+ * correctly omit the env injection — that fail-closed runtime behavior is UNCHANGED by this guard).
+ * Without this check, binding an oauth2 connection to such a grant would save successfully and then
+ * silently spawn every session under that profile credential-less. Rejects at bind time instead — safe
+ * here because this is a human-only config action, never an agent-writable path. Returns an error string
+ * for the FIRST offending grant, or null when every grant's binding is sound.
+ */
+export function capabilityGrantBindingError(
+  grants: { slug: string; connectionId?: string }[],
+  db: CapabilityGrantBindingDbStore,
+): string | null {
+  for (const g of grants) {
+    if (!g.connectionId) continue;
+    const def = db.getCapabilityDefBySlug(g.slug);
+    if (!def?.requiresConnection) continue; // unknown slug / no static-injection grant ⇒ not this guard's concern
+    const conn = db.getConnection(g.connectionId);
+    if (conn?.authScheme === "oauth2") {
+      return `capability '${g.slug}' is bound to an oauth2 connection, which can't be statically injected at spawn — oauth2 connections refresh on use via the authenticated_request tool instead. Bind an api-key/bearer connection here, or drop the connectionId and use authenticated_request for oauth2 access.`;
     }
   }
   return null;
