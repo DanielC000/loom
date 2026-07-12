@@ -29,8 +29,14 @@ const profileSchema = z
     skills: z.array(z.string()).nullable().optional(),
     model: z.string().nullable().optional(),
     icon: z.string().nullable().optional(),
-    // Opt-in browser-automation capability (default off). Human-set via this REST path only — there is
-    // NO agent MCP write surface for profiles, so the capability stays human-gated (like role/allow).
+    // Opt-in browser-automation capability (default off). Agent MCP write surfaces DO exist for profiles
+    // (loom-setup's profile_create/update/agent_update; the LOOM_DEV Platform Lead) and CAN set this field —
+    // but both are role-gated away from ever minting/assigning role:"assistant" (setupRoleError's
+    // SETUP_ALLOWED_PROFILE_ROLES omits it; only the maximally-trusted Platform Lead can reach it), so the
+    // one role that would gain a NEW capability from browserTesting (the untrusted-chat-facing Companion)
+    // can only get it via a HUMAN Profiles UI/REST write, never an agent one. The Playwright MCP itself
+    // additionally disallows its RCE-equivalent browser_run_code_unsafe tool regardless of who granted this
+    // flag — see PLAYWRIGHT_DISALLOWED_TOOLS (pty/host.ts).
     browserTesting: z.boolean().optional(),
     // Opt-in document-conversion capability (default off). Human-gated identically to browserTesting —
     // it launches a host markitdown process, so it is never an agent MCP write surface.

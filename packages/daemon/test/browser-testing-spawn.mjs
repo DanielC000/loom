@@ -43,7 +43,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildMcpServers, playwrightMcpServer, browserScratchEnv } = await import("../dist/pty/host.js");
+const { PtyHost, buildMcpServers, buildSpawnArgs, playwrightMcpServer, browserScratchEnv, disallowedToolsForSpawn, PLAYWRIGHT_DISALLOWED_TOOLS } = await import("../dist/pty/host.js");
 const { sessionScratchDir } = await import("../dist/paths.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -147,6 +147,39 @@ check("(vault) --output-dir is an ABSOLUTE path", path.isAbsolute(vaultOutDir));
 const noVault = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", browserTesting: true });
 check("(vault) a vaultPath property changes NOTHING in the mcp-config",
   JSON.stringify(withVault) === JSON.stringify(noVault));
+
+// ===================== security hardening (card 7159466a): browser_run_code_unsafe is structurally
+// unreachable — the whole-server 'mcp__playwright' --allowedTools wildcard would otherwise grant it
+// too, so disallowedToolsForSpawn must union it into --disallowedTools whenever the Playwright MCP is
+// actually mounted =====================
+check("(PLAYWRIGHT_DISALLOWED_TOOLS) carries exactly the one RCE-equivalent tool name",
+  PLAYWRIGHT_DISALLOWED_TOOLS.length === 1 && PLAYWRIGHT_DISALLOWED_TOOLS[0] === "mcp__playwright__browser_run_code_unsafe");
+
+check("(disallow) playwrightMounted=false ⇒ disallowedToolsForSpawn does NOT include browser_run_code_unsafe",
+  !disallowedToolsForSpawn("worker", false, false, false).includes("mcp__playwright__browser_run_code_unsafe"));
+check("(disallow) playwrightMounted=true ⇒ disallowedToolsForSpawn INCLUDES browser_run_code_unsafe",
+  disallowedToolsForSpawn("worker", false, false, true).includes("mcp__playwright__browser_run_code_unsafe"));
+check("(disallow) playwrightMounted=true still keeps the role's own disallow list (union, not replace)",
+  ["AskUserQuestion", "ExitPlanMode", "EnterPlanMode"].every((t) => disallowedToolsForSpawn("worker", false, false, true).includes(t)));
+check("(disallow) all three flags off ⇒ byte-identical to disallowedToolsForSpawn(role) alone",
+  JSON.stringify(disallowedToolsForSpawn("worker", false, false, false)) === JSON.stringify(disallowedToolsForSpawn("worker")));
+
+// end-to-end through buildSpawnArgs: browser_run_code_unsafe actually lands in --disallowedTools argv
+// when playwright is mounted, and is absent when it isn't — proving the flag is emitted, not just the array.
+{
+  const mcpNoPw = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
+  const mcpWithPw = { ...mcpNoPw, playwright: on.playwright };
+  const argsWithout = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpNoPw, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, false, !!mcpNoPw.playwright) });
+  const argsWith = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithPw, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, false, !!mcpWithPw.playwright) });
+  check("(e2e-disallow) playwright NOT mounted: browser_run_code_unsafe absent from argv",
+    !argsWithout.includes("mcp__playwright__browser_run_code_unsafe"));
+  check("(e2e-disallow) playwright MOUNTED: browser_run_code_unsafe appears in --disallowedTools argv",
+    argsWith.includes("mcp__playwright__browser_run_code_unsafe"));
+  const d = argsWith.indexOf("--disallowedTools");
+  const strict = argsWith.indexOf("--strict-mcp-config");
+  check("(e2e-disallow) --disallowedTools still precedes --strict-mcp-config (flag-ordering invariant preserved)",
+    d !== -1 && strict !== -1 && d < strict);
+}
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
@@ -255,6 +288,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — opt-in worker browser: resolveProfile backstops/passes browserTesting; the Playwright stdio MCP is injected iff browserTesting (absolute paths, headless+isolated, byte-identical off); LOOM_SCRATCH_DIR mirrors the Playwright --output-dir iff the MCP mounted (absent otherwise); the flag threads through startNew/resume/spawnWorker + the persisted row — claude-free, network-free."
+  ? "\n✅ ALL PASS — opt-in worker browser: resolveProfile backstops/passes browserTesting; the Playwright stdio MCP is injected iff browserTesting (absolute paths, headless+isolated, byte-identical off); LOOM_SCRATCH_DIR mirrors the Playwright --output-dir iff the MCP mounted (absent otherwise); the flag threads through startNew/resume/spawnWorker + the persisted row; browser_run_code_unsafe (RCE-equivalent) is unioned into --disallowedTools whenever Playwright mounts, byte-identical off — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

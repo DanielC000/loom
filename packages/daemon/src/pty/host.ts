@@ -947,6 +947,22 @@ export const CODESCAPE_WRITE_TOOLS: readonly string[] = [
 ];
 
 /**
+ * Security hardening (card 7159466a): `browserTesting`'s `--allowedTools` grant is the WHOLE
+ * `mcp__playwright` server (a wildcard — see {@link capabilityToolAllowlist}'s "browser-testing" slug and
+ * the direct browserTesting allow at the createPty chokepoint), which includes `browser_run_code_unsafe` —
+ * @playwright/mcp's own README calls it "RCE-equivalent" (executes arbitrary JS in the Playwright server
+ * process). No legitimate browser-testing workflow needs it (`browser_evaluate` covers in-page JS), and
+ * nothing caps it once the wildcard is granted — including a human enabling `browserTesting` on the
+ * untrusted-chat-facing companion (assistant) profile. This name is unioned into `--disallowedTools` (see
+ * {@link disallowedToolsForSpawn}) whenever the Playwright MCP is actually mounted, so `--disallowedTools`
+ * overrides the wildcard `--allowedTools` grant and the tool is structurally unreachable rather than merely
+ * un-allowlisted (verified empirically via a real spawn — see the spawn-args test).
+ */
+export const PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
+  "mcp__playwright__browser_run_code_unsafe",
+];
+
+/**
  * The `--allowedTools` contribution from every resolved capability grant (agent-tooling P4) — the
  * `createPty` allow-list analog of `buildMcpServers`' mount loop. The two legacy slugs keep their exact
  * hardcoded allow entries; an owner-added capability contributes its own `toolAllowlist` from the catalog.
@@ -1403,20 +1419,24 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
 /**
  * The FULL `--disallowedTools` list for a spawn: the role's disallow list ({@link disallowedToolsForRole}
  * — the human-prompt tools, the task-tracking tools, or both) UNIONed (de-duped, role tools first) with
- * {@link RESTRICTED_NATIVE_TOOLS} iff `restrictedTools` is on, AND with {@link CODESCAPE_WRITE_TOOLS} iff
+ * {@link RESTRICTED_NATIVE_TOOLS} iff `restrictedTools` is on, with {@link CODESCAPE_WRITE_TOOLS} iff
  * `codescapeMounted` is true (the mounted Codescape MCP still advertises its 5 write tools even though
- * they're never allowlisted — see CODESCAPE_WRITE_TOOLS's doc for why that alone isn't enough). When BOTH
- * are off/falsy this returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL
- * to today (no restricted/codescape tokens appended). Pure + exported so the spawn-args test asserts the
+ * they're never allowlisted — see CODESCAPE_WRITE_TOOLS's doc for why that alone isn't enough), AND with
+ * {@link PLAYWRIGHT_DISALLOWED_TOOLS} iff `playwrightMounted` is true (the mounted Playwright MCP's
+ * `--allowedTools` grant is the whole-server wildcard, which includes the RCE-equivalent
+ * `browser_run_code_unsafe` — see PLAYWRIGHT_DISALLOWED_TOOLS's doc). When ALL THREE are off/falsy this
+ * returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no
+ * restricted/codescape/playwright tokens appended). Pure + exported so the spawn-args test asserts the
  * union + the byte-identical-off invariant with no real claude. (Companion blast-radius card; Codescape C2
- * hardening.)
+ * hardening; card 7159466a Playwright hardening.)
  */
-export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean): string[] {
+export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean, playwrightMounted?: boolean): string[] {
   const base = disallowedToolsForRole(role);
-  if (!restrictedTools && !codescapeMounted) return base; // OFF: exactly the role's disallow list (byte-identical to today)
+  if (!restrictedTools && !codescapeMounted && !playwrightMounted) return base; // OFF: exactly the role's disallow list (byte-identical to today)
   const merged = [...base];
   if (restrictedTools) for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (codescapeMounted) for (const t of CODESCAPE_WRITE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
+  if (playwrightMounted) for (const t of PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   return merged;
 }
 
@@ -2346,13 +2366,15 @@ export class PtyHost {
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
-    // blast-radius control), AND with the 5 Codescape write tools when the mcpServers map actually carries
-    // a "codescape" entry (a mounted-but-unallowlisted MCP tool still PROMPTS under acceptEdits, which a
-    // Loom-driven role can never answer — see CODESCAPE_WRITE_TOOLS). Computed from the session role +
-    // pinned flags at the single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot) inherits
-    // it; with restrictedTools off and codescape unmounted this is exactly disallowedToolsForRole(role) ⇒
+    // blast-radius control), with the 5 Codescape write tools when the mcpServers map actually carries a
+    // "codescape" entry (a mounted-but-unallowlisted MCP tool still PROMPTS under acceptEdits, which a
+    // Loom-driven role can never answer — see CODESCAPE_WRITE_TOOLS), AND with browser_run_code_unsafe when
+    // the mcpServers map actually carries a "playwright" entry (its --allowedTools grant is the whole-server
+    // wildcard — see PLAYWRIGHT_DISALLOWED_TOOLS). Computed from the session role + pinned flags at the
+    // single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot) inherits it; with
+    // restrictedTools off and codescape/playwright unmounted this is exactly disallowedToolsForRole(role) ⇒
     // byte-identical argv. See disallowedToolsForSpawn.
-    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape);
+    const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape, !!mcpServers.playwright);
     // Agent-tooling P4 credential-tie hardening: a capability secret must NEVER ride the claude process's
     // own argv. Diverting to a 0600 per-session FILE is CONDITIONAL on the map actually carrying one —
     // every secret-free spawn (every session today) keeps the byte-identical inline --mcp-config <json>
