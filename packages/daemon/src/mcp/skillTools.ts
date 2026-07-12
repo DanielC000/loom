@@ -96,3 +96,61 @@ export function skillWriteData(
   if (!writeSkill(name, content)) return { error: "invalid skill name" };
   return { ok: true, name, bundled: false, skill: listSkills().find((s) => s.name === name) ?? null };
 }
+
+/** Shared input schema for skill_edit — mirrors the Edit tool's oldString/newString contract. */
+export const skillEditInputSchema = {
+  name: z.string(),
+  oldString: z.string(),
+  newString: z.string(),
+  replaceAll: z.boolean().optional(),
+  confirm: z.boolean().optional(),
+};
+
+/** Count non-overlapping occurrences of a literal `needle` in `haystack`. */
+function countOccurrences(haystack: string, needle: string): number {
+  if (!needle) return 0;
+  let count = 0;
+  let idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) {
+    count++;
+    idx += needle.length;
+  }
+  return count;
+}
+
+/**
+ * skill_edit handler payload — the surgical, patch-based alternative to skill_write: exact-string
+ * replace (oldString -> newString) against the skill's CURRENT SKILL.md, mirroring the Edit tool's
+ * contract (oldString must match EXACTLY incl. whitespace and be UNIQUE, unless replaceAll:true).
+ * Deliberately does NOT duplicate any write logic: it reads the current content via readSkill(),
+ * computes the new full content in memory, then hands off to skillWriteData() for the ACTUAL write —
+ * so skill_edit and skill_write always share ONE persistence path (same confirm-first gate, same
+ * kebab-slug guard, same WRITE TARGET selection via `opts.allowBundledAsset`) and can never diverge.
+ */
+export function skillEditData(
+  { name, oldString, newString, replaceAll, confirm }: { name: string; oldString: string; newString: string; replaceAll?: boolean; confirm?: boolean },
+  opts: { allowBundledAsset: boolean },
+): Record<string, unknown> {
+  if (!oldString) {
+    return { error: "oldString must be a non-empty string" };
+  }
+  if (oldString === newString) {
+    return { error: "oldString and newString must differ" };
+  }
+  if (!isValidSkillName(name)) {
+    return { error: "invalid skill name (kebab-case: a-z, 0-9, -, ≤64 chars)" };
+  }
+  const current = readSkill(name);
+  if (!current) {
+    return { error: `skill "${name}" not found — use skill_write to create a new skill` };
+  }
+  const count = countOccurrences(current.content, oldString);
+  if (count === 0) {
+    return { error: `oldString not found in "${name}"'s SKILL.md` };
+  }
+  if (count > 1 && !replaceAll) {
+    return { error: `oldString is not unique in "${name}"'s SKILL.md — ${count} matches; add surrounding context to make it unique, or pass replaceAll:true to replace every occurrence` };
+  }
+  const newContent = replaceAll ? current.content.split(oldString).join(newString) : current.content.replace(oldString, newString);
+  return skillWriteData({ name, content: newContent, confirm }, opts);
+}

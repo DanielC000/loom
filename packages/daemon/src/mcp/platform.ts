@@ -21,7 +21,7 @@ import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
-import { skillListData, skillWriteData, skillWriteInputSchema } from "./skillTools.js";
+import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
 import { prioritySchema } from "./server.js";
@@ -1666,6 +1666,20 @@ export class PlatformMcpRouter {
       },
       // allowBundledAsset:TRUE — the Lead's bundled-asset edit (the operator surface passes false).
       async ({ name, content, confirm }) => ok(skillWriteData({ name, content, confirm }, { allowBundledAsset: true })),
+    );
+
+    server.registerTool(
+      "skill_edit",
+      {
+        description:
+          "Surgical, patch-based alternative to skill_write for a SMALL edit to an EXISTING skill's SKILL.md — exact-string replace (oldString -> newString), mirroring the Edit tool's contract, so a small doctrine tweak doesn't require reprinting the entire file through skill_write. oldString must match the skill's CURRENT content EXACTLY (including whitespace) and be UNIQUE: zero matches errors ('oldString not found'), more than one match errors naming the count ('not unique — N matches; add surrounding context') UNLESS replaceAll:true is passed, in which case every occurrence is replaced. oldString and newString must differ. The skill must already exist (skill_edit never creates one — use skill_write for that, or for a full rewrite).\n" +
+          "Reuses skill_write's EXACT SAME write path under the hood (same WRITE TARGET selection, same kebab-slug guard): for a bundled name it edits the store copy then publishes store→asset, for a USER name it edits the user store only.\n" +
+          "CONFIRM-FIRST (load-bearing): NEVER call this without first showing the user the oldString -> newString change and getting their explicit confirmation. Pass confirm:true to attest you have done so; a missing/false confirm is rejected and nothing is written.",
+        inputSchema: skillEditInputSchema,
+      },
+      // allowBundledAsset:TRUE — same elevated write target as this surface's skill_write.
+      async ({ name, oldString, newString, replaceAll, confirm }) =>
+        ok(skillEditData({ name, oldString, newString, replaceAll, confirm }, { allowBundledAsset: true })),
     );
 
     return server;
