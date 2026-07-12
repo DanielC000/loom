@@ -494,10 +494,10 @@ async function main(): Promise<void> {
   // The injected recorder (bug 0f01f234) persists every OUTBOUND in-app reply to the durable chat-history
   // store, symmetric with the inbound record in companion/controller.ts's handleInAppInbound.
   const inAppChannel = new InAppChannel({
-    record: (sessionId, author, text, proactive) => {
+    record: (sessionId, author, text, proactive, viaVoice) => {
       db.insertCompanionMessage({
         id: randomUUID(), sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, author, text,
-        createdAt: new Date().toISOString(), proactive,
+        createdAt: new Date().toISOString(), proactive, viaVoice,
       });
     },
   });

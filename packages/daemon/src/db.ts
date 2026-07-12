@@ -1962,6 +1962,13 @@ export class Db {
   listCompanionBindings(): CompanionBinding[] {
     return (this.db.prepare("SELECT * FROM companion_bindings ORDER BY created_at, rowid").all() as Row[]).map(toCompanionBinding);
   }
+  /** ONE session's own bindings (every channel it's bound on) — the scoped read the companion's own
+   *  introspection surface uses (`my_context`, mcp/orchestration.ts), so a companion reading its own
+   *  channel binding never needs the global list. */
+  getCompanionBindingsForSession(sessionId: string): CompanionBinding[] {
+    return (this.db.prepare("SELECT * FROM companion_bindings WHERE session_id = ? ORDER BY channel")
+      .all(sessionId) as Row[]).map(toCompanionBinding);
+  }
   /**
    * Upsert a binding KEYED ON (session_id, channel) (multi-channel: one binding per session PER channel):
    * a re-bind of the SAME session on the SAME channel updates its chat_id/scope in place, while a binding
@@ -4738,6 +4745,17 @@ export class Db {
    *  history clears to the same empty state. */
   clearCompanionMessages(sessionId: string, channel: string): void {
     this.db.prepare("DELETE FROM companion_messages WHERE session_id = ? AND channel = ?").run(sessionId, channel);
+  }
+  /** The LAST reply this companion actually delivered (author='companion'), across every channel and every
+   *  conversation — null when it has never sent one. The companion introspection surface (`my_context`,
+   *  mcp/orchestration.ts) uses this so the companion can answer "what did you just send, and where" from
+   *  real state — `text` doubles as the synthesized clip's transcript when `viaVoice` is true (TTS speaks
+   *  exactly the reply text, so there is no separate transcript to store). */
+  getLastCompanionDelivery(sessionId: string): CompanionMessage | null {
+    const r = this.db.prepare(
+      "SELECT * FROM companion_messages WHERE session_id = ? AND author = 'companion' ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    ).get(sessionId) as Row | undefined;
+    return r ? toCompanionMessage(r) : null;
   }
 }
 

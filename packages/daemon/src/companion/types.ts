@@ -248,8 +248,10 @@ export interface CompanionHistoryExport {
  * The injected CHAT HISTORY recorder (unified cross-channel chat, card 7d63e200) - generalizes the
  * original in-app-only "reload loses history" fix (bug 0f01f234) to every channel the gateway routes.
  * `record` is called for BOTH an accepted inbound turn (author:"user") and a delivered/voiced outbound
- * reply (author:"companion"); `viaVoice` is true only for an inbound turn whose text is itself a
- * voice-note STT transcript (always false for an outbound reply - a voiced TTS reply is not tagged).
+ * reply (author:"companion"); `viaVoice` is true for an inbound turn whose text is itself a voice-note STT
+ * transcript, OR for an outbound reply actually DELIVERED as a synthesized voice clip (Companion Delivery
+ * Introspection) — in the outbound case `text` IS that clip's transcript (TTS speaks exactly the reply
+ * text, so there is no separate transcript to store).
  * Optional: undefined ⇒ no recording at all (every existing/test bare `new ChatGateway(...)` construction
  * stays byte-identical). The daemon's real implementation (companion/factory.ts) deliberately SKIPS the
  * in-app channel here - it already records via its own dedicated hooks (companion/controller.ts's inbound

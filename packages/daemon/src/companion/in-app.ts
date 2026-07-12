@@ -163,7 +163,10 @@ export interface InAppClient {
  * reply (`author:"companion"`), never for an inbound (`author:"user"`) turn.
  */
 export interface InAppMessageRecorder {
-  record(sessionId: string, author: "user" | "companion", text: string, proactive?: boolean): void;
+  /** `viaVoice` (Companion Delivery Introspection) is an OPTIONAL trailing arg, defaults false — true only
+   *  when this outbound reply was actually delivered as a synthesized voice clip (the `sendVoice` path
+   *  below), never for a plain `send`. */
+  record(sessionId: string, author: "user" | "companion", text: string, proactive?: boolean, viaVoice?: boolean): void;
 }
 
 /**
@@ -316,7 +319,7 @@ export class InAppChannel {
     // heartbeat/reminder/attention-push reply's self-recorded row + live frame.
     sendVoice: async (chatId: string, audioFilePath: string, text: string, proactive = false) => {
       const data = await fs.promises.readFile(audioFilePath, { encoding: "base64" });
-      this.recordSafely(chatId, "companion", text, proactive);
+      this.recordSafely(chatId, "companion", text, proactive, true);
       this.deliver(chatId, text, { data, mimeType: "audio/ogg" }, proactive);
     },
     // OUTBOUND MEDIA (the `media-out` lever's in-app delivery, card 9ec79b52). `filePath` was already
@@ -341,10 +344,10 @@ export class InAppChannel {
 
   /** Best-effort record (never throws upward) — mirrors `deliver`'s per-client try/catch containment. A
    *  dropped history row is acceptable; it must never break the reply/inbound path it's mirroring. */
-  private recordSafely(sessionId: string, author: "user" | "companion", text: string, proactive = false): void {
+  private recordSafely(sessionId: string, author: "user" | "companion", text: string, proactive = false, viaVoice = false): void {
     if (!this.recorder) return;
     try {
-      this.recorder.record(sessionId, author, text, proactive);
+      this.recorder.record(sessionId, author, text, proactive, viaVoice);
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error(`[companion] in-app history record failed: ${err instanceof Error ? err.message : String(err)}`);

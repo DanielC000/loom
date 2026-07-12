@@ -159,13 +159,15 @@ export class OrchestrationMcpRouter {
    * session can only ever read itself, so cross-session reads are impossible). Reuses the value the
    * Stop-time measurement path persists (`ctx_input_tokens`, via sessions/context.ts) — NO new
    * measurement. Returns `pct: null` + a note when not yet measured (never a fake 0%). Also folds in the
-   * project's RESOLVED `gateCommand` (READ-ONLY — see resolvedGateCommand).
+   * project's RESOLVED `gateCommand` (READ-ONLY — see resolvedGateCommand) and, for a companion (`role
+   * === "assistant"`), its own delivery/channel introspection (see companionIntrospection).
    */
   private myContext(sessionId: string): Record<string, unknown> {
     const s = this.db.getSession(sessionId);
     const ctxInputTokens = s?.ctxInputTokens ?? null;
     const measuredAt = s?.ctxUpdatedAt ?? null;
     const gateCommand = this.resolvedGateCommand(s?.projectId);
+    const companion = s?.role === "assistant" ? this.companionIntrospection(sessionId) : undefined;
     if (ctxInputTokens == null) {
       // Pre-first-turn: the transcript-derived `s.model` is still null (nothing measured yet), but the
       // CONFIGURED model is already known at spawn via the session's agent → Profile (`profile.model`,
@@ -181,6 +183,7 @@ export class OrchestrationMcpRouter {
         ctxInputTokens: null, contextWindow, pct: null, model, measuredAt, gateCommand, measured: false,
         note: "context not measured yet (no completed turn) — occupancy unknown; contextWindow/model " +
           "reflect the CONFIGURED profile model when set, else the DEFAULT_CONTEXT_WINDOW fallback",
+        ...(companion ? { companion } : {}),
       };
     }
     const model = s?.model ?? null;
@@ -192,6 +195,39 @@ export class OrchestrationMcpRouter {
       model,
       measuredAt,
       gateCommand,
+      ...(companion ? { companion } : {}),
+    };
+  }
+
+  /**
+   * READ-ONLY companion self-introspection (Companion Delivery Introspection — owner-directed, 2026-07-12):
+   * the bound channel(s) + each one's effective voice-reply mode, plus the LAST reply this companion
+   * actually delivered (channel, text, and whether it went out as a synthesized voice clip — `text` doubles
+   * as that clip's transcript, since TTS speaks exactly the reply text, so there is nothing further to
+   * store). Folded into `my_context` (assistant role only, see myContext above) so a companion asked "send
+   * the transcript of your last voice message" or "what did you just send, and where" can answer from real
+   * state instead of re-guessing/re-pasting from its own turn history.
+   *
+   * TRUST BOUNDARY: this is a READ over the caller's OWN session ONLY — `sessionId` is the URL-path id
+   * (never agent-suppliable, see resolveRole), so a companion can never introspect another session's
+   * bindings or deliveries. Voice mode is resolved with `senderId: null`, mirroring EXACTLY how
+   * ChatGateway.tryDeliverVoice itself resolves the outbound pref (a DM's key; a group's per-sender pref is
+   * a documented, separate limitation — see voice-prefs.ts) — so what this reports is what actually governs
+   * delivery, never a guess. `chatId` (the external platform identity, e.g. a Telegram chat id) is
+   * deliberately omitted from the bindings list — the companion only needs to know WHICH channels it's
+   * reachable on and their voice mode, not the raw external route.
+   */
+  private companionIntrospection(sessionId: string): Record<string, unknown> {
+    const bindings = this.db.getCompanionBindingsForSession(sessionId).map((b) => ({
+      channel: b.channel,
+      voiceReplies: this.db.getCompanionVoicePref(sessionId, b.channel, b.chatId, null)?.voiceReplies ?? "off",
+    }));
+    const last = this.db.getLastCompanionDelivery(sessionId);
+    return {
+      bindings,
+      lastDelivery: last
+        ? { channel: last.channel, text: last.text, viaVoice: last.viaVoice, sentAt: last.createdAt }
+        : null,
     };
   }
 
@@ -210,7 +246,11 @@ export class OrchestrationMcpRouter {
           "fake reading. `gateCommand` is the project's RESOLVED build/DoD gate, READ-ONLY: " +
           "{configured:true, command} when set, else {configured:false, command:null, note} — when " +
           "unconfigured, ASK THE OWNER to set one (a human-only action); never hand-roll a gate command " +
-          "into a worker's DoD.",
+          "into a worker's DoD. If you are a Companion (chat_reply is on your tool list), the response ALSO " +
+          "includes `companion`: {bindings: [{channel, voiceReplies}], lastDelivery: {channel, text, " +
+          "viaVoice, sentAt} | null} — your OWN bound channel(s) + effective voice-reply mode, and the last " +
+          "reply you actually delivered (`text` IS that clip's transcript when `viaVoice` is true). Use it " +
+          "to answer 'what did you just send / on which channel / was it spoken' from real state.",
         inputSchema: {},
       },
       async () => ok(this.myContext(sessionId)),

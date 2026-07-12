@@ -1166,10 +1166,11 @@ export interface CompanionMessage {
   author: "user" | "companion";
   text: string;
   createdAt: string;
-  /** True iff this turn's `text` is a voice-note STT transcript (card 7d63e200) — e.g. a Telegram voice
-   *  message — so the web panel can render a small mic indicator alongside it. Always false for a typed
-   *  message and for every companion-authored reply (a voiced TTS reply is not tagged; this flags only an
-   *  inbound turn that ITSELF arrived as audio). */
+  /** True iff this turn's `text` IS (or, for a companion reply, WAS synthesized FROM) audio: an inbound
+   *  voice-note STT transcript (card 7d63e200 — e.g. a Telegram voice message), or an outbound reply
+   *  actually delivered as a synthesized TTS voice clip (Companion Delivery Introspection) — `text` doubles
+   *  as that clip's transcript. Always false for a typed message and for a companion reply sent as plain
+   *  text. The web panel renders a small mic indicator alongside a true row. */
   viaVoice: boolean;
   /** Which conversation (per-session, 1-based, monotonic) this turn belongs to — conversation history (card
    *  85f62475). Every "/new"/"/reset" closes the current conversation and opens the next `conversationSeq`;

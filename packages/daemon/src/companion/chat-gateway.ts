@@ -556,19 +556,22 @@ export class ChatGateway {
    *  {@link recordInboundSafely} / {@link CompanionMessageRecorder}. ADDITIONALLY live-pushes the reply —
    *  see {@link recordInboundSafely}'s live-push note. `proactive` (proactive event-line producer) tags a
    *  heartbeat/reminder/attention-push-originated reply so the persisted row + live push both carry it —
-   *  defaults false (every existing caller omitting it stays byte-identical). Never throws. */
-  private recordOutboundSafely(sessionId: string, channel: string, chatId: string, text: string, proactive = false): void {
+   *  defaults false (every existing caller omitting it stays byte-identical). `viaVoice` (Companion Delivery
+   *  Introspection) tags a reply actually DELIVERED as a synthesized voice clip rather than plain text —
+   *  defaults false, so every text-send call site stays byte-identical; only the successful-voice branch of
+   *  `deliverReply` passes true. Never throws. */
+  private recordOutboundSafely(sessionId: string, channel: string, chatId: string, text: string, proactive = false, viaVoice = false): void {
     if (!this.recorder && !this.livePush) return;
     const id = randomUUID();
     if (this.recorder) {
       try {
-        this.recorder.record(sessionId, channel, chatId, "companion", text, false, id, proactive);
+        this.recorder.record(sessionId, channel, chatId, "companion", text, viaVoice, id, proactive);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error(`[companion] outbound history record failed: ${describeError(err)}`);
       }
     }
-    this.pushLiveSafely(sessionId, channel, "companion", text, false, id, proactive);
+    this.pushLiveSafely(sessionId, channel, "companion", text, viaVoice, id, proactive);
   }
 
   /** Shared live-push containment (live-push card): a push failure must NEVER break the record/inbound/
@@ -660,7 +663,7 @@ export class ChatGateway {
     if (this.synthesize) {
       const voiceResult = await this.tryDeliverVoice(sessionId, target, text, voice, proactive);
       if (voiceResult) {
-        this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive);
+        this.recordOutboundSafely(sessionId, target.channel, target.chatId, text, proactive, true);
         return voiceResult;
       }
     }
