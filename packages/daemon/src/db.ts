@@ -4438,22 +4438,28 @@ export class Db {
     ).all(projectId, taskId, taskId) as Row[]).map(toQuestion);
   }
   /**
-   * Every request (any state), ACROSS ALL PROJECTS, newest-first — the backing read for the Platform
-   * Auditor's cross-project `requests_list` (card 59489267), the audit-scope sibling of
-   * `listQuestionsForTask` (one-task-scoped). Deliberately NON-CONSUMING (never touches `state`/
-   * `consumed_at`), same as `listQuestionsForTask`. Filters are optional/AND'd; omit all for the whole
-   * platform. `agentId` is NOT a column on `questions` itself (only the asking session carries it), so this
-   * LEFT JOINs `sessions` to surface it — a hard-deleted asking session reads `agentId: null` rather than
-   * dropping the row. Returns every matching row unpaginated (mirrors list_sessions: the MCP layer applies
-   * the default cap / explicit limit+offset, not this read).
+   * Every request (any state), newest-first — the backing read for the Platform Auditor's cross-project
+   * `requests_list` (card 59489267) AND the manager's own project-scoped `requests_list` (card 988bb585
+   * follow-up): the audit-scope sibling of `listQuestionsForTask` (one-task-scoped). Deliberately
+   * NON-CONSUMING (never touches `state`/`consumed_at`), same as `listQuestionsForTask`. Filters are
+   * optional/AND'd; omit all (no `projectId`) for the whole platform — the Auditor's use; the manager
+   * surface always passes its own `projectId` so it can never read another project's requests.
+   * `excludeConsumed` (default off, so the Auditor's "no filters returns the whole platform" behavior is
+   * unchanged) drops `state:'consumed'` rows UNLESS `state` itself is explicitly set — an explicit
+   * `state:'consumed'` always wins, mirroring `listOpenQuestions`'s `includeConsumed` toggle. `agentId` is
+   * NOT a column on `questions` itself (only the asking session carries it), so this LEFT JOINs `sessions`
+   * to surface it — a hard-deleted asking session reads `agentId: null` rather than dropping the row.
+   * Returns every matching row unpaginated (mirrors list_sessions: the MCP layer applies the default cap /
+   * explicit limit+offset, not this read).
    */
   listQuestionsForAudit(filters: {
-    projectId?: string; state?: QuestionState; type?: QuestionType; since?: string;
+    projectId?: string; state?: QuestionState; type?: QuestionType; since?: string; excludeConsumed?: boolean;
   } = {}): (Question & { agentId: string | null })[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
     if (filters.projectId) { clauses.push("q.project_id = ?"); params.push(filters.projectId); }
     if (filters.state) { clauses.push("q.state = ?"); params.push(filters.state); }
+    else if (filters.excludeConsumed) { clauses.push("q.state != 'consumed'"); }
     if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
     if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";

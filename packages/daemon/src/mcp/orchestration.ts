@@ -5,8 +5,8 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveConfig, resolveProfile, type SessionRole } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem } from "./questionTool.js";
+import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole } from "@loom/shared";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem } from "./questionTool.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -1111,6 +1111,43 @@ export class OrchestrationMcpRouter {
           sessions.purgeAnsweredQuestionNudges(managerSessionId, answered.map((q) => q.id));
         }
         return ok({ questions: answered.map(questionPullItem) });
+      },
+    );
+
+    // requests_list (card 988bb585 follow-up): a NON-CONSUMING, board-wide read of YOUR OWN project's
+    // Requests — the gap between question_pull (consumes, answered-only, no taskId filter) and
+    // task_requests_list/task_request_get (task-scoped only). Mirrors the Platform Auditor's cross-project
+    // requests_list (mcp/audit.ts) — same filters, same per-type answer shaping (questionTool.ts's
+    // auditRequestItem/questionAnswerByType) so the credential never-echo guarantee can't drift between the
+    // two read surfaces — but scoped SERVER-SIDE to this manager's own project (no projectId param; a
+    // manager can never read another project's requests, unlike the Auditor's platform-wide read).
+    server.registerTool(
+      "requests_list",
+      {
+        description:
+          "List Requests (decision/input/permission/credential asks) for YOUR OWN project, board-wide — " +
+          "the non-consuming complement to question_pull (which only returns ANSWERED requests and " +
+          "CONSUMES them). Use this to survey pending/answered/consumed requests, including ones asked " +
+          "with no taskId or asked by a predecessor manager on this project. NON-CONSUMING — reading NEVER " +
+          "drains or flips state; calling it twice returns the same records. Returns, per row: {id, " +
+          "projectId, sessionId, agentId, taskId, type, title, state, createdAt, answeredAt, consumedAt} " +
+          "plus an answer summary by type — chosenOption/note for decision|input, approved/note for " +
+          "permission, ack ONLY for credential (NEVER the secret — a pending row's answer fields read null " +
+          "rather than a misleading false-ish value). Filters (all optional, AND'd): state " +
+          "(pending|answered|consumed), type (decision|input|permission|credential), includeConsumed " +
+          "(false by default — folds already-consumed requests in alongside the rest; an explicit " +
+          "state:\"consumed\" always shows consumed regardless of this flag). Newest-first (createdAt DESC).",
+        inputSchema: {
+          state: z.enum(QUESTION_STATES).optional(),
+          type: z.enum(QUESTION_TYPES).optional(),
+          includeConsumed: z.boolean().optional(),
+        },
+      },
+      async ({ state, type, includeConsumed }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        const rows = db.listQuestionsForAudit({ projectId, state, type, excludeConsumed: !includeConsumed });
+        return ok(rows.map(auditRequestItem));
       },
     );
 
