@@ -6301,7 +6301,15 @@ export class SessionService {
     // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
     // Land the task in the `terminal` lane (role-resolved off its project, last-column fallback) — not the
     // hardcoded "done" key. A merge always has a terminal lane (the role is required + falls back to last).
-    if (args.taskId) {
+    // ONLY on the FIRST finalize for this worker (no prior merge_done event) — a REPLAY (an idempotent
+    // worktree-GC retry, or a reconnect/boot reconciliation re-run finding the merge already landed) must
+    // never force the column back to terminal over a manual move a human made AFTER the merge landed. That
+    // clobber was the bug: a card the manager moved to a non-terminal "ready for owner review" lane got
+    // silently reset to the terminal column on the next reconnect/boot reconcile, which then made
+    // worker_spawn wrongly refuse it as a terminal-column task.
+    const alreadyFinalized = args.taskId != null &&
+      this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
+    if (args.taskId && !alreadyFinalized) {
       const task = this.db.getTask(args.taskId);
       const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
       if (terminalKey) this.db.updateTask(args.taskId, { columnKey: terminalKey });
@@ -6394,9 +6402,13 @@ export class SessionService {
         if (!landedSha) continue;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
-        const terminalKey = this.columnKeyForProjectRole(s.projectId, "terminal");
-        const taskDone = this.db.getTask(s.taskId)?.columnKey === terminalKey;
-        if (taskDone && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
+        // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
+        // a human can freely move a merged card OFF the terminal column afterward (e.g. into a review lane)
+        // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
+        // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
+        // the finalizeMerge guard above) forcing the column back to terminal each time.
+        const alreadyFinalized = this.db.listEventsForWorker(s.id).some((e) => e.kind === "merge_done");
+        if (alreadyFinalized && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
           worktreePath, branch: s.branch, repoPath: project.repoPath, projectId: project.id,
