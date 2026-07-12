@@ -5040,6 +5040,27 @@ export class SessionService {
   }
 
   /**
+   * card (agent_get/agent_update prefix asymmetry): resolve an agentId ref for a manager-surface agent
+   * WRITE exactly like agent_get resolves it for a READ — full id first (a real cross-project id still
+   * hits this and falls through to requireOwnProject's more informative "outside your project" error),
+   * else an unambiguous 8-char id-PREFIX scoped to the manager's OWN project only (listAgents(ownProjectId)
+   * — mirrors agent_get's own-project scoping, so a prefix can never discover a cross-project agent's
+   * existence). Ambiguous/none surface the SAME error shape agent_get gives.
+   */
+  private resolveManagerAgentRef(managerSessionId: string, ref: string): Agent {
+    const exact = this.db.getAgent(ref);
+    if (exact) return exact;
+    const ownProjectId = this.db.getSession(managerSessionId)?.projectId;
+    if (!ownProjectId) throw new Error("no project for this session");
+    const r = resolveIdPrefix(this.db.listAgents(ownProjectId), ref);
+    if (r.kind === "found") return r.record;
+    if (r.kind === "ambiguous") {
+      throw new Error(`ambiguous agent id-prefix '${ref}' — it matches ${r.ids.join(", ")}; pass more characters or the full id`);
+    }
+    throw new Error("agent not found");
+  }
+
+  /**
    * Assign an EXISTING human-authored profile to an agent (or clear it with `profileId: null`).
    * Option B: profile CREATE/edit stays human-only, so any assignable profileId was minted by a
    * human who intended it assignable — assignment can't escalate beyond what a human already blessed.
@@ -5047,13 +5068,12 @@ export class SessionService {
    */
   assignAgentProfile(managerSessionId: string, agentId: string, profileId: string | null): Agent {
     this.requireManager(managerSessionId, "agent_assign_profile");
-    const agent = this.db.getAgent(agentId);
-    if (!agent) throw new Error("agent not found");
+    const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_assign_profile");
     if (profileId != null && !this.db.getProfile(profileId)) throw new Error("profile not found");
-    this.db.updateAgent(agentId, { profileId });
-    this.auditManage(managerSessionId, "agent_assign_profile", { agentId, profileId });
-    return this.db.getAgent(agentId)!;
+    this.db.updateAgent(agent.id, { profileId });
+    this.auditManage(managerSessionId, "agent_assign_profile", { agentId: agent.id, profileId });
+    return this.db.getAgent(agent.id)!;
   }
 
   /**
@@ -5071,8 +5091,7 @@ export class SessionService {
     patch: { name?: string; startupPrompt?: string; appendToStartupPrompt?: string },
   ): Agent {
     this.requireManager(managerSessionId, "agent_update");
-    const agent = this.db.getAgent(agentId);
-    if (!agent) throw new Error("agent not found");
+    const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_update");
     if (patch.startupPrompt !== undefined && patch.appendToStartupPrompt !== undefined) {
       throw new Error("agent_update: pass startupPrompt (full replace) OR appendToStartupPrompt (append), not both");
@@ -5080,9 +5099,9 @@ export class SessionService {
     const startupPrompt = patch.appendToStartupPrompt !== undefined
       ? (agent.startupPrompt ? `${agent.startupPrompt}\n\n${patch.appendToStartupPrompt}` : patch.appendToStartupPrompt)
       : patch.startupPrompt;
-    this.db.updateAgent(agentId, { name: patch.name, startupPrompt });
-    this.auditManage(managerSessionId, "agent_update", { agentId, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
-    return this.db.getAgent(agentId)!;
+    this.db.updateAgent(agent.id, { name: patch.name, startupPrompt });
+    this.auditManage(managerSessionId, "agent_update", { agentId: agent.id, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
+    return this.db.getAgent(agent.id)!;
   }
 
   /**

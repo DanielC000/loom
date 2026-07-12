@@ -16,6 +16,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) exact-id + name resolution still work (regression — historical contract preserved);
 //   (5) agent_get resolves the same UNAMBIGUOUS prefix; an AMBIGUOUS prefix errors listing the candidates;
 //       an unknown prefix → "agent not found"; exact id still works.
+//   (6) agent_update (the agent WRITE handler) resolves the SAME prefix agent_get does — the read/write
+//       asymmetry that used to yield a silent "agent not found" on write; ambiguous still errors naming
+//       both candidates, never resolving to an arbitrary match; full id and unknown-prefix unchanged.
+//   (7) profile_assign resolves the same agentId prefix, with the same ambiguous/exact/unknown behavior.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-id-prefix.mjs
 import fs from "node:fs";
@@ -153,6 +157,34 @@ try {
     typeof gAmb.error === "string" && gAmb.error.includes("ambiguous") && gAmb.error.includes(ID_DUP_A) && gAmb.error.includes(ID_DUP_B));
   const gMiss = await call("agent_get", { agentId: "99999999" });
   check("(5) agent_get on an unknown prefix → 'agent not found'", gMiss.error === "agent not found");
+
+  // ===================== (6) agent_update (platform) resolves the SAME prefix agent_get does ===========
+  // The bug: agent_get resolved an 8-char id-prefix, but agent_update (+ profile_assign) did EXACT-match
+  // only — a prefix that read fine 404'd on write.
+  const uPrefix = await call("agent_update", { agentId: "12ab34cd", name: "Renamed via prefix" });
+  check("(6) agent_update resolves prefix '12ab34cd' → ID_SOLO", uPrefix.id === ID_SOLO && uPrefix.name === "Renamed via prefix" && !uPrefix.error);
+  const uExact = await call("agent_update", { agentId: ID_SOLO, name: "Renamed via full id" });
+  check("(6) agent_update: full id still works (regression)", uExact.id === ID_SOLO && uExact.name === "Renamed via full id" && !uExact.error);
+  const uAmb = await call("agent_update", { agentId: "feedface", name: "should not apply" });
+  check("(6) agent_update on an ambiguous prefix errors, naming BOTH candidate ids",
+    typeof uAmb.error === "string" && uAmb.error.includes("ambiguous") && uAmb.error.includes(ID_DUP_A) && uAmb.error.includes(ID_DUP_B));
+  check("(6) agent_update: the ambiguous call never picked a match (both names unchanged)",
+    db.getAgent(ID_DUP_A)?.name === "Alpha" && db.getAgent(ID_DUP_B)?.name === "Bravo");
+  const uMiss = await call("agent_update", { agentId: "99999999", name: "x" });
+  check("(6) agent_update on an unknown prefix → 'agent not found'", uMiss.error === "agent not found");
+
+  // ===================== (7) profile_assign (platform) resolves the SAME agentId prefix ==================
+  const paPrefix = await call("profile_assign", { agentId: "12ab34cd", profileId: "profDev" });
+  check("(7) profile_assign resolves prefix '12ab34cd' → ID_SOLO", paPrefix.id === ID_SOLO && paPrefix.profileId === "profDev" && !paPrefix.error);
+  const paExact = await call("profile_assign", { agentId: ID_SOLO, profileId: "profDev" });
+  check("(7) profile_assign: full id still works (regression)", paExact.id === ID_SOLO && paExact.profileId === "profDev" && !paExact.error);
+  const paAmb = await call("profile_assign", { agentId: "feedface", profileId: "profDev" });
+  check("(7) profile_assign on an ambiguous prefix errors, naming BOTH candidate ids",
+    typeof paAmb.error === "string" && paAmb.error.includes("ambiguous") && paAmb.error.includes(ID_DUP_A) && paAmb.error.includes(ID_DUP_B));
+  // ID_DUP_A/B were seeded WITH profileId "profDev" already (line ~71-72) — the ambiguous call must leave
+  // that untouched, not clear or otherwise mutate either candidate.
+  check("(7) profile_assign: the ambiguous call left both candidates' assignment UNCHANGED",
+    db.getAgent(ID_DUP_A)?.profileId === "profDev" && db.getAgent(ID_DUP_B)?.profileId === "profDev");
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -164,6 +196,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_spawn + agent_get resolve an unambiguous 8-char agent id-prefix, reject an ambiguous prefix naming the candidate ids, and route an id-shaped miss to an id-based hint (or none) — never a wrong agent name; exact-id + name resolution unchanged."
+  ? "\n✅ ALL PASS — worker_spawn + agent_get resolve an unambiguous 8-char agent id-prefix, reject an ambiguous prefix naming the candidate ids, and route an id-shaped miss to an id-based hint (or none) — never a wrong agent name; exact-id + name resolution unchanged; agent_update + profile_assign now resolve the same prefix agent_get does."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -576,7 +576,7 @@ export class PlatformMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. 404 if the agent id is unknown. Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId.",
+          "Edit an existing agent by id (cross-project). PATCH semantics: only the keys you pass are applied — an omitted key is left as-is; profileId:null CLEARS the assignment (the agent falls back to the plain backstop). Validation is REUSED from the human REST POST /api/agents/:id (agents/validate.ts), so a non-null profileId must reference a real profile (rejected otherwise) exactly like the REST path. agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. NOTE: the HUMAN-only Agent Runs endpoint/ioSchema flags are NOT settable here (human-REST-only, like POST /api/agents/:id's endpoint flag) — use this for name/startupPrompt/profileId.",
         inputSchema: {
           agentId: z.string(),
           name: z.string().optional(),
@@ -586,7 +586,11 @@ export class PlatformMcpRouter {
       },
       async (rawArgs) => {
         const { agentId } = rawArgs as { agentId: string };
-        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        // card (agent_get/agent_update prefix asymmetry): resolve agentId EXACTLY like agent_get does —
+        // full id, else an unambiguous 8-char id-prefix across every project (getByIdPrefix) — so a prefix
+        // that reads fine here also writes, instead of a silent "agent not found".
+        const resolved = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
+        if ("error" in resolved) return ok(resolved);
         // Drop agentId; the rest IS the PATCH. Use the raw args object so an explicit profileId:null is
         // PRESENT (clears) while an omitted key stays absent (left as-is) — the same presence semantics
         // the REST path relies on. allowEndpointFlags:false: endpoint/ioSchema aren't in the inputSchema,
@@ -594,8 +598,8 @@ export class PlatformMcpRouter {
         const { agentId: _aid, ...rawPatch } = rawArgs as Record<string, unknown>;
         const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
         if (!v.ok) return ok({ error: v.error });
-        db.updateAgent(agentId, v.patch);
-        return ok(db.getAgent(agentId));
+        db.updateAgent(resolved.id, v.patch);
+        return ok(db.getAgent(resolved.id));
       },
     );
 
@@ -672,7 +676,8 @@ export class PlatformMcpRouter {
           "deleted session's transcript snapshot. Refuses while any of the agent's sessions is still LIVE " +
           "(\"stop the fleet first\") — stop it first, same guard as the REST path (db.countLiveSessionsForAgent). " +
           "404 (\"agent not found\") if the id is unknown — a no-op write is avoided. FULL id required (no " +
-          "8-char prefix, like agent_create/agent_update). Returns { deleted:true, agentId, sessions:<n> }.",
+          "8-char prefix — deliberately stricter than agent_update/profile_assign, which accept a prefix, " +
+          "since this is a destructive action). Returns { deleted:true, agentId, sessions:<n> }.",
         inputSchema: { agentId: z.string() },
       },
       async ({ agentId }) => {
@@ -910,14 +915,15 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). Assignment only — it never mints a profile (use profile_create).",
+        description: "Assign an EXISTING profile to an agent (cross-project, explicit agentId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create).",
         inputSchema: { agentId: z.string(), profileId: z.string() },
       },
       async ({ agentId, profileId }) => {
-        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
+        if ("error" in agent) return ok(agent);
         if (!db.getProfile(profileId)) return ok({ error: "profile not found" });
-        db.updateAgent(agentId, { profileId });
-        return ok(db.getAgent(agentId));
+        db.updateAgent(agent.id, { profileId });
+        return ok(db.getAgent(agent.id));
       },
     );
 

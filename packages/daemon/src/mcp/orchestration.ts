@@ -1488,7 +1488,9 @@ export class OrchestrationMcpRouter {
           "only ASSIGN a profile a human already created — you cannot create or edit one (profile authoring " +
           "is human-only). A non-existent profileId is rejected. Use this to provision a rig (e.g. assign the " +
           "human-authored 'QA Tester' browser profile) without waiting on a human. The target agent must be in " +
-          "YOUR project (an agent outside it is REJECTED).",
+          "YOUR project (an agent outside it is REJECTED). agentId accepts the full id OR an unambiguous " +
+          "8-char id-prefix (same resolution as agent_get) — an ambiguous prefix errors naming the candidate " +
+          "ids, never resolving to an arbitrary match.",
         inputSchema: { agentId: z.string(), profileId: z.string().nullable() },
       },
       async ({ agentId, profileId }) => {
@@ -1511,7 +1513,9 @@ export class OrchestrationMcpRouter {
           "before); `appendToStartupPrompt` CONCATENATES onto the EXISTING prompt (joined with a blank line) " +
           "so you never have to round-trip the full text for a small addition — read the current prompt first " +
           "with agent_get. Passing BOTH in the same call is REJECTED (pick one). The target agent must be in " +
-          "YOUR project (an agent outside it is REJECTED). Omitted fields are left as-is.",
+          "YOUR project (an agent outside it is REJECTED). agentId accepts the full id OR an unambiguous " +
+          "8-char id-prefix (same resolution as agent_get) — an ambiguous prefix errors naming the candidate " +
+          "ids, never resolving to an arbitrary match. Omitted fields are left as-is.",
         inputSchema: {
           agentId: z.string(),
           name: z.string().optional(),
@@ -1537,8 +1541,9 @@ export class OrchestrationMcpRouter {
           "/api/agents/:id and the Platform Lead's agent_delete: db.deleteAgent cascades the agent's " +
           "sessions/schedules/runs and best-effort drops their transcript snapshots). Refuses while any of " +
           "the agent's sessions is still LIVE (\"stop the fleet first\" — same guard as the human path); stop " +
-          "it first. 404 (\"agent not found\") if the id is unknown. FULL id required (no 8-char prefix, like " +
-          "agent_update). Returns { deleted:true, agentId, sessions:<n> }.",
+          "it first. 404 (\"agent not found\") if the id is unknown. FULL id required (no 8-char prefix — " +
+          "deliberately stricter than agent_update/agent_assign_profile, which accept a prefix, since this " +
+          "is a destructive action). Returns { deleted:true, agentId, sessions:<n> }.",
         inputSchema: { agentId: z.string() },
       },
       async ({ agentId }) => {

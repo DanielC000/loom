@@ -32,6 +32,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (g) agent_update EDITS an existing agent (amend startupPrompt / rename / (re)assign-or-clear profile),
 //       404s an unknown id, and LEAST-PRIVILEGE rejects assigning an elevated-role (platform/auditor/
 //       workspace-auditor) rig — the gap that collapsed "action these cards for me" into "paste this text."
+//   (g2) agent_update / profile_assign resolve an agentId id-PREFIX like agent_get does (the read/write
+//       asymmetry that yielded a silent "agent not found" on a prefix agent_get itself resolved fine):
+//       an unambiguous 8-char prefix resolves, a full id still works, and an ambiguous prefix is REJECTED
+//       naming the candidate ids — never resolved to an arbitrary match.
 //   (h) the single-record reads (agent_get/profile_get/project_get) return FULL records (so the operator
 //       stops reading via empty-payload mutators), not-found on an unknown id.
 //   (i) a kanbanColumns config — the board-rename the operator wrongly called "not implemented" — is
@@ -440,6 +444,37 @@ try {
   check("(g) profile_assign: the rejected elevate left the agent's assignment UNCHANGED", (db.getAgent(agent.id)?.profileId ?? null) === paBefore);
   const paOk = await call("profile_assign", { agentId: agent.id, profileId: prof.id });
   check("(g) profile_assign: an allowed-role (worker) profile still assigns fine", paOk.profileId === prof.id && !paOk.error);
+
+  // ============ (g2) agent_update / profile_assign resolve an id-PREFIX like agent_get does ============
+  // The bug: agent_get resolves an 8-char id-PREFIX, but the agent WRITE handlers (agent_update,
+  // profile_assign) did EXACT-match only — a prefix that read fine 404'd on write. CRAFTED UUID-shaped
+  // ids: one with a UNIQUE 8-char prefix, two that SHARE an 8-char prefix (the ambiguity fixture).
+  const ID_PFX_SOLO = "9a8b7c6d-0000-4000-8000-000000000001"; // unique prefix "9a8b7c6d"
+  const ID_PFX_DUP_A = "d0d0d0d0-0000-4000-8000-00000000000a"; // shares prefix "d0d0d0d0" with…
+  const ID_PFX_DUP_B = "d0d0d0d0-0000-4000-8000-00000000000b"; // …this one
+  db.insertAgent({ id: ID_PFX_SOLO, projectId: created.id, name: "PfxSolo", startupPrompt: "PFX SOLO", position: 10, profileId: null });
+  db.insertAgent({ id: ID_PFX_DUP_A, projectId: created.id, name: "PfxAlpha", startupPrompt: "A", position: 11, profileId: null });
+  db.insertAgent({ id: ID_PFX_DUP_B, projectId: created.id, name: "PfxBravo", startupPrompt: "B", position: 12, profileId: null });
+
+  const auUnambig = await call("agent_update", { agentId: "9a8b7c6d", name: "Renamed via prefix" });
+  check("(g2) agent_update: resolves an UNAMBIGUOUS 8-char id-prefix", auUnambig.id === ID_PFX_SOLO && auUnambig.name === "Renamed via prefix" && !auUnambig.error);
+  const auExact = await call("agent_update", { agentId: ID_PFX_SOLO, name: "Renamed via full id" });
+  check("(g2) agent_update: a full id still works (regression)", auExact.id === ID_PFX_SOLO && auExact.name === "Renamed via full id" && !auExact.error);
+  const auAmbig = await call("agent_update", { agentId: "d0d0d0d0", name: "should not apply" });
+  check("(g2) agent_update: an AMBIGUOUS prefix is REJECTED, naming BOTH candidate ids",
+    typeof auAmbig.error === "string" && auAmbig.error.includes("ambiguous") && auAmbig.error.includes(ID_PFX_DUP_A) && auAmbig.error.includes(ID_PFX_DUP_B));
+  check("(g2) agent_update: the ambiguous call never picked a match (both names unchanged)",
+    db.getAgent(ID_PFX_DUP_A)?.name === "PfxAlpha" && db.getAgent(ID_PFX_DUP_B)?.name === "PfxBravo");
+
+  const paUnambig = await call("profile_assign", { agentId: "9a8b7c6d", profileId: prof.id });
+  check("(g2) profile_assign: resolves an UNAMBIGUOUS 8-char id-prefix", paUnambig.id === ID_PFX_SOLO && paUnambig.profileId === prof.id && !paUnambig.error);
+  const paExact = await call("profile_assign", { agentId: ID_PFX_SOLO, profileId: prof.id });
+  check("(g2) profile_assign: a full id still works (regression)", paExact.id === ID_PFX_SOLO && paExact.profileId === prof.id && !paExact.error);
+  const paAmbig = await call("profile_assign", { agentId: "d0d0d0d0", profileId: prof.id });
+  check("(g2) profile_assign: an AMBIGUOUS prefix is REJECTED, naming BOTH candidate ids",
+    typeof paAmbig.error === "string" && paAmbig.error.includes("ambiguous") && paAmbig.error.includes(ID_PFX_DUP_A) && paAmbig.error.includes(ID_PFX_DUP_B));
+  check("(g2) profile_assign: the ambiguous call assigned NOTHING to either candidate",
+    db.getAgent(ID_PFX_DUP_A)?.profileId == null && db.getAgent(ID_PFX_DUP_B)?.profileId == null);
 
   // ============ (h) single-record READ tools — stop reading via empty-payload mutators ============
   const gotAgent = await call("agent_get", { agentId: agent.id });

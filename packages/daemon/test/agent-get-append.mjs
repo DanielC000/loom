@@ -17,6 +17,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (6) agent_get AND agent_list surface the RESOLVED browserTesting/documentConversion/restrictedTools
 //       flags (Auditor finding 64430a50): an agent bound to a browser profile shows true/true/false;
 //       a profile-less agent backstops to false/false/false — matching resolveProfile exactly.
+//   (7) agent_update / agent_assign_profile (the agent WRITE handlers) resolve an id-PREFIX exactly like
+//       agent_get does — the read/write asymmetry that used to yield a silent "agent not found" on write;
+//       ambiguous still errors naming both candidates; full id unchanged; a foreign-project agent's exact
+//       id still gives "outside your project" while its PREFIX never resolves (no cross-project leak).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/agent-get-append.mjs
 import fs from "node:fs";
@@ -141,12 +145,46 @@ try {
     lBrowser?.browserTesting === true && lBrowser?.documentConversion === false && lBrowser?.restrictedTools === false);
   check("(6) agent_list on a profile-less agent backstops all flags to false",
     lPlain?.browserTesting === false && lPlain?.documentConversion === false && lPlain?.restrictedTools === false);
+
+  // ===================== (7) agent_update / agent_assign_profile resolve an id-PREFIX like agent_get =====
+  // The bug: agent_get resolves an unambiguous 8-char id-prefix, but the manager-surface agent WRITE
+  // handlers (agent_update, agent_assign_profile) did EXACT-match only — a prefix that read fine 404'd on
+  // write. Reuses the SOLO/DUP_A/DUP_B fixture from section (1)/(2).
+  const uPrefix = await call("agent_update", { agentId: "12ab34cd", name: "Renamed via prefix" });
+  check("(7) agent_update resolves prefix '12ab34cd' → ID_SOLO", uPrefix.id === ID_SOLO && uPrefix.name === "Renamed via prefix" && !uPrefix.error);
+  const uExact = await call("agent_update", { agentId: ID_SOLO, name: "Renamed via full id" });
+  check("(7) agent_update: full id still works (regression)", uExact.id === ID_SOLO && uExact.name === "Renamed via full id" && !uExact.error);
+  const uAmb = await call("agent_update", { agentId: "feedface", name: "should not apply" });
+  check("(7) agent_update on an ambiguous prefix errors, naming BOTH candidate ids",
+    typeof uAmb.error === "string" && uAmb.error.includes("ambiguous") && uAmb.error.includes(ID_DUP_A) && uAmb.error.includes(ID_DUP_B));
+  check("(7) agent_update: the ambiguous call never picked a match (both names unchanged)",
+    db.getAgent(ID_DUP_A)?.name === "Alpha" && db.getAgent(ID_DUP_B)?.name === "Bravo");
+  // Cross-project: the exact full id of a FOREIGN agent still gives the more informative "outside your
+  // project" (requireOwnProject, unchanged historical behavior); a PREFIX of that same foreign id must
+  // NOT resolve at all (prefix resolution is scoped to the manager's OWN project only — never leaks a
+  // foreign agent's existence the way a bare exact-id lookup incidentally can).
+  const uForeignExact = await call("agent_update", { agentId: ID_OTHER, name: "x" });
+  check("(7) agent_update on a FOREIGN agent's full id: 'outside your project' (not a leak, not silent)",
+    typeof uForeignExact.error === "string" && uForeignExact.error.includes("outside your project"));
+  const uForeignPrefix = await call("agent_update", { agentId: "deadbeef", name: "x" });
+  check("(7) agent_update on a FOREIGN agent's id-PREFIX: 'agent not found' (never resolves cross-project)",
+    uForeignPrefix.error === "agent not found");
+
+  const apPrefix = await call("agent_assign_profile", { agentId: "12ab34cd", profileId: "profBrowser" });
+  check("(7) agent_assign_profile resolves prefix '12ab34cd' → ID_SOLO", apPrefix.id === ID_SOLO && apPrefix.profileId === "profBrowser" && !apPrefix.error);
+  const apExact = await call("agent_assign_profile", { agentId: ID_SOLO, profileId: null });
+  check("(7) agent_assign_profile: full id still works (regression, clears the assignment)", apExact.id === ID_SOLO && apExact.profileId === null && !apExact.error);
+  const apAmb = await call("agent_assign_profile", { agentId: "feedface", profileId: "profBrowser" });
+  check("(7) agent_assign_profile on an ambiguous prefix errors, naming BOTH candidate ids",
+    typeof apAmb.error === "string" && apAmb.error.includes("ambiguous") && apAmb.error.includes(ID_DUP_A) && apAmb.error.includes(ID_DUP_B));
+  check("(7) agent_assign_profile: the ambiguous call assigned NOTHING to either candidate",
+    db.getAgent(ID_DUP_A)?.profileId == null && db.getAgent(ID_DUP_B)?.profileId == null);
 } finally {
   db.close();
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, and agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags."
+  ? "\n✅ ALL PASS — agent_get returns the full record for an exact id / unambiguous prefix, errors on ambiguous/unknown/cross-project; agent_update's appendToStartupPrompt concatenates (bare when empty), plain startupPrompt still fully replaces, passing both is rejected with no write, agent_get/agent_list surface the resolved browserTesting/documentConversion/restrictedTools flags, and agent_update/agent_assign_profile now resolve the same id-prefix agent_get does."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

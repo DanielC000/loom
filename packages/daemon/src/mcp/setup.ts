@@ -338,7 +338,7 @@ export class SetupMcpRouter {
       "agent_update",
       {
         description:
-          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). 404 if the agent id is unknown. Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
+          "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
         inputSchema: {
           agentId: z.string(),
           name: z.string().optional(),
@@ -348,7 +348,11 @@ export class SetupMcpRouter {
       },
       async (rawArgs) => {
         const { agentId } = rawArgs as { agentId: string };
-        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        // card (agent_get/agent_update prefix asymmetry): resolve agentId EXACTLY like agent_get does —
+        // full id, else an unambiguous 8-char id-prefix across every project (getByIdPrefix) — so a prefix
+        // that reads fine here also writes, instead of a silent "agent not found".
+        const resolved = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
+        if ("error" in resolved) return ok(resolved);
         // Drop agentId; the rest IS the PATCH. Raw args so an explicit profileId:null is PRESENT (clears)
         // while an omitted key stays absent (left as-is) — the same presence semantics the REST path relies
         // on. allowEndpointFlags:false (also absent from inputSchema) keeps the Agent Runs surface human-only.
@@ -362,8 +366,8 @@ export class SetupMcpRouter {
           const roleErr = setupRoleError(db.getProfile(v.patch.profileId)?.role);
           if (roleErr) return ok({ error: roleErr });
         }
-        db.updateAgent(agentId, v.patch);
-        return ok(db.getAgent(agentId));
+        db.updateAgent(resolved.id, v.patch);
+        return ok(db.getAgent(resolved.id));
       },
     );
 
@@ -475,11 +479,12 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_assign",
       {
-        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). Assignment only — it never mints a profile (use profile_create).",
+        description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create).",
         inputSchema: { agentId: z.string(), profileId: z.string() },
       },
       async ({ agentId, profileId }) => {
-        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
+        if ("error" in agent) return ok(agent);
         const assigned = db.getProfile(profileId);
         if (!assigned) return ok({ error: "profile not found" });
         // LEAST-PRIVILEGE (setup-only): mirror agent_update — reject binding an agent to a profile whose
@@ -487,8 +492,8 @@ export class SetupMcpRouter {
         // never plant a latent elevation by this back door. A manager/null/plain rig still assigns fine.
         const roleErr = setupRoleError(assigned.role);
         if (roleErr) return ok({ error: roleErr });
-        db.updateAgent(agentId, { profileId });
-        return ok(db.getAgent(agentId));
+        db.updateAgent(agent.id, { profileId });
+        return ok(db.getAgent(agent.id));
       },
     );
 
