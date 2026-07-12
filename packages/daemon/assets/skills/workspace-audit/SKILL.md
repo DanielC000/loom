@@ -81,6 +81,15 @@ evidence, the two things that improve the user's workflow:
   too-thin `startupPrompt`** — the server prepends that base brief ahead of every kickoff, so a blank or
   doctrine-less brief leaves the worker running on the kickoff alone; flag it and propose a substantive
   base prompt (who it is, how it works, its Step-0 `/worker`).
+- **Token-inefficiency traceable to the user's own prompts** — a place where one of the user's agent
+  prompts (or a rule missing from it) makes their agents burn tokens for no gain: re-reading or
+  re-deriving what a prior turn / handoff / the board already settled, re-exploring a task the brief
+  could have scoped concretely, blind-polling or duplicate tool calls, an oversized brief that bloats
+  every kickoff, or a prompt that never cues the agent to recycle at a clean seam so it rides context to
+  the limit. Treat it exactly like the vague-instruction category — evidence, the implicated prompt, and
+  a concrete prompt tweak that makes the user's agent run leaner — and file it as a board card. This is
+  strictly about the USER'S OWN prompts and agents running efficiently; the token use of Loom itself is
+  the dev Platform Auditor's job, never yours (see *What this is NOT*).
 - **Recurring prompts worth a preset** — a prompt the user types the **same** (or near-same) way
   repeatedly across sessions, worth saving as a one-click preset. Unlike the category above, this is
   **not** a board card — you emit it through `preset_suggestion_suggest`; see below.
