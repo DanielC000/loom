@@ -4,6 +4,32 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.19.0] — 2026-07-12
+
+**Security hardening and reliability.** The opt-in browserTesting browser surface is locked down so an untrusted-chat Companion can't reach host-code-execution or host-file-read tools; the Companion's in-app delivery path gets several route-fallback fixes; and managers gain peer discovery, a board-wide Requests view, and delivery-channel introspection — plus orchestration observability, config-write resilience under load, and a flaky-test hardening pass.
+
+### Added
+- **`peer_list` (manager orchestration).** A non-mutating tool to discover your owner-linked peer projects (`{projectId, name}`) before messaging them — the read-only complement to `peer_message`, scoped server-side to your own project.
+- **Board-wide manager `requests_list`.** A non-consuming, own-project-scoped view of a manager's Requests inbox (`{state?, type?, includeConsumed?}`) — see decisions/credentials/permissions/input across all your cards without consuming them.
+- **Companion delivery introspection.** The Companion can answer "what did you send / on which channel / was it spoken" from real state — `my_context` now surfaces its bound channel(s), effective voice-reply mode, and last delivery (with the clip transcript when spoken).
+- **`LOOM_SCRATCH_DIR`** exposed to browser-testing agents for staged uploads/screenshots.
+- **Orchestration transport observability.** The `loom-orchestration` MCP router logs a warning on a failed/aborted request (the abort path previously had no server-side signal).
+
+### Changed
+- A `[loom:from-manager]` **peer inbound is stamped with the sender's `projectId`**, so the recipient manager can reply via `peer_message` without a human relay.
+
+### Fixed
+- **browserTesting host-escape hardening (security).** The opt-in Playwright surface allowlists the whole MCP server, which includes host-reaching tools. **`browser_run_code_unsafe`** (RCE-equivalent — it runs arbitrary code in the Playwright server process) is now disallowed for **every** role whenever the browser mounts; and the host-file-reading **`browser_file_upload`/`browser_drop`** (they read absolute host paths into a page — a secret-exfil primitive) are disallowed for the **untrusted Companion (`assistant`) role only**, so worker rigs keep them for legitimate upload/drag-drop testing.
+- **Companion in-app delivery.** A route-less **reminder** for an in-app-only Companion no longer no-ops (the in-app home fallback now covers the reminder fire path); a proactive **decision-relay** `chat_reply` no longer fails no-target for an in-app Companion with a null home route; and heartbeat dedup no longer collides two home-less in-app companions onto the same key (suppressing one's heartbeat).
+- **`writeJsonAtomic` under load.** The transient-EPERM rename-retry budget is now env-configurable (`LOOM_TRANSIENT_FS_RETRY_LIMIT`, mirroring `LOOM_TRUST_LOCK_MS`) so it can't exhaust and crash a config writer under extreme concurrent Windows FS contention; the default is unchanged.
+- **Gateway config save.** `PATCH /api/platform/config` shallow-merges only the keys in the body, so one Settings save can no longer clobber a sibling toggle it didn't touch.
+- **Idle-watchdog accuracy.** The idle-watcher no longer counts review-lane cards or cards gated on a pending owner Request as "actionable," ending misleading idle nudges.
+- **agent write-tool id-prefixes.** `agent_update` (and its sibling agent write tools) resolve an 8-char id-prefix like `agent_get` does — fixing a read/write asymmetry that yielded a silent "agent not found."
+- **Resumed-session paste.** A pasted-text attachment that can't be re-rendered into a resumed session after a restart now surfaces an explicit placeholder/raw text instead of a dangling "[Pasted text #N]" the agent can't read.
+
+### Internal
+- Flaky-test hardening (user-audit-surface, worker-spawn-taskless, dev-server-teardown, trust-lock) against timing flakes under the concurrent gate pool. Shipped-skill doctrine refinements: a bundled-skill-currency release check + wrong-tool-name lens for platform-audit, a token-inefficiency audit category for workspace-audit, `ideate` folded into the doctrine batch, and the `@playwright/mcp` download-capture recipe taught in browser-testing guidance.
+
 ## [0.18.0] — 2026-07-12
 
 **The Companion becomes a full remote operator — plus remote access, guided onboarding, and a broad reliability pass.** Behind owner-granted, default-off levers, the in-app Companion can now be elevated toward Platform-Lead reach — read any session's transcript, read/author/relocate cards across projects, list and spawn sessions — under a redesigned session-scoped **trust window** (a confirm "warms" a short window instead of confirming every action) with per-capability risk tiers and grant-time risk advisories. Loom gains a **remote-access story** (per-route trust tiers, gateway token auth, TLS/wss bind, rate-limiting), a **guided onboarding wizard** with team-preset workflow templates, **OAuth2** connections, **event triggers**, and a generalized **Requests inbox** (decisions · credentials · permissions · input). Plus a large orchestration/merge-gate/worktree hardening pass — including a data-loss fix where a worker-merge cleanup could destroy an unpushed nested clone.
