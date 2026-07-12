@@ -3686,6 +3686,30 @@ export class SessionService {
   }
 
   /**
+   * Manager↔manager peer discovery (orchestration `peer_list`) — a NON-MUTATING read letting a manager
+   * enumerate its OWN project's owner-linked peers before it has heard from any of them, so it can
+   * INITIATE a `peer_message` instead of only ever replying to one. Reuses the exact same link table
+   * `messagePeerManager` gates on (`db.listProjectLinks`, filtered to rows touching this project) — so
+   * this returns PRECISELY the target set `peer_message` would accept, never a superset. Scoped
+   * SERVER-SIDE to the caller's own project (derived from `managerSessionId`, mirrors `requests_list`) —
+   * no projectId param, so a manager can never enumerate another project's links. An archived peer is
+   * excluded (mirrors `messagePeerManager`'s archived-target rejection) so a listed peer is always one
+   * `peer_message` would actually accept right now.
+   */
+  listPeerProjects(managerSessionId: string): { projectId: string; name: string }[] {
+    this.requireManager(managerSessionId, "peer_list");
+    const caller = this.db.getSession(managerSessionId)!;
+    const originProjectId = caller.projectId;
+    if (!originProjectId) throw new Error("no project for this session");
+    return this.db.listProjectLinks()
+      .map((link) => (link.projectAId === originProjectId ? link.projectBId : link.projectBId === originProjectId ? link.projectAId : null))
+      .filter((peerId): peerId is string => peerId !== null)
+      .map((peerId) => this.db.getProject(peerId))
+      .filter((p): p is NonNullable<typeof p> => p !== undefined && !p.archivedAt)
+      .map((p) => ({ projectId: p.id, name: p.name }));
+  }
+
+  /**
    * Manager→Platform escalation READ (orchestration `escalation_status`) — closes the gap where a manager
    * has no way to tell whether a `platform_escalate` it filed was ever picked up, so it re-escalates work
    * the Lead already claimed. READ-ONLY, origin-project-scoped: the candidate set is derived SERVER-SIDE

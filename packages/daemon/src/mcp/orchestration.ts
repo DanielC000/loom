@@ -1740,6 +1740,33 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // peer_list: the read-only complement to peer_message — lets a manager DISCOVER its linked peers
+    // instead of only ever replying to one that already messaged it. Scoped server-side to the caller's
+    // own project (no projectId param — mirrors requests_list); reuses the exact same project_links gate
+    // peer_message checks, so it returns exactly the set peer_message would accept as a targetProjectId.
+    server.registerTool(
+      "peer_list",
+      {
+        description:
+          "List the projects the owner has LINKED to yours — the read-only complement to peer_message, " +
+          "letting you DISCOVER a linked peer's project id before it has ever messaged you (peer_message " +
+          "requires a targetProjectId, and nothing else exposes a linked project's id proactively). Scoped " +
+          "SERVER-SIDE to YOUR OWN project — no projectId param, so you can never enumerate another " +
+          "project's links. Returns exactly the target set peer_message would accept right now: " +
+          "[{projectId, name}], one entry per owner-linked peer, excluding any peer that's since been " +
+          "archived. Non-mutating — exposes only the projectId + display name, nothing else about the " +
+          "peer project.",
+        inputSchema: {},
+      },
+      async () => {
+        try {
+          return ok({ peers: sessions.listPeerProjects(managerSessionId) });
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     server.registerTool(
       "escalation_status",
       {
