@@ -6416,11 +6416,14 @@ export class SessionService {
         `merge already landed — finishing bookkeeping, boot-reconcile Pass B will GC the dir: ${(e as Error).message}`);
     }
     // Terminal bookkeeping BEFORE the destructive deleteBranch (see the ORDER IS CRASH-CRITICAL note).
-    // Land the task in the `terminal` lane (role-resolved off its project, last-column fallback) — not the
-    // hardcoded "done" key. A merge always has a terminal lane (the role is required + falls back to last).
+    // Land the task in the `mergeLanding` lane if the project has one configured, else the `terminal`
+    // lane (role-resolved off its project, last-column fallback) — not the hardcoded "done" key. A
+    // project with no `mergeLanding` column resolves `undefined` here and falls through to `terminal`
+    // exactly as before this role existed. A merge always has a terminal lane (the role is required +
+    // falls back to last).
     // ONLY on the FIRST finalize for this worker (no prior merge_done event) — a REPLAY (an idempotent
     // worktree-GC retry, or a reconnect/boot reconciliation re-run finding the merge already landed) must
-    // never force the column back to terminal over a manual move a human made AFTER the merge landed. That
+    // never force the column back over a manual move a human made AFTER the merge landed. That
     // clobber was the bug: a card the manager moved to a non-terminal "ready for owner review" lane got
     // silently reset to the terminal column on the next reconnect/boot reconcile, which then made
     // worker_spawn wrongly refuse it as a terminal-column task.
@@ -6428,8 +6431,11 @@ export class SessionService {
       this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
     if (args.taskId && !alreadyFinalized) {
       const task = this.db.getTask(args.taskId);
-      const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
-      if (terminalKey) this.db.updateTask(args.taskId, { columnKey: terminalKey });
+      const landingKey = task
+        ? (this.columnKeyForProjectRole(task.projectId, "mergeLanding") ??
+          this.columnKeyForProjectRole(task.projectId, "terminal"))
+        : undefined;
+      if (landingKey) this.db.updateTask(args.taskId, { columnKey: landingKey });
     }
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),

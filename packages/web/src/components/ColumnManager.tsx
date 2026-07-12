@@ -16,7 +16,7 @@ import { api, type DesiredColumn } from "../lib/api";
 import { Button, Input, Select, Badge, PresetAccentDots } from "./ui";
 import { color, font, radius, tone, roleTone, type Tone } from "../theme";
 
-// The seven lifecycle roles, in board order, with a human label and which two are REQUIRED exactly once
+// The eight lifecycle roles, in board order, with a human label and which two are REQUIRED exactly once
 // (defaultLanding + terminal — the server's hard floor). Kept here so the badge, the assignment dropdown,
 // and the validator all read one table. The signal tone comes from the shared `roleTone` map (theme.ts)
 // so the role coloring here can never drift from the board header's lane coloring.
@@ -29,8 +29,9 @@ const ROLE_META: Record<ColumnRole, RoleMeta> = {
   review: { label: "Review", short: "REVIEW", t: roleTone.review },
   parked: { label: "Parked", short: "PARKED", t: roleTone.parked },
   terminal: { label: "Terminal (done)", short: "DONE", t: roleTone.terminal, required: true },
+  mergeLanding: { label: "Merge landing", short: "MERGED", t: roleTone.mergeLanding },
 };
-const ROLE_ORDER: ColumnRole[] = ["intake", "defaultLanding", "workReady", "active", "review", "parked", "terminal"];
+const ROLE_ORDER: ColumnRole[] = ["intake", "defaultLanding", "workReady", "active", "review", "parked", "mergeLanding", "terminal"];
 
 // A staged row. `uid` is a stable client identity (drag + React key) that survives a key/label edit, so a
 // rename doesn't remount the row. `originalKey` is the key this column had on the SERVER (undefined = a

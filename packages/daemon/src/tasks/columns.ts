@@ -192,6 +192,10 @@ const ROLE_DEPENDS: Readonly<Partial<Record<ColumnRole, string>>> = {
   active: "where a spawned worker's task is moved",
   review: "where a worker's done report lands for review",
   parked: "where a worker's blocked report lands",
+  // Removing this column drops the mergeLanding role; a merged card then falls back to the
+  // `terminal` column (finalizeMerge's `?? terminal` resolution) — no card-orphaning, since
+  // this same planColumnLayout re-keys the removed column's EXISTING cards to defaultLanding.
+  mergeLanding: "where finalizeMerge lands a merged card (falls back to terminal if removed)",
 };
 
 /**

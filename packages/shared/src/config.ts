@@ -16,7 +16,8 @@ export type ColumnRole =
   | "active"
   | "review"
   | "parked"
-  | "terminal";
+  | "terminal"
+  | "mergeLanding";
 
 export interface KanbanColumn {
   key: string;

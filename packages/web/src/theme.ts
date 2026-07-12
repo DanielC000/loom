@@ -60,6 +60,7 @@ export const roleTone: Record<ColumnRole, Tone> = {
   review: "cyan", // under review
   parked: "muted", // waiting / parked
   terminal: "phosphor", // done
+  mergeLanding: "amber", // where a merged card lands, pre-terminal
 };
 
 // Session-ROLE → badge tone. The ONE place a session/profile's orchestration role maps to a signal

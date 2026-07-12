@@ -40,7 +40,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  */
 // ColumnRole (shared) mirror — kept in lockstep with the ColumnRole union in shared/src/config.ts.
 const columnRole = z.enum([
-  "intake", "defaultLanding", "workReady", "active", "review", "parked", "terminal",
+  "intake", "defaultLanding", "workReady", "active", "review", "parked", "terminal", "mergeLanding",
 ]);
 // `.strict()` deliberately drops accentColor/wipLimit (both present on the shared KanbanColumn type,
 // config.ts) on the GENERIC config-override path: board columns are owned by the dedicated atomic

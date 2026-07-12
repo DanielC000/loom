@@ -20,6 +20,7 @@ export const ROLE_ACCENT: Readonly<Record<ColumnRole, string>> = {
   review: "#5bc8ff", // cyan — under review
   parked: "#7c8b9a", // slate — waiting / parked
   terminal: "#2ee66e", // phosphor — done
+  mergeLanding: "#ffb23e", // amber — where a merged card lands, pre-terminal
 };
 
 /** The general-purpose red swatch (matches the retired humanHold role's tone) — kept as a plain accent
