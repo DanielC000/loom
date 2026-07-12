@@ -19,6 +19,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       "Where things live" block; a lineage's recycle successor (recyclePlatformLead) carries forward
 //       the SAME resolved path as its predecessor — the primary lineage's successor still reads the
 //       base file, a secondary lineage's successor still reads its own seeded file.
+//   (4) PURE-ish composeResumeDocOperationalNotes / findFreshestSiblingResumeDoc — the optional read-cap
+//       + freshest-sibling hardening on top of the doctrine above: a healthy small doc with no siblings
+//       emits nothing; a doc past the ~80KB warn threshold emits a size-warning note naming its own path;
+//       a sibling resume doc whose mtime materially (>=48h) leads the resolved doc's own mtime emits a
+//       staleness note pointing at that freshest sibling; a sibling only slightly fresher stays silent;
+//       the sibling finder ignores non-matching filenames and never throws on a missing dir.
+//   (5) END-TO-END: an oversized doc's injected startupPrompt carries the size-warning note ahead of the
+//       "Where things live" pointer block, and the continuation handoff still rides along after it.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like platform-lead-recycle.mjs: a REAL Db +
 // SessionService driven against a FAKE pty (createPty/stop seam). A real temp git repo backs the spawn
@@ -54,6 +62,7 @@ const {
   lineageRootId, resolvePlatformLeadResumeDocPath,
   platformLeadBaseResumeDocPath, platformLeadLineageResumeDocPath,
   PRIMARY_LINEAGE_META_KEY,
+  findFreshestSiblingResumeDoc, composeResumeDocOperationalNotes,
 } = await import("../dist/sessions/platform-lead-prompt.js");
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude); it also
@@ -177,6 +186,69 @@ try {
   const succPromptB = host.spawned.at(-1).startupPrompt ?? "";
   check("(3) Lead B's successor is a NEW session in the SAME (secondary) lineage", succB.id !== leadB.id && lineageRootId(db, db.getSession(succB.id)) === leadB.id);
   check("(3) Lead B's successor resolves to the SAME per-lineage file as its predecessor (not the base, not lineage A's)", succPromptB.includes(lineageBPath) && !succPromptB.includes(basePathE2E));
+
+  // ==================== (4) composeResumeDocOperationalNotes — size + staleness warnings ====================
+  const home4 = path.join(os.tmpdir(), `loom-lead-resumedoc-home4-${Date.now()}`);
+  fs.mkdirSync(home4, { recursive: true });
+  const doc4 = platformLeadBaseResumeDocPath(home4);
+
+  // No doc on disk yet, no siblings — nothing to flag.
+  check("(4) no doc + no siblings ⇒ empty notes", composeResumeDocOperationalNotes(home4, doc4) === "");
+
+  // A small, healthy doc — well under the warn threshold, no siblings — still nothing to flag.
+  fs.writeFileSync(doc4, "# Platform Lead Resume\n\nSTATE: nothing notable.\n");
+  check("(4) a small doc + no siblings ⇒ empty notes", composeResumeDocOperationalNotes(home4, doc4) === "");
+
+  // A doc past the ~80KB warn threshold ⇒ the size note fires and names the path.
+  fs.writeFileSync(doc4, "x".repeat(90 * 1024));
+  const sizeNotes = composeResumeDocOperationalNotes(home4, doc4);
+  check("(4) an oversized doc ⇒ the size-warning note fires", sizeNotes.includes("[loom:resume-doc-size]"));
+  check("(4) the size-warning note names the doc's own path", sizeNotes.includes(doc4));
+  fs.writeFileSync(doc4, "# Platform Lead Resume\n\nSTATE: nothing notable.\n"); // shrink back down
+
+  // A fresher sibling (another lineage's file) ⇒ the staleness note fires and points at it.
+  const siblingPath4 = platformLeadLineageResumeDocPath(home4, "otherLineage");
+  fs.writeFileSync(siblingPath4, "# Lineage-B resume\n\nSTATE: actively maintained.\n");
+  const oldMs = Date.now() - 5 * 24 * 60 * 60 * 1000; // 5 days ago — well past the 48h material-lag threshold
+  fs.utimesSync(doc4, new Date(oldMs), new Date(oldMs));
+  const staleNotes = composeResumeDocOperationalNotes(home4, doc4);
+  check("(4) a materially-fresher sibling ⇒ the staleness note fires", staleNotes.includes("[loom:resume-doc-stale]"));
+  check("(4) the staleness note names the FRESHEST sibling's path", staleNotes.includes(siblingPath4));
+
+  // A sibling only SLIGHTLY fresher (under the material-lag threshold) ⇒ no staleness note.
+  const recentMs = Date.now() - 2 * 60 * 60 * 1000; // 2h ago — under the 48h threshold
+  fs.utimesSync(doc4, new Date(recentMs), new Date(recentMs));
+  fs.utimesSync(siblingPath4, new Date(), new Date());
+  check("(4) a sibling only slightly fresher (< material-lag) ⇒ no staleness note", !composeResumeDocOperationalNotes(home4, doc4).includes("[loom:resume-doc-stale]"));
+
+  // findFreshestSiblingResumeDoc: excludes the given path, ignores non-matching filenames, tolerates a
+  // missing/unreadable home directory.
+  fs.writeFileSync(path.join(home4, "not-a-resume-doc.md"), "irrelevant\n");
+  const freshest4 = findFreshestSiblingResumeDoc(home4, doc4);
+  check("(4) findFreshestSiblingResumeDoc ignores non-matching filenames and excludes the given path", freshest4 !== null && freshest4.path === siblingPath4);
+  check("(4) findFreshestSiblingResumeDoc on a missing home dir returns null (never throws)", findFreshestSiblingResumeDoc(path.join(home4, "does-not-exist"), doc4) === null);
+
+  // ==================== (5) END-TO-END: the notes ride along in the injected startupPrompt ====================
+  db.deleteMeta(PRIMARY_LINEAGE_META_KEY);
+  const home5 = path.join(os.tmpdir(), `loom-lead-resumedoc-home5-${Date.now()}`);
+  fs.mkdirSync(home5, { recursive: true });
+  db.insertProject({ id: "pHome5", name: "Loom Platform 5", repoPath: repo, vaultPath: home5, config: {}, createdAt: now, archivedAt: null, reserved: true });
+  db.insertAgent({ id: "agentLead5", projectId: "pHome5", name: "Platform", startupPrompt: "LEAD5 WARMUP", position: 0, profileId: null });
+
+  const leadC = svc.startPlatformLead("agentLead5"); // opens the primary lineage — claims the base file at home5
+  const basePathHome5 = platformLeadBaseResumeDocPath(home5);
+  const promptC = host.spawned.at(-1).startupPrompt ?? "";
+  check("(5) a fresh, healthy (nonexistent) doc injects NO operational notes", !promptC.includes("[loom:resume-doc-size]") && !promptC.includes("[loom:resume-doc-stale]"));
+
+  // Blow the doc past the size cap directly on disk, then recycle — the successor's injected prompt must
+  // carry the size warning ahead of the "Where things live" pointer block.
+  fs.writeFileSync(basePathHome5, "y".repeat(90 * 1024));
+  const succC = await svc.recyclePlatformLead(leadC.id, "HANDOFF C: doc has grown too large");
+  const succPromptC = host.spawned.at(-1).startupPrompt ?? "";
+  check("(5) an oversized doc's successor prompt carries the size-warning note", succPromptC.includes("[loom:resume-doc-size]"));
+  check("(5) the size-warning note precedes the 'Where things live' pointer block", succPromptC.indexOf("[loom:resume-doc-size]") < succPromptC.indexOf("Where things live"));
+  check("(5) the successor prompt still carries its continuation handoff after the notes", succPromptC.includes("HANDOFF C: doc has grown too large"));
+  fs.rmSync(home5, { recursive: true, force: true });
 } finally {
   db.close();
   fs.rmSync(repo, { recursive: true, force: true });
@@ -184,6 +256,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Platform Lead resume doc is lineage-scoped: the first-ever lineage keeps the plain base file (single-Lead default), every other (concurrent/later) lineage gets its own file seeded from the base once, a lineage's recycle successor always resolves back to its OWN lineage's file, and concurrently-spawned Leads never contend on one shared file."
+  ? "\n✅ ALL PASS — the Platform Lead resume doc is lineage-scoped: the first-ever lineage keeps the plain base file (single-Lead default), every other (concurrent/later) lineage gets its own file seeded from the base once, a lineage's recycle successor always resolves back to its OWN lineage's file, concurrently-spawned Leads never contend on one shared file, and the optional read-cap/freshest-sibling hardening injects a size or staleness note into the successor's startupPrompt exactly when the doc genuinely warrants it (and stays silent otherwise)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

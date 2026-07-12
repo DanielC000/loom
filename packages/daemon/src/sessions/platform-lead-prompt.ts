@@ -105,14 +105,110 @@ export function resolvePlatformLeadResumeDocPath(db: Db, homePath: string, linea
  * Compose the "Where things live" pre-block for a PLATFORM LEAD spawn — mirrors
  * `composeManagerStartupPrompt` (a265e28) but carries a single already-RESOLVED resume-doc path (the
  * Lead's home has no project vault of its own to derive one from). PURE: the caller decides the actual
- * path (base vs. per-lineage, on-disk seeding) and hands it in ready to emit.
+ * path (base vs. per-lineage, on-disk seeding) and hands it in ready to emit. `notes`, if non-empty
+ * (see {@link composeResumeDocOperationalNotes}), is prepended ahead of the pointer block itself — the
+ * agent sees a size/staleness warning BEFORE it's told where to read.
  */
-export function composePlatformLeadStartupPrompt(startupPrompt: string | undefined, resumeDocPath: string): string {
+export function composePlatformLeadStartupPrompt(startupPrompt: string | undefined, resumeDocPath: string, notes?: string): string {
   const block =
     "## Where things live (your resume doc)\n" +
     `- **Resume doc:** \`${resumeDocPath}\`\n\n` +
     "Read + rewrite your living resume doc at the exact absolute path above, verbatim — do not " +
     "reconstruct it, and never Glob for it (a broad Glob from your home directory hits the search timeout).";
+  const withNotes = notes?.trim() ? `${notes.trim()}\n\n${block}` : block;
   const own = startupPrompt?.trim();
-  return own ? `${block}\n\n${own}` : block;
+  return own ? `${withNotes}\n\n${own}` : withNotes;
+}
+
+/** A harness `Read` starts risking failure near these caps — mirrors the /platform-lead doctrine's own
+ *  size budget (~150 lines target, ~400 hard cap, "well under the 256KB / ~25k-token Read caps"). Warn
+ *  comfortably below both — 25k tokens is the tighter cap for prose (~4 bytes/token ≈ 100KB) — so a
+ *  successor sees the nudge before its first Read of the doc can actually fail. */
+const RESUME_DOC_WARN_BYTES = 80 * 1024;
+
+/** How far a resolved doc's mtime must lag the freshest sibling's before it's "material" enough to flag
+ *  (not every few-hour gap — a Lead legitimately idling overnight shouldn't trigger this every morning). */
+const SIBLING_STALENESS_MS = 48 * 60 * 60 * 1000;
+
+/** Matches every Platform Lead resume-doc filename this feature knows about: the shared base file
+ *  (`PLATFORM-LEAD-RESUME.md`) and any per-lineage sibling (`PLATFORM-LEAD-RESUME-<lineageId>.md`). */
+function isResumeDocFilename(name: string): boolean {
+  return /^PLATFORM-LEAD-RESUME(-.+)?\.md$/.test(name);
+}
+
+/**
+ * Find the most-recently-modified sibling resume doc in `homePath`, excluding `excludePath`. ONE bounded
+ * directory listing (never recursive, never a Glob) — `homePath` is `LOOM_HOME`, a small Loom-managed
+ * directory (not the user's Obsidian vault), so this is cheap and safe on the spawn path. Returns null if
+ * none exist or `homePath` is unreadable (never throws — a spawn must never be blocked by this).
+ */
+export function findFreshestSiblingResumeDoc(homePath: string, excludePath: string): { path: string; mtimeMs: number } | null {
+  let entries: string[];
+  try {
+    entries = fs.readdirSync(homePath);
+  } catch {
+    return null;
+  }
+  let best: { path: string; mtimeMs: number } | null = null;
+  for (const name of entries) {
+    if (!isResumeDocFilename(name)) continue;
+    const candidate = path.join(homePath, name);
+    if (candidate === excludePath) continue;
+    let mtimeMs: number;
+    try {
+      mtimeMs = fs.statSync(candidate).mtimeMs;
+    } catch {
+      continue; // race: listed then removed — skip rather than throw
+    }
+    if (!best || mtimeMs > best.mtimeMs) best = { path: candidate, mtimeMs };
+  }
+  return best;
+}
+
+/**
+ * Compose the operational note block injected ahead of the resume-doc pointer (mirrors the other
+ * `[loom:*]` nudges elsewhere in Loom). IMPURE (stats the filesystem) but never throws and never blocks a
+ * spawn — every fs call is guarded. Two independent checks, either/both/neither may fire:
+ *
+ * 1. **Size** — the resolved doc is nearing the harness Read caps, so a successor sees the warning
+ *    BEFORE its first Read fails rather than silently exceeding it.
+ * 2. **Staleness** — the resolved doc's own mtime materially lags a sibling resume doc (the shared base,
+ *    or another lineage's own file) living in the same home. Surfaced as a DIRECTED pointer — the
+ *    daemon already knows which sibling is freshest — so the agent needn't hand-sort the directory
+ *    itself (mirrors the /platform-lead doctrine's own "inherit the freshest sibling handoff" guidance).
+ *    Fires whenever a fresher sibling exists and either the resolved doc doesn't exist yet or the gap
+ *    exceeds {@link SIBLING_STALENESS_MS}.
+ *
+ * Returns "" when neither check fires (the common, single-lineage, well-maintained-doc case).
+ */
+export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath: string): string {
+  const notes: string[] = [];
+
+  let resolvedMtimeMs: number | null = null;
+  try {
+    const stat = fs.statSync(resumeDocPath);
+    resolvedMtimeMs = stat.mtimeMs;
+    if (stat.size >= RESUME_DOC_WARN_BYTES) {
+      const kb = Math.round(stat.size / 1024);
+      notes.push(
+        `[loom:resume-doc-size] Your resume doc (\`${resumeDocPath}\`) is ~${kb}KB, nearing the harness ` +
+        `Read caps (~256KB / ~25k tokens) — a successor's first Read of it could fail. Rotate it now per ` +
+        `your doctrine's size budget: move the current doc to \`<name>.archive/<YYYY-MM-DD>-NN.md\`, then ` +
+        `start a fresh active doc holding only current state.`,
+      );
+    }
+  } catch {
+    /* doc doesn't exist yet (a fresh, unseeded lineage) — nothing to size-check */
+  }
+
+  const sibling = findFreshestSiblingResumeDoc(homePath, resumeDocPath);
+  if (sibling && (resolvedMtimeMs === null || sibling.mtimeMs - resolvedMtimeMs >= SIBLING_STALENESS_MS)) {
+    notes.push(
+      `[loom:resume-doc-stale] A sibling resume doc at \`${sibling.path}\` was modified more recently than ` +
+      `your lineage's own doc — it may hold more current state. Check it before trusting your own doc as ` +
+      `fully current.`,
+    );
+  }
+
+  return notes.join("\n\n");
 }

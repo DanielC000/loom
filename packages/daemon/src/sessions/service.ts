@@ -21,7 +21,7 @@ import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
-import { composePlatformLeadStartupPrompt, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
+import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
 import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
@@ -916,6 +916,7 @@ export class SessionService {
     // lineageId. Resolve the (base or per-lineage, seeded-if-absent) resume-doc path and inject it as a
     // "Where things live" pre-block, mirroring the manager's composeManagerStartupPrompt seam.
     const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, session.id);
+    const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -927,7 +928,7 @@ export class SessionService {
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       codescapePort: this.codescape?.getPort() ?? null,
       projectId: project.id,
-      startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath),
+      startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath, resumeDocNotes),
       role,
       browserTesting,
       documentConversion,
@@ -4845,7 +4846,8 @@ export class SessionService {
     // the root), so it resolves to the SAME resume-doc path the lineage has always used — never a fresh
     // one, and never another lineage's file.
     const leadResumeDocPath = resolvePlatformLeadResumeDocPath(this.db, project.vaultPath, lineageRootId(this.db, old));
-    const startupPrompt = composePlatformLeadStartupPrompt(continuation, leadResumeDocPath);
+    const resumeDocNotes = composeResumeDocOperationalNotes(project.vaultPath, leadResumeDocPath);
+    const startupPrompt = composePlatformLeadStartupPrompt(continuation, leadResumeDocPath, resumeDocNotes);
 
     const now = new Date().toISOString();
     const fresh: Session = {
