@@ -1702,10 +1702,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // --- Companion CONVERSATION-PRESERVING RESPAWN (Framework §6): a grant write above takes effect on the
-  // companion's NEXT respawn — its MCP tool surface is fixed at OS-process-start, so an already-running
-  // companion doesn't just pick up a new tool-bearing lever. This is that respawn, on demand: stop the OLD
-  // process and `--resume <engineSessionId>` a fresh one under the re-resolved capability surface, so the
-  // SAME conversation thread continues. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (same trust
+  // companion's NEXT respawn — NOT because the server is stale (`OrchestrationMcpRouter.buildServer` is
+  // stateless per MCP request and re-reads the grant table fresh on every call, so a revoke/downgrade is
+  // already live with no respawn), but because the running companion PROCESS only ever fetches `tools/list`
+  // once, at startup, so it has no way to discover a newly-granted tool it never asked for. This is that
+  // respawn, on demand: stop the OLD process and `--resume <engineSessionId>` a fresh one under the
+  // re-resolved capability surface, so the SAME conversation thread continues. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (same trust
   // posture as every other companion writer above) — an injection-exposed companion agent must never
   // trigger its OWN respawn. NOT auto-fired from a grant write above: a respawn has a brief availability
   // gap (the old process stopping before the new one is ready), so the owner picks WHEN. That gap is

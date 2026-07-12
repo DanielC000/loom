@@ -1410,11 +1410,13 @@ export class SessionService {
 
   /**
    * Companion-specific CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework
-   * §6). A running companion's MCP tool surface + allowlist are fixed at OS-process-start — the SAME
-   * invariant `resume()`'s own comment documents (`resolveAgentSpawn` runs only inside `createPty`, only
-   * from `PtyHost.spawn()`) — so a newly-granted tool-bearing lever (`sessions_status`/`decisions_list`/
-   * `board_list`/`vault_lookup`, and future ACT tools) never reaches an already-running companion process.
-   * This closes that gap WITHOUT losing the conversation: re-resolve the agent's CURRENT profile-driven
+   * §6). `OrchestrationMcpRouter.buildServer` is stateless per MCP request — it re-resolves the companion's
+   * grants fresh on every tool call, so a revoke/downgrade is already live with no respawn needed. What
+   * ISN'T live without one is a newly-GRANTED tool-bearing lever (`sessions_status`/`decisions_list`/
+   * `board_list`/`vault_lookup`, and future ACT tools): the running companion PROCESS fetched `tools/list`
+   * only once, at OS-process-start (the SAME invariant `resume()`'s own comment documents —
+   * `resolveAgentSpawn` runs only inside `createPty`, only from `PtyHost.spawn()`), so it has no way to
+   * discover a tool it never asked for. This closes that gap WITHOUT losing the conversation: re-resolve the agent's CURRENT profile-driven
    * capability surface (the exact shape a fresh spawn would resolve), re-pin it on the session ROW, stop
    * the old OS process, then `resume(sessionId)` — which reads those SAME row fields (never re-resolving
    * the Profile — see `resume()`'s own comment) and passes `--resume <engineSessionId>` to `pty.spawn`, so
