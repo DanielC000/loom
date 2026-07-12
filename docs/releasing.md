@@ -25,6 +25,11 @@ Once the owner's one-time setup is done (see *Automated release (CI)* below), cu
 
 1. **Land everything** for the release on `main` and confirm green: `pnpm build` + the hermetic
    daemon suite (`pnpm --filter @loom/daemon test:daemon`).
+   - **Bundled-skill currency check.** If anything in this release added, renamed, or removed an MCP tool,
+     skill, or capability, update the bundled doctrine skill(s) that teach it (`packages/daemon/assets/skills/**`)
+     — and confirm no shipped skill now names a tool that doesn't exist. A wrong or stale tool **name** is
+     the highest-harm skill error (it actively misleads the agent that reads it), so grep the changed
+     skills' tool names against their `registerTool` sites.
 2. **Update `CHANGELOG.md`.** Move the `Unreleased` items into a new `## [X.Y.Z] — YYYY-MM-DD`
    section (keep an empty `Unreleased` on top). This section's text becomes the GitHub Release notes (the CI extracts it with `scripts/extract-changelog.mjs X.Y.Z`).
 3. **Bump the version** with npm so the tag and the root `package.json` move together:

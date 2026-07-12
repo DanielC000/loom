@@ -134,7 +134,11 @@ run a **recurring code-structure pass** over the Loom source with `repo_grep` / 
    thinks it works) or cruft to remove.
 3. **Doc-code-mismatch** — a claim in `CLAUDE.md`, a doctrine/skill, or a tool description that the code
    no longer backs (or never did). The doc says "X is rejected"; grep the validator — is it? A tool
-   description promises a return shape the handler doesn't produce.
+   description promises a return shape the handler doesn't produce. **Highest-harm sub-case: a doctrine
+   skill that NAMES an MCP tool the code doesn't register** — a renamed or removed tool, or a plain wrong
+   name. Grep each tool name a skill teaches against its `registerTool` sites; a skill that points an
+   operator at a nonexistent tool actively misleads it. The inverse is drift too — a shipped tool or
+   capability the doctrine skill that should teach it was never updated for.
 4. **Discipline-dependent** — correctness that rests only on an agent *remembering* a soft rule, with no
    structural backstop. If the only thing stopping a bad outcome is "the doctrine says don't", that is a
    gap: flag the missing hard guard (the soft rule is the complement, not the enforcement).
