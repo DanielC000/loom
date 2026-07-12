@@ -15,7 +15,7 @@ import type { CompanionCapabilityGrant } from "@loom/shared";
 
 export type CapabilitySlug =
   | "session-status" | "decisions-relay" | "attention-push"
-  | "session-steer" | "board-reach" | "vault-read" | "media-out" | "transcript-read";
+  | "session-steer" | "board-reach" | "vault-read" | "media-out" | "transcript-read" | "session-spawn";
 
 export type GrantMode = "read" | "act";
 
@@ -48,6 +48,14 @@ export interface LeverMeta {
    *  start, so a change needs the companion respawned to take effect). Drives the panel's "restart to
    *  apply" state: an appliesLive change never sets it. */
   appliesLive: boolean;
+  /** True for a Tier-X ACT lever whose EVERY use is gated by a fresh owner confirmation (a per-action
+   *  step-up), even inside an otherwise-warm trust window — `session-spawn` today (the self-elevation
+   *  surface). Distinct from `tier: "elevated"` (which is a GRANT-TIME gate): this is the ACT-TIME friction,
+   *  surfaced honestly so the owner isn't misled into reading an elevated lever as friction-free the way
+   *  `session-steer` (also elevated, but confirmation-free per action) is. Undefined/false ⇒ no per-use
+   *  step-up badge. The step-up confirm flow itself is entirely server-driven (companion/capabilities.ts's
+   *  Tier-X propose/confirm); this flag only drives the panel's honest LABEL for it. */
+  stepUpOnUse?: boolean;
 }
 
 // Mirrors DECISION_CLASSES (daemon companion/capabilities.ts) — decisions-relay's act half admits ONLY the
@@ -63,8 +71,9 @@ export const ATTENTION_ALERT_CLASSES = [
 ] as const;
 
 // The panel's lever order: the owner's immediate need first (fleet status + decisions relay), then the
-// other read/informational levers, with the two ELEVATED act-only levers grouped LAST so the sensitive
-// surface reads as a deliberate, separated section.
+// other read/informational levers, with the ELEVATED act-only levers grouped LAST so the sensitive
+// surface reads as a deliberate, separated section — and `session-spawn` (the highest-privilege,
+// always-confirms self-elevation lever) last of all.
 export const COMPANION_LEVERS: readonly LeverMeta[] = [
   {
     slug: "session-status",
@@ -139,6 +148,17 @@ export const COMPANION_LEVERS: readonly LeverMeta[] = [
     configKind: "roleFilter",
     appliesLive: false,
     elevatedAction: "message, steer, stop and resume sessions on your behalf",
+  },
+  {
+    slug: "session-spawn",
+    name: "Spawn sessions",
+    summary: "Spawn a new manager or plain session into a granted project on your behalf — the self-elevation surface, and the highest-privilege lever there is. It can ONLY spawn manager or plain sessions, never a platform, auditor, or worker one. Every spawn ALWAYS asks for your confirmation in chat first, even right after another confirmed action.",
+    modes: ["act"],
+    tier: "elevated",
+    configKind: "none",
+    appliesLive: false,
+    elevatedAction: "spawn new manager or plain sessions on your behalf",
+    stepUpOnUse: true,
   },
 ];
 

@@ -477,6 +477,57 @@ test("Capabilities: an elevated lever (session control) gates its initial grant 
   await expect(card.getByText("on · 1 project", { exact: true })).toBeVisible();
 });
 
+test("Capabilities: session-spawn (Tier-X) is elevated, flags that it confirms every use, and its grant round-trips", async ({ page, loomDaemon }) => {
+  // session-spawn (epic ccdb1e0c lever G) is the highest-privilege lever: elevated (grant-time confirm) AND
+  // Tier-X (every USE steps up to a fresh owner confirm, even in a warm trust window). Unlike session-steer
+  // — also elevated but friction-FREE per action — its card carries a "confirms each use" badge so the owner
+  // isn't misled. Same no-spawn seeded-companion path as the sibling grant tests.
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const focus = async () => {
+    const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+    if (await pickerBtn.count()) {
+      await pickerBtn.click();
+      await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+    }
+    await page.getByRole("tab", { name: "Manage" }).click();
+  };
+  await focus();
+
+  const card = page.getByTestId("companion-lever-session-spawn");
+  // Honest tier/friction labeling: elevated (most powerful) AND confirms every use (Tier-X step-up).
+  await expect(card.getByText("elevated", { exact: true })).toBeVisible();
+  await expect(card.getByText("confirms each use", { exact: true })).toBeVisible();
+
+  // One click opens a confirm — it does NOT grant yet (still "off").
+  await card.getByRole("combobox", { name: "Grant Spawn sessions on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-session-spawn").click();
+  const confirm = page.getByTestId("companion-grant-confirm-session-spawn");
+  await expect(confirm).toBeVisible();
+  // The confirm honestly reiterates the per-use step-up, so the owner grants it knowing it.
+  await expect(confirm.getByText("Every use still asks for your confirmation", { exact: false })).toBeVisible();
+  await expect(card.getByText("off", { exact: true })).toBeVisible();
+
+  // Confirming grants it (observable state change).
+  await page.getByTestId("companion-grant-confirm-go-session-spawn").click();
+  await expect(card.getByText("on · 1 project", { exact: true })).toBeVisible();
+  // The granted row shows the fixed act flag (act-only lever, no mode picker).
+  await expect(card.getByText("act", { exact: true })).toBeVisible();
+
+  // Persists across a FULL reload.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  await focus();
+  await expect(page.getByTestId("companion-lever-session-spawn").getByText("on · 1 project", { exact: true })).toBeVisible();
+
+  // Revokes cleanly.
+  await page.getByTestId("companion-lever-session-spawn").getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByTestId("companion-lever-session-spawn").getByText("off", { exact: true })).toBeVisible();
+});
+
 test("Capabilities: co-granting transcript-read + session control surfaces a grant-time risk banner that persists and clears on revoke", async ({ page, loomDaemon }) => {
   // Card 9beb5ae5 (owner decision 4c33a1bc): the risky PAIR — transcript-read (reads untrusted transcript
   // text into a turn) + session-steer (friction-free cross-session control) — can launder injected

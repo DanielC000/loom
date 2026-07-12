@@ -1591,6 +1591,9 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
         <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>{meta.name}</strong>
         <code style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{meta.slug}</code>
         {tierFlag}
+        {/* Tier-X honest label: an elevated lever that ALSO confirms every single use (session-spawn) is
+            NOT friction-free like session-steer — surface that difference so the owner grants it knowingly. */}
+        {meta.stepUpOnUse && <Badge tone="cyan">confirms each use</Badge>}
         <span style={{ flex: 1 }} />
         {grants.length > 0
           ? <StatusPill tone="phosphor" label={`on · ${grants.length} project${grants.length === 1 ? "" : "s"}`} />
@@ -1648,7 +1651,11 @@ function LeverCard({ sessionId, meta, grants, projects, onMutated }: {
                 This grants <strong style={{ color: color.text }}>{meta.name}</strong> — one of Loom's most
                 powerful levers. The companion will be able to {meta.elevatedAction} in{" "}
                 <strong style={{ color: color.text }}>{projectName(confirmAddId)}</strong> on any future
-                respawn, including crash recovery. Grant it?
+                respawn, including crash recovery.{" "}
+                {meta.stepUpOnUse && (
+                  <>Every use still asks for your confirmation in chat before it happens. </>
+                )}
+                Grant it?
               </span>
               <div style={{ display: "flex", gap: 8 }}>
                 <Button variant="danger" disabled={busy} data-testid={`companion-grant-confirm-go-${meta.slug}`} onClick={() => grantOnProject(confirmAddId)}>
