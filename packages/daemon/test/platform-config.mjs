@@ -368,6 +368,49 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (13) schedulerEnabled moved to daemon-global platform config ============================
+// Card 1debd457: the owner-facing scheduler toggle used to be a per-project orchestration.schedulerEnabled
+// field the boot gate never read (index.ts:676-677 only ever consulted resolved.orchestration.
+// schedulerEnabled off the PLATFORM override, resolveConfig(undefined, platformOverride)) — so no
+// persistent path could enable it, only the LOOM_SCHEDULER_ENABLED env var. Moved to
+// PlatformConfigOverride.schedulerEnabled so the toggle actually reaches the boot gate; the per-project
+// key is now a REJECTED unknown key on both the human and agent schemas (regression guard so it can't
+// silently no-op again).
+{
+  const { validateProjectConfigOverride, validateAgentProjectConfigOverride } = await import("../dist/mcp/platform.js");
+
+  // resolveConfig: the platform override reaches resolved.orchestration.schedulerEnabled, on BOTH the
+  // no-project-override fast path and the full merge path.
+  check("(13) default schedulerEnabled false (no override at all)", resolveConfig(undefined).orchestration.schedulerEnabled === false);
+  check("(13) platform override true reaches resolved.orchestration.schedulerEnabled (no-project-override fast path)",
+    resolveConfig(undefined, { schedulerEnabled: true }).orchestration.schedulerEnabled === true);
+  check("(13) platform override true reaches resolved.orchestration.schedulerEnabled (WITH a project override present)",
+    resolveConfig({ docLint: false }, { schedulerEnabled: true }).orchestration.schedulerEnabled === true);
+  check("(13) platform override explicit false survives (not swallowed to default)",
+    resolveConfig(undefined, { schedulerEnabled: false }).orchestration.schedulerEnabled === false);
+
+  // Backward compat: a STALE per-project orchestration.schedulerEnabled (accepted before this field
+  // moved) is now simply IGNORED by the merge, never read — it can neither enable the scheduler on its
+  // own nor override a real platform-level decision.
+  check("(13) stale per-project orchestration.schedulerEnabled alone (no platform override) does NOT enable it",
+    resolveConfig({ orchestration: { schedulerEnabled: true } }).orchestration.schedulerEnabled === false);
+  check("(13) stale per-project orchestration.schedulerEnabled cannot override the platform value either way",
+    resolveConfig({ orchestration: { schedulerEnabled: true } }, { schedulerEnabled: false }).orchestration.schedulerEnabled === false);
+
+  // validatePlatformConfigOverride: accepts the new daemon-global field, rejects a non-boolean.
+  check("(13) platformConfigOverrideSchema accepts schedulerEnabled:true", validatePlatformConfigOverride({ schedulerEnabled: true }).ok === true);
+  check("(13) platformConfigOverrideSchema accepts schedulerEnabled:false", validatePlatformConfigOverride({ schedulerEnabled: false }).ok === true);
+  check("(13) platformConfigOverrideSchema rejects non-boolean schedulerEnabled", validatePlatformConfigOverride({ schedulerEnabled: "yes" }).ok === false);
+
+  // Per-project schemas (both the human REST path and the agent-facing loom-platform/loom-setup path)
+  // REJECT orchestration.schedulerEnabled as an unrecognized key — it's daemon-global now, not
+  // per-project, so a NEW attempt to set it per-project 400s instead of silently no-op-ing.
+  const humanReject = validateProjectConfigOverride({ orchestration: { schedulerEnabled: true } });
+  check("(13) per-project (human) schema REJECTS orchestration.schedulerEnabled", humanReject.ok === false);
+  const agentReject = validateAgentProjectConfigOverride({ orchestration: { schedulerEnabled: true } });
+  check("(13) per-project (agent) schema REJECTS orchestration.schedulerEnabled", agentReject.ok === false);
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 

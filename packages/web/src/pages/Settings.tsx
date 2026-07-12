@@ -210,7 +210,6 @@ function ConfigEditor({ project }: { project: Project }) {
   const [stuckWorker, setStuckWorker] = useState(numStr(ov.orchestration?.stuckWorkerMinutes));
   const [maxUnanswered, setMaxUnanswered] = useState(numStr(ov.orchestration?.maxUnansweredNudges));
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
-  const [scheduler, setScheduler] = useState(triStr(ov.orchestration?.schedulerEnabled));
   const [docLint, setDocLint] = useState(triStr(ov.docLint));
   // Opt-in Deja capture hook (card b3bd4841) — a per-project HUMAN-ONLY toggle (dropped from the agent
   // config schema, like sessionEnv), so it round-trips ONLY through this REST PATCH (the full validator),
@@ -246,6 +245,11 @@ function ConfigEditor({ project }: { project: Project }) {
     }
 
     const orch: Partial<OrchestrationConfig> = { ...o.orchestration };
+    // schedulerEnabled moved to the daemon-global config (GlobalConfigForm below) — it's no longer
+    // modeled per-project. Drop it unconditionally so a project whose STORED override still carries a
+    // stale value (accepted before the move) doesn't get silently re-sent on the next save and 400 the
+    // strict per-project validator, which now rejects the key outright.
+    delete orch.schedulerEnabled;
     if (gateCommand.trim()) orch.gateCommand = gateCommand.trim(); else delete orch.gateCommand;
     applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s");
     applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s");
@@ -256,7 +260,6 @@ function ConfigEditor({ project }: { project: Project }) {
     applyNum(orch, "stuckWorkerMinutes", stuckWorker);
     applyNum(orch, "maxUnansweredNudges", maxUnanswered);
     applyNum(orch, "idleDefaultSnoozeMinutes", idleSnooze);
-    if (scheduler !== "inherit") orch.schedulerEnabled = scheduler === "true"; else delete orch.schedulerEnabled;
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
 
     if (docLint !== "inherit") o.docLint = docLint === "true"; else delete o.docLint;
@@ -336,12 +339,8 @@ function ConfigEditor({ project }: { project: Project }) {
           <NumField label="Max unanswered nudges" value={maxUnanswered} set={setMaxUnanswered} effective={resolved.orchestration.maxUnansweredNudges} def={defaults.orchestration.maxUnansweredNudges} />
           <NumField label="Idle snooze (min)" value={idleSnooze} set={setIdleSnooze} effective={resolved.orchestration.idleDefaultSnoozeMinutes} def={defaults.orchestration.idleDefaultSnoozeMinutes} />
         </div>
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={fieldLabel}>Scheduler enabled</span>
-            <TriSelect value={scheduler} set={setScheduler} def={defaults.orchestration.schedulerEnabled} />
-          </label>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <div style={{ marginTop: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
             <span style={fieldLabel}>Gate command</span>
             <Input value={gateCommand} onChange={(e) => setGateCommand(e.target.value)} placeholder="e.g. pnpm build (blank = no gate)" />
             <Hint>build/test command run in a worker's worktree before merge · {effHint(resolved.orchestration.gateCommand || "none")}</Hint>
@@ -453,6 +452,11 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // The platform DEFAULT group (resolveConfig with no override) — what blanking a field reverts to, shown
   // in the "inherit (…)" placeholder. Browser-pure (no daemon read), like the per-project `defaults`.
   const defaults = resolveConfig(undefined).platform;
+  // schedulerEnabled lives on ResolvedConfig.orchestration, not the `platform` sub-group above, so its
+  // default/effective values are resolved separately — same pure resolveConfig call the daemon itself
+  // makes at boot (index.ts), so this hint can never drift from what a restart will actually pick up.
+  const schedulerDefault = resolveConfig(undefined).orchestration.schedulerEnabled;
+  const schedulerResolved = resolveConfig(undefined, override).orchestration.schedulerEnabled;
 
   // One flat string dict keyed by field key (unique across groups). "" = inherit. Seeded from the loaded
   // override, each value displayed in its human unit (canonical ms ÷ the unit).
@@ -467,6 +471,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [coalesceAgentMsgs, setCoalesceAgentMsgs] = useState(triStr(override.coalesceAgentMessages));
   // Bucket 2b "Elevated Operator" gate — same daemon-global tri-state pattern, own toggle (default OFF).
   const [operatorEnabled, setOperatorEnabled] = useState(triStr(override.operatorEnabled));
+  // Pillar-B cron Scheduler gate (§19b) — daemon-global (one shared daemon), same tri-state pattern.
+  // Boot-time-gated by design: a flip here needs a daemon restart to start/stop the ticker (see the
+  // banner above and the Schedules page hint).
+  const [schedulerEnabled, setSchedulerEnabled] = useState(triStr(override.schedulerEnabled));
 
   // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
@@ -481,6 +489,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     }
     if (coalesceAgentMsgs !== "inherit") o.coalesceAgentMessages = coalesceAgentMsgs === "true";
     if (operatorEnabled !== "inherit") o.operatorEnabled = operatorEnabled === "true";
+    if (schedulerEnabled !== "inherit") o.schedulerEnabled = schedulerEnabled === "true";
     return o;
   }
 
@@ -555,6 +564,20 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             into one turn (the pre-2026-07 behavior). Loom&apos;s own routine nudges (idle/context/rate-limit
             watchdogs, etc.) still coalesce regardless of this setting; action-required nudges (a merge
             rejection, an already-merged notice) stay on their own turn either way.
+          </Hint>
+        </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Scheduler</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
+          <span style={fieldLabel}>Cron Scheduler enabled (off by default)</span>
+          <TriSelect value={schedulerEnabled} set={setSchedulerEnabled} def={schedulerDefault} />
+          <Hint>{effHint(schedulerResolved)}</Hint>
+          <Hint>
+            When on, the daemon starts the cron Scheduler so due schedules auto-spawn a manager session.
+            Daemon-wide (one shared daemon), not per-project. Boot-time-gated: a flip here takes effect on
+            the next daemon restart, same as the watcher cadences above.
           </Hint>
         </label>
       </Panel>

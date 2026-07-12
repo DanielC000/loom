@@ -797,7 +797,7 @@ async function main(): Promise<void> {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);
   } else {
-    console.log("[boot] scheduler disabled (set orchestration.schedulerEnabled or LOOM_SCHEDULER_ENABLED=1)");
+    console.log("[boot] scheduler disabled (enable it under Settings → Global / Daemon, or set LOOM_SCHEDULER_ENABLED=1)");
   }
 
   // Codescape fleet-daemon (C1): fire-and-forget, like the reconcile kick above — ingest-then-serve can

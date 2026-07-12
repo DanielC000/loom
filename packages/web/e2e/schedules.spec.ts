@@ -135,7 +135,7 @@ test.describe("schedules UI (Direction B)", () => {
     const notice = page.getByRole("status").filter({ hasText: /will not fire/i });
     await expect(notice).toBeVisible();
     await expect(notice).toContainText("LOOM_SCHEDULER_ENABLED=1");
-    await expect(notice).toContainText("orchestration.schedulerEnabled");
+    await expect(notice).toContainText("Settings");
 
     // REST backstop: the status the UI reads from actually reports the gate as false.
     const status = await fetch(`${loomDaemon.baseURL}/api/orchestration/status`).then((r) => r.json()) as { schedulerEnabled: boolean };

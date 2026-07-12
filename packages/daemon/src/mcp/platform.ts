@@ -114,7 +114,11 @@ const orchestrationOverride = z.object({
   // authorize a fleet-bomb.
   maxConcurrentWorkers: z.number().int().min(1).max(100).optional(),
   maxConcurrentManagers: z.number().int().min(1).max(100).optional(),
-  schedulerEnabled: z.boolean().optional(),
+  // NOTE: no `schedulerEnabled` here — it's daemon-GLOBAL (see PlatformConfigOverride.schedulerEnabled),
+  // not per-project, so it lives on platformConfigOverrideSchema below instead. Omitting it here (a
+  // `.strict()` shape) makes a per-project `orchestration.schedulerEnabled` patch a REJECTED unknown key
+  // on both the human REST path and the agent path (agentOrchestrationOverride derives from this object)
+  // — closing the old no-op where setting it per-project silently did nothing.
   // Fraction of the model context window (0 disables); a ratio >1 or <0 is meaningless and would
   // corrupt the ContextWatcher's recycle trigger.
   recycleAtContextRatio: z.number().min(0).max(1).optional(),
@@ -414,6 +418,9 @@ const platformConfigOverrideSchema = z.object({
   // no differently than gateCommand reaches one via the project schema: it simply isn't reachable.
   operatorEnabled: z.boolean().optional(),
   remoteAccess: remoteAccessOverride.optional(),
+  // Pillar-B trigger gate (§19b), moved here from the per-project orchestration shape (see the removal
+  // note on orchestrationOverride above) — schedulerEnabled is a daemon-wide service, not per-project.
+  schedulerEnabled: z.boolean().optional(),
 }).strict();
 
 /**

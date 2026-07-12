@@ -613,6 +613,13 @@ export interface PlatformConfigOverride {
   operatorEnabled?: boolean;
   /** See RemoteAccessConfig. Deep-partial: `tls`/`rateLimit` replace whole when present. */
   remoteAccess?: Partial<RemoteAccessConfig>;
+  /**
+   * See OrchestrationConfig.schedulerEnabled. Daemon-GLOBAL, like backup/coalesceAgentMessages — NOT
+   * a per-project setting (there is no per-project equivalent; ProjectConfigOverride.orchestration
+   * deliberately omits it). The daemon reads this off the platform default (+ LOOM_SCHEDULER_ENABLED
+   * env, which wins when set).
+   */
+  schedulerEnabled?: boolean;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -964,6 +971,9 @@ export function resolveConfig(
     const base = structuredClone(d);
     if (envIdle !== undefined) base.orchestration.idleNudgeMinutes = envIdle;
     if (envBackup !== undefined) base.backup.intervalMinutes = envBackup;
+    // schedulerEnabled is daemon-GLOBAL (like backup/platform below), so it's read off the platform
+    // override even on this no-(project)-override fast path.
+    base.orchestration.schedulerEnabled = platformOverride?.schedulerEnabled ?? d.orchestration.schedulerEnabled;
     // obsidian defaults OFF on this fast path → obsidianSessionEnv({autoStart:false}) is {} → base.sessionEnv
     // stays byte-identical to today (no injection). Nothing to do; left explicit for the next reader.
     // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
@@ -1016,7 +1026,10 @@ export function resolveConfig(
       alertWebhookTimeoutMs: override.orchestration?.alertWebhookTimeoutMs ?? d.orchestration.alertWebhookTimeoutMs,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
       maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
-      schedulerEnabled: override.orchestration?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
+      // Daemon-GLOBAL (no per-project layer, like backup/platform below): the platform override (2nd
+      // arg) wins over the default. A stale per-project `orchestration.schedulerEnabled` (accepted
+      // before this field moved to PlatformConfigOverride) is intentionally ignored here, not read.
+      schedulerEnabled: platformOverride?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
       recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
       // Context-recycle re-nudge cadence + escalation cap (per-project, no env layer). `??` so an explicit
       // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.

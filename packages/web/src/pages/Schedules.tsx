@@ -118,7 +118,7 @@ export default function Schedules() {
             The cron scheduler is disabled, so schedules you create here are saved but{" "}
             <strong style={{ color: color.amber, fontWeight: 700 }}>will not fire</strong>. To enable it, set{" "}
             <code style={codeStyle}>LOOM_SCHEDULER_ENABLED=1</code> in the daemon's environment (or turn on{" "}
-            <code style={codeStyle}>orchestration.schedulerEnabled</code> in config), then restart the daemon.
+            <strong>Scheduler</strong> under <strong>Settings → Global / Daemon</strong>), then restart the daemon.
           </p>
         </div>
       )}

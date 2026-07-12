@@ -1,6 +1,11 @@
 // Scheduler opt-in gate (PR #19b). With schedulerEnabled false (the default) the daemon must NOT
 // start the Scheduler, so a DUE schedule never fires. Deterministic, NO claude. Run against a
 // fresh daemon started WITHOUT LOOM_SCHEDULER_ENABLED (so index.ts skips scheduler.start()).
+// schedulerEnabled is boot-time-gated and daemon-GLOBAL (PlatformConfigOverride.schedulerEnabled,
+// resolved via resolveConfig(undefined, platformOverride) at boot — see index.ts:676-677), not a
+// per-project setting; this script exercises the false (default) side only — the true side needs a
+// daemon started against a DB with a stored platform override, which platform-config.mjs covers at
+// the resolveConfig/schema level (no daemon spawn needed for that).
 //
 //   1) LOOM_HOME=<temp> node dist/index.js              (no LOOM_SCHEDULER_ENABLED)
 //   2) LOOM_HOME=<temp> node test/scheduler-disabled.mjs
