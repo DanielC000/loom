@@ -1643,7 +1643,10 @@ export class OrchestrationMcpRouter {
           "the message is durably BOARDED as a task on that project's OWN board instead of being dropped — " +
           "its manager will see it next time it attaches. Returns `deliveryStatus` (delivered-live | queued " +
           "| boarded) plus `taskId` when boarded. This is DATA delivery only — the recipient acts on it " +
-          "within its OWN project and gains no reach into yours except replying through this same primitive.",
+          "within its OWN project and gains no reach into yours except replying through this same primitive. " +
+          "The delivered frame ([loom:from-manager · <name> · projectId:<id> · sessionId:<id>]) stamps YOUR " +
+          "project id and this manager session's id, so a recipient can reply with peer_message using that " +
+          "projectId as ITS targetProjectId — no need to ask the owner to relay it.",
         inputSchema: { targetProjectId: z.string(), text: z.string() },
       },
       async ({ targetProjectId, text }) => {

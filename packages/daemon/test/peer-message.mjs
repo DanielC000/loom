@@ -163,10 +163,28 @@ try {
   check("(5) a linked target WITH a live manager delivers live (deliveryStatus delivered-live)",
     delivered.deliveryStatus === "delivered-live" && !delivered.error);
   const lastEnq = host.enqueued[host.enqueued.length - 1];
-  check("(6) delivered to MGR_B specifically, framed [loom:from-manager · Project A], kind:\"agent\" (one-per-turn)",
+  check("(6) delivered to MGR_B specifically, framed [loom:from-manager · Project A · projectId:pA · sessionId:MGR_A], kind:\"agent\" (one-per-turn)",
     host.enqueued.length === enqBeforeB + 1 && lastEnq.id === "MGR_B" && lastEnq.kind === "agent" &&
-    lastEnq.text.startsWith("[loom:from-manager · Project A]\n") &&
+    lastEnq.text.startsWith("[loom:from-manager · Project A · projectId:pA · sessionId:MGR_A]\n") &&
     lastEnq.text.includes("what's your webhook payload shape?"));
+
+  // ====== (6b) the stamped id lets the RECIPIENT reply via peer_message with NO human relay ======
+  // Prove the round-trip: parse the origin projectId out of the delivered frame (exactly as a recipient
+  // manager would read it off its inbound turn) and use it as `targetProjectId` on a peer_message call
+  // made AS the recipient (MGR_B) — this is the whole point of the stamp: a reply with no human relay.
+  const stampMatch = lastEnq.text.match(/^\[loom:from-manager · .* · projectId:(\S+) · sessionId:(\S+)\]/);
+  check("(6b) the delivered frame carries a parseable projectId + sessionId stamp",
+    !!stampMatch && stampMatch[1] === "pA" && stampMatch[2] === "MGR_A");
+  const mgrBClient = await connect(orch.buildServer("MGR_B", "manager"));
+  const bCall = async (name, args) => parse(await mgrBClient.callTool({ name, arguments: args }));
+  const enqBeforeReply = host.enqueued.length;
+  const reply = await bCall("peer_message", { targetProjectId: stampMatch[1], text: "here's the payload shape" });
+  check("(6b) MGR_B replies using ONLY the stamped projectId — delivered live back to MGR_A, no human relay",
+    reply.deliveryStatus === "delivered-live" && !reply.error &&
+    host.enqueued.length === enqBeforeReply + 1 &&
+    host.enqueued[host.enqueued.length - 1].id === "MGR_A" &&
+    host.enqueued[host.enqueued.length - 1].text.includes("here's the payload shape"));
+  await mgrBClient.close();
 
   // ===================== (7) audit event recorded (both directions traceable) =====================
   check("(7) a cross_project_message audit event was recorded under the sending manager (origin/target/text)",

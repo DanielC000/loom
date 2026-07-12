@@ -3578,6 +3578,11 @@ export class SessionService {
    *     recipient nothing beyond an inbound turn it acts on WITHIN ITS OWN project.
    *   - rate-limited per ORIGIN manager session (`checkPeerMessageRateLimit`) so a compromised/confused
    *     manager can't turn this into a cross-project spam/probe vector.
+   *   - REPLY-ABLE: the frame stamps the ORIGIN `projectId` + sending manager's `sessionId` alongside its
+   *     human-readable name, so the recipient manager can `peer_message` back with `targetProjectId` set
+   *     to the stamped id — without this, a recipient sees only a project NAME (peer_message requires an
+   *     id, and nothing else exposes a linked project's id), so it could never reply without a full human
+   *     relay, defeating this channel's whole no-human-relay premise (board gap, see fix commit).
    * When the target project has NO live manager, mirrors `deliverSessionMessage`'s offline path: rather
    * than dropping the message or erroring, it boards a durable card on the target project's OWN board (the
    * message is never lost — the peer's manager picks it up as a normal task on its next boot/attach).
@@ -3606,7 +3611,10 @@ export class SessionService {
 
     const originProject = this.db.getProject(originProjectId);
     const originName = originProject?.name ?? originProjectId;
-    const framed = `[loom:from-manager · ${originName}]\n${text}`;
+    // Stamp the origin projectId + sending manager sessionId onto the frame: nothing else exposes a
+    // linked peer's project id to the recipient, so without this a recipient manager could never reply
+    // via peer_message (which requires a targetProjectId) without a full human relay.
+    const framed = `[loom:from-manager · ${originName} · projectId:${originProjectId} · sessionId:${managerSessionId}]\n${text}`;
 
     // manager↔manager ONLY: match role==="manager" explicitly — a live worker/platform/auditor session in
     // the target project must never be matched, even if it's the only live session there.
