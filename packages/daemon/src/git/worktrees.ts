@@ -1063,8 +1063,20 @@ export interface DiffstatFile {
  * `*`/`?` stay within a single segment. No `{a,b}` brace expansion — keep the surface small and
  * predictable. (Deliberately a small local copy rather than importing `mcp/repo-read.ts`'s equivalent —
  * this git-layer module shouldn't reach up into the mcp layer for a 15-line helper.)
+ *
+ * A BARE leading `*` with no `/` anywhere in the pattern (e.g. `*service.ts`) is auto-prefixed with a
+ * `**` + `/` (zero-or-more-dirs) segment before translation: as written, `*` stays within one path
+ * segment, so `*service.ts` only ever matches a ROOT-level file and silently misses
+ * `packages/daemon/src/sessions/service.ts` — the "matched 0 files, indistinguishable from no changes"
+ * trap (task 91d847db). A caller writing a bare filename glob almost always means "match this file
+ * anywhere", so that's the least-surprising behavior. Patterns that already scope a directory (contain
+ * `/`) or already cross boundaries (start with `**`) are left untouched — only the fully-bare,
+ * single-segment case is rewritten.
  */
-function pathGlobToRegExp(glob: string): RegExp {
+function pathGlobToRegExp(rawGlob: string): RegExp {
+  const glob = rawGlob.startsWith("*") && !rawGlob.startsWith("**") && !rawGlob.includes("/")
+    ? `**/${rawGlob}`
+    : rawGlob;
   const SPECIAL = /[.+^${}()|[\]\\]/g;
   let re = "^";
   let i = 0;
@@ -1087,7 +1099,7 @@ function pathGlobToRegExp(glob: string): RegExp {
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",
   opts: { includePatch?: boolean; files?: string[]; pathGlob?: string } = {},
-): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch: string }> {
+): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch: string; hint?: string }> {
   // The full unified `patch` is UNBOUNDED — on a large change it overflows an MCP display limit, blinding a
   // manager exactly when the diff is biggest/riskiest. So the patch is OPT-IN: callers that only need a
   // bounded summary pass includePatch:false and skip the expensive `git diff` entirely. Defaults to true so
@@ -1124,7 +1136,19 @@ export async function diffBranch(
       : await git.diff([range])
     : "";
 
-  return { filesChanged, insertions, deletions, files, patch };
+  // pathGlob matched ZERO of the N actually-changed files: without this, the result is `filesChanged:0`
+  // — indistinguishable from "nothing changed" (the bug this hint exists to prevent; recurred ≥3x in
+  // real orchestrator use). Only fires for pathGlob (not a plain `files` substring miss, which is
+  // unambiguous) and only when there WERE changes to miss.
+  const hint = globRe && files.length === 0 && allFiles.length > 0
+    ? `pathGlob \`${opts.pathGlob}\` matched 0 of ${allFiles.length} changed file(s). Note: a bare ` +
+      `\`*name\` pattern with no \`/\` is auto-matched anywhere (as \`**/*name\`), but any pattern ` +
+      `containing \`/\` scopes to that literal directory structure and won't match elsewhere. Changed ` +
+      `files: ${allFiles.map((f) => f.file).join(", ")}. The \`files\` substring filter matches nested ` +
+      `paths reliably as an alternative.`
+    : undefined;
+
+  return { filesChanged, insertions, deletions, files, patch, ...(hint ? { hint } : {}) };
 }
 
 export interface WorkerDiff {

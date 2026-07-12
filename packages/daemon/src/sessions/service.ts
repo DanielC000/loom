@@ -5453,7 +5453,7 @@ export class SessionService {
     opts: { includePatch?: boolean; files?: string[]; pathGlob?: string } = {},
   ): Promise<{
     filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[];
-    patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string;
+    patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string; hint?: string;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
@@ -5506,6 +5506,7 @@ export class SessionService {
           : { patch: diff.patch })
         : { note: "Diffstat only — re-call worker_merge with fullDiff:true for the full unified patch." }),
       ...(warning ? { warning } : {}),
+      ...(diff.hint ? { hint: diff.hint } : {}),
     };
   }
 

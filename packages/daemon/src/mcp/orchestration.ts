@@ -1179,10 +1179,15 @@ export class OrchestrationMcpRouter {
           "overflow the display on a large change (where the full patch is biggest/riskiest). Pass " +
           "fullDiff:true to ALSO get the full unified patch for line-level review (the full patch is " +
           "unbounded and may itself overflow on a very large change — review the diffstat first, then pull " +
-          "the patch). Pass `files` (an array of exact/substring path matches) and/or `pathGlob` (a glob " +
-          "like 'packages/daemon/src/mcp/*.ts') to scope BOTH the diffstat and the patch to matching file(s) " +
-          "— pull one file's hunk at a time on a large multi-file change instead of the whole patch. Omit " +
-          "both for the full unfiltered diff (unchanged). If the (possibly filtered) patch is still too " +
+          "the patch). Pass `files` (an array of exact/substring path matches — RELIABLE for nested paths, " +
+          "e.g. 'sessions/service.ts' matches 'packages/daemon/src/sessions/service.ts') and/or `pathGlob` " +
+          "(a glob like 'packages/daemon/src/mcp/*.ts'; a bare pattern with no '/', e.g. '*service.ts', is " +
+          "auto-matched anywhere as if written '**/*service.ts' — but a pattern that DOES contain '/' " +
+          "scopes to that literal directory and won't match elsewhere) to scope BOTH the diffstat and the " +
+          "patch to matching file(s) — pull one file's hunk at a time on a large multi-file change instead " +
+          "of the whole patch. A pathGlob matching 0 of the actually-changed files returns a `hint` " +
+          "explaining the miss (with the list of changed files) instead of a silent, empty-looking result. " +
+          "Omit both for the full unfiltered diff (unchanged). If the (possibly filtered) patch is still too " +
           "large to inline safely, it's written to a scratch file instead — UTF-8, real line breaks, " +
           "Read-pageable with offset/limit — and the response carries patchFile/patchChars + a note in " +
           "place of the inline patch. No merge happens; you must review before confirming (there is no " +
