@@ -5,3 +5,8 @@
 # `install.sh` MUST stay LF — a CRLF shebang breaks `curl … | sh`. The .ps1 uses the Windows default.
 *.sh         text eol=lf
 install.ps1  text eol=crlf
+
+# Bundled skill sources (packages/daemon/assets/skills/**, synced by scripts/sync-claude-skills.mjs to
+# the gitignored .claude/skills/** mirror) are shipped, generic doctrine text — pin LF so a Windows
+# contributor's autocrlf checkout can never introduce pure CRLF churn on edit/commit.
+packages/daemon/assets/skills/**  text eol=lf

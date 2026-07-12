@@ -33,6 +33,43 @@ function dirNames(dir) {
   return entries.filter((e) => e.isDirectory()).map((e) => e.name);
 }
 
+// EOL-insensitive equality: a pure LF/CRLF difference must never be treated as a real change, so a
+// rerun (or a build on a checkout whose autocrlf normalizes differently) never rewrites a byte-identical
+// skill file and produces spurious mtime/EOL churn in the destination.
+function contentEquals(a, b) {
+  if (a.length === b.length && a.equals(b)) return true;
+  const normalize = (buf) => buf.toString("utf8").replace(/\r\n/g, "\n");
+  return normalize(a) === normalize(b);
+}
+
+// Recursively mirror src → dest, writing a file ONLY when its content actually differs (EOL-insensitive)
+// and removing a dest entry that no longer exists in src — never a blanket rm+copy of the whole tree.
+function syncDir(src, dest) {
+  fs.mkdirSync(dest, { recursive: true });
+  const srcEntries = fs.readdirSync(src, { withFileTypes: true });
+  const srcNames = new Set(srcEntries.map((e) => e.name));
+
+  for (const entry of fs.readdirSync(dest, { withFileTypes: true })) {
+    if (!srcNames.has(entry.name)) {
+      fs.rmSync(path.join(dest, entry.name), { recursive: true, force: true });
+    }
+  }
+
+  for (const entry of srcEntries) {
+    const srcPath = path.join(src, entry.name);
+    const destPath = path.join(dest, entry.name);
+    if (entry.isDirectory()) {
+      syncDir(srcPath, destPath);
+      continue;
+    }
+    const srcContent = fs.readFileSync(srcPath);
+    let destContent = null;
+    try { destContent = fs.readFileSync(destPath); } catch { /* dest missing */ }
+    if (destContent !== null && contentEquals(srcContent, destContent)) continue;
+    fs.writeFileSync(destPath, srcContent);
+  }
+}
+
 function readManagedManifest() {
   let raw;
   try { raw = JSON.parse(fs.readFileSync(managedManifestPath, "utf8")); } catch { return []; }
@@ -55,12 +92,12 @@ for (const prevManaged of readManagedManifest()) {
   fs.rmSync(path.join(destDir, prevManaged), { recursive: true, force: true });
 }
 
-// Refresh every current canonical skill — the actual drift fix.
+// Refresh every current canonical skill — the actual drift fix. syncDir only touches an entry whose
+// content actually changed, so a rerun over an already-current mirror writes nothing.
 for (const name of canonical) {
   const src = path.join(srcDir, name);
   const dest = path.join(destDir, name);
-  fs.rmSync(dest, { recursive: true, force: true });
-  fs.cpSync(src, dest, { recursive: true });
+  syncDir(src, dest);
 }
 
 const manifestTmp = `${managedManifestPath}.tmp`;
