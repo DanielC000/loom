@@ -3237,8 +3237,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.patch("/api/platform/config", async (req, reply) => {
     const v = validatePlatformConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid platform config: ${v.error}` });
+    // Shallow-merge the submitted top-level keys onto the PERSISTED config rather than replacing the
+    // whole blob — a PATCH carrying only one field (e.g. a single Settings toggle) must leave every
+    // sibling field the caller didn't touch byte-identical. Re-validate the merged result too, so a
+    // partial body can't bypass the bounds/shape checks the old full-blob path enforced.
+    const merged = { ...deps.db.getPlatformConfig(), ...v.value };
+    const mv = validatePlatformConfigOverride(merged);
+    if (!mv.ok) return reply.code(400).send({ error: `invalid platform config: ${mv.error}` });
     const wasOperatorEnabled = isOperatorEnabled(deps.db);
-    deps.db.setPlatformConfig(v.value);
+    deps.db.setPlatformConfig(mv.value);
     // Bucket 2b follow-up: a false→true flip should surface the bundled "Elevated Operator" convenience
     // agent immediately, not just on the next boot seed (seedOperatorAgent is itself flag-gated + idempotent
     // seed-if-absent-by-name, so this is a safe no-op on every other transition). Best-effort — a seed
@@ -3251,7 +3258,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         console.warn(`[platform-config] seedOperatorAgent failed after operatorEnabled flip: ${(e as Error).message}`);
       }
     }
-    return { ok: true, override: v.value };
+    return { ok: true, override: mv.value };
   });
 
   app.post("/api/projects/:id/agents", async (req, reply) => {

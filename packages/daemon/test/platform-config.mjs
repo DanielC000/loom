@@ -331,10 +331,47 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (12) PATCH shallow-merges onto the persisted config (no clobber) ============================
+// Regression guard: the REST PATCH handler used to call db.setPlatformConfig(v.value) with ONLY the
+// submitted fields, blindly REPLACING the whole persisted blob — so a Settings Save that resubmitted
+// just one toggle silently dropped every other already-set field (real incident: coalesceAgentMessages
+// flipped by an unrelated Save). The handler now shallow-merges the incoming top-level keys onto the
+// existing persisted config before persisting.
+{
+  const mergeDbFile = path.join(TMP, "merge-guard.db");
+  const db = new Db(mergeDbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    // Seed TWO top-level fields directly (bypassing the handler) so we start from a known persisted state.
+    db.setPlatformConfig({ rateLimit: { defaultBackoffMs: 1800000 }, coalesceAgentMessages: true });
+    const before = db.getPlatformConfig();
+    check("(12) seed: two fields persisted", before.rateLimit?.defaultBackoffMs === 1800000 && before.coalesceAgentMessages === true);
+
+    // PATCH a THIRD, unrelated top-level field only.
+    const patch = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { watchers: { wakeMs: 90000 } } });
+    check("(12) single-field PATCH → 200", patch.statusCode === 200 && patch.json().ok === true);
+
+    const after = db.getPlatformConfig();
+    check("(12) untouched sibling #1 (rateLimit) is byte-identical", after.rateLimit?.defaultBackoffMs === 1800000);
+    check("(12) untouched sibling #2 (coalesceAgentMessages) is byte-identical", after.coalesceAgentMessages === true);
+    check("(12) the patched field actually took", after.watchers?.wakeMs === 90000);
+
+    // The response's echoed override reflects the full persisted (merged) config, matching GET's shape,
+    // not just the submitted delta.
+    const echoed = patch.json().override;
+    check("(12) PATCH response echoes the full merged override, not just the submitted delta",
+      echoed.rateLimit?.defaultBackoffMs === 1800000 && echoed.coalesceAgentMessages === true && echoed.watchers?.wakeMs === 90000);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; and a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH)."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); and a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
