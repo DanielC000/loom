@@ -6,10 +6,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // [loom:worker-idle] "did NOT call worker_report … may be stalled" nudge, costing the manager a wasted
 // worker_transcript pull on a healthy worker.
 //
+// Also covers the follow-up WORDING fix (card 95b2abb3): a worker that called worker_report(progress)
+// and THEN self-parked via wake_me used to draw the parked-ack "IS parked awaiting your reply" nudge —
+// false, since the manager owes it nothing; it resumes on its own wake. Fixed by classifyIdleWorker
+// distinguishing "reported + pending wake" (parked-wake, new wording) from "never reported + pending
+// wake" (kept as the original silent not-stranded case).
+//
 // Asserts:
-//   (a) a worker with a PENDING wake is NOT classified stranded and draws NO stall nudge.
+//   (a) a worker with a PENDING wake and NO report is NOT classified stranded and draws NO stall nudge.
 //   (b) a worker with NO pending wake, idle, and no report IS still classified stranded and nudged
 //       (the guard is narrow — proves it doesn't over-suppress).
+//   (c) a FIRED (no longer pending) wake does not suppress the stall nudge.
+//   (d) reported progress + a PENDING wake → a nudge fires with "no reply owed" wording, NOT "awaiting
+//       your reply".
+//   (e) reported progress + NO pending wake → the existing parked-ack "awaiting your reply" wording is
+//       unchanged (regression guard).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -127,7 +138,51 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============ (d) reported progress + a PENDING wake → "no reply owed" wording (card 95b2abb3) ==========
+// A worker that called worker_report(progress) and THEN self-parked on its OWN wake_me is on its own
+// background gate, not the manager's reply — the [loom:worker-idle] nudge must say so, not assert
+// "awaiting your reply" (which is false here: nobody owes it anything, it resumes itself).
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-d");
+  seedTask(e, "tk-d", "in_progress");
+  seedWorker(e, "wkr-d", "mgr-d", "tk-d", { idleMin: 60 });
+  e.db.appendEvent({
+    id: "evt-d", ts: minutesAgo(50), managerSessionId: "mgr-d", workerSessionId: "wkr-d", taskId: "tk-d",
+    kind: "worker_report", detail: { status: "progress", summary: "kicked off a long build, waiting on it" },
+  });
+  const wakeAt = new Date(NOW.getTime() + 15 * 60_000).toISOString();
+  e.db.insertWake({ id: "wake-d", sessionId: "wkr-d", wakeAt, note: "check the build", createdAt: NOW.toISOString() });
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-d");
+  const nudge = e.enqueued.find((x) => x.id === "mgr-d" && /worker-idle/.test(x.text));
+  check("(d) a [loom:worker-idle] nudge IS sent (not silently suppressed)", !!nudge);
+  check("(d) the nudge does NOT claim it's awaiting the manager's reply", !!nudge && !/awaiting your reply/.test(nudge.text));
+  check("(d) the nudge explains it's self-resuming on its own scheduled wake / no reply owed",
+    !!nudge && /no reply owed/.test(nudge.text) && /OWN scheduled wake/.test(nudge.text));
+  cleanup(e);
+}
+
+// ============ (e) regression guard — reported progress, NO pending wake → unchanged parked-ack wording ====
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-e");
+  seedTask(e, "tk-e", "in_progress");
+  seedWorker(e, "wkr-e", "mgr-e", "tk-e", { idleMin: 60 });
+  e.db.appendEvent({
+    id: "evt-e", ts: minutesAgo(50), managerSessionId: "mgr-e", workerSessionId: "wkr-e", taskId: "tk-e",
+    kind: "worker_report", detail: { status: "progress", summary: "still investigating" },
+  });
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-e");
+  const nudge = e.enqueued.find((x) => x.id === "mgr-e" && /worker-idle/.test(x.text));
+  check("(e) a [loom:worker-idle] nudge IS sent", !!nudge);
+  check("(e) with NO pending wake, the existing parked-ack \"awaiting your reply\" wording is unchanged",
+    !!nudge && /awaiting your reply/.test(nudge.text));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a wake-parked worker (pending, not-yet-fired wake) is no longer misclassified stranded and draws no false stall nudge; a genuinely stalled worker with no pending wake still is/does."
+  ? "\n✅ ALL PASS — a wake-parked worker (pending, not-yet-fired wake) is no longer misclassified stranded and draws no false stall nudge; a genuinely stalled worker with no pending wake still is/does; a reported-then-wake-parked worker draws a correctly-worded 'no reply owed' nudge instead of a false 'awaiting your reply' one."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -4393,11 +4393,17 @@ export class SessionService {
    *   land since (the manager hasn't replied yet) — a healthy await-ack park, not a stall. Once the
    *   manager DOES reply and the worker goes idle again without a fresh report, this no longer holds — a
    *   real stall still classifies `stranded`, so an acked-then-stalled worker is never silently missed.
+   * - `parked-wake` — SAME reported-and-unacked shape as `parked-ack`, but the worker ALSO has a PENDING
+   *   self-scheduled wake (card 95b2abb3, follow-up to the WAKE GUARD below): it reported `progress`/
+   *   `done`/`blocked` and then parked itself on its OWN `wake_me`, not on the manager. The manager owes
+   *   it NO reply — it resumes itself when the wake fires — so this is reported with distinct wording
+   *   rather than folded into `parked-ack`'s "awaiting your reply" phrasing, which would be false here.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
     | { kind: "not-evaluable" | "not-stranded" | "broken-spawn" | "stranded" }
-    | { kind: "parked-ack"; status: string } {
+    | { kind: "parked-ack"; status: string }
+    | { kind: "parked-wake"; status: string; wakeAt: string } {
     // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
     // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
     // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
@@ -4413,7 +4419,10 @@ export class SessionService {
 
     if (w.rateLimitedUntil && Date.parse(w.rateLimitedUntil) > Date.now()) return { kind: "not-stranded" };
 
-    if (this.db.listWakesForSession(workerSessionId).length > 0) return { kind: "not-stranded" }; // wake-parked, see WAKE GUARD above
+    // WAKE GUARD (card dfa87343): read the worker's pending self-scheduled wakes now, but DON'T branch on
+    // them yet — a pending wake means different things depending on whether the worker also reported (see
+    // the `parked-wake` vs the bare `not-stranded` return at the bottom of this function).
+    const pendingWakes = this.db.listWakesForSession(workerSessionId);
 
     const task = this.db.getTask(w.taskId);
     const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
@@ -4431,8 +4440,16 @@ export class SessionService {
     const status = lastReport?.detail?.status as string | undefined;
     const ackedSince = !!lastReport && events.slice(lastReportIdx + 1).some((e) => e.kind === "message_worker" || e.kind === "redirect_worker");
     if (lastReport && (status === "progress" || status === "done" || status === "blocked") && !ackedSince) {
+      // Reported AND has a pending self-scheduled wake → it's parked on its OWN gate, not the manager's
+      // reply (card 95b2abb3). Reported with NO pending wake → the existing parked-ack await-reply case.
+      const nextWake = pendingWakes[0];
+      if (nextWake) return { kind: "parked-wake", status: status!, wakeAt: nextWake.wakeAt };
       return { kind: "parked-ack", status: status! };
     }
+    // No usable report to explain the idle state — a pending wake still means it'll resume on its own
+    // (the ORIGINAL WAKE GUARD case: e.g. never reported at all, but self-parked anyway), so it's not a
+    // stall the manager needs to act on; a worker with no report AND no wake is genuinely stranded.
+    if (pendingWakes.length > 0) return { kind: "not-stranded" };
     return { kind: "stranded" };
   }
 
@@ -4509,7 +4526,9 @@ export class SessionService {
       return;
     }
 
-    const msg = cls.kind === "parked-ack"
+    const msg = cls.kind === "parked-wake"
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and is parked on its OWN scheduled wake (self-resumes at ${cls.wakeAt}) — no reply owed; it will continue on its own. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
+      : cls.kind === "parked-ack"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(${cls.status}) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
       : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
     try { this.pty.enqueueStdin(w.parentSessionId, msg); } catch { /* manager not live */ }
