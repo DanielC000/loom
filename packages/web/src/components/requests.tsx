@@ -552,8 +552,9 @@ function CredentialControl({ q }: { q: QuestionInboxItem }) {
       <Panel style={{ borderLeft: `3px solid ${color.amber}`, display: "flex", flexDirection: "column", gap: 4 }}>
         <span style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.08em", color: color.amber }}>Write-only secret</span>
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.5 }}>
-          Stored envelope-encrypted (AES-256-GCM), exposed only to the agent’s environment, and NEVER echoed
-          back to the agent or shown here again. Store it once — you won’t see it after.
+          Stored envelope-encrypted (AES-256-GCM) and NEVER echoed back to the agent or shown here again.
+          It is NOT auto-injected into any session — wire it into a Connection or the project's config
+          yourself before an agent can use it. Store it once — you won’t see it after.
         </span>
       </Panel>
       <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>

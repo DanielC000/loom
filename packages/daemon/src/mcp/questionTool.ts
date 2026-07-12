@@ -102,13 +102,17 @@ export function buildQuestionAsk(
  * The `type:"credential"` ack text — factored out of `questionPullItem` (card 988bb585) so
  * `taskRequestGetItem`'s full-detail read can share the EXACT same never-echo phrasing without
  * duplicating it and risking drift. Never touches `secret_blob` — it only ever reads `credentialEnvVar`,
- * the ask-time hint (not the answer).
+ * the ask-time hint (not the answer). Deliberately does NOT promise auto-provisioning (card 3f8bd560):
+ * nothing in the daemon reads `secret_blob` back out and injects it into a session env, so the wording
+ * must say a human still has to wire it in — auto-wiring is a separate, unbuilt feature.
  */
 function credentialAck(q: Question): string {
   return q.credentialEnvVar
-    ? `Provided and stored securely — not returned via this tool. Expect it under ${q.credentialEnvVar} ` +
-      "once your environment/project config is provisioned with it."
-    : "Provided and stored securely — not returned via this tool. Ask your operator how it's made available to you.";
+    ? `Provided and stored securely — not returned via this tool. It is NOT auto-injected into any ` +
+      `session env; a human must wire it into a Connection or this project's config (as ${q.credentialEnvVar}) ` +
+      "before an agent session can use it."
+    : "Provided and stored securely — not returned via this tool. It is NOT auto-injected into any " +
+      "session env; ask your operator how (or whether) it's made available to you.";
 }
 
 /**

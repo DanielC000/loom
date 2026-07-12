@@ -1474,7 +1474,9 @@ export class PlatformMcpRouter {
           "ask/answer channel, not a second gate: it does not itself block anything, so if the action " +
           "must actually WAIT on the answer, hold it yourself. \"credential\" — ask for a secret (API " +
           "key/token) under a NEVER-ECHO model: you will NEVER receive the plaintext, only an ack once " +
-          "it's provided; `envVar` (optional) hints the env var/config key you expect it under. " +
+          "it's provided; `envVar` (optional) names the env var/config key you'd like it stored under. " +
+          "It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
+          "(outside this tool) that must happen before an agent session can use it. " +
           "`taskId` (optional) softly links this to a board task. You'll get a one-time push nudge into " +
           "your own session when the human answers; call question_pull (e.g. when you reach the point " +
           "this was blocking) to fetch the answer. Returns {questionId}.",
