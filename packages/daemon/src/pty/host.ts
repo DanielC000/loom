@@ -2936,6 +2936,21 @@ export class PtyHost {
   }
 
   /**
+   * PUBLIC read of the same composer-dirty signal (see deferForHumanDraft), for restart-intent capture
+   * (SessionService.liveFleetResumeSet): a daemon restart kills this pty — and the uncommitted raw-
+   * terminal draft living only in its (and the engine's) in-memory composer state dies with it, with
+   * NOTHING to replay (unlike the `pending` FIFO, which is Loom-owned text and survives via the intent
+   * snapshot). A draft this size commonly IS a large paste the terminal has collapsed to a
+   * "[Pasted text #N]" placeholder — capturing this lets resumeFleetOnBoot tell the resumed agent that
+   * loss explicitly instead of leaving it silently unaccounted for. Returns false for an unknown/dead
+   * session id (nothing to report) rather than throwing.
+   */
+  isComposerDirty(sessionId: string): boolean {
+    const live = this.live.get(sessionId);
+    return !!live && this.deferForHumanDraft(live);
+  }
+
+  /**
    * Clear a phantom 'busy' (busy with no engine output for a stale window) so its queue can drain.
    * A session that has NEVER started its first turn (`!firstTurnStarted`) uses the much SHORTER
    * FIRST_TURN_STALE_MS instead of `busyStaleMs` — there's no such thing as a legitimately long tool

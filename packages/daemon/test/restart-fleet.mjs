@@ -47,6 +47,7 @@ class PtyStub {
   isAlive() { return false; } // resumed rows are not-live; let resume()'s already-live short-circuit fall through to spawn/guards
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
+  isComposerDirty() { return false; } // claude-free stub: no live composer to be dirty — liveFleetResumeSet() calls this per session
 }
 
 const db = new Db();

@@ -34,3 +34,26 @@ export const RESUME_NUDGE_TAIL =
   'is rejected as "not read yet". It also killed any background shells you had running — a status check on ' +
   'one now returns <status>killed</status>; that\'s expected, not a new failure, so just re-launch what you ' +
   'still need.)';
+
+/**
+ * CONDITIONAL companion to RESUME_NUDGE_TAIL — appended only for a session whose raw-terminal composer
+ * held an unsent human draft at restart-capture time (RestartResumeEntry.hadUnsentDraft, set from
+ * PtyHost.isComposerDirty in liveFleetResumeSet). Unlike RESUME_NUDGE_TAIL's two facts (always true of
+ * every resume), this one is true only for THAT session, so it is NOT folded into the shared tail.
+ *
+ * Real-engine probes (card: pasted-text-attachment-survives-restart) confirmed a SUBMITTED turn's pasted
+ * text is fully durable — the engine resolves it to full content before persisting, and `--resume`
+ * reconstructs it correctly every time. The ONE genuine gap is a draft that was pasted/typed but never
+ * submitted (Enter not yet pressed) at the moment of the restart: it lives only in the now-dead pty's (and
+ * engine's) in-memory composer, commonly collapsed on-screen to a "[Pasted text #N]" placeholder, and is
+ * not part of the transcript at all — so it is NOT replayed and NOT recoverable. Without this note that
+ * loss is entirely silent (no dangling reference even appears); this makes it explicit instead of leaving
+ * the resumed agent to either not notice or guess at content it never actually saw.
+ */
+export const DRAFT_LOSS_NOTE =
+  ' (Note: at the moment of this restart you had an UNSENT draft sitting in your raw-terminal input box — ' +
+  'never submitted, so it is not part of your resumed history. This is commonly a large pasted block of ' +
+  'text, which the terminal may have shown collapsed as "[Pasted text #N]" before it could be sent. That ' +
+  'draft did NOT survive the restart. If it comes up, or you see any "[Pasted text #N]"-style mention with ' +
+  'no real content behind it, do not guess at what it said — tell whoever is asking that it was lost in the ' +
+  'restart and ask them to resend it.)';

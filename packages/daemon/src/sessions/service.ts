@@ -34,7 +34,7 @@ import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resum
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
 import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-workers.js";
-import { RESUME_NUDGE_TAIL } from "../orchestration/resume-nudge.js";
+import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult } from "../orchestration/gate-runner.js";
@@ -1693,8 +1693,13 @@ export class SessionService {
       // is already gone at capture time, so a dead-worktree row never even enters the restart intent.
       .filter((s) => s.processState === "live" && s.role !== "run" && fs.existsSync(s.cwd))
       // `busy` snapshots whether the session was mid-turn/mid-run at capture — used by resumeFleetOnBoot to
-      // gate the standing-reviewer resume nudge (card b5664b5b, Problem B).
-      .map((s) => ({ sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null, busy: !!s.busy }));
+      // gate the standing-reviewer resume nudge (card b5664b5b, Problem B). `hadUnsentDraft` snapshots
+      // whether its raw-terminal composer held an unsent human draft (PtyHost.isComposerDirty) — that
+      // draft dies with the pty and resumeFleetOnBoot uses this to disclose the loss explicitly.
+      .map((s) => ({
+        sessionId: s.id, role: s.role ?? null, parentSessionId: s.parentSessionId ?? null, busy: !!s.busy,
+        hadUnsentDraft: this.pty.isComposerDirty(s.id),
+      }));
   }
 
   /**
@@ -1842,12 +1847,17 @@ export class SessionService {
       resumed.push(e.sessionId);
       if (parked) { skippedParked.push(e.sessionId); continue; } // resumed live; honor the park — no nudge/replay
       replayPending(e.sessionId);
+      // The composer-dirty disclosure (see DRAFT_LOSS_NOTE) is ADDITIVE to whatever nudge a role already
+      // gets — appended when one is enqueued below, or sent standalone when a role's classification would
+      // otherwise stay silent (a lost draft is new, actionable information distinct from board-impact
+      // classification, so it is never suppressed by the no-op/idle/no-nudge branches below).
+      const draftNote = e.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
       if (e.role === "worker") {
         this.pty.enqueueStdin(
           e.sessionId,
           `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
           `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
-          `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL,
+          `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
         );
       } else if (e.role === "manager" || e.role === "platform") {
         const impact = wakeImpact(e.sessionId);
@@ -1864,6 +1874,8 @@ export class SessionService {
           // path below — and the platform (Lead) flows through this same branch, so a deploy-restart that
           // resumes the Lead with no new causal input (incl. a merely pending owner AskUserQuestion, which
           // is not board work) no longer forces a turn either.
+          // EXCEPT a lost draft: that's actionable regardless of board impact, so it still gets a minimal turn.
+          if (draftNote) this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, or pending board work) → the full re-orient,
           // with a one-line classification of WHAT this restart touched so the manager re-checks precisely.
@@ -1882,14 +1894,14 @@ export class SessionService {
               e.sessionId,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
-              `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL,
+              `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
             );
           } else {
             this.pty.enqueueStdin(
               e.sessionId,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
-              `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL,
+              `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote,
             );
           }
         }
@@ -1909,12 +1921,18 @@ export class SessionService {
           this.pty.enqueueStdin(
             e.sessionId,
             `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
-            `work from where you left off.` + RESUME_NUDGE_TAIL,
+            `work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
           );
+        } else if (draftNote) {
+          // Idle-at-capture normally resumes silently (its schedule re-engages it) — but a lost draft is
+          // new, actionable information a silent resume would otherwise never surface at all.
+          this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
         }
+      } else if (draftNote) {
+        // role null (plain session) or "run": normally no nudge at all (no orchestration loop to re-engage)
+        // — but a lost draft still needs surfacing, since nothing else will ever tell this session about it.
+        this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
       }
-      // role null (plain session) or "run" (runs don't resume — see shared/types.ts SessionRole):
-      // resumed, but no orchestration loop to re-engage → no nudge.
     }
 
     // The requesting manager last: bring it back with its "your code is live, verify + continue" prompt.
@@ -1928,6 +1946,7 @@ export class SessionService {
         // own "X COMPLETE + DEPLOYED" completion escalation for that SHA is de-duped (card 5907b71e part 2).
         this.recordDeployShasDelivered(reqId, reasonShas);
         const reqWorkersResumed = reqWorkers.filter((id) => resumed.includes(id)).length;
+        const reqDraftNote = entries.find((e) => e.sessionId === reqId)?.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
         // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
         // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
         // with a stale done/waiting idle-policy, the case the old converged-FYI branch wrongly stalled).
@@ -1936,7 +1955,7 @@ export class SessionService {
           `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
           `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
           `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
-          `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL,
+          `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote,
         );
       }
     } else {

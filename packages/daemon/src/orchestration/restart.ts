@@ -59,6 +59,16 @@ export interface RestartResumeEntry {
    * intent (pre-this-field) degrades to the silent path for reviewers, never crashes.
    */
   busy?: boolean;
+  /**
+   * Whether this session's raw-terminal composer held an UNSENT human draft at capture time
+   * (PtyHost.isComposerDirty — composerLen > 0). That draft (commonly a large paste the terminal has
+   * collapsed to a "[Pasted text #N]" placeholder) lives only in the now-dead pty's in-memory composer
+   * state — unlike the `pending` FIFO, there is nothing to replay. Used by resumeFleetOnBoot to tell the
+   * resumed agent this loss explicitly (card: pasted-text-attachment-survives-restart) instead of leaving
+   * it silently unaccounted for. Optional + defaults falsy so an OLD on-disk intent (pre-this-field)
+   * degrades to no note, never crashes.
+   */
+  hadUnsentDraft?: boolean;
 }
 
 export interface RestartIntent {
