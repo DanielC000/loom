@@ -102,7 +102,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    that root, pass no filename/path at all and let the tool auto-name into it. **If your session has
    browser-testing tools, that allowed root is also exposed to you directly as the `$LOOM_SCRATCH_DIR`
    environment variable** — stage a file-upload source there too (not your generic harness scratchpad,
-   which the browser tools reject as outside allowed roots). For a NEW interactive control (toggle, button, input, menu), a render-only check is
+   which the browser tools reject as outside allowed roots). **Verifying a file download?** The browser
+   MCP auto-saves every triggered download to its output dir (the same scratch dir your screenshots land
+   in) and reports the saved path in the *triggering* call's own response, under an **"Events"** section
+   — a line like `Downloaded file <name> to "<path>"`. So check a download at the byte level: trigger it
+   with a normal browser action (e.g. `browser_click`), read the saved path out of that response's Events
+   section, then `Read()` the file off disk — don't reach first for `page.waitForEvent('download')` in a
+   separate `browser_run_code_unsafe` call, which always times out because the MCP already consumed the
+   download event. If that trigger→read-Events→`Read()` ever comes up empty, that's the `<a download
+   href="data:…">` edge case — do a deliberate fresh repro rather than settling for a weaker functional
+   check. For a NEW interactive control (toggle, button, input, menu), a render-only check is
    not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
    before vs. after — not just that the page renders without console errors. `@playwright/mcp`'s
    `browser_click` takes `{ element: "<human-readable description>", target: "<exact ref from a
