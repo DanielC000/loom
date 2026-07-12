@@ -136,12 +136,13 @@ export function isSupervised(): boolean {
 }
 
 /**
- * Cause/impact of a `[loom:daemon-restarted]` wake, for ONE resumed session (card 5907b71e part 1). A
- * single self-hosting session takes ~10 restart wakes, most for routine deploys/version-syncs another
- * session triggered — and each currently burns a FULL re-check turn confirming "nothing for me". This
- * classification lets an UNAFFECTED bystander no-op cheaply instead: it answers, per session, the two
- * questions the wake should — did THIS session cause the restart, and did the restart touch anything of
- * its (its workers, its queued I/O, its board)?
+ * Cause/impact of a `[loom:daemon-restarted]` wake, for ONE resumed session (card 5907b71e part 1, refined
+ * by 61cc91c6). A single self-hosting session takes ~10 restart wakes, most for routine deploys/
+ * version-syncs another session triggered — and each currently burns a FULL re-check turn confirming
+ * "nothing for me". This classification lets an UNAFFECTED bystander no-op cheaply instead: it answers,
+ * per session, the questions the wake should — did THIS session cause the restart, did it touch anything
+ * of its own (workers, queued I/O, a genuinely pending answer), and is there board work that NOTHING ELSE
+ * will ever re-surface?
  */
 export interface RestartWakeImpact {
   /** This session REQUESTED the restart (the deploying manager) — never short-circuited; always full. */
@@ -150,24 +151,35 @@ export interface RestartWakeImpact {
   liveWorkersResumed: number;
   /** How many queued inbound messages were replayed onto this session by the restart (real work waiting). */
   queuedIoReplayed: number;
-  /** This session still has actionable board work (a no-op would STRAND it — the idle-watcher skips a
-   *  snoozed/suppressed manager, so the restart re-check is its only re-engagement). */
-  pendingBoardWork: boolean;
+  /** This session itself has an ANSWERED, not-yet-`question_pull`ed question — a genuinely new event for
+   *  it specifically, distinct from generic board content. */
+  hasUnconsumedAnswer: boolean;
+  /**
+   * This session has actionable board work that NO OTHER mechanism will ever re-surface — 61cc91c6
+   * narrowed this from "any non-terminal/non-held/non-deferred card exists" (which fired on ordinary
+   * backlog almost every restart) to "and nothing else is watching it". See
+   * SessionService.resumeFleetOnBoot's `strandedBoardWork` for the exact per-role/per-policy derivation.
+   */
+  strandedBoardWork: boolean;
 }
 
 /**
  * A non-causal manager/platform whose restart touched NOTHING of its own — no workers resumed, no queued
- * I/O replayed, and an empty board — has nothing to re-check this restart, so it gets the lightweight
- * "no action needed" FYI instead of the full "re-check your workers" re-orient. PURE + exported for the
- * hermetic test. Pending board work FORCES the full nudge (safety: a snoozed/suppressed manager isn't
- * re-engaged by the idle-watcher, so the restart re-check must not silently drop its queue). Supersedes
- * the older board-AND-stale-idle-policy "converged" gate (card 90058589): impact, not idle-policy, decides.
+ * I/O replayed, no genuinely new answer, and no stranded board work — has nothing to re-check this
+ * restart, so it gets the lightweight "no action needed" FYI instead of the full "re-check your workers"
+ * re-orient. PURE + exported for the hermetic test. `strandedBoardWork` FORCES the full nudge (safety: a
+ * session nothing else re-engages must not have its queue silently dropped) — but ordinary, actively-
+ * watched backlog no longer counts (61cc91c6: it was forcing the full nudge on virtually every restart,
+ * since the idle-watcher already independently covers a 'watching'/'snoozed' manager on its own cadence).
+ * Supersedes the older board-AND-stale-idle-policy "converged" gate (card 90058589): impact, not raw
+ * idle-policy, decides.
  */
 export function isNoOpManagerWake(impact: RestartWakeImpact): boolean {
   return !impact.causal
     && impact.liveWorkersResumed === 0
     && impact.queuedIoReplayed === 0
-    && !impact.pendingBoardWork;
+    && !impact.hasUnconsumedAnswer
+    && !impact.strandedBoardWork;
 }
 
 /**

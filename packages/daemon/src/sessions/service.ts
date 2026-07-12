@@ -1732,19 +1732,23 @@ export class SessionService {
    * startup prompt, so without a nudge a worker/manager would sit idle — the stranded-worker hook can't
    * catch a resume's direct setBusy(false)):
    *   - the REQUESTING manager gets its "merged code is now live — continue/verify" re-prompt;
-   *   - an AFFECTED manager/platform (workers resumed alongside it, queued I/O replayed to it, or pending
-   *     board work) gets the full "re-check your workers" re-orient, prefixed with a one-line classification
-   *     of WHAT this restart touched;
+   *   - an AFFECTED manager/platform (workers resumed alongside it, queued I/O replayed to it, an unconsumed
+   *     answered question, or STRANDED board work — see strandedBoardWork) gets the full "re-check your
+   *     workers" re-orient, prefixed with a one-line classification of WHAT this restart touched;
    *   - an UNAFFECTED bystander manager/platform (card 5907b71e part 1 — isNoOpManagerWake: non-causal,
-   *     0 live workers in the resume set, no queued I/O replayed, AND an empty board) resumes SILENTLY —
-   *     NO enqueue at all (card b5664b5b Problems A + C1). The old "lightweight FYI" was still an
-   *     enqueueStdin, and an enqueue to an idle session submits as a full TURN, so the FYI burned the very
-   *     turn it claimed to save (the Lead, which flows through this same branch, took ~10 such wakes in one
-   *     session). Pending board work FORCES the full nudge (the idle-watcher skips a snoozed/suppressed
-   *     manager, so the restart re-check is its only re-engagement — a no-op would strand the queue). Impact,
-   *     not the stale idle-policy, decides (supersedes the board-AND-policy "converged" gate of card
-   *     90058589). The deploy REQUESTER is NEVER short-circuited — it always gets the full "code is live —
-   *     continue/verify" nudge;
+   *     0 live workers in the resume set, no queued I/O replayed, no unconsumed answer, AND no stranded
+   *     board work) resumes SILENTLY — NO enqueue at all (card b5664b5b Problems A + C1). The old
+   *     "lightweight FYI" was still an enqueueStdin, and an enqueue to an idle session submits as a full
+   *     TURN, so the FYI burned the very turn it claimed to save (the Lead, which flows through this same
+   *     branch, took ~10 such wakes in one session). 61cc91c6 further narrowed "pending board work": raw
+   *     backlog no longer forces the full nudge by itself — a 'watching' or 'snoozed' manager's ordinary
+   *     backlog is ALREADY independently covered by the idle-watcher's own cadence regardless of this
+   *     restart, so re-forcing it here was pure duplication (this was the dominant source of the reported
+   *     waste — see strandedBoardWork's doc for the full per-role/per-policy breakdown, incl. why a
+   *     platform/Lead session — not covered by IdleWatcher at all — keeps today's unconditional behavior).
+   *     Only board work NOTHING ELSE will ever re-surface (a 'suppressed'-via-escalation manager, or any
+   *     platform/Lead) still forces the full nudge — a no-op there would strand the queue. The deploy
+   *     REQUESTER is NEVER short-circuited — it always gets the full "code is live — continue/verify" nudge;
    *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a "you were resumed — continue your work"
    *     nudge ONLY if it was BUSY (mid-run) at capture (card b5664b5b Problem B); an already-IDLE reviewer
@@ -1804,9 +1808,8 @@ export class SessionService {
     // Actionable board work: a task whose column is NOT the terminal lane AND is NOT held AND is NOT
     // deferred (every other non-held/non-deferred lane — intake/defaultLanding/workReady/active/review/
     // parked — is pending work a manager should drive; a held card is the owner's brake and `deferred`
-    // is the manager's own sequencing marker, neither ever counts, in any column). It FORCES the full
-    // nudge: the idle-watcher skips a snoozed/suppressed manager, so the restart re-check is its only
-    // re-engagement — a cheap no-op would silently strand the queue. Mirrors the idle-watcher's
+    // is the manager's own sequencing marker, neither ever counts, in any column). Raw signal only — see
+    // strandedBoardWork below for whether it actually forces the restart nudge. Mirrors the idle-watcher's
     // actionable-count definition (orchestration/idle-watcher.ts) so the two stay consistent.
     const hasPendingBoardWork = (id: string): boolean => {
       try {
@@ -1823,13 +1826,90 @@ export class SessionService {
         return true; // defensive: a board-read fault must never produce a false "no-op" stall
       }
     };
+    // A genuinely NEW per-session event distinct from generic board content: an ANSWERED question this
+    // session itself asked that it hasn't `question_pull`ed yet. Non-destructive PEEK (listQuestionsForSession
+    // reads all states without flipping anything, unlike pullAnsweredQuestions) — the restart classification
+    // must never consume the queue it's only checking.
+    const hasUnconsumedAnswer = (id: string): boolean => {
+      try {
+        return this.db.listQuestionsForSession(id).some((q) => q.state === "answered");
+      } catch {
+        return true; // defensive: a read fault must never silently drop a real pending answer
+      }
+    };
+    // Was this session's CURRENT 'suppressed' idle-nudge policy reached via the idle-watcher's
+    // unanswered-nudge-cap ESCALATION (idle-watcher.ts, the manager stopped responding to nudges) rather
+    // than a deliberate idle_report('done')? Both set policy='suppressed' with no distinguishing DB field,
+    // so this replays the session's own event history: the escalation path appends 'idle_escalated'
+    // WITHOUT resetting state first (idle-watcher.ts), while EVERY idle_report call (incl. 'done') appends
+    // 'idle_report' via resetIdleNudgeState-then-set (recordIdleReport). Whichever of the two kinds is
+    // MOST RECENT for this session tells us which state it's actually in.
+    const isEscalatedSuppression = (id: string): boolean => {
+      try {
+        let lastEscalated: string | null = null;
+        let lastReport: string | null = null;
+        for (const e of this.db.listEvents(id)) {
+          if (e.kind === "idle_escalated") lastEscalated = e.ts;
+          else if (e.kind === "idle_report") lastReport = e.ts;
+        }
+        if (!lastEscalated) return false;
+        return !lastReport || lastEscalated > lastReport;
+      } catch {
+        return true; // defensive: never silently downgrade a genuinely stuck manager
+      }
+    };
+    // Is the idle-watcher actually ticking for this session's project? Mirrors idle-watcher.ts's OWN
+    // resolution (`resolveConfig(project.config).orchestration.idleNudgeMinutes`) exactly — a project can
+    // set idleNudgeMinutes:0 to disable the watcher entirely (shared/config.ts), and idle-watcher.ts:132
+    // `continue`s on that BEFORE any nudge/snooze-expiry/escalation logic runs — so for that project
+    // NOTHING re-engages a 'watching'/'snoozed' manager, and strandedBoardWork below must not assume
+    // coverage that doesn't exist (CR-caught regression). Fails SAFE (false = watcher not confirmed
+    // active) on any lookup fault, biasing toward the nudge, never toward silently stranding the queue.
+    const isWatcherActiveForSession = (id: string): boolean => {
+      try {
+        const projectId = this.db.getSession(id)?.projectId;
+        if (!projectId) return false;
+        const project = this.db.getProject(projectId);
+        if (!project) return false;
+        return resolveConfig(project.config).orchestration.idleNudgeMinutes > 0;
+      } catch {
+        return false;
+      }
+    };
+    // Board work is a restart STAKE only when NOTHING ELSE will ever re-surface it (61cc91c6 — the raw
+    // hasPendingBoardWork check above was forcing the full re-orient nudge on virtually every restart,
+    // since almost any active project has SOME open backlog). A 'manager' session's idle-watchdog
+    // (idle-watcher.ts) already independently covers 'watching' (nudges on its own cadence, restart or
+    // not) and 'snoozed' (self-expires via the SAME ticker once daemon_restart's respawn brings it back —
+    // the restart contributes nothing either case wouldn't already get) — PROVIDED the watcher is actually
+    // active for that project (isWatcherActiveForSession above); if idleNudgeMinutes is 0 for the project,
+    // neither case has ANY natural re-arm, so board work stays stranded exactly like the pre-change
+    // behavior. 'suppressed' via a deliberate idle_report('done') is the manager's own considered judgment
+    // call — re-litigating it every restart IS the reported waste, not a safety net (this one is NOT
+    // watcher-dependent: the manager itself already made the call, on or off). Only 'suppressed' reached
+    // via the escalation-cap has no natural re-arm (better to over-nudge a stuck manager than strand it —
+    // the idle_escalated human alert is the PRIMARY recovery path; this stays as belt-and-suspenders). A
+    // 'platform' (Lead) session is NOT covered by IdleWatcher AT ALL — db.listLiveManagers() is
+    // role='manager' only, and idle_report itself is a manager-only surface (sessions/service.ts
+    // recordIdleReport) — so nothing else ever proactively re-surfaces a Lead's backlog; its board work
+    // stays a stake unconditionally (today's behavior, unchanged) until a Lead-equivalent watchdog exists
+    // (tracked separately, not this card's scope).
+    const strandedBoardWork = (id: string, role: SessionRole | null): boolean => {
+      if (!hasPendingBoardWork(id)) return false;
+      if (role === "platform") return true;
+      const state = this.db.getIdleNudgeState(id);
+      if (!state) return true; // defensive: no idle-nudge row → can't confirm coverage, assume stranded
+      if (state.policy === "watching" || state.policy === "snoozed") return !isWatcherActiveForSession(id);
+      return isEscalatedSuppression(id); // policy === "suppressed"
+    };
     // Per-session restart impact, used by isNoOpManagerWake (restart.ts) to pick the cheap FYI vs the full
     // re-check, AND by the classification clause in the nudge text.
-    const wakeImpact = (id: string) => ({
+    const wakeImpact = (id: string, role: SessionRole | null) => ({
       causal: id === reqId,
       liveWorkersResumed: liveWorkerCount(id),
       queuedIoReplayed: (intent.pending?.[id] ?? []).length,
-      pendingBoardWork: hasPendingBoardWork(id),
+      hasUnconsumedAnswer: hasUnconsumedAnswer(id),
+      strandedBoardWork: strandedBoardWork(id, role),
     });
 
     // Deploy SHAs named in the restart reason — a manager typically stamps the deployed SHA into it. Every
@@ -1860,35 +1940,41 @@ export class SessionService {
           `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
         );
       } else if (e.role === "manager" || e.role === "platform") {
-        const impact = wakeImpact(e.sessionId);
+        const impact = wakeImpact(e.sessionId, e.role);
         // The reason names the SHA — record it so a later completion escalation for the same SHA is a
         // recognized duplicate (part 2). Done for BOTH wake kinds: an unaffected bystander still "saw" it.
         this.recordDeployShasDelivered(e.sessionId, reasonShas);
         if (isNoOpManagerWake(impact)) {
-          // card b5664b5b (Problems A + C1): a non-causal bystander this restart did NOT touch (no workers
-          // resumed, no queued I/O, empty board) resumes SILENTLY — NO enqueue. The old "lightweight FYI"
-          // was still an enqueueStdin, and an enqueue to an idle session is submitted as a full TURN, so the
-          // FYI burned the very turn it claimed to save (the Lead took ~10 such wakes in one session). The
-          // `!pendingBoardWork` precondition guarantees there's no queue to strand; if actionable work
-          // appears later the idle-watcher re-engages normally. This mirrors the plain/run silent-resume
-          // path below — and the platform (Lead) flows through this same branch, so a deploy-restart that
-          // resumes the Lead with no new causal input (incl. a merely pending owner AskUserQuestion, which
-          // is not board work) no longer forces a turn either.
-          // EXCEPT a lost draft: that's actionable regardless of board impact, so it still gets a minimal turn.
+          // card b5664b5b (Problems A + C1), narrowed further by 61cc91c6: a non-causal bystander this
+          // restart did NOT touch (no workers resumed, no queued I/O, no unconsumed answer, no STRANDED
+          // board work) resumes SILENTLY — NO enqueue. The old "lightweight FYI" was still an enqueueStdin,
+          // and an enqueue to an idle session is submitted as a full TURN, so the FYI burned the very turn
+          // it claimed to save (the Lead took ~10 such wakes in one session). `!strandedBoardWork` no
+          // longer requires an EMPTY board — a 'watching'/'snoozed' manager's ordinary backlog is already
+          // covered by the idle-watcher's own cadence regardless of this restart, so forcing a turn for it
+          // here is pure duplication; only board work NOTHING ELSE will re-surface (a 'suppressed'-via-
+          // escalation manager, or any platform/Lead — see strandedBoardWork) still forces it. A merely
+          // PENDING (unanswered) owner question still never forces a turn either — only an ANSWERED,
+          // not-yet-pulled one does (hasUnconsumedAnswer), since that's genuinely new for this session.
+          // EXCEPT a lost draft: that's actionable regardless of impact, so it still gets a minimal turn.
           if (draftNote) this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
         } else {
-          // Affected (workers resumed, queued I/O replayed, or pending board work) → the full re-orient,
-          // with a one-line classification of WHAT this restart touched so the manager re-checks precisely.
+          // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
+          // → the full re-orient, with a one-line classification of WHAT this restart touched so the
+          // manager re-checks precisely.
           const affected = [
             impact.liveWorkersResumed > 0 ? `${impact.liveWorkersResumed} of your live workers were resumed` : null,
             impact.queuedIoReplayed > 0 ? `${impact.queuedIoReplayed} queued message(s) were replayed to you` : null,
-            impact.pendingBoardWork ? `your board has pending work` : null,
+            impact.hasUnconsumedAnswer ? `you have an answered question awaiting question_pull` : null,
+            impact.strandedBoardWork ? `your board has pending work` : null,
           ].filter(Boolean).join("; ");
           if (e.role === "platform") {
             // Lead-appropriate text: a Platform Lead has no worktrees and no workers, so the manager-shaped
             // "your worktrees are intact / resume orchestrating your workers" phrasing is nonsense it has to
-            // reason away on EVERY restart (aggravated: `pendingBoardWork` fires on mere backlog, so a Lead's
-            // near-always-nonempty home board classifies it as "affected" almost every time). Re-orient it
+            // reason away on EVERY restart. A Lead is NOT covered by IdleWatcher at all (role='manager'-only),
+            // so unlike a manager, `strandedBoardWork` stays true unconditionally whenever it has ANY
+            // backlog (61cc91c6) — a Lead's near-always-nonempty home board still classifies it as "affected"
+            // almost every time, until a Lead-equivalent watchdog exists (tracked separately). Re-orient it
             // from the board + its own living resume doc instead.
             this.pty.enqueueStdin(
               e.sessionId,

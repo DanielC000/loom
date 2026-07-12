@@ -262,13 +262,17 @@ try {
   // resumes SILENTLY (card b5664b5b Problem B: its next due wake/schedule re-engages it, so a nudge only
   // burned a turn). A `run` (runs don't resume — see shared/types.ts SessionRole) gets NONE. And a non-causal
   // bystander manager/platform with 0 live workers AND an EMPTY board now resumes SILENTLY too (card b5664b5b
-  // A+C1 — the old "lightweight FYI" was itself a wasted turn); one with a PENDING board card (even with a
-  // stale suppressed/snoozed idle-policy) still gets the full "re-check your workers" re-orient; and the
-  // deploy REQUESTER is NEVER short-circuited.
+  // A+C1 — the old "lightweight FYI" was itself a wasted turn); one with a PENDING board card the idle-watcher
+  // will NEVER independently re-surface — i.e. suppressed via the idle-watcher's unanswered-cap ESCALATION,
+  // with no natural re-arm (61cc91c6) — still gets the full "re-check your workers" re-orient; and the
+  // deploy REQUESTER is NEVER short-circuited. (A merely 'snoozed'/deliberately-'suppressed'-via-idle_report
+  // manager's pending board is covered independently by the idle-watcher's own cadence — see
+  // restart-wake-classification.mjs for that full per-cause matrix; this file keeps ONE escalation-cause
+  // regression guard for the original card 90058589 scenario.)
   // C.proj is an EMPTY board (no tasks) — its 0-worker managers are GENUINELY converged.
   // C2.proj has ≥1 PENDING card (mkTask lands at "in_progress" = the `active` lane, non-terminal and NOT
-  // held) — its 0-worker managers are NOT converged despite a stale suppressed idle-policy (card 90058589:
-  // a manager that deploys mid-queue sits at 0 live workers but still has pending work).
+  // held) — its 0-worker managers are NOT converged despite a stale ESCALATED-suppressed idle-policy (card
+  // 90058589: a manager that deploys mid-queue sits at 0 live workers but still has pending work).
   // C3.proj's ONLY card is HELD (Board Hold Model) — the owner's brake, checked in ANY column now, not a
   // `blocked` column. hasPendingBoardWork must exclude it exactly like C's empty board, NOT count it like
   // C2's genuine pending card.
@@ -297,9 +301,13 @@ try {
   // policy "snoozed"). Still gets the lightweight FYI (the genuine bystander-converged case is preserved).
   mkSession({ id: cid.convMgr, projId: C.proj, agentId: C.agent, role: "manager" });
   db.setIdleNudgePolicy(cid.convMgr, "snoozed", future);
-  // pendMgr: a NON-requesting manager on C2 (suppressed idle-policy + 0 workers + a PENDING board card).
-  // The stale suppressed policy alone is NOT sufficient — the pending board makes it NON-converged → full nudge.
+  // pendMgr: a NON-requesting manager on C2 (0 workers + a PENDING board card), suppressed via the
+  // idle-watcher's unanswered-cap ESCALATION (mirrors idle-watcher.ts's escalation branch exactly —
+  // appendEvent('idle_escalated') THEN setIdleNudgePolicy, no resetIdleNudgeState first) — the one
+  // 'suppressed' cause with NO natural re-arm (61cc91c6), so the pending board makes it NON-converged
+  // → full nudge, same as the original card 90058589 scenario.
   mkSession({ id: cid.pendMgr, projId: C2.proj, agentId: C2.agent, role: "manager" });
+  db.appendEvent({ id: `rf-pend-esc-evt-${sfx}`, ts: now, managerSessionId: cid.pendMgr, kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
   db.setIdleNudgePolicy(cid.pendMgr, "suppressed");
   // activeMgr: a NON-requesting manager WITH a live worker → full re-check nudge (the control).
   mkSession({ id: cid.activeMgr, projId: C.proj, agentId: C.agent, role: "manager" });
@@ -341,10 +349,10 @@ try {
   const reqMsg = n6(cid.reqMgr);
   check("(6c) the deploy REQUESTER (pending board) gets the FULL code-live nudge, NOT the FYI",
     reqMsg.length === 1 && reqMsg[0].includes("now LIVE") && /verify the live behavior/i.test(reqMsg[0]) && !/no action is needed/i.test(reqMsg[0]));
-  // A NON-requesting manager with a stale suppressed idle-policy + 0 workers but a PENDING board card is
-  // NOT converged — the regression fix: it gets the full re-check nudge, not the wrong "no action" FYI.
+  // A NON-requesting manager ESCALATED-suppressed (no natural re-arm) + 0 workers but a PENDING board card
+  // is NOT converged — the regression fix: it gets the full re-check nudge, not the wrong "no action" FYI.
   const pendMsg = n6(cid.pendMgr);
-  check("(6c) a non-requesting manager with a PENDING board (stale suppressed policy) gets the FULL re-check nudge",
+  check("(6c) a non-requesting manager with a PENDING board (escalated-suppressed policy) gets the FULL re-check nudge",
     pendMsg.length === 1 && /re-check your workers/i.test(pendMsg[0]) && !/no action is needed/i.test(pendMsg[0]));
   // card b5664b5b A+C1: a NON-requesting manager that is TRULY converged (empty board + 0 workers) now
   // resumes SILENTLY — the old "lightweight FYI" was itself a wasted turn it claimed to save.

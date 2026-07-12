@@ -1,14 +1,35 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Restart wake cause/impact classification + completion-escalation de-dup (card 5907b71e parts 1 & 2).
-// NO claude, NO live daemon — drives SessionService.resumeFleetOnBoot + platformEscalate directly against
-// an isolated LOOM_HOME with a claude-free PtyStub. Proves:
+// Restart wake cause/impact classification + completion-escalation de-dup (card 5907b71e parts 1 & 2,
+// narrowed by 61cc91c6). NO claude, NO live daemon — drives SessionService.resumeFleetOnBoot +
+// platformEscalate directly against an isolated LOOM_HOME with a claude-free PtyStub. Proves:
 //
 //   PART 1 — SILENT NO-OP WAKE. A non-causal routine deploy (triggered by ANOTHER session) that touched
-//     nothing of a bystander manager/platform — no workers resumed, no queued I/O replayed, empty board —
-//     resumes SILENTLY with ZERO enqueued turns (card b5664b5b Problems A + C1; an enqueue to an idle
-//     session is itself a wasted turn). An AFFECTED bystander (live worker / queued I/O / pending board)
-//     still gets the full re-check, and the deploy requester its "code is live" nudge. A standing reviewer
-//     (auditor) is gated on busy-at-capture (card b5664b5b Problem B): idle → silent, busy → nudged.
+//     nothing of a bystander manager/platform — no workers resumed, no queued I/O replayed, no unconsumed
+//     answer, no STRANDED board work — resumes SILENTLY with ZERO enqueued turns (card b5664b5b Problems
+//     A + C1; an enqueue to an idle session is itself a wasted turn). An AFFECTED bystander (live worker /
+//     queued I/O / unconsumed answer / stranded board work) still gets the full re-check, and the deploy
+//     requester its "code is live" nudge. A standing reviewer (auditor) is gated on busy-at-capture (card
+//     b5664b5b Problem B): idle → silent, busy → nudged.
+//
+//   PART 1b — 61cc91c6's NARROWING of "pending board work" into "STRANDED board work": raw backlog no
+//     longer forces the full nudge by itself — only board work NOTHING ELSE will ever re-surface does.
+//     A manager with ordinary backlog is silent whether its idle-nudge policy is 'watching' (never
+//     idle_report'd — the idle-watcher covers it on its own cadence), 'snoozed' (idle_report('waiting') —
+//     self-expires via the SAME ticker), or 'suppressed' via a deliberate idle_report('done') (the
+//     manager's own considered judgment — re-litigating it every restart WAS the reported waste). Only
+//     'suppressed' reached via the idle-watcher's unanswered-nudge-cap ESCALATION (no natural re-arm — the
+//     manager stopped responding, not a deliberate call) still forces the full nudge — better to over-nudge
+//     a stuck manager than strand it. A platform/Lead session is NOT covered by IdleWatcher at ALL (it's
+//     role='manager'-only, and idle_report itself is a manager-only surface), so a Lead's board work stays
+//     a stake UNCONDITIONALLY (today's behavior, unchanged) regardless of any idle-nudge state.
+//     REGRESSION GUARD (CR-caught): the 'watching'/'snoozed' silence above is conditioned on the project's
+//     idle-watcher ACTUALLY being active (`idleNudgeMinutes > 0`) — a project can set idleNudgeMinutes:0 to
+//     disable the watcher entirely, in which case NOTHING re-engages a 'watching'/'snoozed' manager, so
+//     board work falls back to the pre-change STRANDED (full re-check) behavior for that project.
+//
+//   PART 1c — hasUnconsumedAnswer: a session with an ANSWERED, not-yet-question_pull'ed question of its
+//     own is a genuinely NEW per-session event distinct from generic board content, so it forces the full
+//     nudge even with zero backlog. A merely PENDING (unanswered) question does NOT (nothing to act on yet).
 //
 //   PART 2 — ONE COMPLETION = ONE TURN. When a deploy restart already delivered a SHA to the Lead (in the
 //     restart reason), a SEPARATE "X COMPLETE + DEPLOYED" platform_escalate for the SAME SHA suppresses its
@@ -63,16 +84,19 @@ const sessions = new SessionService(db, pty, new OrchestrationControl());
 
 try {
   // ============================ (0) PURE HELPERS ============================
+  const base = { causal: false, liveWorkersResumed: 0, queuedIoReplayed: 0, hasUnconsumedAnswer: false, strandedBoardWork: false };
   check("(0) isNoOpManagerWake: unaffected bystander → true",
-    isNoOpManagerWake({ causal: false, liveWorkersResumed: 0, queuedIoReplayed: 0, pendingBoardWork: false }) === true);
+    isNoOpManagerWake(base) === true);
   check("(0) isNoOpManagerWake: causal (requester) → false",
-    isNoOpManagerWake({ causal: true, liveWorkersResumed: 0, queuedIoReplayed: 0, pendingBoardWork: false }) === false);
+    isNoOpManagerWake({ ...base, causal: true }) === false);
   check("(0) isNoOpManagerWake: live workers resumed → false",
-    isNoOpManagerWake({ causal: false, liveWorkersResumed: 1, queuedIoReplayed: 0, pendingBoardWork: false }) === false);
+    isNoOpManagerWake({ ...base, liveWorkersResumed: 1 }) === false);
   check("(0) isNoOpManagerWake: queued I/O replayed → false",
-    isNoOpManagerWake({ causal: false, liveWorkersResumed: 0, queuedIoReplayed: 2, pendingBoardWork: false }) === false);
-  check("(0) isNoOpManagerWake: pending board work → false (would strand the queue)",
-    isNoOpManagerWake({ causal: false, liveWorkersResumed: 0, queuedIoReplayed: 0, pendingBoardWork: true }) === false);
+    isNoOpManagerWake({ ...base, queuedIoReplayed: 2 }) === false);
+  check("(0) isNoOpManagerWake: unconsumed answer → false",
+    isNoOpManagerWake({ ...base, hasUnconsumedAnswer: true }) === false);
+  check("(0) isNoOpManagerWake: stranded board work → false (would strand the queue)",
+    isNoOpManagerWake({ ...base, strandedBoardWork: true }) === false);
   check("(0) extractCommitShas: pulls a SHA, lower-cased + de-duped, ignores non-hex words",
     JSON.stringify(extractCommitShas("deploy fix ABC1234f for issue ABC1234f — daemon merged")) === JSON.stringify(["abc1234f"]));
   check("(0) extractCommitShas: no SHA in plain prose → []", extractCommitShas("routine version sync, no hash here").length === 0);
@@ -96,25 +120,69 @@ try {
   // the pending-board-work check the SAME as `held`, so its manager must classify unaffected (card 345b1dcc).
   db.insertTask({ id: `rwc-W-deferred-${sfx}`, projectId: projW, title: "sequenced behind other work",
     body: "", columnKey: "in_progress", deferred: true, position: 1, createdAt: now, updatedAt: now });
+  // projV resolves idleNudgeMinutes:0 — the watcher is DISABLED for this project entirely
+  // (idle-watcher.ts:132 `continue`s before any nudge/snooze-expiry/escalation logic runs), so NOTHING
+  // ever re-engages a 'watching'/'snoozed' manager here — the CR-caught regression this test closes.
+  const projV = `rwc-V-${sfx}`, vAg = `rwc-V-ag-${sfx}`;
+  db.insertProject({ id: projV, name: projV, repoPath: `/tmp/${projV}`, vaultPath: `/tmp/${projV}`,
+    config: { orchestration: { idleNudgeMinutes: 0 } }, createdAt: now, archivedAt: null, reserved: false });
+  mkAgent(vAg, projV);
+  mkTask(`rwc-V-pending-${sfx}`, projV, "in_progress"); // projV has a PENDING card too
 
   const id = {
     lead: `rwc-lead-${sfx}`, deployer: `rwc-deployer-${sfx}`,
     bystander: `rwc-bystander-${sfx}`, affMgr: `rwc-affMgr-${sfx}`, affWkr: `rwc-affWkr-${sfx}`,
     pendMgr: `rwc-pendMgr-${sfx}`, affLead: `rwc-affLead-${sfx}`, deferredMgr: `rwc-deferredMgr-${sfx}`,
     idleReviewer: `rwc-idleRev-${sfx}`, busyReviewer: `rwc-busyRev-${sfx}`,
+    snoozedMgr: `rwc-snoozedMgr-${sfx}`, doneMgr: `rwc-doneMgr-${sfx}`, escalatedMgr: `rwc-escalatedMgr-${sfx}`,
+    answerMgr: `rwc-answerMgr-${sfx}`,
+    watcherOffMgr: `rwc-watcherOffMgr-${sfx}`, watcherOffSnoozedMgr: `rwc-watcherOffSnoozedMgr-${sfx}`,
   };
   mkSession({ id: id.lead, projId: home, agentId: homeAg, role: "platform" });
   mkSession({ id: id.deployer, projId: projX, agentId: xAg, role: "manager" });   // the requester (causal)
   mkSession({ id: id.bystander, projId: projX, agentId: xAg, role: "manager" });  // 0 workers, empty board
   mkSession({ id: id.affMgr, projId: projX, agentId: xAg, role: "manager" });     // has a live worker
   mkSession({ id: id.affWkr, projId: projX, agentId: xAg, role: "worker", parentSessionId: id.affMgr });
-  mkSession({ id: id.pendMgr, projId: projY, agentId: yAg, role: "manager" });    // 0 workers, PENDING board
+  // 61cc91c6: projY's board has a PENDING card — shared (project-scoped) by every manager below, so each
+  // isolates ONE idle-nudge-policy variant against the SAME raw backlog.
+  mkSession({ id: id.pendMgr, projId: projY, agentId: yAg, role: "manager" });      // policy 'watching' (never idle_report'd)
+  mkSession({ id: id.snoozedMgr, projId: projY, agentId: yAg, role: "manager" });   // policy 'snoozed' (idle_report('waiting'))
+  mkSession({ id: id.doneMgr, projId: projY, agentId: yAg, role: "manager" });      // policy 'suppressed' via idle_report('done')
+  mkSession({ id: id.escalatedMgr, projId: projY, agentId: yAg, role: "manager" }); // policy 'suppressed' via idle-watcher's cap escalation
   mkSession({ id: id.affLead, projId: projZ, agentId: zAg, role: "platform" });   // 0 workers, PENDING board
   mkSession({ id: id.deferredMgr, projId: projW, agentId: wAg, role: "manager" }); // 0 workers, board is deferred-only
+  mkSession({ id: id.answerMgr, projId: projX, agentId: xAg, role: "manager" });  // 0 workers, EMPTY board, unconsumed answer
+  // watcherOffMgr / watcherOffSnoozedMgr: same PENDING board as pendMgr/snoozedMgr, but in projV where
+  // idleNudgeMinutes=0 (watcher disabled) — NOTHING re-engages either policy here, so BOTH must classify
+  // STRANDED (the CR-caught regression: without the idleNudgeMinutes gate these would wrongly go silent).
+  mkSession({ id: id.watcherOffMgr, projId: projV, agentId: vAg, role: "manager" });         // policy 'watching', watcher OFF
+  mkSession({ id: id.watcherOffSnoozedMgr, projId: projV, agentId: vAg, role: "manager" });   // policy 'snoozed', watcher OFF
   // Two standing reviewers (Platform Auditors) — one IDLE at capture, one BUSY at capture (card b5664b5b
   // Problem B): the idle one must resume SILENTLY (its schedule/wake re-engages it), the busy one is nudged.
   mkSession({ id: id.idleReviewer, projId: home, agentId: homeAg, role: "auditor" });
   mkSession({ id: id.busyReviewer, projId: home, agentId: homeAg, role: "auditor" });
+
+  // snoozedMgr: idle_report('waiting') → policy 'snoozed', self-expires via the idle-watcher's OWN ticker —
+  // the restart contributes nothing that ticker wasn't already going to do.
+  sessions.recordIdleReport(id.snoozedMgr, "waiting", { minutes: 60 });
+  // doneMgr: idle_report('done') → policy 'suppressed', the manager's OWN considered judgment call.
+  sessions.recordIdleReport(id.doneMgr, "done");
+  // escalatedMgr: mirrors idle-watcher.ts's escalation branch EXACTLY (appendEvent('idle_escalated') THEN
+  // setIdleNudgePolicy('suppressed'), WITHOUT resetIdleNudgeState first) — the one policy='suppressed' path
+  // with NO natural re-arm, so it must still be classified STRANDED.
+  db.appendEvent({ id: `rwc-esc-evt-${sfx}`, ts: now, managerSessionId: id.escalatedMgr, kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  db.setIdleNudgePolicy(id.escalatedMgr, "suppressed");
+
+  // answerMgr: an ANSWERED, not-yet-question_pull'ed question of its own — genuinely new, forces the full
+  // nudge even with ZERO backlog (projX has no tasks at all).
+  db.insertQuestion({
+    id: `rwc-answered-q-${sfx}`, sessionId: id.answerMgr, projectId: projX, type: "decision",
+    title: "pick an approach", body: "", state: "answered", chosenOption: "a", createdAt: now, answeredAt: now,
+  });
+
+  // watcherOffSnoozedMgr: idle_report('waiting') too, but its project's watcher is disabled — the snooze
+  // would self-expire ONLY if idle-watcher.ts's ticker were running for this project, which it never is.
+  sessions.recordIdleReport(id.watcherOffSnoozedMgr, "waiting", { minutes: 60 });
 
   const SHA = "abc1234f";
   const intent = {
@@ -126,8 +194,14 @@ try {
       { sessionId: id.affMgr, role: "manager", parentSessionId: null },
       { sessionId: id.affWkr, role: "worker", parentSessionId: id.affMgr },
       { sessionId: id.pendMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.snoozedMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.doneMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.escalatedMgr, role: "manager", parentSessionId: null },
       { sessionId: id.affLead, role: "platform", parentSessionId: null },
       { sessionId: id.deferredMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.answerMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.watcherOffMgr, role: "manager", parentSessionId: null },
+      { sessionId: id.watcherOffSnoozedMgr, role: "manager", parentSessionId: null },
       // busy flag mirrors liveFleetResumeSet's capture (omitted ⇒ falsy ⇒ idle).
       { sessionId: id.idleReviewer, role: "auditor", parentSessionId: null, busy: false },
       { sessionId: id.busyReviewer, role: "auditor", parentSessionId: null, busy: true },
@@ -145,15 +219,38 @@ try {
   // The affected manager (live worker resumed) → full re-check, with the impact classification.
   check("(1) the affected manager (live worker) gets the FULL re-check nudge with the impact clause",
     q(id.affMgr).length === 1 && /re-check your workers/i.test(q(id.affMgr)[0]) && /live workers were resumed/i.test(q(id.affMgr)[0]) && !/no action is needed/i.test(q(id.affMgr)[0]));
-  // A non-causal manager with PENDING board work → full re-check (a no-op would strand it; idle-watcher
-  // skips a snoozed/suppressed manager). This is the safety carve-out that survives the reframing.
-  check("(1) a non-causal manager with a PENDING board still gets the FULL re-check (no stranding)",
-    q(id.pendMgr).length === 1 && /re-check your workers/i.test(q(id.pendMgr)[0]) && /board has pending work/i.test(q(id.pendMgr)[0]) && !/no action is needed/i.test(q(id.pendMgr)[0]));
+  // 61cc91c6: raw backlog no longer forces the full nudge by itself. A manager whose idle-nudge policy is
+  // 'watching' (pendMgr — never idle_report'd) or 'snoozed' (snoozedMgr — idle_report('waiting')) has that
+  // SAME backlog independently covered by the idle-watcher's own cadence, restart or not — resumes SILENTLY.
+  check("(1) a non-causal manager (policy 'watching') with ordinary backlog now resumes SILENTLY — idle-watcher covers it",
+    q(id.pendMgr).length === 0);
+  check("(1) a SNOOZED manager (idle_report('waiting')) with the same backlog also resumes SILENTLY — self-expires on its own",
+    q(id.snoozedMgr).length === 0);
+  // A manager SUPPRESSED via its OWN deliberate idle_report('done') also resumes SILENTLY — re-litigating
+  // its own "nothing to do" judgment every restart was exactly the reported waste, not a safety net.
+  check("(1) a manager suppressed via idle_report('done') with the same backlog resumes SILENTLY (its own call, not restart's to re-litigate)",
+    q(id.doneMgr).length === 0);
+  // A manager SUPPRESSED via the idle-watcher's unanswered-cap ESCALATION (it stopped responding, not a
+  // deliberate call — no natural re-arm) is the ONE 'suppressed' case that still STRANDS without the
+  // restart nudge — it still gets the full re-check. This is the safety carve-out that survives the reframing.
+  check("(1) a manager suppressed via the idle-watcher's ESCALATION-CAP still gets the FULL re-check (no stranding)",
+    q(id.escalatedMgr).length === 1 && /re-check your workers/i.test(q(id.escalatedMgr)[0]) && /board has pending work/i.test(q(id.escalatedMgr)[0]) && !/no action is needed/i.test(q(id.escalatedMgr)[0]));
   // The manager-shaped "affected" nudge text stays BYTE-IDENTICAL to before the platform split.
   check("(1) the affected manager nudge is the unchanged manager-shaped text (worktrees/orchestrating/workers)",
-    q(id.pendMgr)[0].includes("your worktrees are intact") &&
-    q(id.pendMgr)[0].includes("Resume orchestrating from where you left off") &&
-    q(id.pendMgr)[0].includes("re-check your workers' state; some may have just been resumed too"));
+    q(id.escalatedMgr)[0].includes("your worktrees are intact") &&
+    q(id.escalatedMgr)[0].includes("Resume orchestrating from where you left off") &&
+    q(id.escalatedMgr)[0].includes("re-check your workers' state; some may have just been resumed too"));
+  // A manager with ZERO backlog but a genuinely NEW unconsumed ANSWERED question of its own → full re-check
+  // even though its board is empty (distinct from generic board content, so board-work silence doesn't apply).
+  check("(1) a non-causal manager with an unconsumed ANSWERED question gets the FULL re-check despite an empty board",
+    q(id.answerMgr).length === 1 && /answered question awaiting question_pull/i.test(q(id.answerMgr)[0]) && !/no action is needed/i.test(q(id.answerMgr)[0]));
+  // CR-caught regression fix: idleNudgeMinutes:0 (watcher DISABLED for the project) means NOTHING re-engages
+  // a 'watching'/'snoozed' manager on its own — the pendMgr/snoozedMgr silence above does NOT hold here, so
+  // BOTH policies must fall back to the pre-change STRANDED behavior (the full re-check), same board content.
+  check("(1) a 'watching' manager with backlog in an idleNudgeMinutes:0 project gets the FULL re-check (NOT silent — regression guard)",
+    q(id.watcherOffMgr).length === 1 && /re-check your workers/i.test(q(id.watcherOffMgr)[0]) && /board has pending work/i.test(q(id.watcherOffMgr)[0]) && !/no action is needed/i.test(q(id.watcherOffMgr)[0]));
+  check("(1) a 'snoozed' manager with the same backlog in the same idleNudgeMinutes:0 project ALSO gets the FULL re-check",
+    q(id.watcherOffSnoozedMgr).length === 1 && /re-check your workers/i.test(q(id.watcherOffSnoozedMgr)[0]) && /board has pending work/i.test(q(id.watcherOffSnoozedMgr)[0]) && !/no action is needed/i.test(q(id.watcherOffSnoozedMgr)[0]));
   // card 46a961a4: a non-causal PLATFORM (Lead) session with pending board work also gets the FULL re-check,
   // but with LEAD-appropriate text — NO manager/worktree/worker phrasing (a Lead has neither).
   check("(1) an affected platform (Lead) with a PENDING board gets a re-check nudge with the impact clause",
