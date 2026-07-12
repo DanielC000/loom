@@ -16,7 +16,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { ensureTrusted, __setOpenSyncForTest, TRANSIENT_FS_RETRY_LIMIT } from "../dist/pty/claude-config.js";
+import { ensureTrusted, __setOpenSyncForTest, transientFsRetryLimit } from "../dist/pty/claude-config.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -63,7 +63,7 @@ try {
     process.env.CLAUDE_CONFIG_DIR = configDir;
     const proj = path.join(root, "retry-proj");
 
-    const FAILS = 5; // comfortably under TRANSIENT_FS_RETRY_LIMIT — proves multi-attempt retry, not a fluke
+    const FAILS = 5; // comfortably under transientFsRetryLimit() — proves multi-attempt retry, not a fluke
     let calls = 0;
     __setOpenSyncForTest((p, flags) => {
       calls++;
@@ -82,7 +82,7 @@ try {
     delete process.env.CLAUDE_CONFIG_DIR;
   }
 
-  // === (2) Transient EPERM/EBUSY NEVER clears → after exhausting TRANSIENT_FS_RETRY_LIMIT retries,
+  // === (2) Transient EPERM/EBUSY NEVER clears → after exhausting transientFsRetryLimit() retries,
   // withTrustLock DEGRADES to best-effort lock-free: fn still runs, ensureTrusted still returns
   // (no hang). ===
   {
@@ -99,7 +99,7 @@ try {
     ensureTrusted(proj); // must return — not hang — even though the lock is never acquirable
     const dt = performance.now() - t0;
 
-    const expectedCalls = TRANSIENT_FS_RETRY_LIMIT + 1; // the first attempt + LIMIT retries, then give up
+    const expectedCalls = transientFsRetryLimit() + 1; // the first attempt + LIMIT retries, then give up
     check(`(2) exhausted the transient-retry budget before degrading (${calls} calls, expected ${expectedCalls})`,
       calls === expectedCalls);
     check(`(2) degraded to best-effort — fn still ran unlocked, no hang (${dt.toFixed(1)}ms)`,
