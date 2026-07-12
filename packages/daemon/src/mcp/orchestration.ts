@@ -953,10 +953,14 @@ export class OrchestrationMcpRouter {
           "for when a worker has landed in (or been pushed into) a bad mode. A worker can NEVER change its " +
           "own mode (Shift+Tab is a human TUI keystroke; ExitPlanMode/EnterPlanMode are disallowed for a " +
           "worker), so messaging it can't fix a bad mode — this is daemon-driven instead. mode is ONE of " +
-          "acceptEdits|auto|plan (bypassPermissions and anything else are REJECTED — a worker must never be " +
-          "escalated out of its sandbox). Pure keystroke injection: bypasses the busy/turn queue (~0 worker " +
-          "tokens), does not submit a turn. Returns the FEEDBACK-VERIFIED landed mode (read off the footer " +
-          "after the cycle settles) — may differ from `mode` if the cycle gave up early.",
+          "acceptEdits|auto|plan, but `plan` is REJECTED for a worker (or any role that structurally cannot " +
+          "self-exit plan mode — ExitPlanMode is disallowed for it): plan mode gates even the worker's OWN " +
+          "worker_report tool behind an interactive permission prompt nobody can answer, so pushing a worker " +
+          "into plan silently traps it — use a kickoff instruction for 'investigate first' instead. " +
+          "(bypassPermissions and anything outside acceptEdits|auto|plan are REJECTED outright — a worker " +
+          "must never be escalated out of its sandbox.) Pure keystroke injection: bypasses the busy/turn " +
+          "queue (~0 worker tokens), does not submit a turn. Returns the FEEDBACK-VERIFIED landed mode (read " +
+          "off the footer after the cycle settles) — may differ from `mode` if the cycle gave up early.",
         inputSchema: { workerSessionId: z.string(), mode: z.enum(["acceptEdits", "auto", "plan"]) },
       },
       async ({ workerSessionId, mode }) => {

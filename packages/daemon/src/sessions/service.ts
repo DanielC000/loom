@@ -10,7 +10,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
@@ -3324,6 +3324,18 @@ export class SessionService {
    * into, and an agent (a manager calling this tool) must never be able to escalate a worker out of that
    * sandbox. `default`/`unknown`/any other string is rejected the same way.
    *
+   * SECOND BOUNDARY (card 9c03f5a6) — `plan` is further rejected for a role that CANNOT self-exit it: a
+   * Loom-driven role with `ExitPlanMode` disallowed (`disallowedToolsForRole(worker.role).includes(
+   * "ExitPlanMode")` — the SAME predicate `buildSpawnArgs` uses to strip the human-prompt tools at spawn,
+   * reused here so the two can never drift) has no tool to leave plan mode and no human on its stdin to
+   * answer the "not this tool" TUI nudge either. Worse: Claude Code's own permission engine gates ANY
+   * non-read-only MCP tool call while in plan mode behind an interactive "ask" — including the worker's
+   * OWN `worker_report` escape hatch — so a worker pushed into plan can neither act nor report up; it
+   * silently occupies a concurrency slot until a human notices and intervenes by hand. A manager that
+   * wants "investigate first" gets it via the kickoff prompt, never by parking a worker in a mode it can't
+   * leave. (`manager`/`platform`/plain sessions are unaffected — that predicate never disallows
+   * ExitPlanMode for them, so a human legitimately Shift+Tabbing one of THOSE into plan is untouched.)
+   *
    * Drives the footer via `pty.setPermissionMode`, which reuses the SAME feedback-verified `cycleToMode`
    * primitive the spawn/resume convergence uses (press Shift+Tab, wait for the footer to actually change) —
    * pure keystroke injection, bypassing the busy/turn queue (~0 worker tokens). Returns the FEEDBACK-
@@ -3336,6 +3348,13 @@ export class SessionService {
     }
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    if (mode === "plan" && disallowedToolsForRole(worker.role).includes("ExitPlanMode")) {
+      throw new Error(
+        `plan mode is not permitted for a Loom-driven '${worker.role}' session — it cannot self-exit plan ` +
+          `mode (ExitPlanMode is disallowed) and has no human on its stdin to answer the resulting ` +
+          `permission prompts, incl. its own worker_report escape hatch; use a kickoff instruction instead`,
+      );
+    }
     const landed = await this.pty.setPermissionMode(workerSessionId, mode as WorkerSettableMode);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),

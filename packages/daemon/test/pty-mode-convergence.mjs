@@ -20,6 +20,10 @@
 //      the heal's own corrective press doesn't register on the first read).
 //   3. The auto-heal is role-scoped: a manager (ExitPlanMode NOT disallowed) resting in `plan` after the
 //      same stuck sequence is left alone — the backstop never fights a legitimate human-approved plan.
+//   4. WIDENED (card 9c03f5a6): the heal's trigger is no longer plan-only — a worker whose VERY FIRST
+//      press never registers gives up resting at `acceptEdits` (short of the `auto` target), the OTHER
+//      stall the owner named ("a worker in acceptEdits hitting a non-allowlisted command prompt"). The
+//      heal now fires for ANY landed mode that isn't the session's own computed target, not just `plan`.
 //
 // RUN: pnpm build (repo root) then `node test/pty-mode-convergence.mjs` from packages/daemon.
 import fs from "node:fs";
@@ -29,6 +33,14 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn). Speed up the
 // feedback-cycle polling (defaults: 200ms/15 polls ≈ 3s change-wait) so the "stuck" scenarios below don't
@@ -53,6 +65,13 @@ const SHIFT_TAB = "\x1b[Z";
 const ACCEPT_EDITS_FOOTER = "accept edits on (shift+tab to cycle)";
 const PLAN_FOOTER = "plan mode on (shift+tab to cycle)";
 const AUTO_FOOTER = "auto mode on (shift+tab to cycle)";
+const DEFAULT_FOOTER = "(shift+tab to cycle)"; // no mode label — the unlabeled "default" state
+// detectPermissionMode reads only the trailing 8192 bytes of the ring and picks the LAST labeled token —
+// transitioning TO the unlabeled "default" state emits no label of its own, so a stale earlier label still
+// sitting in that trailing window would otherwise win. Pad the ring past that window first so the read
+// sees ONLY the fresh (unlabeled) content — a test-harness accommodation, not a production behavior change
+// (mirrors pty-mode-race.mjs's identical accommodation).
+const RING_WINDOW_PAD = "x".repeat(8300);
 
 const fakes = [];
 function makeFakePty() {
@@ -72,10 +91,10 @@ const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRat
 const host = new TestPtyHost(events);
 
 const countShiftTabs = (fake) => fake.writes.filter((w) => w === SHIFT_TAB).length;
-const spawnFresh = (id, role) => {
+const spawnFresh = (id, role, startupModeCycles = 2) => {
   host.spawn({
     sessionId: id, cwd: tmpHome,
-    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 2 },
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles },
     geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role,
   });
   return fakes[fakes.length - 1];
@@ -143,8 +162,95 @@ try {
   await sleep(1300); // change-wait cap + MODE_LOG_POLL_MS + slack — enough for a heal to have fired if it would
   check("3: NO auto-heal press for a manager stranded in plan (role-gated — never fights a legitimate plan)",
     countShiftTabs(fc) === 2);
+
+  // ============ 4) Stuck at the START: the 1st press never registers → raw give-up lands on `acceptEdits` ============
+  // ============    → the WIDENED auto-heal (card 9c03f5a6) still corrects it — not just a plan landing ============
+  // Before the widening, logLandedMode only healed `mode==="plan"` — a worker resting at `acceptEdits`
+  // (short of its `auto` target) had NO backstop, and could hit exactly the OTHER trap the owner named: a
+  // non-allowlisted command prompts for approval nobody can answer.
+  const D = "sess-fresh-worker-stuck-start";
+  const fd = spawnFresh(D, "worker");
+  fd.feed(ACCEPT_EDITS_FOOTER);
+  host.deliverHook(D, { hook_event_name: "SessionStart", session_id: "eng-D" });
+  await sleep(750);
+  check("4: 1st press issued (acceptEdits → plan attempt)", countShiftTabs(fd) === 1);
+  // Do NOT feed anything — the 1st press itself never registers, simulating a dropped/mistimed VERY FIRST
+  // keystroke. The change-wait cap (overridden ≈120ms) expires and the raw cycler gives up AT acceptEdits
+  // (the pre-press mode — `finish` reports whatever `cur` was, and no change was ever confirmed).
+  await sleep(400);
+  check("4: the RAW cycler gave up WITHOUT a 2nd blind press, resting at the boot default (acceptEdits)",
+    countShiftTabs(fd) === 1);
+  // The widened heal fires (mode=acceptEdits !== target=auto, ExitPlanMode disallowed for worker) and
+  // drives its OWN cycleToMode(target:"auto") — needing 2 presses from acceptEdits (acceptEdits→plan→auto).
+  // Unlike scenario 2's single-press heal, THIS heal needs a 2nd corrective press too, so its own
+  // change-wait window (overridden ≈120ms) must be fed WITHIN that window — poll for each press instead
+  // of a long fixed sleep, or the heal's own cycle would give up mid-correction exactly like scenario 2's
+  // ORIGINAL failure (a test-timing pitfall, not a production one).
+  check("4: WIDENED auto-heal fired a 2nd Shift+Tab (acceptEdits → plan attempt) — not just for a plan landing",
+    await waitUntil(() => countShiftTabs(fd) === 2, 2500));
+  fd.feed(PLAN_FOOTER); // the heal's 1st corrective press registers — feed it promptly, inside the ≈120ms window
+  check("4: heal's 2nd corrective press issued (plan → auto attempt)",
+    await waitUntil(() => countShiftTabs(fd) === 3, 1000));
+  fd.feed(AUTO_FOOTER); // the heal's 2nd corrective press registers — reaches the target
+  await sleep(150);
+  check("4: heal converged the worker to auto (2 corrective presses) — never left stranded at acceptEdits",
+    countShiftTabs(fd) === 3);
+  const healCountScenario4 = countShiftTabs(fd);
+  await sleep(700);
+  check("4: the widened heal also fires AT MOST ONCE per session (modeLogged guard)",
+    countShiftTabs(fd) === healCountScenario4);
+
+  // ============ 5) A role reaches `default` cleanly (its OWN configured target, startupModeCycles:3) ============
+  // ============    — the WIDENED heal STILL corrects it toward auto: HEALABLE_MODES (card 9c03f5a6) fires ============
+  // ============    on ANY of {plan,acceptEdits,default,bypassPermissions} UNCONDITIONALLY, not only a ============
+  // ============    give-up/failure landing — the heal's destination is hardcoded `auto`, not a per-session ============
+  // ============    computed target (mirrors the pre-widening code, which also hardcoded `auto`). ============
+  const E = "sess-fresh-worker-default-target";
+  const fe = spawnFresh(E, "worker", 3); // startupModeCycles:3 → the RAW cycle's own target is "default"
+  fe.feed(ACCEPT_EDITS_FOOTER);
+  host.deliverHook(E, { hook_event_name: "SessionStart", session_id: "eng-E" });
+  await sleep(750);
+  check("5: 1st press issued (acceptEdits → plan attempt)", countShiftTabs(fe) === 1);
+  fe.feed(PLAN_FOOTER);
+  await sleep(150);
+  check("5: 2nd press issued (plan → auto attempt)", countShiftTabs(fe) === 2);
+  fe.feed(AUTO_FOOTER);
+  await sleep(150);
+  check("5: 3rd press issued (auto → default attempt)", countShiftTabs(fe) === 3);
+  fe.feed(RING_WINDOW_PAD + DEFAULT_FOOTER);
+  await sleep(150);
+  check("5: the RAW cycler cleanly reached ITS OWN target `default` in exactly 3 presses (no give-up)",
+    countShiftTabs(fe) === 3);
+  check("5: WIDENED heal fires a 4th Shift+Tab (default → acceptEdits attempt) even though the main cycle " +
+    "SUCCEEDED at reaching its own target — the trigger is the enumerated set, not a failure detector",
+    await waitUntil(() => countShiftTabs(fe) === 4, 2500));
+  fe.feed(ACCEPT_EDITS_FOOTER);
+  check("5: heal's 2nd corrective press issued (acceptEdits → plan attempt)",
+    await waitUntil(() => countShiftTabs(fe) === 5, 1000));
+  fe.feed(PLAN_FOOTER);
+  check("5: heal's 3rd corrective press issued (plan → auto attempt)",
+    await waitUntil(() => countShiftTabs(fe) === 6, 1000));
+  fe.feed(AUTO_FOOTER);
+  await sleep(150);
+  check("5: heal converged the worker to auto (3 corrective presses)", countShiftTabs(fe) === 6);
+
+  // ============ 6) A footer that NEVER becomes readable ("unknown") triggers NO auto-heal ============
+  // ============    — the load-bearing invariant "no correction without a definite read" survives the widening ============
+  const F = "sess-fresh-worker-unknown";
+  const ff2 = spawnFresh(F, "worker");
+  // Deliberately feed NOTHING — the footer is never painted, so every read (the main cycle's AND
+  // logLandedMode's) is "unknown" through both polling windows.
+  host.deliverHook(F, { hook_event_name: "SessionStart", session_id: "eng-F" });
+  await sleep(6000); // > MODE_CYCLE_SETTLE_MS + the raw cycle's own give-up window + logLandedMode's full poll cap
+  check("6: the raw main cycle issued ZERO presses (never had a definite footer to decide from)",
+    countShiftTabs(ff2) === 0);
+  check("6: NO auto-heal press fires for an unreadable footer — HEALABLE_MODES excludes 'unknown' by construction",
+    countShiftTabs(ff2) === 0);
 } finally {
-  for (const s of ["sess-fresh-A", "sess-fresh-worker-stuck", "sess-fresh-manager-stuck"]) {
+  for (const s of [
+    "sess-fresh-A", "sess-fresh-worker-stuck", "sess-fresh-manager-stuck", "sess-fresh-worker-stuck-start",
+    "sess-fresh-worker-default-target", "sess-fresh-worker-unknown",
+  ]) {
     try { host.stop(s, "hard"); } catch { /* ignore */ }
   }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
@@ -152,7 +258,9 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a fresh spawn converges to its target mode by reading the footer (not blind timing), "
-    + "a dropped press's worst case is caught by the role-gated plan auto-heal (fires once, worker-only, "
-    + "never touches a manager) — a Loom-driven worker can never be silently stranded in plan mode."
+    + "a dropped press's worst case is caught by the role-gated auto-heal (fires once, worker-only, never "
+    + "touches a manager) — WIDENED to correct ANY landed mode short of the session's target, not just a "
+    + "plan landing — so a Loom-driven worker can never be silently stranded in plan OR left short at "
+    + "acceptEdits (the other unattended-prompt trap)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

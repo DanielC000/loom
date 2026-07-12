@@ -27,6 +27,28 @@ const RESUME_GATE_ENV_OVERRIDE: Record<string, string> = {
 };
 
 /**
+ * BEST-EFFORT suppression of Claude Code's "auto mode" first-run entry-warning dialog (card 9c03f5a6) —
+ * a SEPARATE interactive gate from the `--dangerously-skip-permissions`/bypassPermissions acceptance
+ * dialog this file already avoids (see `writeSessionSettings`'s own doc comment: acceptEdits + allowlist
+ * over `--dangerously-skip-permissions` specifically to dodge THAT gate). Loom's workers already boot
+ * gate-free at `acceptEdits` and feedback-cycle to `auto` post-boot (host.ts's `cycleToMode`); this key
+ * closes the residual risk that auto mode's OWN one-time consent dialog could fire the first time a
+ * machine/profile ever reaches auto, which would be exactly the kind of unattended boot hang this whole
+ * card exists to eliminate — now that the widened auto-heal (host.ts's `logLandedMode`) reliably drives
+ * every Loom-driven role all the way to auto, this residual risk is reachable more often than before.
+ *
+ * UNVERIFIED / reverse-engineered (found by inspecting the installed CLI binary's own gating logic:
+ * `skipAutoPermissionPrompt===true` on ANY of a few named settings scopes suppresses the dialog) — the
+ * exact settings-SCOPE our per-session `--settings <file>` maps to was NOT confirmed live (no real-CLI
+ * harness to probe it against in the environment this was written in). Purely ADDITIVE and safe even if
+ * the guess is wrong: an unrecognized settings key is simply ignored by both an older CLI and (if the
+ * scope mapping turns out wrong) this CLI too — worst case is a no-op, never a regression. Does NOT touch
+ * the spawn argv or the `--permission-mode acceptEdits` boot flag — settings-file key only. Treat as a
+ * belt on top of the proven acceptEdits-then-cycle recipe, not a replacement for it.
+ */
+const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as const;
+
+/**
  * Write the per-session --settings file: the hooks that relay back to the daemon, plus the
  * resolved permission policy. SessionStart captures the engine id; UserPromptSubmit/Stop/
  * StopFailure drive the busy state machine (rising/falling edges). acceptEdits + allowlist
@@ -81,6 +103,7 @@ export function writeSessionSettings(
     },
     includeCoAuthoredBy: false,
     env: RESUME_GATE_ENV_OVERRIDE,
+    ...AUTO_MODE_ENTRY_WARNING_OVERRIDE,
   };
   const file = path.join(SETTINGS_DIR, `${sessionId}.json`);
   const tmp = `${file}.tmp`;

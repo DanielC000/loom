@@ -217,7 +217,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       check(`(b) an unknown workerSessionId REJECTED ('not your worker', got: ${threwUnknownWorker})`, threwUnknownWorker === "not your worker");
     }
 
-    // ===================== (c) HAPPY PATH — owned worker, allowed mode: lands + records the event =====================
+    // ===================== (c) HAPPY PATH — owned worker, a WORKING mode: lands + records the event =====================
+    // `plan` is deliberately EXCLUDED from this happy-path loop now (card 9c03f5a6) — see (d) below.
     {
       const pty = new PtyStub();
       const sessions = new SessionService(db, pty, new OrchestrationControl());
@@ -225,17 +226,63 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       mkSession({ id: mgr, role: "manager" });
       mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: "task-wsm-c" });
 
-      for (const mode of ["acceptEdits", "auto", "plan"]) {
+      for (const mode of ["acceptEdits", "auto"]) {
         const landed = await sessions.setWorkerMode(mgr, wkr, mode);
         check(`(c) setWorkerMode(${mode}) reaches the pty and lands '${mode}' (got ${landed})`, landed === mode);
       }
-      check("(c) the pty stub recorded all 3 allowed-mode calls for the owned worker",
-        pty.calls.length === 3 && pty.calls.every((c) => c.id === wkr));
+      check("(c) the pty stub recorded both working-mode calls for the owned worker",
+        pty.calls.length === 2 && pty.calls.every((c) => c.id === wkr));
 
       const evts = db.listEventsForWorker(wkr).filter((e) => e.kind === "set_worker_mode");
-      check("(c) a set_worker_mode event is recorded per call, under the manager", evts.length === 3 && evts.every((e) => e.managerSessionId === mgr));
+      check("(c) a set_worker_mode event is recorded per call, under the manager", evts.length === 2 && evts.every((e) => e.managerSessionId === mgr));
       check("(c) each event's detail carries {target, landed}",
-        evts.every((e) => ["acceptEdits", "auto", "plan"].includes(e.detail?.target) && e.detail?.landed === e.detail?.target));
+        evts.every((e) => ["acceptEdits", "auto"].includes(e.detail?.target) && e.detail?.landed === e.detail?.target));
+    }
+
+    // ===================== (d) PLAN-REJECT BOUNDARY (card 9c03f5a6) =====================
+    // `plan` is rejected for a role that structurally CANNOT self-exit it — DERIVED from the exact same
+    // `disallowedToolsForRole(role).includes("ExitPlanMode")` predicate `buildSpawnArgs` uses at spawn,
+    // so the two can never drift. That predicate's ExitPlanMode-disallowed set today is EXACTLY:
+    // worker / setup / auditor / workspace-auditor / run / assistant — manager/platform/plain are NOT in
+    // it (a human can legitimately Shift+Tab one of those into plan), which the second half of this block
+    // proves by asserting plan is NOT rejected for those roles.
+    {
+      const REJECTED_ROLES = ["worker", "setup", "auditor", "workspace-auditor", "run", "assistant"];
+      const ALLOWED_ROLES = ["manager", "platform", null]; // null = a plain/role-less session
+
+      for (const role of REJECTED_ROLES) {
+        const pty = new PtyStub();
+        const sessions = new SessionService(db, pty, new OrchestrationControl());
+        const mgr = `wsm-d-mgr-${role}-${sfx}`, wkr = `wsm-d-wkr-${role}-${sfx}`;
+        mkSession({ id: mgr, role: "manager" });
+        mkSession({ id: wkr, role, parentSessionId: mgr });
+
+        let threw = null;
+        try { await sessions.setWorkerMode(mgr, wkr, "plan"); } catch (e) { threw = e.message; }
+        check(`(d) plan REJECTED for role='${role}' (cannot self-exit plan, got: ${threw})`,
+          threw != null && threw.includes("plan") && threw.toLowerCase().includes(String(role).toLowerCase()));
+        check(`(d) the rejected plan call for role='${role}' never reached the pty`, pty.calls.length === 0);
+        check(`(d) no set_worker_mode event recorded for the refused plan call (role='${role}')`,
+          db.listEventsForWorker(wkr).filter((e) => e.kind === "set_worker_mode").length === 0);
+        // acceptEdits/auto stay UNAFFECTED for the same role — this is a plan-SPECIFIC boundary, not a
+        // blanket lockout of worker_set_mode for these roles.
+        const landed = await sessions.setWorkerMode(mgr, wkr, "auto");
+        check(`(d) 'auto' still lands normally for role='${role}' (got ${landed})`, landed === "auto");
+      }
+
+      for (const role of ALLOWED_ROLES) {
+        const pty = new PtyStub();
+        const sessions = new SessionService(db, pty, new OrchestrationControl());
+        const label = role ?? "plain";
+        const mgr = `wsm-d2-mgr-${label}-${sfx}`, tgt = `wsm-d2-tgt-${label}-${sfx}`;
+        mkSession({ id: mgr, role: "manager" });
+        mkSession({ id: tgt, role, parentSessionId: mgr });
+
+        const landed = await sessions.setWorkerMode(mgr, tgt, "plan");
+        check(`(d) plan is NOT rejected for role='${label}' (can self-exit / human-driven, got landed=${landed})`,
+          landed === "plan");
+        check(`(d) the pty WAS reached for role='${label}'`, pty.calls.length === 1 && pty.calls[0].mode === "plan");
+      }
     }
 
     db.close();
@@ -245,9 +292,11 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_set_mode drives a live worker's footer to acceptEdits/plan/auto via the SAME "
+  ? "\n✅ ALL PASS — worker_set_mode drives a live worker's footer to acceptEdits/auto via the SAME "
     + "feedback-verified cycler the spawn/resume convergence uses, fails CLOSED on bypassPermissions/an "
-    + "unknown mode BEFORE touching the pty, is parent-scoped exactly like stopWorker/messageWorker, and "
-    + "records a set_worker_mode event carrying {target, landed} on success."
+    + "unknown mode BEFORE touching the pty, REJECTS 'plan' for exactly the roles that cannot self-exit it "
+    + "(derived from disallowedToolsForRole, never a second hand-maintained list) while leaving plan usable "
+    + "for a human-driven manager/platform/plain session, is parent-scoped exactly like "
+    + "stopWorker/messageWorker, and records a set_worker_mode event carrying {target, landed} on success."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

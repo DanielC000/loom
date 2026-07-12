@@ -332,6 +332,22 @@ const RESUME_MODE_READ_POLL_MS = Number(process.env.LOOM_RESUME_MODE_POLL_MS) ||
 const RESUME_MODE_CHANGE_MAX_POLLS = Number(process.env.LOOM_RESUME_MODE_MAX_POLLS) || 15;
 const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES) || 4;
 /**
+ * `logLandedMode`'s auto-heal trigger set (card 9c03f5a6) — every DEFINITE `LandedMode` reading that is
+ * NOT the healthy target `auto`. Deliberately an explicit enumeration, not `mode !== "auto"`: the latter
+ * would also match `"unknown"` (no footer could be read at all), breaking the heal's load-bearing
+ * invariant that no correction is EVER attempted without a definite read. `"unknown"` is excluded by
+ * construction here, not by a separate runtime check.
+ */
+const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", "default", "bypassPermissions"]);
+/**
+ * `setPermissionMode` (worker_set_mode) outer retry bound (card 9c03f5a6) — how many FULL cycleToMode
+ * passes to attempt, each starting from a fresh footer read, before giving up and reporting the true
+ * landed mode. 1 = the raw single-pass behaviour; >1 self-corrects a genuinely dropped keystroke (a press
+ * whose footer repaint never registered within one pass's own change-wait cap) without the caller having
+ * to notice a miss and retry by hand.
+ */
+const MODE_OVERRIDE_MAX_ATTEMPTS = Number(process.env.LOOM_MODE_OVERRIDE_MAX_ATTEMPTS) || 3;
+/**
  * Readiness fallback. SessionStart normally flips a (re)spawned session to `ready` (after the
  * mode-cycles land). If that hook never arrives, don't strand a queued boot injection forever —
  * mark ready after this grace so the message still drains. Env-overridable so tests don't wait 20s.
@@ -1179,6 +1195,13 @@ interface Live {
   lastPromptSenderId: string | null;
   startupModeCycles: number; // Shift+Tab presses to inject once, after SessionStart, to reach the target mode
   startupCyclesDone: boolean; // guard so the cycle-inject fires at most once per session
+  // Serializes every cycleToMode() invocation for THIS session (the boot convergence, the plan
+  // auto-heal, and any manager-driven worker_set_mode override) onto one queue, so no two ever press
+  // Shift+Tab or read the footer concurrently — see cycleToMode's doc comment (card 9c03f5a6: an
+  // uncoordinated race between the boot cycle and a manual override interleaved their keystrokes/reads
+  // and could settle on EITHER cycle's target, observed as worker_set_mode landing on the boot default
+  // ("auto") regardless of what was requested). Always resolved (never rejects) so the chain can't wedge.
+  modeCycleChain: Promise<void>;
   mcpPromptHandled: boolean;  // guard: dismiss the plugin-MCP enable-prompt with Esc at most once per session
   bootScan: string;           // bounded rolling buffer of early boot output, scanned for that prompt
   resumeGateHandled: boolean; // TERMINAL: true once Enter has actually been sent for the resume-from-summary
@@ -2026,6 +2049,7 @@ export class PtyHost {
       // Boot is always gate-free (acceptEdits); cycle to the target mode once the TUI is up (SessionStart).
       startupModeCycles: opts.permission.startupModeCycles ?? 0,
       startupCyclesDone: false,
+      modeCycleChain: Promise.resolve(),
       mcpPromptHandled: false,
       bootScan: "",
       resumeGateHandled: false,
@@ -2160,6 +2184,7 @@ export class PtyHost {
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
+      modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
@@ -2229,6 +2254,7 @@ export class PtyHost {
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
+      modeCycleChain: Promise.resolve(),
       mcpPromptHandled: true, bootScan: "",
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true,
@@ -3395,8 +3421,35 @@ export class PtyHost {
    * mode (incl. `plan`) rather than the target — `logLandedMode`'s role-gated auto-heal is the backstop
    * that catches a Loom-driven role (no `ExitPlanMode` tool) left stranded there; this primitive itself is
    * intentionally unchanged behaviour for the resume caller (do not add path-specific corrections here).
+   *
+   * SERIALIZED per session (card 9c03f5a6) via `Live.modeCycleChain`: every caller — the boot
+   * convergence above, `logLandedMode`'s plan auto-heal, and `setPermissionMode`'s manager-driven
+   * override — funnels through this one entry point, which QUEUES onto that chain rather than running
+   * immediately. Two `cycleToMode` runs sharing one session's pty/footer would otherwise interleave their
+   * Shift+Tab presses and footer reads (each mistaking the OTHER's press for its own registered change),
+   * converging to whichever cycle's target happens to win the race — this is exactly how a
+   * `worker_set_mode` call issued right after spawn (a natural pattern: push a freshly-spawned worker
+   * straight into its working mode) could land on the BOOT cycle's own default target ("auto") instead of
+   * the one actually requested. Queueing guarantees each cycle starts from a footer state no other cycle
+   * is concurrently mutating.
    */
   private cycleToMode(sessionId: string, target: LandedMode, onDone: () => void): void {
+    const live = this.live.get(sessionId);
+    if (!live) { onDone(); return; }
+    const runQueued = (): Promise<void> => new Promise((resolveChain) => {
+      this.runCycleToMode(sessionId, target, () => {
+        onDone();
+        resolveChain();
+      });
+    });
+    // Chain off whatever is currently in flight for this session (never let a prior link's rejection
+    // break the chain — runQueued itself never rejects, but stay defensive for any future caller).
+    live.modeCycleChain = live.modeCycleChain.then(runQueued, runQueued);
+  }
+
+  /** The actual press-and-verify cycle loop, run EXCLUSIVELY (see cycleToMode's queueing above) — never
+   *  call this directly; go through `cycleToMode`. */
+  private runCycleToMode(sessionId: string, target: LandedMode, onDone: () => void): void {
     let presses = 0;
     let finished = false;
     const finish = (reason: string, mode: LandedMode): void => {
@@ -3575,25 +3628,40 @@ export class PtyHost {
   }
 
   /**
-   * OBSERVABILITY + defense-in-depth plan auto-heal (card f05e4897 / b99d3d67 / 1658fc22) — record, to
-   * the daemon log, what permission mode a (re)spawned session actually LANDED in once it settled
-   * (mode-cycles/gate handling done + markReady), and — the auto-heal — if a Loom-DRIVEN role with
-   * `ExitPlanMode` disallowed (any role `disallowedToolsForRole` disallows it for — worker, setup,
-   * auditor, workspace-auditor, run, assistant) is found resting in `plan`, drive it off plan via the
-   * SAME feedback-verified `cycleToMode` primitive the main convergence path uses (target `auto`), not a
-   * single blind press. `plan` is the one landed mode such a role can NEVER self-exit (its `ExitPlanMode`
-   * tool is structurally removed at spawn), so a session stranded there — by either cycleToMode's rare
-   * give-up-mid-cycle worst case, or anything else that ever leaves it in plan — would otherwise sit
-   * inert forever. A single blind corrective press has the same drop risk as the failure it's healing
-   * (card 1658fc22): if IT also drops under load, the session stays stranded with no further retry.
-   * Routing through cycleToMode instead reads the footer and retries (bounded) until it's off plan or the
-   * pty dies, exactly like the main path — so a dropped press just costs one more poll, not a permanent
+   * OBSERVABILITY + defense-in-depth landed-mode auto-heal (card f05e4897 / b99d3d67 / 1658fc22 /
+   * 9c03f5a6) — record, to the daemon log, what permission mode a (re)spawned session actually LANDED in
+   * once it settled (mode-cycles/gate handling done + markReady), and — the auto-heal — if a Loom-DRIVEN
+   * role with `ExitPlanMode` disallowed (any role `disallowedToolsForRole` disallows it for — worker,
+   * setup, auditor, workspace-auditor, run, assistant) is found resting SOMEWHERE OTHER than its intended
+   * boot target, drive it back onto that target via the SAME feedback-verified `cycleToMode` primitive the
+   * main convergence path uses, not a single blind press.
+   *
+   * WIDENED (card 9c03f5a6) from a plan-only trigger to the explicit {@link HEALABLE_MODES} set
+   * (plan|acceptEdits|default|bypassPermissions — every definite reading short of `auto`, `"unknown"`
+   * excluded by construction): `plan` was always the one landed mode such a role can NEVER self-exit
+   * itself (its `ExitPlanMode` tool is structurally removed at spawn, and Claude Code's own permission
+   * engine additionally gates ANY non-read-only MCP tool call — incl. the role's own report-up channel —
+   * behind an unanswerable "ask" while in plan), but the SAME give-up-mid-cycle worst case that could
+   * strand a session in plan can just as easily strand it ONE STEP SHORT of the working target — e.g.
+   * resting in `acceptEdits` (the boot cycle's very first press never registers, so `runCycleToMode` gives
+   * up at the RAW gate-free boot mode) — which is the OTHER stall the owner named: an unattended role
+   * sitting in a mode that hasn't earned an allowlist entry for the command it needs stalls on that
+   * permission prompt exactly the same way. The heal's destination is hardcoded `auto` (not a per-session
+   * computed target) — every Loom-driven role this heal protects boots at the SAME platform default target
+   * (mirrors the pre-widening code, which also hardcoded `auto`); a session whose `startupModeCycles:0`
+   * deliberately configures NO cycling (stay at the gate-free boot mode) is excluded via
+   * `noCyclingConfigured` below rather than fighting that deliberate choice.
+   *
+   * A single blind corrective press would have the same drop risk as the failure it's healing (card
+   * 1658fc22): if IT also drops under load, the session stays stranded with no further retry. Routing
+   * through cycleToMode instead reads the footer and retries (bounded) until it reaches `auto` or the pty
+   * dies, exactly like the main path — so a dropped press just costs one more poll, not a permanent
    * strand. This is a BACKSTOP, independent of cycleToMode's own convergence logic invoked from the main
    * SessionStart path (which stays unchanged for that caller — see cycleToMode's doc comment): it fires
    * off the mode ACTUALLY read from the footer, regardless of why the session ended up there. A
    * manager/platform session is structurally excluded (`disallowedToolsForRole` never puts `ExitPlanMode`
    * in their list — they may separately carry the task-tracking disallow, which this check ignores), so
-   * this never fights a manager's legitimate, human-approved entry into plan mode.
+   * this never fights a manager's legitimate, human-approved entry into plan mode (or any other mode).
    *
    * Best-effort + bounded: polls the ring (the existing rolling output buffer) a few times to let the
    * footer repaint into its final state, logs as soon as a mode is read (or gives up at the cap, logging
@@ -3608,6 +3676,10 @@ export class PtyHost {
     live.modeLogged = true; // claim it once, up front — a repeat markReady won't re-schedule this
     const isResume = live.isResume;
     const role = live.role;
+    // A project that deliberately configures NO cycling (startupModeCycles:0, no resumeModeTarget) wants
+    // its Loom-driven role to STAY at the gate-free acceptEdits boot mode — the heal must not force it
+    // toward auto anyway just because acceptEdits is in HEALABLE_MODES.
+    const noCyclingConfigured = live.startupModeCycles === 0 && live.resumeModeTarget == null;
     let attempts = 0;
     const tryRead = (): void => {
       const l = this.live.get(sessionId);
@@ -3624,9 +3696,9 @@ export class PtyHost {
       const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
       // eslint-disable-next-line no-console
       console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
-      if (mode === "plan" && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
+      if (!noCyclingConfigured && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
-        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in plan (ExitPlanMode disallowed) — cycling off plan`);
+        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to auto`);
         this.cycleToMode(sessionId, "auto", () => {});
       }
     };
@@ -3805,16 +3877,50 @@ export class PtyHost {
    * since a worker can never change its own mode itself (Shift+Tab is a human TUI keystroke; ExitPlanMode/
    * EnterPlanMode are disallowed for a worker). Reuses `cycleToMode` VERBATIM — same press-and-wait-for-
    * change feedback loop, same bounds — so a manual override behaves identically to the automatic paths;
-   * this does not hand-roll its own keystroke cycling. Resolves with the FEEDBACK-VERIFIED landed mode read
-   * fresh off the footer once the cycle settles (which may differ from `target` if it gave up early — the
-   * caller sees the truth, not an assumed success), or "unknown" if the session isn't live.
+   * this does not hand-roll its own keystroke cycling. `cycleToMode` itself now QUEUES onto the session's
+   * `modeCycleChain` (card 9c03f5a6), so this override can never race the boot convergence / plan
+   * auto-heal — it waits its turn and then cycles from an uncontested footer read. On top of that, this
+   * wraps a bounded OUTER retry (`cycleToModeWithRetries`): a single cycleToMode pass can still miss the
+   * exact target on a genuinely dropped keystroke, and the DoD is to keep retrying rather than accept a
+   * neighbor mode on the first miss. Resolves with the FEEDBACK-VERIFIED landed mode read fresh off the
+   * footer once cycling settles (which may still differ from `target` if every bounded attempt gave up —
+   * the caller sees the truth, not an assumed success), or "unknown" if the session isn't live.
    */
   setPermissionMode(sessionId: string, target: LandedMode): Promise<LandedMode> {
+    return this.cycleToModeWithRetries(sessionId, target, MODE_OVERRIDE_MAX_ATTEMPTS)
+      .then((landed) => this.escapePlanIfStuck(sessionId, target, landed));
+  }
+
+  /**
+   * Last-resort safety net (card 9c03f5a6 DoD) — a WORKING-mode request (acceptEdits|auto) must never be
+   * reported as having left the worker resting in `plan`: a worker has no `ExitPlanMode` tool to self-exit
+   * plan mode, so landing there is a silent STALL (can't edit) that wastes the worker's slot until a human
+   * notices. If every bounded attempt in `cycleToModeWithRetries` still could not confirm the EXACT target
+   * and the worker is resting in plan, make one more bounded push to `auto` (a single Shift+Tab away from
+   * plan in the cycle order) — ANY safe working mode beats reporting "still in plan". A genuine
+   * set-to-`plan` request, or a target that was already reached, passes through untouched.
+   */
+  private escapePlanIfStuck(sessionId: string, target: LandedMode, landed: LandedMode): Promise<LandedMode> {
+    if (target === "plan" || landed !== "plan") return Promise.resolve(landed);
+    return this.cycleToModeWithRetries(sessionId, "auto", MODE_OVERRIDE_MAX_ATTEMPTS);
+  }
+
+  /**
+   * `setPermissionMode`'s bounded outer retry loop (card 9c03f5a6). Each attempt runs a full
+   * `cycleToMode` pass (itself queued against any concurrent cycle) and re-reads the footer; a miss
+   * re-attempts from that FRESH read (never reuses a stale one) until `attemptsLeft` is exhausted, so a
+   * one-off dropped keystroke self-corrects instead of surfacing a non-target neighbor on the first try.
+   * Stops immediately on an exact match or an "unknown" (dead session — retrying can't help). Bounded, so
+   * a genuinely wedged footer still reports the honest landed mode rather than looping forever.
+   */
+  private cycleToModeWithRetries(sessionId: string, target: LandedMode, attemptsLeft: number): Promise<LandedMode> {
     return new Promise((resolve) => {
       if (!this.live.get(sessionId)?.alive) { resolve("unknown"); return; }
       this.cycleToMode(sessionId, target, () => {
         const live = this.live.get(sessionId);
-        resolve(live?.alive ? this.readFooterMode(live) : "unknown");
+        const landed: LandedMode = live?.alive ? this.readFooterMode(live) : "unknown";
+        if (landed === target || landed === "unknown" || attemptsLeft <= 1) { resolve(landed); return; }
+        resolve(this.cycleToModeWithRetries(sessionId, target, attemptsLeft - 1));
       });
     });
   }
