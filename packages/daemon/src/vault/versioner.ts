@@ -70,6 +70,16 @@ async function resolveVaultRepoContext(
  * commits THERE — so a vault that is a subfolder of a plain repo gets per-edit history at the repo root,
  * while a vault folder that is its own repo root (or has no repo) is watched/committed in place. Backs
  * off ONLY for an Obsidian-Git-managed repo (a real external auto-committer owns its history).
+ *
+ * **Commit-only by design — this never pushes, and that is intentional, not a gap.** (Investigated under
+ * task f48ee77d: a vault observed 172 `loom: auto-commit` commits ahead of `origin/main`.) Pushing a repo
+ * is a HUMAN-only trust-boundary action in Loom (see `git/writer.ts` `GitWriter.push()` + the human-only
+ * git-write REST surface) — this versioner runs unattended in the daemon, triggered by any filesystem
+ * event (including an ordinary agent's doc rewrite), so it must never perform outbound network git
+ * operations itself; doing so would silently widen that boundary. For a vault whose governing repo DOES
+ * have a configured upstream, the resulting backlog is made VISIBLE instead of silent via
+ * {@link checkVaultPushStatus} / {@link VaultPushStatusWatcher} below (read-only `rev-list --count`, no
+ * writes) — push stays a manual action the human takes through the existing git-write surface.
  */
 export class VaultVersioner {
   private git: SimpleGit;
@@ -82,6 +92,11 @@ export class VaultVersioner {
   constructor(private vaultPath: string, private debounceMs = 5000) {
     this.commitPath = vaultPath;
     this.git = simpleGit(vaultPath);
+  }
+
+  /** The resolved governing repo root this instance watches + commits (valid after `start()`). */
+  get commitRoot(): string {
+    return this.commitPath;
   }
 
   async start(): Promise<void> {
@@ -143,6 +158,99 @@ export class VaultVersioner {
     } catch {
       return false; // best-effort — a missing identity / no-repo / git error must never block exit
     }
+  }
+}
+
+/** One vault's governing repo sitting some number of commits ahead of its configured upstream. */
+export interface VaultPushStatus {
+  /** The resolved governing repo root (same value as `VaultVersioner.commitRoot`). */
+  commitPath: string;
+  /** The upstream ref this was measured against, e.g. `origin/main`. */
+  upstream: string;
+  /** Commits reachable from HEAD but not from `upstream` — i.e. commits the vault has never pushed. */
+  ahead: number;
+}
+
+/**
+ * Read-only: how far a vault's governing repo sits ahead of its configured upstream — task f48ee77d's
+ * visibility fix (auto-commit is commit-only by design; see the `VaultVersioner` doc above). Returns
+ * `null`, cleanly and silently, for a vault repo with NO upstream configured for its current branch —
+ * the common case for a fresh local-only vault with no remote at all — so callers can skip it with zero
+ * noise instead of reporting a meaningless "ahead of nothing".
+ *
+ * `@{u}` (`rev-parse --abbrev-ref --symbolic-full-name @{u}`) is git's own answer to "does this branch
+ * track a remote, and which one" — it fails fast (non-zero exit) when there is none, which is exactly
+ * the skip signal we want. The count itself is the same read-only `rev-list --count <upstream>..HEAD`
+ * shape already used (and unit-tested) for worktree branches in `git/worktrees.ts`
+ * (`mayRecutOntoMain` / the ahead-checks around lines 434-437, 911-918) — never a fetch, never a write,
+ * never a push.
+ */
+export async function checkVaultPushStatus(commitPath: string): Promise<VaultPushStatus | null> {
+  try {
+    // simpleGit() itself throws synchronously for a non-existent baseDir — construct it INSIDE the try
+    // so a stale/bogus commitPath degrades to "nothing to report", same as any other git error here.
+    const git = simpleGit(commitPath);
+    const upstream = (await git.raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"])).trim();
+    if (!upstream) return null;
+    const ahead = parseInt((await git.raw(["rev-list", "--count", `${upstream}..HEAD`])).trim(), 10);
+    if (!Number.isFinite(ahead)) return null; // malformed count — fail safe to "nothing to report"
+    return { commitPath, upstream, ahead };
+  } catch {
+    return null; // no upstream configured (fatal: no upstream for branch) — or any other git error
+  }
+}
+
+/**
+ * Check every given vault repo root and log ONE line per vault that has unpushed commits — the actual
+ * "N commits un-pushed" visibility surface. A vault with no upstream, or with an upstream but nothing
+ * ahead, is silent (no noise). Returns the unpushed statuses so a caller (boot log, the watcher below,
+ * or a test) can assert on them without scraping console output.
+ */
+export async function logVaultPushStatus(commitPaths: string[]): Promise<VaultPushStatus[]> {
+  const statuses = await Promise.all(commitPaths.map((p) => checkVaultPushStatus(p)));
+  const unpushed = statuses.filter((s): s is VaultPushStatus => s !== null && s.ahead > 0);
+  for (const s of unpushed) {
+    console.log(
+      `[vault-push] ${s.commitPath} is ${s.ahead} commit(s) ahead of ${s.upstream} ` +
+      `(auto-commit is local-only by design — push manually when ready)`,
+    );
+  }
+  return unpushed;
+}
+
+/** The slice a periodic ticker needs (injectable so a test drives `tick()` directly, no real timers). */
+export interface VaultPushStatusWatcherDeps {
+  /** Read the CURRENT set of watched vault repo roots at tick time (not captured once at construction). */
+  getCommitPaths: () => string[];
+  /** Tick cadence override in ms (tests use a short interval; the daemon uses the default). */
+  intervalMs?: number;
+}
+
+const DEFAULT_VAULT_PUSH_CHECK_INTERVAL_MS = 30 * 60_000; // 30 minutes — a backlog nudge, not a hot loop
+
+/**
+ * Periodic "N vault commits un-pushed" ticker — twin of `DbBackupWatcher` (index.ts), same start/stop
+ * shape and best-effort posture. Read-only + additive: every tick only runs `logVaultPushStatus` (git
+ * status reads), never a write, never a push.
+ */
+export class VaultPushStatusWatcher {
+  private timer: ReturnType<typeof setInterval> | null = null;
+  constructor(private deps: VaultPushStatusWatcherDeps) {}
+
+  /** Run one check (best-effort; never throws). Exposed so a test can drive it directly. */
+  async tick(): Promise<VaultPushStatus[]> {
+    try { return await logVaultPushStatus(this.deps.getCommitPaths()); }
+    catch { return []; } // best-effort — a bad tick must never kill the ticker or the daemon
+  }
+
+  start(): void {
+    if (this.timer) return;
+    const ms = this.deps.intervalMs ?? DEFAULT_VAULT_PUSH_CHECK_INTERVAL_MS;
+    this.timer = setInterval(() => { void this.tick(); }, ms);
+  }
+
+  stop(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
   }
 }
 

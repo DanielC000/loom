@@ -52,7 +52,7 @@ import { AlertWebhookEmitter } from "./orchestration/alert-webhook.js";
 import { recordClaudeRateLimit } from "./orchestration/usage-awareness.js";
 import { rateLimitDeadline, rateLimitedUntil, resumeResetFromUsageStatus } from "./orchestration/usage-limit.js";
 import { readRestartIntent, clearRestartIntent, protectedIdsFromIntent } from "./orchestration/restart.js";
-import { startVaultVersioners, type VaultVersioner } from "./vault/versioner.js";
+import { startVaultVersioners, logVaultPushStatus, VaultPushStatusWatcher, type VaultVersioner } from "./vault/versioner.js";
 import { buildServer } from "./gateway/server.js";
 import { resolveAllCompanionConfigs } from "./companion/store.js";
 import { CompanionController, type CompanionReplyHooks } from "./companion/controller.js";
@@ -963,6 +963,24 @@ async function main(): Promise<void> {
     console.warn(`[boot] vault auto-committer start failed (continuing boot): ${(err as Error).message}`);
   }
 
+  // Vault push-status visibility (task f48ee77d): the auto-committer above is commit-only BY DESIGN —
+  // pushing is a human-only trust-boundary action (git/writer.ts GitWriter.push()), never something this
+  // unattended, filesystem-triggered watcher should do itself. For a vault whose governing repo DOES have
+  // a configured upstream, that means its unpushed backlog would otherwise grow silently — so this makes
+  // it VISIBLE instead: one read-only check at boot, then a periodic re-check, both via `logVaultPushStatus`
+  // (git status reads only; no writes, no push). A vault with no upstream (the common local-only case)
+  // is skipped with zero noise. Twin of the db-backup ticker just above in shape (boot check + interval).
+  try {
+    await logVaultPushStatus(vaultVersioners.map((v) => v.commitRoot));
+  } catch (err) {
+    console.warn(`[boot] vault-push-status check failed (continuing boot): ${(err as Error).message}`);
+  }
+  const vaultPushStatusWatcher = new VaultPushStatusWatcher({
+    getCommitPaths: () => vaultVersioners.map((v) => v.commitRoot),
+    intervalMs: Number(process.env.LOOM_VAULT_PUSH_CHECK_INTERVAL_MS) || undefined,
+  });
+  vaultPushStatusWatcher.start();
+
   // Outbound alert-webhook (external delivery): a passive listener on the orchestration event
   // chokepoint that POSTs to a HUMAN-configured `orchestration.alertWebhook` URL on matching event
   // kinds — best-effort + bounded, never blocks/breaks the event path. Registered AFTER the boot
@@ -1065,7 +1083,7 @@ async function main(): Promise<void> {
     // Best-effort courtesy stop of the companion (long-poll + heartbeat, no-op when off); it dies with the
     // process anyway. The controller owns BOTH now, so stop() disarms the heartbeat too (no separate stop).
     void companionController.stop().catch(() => { /* never block the exit */ });
-    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop();
+    scheduler.stop(); rateLimitWatcher.stop(); usageStatus.stop(); updateCheck.stop(); wakes.stop(); polls.stop(); eventTriggers.stop(); clearInterval(reconcileTimer); clearInterval(snapshotTimer); contextWatcher.stop(); idleWatcher.stop(); busyWorkerWatcher.stop(); usageSampler.stop(); crashRecoveryWatcher.stop(); dbBackupWatcher.stop(); vaultPushStatusWatcher.stop();
     console.log(`[shutdown] graceful stop (${reason})`);
     process.exit(0); // clean stop — NOT exit 75 (the supervisor's restart sentinel)
   };
