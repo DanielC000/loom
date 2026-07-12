@@ -211,33 +211,52 @@ export class IdleWatcher {
 
       // Count ALL actionable cards (role-resolved), not just the workReady lane: a task is actionable when
       // its column is NOT the terminal lane AND it is NOT held AND it is NOT deferred — every other
-      // non-held/non-deferred lane (intake/defaultLanding/workReady/active/review/parked) is pending work a
+      // non-held/non-deferred lane (intake/defaultLanding/workReady/active/parked) is pending work a
       // manager should be driving. Counting only workReady mis-told an idle manager "0 todo" while actionable
-      // cards sat in inbox/active/review. Mirrors resumeFleetOnBoot's "pending board work" definition
+      // cards sat in inbox/active. Mirrors resumeFleetOnBoot's "pending board work" definition
       // (sessions/service.ts) so the two stay consistent. `held` (Board Hold Model redesign) is the SOLE owner
       // brake now, checked in ANY column — a legit card titled with uppercase HOLD/CONFIRM is counted/nudges
       // unless explicitly flagged held (card 788274a9 hardened the old OWNER_HELD_TITLE_RE false-positive
       // away). `deferred` is the manager's OWN sequencing marker (orthogonal to `held`, never checked by
       // worker_spawn) — discounted from the count the same way, so a manager's deliberate defer never
-      // triggers a recurring idle nudge.
+      // triggers a recurring idle nudge. The REVIEW lane is ALSO discounted (card follow-up): a card there
+      // is awaiting the manager's OWN merge review, not dispatchable work — role-resolved via
+      // columnKeyForRole (never a hardcoded "review" key) so a project with renamed/reordered columns still
+      // identifies it correctly. Likewise a card carrying a PENDING (unanswered) connected owner Request
+      // (db.listQuestionsForTask, the same taskId→questions linkage tasks_get's connected-requests summary
+      // and task_requests_list use) is blocked on the owner, not the manager — discounted the same way; a
+      // card whose request is already answered/consumed is NOT discounted (it's actionable again).
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
+      const reviewKey = columnKeyForRole(cols, "review");
       const nonTerminal = db.listTasks(m.projectId).filter((t) => t.columnKey !== terminalKey);
-      const openCards = nonTerminal.filter((t) => t.held !== true && t.deferred !== true);
+      const openCards = nonTerminal.filter((t) =>
+        t.held !== true
+        && t.deferred !== true
+        && t.columnKey !== reviewKey
+        && !db.listQuestionsForTask(m.projectId, t.id).some((q) => q.state === "pending"),
+      );
       // Narrow liveWorkers (all idle at this point — a live BUSY one would have skipped above) to
       // GENUINELY STRANDED ones (CR blocker #2): a live worker that's rate-limited, already reported
       // (awaiting merge), or parked awaiting an ack is NOT "unreported" and nobody needs to check on it
       // — asserting otherwise is exactly board card 99efaab3's false-alarm shape. Single-sources the SAME
       // reconciliation `notifyIdleWorker`/tickIdleWorkers use via the injected isWorkerStranded.
       const strandedWorkers = liveWorkers.filter((w) => this.deps.isWorkerStranded(w.id));
-      // If EVERY non-terminal card is held/deferred (≥1 exists, 0 genuinely-actionable) AND there's no
-      // genuinely-stranded worker to check on either, the manager has nothing it can action and no way
-      // to clear the gate → skip silently instead of deadlock-nudging. A truly empty board (no cards at
-      // all) still nudges — the manager should `idle_report 'done'`. But board card b9d479b0: a live
-      // STRANDED worker is independently actionable (check on it / worker_message it) even when every
-      // OTHER card is deliberately held/deferred — don't let this skip re-silence exactly the manager
-      // that should be checking on its stranded worker.
-      if (strandedWorkers.length === 0 && nonTerminal.length > 0 && openCards.length === 0) continue;
+      // A card sitting in review IS independently actionable by the MANAGER itself (go merge it) even
+      // though it's excluded from the dispatch-facing `openCards` tally above — unlike held/deferred/
+      // pending-request (genuinely nothing the manager can do until someone else acts), review-lane work
+      // is squarely the manager's own next step. So its presence must NOT feed the "nothing to do at all"
+      // skip below, or a done-and-awaiting-merge worker's card would silently stop nudging its manager to
+      // go merge it (regression risk on the existing worker-report → review-lane → idle-nudge coverage).
+      const hasReviewCards = nonTerminal.some((t) => t.columnKey === reviewKey);
+      // If EVERY non-terminal card is non-actionable (held/deferred/pending-request — ≥1 exists, 0
+      // genuinely-actionable) AND there's no review-lane card to merge AND no genuinely-stranded worker to
+      // check on either, the manager has nothing it can action and no way to clear the gate → skip silently
+      // instead of deadlock-nudging. A truly empty board (no cards at all) still nudges — the manager should
+      // `idle_report 'done'`. But board card b9d479b0: a live STRANDED worker is independently actionable
+      // (check on it / worker_message it) even when every OTHER card is non-actionable — don't let this skip
+      // re-silence exactly the manager that should be checking on its stranded worker.
+      if (strandedWorkers.length === 0 && !hasReviewCards && nonTerminal.length > 0 && openCards.length === 0) continue;
       const openTodos = openCards.length;
       const n = Math.round((nowMs - lastActivityMs) / 60_000);
       // Three honest cases: a genuinely-stranded live worker (say so specifically); a live worker that's

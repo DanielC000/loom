@@ -91,6 +91,20 @@ function seedTitled(e, columnKey, title, held = false, deferred = false) {
   e.db.insertTask({ id: `tk-${columnKey}-${Math.random().toString(36).slice(2, 6)}`, projectId: e.projId,
     title, body: "", columnKey, held, deferred, position: 0, createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
 }
+// Seed a connected owner Request (question) on a task — the same taskId->questions linkage tasks_get's
+// connected-requests summary / task_requests_list use. sessionId must be a live row (FK) — pass the
+// manager's own id, mirroring how a manager's own question_ask call would be attributed.
+function seedQuestion(e, sessionId, taskId, state = "pending") {
+  const id = `q-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertQuestion({
+    id, sessionId, projectId: e.projId, type: "decision", title: "a decision", body: "",
+    options: null, recommendation: null, taskId,
+    permissionAction: null, permissionScope: null, permissionExpiresAt: null, credentialEnvVar: null,
+    state, chosenOption: null, note: null, createdAt: NOW.toISOString(),
+    answeredAt: state !== "pending" ? NOW.toISOString() : null, consumedAt: null,
+  });
+  return id;
+}
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(e.dbFile + ext, { force: true }); } catch { /* ignore */ } }
@@ -110,24 +124,25 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ===== (1b) the nudge counts ALL actionable lanes (not just workReady), excluding ONLY terminal =====
+// ===== (1b) the nudge counts ALL actionable lanes (not just workReady), excluding terminal + review =====
 // (Board Hold Model redesign: the `blocked` column / `humanHold` role is retired — there is no longer a
-// column-based exclusion. A card on ANY non-terminal lane, including one literally keyed "blocked", now
-// counts as actionable unless it is explicitly `held` — see (1c) below for the held-based exclusion.)
+// column-based exclusion for it. A card on ANY non-terminal, non-review lane, including one literally
+// keyed "blocked", counts as actionable unless it is explicitly `held` — see (1c) below for the
+// held-based exclusion. The REVIEW lane IS a column-based exclusion, role-resolved — see (1f) below.)
 {
   const e = makeEnv();
   seedManager(e, "mgr-multilane");
-  // Default board: actionable = every lane EXCEPT done (terminal).
+  // Default board: actionable = every lane EXCEPT done (terminal) and review (awaiting merge review).
   seedCard(e, "inbox");        // intake      → actionable
   seedCard(e, "backlog");      // defaultLanding → actionable
   seedCard(e, "todo");         // workReady   → actionable
   seedCard(e, "in_progress");  // active      → actionable
-  seedCard(e, "review");       // review      → actionable
+  seedCard(e, "review");       // review      → EXCLUDED (not dispatchable — awaiting merge review)
   seedCard(e, "waiting");      // parked      → actionable
   seedCard(e, "done");         // terminal    → EXCLUDED
   e.watcher.tick(NOW);
-  check("(1b) counts ALL actionable lanes (6), excluding only the done lane",
-    e.enqueued.length === 1 && e.enqueued[0].text.includes("6 actionable"));
+  check("(1b) counts actionable lanes (5), excluding the done lane AND the review lane",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("5 actionable"));
   cleanup(e);
 }
 
@@ -238,6 +253,94 @@ function cleanup(e) {
   check("(1d) the ordinary + lowercase cards stay held=false", tasks().filter((t) => !t.held).length === 2);
   // One-shot: a second invocation is a clean no-op (returns 0, flips nothing more).
   check("(1d) a second backfill is a no-op (one-shot marker)", e.db.backfillHeldFromTitlesOnce() === 0);
+  cleanup(e);
+}
+
+// ===== (1f) REVIEW-lane cards are DISCOUNTED from the actionable TALLY (role-resolved), but a review =====
+// ===== card still keeps the nudge ALIVE — merging IS manager-actionable work, unlike held/deferred =====
+// (idle-watcher overcount fix): a card sitting in the review lane is awaiting the manager's OWN merge
+// review, so it's excluded from the dispatch-facing "N actionable" count (it isn't NEW work to spawn a
+// worker onto). But unlike held/deferred/pending-request (genuinely nothing the manager itself can do),
+// a review-lane card IS the manager's own next step — so its presence must NOT be treated as "nothing to
+// action" and silence the nudge entirely (that would regress the existing done-worker → review-lane →
+// idle-nudge coverage: a manager that forgot to merge a shipped worker must still get nagged). Identified
+// via columnKeyForRole(cols, "review"), never a hardcoded "review" key, so a project with renamed/
+// reordered columns still identifies the right lane.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-review-only");
+  seedCard(e, "review"); // sole open card, sitting in review
+  e.watcher.tick(NOW);
+  check("(1f) a review-lane card as the sole open card → STILL nudged (go merge it)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-review-only");
+  check("(1f) the reported actionable count EXCLUDES the review card (0, not 1 — it's not new dispatch work)",
+    e.enqueued[0]?.text.includes("0 actionable"));
+  cleanup(e);
+}
+{
+  // A genuinely-actionable card alongside a review-lane one → STILL nudges; the count EXCLUDES the review card.
+  const e = makeEnv();
+  seedManager(e, "mgr-review-mixed");
+  seedCard(e, "review");                                           // discounted from the tally
+  seedTitled(e, "todo", "fix(web): real actionable task", false);  // counted
+  e.watcher.tick(NOW);
+  check("(1f) a review + a genuine card → STILL nudged (genuine work exists)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-review-mixed");
+  check("(1f) the reported actionable count EXCLUDES the review card (1, not 2)", e.enqueued[0]?.text.includes("1 actionable"));
+  cleanup(e);
+}
+{
+  // A project with a CUSTOM review-role column key (not the literal "review" string) is still identified
+  // correctly — proves the identification is role-based, not a hardcoded key.
+  const e = makeEnv({ projectConfig: { kanbanColumns: [
+    { key: "backlog", label: "Backlog", role: "defaultLanding" },
+    { key: "doing", label: "Doing", role: "active" },
+    { key: "awaiting_merge", label: "Awaiting Merge", role: "review" },
+    { key: "shipped", label: "Shipped", role: "terminal" },
+  ] } });
+  seedManager(e, "mgr-custom-review");
+  seedCard(e, "awaiting_merge"); // sole open card, custom-keyed review lane
+  e.watcher.tick(NOW);
+  check("(1f) a CUSTOM-keyed review-role column is STILL nudged (role-resolved, not hardcoded)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-custom-review");
+  check("(1f) and its tally still excludes that custom-keyed review card (0 actionable)", e.enqueued[0]?.text.includes("0 actionable"));
+  cleanup(e);
+}
+
+// ===== (1g) cards with a PENDING connected owner Request are DISCOUNTED; ANSWERED ones are NOT =====
+// (idle-watcher overcount fix): a card gated on an unanswered owner Request is blocked on the owner, not
+// dispatchable by the manager. Reuses the same taskId→questions linkage tasks_get's connected-requests
+// summary / task_requests_list use (db.listQuestionsForTask) — a card whose request is already
+// answered/consumed is NOT discounted (it's actionable again).
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-pending-request");
+  seedCard(e, "todo");
+  const task = e.db.listTasks(e.projId)[0];
+  seedQuestion(e, "mgr-pending-request", task.id, "pending");
+  e.watcher.tick(NOW);
+  check("(1g) a card with a PENDING connected owner Request as the sole open card → NO idle nudge (blocked on owner)", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-answered-request");
+  seedCard(e, "todo");
+  const task = e.db.listTasks(e.projId)[0];
+  seedQuestion(e, "mgr-answered-request", task.id, "answered");
+  e.watcher.tick(NOW);
+  check("(1g) a card whose connected Request is ALREADY ANSWERED is NOT discounted (actionable again)",
+    e.enqueued.length === 1 && e.enqueued[0].text.includes("1 actionable"));
+  cleanup(e);
+}
+{
+  // Mixed: a pending-request card + a genuine card → still nudges, count excludes only the gated one.
+  const e = makeEnv();
+  seedManager(e, "mgr-pending-mixed");
+  seedCard(e, "todo");
+  const pendingTask = e.db.listTasks(e.projId)[0];
+  seedQuestion(e, "mgr-pending-mixed", pendingTask.id, "pending");
+  seedTitled(e, "todo", "fix(web): real actionable task", false);
+  e.watcher.tick(NOW);
+  check("(1g) a pending-request card + a genuine card → STILL nudged, count excludes only the gated one",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-pending-mixed" && e.enqueued[0].text.includes("1 actionable"));
   cleanup(e);
 }
 
