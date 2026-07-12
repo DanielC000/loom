@@ -11,7 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE } from "../pty/host.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -83,6 +83,27 @@ type GateRejectionDetail = {
 };
 
 type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string };
+
+/** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
+ *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
+type GcOutcomeResult = {
+  outcome: "removed" | "wedged" | "left-on-disk" | "needs-human-skip" | "nested-repo-blocked";
+  nestedRepoPaths?: string[];
+  scanTruncated?: boolean;
+};
+
+/** The manager-facing `warning` text for a `worker_merge_confirm` whose worktree removal was blocked by
+ *  the nested-repo guard (card b6d41db1) — shared by the Green path and the ALREADY_MERGED path
+ *  ({@link SessionService.finishAlreadyMerged}) so the two can't drift. A TRUNCATED scan (inconclusive,
+ *  not a confirmed finding) gets its own wording — never phrased as if specific paths were found. */
+function nestedRepoBlockWarning(block: { paths: string[]; truncated: boolean }): string {
+  return block.truncated
+    ? "worktree retained — the nested-repo scan was INCONCLUSIVE (truncated, or the scan itself failed) " +
+      "and could not confirm the worktree is clean, so it was NOT removed. Verify manually for a nested " +
+      "clone, then remove it yourself, or re-run worker_merge_confirm with forceRemoveWorktree:true to force removal."
+    : `worktree retained — nested git repo(s) found and NOT removed: ${block.paths.join(", ")}. ` +
+      "Move/push that content out of the worktree yourself, then remove it, or re-run worker_merge_confirm with forceRemoveWorktree:true to force removal.";
+}
 
 /**
  * worker_set_mode's mode ALLOWLIST (card 610abe29) — the security boundary for `setWorkerMode`.
@@ -379,6 +400,13 @@ export class SessionService {
    */
   private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
   /**
+   * Test-only seam for {@link findNestedGitRepos} (card b6d41db1's follow-up — the shared-chokepoint
+   * fix). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real scan. Lets a test
+   * drive a deterministic TRUNCATED result (`{repos:[],truncated:true}`) through gcWorktreeDir's
+   * fail-safe path without needing to actually create tens of thousands of files to trip the real cap.
+   */
+  private readonly findNestedGitReposOverride: ((worktreePath: string) => Promise<{ repos: string[]; truncated: boolean }>) | undefined;
+  /**
    * Injectable seam for {@link runGateSequential} (card bcba83a1 — the merge gate's kill-classification +
    * auto-retry). `undefined` in production ⇒ {@link confirmWorkerMerge} falls back to the real
    * `runGateSequential`, which spawns real processes. Lets a hermetic test drive a deterministic
@@ -499,6 +527,7 @@ export class SessionService {
       gitOpMs?: number; provisionMs?: number; runWebhookPost?: RunWebhookPoster; runWebhookTimeoutMs?: number; runTimeoutMs?: number;
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
       reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
+      findNestedGitRepos?: (worktreePath: string) => Promise<{ repos: string[]; truncated: boolean }>;
       runGate?: (gate: string, cwd: string, timeoutMs: number) => Promise<GateSequentialResult>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       codescape?: CodescapeSupervisor;
@@ -508,6 +537,7 @@ export class SessionService {
     this.provisionMs = opts?.provisionMs;
     this.removeDirOverride = opts?.removeDir;
     this.reapWorktreeProcesses = opts?.reapWorktreeProcesses;
+    this.findNestedGitReposOverride = opts?.findNestedGitRepos;
     this.runGate = opts?.runGate;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
@@ -5500,7 +5530,7 @@ export class SessionService {
    *                          recovers the commit. A 0-ahead branch with NO report stays the gentle soft retry.
    */
   async confirmWorkerMerge(
-    managerSessionId: string, workerSessionId: string, opId?: string,
+    managerSessionId: string, workerSessionId: string, opId?: string, forceRemoveWorktree?: boolean,
   ): Promise<ConfirmMergeResult> {
     // CORRELATION STAMP (card 369d8824): threaded from PendingOpRegistry.attach (the SAME opId a caller
     // routed through confirmWorkerMergeTracked was already handed in its own `{status:"pending",opId}`
@@ -5565,7 +5595,7 @@ export class SessionService {
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
       const alreadyLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (alreadyLanded) {
-        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId });
+        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree });
       }
     }
 
@@ -5820,7 +5850,7 @@ export class SessionService {
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses.
-      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId });
+      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree });
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
@@ -5835,15 +5865,19 @@ export class SessionService {
     // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
     // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
-    await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, forceRemoveWorktree });
+    // NESTED-REPO WARNING (card b6d41db1): the worktree was retained (not force-removed) because it holds
+    // an unrecoverable nested clone (or the scan couldn't confirm it was clean) — surface it so the
+    // manager knows cleanup is on it.
+    const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
     // NO-GATE WARNING (finding 8363e602): with no gateCommand configured, the branch above merges
     // unconditionally — carry that forward explicitly so the manager knows this merge was NOT verified by
     // any build/DoD check, rather than silently rubber-stamping it with no signal either way. `notified`
     // is left undefined here (unlike every other branch): the GREEN path sends no direct nudge of its
     // own, so confirmWorkerMergeTracked's generic `[loom:merge-done]` echo is the sole terminal signal.
-    return gate
-      ? { merged: true, opId: thisOpId }
-      : { merged: true, opId: thisOpId, warning: "unverified: no gateCommand is configured for this project — the merge was NOT checked by any build/DoD gate" };
+    const gateWarning = gate ? undefined : "unverified: no gateCommand is configured for this project — the merge was NOT checked by any build/DoD gate";
+    const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    return warning ? { merged: true, opId: thisOpId, warning } : { merged: true, opId: thisOpId };
   }
 
   /**
@@ -5871,6 +5905,7 @@ export class SessionService {
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
+    forceRemoveWorktree?: boolean;
   }): Promise<ConfirmMergeResult> {
     const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
     if (!alreadyFinalized) {
@@ -5880,8 +5915,11 @@ export class SessionService {
     for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
-    await this.finalizeMerge(args);
-    return { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true };
+    const finalizeResult = await this.finalizeMerge(args);
+    const warning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
+    return warning
+      ? { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true, warning }
+      : { merged: true, emptyKind: "ALREADY_MERGED", opId: args.opId, notified: true };
   }
 
   /**
@@ -5919,14 +5957,14 @@ export class SessionService {
    * that produced it.
    */
   async confirmWorkerMergeTracked(
-    managerSessionId: string, workerSessionId: string,
+    managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
   ): Promise<AttachResult<ConfirmMergeResult>> {
     const key = `merge:${workerSessionId}`;
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
     const who = (opId: string) => `worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${opId}]`;
     return this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
-      (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId),
+      (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree),
       (outcome, opId) => {
         // DOUBLE-NOTIFY FIX (card 9eea3901, widened by 187f5b76 to cover the ALREADY_MERGED success path
         // too): a branch that already sent its own rich/direct push (`outcome.value.notified` — the
@@ -6051,8 +6089,11 @@ export class SessionService {
 
   /**
    * Slow-retry-aware wrapper around {@link removeWorktree} — the single removal chokepoint shared by
-   * finalizeMerge, boot-reconcile Pass B's two GC sites, and the background wedge sweep (task dea6728e).
-   * A worktree that's given up on (`needsHuman`, past the long give-up bound) is SKIPPED entirely — no
+   * finalizeMerge, boot-reconcile Pass B's two GC sites, and the background wedge sweep (task dea6728e,
+   * widened by card b6d41db1's follow-up to be the ONE place the nested-repo guard below lives, so all
+   * four callers inherit it — a guard planted only in finalizeMerge left the other three force-removing
+   * past a nested clone with no scan at all, the exact same data-loss shape via a sibling path). A
+   * worktree that's given up on (`needsHuman`, past the long give-up bound) is SKIPPED entirely — no
    * removal is even attempted. Everything else ALWAYS attempts the removal: most wedges are eventually
    * resolvable (a held OS-indexer/Defender-scan handle releases on its own, or a pnpm-junction structure
    * `rmdir` succeeds where the old `fs.rm` choked), so a dir that was wedged before is NOT skipped here —
@@ -6064,19 +6105,56 @@ export class SessionService {
    * retrying slowly" and the low-frequency background sweep is armed so it keeps getting retried even
    * between boots.
    *
-   * BEFORE every removal attempt, sweeps and kills any OS process still ROOTED in `worktreePath` (task
-   * 8e5a7a5e — the dangling-worktree PREVENTION: an escaped esbuild service / vite dev-server holds a file
-   * handle open inside the dir and would make the removal below fail with `ERROR_SHARING_VIOLATION`, the
-   * confirmed root cause). See {@link reapProcessesRootedInWorktree} for the safety scoping — it only ever
-   * matches THIS `worktreePath`, so a caller that only ever reaches this method with a worktree it has
-   * already decided to discard (every call site here does) can never sweep a live/protected one.
+   * NESTED-REPO GUARD (card b6d41db1 — the incident): `git worktree remove --force` happily deletes
+   * EVERYTHING under the worktree, including a repo a manager (or, on the boot-reconcile paths below, an
+   * orphaned pre-merge crash) left cloned in a gitignored subdirectory with unpushed work — silently,
+   * unrecoverably. `findNestedGitRepos` scans for that BEFORE any removal is attempted; a hit (or an
+   * inconclusive TRUNCATED scan — see its own doc for why that must fail safe too) returns
+   * `"nested-repo-blocked"` and skips the removal entirely, RETAINING the worktree intact. Skippable via
+   * `opts.forceRemoveWorktree` — but ONLY finalizeMerge's manager-facing caller ever sets that; boot-
+   * reconcile Pass B's two GC sites and the background wedge sweep have no manager to warn and no
+   * override to pass, so they NEVER set it and always fail safe on a hit (a retained orphaned worktree is
+   * recoverable; a destroyed one is not).
+   *
+   * BEFORE every removal attempt (guard included), sweeps and kills any OS process still ROOTED in
+   * `worktreePath` (task 8e5a7a5e — the dangling-worktree PREVENTION: an escaped esbuild service / vite
+   * dev-server holds a file handle open inside the dir and would make the removal below fail with
+   * `ERROR_SHARING_VIOLATION`, the confirmed root cause). See {@link reapProcessesRootedInWorktree} for
+   * the safety scoping — it only ever matches THIS `worktreePath`, so a caller that only ever reaches
+   * this method with a worktree it has already decided to discard (every call site here does) can never
+   * sweep a live/protected one.
    */
   private async gcWorktreeDir(
     repoPath: string,
     worktreePath: string,
     codescapeCtx?: { projectId: string; worktreeId: string | null },
-  ): Promise<"removed" | "wedged" | "left-on-disk" | "needs-human-skip"> {
-    if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return "needs-human-skip";
+    opts?: { forceRemoveWorktree?: boolean },
+  ): Promise<GcOutcomeResult> {
+    if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return { outcome: "needs-human-skip" };
+    if (!opts?.forceRemoveWorktree) {
+      const scanFn = this.findNestedGitReposOverride ?? findNestedGitRepos;
+      // FAIL SAFE on a scan REJECTION too (a pathologically deep tree, a throwing test seam, …) — this is
+      // NOT the per-directory readdir glitch findNestedGitRepos already swallows internally; it's the scan
+      // never producing a result at all. Treating that as "confirmed clean" would proceed straight to
+      // force-remove on an INCONCLUSIVE result, contradicting this whole guard's thesis (CR follow-up on
+      // card b6d41db1: the truncated-cap path already fails safe this way — a thrown scan must too).
+      // Routes into the SAME `scan.truncated` blocked branch below, not a special case.
+      const scan = await scanFn(worktreePath).catch((): { repos: string[]; truncated: boolean } => ({ repos: [], truncated: true }));
+      if (scan.truncated) {
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] nested-repo scan of ${worktreePath} was INCONCLUSIVE (truncated, or the ` +
+          `scan itself failed) — treating as BLOCKED to fail safe rather than trusting a partial/absent ` +
+          `"nothing found." Worktree RETAINED. Verify manually for a nested clone, then remove it, or ` +
+          `re-run with forceRemoveWorktree:true.`);
+        return { outcome: "nested-repo-blocked", scanTruncated: true };
+      }
+      if (scan.repos.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`[worktree] ${worktreePath} RETAINED — nested git repo(s) found and NOT removed: ` +
+          `${scan.repos.join(", ")}. Move/push that content out of the worktree, then remove it, or re-run with forceRemoveWorktree:true.`);
+        return { outcome: "nested-repo-blocked", nestedRepoPaths: scan.repos };
+      }
+    }
     const reap = this.reapWorktreeProcesses ?? ((p: string) => reapProcessesRootedInWorktree(p));
     try {
       await reap(worktreePath);
@@ -6090,7 +6168,7 @@ export class SessionService {
       // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
       // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
       this.fireCodescapeDrop(codescapeCtx);
-      return "removed";
+      return { outcome: "removed" };
     }
     if (wedged) {
       const entry = this.db.recordWorktreeWedgeAttempt(worktreePath, repoPath, "killable removal was force-killed on timeout (handle still held)");
@@ -6103,15 +6181,15 @@ export class SessionService {
         // This IS the pass that crossed the give-up bound — report it as the give-up outcome directly
         // (not "wedged") so the caller's aggregate counts it as a give-up on the SAME pass it happened,
         // rather than under-counting it as one more ordinary retry.
-        return "needs-human-skip";
+        return { outcome: "needs-human-skip" };
       }
       // eslint-disable-next-line no-console
       console.warn(`[worktree] ${worktreePath} still wedged (attempt ${entry.attempts}) — retrying slowly ` +
         `(next: a later boot, or the background sweep in ≤${Math.round(this.wedgeSweepIntervalMs / 60_000)}min). Not abandoned.`);
       this.armWedgeSweep();
-      return "wedged";
+      return { outcome: "wedged" };
     }
-    return "left-on-disk";
+    return { outcome: "left-on-disk" };
   }
 
   /** Arm the low-frequency background wedge-retry sweep if it isn't already running. Self-disarms (see
@@ -6179,21 +6257,38 @@ export class SessionService {
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string; projectId: string;
-  }): Promise<void> {
+    /**
+     * Skip the nested-git-repo guard below and force the removal through regardless (card b6d41db1's
+     * override) — for a manager that has confirmed the worktree's untracked content is disposable.
+     * Default OFF (safe): a nested repo is retained unless this is explicitly set.
+     */
+    forceRemoveWorktree?: boolean;
+  }): Promise<{ nestedRepoBlock?: { paths: string[]; truncated: boolean } }> {
     // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
     // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
     // worker being merged (already hard-stopped by the caller). Covers BOTH confirmWorkerMerge paths
     // (ALREADY_MERGED + Green) here once, so they can't drift; at boot-reconcile it's a no-op (recoverStale-
     // Sessions has already marked prior-run ptys exited, so the task has no live siblings).
     await this.retireSiblingSessionsForTask(args.taskId, args.workerSessionId);
+    let nestedRepoBlock: { paths: string[]; truncated: boolean } | undefined;
     try {
-      const outcome = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
+      // The nested-git-repo guard (card b6d41db1) lives IN gcWorktreeDir — the single removal
+      // chokepoint every caller (this, boot-reconcile Pass B's two GC sites, the wedge sweep) shares —
+      // so it can never be bypassed via a sibling path. `forceRemoveWorktree` is threaded through ONLY
+      // from this manager-facing caller; see gcWorktreeDir's own doc for why the automatic paths never
+      // set it.
+      const result = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
         projectId: args.projectId,
         worktreeId: codescapeWorktreeId(args.taskId),
-      });
-      if (outcome !== "removed") {
+      }, { forceRemoveWorktree: args.forceRemoveWorktree });
+      if (result.outcome === "nested-repo-blocked") {
+        nestedRepoBlock = { paths: result.nestedRepoPaths ?? [], truncated: !!result.scanTruncated };
         // eslint-disable-next-line no-console
-        console.warn(`[finalizeMerge] worktree ${args.worktreePath} not removed (${outcome}); ` +
+        console.warn(`[finalizeMerge] worktree ${args.worktreePath} RETAINED (nested-repo-blocked) — ` +
+          `merge already landed, only the worktree cleanup is deferred.`);
+      } else if (result.outcome !== "removed") {
+        // eslint-disable-next-line no-console
+        console.warn(`[finalizeMerge] worktree ${args.worktreePath} not removed (${result.outcome}); ` +
           `merge already landed — finishing bookkeeping regardless.`);
       }
     } catch (e) {
@@ -6216,12 +6311,16 @@ export class SessionService {
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
       taskId: args.taskId, kind: "merge_done", detail: { branch: args.branch },
     });
-    await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs });
+    // A retained worktree (nested-repo guard above, hit OR inconclusively truncated) is still checked
+    // out on `branch` — `git branch -D` would only fail ("checked out at ...") and warn for a reason we
+    // already know, so skip it; the branch is deleted on a later confirm once the worktree is actually gone.
+    if (!nestedRepoBlock) await deleteBranch(args.repoPath, args.branch, { timeoutMs: this.gitOpMs });
     // Codescape C3: reingest main's CURRENT working tree AFTER it's been checked out above (both the
     // Green path and the ALREADY_MERGED path converge here) — fire-and-forget, NEVER awaited inline: the
     // supervisor's own request is synchronous server-side (~9-11s, single-flight-serialized), so awaiting
     // it here would hold the merge caller for that whole window. Best-effort by construction.
     this.fireCodescapeReingest(args.projectId);
+    return nestedRepoBlock ? { nestedRepoBlock } : {};
   }
 
   /**
@@ -6363,12 +6462,16 @@ export class SessionService {
       // worktrees stays byte-intact). Scope: only the no-`.git` case — NOT the rarer "`.git` exists but
       // gitdir pruned" variant.
       if (!fs.existsSync(path.join(worktreePath, ".git"))) {
-        const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath, {
+        // gcWorktreeDir's nested-repo guard applies here too (card b6d41db1 follow-up) — a partially-
+        // deleted worktree (no root `.git` linkage left) can still hold a live nested clone; NO override
+        // is ever passed on this automatic path, so a hit is always retained + logged, never destroyed.
+        const { outcome } = await this.gcWorktreeDir(project.repoPath, worktreePath, {
           projectId: project.id,
           worktreeId: codescapeWorktreeId(s.taskId),
-        }).catch(() => "left-on-disk" as const);
-        // Only an ACTUAL removal counts as pruned — "wedged"/"left-on-disk" is a retry-pending attempt,
-        // not a completed prune, and double-counting it here overstated the aggregate.
+        }).catch(() => ({ outcome: "left-on-disk" as const }));
+        // Only an ACTUAL removal counts as pruned — "wedged"/"left-on-disk"/"nested-repo-blocked" is a
+        // retry-pending (or human-recoverable) attempt, not a completed prune, and double-counting it
+        // here overstated the aggregate.
         if (outcome === "needs-human-skip") worktreesNeedsHuman++;
         else if (outcome === "removed") worktreesPruned++;
         continue;
@@ -6379,10 +6482,15 @@ export class SessionService {
         worktreesKept++;
         continue;
       }
-      const outcome = await this.gcWorktreeDir(project.repoPath, worktreePath, {
+      // Same nested-repo guard, same "never override on an automatic path" rule as above — this is the
+      // OTHER Pass B GC site (a provably-disposable worktree per worktreeHasWork), and it's the incident's
+      // worse real trigger: a pre-merge crash orphans a worktree whose nested clone is GITIGNORED, so
+      // `git status --porcelain`/worktreeHasWork are both blind to it and would otherwise force-remove
+      // straight through.
+      const { outcome } = await this.gcWorktreeDir(project.repoPath, worktreePath, {
         projectId: project.id,
         worktreeId: codescapeWorktreeId(s.taskId),
-      }).catch(() => "left-on-disk" as const);
+      }).catch(() => ({ outcome: "left-on-disk" as const }));
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
       else if (outcome === "removed") worktreesPruned++;

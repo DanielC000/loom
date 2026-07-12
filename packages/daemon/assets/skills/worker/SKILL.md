@@ -156,6 +156,15 @@ via a real install or a plain file copy, never a junction/symlink into a tree th
 clone or check out large/deep trees into a **short** filesystem path to avoid Windows MAX_PATH (260-char)
 failures — enable `core.longpaths` if the path is unavoidably deep.
 
+**Your worktree is force-removed on merge — nothing durable belongs inside it that isn't committed.**
+Once your work merges, the whole worktree directory is force-deleted, including any gitignored/untracked
+content — build output, caches, and (this is the trap) anything you cloned or created inside it that
+ISN'T part of your own commit. If your task needs another repo checked out alongside your work (e.g. a
+reference clone, a scratch experiment), put it **outside** your worktree, or make sure its own work is
+**pushed to its own remote** before you report done — an unpushed branch left inside your worktree is
+gone, unrecoverably, the moment the merge cleanup runs. This is a safety net, not a substitute for
+following that rule: don't rely on it refusing removal on your behalf.
+
 **Never let a shell command hang your turn.** Your session is **unattended** — a command that blocks on
 input never returns, so the turn never ends and you wedge at `busy` (a false "stuck" trip + your report
 sits undelivered). Always inspect git with **`git --no-pager`** (`git --no-pager diff`, `git --no-pager

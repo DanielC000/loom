@@ -549,6 +549,75 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
   }
 }
 
+/** Directories a nested-repo scan never descends into — every one is bulk ephemeral build/dep output
+ *  that never legitimately contains a nested clone (and can otherwise burn the whole scan budget before
+ *  the walk ever reaches a real nested repo sitting alongside it); a worktree's own root `.git` linkage
+ *  is not itself a finding either. */
+const NESTED_REPO_SCAN_SKIP_DIRS = new Set(["node_modules", ".git", "dist", "build", ".turbo", ".next", "coverage"]);
+
+/** Hard cap on directory entries visited by {@link findNestedGitRepos} — a pathological tree stops the
+ *  scan rather than running unbounded. Hitting this is signalled via `truncated`, NOT silently reported
+ *  as clean — see the doc below for why a truncated scan must never be treated as "nothing found". */
+const NESTED_REPO_SCAN_MAX_ENTRIES = 20_000;
+
+/** {@link findNestedGitRepos}'s result. `truncated:true` means the scan hit {@link
+ *  NESTED_REPO_SCAN_MAX_ENTRIES} before finishing — `repos` is then only a PARTIAL result, and callers
+ *  MUST fail safe (treat the worktree as if a nested repo were found) rather than trust an empty `repos`
+ *  as "confirmed clean". */
+export interface NestedRepoScanResult {
+  repos: string[];
+  truncated: boolean;
+}
+
+/**
+ * Find nested git repositories inside a worker worktree (card b6d41db1) — a subdirectory carrying its
+ * OWN `.git` (dir or file), distinct from the worktree's own root git linkage. Every worker worktree
+ * ALWAYS has expected ephemeral untracked content (`node_modules`, `dist`, `.turbo`, …) — that's WHY
+ * removeWorktree force-removes it — but a nested `.git` marks something else: a cloned repo, which can
+ * hold real unrecoverable work (unpushed branches). This is the precise signal that distinguishes that
+ * valuable class from ordinary build/dep noise.
+ *
+ * ASYNC + BOUNDED: walks with `fs.promises.readdir` (never a synchronous recursive walk that could block
+ * the event loop) and stops after {@link NESTED_REPO_SCAN_MAX_ENTRIES} visited entries — signalling
+ * `truncated:true` when it does, so a caller can distinguish "confirmed clean" from "gave up partway"
+ * (CR finding, card b6d41db1 follow-up: a cap that silently returns a partial `repos` list lets a wide
+ * enough build-output sibling exhaust the budget before the walk ever reaches a real nested repo,
+ * re-opening the exact data-loss hole this scan exists to close). Never descends into the known
+ * build/dep noise dirs in {@link NESTED_REPO_SCAN_SKIP_DIRS} (bulk of most trees, never a legitimate
+ * nested-repo location) or into a repo it just found (no need to look inside a clone for further
+ * clones). Fails OPEN on a read error for any one directory (permissions, a race with concurrent
+ * cleanup) — a scan glitch on ONE subdirectory must never itself block a legitimate merge; it simply
+ * skips what it couldn't read (distinct from hitting the entry cap, which DOES signal `truncated`).
+ */
+export async function findNestedGitRepos(worktreePath: string): Promise<NestedRepoScanResult> {
+  const repos: string[] = [];
+  let visited = 0;
+  let truncated = false;
+  async function walk(dir: string): Promise<void> {
+    if (visited >= NESTED_REPO_SCAN_MAX_ENTRIES) { truncated = true; return; }
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (visited >= NESTED_REPO_SCAN_MAX_ENTRIES) { truncated = true; return; }
+      visited++;
+      if (!entry.isDirectory() || NESTED_REPO_SCAN_SKIP_DIRS.has(entry.name)) continue;
+      const full = path.join(dir, entry.name);
+      const hasGit = await fs.promises.access(path.join(full, ".git")).then(() => true, () => false);
+      if (hasGit) {
+        repos.push(full);
+        continue; // a repo's own tree needs no further descent
+      }
+      await walk(full);
+    }
+  }
+  await walk(worktreePath);
+  return { repos, truncated };
+}
+
 /** Result of one {@link killableRemoveDir} attempt. */
 export interface RemoveDirResult {
   /** `target` is confirmed GONE from disk after this attempt. */
