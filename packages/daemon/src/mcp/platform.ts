@@ -1278,9 +1278,12 @@ export class PlatformMcpRouter {
           "that isn't on the Lead's own home board; omit to leave it untouched), deferred? (a manager's own " +
           "sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but " +
           "unlike held it never blocks worker_spawn; omit to leave it untouched). Reuses the SAME backing path + " +
-          "column validation as the in-project loom-tasks tasks_update. A taskId not on the named project " +
+          "column validation as the in-project loom-tasks tasks_update — INCLUDING its trimmed-ack behavior: a " +
+          "patch that doesn't touch body returns a small ack ({id,title,columnKey,priority,position,held," +
+          "deferred,updatedAt,changed}, no body) instead of the full card; pass body to intentionally edit it " +
+          "and get the full updated Task row back. A taskId not on the named project " +
           "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
-          "project_get). Returns the updated Task row. Error if the project is unknown or an ambiguous prefix " +
+          "project_get). Error if the project is unknown or an ambiguous prefix " +
           "(the error names the candidate ids).",
         inputSchema: {
           projectId: z.string(),

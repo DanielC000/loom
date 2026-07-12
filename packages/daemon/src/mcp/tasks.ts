@@ -237,10 +237,21 @@ export function createProjectTask(
   return task;
 }
 
+/**
+ * The trimmed ack {@link updateProjectTask} returns for a patch that does NOT touch `body` (card
+ * 3be9389b) — a column/priority/deferred/held-only move (the common case during board repair)
+ * used to echo the ENTIRE updated task back, including a full multi-hundred-word body the caller
+ * never asked to see. Still a valid task-ish object (id + the small fields), just without the
+ * heavy field — plus `changed`, the patch keys the caller actually passed.
+ */
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred"> & {
+  changed: string[];
+};
+
 export function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>,
-): Task | { error: string } {
+): Task | TaskUpdateAck | { error: string } {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
   // an exact id, so a prefix must never be written straight through.
@@ -257,7 +268,15 @@ export function updateProjectTask(
     }
   }
   db.updateTask(owned.id, patch);
-  return { ...owned, ...patch, updatedAt: new Date().toISOString() };
+  const updated = { ...owned, ...patch, updatedAt: new Date().toISOString() };
+  // A patch that doesn't touch `body` doesn't need it echoed back — trim to the small fields. A patch
+  // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
+  // see the result).
+  if (patch.body === undefined) {
+    const { id, title, columnKey, priority, position, held, deferred, updatedAt } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, updatedAt, changed: Object.keys(patch) };
+  }
+  return updated;
 }
 
 /**
@@ -292,7 +311,7 @@ export const TASK_TOOL_DESCRIPTORS = [
   { name: "tasks_list", description: "List the current project's board tasks. Defaults to a lightweight summary (no body) with done cards excluded; pass includeBody:true or use tasks_get(id) for bodies." },
   { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Also returns a `requests` summary ({total, answered, pending, items:[{id,type,title,state}]}) of any Requests connected to this task (via taskId at question_ask time) — a task may carry prior owner decisions you'd otherwise miss; read them in full with task_requests_list/task_request_get." },
   { name: "tasks_create", description: "Create a task on the current project's board (title, body?, columnKey?, priority?). priority is p0|p1|p2|p3 (low number = higher priority), default p2." },
-  { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?, deferred?) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts; deferred=true is YOUR OWN (manager) sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but unlike held it never blocks worker_spawn." },
+  { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?, deferred?) by id, within the current project. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts; deferred=true is YOUR OWN (manager) sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but unlike held it never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack (no body) instead of echoing the full card; pass body when intentionally editing it to get the full task back." },
   { name: "task_requests_list", description: "List every Request connected to a task (pending + answered + consumed alike), title-altitude only: {id,type,title,state,answeredAt}. NON-CONSUMING — re-readable across turns/agents, unlike question_pull's drain-and-consume. taskId accepts the full id OR an unambiguous 8-char id-prefix." },
   { name: "task_request_get", description: "Read ONE connected Request in full (body, options, recommendation, type, state) plus its answer by type — chosenOption/note for decision|input, approved/note for permission, ack ONLY (never the secret) for credential. NON-CONSUMING. id is the request id; an optional taskId further scopes the lookup." },
 ] as const;

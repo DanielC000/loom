@@ -21,7 +21,7 @@ import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
-import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary } from "../mcp/tasks.js";
+import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation } from "./attestation.js";
@@ -1126,7 +1126,7 @@ const BOARD_REACH: CompanionCapability = {
         const contentIsVerbatim = authoredContentAllowed(cfg)
           || ((!hasTitle || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedTitle as string))
             && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string)));
-        const applyPatch = (): { error: string } | { updated: Task } => {
+        const applyPatch = (): { error: string } | { updated: Task | TaskUpdateAck } => {
           const patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "priority" | "held">> = {};
           if (hasTitle) patch.title = normalizedTitle;
           if (hasBody) patch.body = normalizedBody;
