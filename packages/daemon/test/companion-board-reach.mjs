@@ -18,6 +18,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       surface); a mode:'act' grant DOES register both (card 7975c034 — the ACT half's own guards are
 //       tested separately in companion-board-write.mjs). NO delete tool is ever registered, under
 //       either mode.
+//   (g) `includeDone`/`columns` filters (card e3b477e7): default (neither passed) stays byte-identical
+//       (excludeDone:true, all columns); includeDone:true surfaces done/terminal cards; columns narrows
+//       to the given column keys (composes with includeDone); the per-project scope check still applies
+//       when filters are passed alongside an out-of-scope `project`.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-board-reach.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -114,6 +118,46 @@ try {
     const rejected = await call(client, "board_list", { project: projB });
     check("(b) a `project` selector OUTSIDE scope is REJECTED with an {error} (can never widen scope)",
       typeof rejected.error === "string" && rejected.cards === undefined);
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ (g) includeDone/columns filters (card e3b477e7) — additive, default unchanged ============
+  {
+    const db = tmpDb();
+    const proj = "proj-filters";
+    seedProject(db, proj, "Filters");
+    const companionSess = "companion-filters";
+    seedSession(db, companionSess, proj, "assistant");
+
+    seedTask(db, "f-backlog", proj, { title: "Backlog card", columnKey: "backlog" });
+    seedTask(db, "f-progress", proj, { title: "In-progress card", columnKey: "in_progress" });
+    seedTask(db, "f-done", proj, { title: "Done card", columnKey: "done" });
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const byDefault = await call(client, "board_list", {});
+    check("(g) default (no filters) excludes the done card — unchanged", !byDefault.cards.some((c) => c.id === "f-done"));
+    check("(g) default (no filters) includes non-done cards — unchanged", byDefault.cards.some((c) => c.id === "f-backlog") && byDefault.cards.some((c) => c.id === "f-progress"));
+
+    const withDone = await call(client, "board_list", { includeDone: true });
+    check("(g) includeDone:true includes the done/terminal card", withDone.cards.some((c) => c.id === "f-done"));
+    check("(g) includeDone:true still includes non-done cards", withDone.cards.some((c) => c.id === "f-backlog"));
+
+    const oneColumn = await call(client, "board_list", { columns: ["backlog"] });
+    check("(g) columns:['backlog'] returns only the backlog card", oneColumn.cards.length === 1 && oneColumn.cards[0].id === "f-backlog");
+    check("(g) columns:['backlog'] excludes the in_progress card", !oneColumn.cards.some((c) => c.id === "f-progress"));
+
+    const columnsWithDone = await call(client, "board_list", { includeDone: true, columns: ["done"] });
+    check("(g) columns:['done'] + includeDone:true returns only the done card", columnsWithDone.cards.length === 1 && columnsWithDone.cards[0].id === "f-done");
+
+    const rejectedScope = await call(client, "board_list", { project: "proj-not-granted", includeDone: true });
+    check("(g) per-project scope check still enforced when filters are passed",
+      typeof rejectedScope.error === "string" && rejectedScope.cards === undefined);
 
     await client.close();
     db.close();

@@ -751,14 +751,16 @@ const BOARD_REACH: CompanionCapability = {
       "board_list",
       {
         description:
-          "Read-only view of board cards (done/terminal cards excluded, mirroring tasks_list's default) " +
-          "in your granted project(s): id, title, column, priority, position, last-updated, and which " +
-          "project each card belongs to. Optionally pass `project` (a project id) to narrow to ONE of " +
-          "your granted projects — passing a project you were NOT granted is rejected with an {error}; " +
-          "omitting it returns every granted project's cards.",
-        inputSchema: { project: z.string().optional() },
+          "Read-only view of board cards (done/terminal cards excluded by default, mirroring tasks_list's " +
+          "default) in your granted project(s): id, title, column, priority, position, last-updated, and " +
+          "which project each card belongs to. Optionally pass `project` (a project id) to narrow to ONE " +
+          "of your granted projects — passing a project you were NOT granted is rejected with an {error}; " +
+          "omitting it returns every granted project's cards. Pass `includeDone:true` to also include " +
+          "done/terminal cards, and/or `columns` to narrow to specific column keys (mirrors tasks_list's " +
+          "excludeDone/columns filters). Omitting both filters is byte-identical to today's behavior.",
+        inputSchema: { project: z.string().optional(), includeDone: z.boolean().optional(), columns: z.array(z.string()).optional() },
       },
-      async ({ project }) => {
+      async ({ project, includeDone, columns }) => {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
@@ -767,7 +769,7 @@ const BOARD_REACH: CompanionCapability = {
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
         const cards = [...targetProjects].flatMap((pid) => {
           const projectName = db.getProject(pid)?.name ?? null;
-          return (listProjectTasks(db, pid, { excludeDone: true }) as TaskSummary[]).map((t) => ({
+          return (listProjectTasks(db, pid, { excludeDone: !includeDone, columns }) as TaskSummary[]).map((t) => ({
             id: t.id, title: t.title, columnKey: t.columnKey, priority: t.priority,
             position: t.position, updatedAt: t.updatedAt, projectId: pid, projectName,
           }));
