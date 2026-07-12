@@ -175,7 +175,9 @@ MCP — spawns with one), use it:
    generic session scratch/temp dir, and a path outside Playwright's own allowed roots is rejected ("…
    is outside allowed roots"); a bare or relative name also resolves against the browser tool's client
    workspace (the repo root), litters the tree, and risks an accidental commit (`git status` will flag
-   it). To persist a shot **as a file**, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
+   it). **If your session has browser-testing tools, that allowed root is exposed to you directly as the
+   `$LOOM_SCRATCH_DIR` environment variable** — persist a shot there rather than your generic session
+   scratch/temp dir. To persist a shot **as a file**, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
    reachable file (Claude Code issue #40141). Use Playwright `page.screenshot({ path })` against the
    loopback page (launch with `{ channel: 'chrome' }` to reuse system Chrome and skip a download), or
    decode the base64 from the transcript for a shot you already captured.

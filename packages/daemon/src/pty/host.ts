@@ -1557,6 +1557,25 @@ export function buildSpawnEnv(
 }
 
 /**
+ * The `LOOM_SCRATCH_DIR` env addition for a browser-testing spawn — `@playwright/mcp`'s `checkFile`
+ * guard only allows a write inside `--output-dir` (which `buildMcpServers` always points at
+ * `sessionScratchDir`) or the subprocess's inherited cwd, so a browser-capable agent needs to be TOLD
+ * that path to stage a `browser_file_upload` source file or persist an explicit-path screenshot inside
+ * an allowed root — its generic harness scratchpad is neither.
+ *
+ * Gated on `mcpServers.playwright` itself (the ACTUAL mount decision), not a raw `browserTesting` flag,
+ * so this can never disagree with whether the Playwright MCP mounted — a resolution failure (see
+ * `playwrightMcpServer`) leaves both the MCP and this var absent. Returns `{}` for every other spawn
+ * (fully additive — byte-identical env when off).
+ */
+export function browserScratchEnv(
+  mcpServers: Record<string, unknown>,
+  sessionId: string,
+): Record<string, string> {
+  return mcpServers.playwright ? { LOOM_SCRATCH_DIR: sessionScratchDir(sessionId) } : {};
+}
+
+/**
  * The host's default interactive shell, used to PREFILL the "+ Shell" modal (the human can override).
  * Windows: prefer PowerShell 7 (pwsh), else Windows PowerShell, else cmd — returned as an ABSOLUTE path
  * (node-pty's Windows agent doesn't search %PATH%). Unix: $SHELL, else /bin/bash. This is a convenience
@@ -2353,6 +2372,14 @@ export class PtyHost {
     // off the var is absent and every existing spawn's env is byte-identical. A deliberate override wins.
     if (env.LOOM_OBSIDIAN_AUTOSTART === "1" && !env.LOOM_OBSIDIAN_PREFLIGHT) {
       env.LOOM_OBSIDIAN_PREFLIGHT = ENSURE_OBSIDIAN_SCRIPT;
+    }
+    // LOOM_SCRATCH_DIR: tell a browser-testing agent WHERE its Playwright tools' own write boundary is.
+    // See browserScratchEnv for the gating rationale. Ensure the dir actually EXISTS (best-effort) so the
+    // agent can Write a file into it immediately (e.g. to stage a browser_file_upload source).
+    const scratchEnv = browserScratchEnv(mcpServers, opts.sessionId);
+    if (scratchEnv.LOOM_SCRATCH_DIR) {
+      try { fs.mkdirSync(scratchEnv.LOOM_SCRATCH_DIR, { recursive: true }); } catch { /* best-effort; never block spawn */ }
+      Object.assign(env, scratchEnv);
     }
 
     // Belt-and-suspenders (agent-tooling P4): redact any capability secret out of the LOGGED argv even

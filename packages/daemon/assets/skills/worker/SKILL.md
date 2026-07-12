@@ -99,7 +99,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    flags it) and risks an accidental commit. The only sanctioned destinations are the repo-external
    per-session scratch dir (the auto-name default) or, if you must persist a shot as a project artifact,
    the project's configured `vaultPath` when it has one — never an arbitrary path you pick. When unsure of
-   that root, pass no filename/path at all and let the tool auto-name into it. For a NEW interactive control (toggle, button, input, menu), a render-only check is
+   that root, pass no filename/path at all and let the tool auto-name into it. **If your session has
+   browser-testing tools, that allowed root is also exposed to you directly as the `$LOOM_SCRATCH_DIR`
+   environment variable** — stage a file-upload source there too (not your generic harness scratchpad,
+   which the browser tools reject as outside allowed roots). For a NEW interactive control (toggle, button, input, menu), a render-only check is
    not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
    before vs. after — not just that the page renders without console errors. `@playwright/mcp`'s
    `browser_click` takes `{ element: "<human-readable description>", target: "<exact ref from a

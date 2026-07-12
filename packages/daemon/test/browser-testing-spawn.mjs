@@ -19,6 +19,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       card 61ab62e3: an earlier revision pointed --output-dir at vaultPath when set, which meant the
 //       ARIA `page-*.yml` snapshot @playwright/mcp writes by default on every browser tool call littered
 //       the user's Obsidian vault. buildMcpServers no longer takes a vaultPath param at all.
+//   plus (env) browserScratchEnv sets LOOM_SCRATCH_DIR == sessionScratchDir (== the Playwright
+//       --output-dir) for a browserTesting spawn, and is fully absent for a plain spawn — gated on the
+//       mcp-config's actual 'playwright' entry, not a raw flag.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/browser-testing-spawn.mjs
 import fs from "node:fs";
@@ -40,7 +43,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildMcpServers, playwrightMcpServer } = await import("../dist/pty/host.js");
+const { PtyHost, buildMcpServers, playwrightMcpServer, browserScratchEnv } = await import("../dist/pty/host.js");
 const { sessionScratchDir } = await import("../dist/paths.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -112,6 +115,23 @@ check("(out) playwrightMcpServer() with no dir omits --output-dir (additive)",
 const plainBrowser = buildMcpServers({ sessionId: "s2", port: 4317, browserTesting: true });
 check("(a) browserTesting works for a role-null session too (orthogonal to role)",
   "playwright" in plainBrowser && !("loom-orchestration" in plainBrowser));
+
+// ===================== (env) LOOM_SCRATCH_DIR — the agent's own pointer to Playwright's write boundary =====================
+// @playwright/mcp's checkFile guard only allows a write inside --output-dir or cwd; the agent's generic
+// harness scratchpad is neither, so a browser-testing session needs LOOM_SCRATCH_DIR telling it exactly
+// where --output-dir points (sessionScratchDir) so it can stage an upload / persist an explicit-path shot.
+const scratchOn = browserScratchEnv(on, "s1");
+const scratchOff = browserScratchEnv(off, "s1");
+check("(env) browserTesting spawn: LOOM_SCRATCH_DIR is present and equals sessionScratchDir(sessionId)",
+  scratchOn.LOOM_SCRATCH_DIR === sessionScratchDir("s1"));
+check("(env) browserTesting spawn: LOOM_SCRATCH_DIR equals the Playwright --output-dir (same allowed root)",
+  scratchOn.LOOM_SCRATCH_DIR === on.playwright.args[on.playwright.args.indexOf("--output-dir") + 1]);
+check("(env) plain (non-browser) spawn: NO LOOM_SCRATCH_DIR key at all", !("LOOM_SCRATCH_DIR" in scratchOff));
+check("(env) plain spawn: browserScratchEnv returns {} (fully additive)", Object.keys(scratchOff).length === 0);
+// Gated on the ACTUAL mount (mcpServers.playwright), not a raw flag — a map that never got the entry
+// (e.g. resolution failure) yields no env var either, even if called with browserTesting semantics elsewhere.
+check("(env) gated on the map's actual 'playwright' entry, not a separate flag",
+  JSON.stringify(browserScratchEnv({ "loom-tasks": off["loom-tasks"] }, "s1")) === "{}");
 
 // ===================== --output-dir is ALWAYS scratch, never the vault (card 61ab62e3) =====================
 // buildMcpServers no longer accepts (or consults) a vaultPath — an unrecognized property passed alongside
@@ -235,6 +255,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — opt-in worker browser: resolveProfile backstops/passes browserTesting; the Playwright stdio MCP is injected iff browserTesting (absolute paths, headless+isolated, byte-identical off); the flag threads through startNew/resume/spawnWorker + the persisted row — claude-free, network-free."
+  ? "\n✅ ALL PASS — opt-in worker browser: resolveProfile backstops/passes browserTesting; the Playwright stdio MCP is injected iff browserTesting (absolute paths, headless+isolated, byte-identical off); LOOM_SCRATCH_DIR mirrors the Playwright --output-dir iff the MCP mounted (absent otherwise); the flag threads through startNew/resume/spawnWorker + the persisted row — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
