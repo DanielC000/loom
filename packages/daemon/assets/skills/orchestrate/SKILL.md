@@ -46,7 +46,7 @@ so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, 
 round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start** — include the
 orientation reads (`worker_list` is your standard first call) and the direction tools, so even your
 first bare call lands:
-`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask`
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__deploy,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask`
 (add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
 
 ## Standing goal — never idle
@@ -402,7 +402,9 @@ mid-report — before sending anything.
    or file an owner go/no-go for one — for work a handoff calls un-built, confirm against `git log`/`git
    merge-base` that those commits aren't ALREADY on the mainline.** A resume doc's "still to build" line
    goes stale the moment the work lands, and re-dispatching already-merged work burns a worker (and can
-   spend a consumed owner decision) re-deriving what already exists.
+   spend a consumed owner decision) re-deriving what already exists. The same check applies to a build
+   card scoped from an eval or inference of a "missing" capability — confirm the feature isn't already
+   merged (`git log` / grep the code) before spawning a builder to (re)discover it.
    **Other vault notes — shallow taxonomy, not flat.** Your resume doc (and any note the project's
    `CLAUDE.md` pins by exact path) stays at the vault root; **every other note goes in a one-level
    taxonomy folder** named in that project's `CLAUDE.md` **"Vault structure"** section (mirrors the
