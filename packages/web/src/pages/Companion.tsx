@@ -1357,6 +1357,10 @@ function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
 
   const rows = grants.data?.grants ?? [];
   const liveProcessStartedAt = grants.data?.liveProcessStartedAt ?? null;
+  // Server-computed grant-time co-grant advisories over the WHOLE grant set (owner decision 4c33a1bc). The
+  // GET re-derives them on every refetch, so this banner is PERSISTENT — a risky pair stays flagged across
+  // reloads and after any grant mutation, not just on the POST that first created it.
+  const coGrantWarnings = grants.data?.warnings ?? [];
   const projectList = projects.data ?? [];
 
   // SERVER-DERIVED apply-pending (Code Review Major #1): a non-appliesLive grant created AFTER the running
@@ -1413,6 +1417,33 @@ function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
             </div>
           )}
           {respawn.error && <span style={errStyle}>{(respawn.error as Error).message}</span>}
+
+          {coGrantWarnings.length > 0 && (
+            <div
+              data-testid="companion-grants-cogrant-warning"
+              role="alert"
+              style={{
+                display: "flex", flexDirection: "column", gap: 10, padding: "10px 12px",
+                border: `1px solid ${color.amber}`, borderRadius: radius.base, background: "rgba(232,168,68,0.07)",
+              }}
+            >
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <Badge tone="amber">heads up</Badge>
+                <strong style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>
+                  Risky capability combination
+                </strong>
+              </div>
+              <p style={{ ...hint, margin: 0 }}>
+                These grants are allowed and stay active — you're being told so you can grant them knowingly.
+              </p>
+              {coGrantWarnings.map((w) => (
+                <div key={w.code} data-testid={`companion-cogrant-warning-${w.code}`} style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+                  <strong style={{ fontFamily: font.mono, fontSize: 12, color: color.amber }}>{w.title}</strong>
+                  <p style={{ ...hint, margin: 0 }}>{w.detail}</p>
+                </div>
+              ))}
+            </div>
+          )}
 
           <GrantsByProject rows={rows} projects={projectList} />
 

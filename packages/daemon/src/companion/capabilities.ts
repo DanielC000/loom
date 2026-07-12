@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CompanionRoute, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
+import type { CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionRoute, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -37,6 +37,85 @@ export const COMPANION_CAPABILITY_SLUGS = [
   "board-reach", "vault-read", "media-out", "transcript-read", "session-spawn",
 ] as const;
 export type CapabilitySlug = (typeof COMPANION_CAPABILITY_SLUGS)[number];
+
+// --- Grant-time co-grant RISK ADVISORIES (owner decision `4c33a1bc`, 2026-07-12) — the SINGLE
+// server-side source of truth for "this combination of grants is riskier together than apart." These are
+// WARNINGS, never blocks: the grant always succeeds; the owner opted into the risk knowingly (option B —
+// keep the friction-free model, but be told at grant time). Computed over a session's WHOLE resolved grant
+// set (`computeCoGrantWarnings`), returned on the grants GET/POST/PUT responses, and rendered by the human
+// grant UI. Deliberately kept as a small explicit slug list, not derived from per-act FrictionTier logic
+// (which is decided per-CALL, e.g. a decisions-relay act is Tier A for a "general" decision but Tier X for
+// a deploy/irreversible one): the ADVISORY is about which levers were CO-GRANTED, a static grant-set fact.
+
+/** The "session-steer class" — the friction-free cross-session CONTROL levers (session_message/steer/stop/
+ *  resume all live under the ONE `session-steer` slug). An ACT grant here commits with no per-action
+ *  confirm, so pairing it with `transcript-read` is the injection-launder risk the primary advisory warns
+ *  about. A list (not a single slug) so a future 2nd session-control lever joins the risk model by name. */
+const SESSION_STEER_CLASS_SLUGS: readonly string[] = ["session-steer"];
+
+/** The levers whose ACT half flows through the ONE shared per-(session,route,sender) Tier-A trust window
+ *  (a confirm on any of them warms it for the rest until it cools) — `decisions-relay` (a "general"
+ *  decision) and `board-reach` (create/update). `session-spawn` (Tier X, always steps up) and
+ *  `session-steer` (friction-free, never touches the window) are deliberately EXCLUDED — see the secondary
+ *  advisory's own doc. Used only to count DISTINCT co-granted Tier-A act capabilities for that advisory. */
+const TIER_A_ACT_SLUGS: readonly string[] = ["decisions-relay", "board-reach"];
+
+/**
+ * Compute the grant-time co-grant advisories for a companion session's WHOLE resolved grant set (pass every
+ * row from `listCompanionCapabilityGrantsForSession` — cross-project by design: `transcript-read` on
+ * project X + `session-steer` on project Y is exactly the risk, so project is deliberately ignored here).
+ * Pure + side-effect-free; returns `[]` for a benign grant set (the common case), so a single-lever grant
+ * surfaces nothing. Order is stable (primary launder risk first, then the shared-window ceiling).
+ *
+ * (1) transcript-read + session-steer LAUNDER: `transcript_read` pulls UNTRUSTED transcript text into the
+ *     owner's turn context, and a friction-free session-steer act can then commit an attacker-composed
+ *     steer on that SAME owner-authored turn with no confirm — so injected instructions can be laundered
+ *     from a transcript into a real cross-session action inside one benign turn. Fires when BOTH are in the
+ *     grant set (transcript-read is read-only, so any grant of it counts; session-steer must be act).
+ * (2) MULTI-Tier-A shared-window ceiling (CR LOW #4): 2+ DISTINCT Tier-A act capabilities share one trust
+ *     window, so a confirm on the lowest-stakes one warms it for ALL of them — the effective confirmation
+ *     ceiling becomes the highest-consequence Tier-A act granted, not each on its own.
+ */
+export function computeCoGrantWarnings(grants: Pick<CompanionCapabilityGrant, "capability" | "mode">[]): CompanionCoGrantWarning[] {
+  const warnings: CompanionCoGrantWarning[] = [];
+
+  // (1) transcript-read is read-only (its only mode is "read"), so its mere PRESENCE is the read half;
+  //     the steer half must be an ACT grant to be friction-free-committable.
+  const hasTranscriptRead = grants.some((g) => g.capability === "transcript-read");
+  const hasSessionSteer = grants.some((g) => g.mode === "act" && SESSION_STEER_CLASS_SLUGS.includes(g.capability));
+  if (hasTranscriptRead && hasSessionSteer) {
+    warnings.push({
+      code: "transcript-steer-launder",
+      title: "Reading transcripts + steering sessions is a risky pair",
+      detail:
+        "This companion can both READ session transcripts and STEER sessions (message/redirect/stop/resume) " +
+        "on your behalf. Transcript text is untrusted — an attacker who plants instructions inside a " +
+        "transcript can get them read into a turn and then acted on as a friction-free steer, all inside " +
+        "one message you authored, with no separate confirmation. You chose to keep session control " +
+        "confirmation-free, so grant this combination only where you accept that risk. To close it, revoke " +
+        "one side of the pair (transcript reading or session control) for this companion.",
+    });
+  }
+
+  // (2) Distinct co-granted Tier-A act capabilities (dedupe by slug — the same capability on several
+  //     projects is still one capability for this ceiling; it's cross-CAPABILITY sharing that matters).
+  const tierAActCaps = new Set(
+    grants.filter((g) => g.mode === "act" && TIER_A_ACT_SLUGS.includes(g.capability)).map((g) => g.capability),
+  );
+  if (tierAActCaps.size >= 2) {
+    warnings.push({
+      code: "multi-tier-a-window",
+      title: "Act levers share one confirmation window",
+      detail:
+        "You've granted more than one act lever that shares a single trust window (decisions relay, board " +
+        "reach). Confirming the lowest-stakes act warms that window for ALL of them until it cools — so the " +
+        "effective confirmation ceiling is the most consequential act you've granted, not each one on its " +
+        "own. Grant them together only where that shared trust is acceptable.",
+    });
+  }
+
+  return warnings;
+}
 
 /** One project's resolved {mode, config} within a capability's scope — see {@link ResolvedGrantScope}. */
 export interface ProjectGrant {

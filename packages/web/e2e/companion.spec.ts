@@ -477,6 +477,63 @@ test("Capabilities: an elevated lever (session control) gates its initial grant 
   await expect(card.getByText("on · 1 project", { exact: true })).toBeVisible();
 });
 
+test("Capabilities: co-granting transcript-read + session control surfaces a grant-time risk banner that persists and clears on revoke", async ({ page, loomDaemon }) => {
+  // Card 9beb5ae5 (owner decision 4c33a1bc): the risky PAIR — transcript-read (reads untrusted transcript
+  // text into a turn) + session-steer (friction-free cross-session control) — can launder injected
+  // instructions into a real action inside one owner turn. The owner chose to KEEP the friction-free model
+  // but be WARNED at grant time. The warning is server-computed over the whole grant set and rendered here;
+  // the grant still succeeds (a warning, never a block). Same no-spawn seeded-companion path as the sibling
+  // grant tests. We grant transcript-read (read-only, direct) then session control (elevated, confirm-gated).
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  const companion = await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const focus = async () => {
+    const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+    if (await pickerBtn.count()) {
+      await pickerBtn.click();
+      await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+    }
+    await page.getByRole("tab", { name: "Manage" }).click();
+  };
+  await focus();
+
+  const banner = page.getByTestId("companion-grants-cogrant-warning");
+  // No banner before the risky pair exists.
+  await expect(banner).toHaveCount(0);
+
+  // Grant transcript-read (read-only → direct grant, no confirm) on the companion's own project.
+  const transcriptCard = page.getByTestId("companion-lever-transcript-read");
+  await transcriptCard.getByRole("combobox", { name: "Grant Transcript read on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-transcript-read").click();
+  await expect(transcriptCard.getByText("on · 1 project", { exact: true })).toBeVisible();
+  // Still only one side of the pair → no banner yet.
+  await expect(banner).toHaveCount(0);
+
+  // Grant session control (elevated → confirm-gated) on the same project, completing the pair.
+  const steerCard = page.getByTestId("companion-lever-session-steer");
+  await steerCard.getByRole("combobox", { name: "Grant Session control on a project" }).selectOption(companion.projectId);
+  await page.getByTestId("companion-grant-add-session-steer").click();
+  await page.getByTestId("companion-grant-confirm-go-session-steer").click();
+  await expect(steerCard.getByText("on · 1 project", { exact: true })).toBeVisible();
+
+  // The risk banner now renders, naming the specific launder advisory (observable state change).
+  await expect(banner).toBeVisible();
+  await expect(page.getByTestId("companion-cogrant-warning-transcript-steer-launder")).toBeVisible();
+
+  // Persists across a FULL reload — it's server-derived from the whole grant set, not transient client state.
+  await page.reload();
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  await focus();
+  await expect(page.getByTestId("companion-grants-cogrant-warning")).toBeVisible();
+
+  // Revoking one side of the pair clears the warning.
+  await page.getByTestId("companion-lever-transcript-read").getByRole("button", { name: "Remove" }).click();
+  await expect(page.getByTestId("companion-lever-transcript-read").getByText("off", { exact: true })).toBeVisible();
+  await expect(page.getByTestId("companion-grants-cogrant-warning")).toHaveCount(0);
+});
+
 test("multi-companion: the create form opens over the current companion and cancels back", async ({ page, loomDaemon }) => {
   await loomDaemon.seedCompanion({ name: `Ada-${randomUUID().slice(0, 8)}` });
   await page.goto(`${loomDaemon.baseURL}/companion`);

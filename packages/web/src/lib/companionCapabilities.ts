@@ -15,7 +15,7 @@ import type { CompanionCapabilityGrant } from "@loom/shared";
 
 export type CapabilitySlug =
   | "session-status" | "decisions-relay" | "attention-push"
-  | "session-steer" | "board-reach" | "vault-read" | "media-out";
+  | "session-steer" | "board-reach" | "vault-read" | "media-out" | "transcript-read";
 
 export type GrantMode = "read" | "act";
 
@@ -97,6 +97,15 @@ export const COMPANION_LEVERS: readonly LeverMeta[] = [
     slug: "vault-read",
     name: "Vault lookup",
     summary: "Search granted projects' Obsidian notes and answer from real docs. Read-only; secret-shaped files are never returned.",
+    modes: ["read"],
+    tier: "read",
+    configKind: "none",
+    appliesLive: false,
+  },
+  {
+    slug: "transcript-read",
+    name: "Transcript read",
+    summary: "Read a session's transcript in granted projects, on your behalf — DM-only and only when you ask. Read-only, but transcript text is untrusted: co-granting this with session control is flagged as a risky combination.",
     modes: ["read"],
     tier: "read",
     configKind: "none",

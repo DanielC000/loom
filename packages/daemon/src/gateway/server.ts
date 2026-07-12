@@ -34,7 +34,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES } from "../companion/capabilities.js";
+import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, computeCoGrantWarnings } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
@@ -1627,9 +1627,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // AFTER the running process started isn't yet on its (respawn-fixed) tool surface — so it survives a
     // page reload. Null when not live ⇒ nothing to be stale against (a fresh spawn re-reads every grant).
     const started = deps.pty.liveStartedAt(sessionId);
+    const grants = deps.db.listCompanionCapabilityGrantsForSession(sessionId);
     return {
-      grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId),
+      grants,
       liveProcessStartedAt: started === null ? null : new Date(started).toISOString(),
+      // Grant-time co-grant advisories over the WHOLE grant set (owner decision 4c33a1bc) — computed
+      // SERVER-side (single source of truth) so the panel can render a persistent risk banner that
+      // survives a reload, not just the transient one on the POST/PUT that created the risky pair.
+      warnings: computeCoGrantWarnings(grants),
     };
   });
   app.post("/api/companion/:sessionId/grants", async (req, reply) => {
@@ -1655,7 +1660,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // chained like every other `closeCompanionTrustWindow` call site (binding-unbind, config-teardown) —
     // several existing gateway tests construct a minimal `orchMcp` stub that predates this method.
     deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
-    return reply.code(existedBefore ? 200 : 201).send(grant);
+    // Attach the grant-time co-grant advisories for the resulting WHOLE grant set (owner decision
+    // 4c33a1bc) — the immediate at-grant-time signal, computed from the same server-side risk model the
+    // GET uses. Additive: the grant row's own fields are unchanged, so existing clients keep working.
+    const warnings = computeCoGrantWarnings(deps.db.listCompanionCapabilityGrantsForSession(sessionId));
+    return reply.code(existedBefore ? 200 : 201).send({ ...grant, warnings });
   });
   app.put("/api/companion/:sessionId/grants", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
@@ -1671,7 +1680,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // pre-existing warm trust window standing — see the POST handler's own comment above for the full
     // rationale (this PUT shares the identical upsert + risk).
     deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
-    return grant;
+    // Co-grant advisories for the resulting whole grant set — same server-side risk model as POST/GET.
+    const warnings = computeCoGrantWarnings(deps.db.listCompanionCapabilityGrantsForSession(sessionId));
+    return { ...grant, warnings };
   });
   app.delete("/api/companion/:sessionId/grants", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;

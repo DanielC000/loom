@@ -1091,6 +1091,26 @@ export interface CompanionCapabilityGrant {
 }
 
 /**
+ * A grant-time RISK ADVISORY about a companion session's WHOLE resolved grant set (never one row) — a
+ * cross-lever combination that is individually allowed but riskier TOGETHER (Companion Capability &
+ * Permission-Lever Framework; owner decision `4c33a1bc`, 2026-07-12). It is a WARNING, never a block: the
+ * grant still succeeds. Computed SERVER-SIDE (the single source of truth for the risk model —
+ * `computeCoGrantWarnings`, daemon `companion/capabilities.ts`) and returned on the grants GET / POST /
+ * PUT responses so the human grant UI can surface it near the grant controls. The `detail` is
+ * owner-facing prose authored by the daemon; the web panel only renders it, so the copy never drifts
+ * between the two.
+ */
+export interface CompanionCoGrantWarning {
+  /** Stable machine code for the specific risk (e.g. "transcript-steer-launder", "multi-tier-a-window")
+   *  — a React key / test anchor, never shown to the owner. */
+  code: string;
+  /** Short owner-facing headline for the advisory. */
+  title: string;
+  /** The full owner-facing explanation of the combined risk and why the owner is being told about it. */
+  detail: string;
+}
+
+/**
  * A per-ROUTE Companion VOICE preference (Companion Voice epic, VOICE-P1 foundation) — the language/voice
  * settings a "/lang"/"/voice" slash-command sets for ONE (session, channel, chatId[, senderId]) route.
  * Keyed like {@link CompanionBinding} but ADDITIONALLY by `senderId` for a GROUP-scoped binding (a DM's

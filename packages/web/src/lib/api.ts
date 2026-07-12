@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -799,10 +799,13 @@ export const api = {
   // the server truth the Capabilities panel compares each grant's createdAt against to derive an
   // apply-pending state that survives a page reload (a grant newer than the running process isn't yet on
   // its respawn-fixed tool surface).
+  // `warnings` = server-computed grant-time co-grant advisories over the WHOLE grant set (owner decision
+  // 4c33a1bc) — the Capabilities panel renders them as a persistent risk banner (a risky pair stays
+  // flagged across reloads, since GET re-derives it every refetch). `[]` for a benign grant set.
   companionGrants: (sessionId: string) =>
-    get<{ grants: CompanionCapabilityGrant[]; liveProcessStartedAt: string | null }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`),
+    get<{ grants: CompanionCapabilityGrant[]; liveProcessStartedAt: string | null; warnings: CompanionCoGrantWarning[] }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`),
   upsertCompanionGrant: (sessionId: string, b: { capability: string; projectId?: string | null; mode?: "read" | "act"; config?: Record<string, unknown> }) =>
-    postErr<CompanionCapabilityGrant>(`/api/companion/${encodeURIComponent(sessionId)}/grants`, b),
+    postErr<CompanionCapabilityGrant & { warnings: CompanionCoGrantWarning[] }>(`/api/companion/${encodeURIComponent(sessionId)}/grants`, b),
   deleteCompanionGrant: (sessionId: string, capability: string, projectId?: string | null) => {
     const params = new URLSearchParams({ capability });
     if (projectId) params.set("projectId", projectId); // omitted ⇒ the null-scope grant (companion's own project)
