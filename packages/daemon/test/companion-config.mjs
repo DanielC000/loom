@@ -342,6 +342,38 @@ try {
     // out of scope here) — just never as the WINNER of a live liveness comparison.
     check("liveness gate: both dead-but-enabled configs still resolve (untouched by this guard)", deadWinnerResolved.length === 4);
     db9.close();
+
+    // (2k) HOME-LESS DEDUP COLLISION FIX: an in-app-only companion with NO explicit home resolves
+    // (buildConfigFromRow) to homeChannel = row.channel ("in-app") and homeChatId = row.allowedChatId
+    // (""), since `home` is null. TWO such home-less in-app companions previously both keyed to the SAME
+    // `"in-app\0"` dedup bucket and the same-home guard wrongly silenced one of them, even though they
+    // share no real destination. Both must now independently keep their heartbeat armed.
+    const db10 = new Db(dbFile("p2k.db"));
+    const p2kNow = new Date().toISOString();
+    db10.insertProject({ id: "p2k-proj", name: "Home-less In-App", repoPath: "p2k-proj", vaultPath: "p2k-proj", config: {}, createdAt: p2kNow, archivedAt: null });
+    db10.insertAgent({ id: "p2k-agent", projectId: "p2k-proj", name: "Companion", startupPrompt: "P", position: 0, profileId: null, endpoint: false, ioSchema: null });
+    db10.insertSession({ id: "sess-inapp-1", projectId: "p2k-proj", agentId: "p2k-agent", engineSessionId: "eng-sess-inapp-1", title: null, cwd: "p2k-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2kNow, lastActivity: p2kNow, lastError: null, role: "assistant" });
+    db10.insertSession({ id: "sess-inapp-2", projectId: "p2k-proj", agentId: "p2k-agent", engineSessionId: "eng-sess-inapp-2", title: null, cwd: "p2k-proj", processState: "live", resumability: "resumable", busy: false, createdAt: p2kNow, lastActivity: p2kNow, lastError: null, role: "assistant" });
+    // No token (in-app-only), no allowedChatId, and — crucially — no setCompanionHome call for either
+    // session: this is the exact home-less shape the bug reproduces on.
+    db10.upsertCompanionConfig({ sessionId: "sess-inapp-1", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    db10.upsertCompanionConfig({ sessionId: "sess-inapp-2", botTokenBlob: "", channel: "in-app", allowedChatId: "", chatScope: "dm", heartbeatIntervalMinutes: 360, heartbeatPrompt: null, enabled: true });
+    const inAppResolved = resolveAllCompanionConfigs(db10, {});
+    check(
+      "home-less dedup fix: BOTH home-less in-app companions keep their heartbeat armed (no false collision)",
+      inAppResolved.find((c) => c.sessionId === "sess-inapp-1")?.heartbeatIntervalMinutes === 360 &&
+        inAppResolved.find((c) => c.sessionId === "sess-inapp-2")?.heartbeatIntervalMinutes === 360,
+    );
+    // A genuinely SHARED real home (both explicitly bound to the same channel+chatId) must still dedup —
+    // proves the fix narrows the guard to home-less configs only, without regressing the legitimate case.
+    db10.setCompanionHome("sess-inapp-1", { channel: "in-app", chatId: "shared-chat" });
+    db10.setCompanionHome("sess-inapp-2", { channel: "in-app", chatId: "shared-chat" });
+    const inAppSharedHome = resolveAllCompanionConfigs(db10, {});
+    check(
+      "real shared home still dedups: exactly one of the two in-app companions keeps its heartbeat armed",
+      inAppSharedHome.filter((c) => c.heartbeatIntervalMinutes === 360).length === 1,
+    );
+    db10.close();
   }
 
   // ============ Part 3 — the human-only REST CRUD via the REAL buildServer (app.inject) ============

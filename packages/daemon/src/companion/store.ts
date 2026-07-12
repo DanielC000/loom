@@ -166,7 +166,14 @@ function suppressDuplicateHomeHeartbeats(db: CompanionConfigStore, configs: Comp
   const byHome = new Map<string, CompanionConfig[]>(); // "channel\0chatId" -> every armed config on it
   for (const cfg of configs) {
     if (cfg.heartbeatIntervalMinutes <= 0) continue; // already off — nothing to de-dup
-    const key = `${cfg.homeChannel}\0${cfg.homeChatId}`;
+    // A home-LESS config (no explicit home AND no real fallback chat — the in-app-only companion with
+    // neither a Telegram allowedChatId nor an explicit home) has no shared destination two sessions could
+    // actually collide on: `buildConfigFromRow`'s fallback (home?.chatId ?? row.allowedChatId) leaves
+    // `homeChatId` as the EMPTY STRING for this shape, so two such sessions would otherwise both key to
+    // `"in-app\0"` and wrongly dedup against each other. Key those by sessionId instead — unique per
+    // session, so each keeps its own heartbeat — while a config with a real non-empty homeChatId (a bound
+    // Telegram chat, or an explicitly-set home) still groups on the shared `channel\0chatId` destination.
+    const key = cfg.homeChatId ? `${cfg.homeChannel}\0${cfg.homeChatId}` : `\0unset\0${cfg.sessionId}`;
     const group = byHome.get(key);
     if (group) group.push(cfg);
     else byHome.set(key, [cfg]);
