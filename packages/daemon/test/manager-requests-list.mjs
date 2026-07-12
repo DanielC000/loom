@@ -1,5 +1,5 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// A non-consuming, board-wide manager `requests_list({state?,type?,includeConsumed?})` on the
+// A non-consuming, board-wide manager `requests_list({state?,type?,includeConsumed?,mine?})` on the
 // `loom-orchestration` surface (mcp/orchestration.ts), scoped SERVER-SIDE to the caller's own project —
 // the gap between question_pull (consumes, answered-only) and task_requests_list/task_request_get
 // (task-scoped only): a request answered with NO taskId, or a board-wide survey including
@@ -8,6 +8,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // audit-requests-list.mjs) — same per-type answer shaping (questionTool.ts's auditRequestItem/
 // questionAnswerByType) so the credential never-echo guarantee can't drift between the two read
 // surfaces — but scoped to ONE project, with NO projectId param, plus an `includeConsumed` toggle.
+//
+// `mine` (task f724d65a) is the NON-CONSUMING counterpart to question_pull for a scheduled/autonomous
+// agent to dedup before re-filing: narrows the board-wide read down to ONLY this caller's own AGENT
+// LINEAGE's requests — the identical ownership scope `question_pull`/`pullAnsweredQuestionsForAgent`
+// consume from (db.ts's `listQuestionsForAudit` `agentId` filter), so a fresh successor session on the
+// same agent still sees a predecessor's still-pending/answered-but-unpulled requests. Chosen over adding
+// a brand-new tool: it reuses the exact same query/shaping code as the existing board-wide read, just one
+// more optional filter — see orchestration.ts's requests_list registration for the design note.
 //
 // HERMETIC — a REAL Db + SessionService + OrchestrationMcpRouter, tool handlers invoked directly (no pty,
 // no real claude/network/daemon). Mirrors question-answer-nudge-purge.mjs's router setup.
@@ -22,6 +30,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       projectId param to widen the read.
 //   (E) credential never-echo — a credential row carries only {ack}, never secret_blob/secretBlob/secret,
 //       and the raw stored secret_blob is genuinely ciphertext (proves the tool is what filters it).
+//   (F) mine — returns BOTH of the caller's own pending+answered requests, excludes another agent's
+//       request on the SAME project (proves it's narrower than plain project scoping) and another
+//       project's request; is non-consuming (repeat call + a still-pending question_pull afterward both
+//       see it unchanged); a subsequent REAL question_pull call still finds + consumes the answered one.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/manager-requests-list.mjs
 import fs from "node:fs";
@@ -91,7 +103,7 @@ try {
   // pOther: a request that must NEVER surface for mgrA.
   const qOther = insertQ({ id: "req-other-1", sessionId: "mgrOther", projectId: "pOther", title: "Other project's ask" });
 
-  const sessions = new SessionService(db, { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getActiveTurnOrigin: () => null }, new OrchestrationControl());
+  const sessions = new SessionService(db, { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getActiveTurnOrigin: () => null, purgeQueuedByQuestionIds: () => [] }, new OrchestrationControl());
   const router = new OrchestrationMcpRouter(db, sessions);
   const mgrServer = router.buildServer("mgrA", "manager");
   const call = async (args) => JSON.parse((await mgrServer._registeredTools["requests_list"].handler(args ?? {})).content[0].text);
@@ -118,7 +130,7 @@ try {
     const tool = (await mcpClient.listTools()).tools.find((t) => t.name === "requests_list");
     const props = tool?.inputSchema?.properties ?? {};
     check("(D) requests_list has NO projectId param to widen the read", !("projectId" in props));
-    check("(D) requests_list exposes exactly state/type/includeConsumed", ["state", "type", "includeConsumed"].every((k) => k in props) && Object.keys(props).length === 3);
+    check("(D) requests_list exposes exactly state/type/includeConsumed/mine", ["state", "type", "includeConsumed", "mine"].every((k) => k in props) && Object.keys(props).length === 4);
     await mcpClient.close();
   }
 
@@ -169,12 +181,52 @@ try {
   const rawCredRow = db.db.prepare("SELECT secret_blob FROM questions WHERE id = ?").get(qCred);
   check("(E) the underlying db row DOES carry a non-empty encrypted secret_blob (proves the tool is what filters it, not that it's simply absent)", typeof rawCredRow?.secret_blob === "string" && rawCredRow.secret_blob.length > 0);
   check("(E) the raw stored secret_blob is genuinely ciphertext, not the plaintext secret", rawCredRow.secret_blob !== plaintext && !rawCredRow.secret_blob.includes(plaintext));
+
+  // ============ (F) mine — agent-lineage "my own requests" dedup read (task f724d65a) ============
+  // A second agent (agentA2) on the SAME project pA — proves `mine` narrows past project-scoping alone.
+  db.insertAgent({ id: "agentA2", projectId: "pA", name: "Mgr A2", startupPrompt: "MGR", position: 1 });
+  db.insertSession({
+    id: "mgrA2", projectId: "pA", agentId: "agentA2", engineSessionId: null, title: null, cwd: "pA",
+    processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "manager",
+  });
+  const qOtherAgentSameProject = insertQ({ id: "req-a2-pending", sessionId: "mgrA2", projectId: "pA", title: "Another agent's ask on the same project" });
+
+  // File mgrA's own two requests through the REAL question_ask tool, so ownership is stamped exactly the
+  // way production does (mcp/questionTool.ts's buildQuestionAsk sets sessionId: ctx.sessionId server-side).
+  const askMine = async (args) => JSON.parse((await mgrServer._registeredTools["question_ask"].handler(args)).content[0].text);
+  const pendingMineId = (await askMine({ title: "Mine — still pending", body: "b" })).questionId;
+  const answeredMineId = (await askMine({ title: "Mine — answered, not yet pulled", body: "b" })).questionId;
+  db.answerQuestion(answeredMineId, { chosenOption: null, note: "yep", answeredAt: new Date().toISOString() });
+
+  const mineRead1 = await call({ mine: true });
+  check(
+    "(F) mine:true returns BOTH of this agent's own requests, with correct states",
+    mineRead1.some((r) => r.id === pendingMineId && r.state === "pending") &&
+      mineRead1.some((r) => r.id === answeredMineId && r.state === "answered"),
+  );
+  check("(F) mine:true does NOT return another agent's request on the SAME project", !mineRead1.some((r) => r.id === qOtherAgentSameProject));
+  check("(F) mine:true does NOT return another project's request either", !mineRead1.some((r) => r.id === qOther));
+  check("(F) plain requests_list (no mine) DOES see the other agent's request — proves mine is narrower, not just project-scoped", (await call({})).some((r) => r.id === qOtherAgentSameProject));
+
+  const mineRead2 = await call({ mine: true });
+  check("(F) mine:true is NON-CONSUMING — a second call returns the same ids", JSON.stringify(mineRead1.map((r) => r.id).sort()) === JSON.stringify(mineRead2.map((r) => r.id).sort()));
+  check("(F) mine:true reading an answered row never flips its state", db.getQuestion(answeredMineId).state === "answered");
+
+  const pull = async () => JSON.parse((await mgrServer._registeredTools["question_pull"].handler({})).content[0].text);
+  const pulled = await pull();
+  check("(F) a subsequent question_pull still finds the answered request unconsumed by the earlier mine:true reads", pulled.questions.some((q) => q.questionId === answeredMineId));
+  check("(F) after question_pull, the request is now consumed", db.getQuestion(answeredMineId).state === "consumed");
+  const mineRead3 = await call({ mine: true });
+  check("(F) mine:true (excludeConsumed default) no longer shows the now-consumed request", !mineRead3.some((r) => r.id === answeredMineId));
+  const mineRead3WithConsumed = await call({ mine: true, includeConsumed: true });
+  check("(F) mine:true with includeConsumed:true still shows it, correctly state:consumed", mineRead3WithConsumed.some((r) => r.id === answeredMineId && r.state === "consumed"));
 } finally {
   try { db.close(); } catch { /* ignore */ }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the manager's requests_list correctly filters by state+type, folds in consumed rows only via includeConsumed (an explicit state:\"consumed\" always wins), never consumes/flips state on read (stable across repeated calls), never surfaces another project's requests (and has no projectId param to widen the read), and a credential request's secret is never present in the output (only a non-secret ack)."
+  ? "\n✅ ALL PASS — the manager's requests_list correctly filters by state+type, folds in consumed rows only via includeConsumed (an explicit state:\"consumed\" always wins), never consumes/flips state on read (stable across repeated calls), never surfaces another project's requests (and has no projectId param to widen the read), a credential request's secret is never present in the output (only a non-secret ack), and mine:true correctly narrows to the caller's own agent lineage — excluding another agent's request on the same project — while staying non-consuming alongside a REAL question_pull."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

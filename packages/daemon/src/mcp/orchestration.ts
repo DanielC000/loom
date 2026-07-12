@@ -1138,17 +1138,27 @@ export class OrchestrationMcpRouter {
           "rather than a misleading false-ish value). Filters (all optional, AND'd): state " +
           "(pending|answered|consumed), type (decision|input|permission|credential), includeConsumed " +
           "(false by default — folds already-consumed requests in alongside the rest; an explicit " +
-          "state:\"consumed\" always shows consumed regardless of this flag). Newest-first (createdAt DESC).",
+          "state:\"consumed\" always shows consumed regardless of this flag), mine (false by default — " +
+          "when true, narrows to ONLY requests filed by YOUR OWN agent lineage, the same ownership scope " +
+          "question_pull consumes from, so a fresh successor session on the same agent still sees them). " +
+          "`mine:true` is the dedup read for a scheduled/autonomous agent: before filing a new " +
+          "question_ask, call this to check whether you (or a predecessor session on your agent) already " +
+          "filed an equivalent request that's still pending or answered-but-unpulled, instead of re-filing " +
+          "a duplicate every cycle. Newest-first (createdAt DESC).",
         inputSchema: {
           state: z.enum(QUESTION_STATES).optional(),
           type: z.enum(QUESTION_TYPES).optional(),
           includeConsumed: z.boolean().optional(),
+          mine: z.boolean().optional(),
         },
       },
-      async ({ state, type, includeConsumed }) => {
-        const projectId = db.getSession(managerSessionId)?.projectId;
-        if (!projectId) return ok({ error: "no project for this session" });
-        const rows = db.listQuestionsForAudit({ projectId, state, type, excludeConsumed: !includeConsumed });
+      async ({ state, type, includeConsumed, mine }) => {
+        const asker = db.getSession(managerSessionId);
+        if (!asker?.projectId) return ok({ error: "no project for this session" });
+        const rows = db.listQuestionsForAudit({
+          projectId: asker.projectId, state, type, excludeConsumed: !includeConsumed,
+          agentId: mine ? asker.agentId : undefined,
+        });
         return ok(rows.map(auditRequestItem));
       },
     );

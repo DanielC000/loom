@@ -4449,11 +4449,15 @@ export class Db {
    * `state:'consumed'` always wins, mirroring `listOpenQuestions`'s `includeConsumed` toggle. `agentId` is
    * NOT a column on `questions` itself (only the asking session carries it), so this LEFT JOINs `sessions`
    * to surface it — a hard-deleted asking session reads `agentId: null` rather than dropping the row.
+   * `agentId` is ALSO an optional filter (task f724d65a), matched against that same joined
+   * `sessions.agent_id` — the identical AGENT-LINEAGE ownership definition `pullAnsweredQuestionsForAgent`
+   * uses (not one exact `session_id`), so `requests_list`'s `mine` scoping stays consistent with what
+   * `question_pull` will later find/consume for that same lineage.
    * Returns every matching row unpaginated (mirrors list_sessions: the MCP layer applies the default cap /
    * explicit limit+offset, not this read).
    */
   listQuestionsForAudit(filters: {
-    projectId?: string; state?: QuestionState; type?: QuestionType; since?: string; excludeConsumed?: boolean;
+    projectId?: string; state?: QuestionState; type?: QuestionType; since?: string; excludeConsumed?: boolean; agentId?: string;
   } = {}): (Question & { agentId: string | null })[] {
     const clauses: string[] = [];
     const params: unknown[] = [];
@@ -4462,6 +4466,7 @@ export class Db {
     else if (filters.excludeConsumed) { clauses.push("q.state != 'consumed'"); }
     if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
     if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
+    if (filters.agentId) { clauses.push("s.agent_id = ?"); params.push(filters.agentId); }
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.db.prepare(
       `SELECT q.*, s.agent_id AS joined_agent_id FROM questions q
