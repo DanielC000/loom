@@ -429,7 +429,8 @@ try {
     check("6c: the exact cross-delivery bug — B's route is NOT A's home", JSON.stringify(fireB.route) !== JSON.stringify(fireA.route));
 
     // The narrower repro as literally stated on the card: ONLY A's home is ever configured (B's is left
-    // unset) — B must NOT inherit A's home (no route at all, same as an unconfigured single companion).
+    // unset) — B must NOT inherit A's home. (It DOES now fall back to its OWN implicit in-app route — the
+    // in-app-home-fallback fix — never to a sibling's home; see the check below.)
     const db2 = new Db(dbFile("p6b.db"));
     seedSession(db2, "hbC");
     seedSession(db2, "hbD");
@@ -447,7 +448,10 @@ try {
     const hbWatcherD = new CompanionHeartbeatWatcher({ db: db2, pty: pty2, sessionId: "hbD", intervalMinutes: cfgD.heartbeatIntervalMinutes, prompt: cfgD.heartbeatPrompt });
     hbWatcherD.tick(new Date());
     const fireD = enqueued2.find((e) => e.sessionId === "hbD");
-    check("6d: with ONLY hbC's home configured, hbD's heartbeat carries NO route (never inherits hbC's home)", !!fireD && fireD.route === undefined);
+    check(
+      "6d: with ONLY hbC's home configured, hbD's heartbeat falls back to its OWN in-app route (never inherits hbC's home)",
+      !!fireD && JSON.stringify(fireD.route) === JSON.stringify({ channel: "in-app", chatId: "hbD" }),
+    );
     db2.close();
 
     db.close();

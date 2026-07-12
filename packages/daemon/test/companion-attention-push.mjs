@@ -124,6 +124,11 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("deliver: enqueues ONE turn to the companion", e.enqueued.length === 1 && e.enqueued[0].sessionId === e.sessId);
   check("deliver: framed [loom:alert]", e.enqueued[0].text.startsWith(ALERT_TAG));
   check("deliver: chat line names the project + a who-slice", e.enqueued[0].text.includes("Proj A") && e.enqueued[0].text.includes("worker-s"));
+  // BUG REPRO / FIX: this env's session has NO companion home configured (makeEnv never seeds one) — the
+  // same in-app-only shape as an in-app companion with no external channel bound. Pre-fix the pushed alert
+  // turn carried an undefined route (⇒ chat_reply later resolves `no-target`, silently vanishing); it must
+  // now fall back to the session's own implicit in-app route (see in-app.ts's `inAppHomeRoute`).
+  check("deliver: no home configured ⇒ falls back to the session's in-app route (never undefined)", JSON.stringify(e.enqueued[0].route) === JSON.stringify({ channel: "in-app", chatId: e.sessId }));
   const pushed = events(e, "companion_alert_pushed");
   check("deliver: emits ONE companion_alert_pushed event", pushed.length === 1);
   check("deliver: detail carries sourceSeq/alertClass/sourceKind", typeof pushed[0].detail.sourceSeq === "number" && pushed[0].detail.alertClass === "merge-gate" && pushed[0].detail.sourceKind === "merge_rejected");

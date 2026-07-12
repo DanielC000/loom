@@ -31,6 +31,7 @@ import type { OrchestrationEvent } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { HeartbeatPty } from "./heartbeat.js";
 import { resolveCompanionGrant, type ResolvedGrantScope } from "./capabilities.js";
+import { inAppHomeRoute } from "./in-app.js";
 
 /** The trusted-daemon framing tag — also the marker the no-stacking guard matches in the pending queue
  *  (mirrors HEARTBEAT_TAG/REMINDER_TAG). */
@@ -317,21 +318,25 @@ export class AttentionPushWatcher {
    */
   private tickImmediate(now: Date, qualifying: Qualifying[], scanned: EventWithSeq[]): void {
     if (qualifying.length > IMMEDIATE_BURST_CAP) {
-      const home = this.deps.db.getCompanionHome(this.deps.sessionId);
+      // No home configured ⇒ fall back to the session's implicit in-app route (always deliverable — see
+      // inAppHomeRoute's doc) so this proactive push still lands somewhere instead of chat_reply resolving
+      // `no-target`.
+      const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
       const lines = qualifying.map(({ e, cls, projectName }) => alertLine(e, cls, projectName));
       // proactive:true (proactive event-line producer) — a daemon-driven alert push, tagged for the web
       // chat's amber event line.
-      this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
+      this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
       this.deferredSinceLastPush = false;
       for (const { e, cls } of qualifying) {
         this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
       }
     } else if (qualifying.length > 0) {
-      const home = this.deps.db.getCompanionHome(this.deps.sessionId);
+      // Same in-app fallback as the digest branch above.
+      const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
       for (const { e, cls, projectName } of qualifying) {
         // kind:"agent" — a daemon-driven push turn, must land as its own turn (never mashed with a sibling).
         // proactive:true — see the digest branch above.
-        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName)), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
+        this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName)), "system", undefined, home, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
         this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
       }
@@ -363,10 +368,12 @@ export class AttentionPushWatcher {
       this.watermark = qualifying[0]!.e.seq - 1; // consume leading non-qualifying rows; keep the buffer visible.
       return;
     }
-    const home = this.deps.db.getCompanionHome(this.deps.sessionId);
+    // No home configured ⇒ fall back to the session's implicit in-app route — see tickImmediate's digest
+    // branch above.
+    const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
     const lines = qualifying.map(({ e, cls, projectName }) => alertLine(e, cls, projectName));
     // proactive:true — see tickImmediate's digest branch above.
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
     this.lastDigestFlushAt = now.getTime();
     this.deferredSinceLastPush = false;
     for (const { e, cls } of qualifying) {

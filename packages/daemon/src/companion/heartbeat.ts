@@ -22,6 +22,7 @@
 import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
 import type { CompanionRoute } from "@loom/shared";
+import { inAppHomeRoute } from "./in-app.js";
 
 /** The trusted-daemon framing tag — also the marker the no-stacking guard matches in the pending queue. */
 export const HEARTBEAT_TAG = "[loom:heartbeat]";
@@ -117,17 +118,19 @@ export class CompanionHeartbeatWatcher {
 
     // Fire: enqueue ONE framed proactive turn, CARRYING the configured HOME route so the turn's chat_reply
     // delivers to the home channel via the per-turn-route path (multi-channel routing). No home configured ⇒
-    // no route ⇒ a proactive reply has nowhere to go (chat_reply → no-target), which is correct. If the
-    // session is busy, enqueueStdin queues it FIFO (the no-stacking guard above ensures at most one pending).
-    // Record lastFiredAt + emit the durable event. A real fire ends the current defer streak.
+    // fall back to the session's implicit IN-APP route (inAppHomeRoute — always deliverable, no binding
+    // needed) so a proactive reply for an in-app-only companion still lands somewhere instead of the
+    // chat_reply resolving `no-target` and silently vanishing. If the session is busy, enqueueStdin queues
+    // it FIFO (the no-stacking guard above ensures at most one pending). Record lastFiredAt + emit the
+    // durable event. A real fire ends the current defer streak.
     // PER-SESSION home (multi-companion cross-delivery fix, task e849a487): read THIS companion's OWN
     // app_meta home key, never a value shared with a sibling companion session.
-    const home = this.deps.db.getCompanionHome(this.deps.sessionId);
+    const home = this.deps.db.getCompanionHome(this.deps.sessionId) ?? inAppHomeRoute(this.deps.sessionId);
     // kind:"agent" — a user-configured proactive prompt, the companion's own analogue of an inbound
     // chat message; it must land as its own turn, never mashed with a sibling reminder/heartbeat.
     // proactive:true (proactive event-line producer) — this IS the daemon-driven heartbeat submit, so the
     // companion's reply is tagged for the web chat's amber event line.
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home ?? undefined, "agent", undefined, undefined, true);
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedHeartbeat(this.deps.prompt), "system", undefined, home, "agent", undefined, undefined, true);
     this.lastFiredAt = now.getTime();
     this.deferredSinceLastFire = false;
     this.emit(now, "companion_heartbeat_fired", { intervalMinutes: this.deps.intervalMinutes });

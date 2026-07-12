@@ -192,9 +192,13 @@ export class CompanionReminderWatcher {
     }
   }
 
-  /** Fire ONE framed proactive turn, CARRYING the reminder's own route (or none — a reminder created
-   *  with no route then has nowhere to chat_reply, same as an unconfigured heartbeat home). Records
-   *  lastFiredAt + emits the durable event; a real fire ends that reminder's current defer streak. */
+  /** Fire ONE framed proactive turn, CARRYING the reminder's own route (captured server-side at
+   *  reminder_create time from the creating turn's own origin — orchestration.ts's `getActiveTurnOrigin`
+   *  — or none, if that turn itself had no origin, e.g. the session's very first spawn turn). A route-less
+   *  reminder then has nowhere to chat_reply. Note this is now narrower than an unconfigured heartbeat
+   *  home: heartbeat/attention-push always fall back to the session's in-app route (see heartbeat.ts's
+   *  `inAppHomeRoute` use), so most companion turns DO carry an origin by the time reminder_create runs.
+   *  Records lastFiredAt + emits the durable event; a real fire ends that reminder's current defer streak. */
   private fire(reminder: CompanionReminder, now: Date): void {
     // kind:"agent" — a user-authored recurring reminder prompt; must land as its own turn.
     // proactive:true (proactive event-line producer) — this IS the daemon-driven reminder submit, so the

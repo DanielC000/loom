@@ -202,11 +202,17 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
     cleanupEnv(e);
   }
 
-  // (b) With NO home configured, the heartbeat carries NO route (a proactive reply then has nowhere to go).
+  // (b) BUG REPRO / FIX: with NO home configured (the in-app-only companion case — no external channel
+  //     ever bound), the heartbeat must NOT carry an undefined route (pre-fix: a proactive reply then had
+  //     nowhere to go — chat_reply resolved `no-target` and silently vanished). It now falls back to the
+  //     session's own implicit in-app route ({channel:"in-app", chatId: sessionId} — see in-app.ts's
+  //     `inAppHomeRoute`), which is ALWAYS deliverable (every gateway registers the in-app adapter
+  //     unconditionally).
   {
     const e = makeEnv(); // no home
     e.watcher.tick(new Date());
-    check("home-route: no home configured ⇒ the heartbeat carries no route", e.enqueued.length === 1 && e.enqueued[0].route === undefined);
+    const expected = { channel: "in-app", chatId: e.sessId };
+    check("home-route: no home configured ⇒ falls back to the session's in-app route (never undefined)", e.enqueued.length === 1 && JSON.stringify(e.enqueued[0].route) === JSON.stringify(expected));
     cleanupEnv(e);
   }
 
@@ -221,9 +227,23 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
     const none = await gw.deliverReply("no-route-sess", "x");
     check("per-turn-route: a turn with no route → no-target, nothing sent", none.delivered === false && none.reason === "no-target" && sent.length === 1);
   }
+
+  // (d) BUG REPRO / FIX, end-to-end through deliverReply: an in-app-only companion (no home bound) fires a
+  //     proactive heartbeat turn, and the reply lands on the in-app channel instead of no-target. Mirrors
+  //     what the real daemon wires: the pty pins the heartbeat's carried route as the turn's origin, and
+  //     the gateway resolves it via originResolver exactly like a home-bound companion's turn does.
+  {
+    const inAppSent = [];
+    const sid = "in-app-only-sess";
+    const inAppRoute = { channel: "in-app", chatId: sid };
+    const gw = new ChatGateway(noopSubmit, [], undefined, undefined, (queried) => (queried === sid ? inAppRoute : null));
+    gw.registerAdapter(fakeAdapter("in-app", inAppSent));
+    const res = await gw.deliverReply(sid, "proactive check-in");
+    check("in-app fallback E2E: a home-less proactive turn's reply delivers via the in-app channel", res.delivered === true && inAppSent.length === 1 && inAppSent[0].chatId === sid && inAppSent[0].text === "proactive check-in");
+  }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CompanionHeartbeatWatcher fires due/live, defers under park, skips stopped, never stacks, stays OFF at 0 cadence, and carries the configured HOME route on its proactive turn so its chat_reply flows to home via the per-turn-route path (no route ⇒ no-target)."
+  ? "\n✅ ALL PASS — CompanionHeartbeatWatcher fires due/live, defers under park, skips stopped, never stacks, stays OFF at 0 cadence, and carries the configured HOME route (or the in-app fallback route when unconfigured) on its proactive turn so its chat_reply always has somewhere to go via the per-turn-route path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

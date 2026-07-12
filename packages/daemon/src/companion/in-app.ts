@@ -38,10 +38,27 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { LOOM_HOME } from "../paths.js";
 import { vaultFileContentType } from "../vault/browser.js";
-import type { ChannelAdapter, InboundMessage } from "./types.js";
+import type { ChannelAdapter, CompanionRoute, InboundMessage } from "./types.js";
 
 /** The stable channel name — the key in the gateway registry and the `channel` on every in-app binding. */
 export const IN_APP_CHANNEL = "in-app";
+
+/**
+ * The implicit in-app home route for a companion session — the SAME address convention documented above
+ * (an in-app "chat id" IS the bound session id). Every companion gateway registers the in-app adapter
+ * UNCONDITIONALLY (factory.ts's `if (inApp) gateway.registerAdapter(inApp.adapter)`, always true — `inApp`
+ * is constructed at boot regardless of companion config), so this route is ALWAYS deliverable with no
+ * binding/provisioning required — unlike Telegram, there is no "unbound" state for it to fall into.
+ *
+ * Used as the fallback when a companion session has no explicit proactive home configured
+ * (`db.getCompanionHome` returns null): without this, a heartbeat/attention-push turn for an in-app-only
+ * companion (no external channel bound) carried NO route at all, so its `chat_reply` resolved the
+ * per-turn origin to null and `deliverReply` silently returned `no-target` — the proactive turn ran, but
+ * the reply vanished. See heartbeat.ts / attention-push.ts.
+ */
+export function inAppHomeRoute(sessionId: string): CompanionRoute {
+  return { channel: IN_APP_CHANNEL, chatId: sessionId };
+}
 
 /** Base64-encoded audio carried on an outbound frame (Companion Voice epic, VOICE-P4 outbound) — always a
  *  Kokoro-synthesized OGG/Opus clip. Never persisted (text is what's stored/shown); transport only. */
