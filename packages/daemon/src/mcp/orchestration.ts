@@ -1808,7 +1808,28 @@ export class OrchestrationMcpRouter {
     // onclose, so the worker_* surface can't vanish mid-session. Rebuilt each call from the role.
     const server = this.buildServer(sessionId, resolved.role);
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
-    res.on("close", () => { void transport.close(); void server.close(); });
+    res.on("close", () => {
+      // `close` also fires on a NORMAL completed response (after res.end()) AND on the transport's
+      // OPTIONAL long-lived GET/SSE push stream — that one is BY DESIGN left open (never res.end()'d)
+      // until the client tears it down, so its ordinary teardown must not warn either (a real client
+      // opens one on every connect(), and its later close is routine, not a drop). So gate on BOTH:
+      // POST only (the GET stream would otherwise false-positive on every normal disconnect), and
+      // `writableEnded` false (flips true synchronously when transport.handleRequest() calls
+      // res.end(), so false here means the connection dropped before we finished responding).
+      if (req.method === "POST" && !res.writableEnded) {
+        const rpc = body as { method?: unknown; params?: { name?: unknown } } | undefined;
+        const method = typeof rpc?.method === "string" ? rpc.method : undefined;
+        const tool = typeof rpc?.params?.name === "string" ? rpc.params.name : undefined;
+        console.warn(
+          `[orchestration] /mcp-orch request aborted before completion (sessionId=${sessionId}` +
+            (method ? `, method=${method}` : "") +
+            (tool ? `, tool=${tool}` : "") +
+            ")",
+        );
+      }
+      void transport.close();
+      void server.close();
+    });
     await server.connect(transport);
     await transport.handleRequest(req, res, body);
   }
