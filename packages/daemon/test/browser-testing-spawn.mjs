@@ -43,7 +43,7 @@ process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFIL
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildMcpServers, buildSpawnArgs, playwrightMcpServer, browserScratchEnv, disallowedToolsForSpawn, PLAYWRIGHT_DISALLOWED_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, buildMcpServers, buildSpawnArgs, playwrightMcpServer, browserScratchEnv, disallowedToolsForSpawn, PLAYWRIGHT_DISALLOWED_TOOLS, ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS } = await import("../dist/pty/host.js");
 const { sessionScratchDir } = await import("../dist/paths.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -181,6 +181,43 @@ check("(disallow) all three flags off ⇒ byte-identical to disallowedToolsForSp
     d !== -1 && strict !== -1 && d < strict);
 }
 
+// ===================== security hardening (card f1609e1a): browser_file_upload/browser_drop — the two
+// default Playwright tools that take ABSOLUTE HOST FILE PATHS and read them into a page — are
+// structurally unreachable ONLY for the untrusted-chat-facing "assistant" role; worker/manager rigs keep
+// them (legitimate upload/drag-drop testing) =====================
+check("(ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS) carries exactly the two host-file-reading tool names",
+  ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS.length === 2
+  && ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS.includes("mcp__playwright__browser_file_upload")
+  && ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS.includes("mcp__playwright__browser_drop"));
+
+check("(disallow-assistant) role=assistant + playwrightMounted=true ⇒ file_upload/drop are disallowed",
+  ["mcp__playwright__browser_file_upload", "mcp__playwright__browser_drop"]
+    .every((t) => disallowedToolsForSpawn("assistant", false, false, true).includes(t)));
+check("(disallow-assistant) role=assistant + playwrightMounted=true ⇒ run_code_unsafe STILL disallowed too (union, not replace)",
+  disallowedToolsForSpawn("assistant", false, false, true).includes("mcp__playwright__browser_run_code_unsafe"));
+check("(disallow-assistant) role=assistant + playwrightMounted=false ⇒ file_upload/drop NOT disallowed (nothing to guard — Playwright isn't mounted)",
+  !["mcp__playwright__browser_file_upload", "mcp__playwright__browser_drop"]
+    .some((t) => disallowedToolsForSpawn("assistant", false, false, false).includes(t)));
+check("(disallow-worker) role=worker + playwrightMounted=true ⇒ file_upload/drop are NOT disallowed (QA/Web-Designer upload testing preserved)",
+  !["mcp__playwright__browser_file_upload", "mcp__playwright__browser_drop"]
+    .some((t) => disallowedToolsForSpawn("worker", false, false, true).includes(t)));
+check("(disallow-worker) role=worker + playwrightMounted=true ⇒ run_code_unsafe is STILL disallowed (that one applies to every role)",
+  disallowedToolsForSpawn("worker", false, false, true).includes("mcp__playwright__browser_run_code_unsafe"));
+check("(disallow-assistant) all flags off ⇒ byte-identical to disallowedToolsForSpawn(role) alone",
+  JSON.stringify(disallowedToolsForSpawn("assistant", false, false, false)) === JSON.stringify(disallowedToolsForSpawn("assistant")));
+
+// end-to-end through buildSpawnArgs: file_upload/drop actually land in --disallowedTools argv for the
+// assistant role when playwright is mounted, and are absent for the worker role under the same mount.
+{
+  const mcpWithPw2 = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" }, playwright: on.playwright };
+  const argsAssistant = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithPw2, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("assistant", false, false, !!mcpWithPw2.playwright) });
+  const argsWorker = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithPw2, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, false, !!mcpWithPw2.playwright) });
+  check("(e2e-disallow-assistant) assistant role, playwright MOUNTED: file_upload/drop appear in --disallowedTools argv",
+    argsAssistant.includes("mcp__playwright__browser_file_upload") && argsAssistant.includes("mcp__playwright__browser_drop"));
+  check("(e2e-disallow-assistant) worker role, SAME playwright mount: file_upload/drop absent from --disallowedTools argv",
+    !argsWorker.includes("mcp__playwright__browser_file_upload") && !argsWorker.includes("mcp__playwright__browser_drop"));
+}
+
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
 const repo = path.join(os.tmpdir(), `loom-bt-repo-${Date.now()}`);
@@ -288,6 +325,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — opt-in worker browser: resolveProfile backstops/passes browserTesting; the Playwright stdio MCP is injected iff browserTesting (absolute paths, headless+isolated, byte-identical off); LOOM_SCRATCH_DIR mirrors the Playwright --output-dir iff the MCP mounted (absent otherwise); the flag threads through startNew/resume/spawnWorker + the persisted row; browser_run_code_unsafe (RCE-equivalent) is unioned into --disallowedTools whenever Playwright mounts, byte-identical off — claude-free, network-free."
+  ? "\n✅ ALL PASS — opt-in worker browser: resolveProfile backstops/passes browserTesting; the Playwright stdio MCP is injected iff browserTesting (absolute paths, headless+isolated, byte-identical off); LOOM_SCRATCH_DIR mirrors the Playwright --output-dir iff the MCP mounted (absent otherwise); the flag threads through startNew/resume/spawnWorker + the persisted row; browser_run_code_unsafe (RCE-equivalent) is unioned into --disallowedTools whenever Playwright mounts, byte-identical off; file_upload/drop (host-file-reading exfil primitive) are unioned into --disallowedTools ONLY for the assistant role when Playwright mounts, leaving worker/manager rigs byte-identical (upload/drag-drop testing preserved) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -963,6 +963,29 @@ export const PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
 ];
 
 /**
+ * Security hardening (card f1609e1a, a residual the Code Reviewer surfaced OUTSIDE card 7159466a's
+ * RCE scope): beyond `browser_run_code_unsafe`, `@playwright/mcp`'s default tool set also mounts two
+ * tools that take ABSOLUTE HOST FILE PATHS and read them into a page — verified against the installed
+ * `@playwright/mcp` README (`browser_file_upload`'s and `browser_drop`'s `paths` params) —
+ * `browser_file_upload` and `browser_drop`. (`browser_drag` was checked and excluded: it takes only
+ * page-snapshot element refs, no host path.) Combined with `browser_navigate` to an attacker-controlled
+ * page, that's a host-secret EXFILTRATION primitive (read `~/.ssh/id_rsa` / `.env`, POST from a
+ * cooperating page) — NOT RCE, but the same threat model as PLAYWRIGHT_DISALLOWED_TOOLS: a human
+ * enabling `browserTesting` on the untrusted-chat-facing companion (`assistant`) profile.
+ *
+ * UNLIKE `browser_run_code_unsafe` (which no legitimate workflow needs and is disallowed for EVERY
+ * role), these two ARE legitimately needed for upload/drag-drop testing on the worker rigs (QA Tester /
+ * Web Designer) — so this set is ROLE-SCOPED: {@link disallowedToolsForSpawn} unions it in ONLY when
+ * `role === "assistant"` AND the Playwright MCP is mounted, leaving worker/manager/other roles
+ * byte-identical (they keep file_upload/drop). Same posture as `RESTRICTED_NATIVE_TOOLS` — blast-radius
+ * control scoped to the chat-reachable companion, not a blanket restriction.
+ */
+export const ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS: readonly string[] = [
+  "mcp__playwright__browser_file_upload",
+  "mcp__playwright__browser_drop",
+];
+
+/**
  * The `--allowedTools` contribution from every resolved capability grant (agent-tooling P4) — the
  * `createPty` allow-list analog of `buildMcpServers`' mount loop. The two legacy slugs keep their exact
  * hardcoded allow entries; an owner-added capability contributes its own `toolAllowlist` from the catalog.
@@ -1424,11 +1447,14 @@ export const RESTRICTED_NATIVE_TOOLS: readonly string[] = Object.freeze([
  * they're never allowlisted — see CODESCAPE_WRITE_TOOLS's doc for why that alone isn't enough), AND with
  * {@link PLAYWRIGHT_DISALLOWED_TOOLS} iff `playwrightMounted` is true (the mounted Playwright MCP's
  * `--allowedTools` grant is the whole-server wildcard, which includes the RCE-equivalent
- * `browser_run_code_unsafe` — see PLAYWRIGHT_DISALLOWED_TOOLS's doc). When ALL THREE are off/falsy this
- * returns EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no
+ * `browser_run_code_unsafe` — see PLAYWRIGHT_DISALLOWED_TOOLS's doc), AND — ONLY when `role ===
+ * "assistant"` — with {@link ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS} (the host-file-reading
+ * file_upload/drop pair; role-scoped because worker rigs legitimately need them — see that const's
+ * doc). When ALL of restrictedTools/codescapeMounted/playwrightMounted are off/falsy this returns
+ * EXACTLY `disallowedToolsForRole(role)` — so the flag-off argv is BYTE-IDENTICAL to today (no
  * restricted/codescape/playwright tokens appended). Pure + exported so the spawn-args test asserts the
  * union + the byte-identical-off invariant with no real claude. (Companion blast-radius card; Codescape C2
- * hardening; card 7159466a Playwright hardening.)
+ * hardening; card 7159466a Playwright hardening; card f1609e1a assistant file_upload/drop hardening.)
  */
 export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedTools?: boolean, codescapeMounted?: boolean, playwrightMounted?: boolean): string[] {
   const base = disallowedToolsForRole(role);
@@ -1437,6 +1463,7 @@ export function disallowedToolsForSpawn(role?: SessionRole | null, restrictedToo
   if (restrictedTools) for (const t of RESTRICTED_NATIVE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (codescapeMounted) for (const t of CODESCAPE_WRITE_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
   if (playwrightMounted) for (const t of PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped
+  if (playwrightMounted && role === "assistant") for (const t of ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS) if (!merged.includes(t)) merged.push(t); // union, de-duped — role-scoped
   return merged;
 }
 
@@ -2370,7 +2397,9 @@ export class PtyHost {
     // "codescape" entry (a mounted-but-unallowlisted MCP tool still PROMPTS under acceptEdits, which a
     // Loom-driven role can never answer — see CODESCAPE_WRITE_TOOLS), AND with browser_run_code_unsafe when
     // the mcpServers map actually carries a "playwright" entry (its --allowedTools grant is the whole-server
-    // wildcard — see PLAYWRIGHT_DISALLOWED_TOOLS). Computed from the session role + pinned flags at the
+    // wildcard — see PLAYWRIGHT_DISALLOWED_TOOLS), AND — ONLY for the untrusted-chat-facing "assistant" role
+    // — with the host-file-reading file_upload/drop pair (see ASSISTANT_PLAYWRIGHT_DISALLOWED_TOOLS).
+    // Computed from the session role + pinned flags at the
     // single spawn chokepoint, so EVERY path (fresh/resume/fork/recycle/boot) inherits it; with
     // restrictedTools off and codescape/playwright unmounted this is exactly disallowedToolsForRole(role) ⇒
     // byte-identical argv. See disallowedToolsForSpawn.
