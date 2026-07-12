@@ -23,7 +23,10 @@ project id anywhere; it's derived server-side.
      absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
      (substitute your project's name). **Read it by that ABSOLUTE path — never Glob, Bash `find`, or
      Bash `ls` for it** (a broad search from your home directory hits the search timeout). Cross-check
-     it against the board. If that injected root turns out wrong (the read 404s), don't fall back to a
+     it against the board. **Before acting on a handoff's "still to build / un-built" claim, verify it
+     against `git log`/`git merge-base` first** — work a resume doc calls unbuilt may already be merged on
+     the mainline, and dispatching (or filing an owner go/no-go for) it re-derives work that already
+     exists. If that injected root turns out wrong (the read 404s), don't fall back to a
      broad search — resolve the real vault root from Obsidian's own global config file (`obsidian.json`,
      under the OS's per-user app-data directory, e.g. `%APPDATA%\obsidian\obsidian.json` on Windows),
      which lists every known vault path; then retry against the resolved root.
