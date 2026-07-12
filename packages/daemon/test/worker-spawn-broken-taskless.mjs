@@ -16,12 +16,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // classification (parked-ack/stranded/etc) stays intentionally out of scope for taskless (no card to
 // reconcile against — see that function's own comment).
 //
+// SILENT-FINISH GAP CLOSED (card df48366b): a taskless worker that DID start a turn (engineSessionId set)
+// but then went idle WITHOUT ever calling worker_report used to draw NO signal at all — this branch used
+// to `return` unconditionally past the broken-spawn check. It now also checks "has this session EVER
+// called worker_report" (no board column to reconcile against, so no parked-ack/re-ack nuance — just
+// ever-vs-never) and fires a [loom:worker-idle] nudge on "never".
+//
 // Proves:
 //   (T1) a taskless worker with engineSessionId:null → the SAME [loom:worker-spawn-broken] nudge a tasked
 //        worker gets, just with no "(task X)" mention (mirrors worker-kickoff-guarantee.mjs's S1).
-//   (T2) a taskless worker with engineSessionId SET (a real turn ran) → NO nudge at all (there's no board-
-//        column-based "did NOT call worker_report" signal for a taskless worker — regression guard: it
-//        must not be silently mis-classified as broken, nor spuriously nudged for the ordinary case).
+//   (T2) a taskless worker with engineSessionId SET (a real turn ran) and NO worker_report ever → a
+//        [loom:worker-idle] silent-finish nudge now fires (card df48366b; this used to be silent).
+//   (T2b) a taskless worker with engineSessionId SET that HAS called worker_report at least once → NO
+//        nudge (the ever-vs-never check is satisfied; no false alarm for the ordinary reported case).
 //   (T3) a taskless worker with engineSessionId:null AND pending direction already queued → still SKIPS
 //        (the same redirect-race guard classifyIdleWorker applies for tasked workers, applied here too).
 //   (T4) a TASKED worker's broken-spawn nudge is completely unaffected (still fires, still names the task)
@@ -96,15 +103,31 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// ============ (T2) taskless + engineSessionId SET → NO nudge (regression guard) ============
+// ============ (T2) taskless + engineSessionId SET + NEVER reported → silent-finish nudge (card df48366b) ============
 {
   const e = makeEnv();
   seedSession(e, "mgr-t2", { role: "manager" });
   seedSession(e, "wkr-t2", { taskId: null, parentSessionId: "mgr-t2", branch: "loom/spike-t2", engineSessionId: "eng-wkr-t2" });
 
   e.sessions.notifyManagerOfIdleWorker("wkr-t2");
-  check("(T2) taskless + engineSessionId set → NO nudge at all (no board-column signal exists for a taskless worker)",
-    e.enqueued.filter((x) => x.id === "mgr-t2").length === 0);
+  const idle = e.enqueued.find((x) => x.id === "mgr-t2" && /worker-idle/.test(x.text));
+  check("(T2) taskless + engineSessionId set + never reported → a [loom:worker-idle] silent-finish nudge now fires",
+    !!idle);
+  check("(T2) the nudge says it never called worker_report", !!idle && /never called worker_report/.test(idle.text));
+  cleanup(e);
+}
+
+// ============ (T2b) taskless + engineSessionId SET + ALREADY reported → NO false alarm ============
+{
+  const e = makeEnv();
+  seedSession(e, "mgr-t2b", { role: "manager" });
+  seedSession(e, "wkr-t2b", { taskId: null, parentSessionId: "mgr-t2b", branch: "loom/spike-t2b", engineSessionId: "eng-wkr-t2b" });
+  await e.sessions.workerReport("wkr-t2b", { status: "done", summary: "spike done", noChanges: true });
+  e.enqueued.length = 0; // isolate to the notify call below
+
+  e.sessions.notifyManagerOfIdleWorker("wkr-t2b");
+  check("(T2b) a taskless worker that HAS called worker_report at least once draws NO false silent-finish nudge",
+    e.enqueued.filter((x) => x.id === "mgr-t2b").length === 0);
   cleanup(e);
 }
 
@@ -136,6 +159,6 @@ function cleanup(e) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — notifyManagerOfIdleWorker now covers a TASKLESS worker's broken spawn (engineSessionId never established → [loom:worker-spawn-broken], no task mention, same redirect-race guard as tasked), closing the safety-net gap taskless worker_spawn opened; a taskless worker that started fine draws no false nudge; a TASKED worker's existing broken-spawn coverage is byte-unaffected."
+  ? "\n✅ ALL PASS — notifyManagerOfIdleWorker now covers a TASKLESS worker's broken spawn (engineSessionId never established → [loom:worker-spawn-broken], no task mention, same redirect-race guard as tasked) AND its silent finish (engineSessionId set, never reported → [loom:worker-idle], card df48366b) — a taskless worker that has reported at least once draws no false alarm; a TASKED worker's existing broken-spawn coverage is byte-unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

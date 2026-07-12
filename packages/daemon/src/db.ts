@@ -3792,10 +3792,19 @@ export class Db {
     ).get(agentId) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
-  /** Currently-LIVE worker sessions across all projects — the BusyWorkerWatcher's work set (stuck-busy). */
+  /**
+   * Currently-LIVE worker sessions across all projects — the BusyWorkerWatcher's and IdleWatcher's work
+   * set (stuck-busy / idle-unreported). Includes ROLE-LESS children too (`role IS NULL`, e.g. a
+   * role-less consultation worker spawned under a manager) — a manager-parented, role-less session is
+   * exactly as "worker-like" as a role='worker' one for these two watchdogs, and excluding it left it
+   * with NO periodic busy/idle coverage at all (card df48366b). `parent_session_id IS NOT NULL` keeps a
+   * PARENTLESS role-less session (a standalone `plain` platform spawn) out of this set — both watchers'
+   * own downstream guards already skip a parentless row, but scoping it here matches the doc's contract.
+   */
   listLiveWorkers(): Session[] {
-    return (this.db.prepare("SELECT * FROM sessions WHERE role = 'worker' AND process_state = 'live'")
-      .all() as Row[]).map(toSession);
+    return (this.db.prepare(
+      "SELECT * FROM sessions WHERE process_state = 'live' AND parent_session_id IS NOT NULL AND (role = 'worker' OR role IS NULL)",
+    ).all() as Row[]).map(toSession);
   }
   /** ALL currently-LIVE sessions across every role/project — the usage sampler's per-tick work set
    *  (epic c9924bcd, card B). The sampler skips run sessions itself (accounted via aggregateRunUsage). */

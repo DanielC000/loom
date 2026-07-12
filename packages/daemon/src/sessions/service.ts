@@ -4404,7 +4404,11 @@ export class SessionService {
     // coverage (the one kind here that needs no board state at all) is handled directly in
     // notifyManagerOfIdleWorker instead, WITHOUT routing through this classifier — see its comment.
     const w = this.db.getSession(workerSessionId);
-    if (!w || w.role !== "worker" || !w.parentSessionId || !w.taskId) return { kind: "not-evaluable" };
+    // ROLE-LESS children (role IS NULL, e.g. a role-less consultation worker) are exactly as evaluable as
+    // role='worker' here — only an unrelated role (manager/platform/etc, which never has this manager as
+    // its parent in practice) is excluded. Card df48366b: this used to hard-require role==='worker',
+    // excluding a role-less child from ANY reconciliation.
+    if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId || !w.taskId) return { kind: "not-evaluable" };
     if (this.pty.getPendingEntries(workerSessionId).length > 0) return { kind: "not-evaluable" }; // direction queued, about to drain
 
     if (w.rateLimitedUntil && Date.parse(w.rateLimitedUntil) > Date.now()) return { kind: "not-stranded" };
@@ -4454,29 +4458,46 @@ export class SessionService {
    * to its manager. No-op for a non-strand (already reported/merged, rate-limited, queued report, or
    * legitimately parked awaiting an ack).
    *
-   * TASKLESS BROKEN-SPAWN (CR-flagged asymmetry on card 2514e6e1's taskless worker_spawn): a taskless
-   * worker (an ad-hoc spike, or a read-only Code Reviewer with no vehicle card) has no board card for
-   * classifyIdleWorker's column-based reconciliation (parked-ack/stranded/queued-report all need a task's
-   * lane) — that classifier stays entry-gated on taskId and out of scope here (see its own comment). But
-   * "did the engine ever start a turn at all" needs no board state, and is exactly as safety-critical for
-   * a taskless worker as a tasked one: before this, a taskless worker whose spawn kickoff silently never
-   * ran got NO nudge whatsoever — a real safety-net regression versus the pre-taskless world, where every
-   * worker carried a vehicle-card taskId and so was covered by the branch below. Handled directly here,
+   * TASKLESS (CR-flagged asymmetry on card 2514e6e1's taskless worker_spawn, widened by card df48366b): a
+   * taskless worker (an ad-hoc spike, or a read-only Code Reviewer with no vehicle card) has no board card
+   * for classifyIdleWorker's column-based reconciliation (parked-ack/queued-report need a task's lane) —
+   * that classifier stays entry-gated on taskId and out of scope here (see its own comment). But two
+   * things need no board state at all and are exactly as safety-critical for a taskless worker as a tasked
+   * one: (1) "did the engine ever start a turn at all" (broken-spawn) and (2) "did it finish a turn and go
+   * idle without EVER calling worker_report" (silent-finish) — a taskless worker that engaged, ran, and
+   * went idle used to get NEITHER signal (this branch returned unconditionally once past the broken-spawn
+   * check), leaving it just as silently stranded as the role-less case below. Handled directly here,
    * BEFORE delegating to classifyIdleWorker, with the SAME pending-direction race guard that classifier
    * applies (card 6101d7f7) and the busy-worker-watcher.ts `w.taskId ? ... : ""` taskId-optional message
-   * shape. Every OTHER idle-worker signal is intentionally NOT extended to taskless: the manager that
-   * spawned it is expected to actively await + worker_stop it directly, not rely on this board-driven
-   * safety net for anything beyond "did it even start."
+   * shape. Reconciliation beyond "ever reported at all" (parked-ack wording, re-ack tracking) is
+   * intentionally NOT extended to taskless — the manager that spawned it is expected to actively await +
+   * worker_stop it directly once nudged.
+   *
+   * ROLE-LESS CHILDREN (card df48366b): a session with `role: null` parented to a manager (e.g. a
+   * role-less consultation worker) is exactly as much this manager's responsibility as a role='worker'
+   * child — the entry gate below used to hard-require `role === "worker"`, so a role-less child got NO
+   * nudge whatsoever, tasked or not (the ONLY signal that could ever reach its manager on a silent finish).
    */
   notifyManagerOfIdleWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
-    if (!w || w.role !== "worker" || !w.parentSessionId) return;
+    if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) return;
 
     const brokenSpawnMsg = `[loom:worker-spawn-broken] worker ${workerSessionId}${w.taskId ? ` (task ${w.taskId})` : ""} went idle WITHOUT ever starting a turn — its spawn kickoff never ran (no engine session was ever established). This is NOT a benign idle park; it will not resolve on its own. Re-drive it: worker_message it with the task direction, or worker_recycle/re-spawn if it stays stuck.`;
 
     if (!w.taskId) {
       if (this.pty.getPendingEntries(workerSessionId).length > 0) return; // direction queued, about to drain
-      if (!w.engineSessionId) { try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ } }
+      if (!w.engineSessionId) {
+        try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ }
+        return;
+      }
+      // It DID start a turn — has it EVER called worker_report? If not, it finished silently with no
+      // board state to reconcile against, so this is the only signal available (no parked-ack/re-ack
+      // nuance — that needs a report to compare against, which by definition doesn't exist yet).
+      const everReported = this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report");
+      if (!everReported) {
+        const silentFinishMsg = `[loom:worker-idle] worker ${workerSessionId} finished a turn and is idle but has never called worker_report (taskless — no board card to check). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_message it or worker_stop it once reviewed.`;
+        try { this.pty.enqueueStdin(w.parentSessionId, silentFinishMsg); } catch { /* manager not live */ }
+      }
       return; // nothing else to classify without a task
     }
 
@@ -4512,7 +4533,9 @@ export class SessionService {
    */
   purgeStaleIdleNudgeForReengagedWorker(workerSessionId: string): void {
     const w = this.db.getSession(workerSessionId);
-    if (!w || w.role !== "worker" || !w.parentSessionId) return;
+    // Mirrors notifyManagerOfIdleWorker's role gate (card df48366b) — a role-less child can now have a
+    // nudge enqueued for it, so its re-engage edge must be able to purge a now-stale one too.
+    if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) return;
     try { this.pty.purgeQueuedWorkerIdleNudges(w.parentSessionId, workerSessionId); } catch { /* manager not live */ }
   }
 
