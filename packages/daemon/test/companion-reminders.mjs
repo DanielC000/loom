@@ -2,7 +2,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Companion RECURRING reminders (Companion Memory & Reminders Design, Surface 2 s3). NO claude, NO
 // network, NO daemon — the watcher takes an injected pty-slice + a REAL Db on an explicit temp file, so
 // the tick tests use RECORDING STUBS and drive tick() directly. Covers: a DUE cron reminder firing exactly
-// ONE framed [loom:reminder] turn carrying its own route, not-live skip, rate-limit PARK defer (once per
+// ONE framed [loom:reminder] turn carrying its own route (or the in-app fallback route when route-less,
+// so its chat_reply never resolves no-target), not-live skip, rate-limit PARK defer (once per
 // streak), no-stacking on a PER-REMINDER marker (two distinct reminders don't suppress each other),
 // restart-seed (no double-fire across a fresh watcher), enabled=false never fires, and DEFAULT-OFF
 // byte-identical behavior with zero rows.
@@ -13,6 +14,7 @@ import { randomUUID } from "node:crypto";
 import { Db } from "../dist/db.js";
 import { CompanionReminderWatcher, REMINDER_TAG, reminderMarker } from "../dist/companion/reminders.js";
 import { nextFireAt } from "../dist/orchestration/cron.js";
+import { ChatGateway } from "../dist/companion/chat-gateway.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -213,10 +215,32 @@ function addReminder(e, over = {}) {
 }
 {
   const e = makeEnv();
-  addReminder(e); // no route
+  addReminder(e); // no captured route
   e.watcher.tick(new Date());
-  check("route-carry: no route configured on the row ⇒ the reminder carries no route", e.enqueued.length === 1 && e.enqueued[0].route === undefined);
+  // BUG REPRO / FIX: a reminder created on a truly origin-less turn (e.g. the session's very first spawn
+  // turn) captures no route at reminder_create time. Pre-fix this fired with an undefined route, so its
+  // chat_reply later resolved `no-target` and silently vanished. It now falls back to the session's own
+  // implicit in-app route ({channel:"in-app", chatId: sessionId} — in-app.ts's `inAppHomeRoute`), the SAME
+  // fallback heartbeat.ts/attention-push.ts already use.
+  const expected = { channel: "in-app", chatId: e.sessId };
+  check("route-carry: no captured route ⇒ falls back to the session's in-app route (never undefined)", e.enqueued.length === 1 && JSON.stringify(e.enqueued[0].route) === JSON.stringify(expected));
   cleanupEnv(e);
+}
+
+// --- 9(b). BUG REPRO / FIX, end-to-end through deliverReply: a route-less reminder's proactive turn lands
+// on the in-app channel instead of no-target. Mirrors the heartbeat's own (d) end-to-end case: the pty pins
+// the reminder's carried route as the turn's origin, and the gateway resolves it via originResolver exactly
+// like a routed reminder's turn does. ---
+{
+  const fakeAdapter = (name, sent) => ({ name, maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { sent.push({ chatId, text }); } });
+  const noopSubmit = () => ({ delivered: true });
+  const inAppSent = [];
+  const sid = "in-app-only-reminder-sess";
+  const inAppRoute = { channel: "in-app", chatId: sid };
+  const gw = new ChatGateway(noopSubmit, [], undefined, undefined, (queried) => (queried === sid ? inAppRoute : null));
+  gw.registerAdapter(fakeAdapter("in-app", inAppSent));
+  const res = await gw.deliverReply(sid, "reminder check-in");
+  check("in-app fallback E2E: a route-less reminder's reply delivers via the in-app channel", res.delivered === true && inAppSent.length === 1 && inAppSent[0].chatId === sid && inAppSent[0].text === "reminder check-in");
 }
 
 // --- 10. No-stacking guard is COLLISION-PROOF across lexically-prefixing ids ("1" vs "10") ---
@@ -289,6 +313,6 @@ function addReminder(e, over = {}) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CompanionReminderWatcher fires each due/live/enabled reminder exactly once (carrying its own route), defers under park (once per streak, per reminder, bounded across repeated ticks), skips a stopped companion, never stacks a reminder against its OWN unconsumed turn (distinct reminders don't cross-suppress, even across lexically-prefixing ids), restart-seeds per reminder id (no double-fire), never fires a disabled row, survives a malformed cron with no throw and no fire, and stays fully inert with zero rows."
+  ? "\n✅ ALL PASS — CompanionReminderWatcher fires each due/live/enabled reminder exactly once (carrying its own route, or the in-app fallback route when route-less, so its chat_reply always has somewhere to go), defers under park (once per streak, per reminder, bounded across repeated ticks), skips a stopped companion, never stacks a reminder against its OWN unconsumed turn (distinct reminders don't cross-suppress, even across lexically-prefixing ids), restart-seeds per reminder id (no double-fire), never fires a disabled row, survives a malformed cron with no throw and no fire, and stays fully inert with zero rows."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

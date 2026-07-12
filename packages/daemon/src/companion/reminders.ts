@@ -22,6 +22,7 @@ import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
 import type { HeartbeatPty } from "./heartbeat.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { inAppHomeRoute } from "./in-app.js";
 import type { CompanionReminder } from "./types.js";
 
 /** The trusted-daemon framing tag — shared with the one-shot route-aware `wake_me` reminder framing
@@ -195,15 +196,16 @@ export class CompanionReminderWatcher {
   /** Fire ONE framed proactive turn, CARRYING the reminder's own route (captured server-side at
    *  reminder_create time from the creating turn's own origin — orchestration.ts's `getActiveTurnOrigin`
    *  — or none, if that turn itself had no origin, e.g. the session's very first spawn turn). A route-less
-   *  reminder then has nowhere to chat_reply. Note this is now narrower than an unconfigured heartbeat
-   *  home: heartbeat/attention-push always fall back to the session's in-app route (see heartbeat.ts's
-   *  `inAppHomeRoute` use), so most companion turns DO carry an origin by the time reminder_create runs.
+   *  reminder falls back to the session's implicit IN-APP route (`inAppHomeRoute` — always deliverable, no
+   *  binding needed), the SAME fallback heartbeat.ts/attention-push.ts use, so it still lands somewhere
+   *  instead of chat_reply resolving `no-target` and silently vanishing.
    *  Records lastFiredAt + emits the durable event; a real fire ends that reminder's current defer streak. */
   private fire(reminder: CompanionReminder, now: Date): void {
+    const route = reminder.route ?? inAppHomeRoute(this.deps.sessionId);
     // kind:"agent" — a user-authored recurring reminder prompt; must land as its own turn.
     // proactive:true (proactive event-line producer) — this IS the daemon-driven reminder submit, so the
     // companion's reply is tagged for the web chat's amber event line.
-    this.deps.pty.enqueueStdin(this.deps.sessionId, framedReminder(reminder), "system", undefined, reminder.route ?? undefined, "agent", undefined, undefined, true);
+    this.deps.pty.enqueueStdin(this.deps.sessionId, framedReminder(reminder), "system", undefined, route, "agent", undefined, undefined, true);
     this.lastFiredAt.set(reminder.id, now.getTime());
     this.deferredSinceLastFire.delete(reminder.id);
     this.emit(reminder.id, now, "companion_reminder_fired", { cron: reminder.cron, label: reminder.label });

@@ -228,7 +228,10 @@ try {
     watcher.tick(boundary);
     check("arm-on-create: the due tick fires BOTH reminders created via the tool", enqueued.filter((en) => en.text.startsWith(`${reminderMarker(reminderIdWithRoute)} `) || en.text.startsWith(`${reminderMarker(reminderIdNoRoute)} `)).length === 2);
     check("arm-on-create: the route-carrying reminder's fired turn carries its captured route", enqueued.find((en) => en.text.startsWith(`${reminderMarker(reminderIdWithRoute)} `)).route.chatId === "chat-1");
-    check("arm-on-create: the no-route reminder's fired turn carries no route", enqueued.find((en) => en.text.startsWith(`${reminderMarker(reminderIdNoRoute)} `)).route === undefined);
+    // No captured route ⇒ CompanionReminderWatcher.fire() falls back to the session's implicit in-app route
+    // (in-app.ts's `inAppHomeRoute`, the same fallback heartbeat.ts/attention-push.ts already use) instead
+    // of carrying no route at all — otherwise this reminder's chat_reply would resolve `no-target`.
+    check("arm-on-create: the no-route reminder's fired turn falls back to the in-app route", JSON.stringify(enqueued.find((en) => en.text.startsWith(`${reminderMarker(reminderIdNoRoute)} `)).route) === JSON.stringify({ channel: "in-app", chatId: SESS }));
   }
 
   // ============ 5. reminder_list reflects both created reminders ============
