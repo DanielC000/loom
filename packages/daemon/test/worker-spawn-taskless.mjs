@@ -88,7 +88,10 @@ const host = new SeamHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
 
 // --- main scenario project (generous cap — the cap admission itself is tested in isolation below) ---
-const repo = path.join(os.tmpdir(), `loom-wstl-repo-${Date.now()}`);
+// pid-disambiguated (matches tmpHome above) — a bare Date.now() name can collide across two concurrent
+// instances of this SAME test file whose clocks land on the same millisecond, racing `git init` itself
+// (observed: "cannot copy '…/templates/description' … File exists" under a stress-duplicated repro).
+const repo = path.join(os.tmpdir(), `loom-wstl-repo-${Date.now()}-${process.pid}`);
 initRepo(repo);
 db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 20 } }, createdAt: now, archivedAt: null });
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
@@ -188,7 +191,7 @@ try {
 
   // ===================== (5) isolated mini-project: taskless spawn counts toward the concurrency cap =====================
   {
-    const repoCap = path.join(os.tmpdir(), `loom-wstl-cap-repo-${Date.now()}`);
+    const repoCap = path.join(os.tmpdir(), `loom-wstl-cap-repo-${Date.now()}-${process.pid}`);
     initRepo(repoCap);
     db.insertProject({ id: "pCap", name: "Cap", repoPath: repoCap, vaultPath: repoCap, config: { orchestration: { maxConcurrentWorkers: 2 } }, createdAt: now, archivedAt: null });
     db.insertAgent({ id: "capMgrAgent", projectId: "pCap", name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });

@@ -190,10 +190,13 @@ try {
   // is repo-read.ts's GREP_FILE_TIMEOUT_MS (a vm isolate-termination timeout wrapping the WHOLE per-file
   // match loop — one vm crossing per FILE, not per line).
   fs.writeFileSync(path.join(repo, "src", "pathological.ts"), "a".repeat(40) + "!" + "a".repeat(600) + "\n");
-  const redosT0 = Date.now();
+  // MONOTONIC performance.now() (not Date.now()): a wall-clock forward/backward step under load can't
+  // inflate or hide the measured elapsed time (mirrors the perf-sanity check below and the trust-lock.mjs
+  // convention — see the 2026-06-16 CI timing-flake fix).
+  const redosT0 = performance.now();
   const redosRes = await call("repo_grep", { projectId: "pOrd", pattern: "^(a+)+$" });
-  const redosMs = Date.now() - redosT0;
-  check(`(b3) repo_grep: a catastrophic-backtracking pattern returns QUICKLY (${redosMs}ms), not a hang`, redosMs < 5000);
+  const redosMs = performance.now() - redosT0;
+  check(`(b3) repo_grep: a catastrophic-backtracking pattern returns QUICKLY (${Math.round(redosMs)}ms), not a hang`, redosMs < 5000);
   check("(b3) repo_grep: the pathological (non-matching) line correctly reports NO match", !redosRes.matches?.some((m) => m.file === "src/pathological.ts"));
   // A SINGLE file's per-file timeout is an absorbed, silent trade-off (same posture as clampLine's own
   // truncation) — it does NOT itself flip the top-level timedOut flag; only the TOTAL grep budget being
@@ -204,28 +207,41 @@ try {
 
   // PERF SANITY (CR finding): the vm boundary must be crossed once per FILE, not once per line — a per-line
   // crossing measured ~0.3ms/call in isolation, which would make a broad grep itself slow (e.g. ~4.5s for
-  // 300 files x 50 non-adversarial lines under a per-line design). Prove the per-line tax is gone: a
-  // synthetic multi-hundred-file tree with ORDINARY (non-pathological) content greps in well under a second.
+  // 15000 non-adversarial lines under a per-line design). Prove the per-line tax is gone: a synthetic
+  // multi-file tree with ORDINARY (non-pathological) content greps in well under a second.
+  //
+  // FILE COUNT vs LINE COUNT (pool-load flake fix, card test-harden-pool-flakes): keep the TOTAL probe
+  // count fixed at 15000 (so a real per-line-crossing regression still blows well past GREP_TOTAL_BUDGET_MS
+  // — see below) but spread it over FEWER, LARGER files (60 files x 250 lines, not 300 x 50). The healthy
+  // per-file-crossing path's wall-clock cost under host contention is dominated by fs.readFileSync calls +
+  // vm crossings — both scale with FILE COUNT, not probe count — so 5x fewer files buys real headroom
+  // against ambient scheduler/IO contention without weakening the regression signal one bit (a regressed
+  // per-line design still pays the SAME 15000 x ~0.3ms crossing tax regardless of file count). Confirmed
+  // by repro: at 300 files the healthy path measured 4029ms under a loaded pool — 29ms OVER the 4000ms
+  // budget, flipping `timedOut` true on otherwise-correct code (observed via a synthetic 16-way-concurrency
+  // + CPU-burn stress harness mirroring the real gate's pool-8 contention).
   const perfDir = path.join(repo, "src", "perf");
   fs.mkdirSync(perfDir, { recursive: true });
-  for (let f = 0; f < 300; f++) {
-    const lines = Array.from({ length: 50 }, (_, i) => `const line_${f}_${i} = "just an ordinary line of source text";`);
+  const PERF_FILES = 60;
+  const PERF_LINES_PER_FILE = 250; // 60 x 250 = 15000 total probes, same regression math as before
+  for (let f = 0; f < PERF_FILES; f++) {
+    const lines = Array.from({ length: PERF_LINES_PER_FILE }, (_, i) => `const line_${f}_${i} = "just an ordinary line of source text";`);
     fs.writeFileSync(path.join(perfDir, `file${f}.ts`), lines.join("\n") + "\n");
   }
   // MONOTONIC performance.now() (not Date.now()), so a wall-clock backward/forward step under load can't
   // skew elapsed. The PRIMARY regression guard here is FUNCTIONAL, not wall-clock: a regression back to a
-  // per-line vm crossing (instead of the intended once-per-file crossing) would make this 300-file /
-  // 15000-line scan slow enough to blow repo-read.ts's own GREP_TOTAL_BUDGET_MS (4000ms) partway through,
-  // which flips `timedOut` to true — that's the SAME clock/budget the product code enforces on itself, so
-  // it isn't sensitive to ambient test-load noise the way an arbitrary test-invented wall-clock threshold
-  // is (a bare "<1s" assertion flaked under concurrent daemon+test load — observed ~4010ms on a healthy,
-  // non-regressed run; card 3e5a8dc6). The wall-clock check below is kept only as a generous outer sanity
-  // ceiling (3x GREP_TOTAL_BUDGET_MS + slack) to catch a genuine hang, not to assert "fast".
+  // per-line vm crossing (instead of the intended once-per-file crossing) would make this 15000-probe scan
+  // slow enough to blow repo-read.ts's own GREP_TOTAL_BUDGET_MS (4000ms) partway through, which flips
+  // `timedOut` to true — that's the SAME clock/budget the product code enforces on itself, so it isn't
+  // sensitive to ambient test-load noise the way an arbitrary test-invented wall-clock threshold is (a bare
+  // "<1s" assertion flaked under concurrent daemon+test load — observed ~4010ms on a healthy, non-regressed
+  // run; card 3e5a8dc6). The wall-clock check below is kept only as a generous outer sanity ceiling (3x
+  // GREP_TOTAL_BUDGET_MS + slack) to catch a genuine hang, not to assert "fast".
   const perfT0 = performance.now();
   const perfRes = await call("repo_grep", { projectId: "pOrd", pattern: "NOTHING_MATCHES_THIS", maxResults: 200 });
   const perfMs = performance.now() - perfT0;
   check("(b3) repo_grep: the perf-tree scan legitimately found nothing — FUNCTIONAL per-line-tax regression guard (not silently timed out against GREP_TOTAL_BUDGET_MS)", perfRes.timedOut !== true);
-  check(`(b3) repo_grep: a 300-file / 15000-line non-pathological tree greps within a generous sanity ceiling (${Math.round(perfMs)}ms < 13500ms)`, perfMs < 13500);
+  check(`(b3) repo_grep: a ${PERF_FILES}-file / ${PERF_FILES * PERF_LINES_PER_FILE}-line non-pathological tree greps within a generous sanity ceiling (${Math.round(perfMs)}ms < 13500ms)`, perfMs < 13500);
   fs.rmSync(perfDir, { recursive: true, force: true });
 
   // CONFINEMENT: a `..` traversal and an absolute path both escape the project root and are REFUSED.

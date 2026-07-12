@@ -27,14 +27,34 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isAlive = (pid) => {
   try { process.kill(pid, 0); return true; } catch { return false; }
 };
+// MONOTONIC performance.now() (not Date.now()): a wall-clock forward/backward step under load can't
+// inflate or hide the elapsed budget (same convention as trust-lock.mjs).
 const waitUntil = async (cond, timeoutMs, stepMs = 100) => {
-  const start = Date.now();
-  while (Date.now() - start < timeoutMs) {
+  const start = performance.now();
+  while (performance.now() - start < timeoutMs) {
     if (cond()) return true;
     await sleep(stepMs);
   }
   return cond();
 };
+
+// Ambient-load calibration (mirrors trust-lock.mjs): measure how much slower a nominal 50ms sleep runs
+// RIGHT NOW under whatever contention this run's host currently has, and scale the load-sensitive reap
+// bounds below by that measured factor instead of guessing a fixed number a more loaded pool run could
+// still blow through. 1 = no contention observed; >1 scales with it.
+const calibT0 = performance.now();
+Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+const calibDt = performance.now() - calibT0;
+const overshoot = Math.max(1, calibDt / 50);
+// Killing an already-spawned local process is a plain OS syscall — not itself contention-sensitive the
+// way spawning a NEW helper process is — but scale it too for headroom.
+const ROOT_DEATH_TIMEOUT_MS = Math.round(3000 * overshoot * 2);
+// reapOrphanedDescendants spawns a NEW powershell.exe that queries the FULL system process list via CIM
+// — real external-process work (process creation + WMI provider IPC), not just scheduler delay, so it
+// gets the most generous scaling: under a loaded pool this genuinely observed >5000ms to complete
+// (confirmed by a 16-way-concurrency + CPU-burn repro mirroring the real gate's pool-8 contention).
+const REAP_TIMEOUT_MS = Math.round(5000 * overshoot * 4);
+console.log(`[calib] ambient overshoot ${overshoot.toFixed(2)}x → root-death bound ${ROOT_DEATH_TIMEOUT_MS}ms, reap bound ${REAP_TIMEOUT_MS}ms`);
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()).
 const tmpHome = path.join(os.tmpdir(), `loom-devserver-teardown-${Date.now()}-${process.pid}`);
@@ -69,7 +89,8 @@ async function readGrandchildPid(root) {
       if (m) { root.stdout.off("data", onData); resolve(Number(m[1])); }
     };
     root.stdout.on("data", onData);
-    setTimeout(() => reject(new Error("timed out waiting for GRANDCHILD_PID")), 5000);
+    // Real process spawn + startup — scale with the same ambient-load calibration as the reap waits below.
+    setTimeout(() => reject(new Error("timed out waiting for GRANDCHILD_PID")), REAP_TIMEOUT_MS);
   });
 }
 
@@ -115,13 +136,13 @@ try {
     grandchildPid = await readGrandchildPid(root);
     check("unit: grandchild is alive right after spawn", isAlive(grandchildPid));
     root.kill();
-    await waitUntil(() => !isAlive(root.pid), 3000);
+    await waitUntil(() => !isAlive(root.pid), ROOT_DEATH_TIMEOUT_MS);
     check("unit: root is dead", !isAlive(root.pid));
     check("unit: grandchild OUTLIVES its dead root (the leak, unpatched)", isAlive(grandchildPid));
 
     reapOrphanedDescendants(root.pid);
     if (process.platform === "win32") {
-      const reaped = await waitUntil(() => !isAlive(grandchildPid), 5000);
+      const reaped = await waitUntil(() => !isAlive(grandchildPid), REAP_TIMEOUT_MS);
       check("unit: reapOrphanedDescendants kills the orphan even though its root already exited", reaped);
     } else {
       // Skipped on POSIX: a setsid-detached child reparents to init (ppid=1) the instant its root
@@ -148,11 +169,11 @@ try {
     check("session: session is alive before stop", host.isAlive(SID) === true);
 
     host.stop(SID, "hard");
-    await waitUntil(() => !host.isAlive(SID), 3000);
+    await waitUntil(() => !host.isAlive(SID), ROOT_DEATH_TIMEOUT_MS);
     check("session: session reached exited", host.isAlive(SID) === false);
 
     if (process.platform === "win32") {
-      const gone = await waitUntil(() => !isAlive(grandchildPid), 5000);
+      const gone = await waitUntil(() => !isAlive(grandchildPid), REAP_TIMEOUT_MS);
       check("session: the escaped dev-server process is GONE after session end", gone);
     } else {
       // Skipped on POSIX — same setsid-reparent-to-init limitation as scenario 1 above.
