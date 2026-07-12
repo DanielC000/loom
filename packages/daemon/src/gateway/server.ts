@@ -34,7 +34,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES } from "../companion/capabilities.js";
+import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
@@ -1470,16 +1470,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // data model every opt-in Companion lever (session-status, decisions-relay, …) is gated on. HUMAN-ONLY
   // loopback REST — there is INTENTIONALLY NO MCP path (of ANY router: orchestration/platform/setup/audit),
   // same trust posture as the bindings/allowlist/config writers above: an injection-exposed companion agent
-  // must never widen its own capability. For every MCP-TOOL lever (session-status, decisions-relay, …) a
-  // grant write takes effect on the companion's NEXT respawn (the MCP tool surface is fixed at
-  // OS-process-start — see `POST /api/companion/:sessionId/upgrade` below, Framework §6's conversation-
-  // preserving respawn, for the on-demand live-apply path; this route alone does not trigger one).
-  // `attention-push` is the ONE exception: it's a daemon-owned
-  // WATCHER, not an MCP tool (companion/attention-push.ts), so `deps.companion?.reconcile(sessionId)` below
-  // arms/disarms it LIVE, no respawn needed — see CompanionController.rearmAttentionPushFor. Grants are
-  // keyed on the natural key (sessionId, capability, projectId) — POST/PUT both upsert; POST additionally
-  // 201s a fresh grant while PUT 404s when there's nothing existing to update (so a client can tell
-  // "created" from "must exist").
+  // must never widen its own capability.
+  //
+  // ADD/upgrade (a brand-new tool, or read→act) needs a respawn to take effect — NOT because the SERVER is
+  // stale (`OrchestrationMcpRouter.buildServer` is stateless per MCP request — see its own `handle()` doc —
+  // so `resolveCompanionGrant` re-reads this table fresh on EVERY tool call), but because the running
+  // companion PROCESS only ever fetches `tools/list` once, at MCP registration/startup: it has no way to
+  // discover a tool it never asked for. See `POST /api/companion/:sessionId/upgrade` below (Framework §6's
+  // conversation-preserving respawn) for the on-demand live-apply path; this route alone does not trigger one.
+  //
+  // REVOKE/downgrade (this CR fix), by contrast, is ALREADY live with NO respawn needed: the companion may
+  // still believe a revoked tool exists (its own stale `tools/list` belief), but the very next attempt to
+  // CALL it hits the freshly-rebuilt server, which either doesn't register the tool at all anymore or — for
+  // an act-mode lever that stays registered because another granted project is still act-mode — rejects it
+  // at the per-project `ctx.scope.mayAct` belt-and-suspenders re-check (also freshly resolved). What a
+  // revoke/downgrade does NOT do on its own is close the Companion Trust Window (Framework Card 0): a
+  // Tier-A lever's WARM low-friction window is keyed on (session, route, sender), not per-capability, so it
+  // can outlive a grant change entirely — `deps.orchMcp.closeCompanionTrustWindow?.(sessionId)` below closes
+  // it on every write (defense-in-depth: harmless on a grant that stays unchanged, and load-bearing against
+  // a stale-armed window surviving a downgrade-then-re-upgrade of the SAME capability).
+  //
+  // `attention-push` is the ONE lever with its own daemon-owned WATCHER, not an MCP tool at all
+  // (companion/attention-push.ts) — `deps.companion?.reconcile(sessionId)` below arms/disarms it LIVE, same
+  // as every other lever's revoke/downgrade path, just through its own mechanism (CompanionController.
+  // rearmAttentionPushFor) instead of the MCP tool surface. Grants are keyed on the natural key (sessionId,
+  // capability, projectId) — POST/PUT both upsert; POST additionally 201s a fresh grant while PUT 404s when
+  // there's nothing existing to update (so a client can tell "created" from "must exist").
   const GRANT_CONFIG_MAX_BYTES = 4096;
   const isValidGrantMode = (v: unknown): v is "read" | "act" => v === "read" || v === "act";
   // Buffer.byteLength (UTF-8 bytes), NOT .length (UTF-16 code units) — a multibyte config (e.g. non-ASCII
@@ -1562,6 +1578,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       projectId = b.projectId.trim();
     }
     if (b.mode !== undefined && !isValidGrantMode(b.mode)) return { ok: false, code: 400, error: "mode must be 'read' or 'act'" };
+    // CR fix: `isValidGrantMode` only checks read|act — it never checked the mode against the TARGET
+    // capability's own `supportsMode` (companion/capabilities.ts), so `mode:"act"` was silently accepted
+    // on a read-only lever (session-status/vault-read/transcript-read) and `mode:"read"` on an act-only
+    // lever (media-out/session-steer/session-spawn) — an inert grant the UI then shows as "granted." Only
+    // checked when `mode` is EXPLICITLY given (an omitted mode falls back to the DB's own default/preserve
+    // behavior, untouched by this fix).
+    if (b.mode !== undefined) {
+      const cap = COMPANION_CAPABILITIES.find((c) => c.slug === b.capability);
+      if (cap && !cap.supportsMode.includes(b.mode)) {
+        return {
+          ok: false, code: 400,
+          error: `capability "${b.capability}" does not support mode "${b.mode}" — it only supports: ${cap.supportsMode.join(", ")}`,
+        };
+      }
+    }
     if (!isValidGrantConfig(b.config)) return { ok: false, code: 400, error: `config must be a plain JSON object of at most ${GRANT_CONFIG_MAX_BYTES} bytes` };
     if (b.capability === "attention-push" && !isValidAttentionPushConfig(b.config as Record<string, unknown> | undefined)) {
       return {
@@ -1616,6 +1647,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // WATCHER that reconcile() can arm/disarm without a respawn (every other lever's MCP tool surface is
     // fixed at OS-process-start, per this route's own header comment) — a no-op for those, cheap either way.
     await deps.companion?.reconcile(sessionId);
+    // CR fix: POST is the SAME upsert PUT is (it can flip an EXISTING grant's mode act→read too — see
+    // "201 only when genuinely NEW" above), so it carries the identical stale-warm-window risk as PUT's
+    // own downgrade path below. Close every trust window this session holds (Framework Card 0) — cheap,
+    // and the correct direction regardless: a grant write is the owner re-asserting/changing trust, so
+    // any pre-existing warm low-friction window should never silently carry over unchanged. Optional-
+    // chained like every other `closeCompanionTrustWindow` call site (binding-unbind, config-teardown) —
+    // several existing gateway tests construct a minimal `orchMcp` stub that predates this method.
+    deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
     return reply.code(existedBefore ? 200 : 201).send(grant);
   });
   app.put("/api/companion/:sessionId/grants", async (req, reply) => {
@@ -1628,6 +1667,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!existing) return reply.code(404).send({ error: "no existing grant for that (capability, projectId) — POST to create one" });
     const grant = deps.db.upsertCompanionCapabilityGrant({ sessionId, capability: parsed.capability, projectId: parsed.projectId, mode: parsed.mode, config: parsed.config });
     await deps.companion?.reconcile(sessionId); // live re-arm — see the POST handler's comment above
+    // CR fix (Companion Trust Window, Framework Card 0): an act→read downgrade here must not leave a
+    // pre-existing warm trust window standing — see the POST handler's own comment above for the full
+    // rationale (this PUT shares the identical upsert + risk).
+    deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
     return grant;
   });
   app.delete("/api/companion/:sessionId/grants", async (req, reply) => {
@@ -1641,6 +1684,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const projectId = isNonBlankStr(q.projectId) ? q.projectId.trim() : null;
     deps.db.deleteCompanionCapabilityGrant(sessionId, q.capability, projectId);
     await deps.companion?.reconcile(sessionId); // live disarm — see the POST handler's comment above
+    // CR fix (Companion Trust Window, Framework Card 0): a full revoke must not leave a pre-existing warm
+    // trust window standing either — see the POST handler's own comment above for the full rationale.
+    deps.orchMcp.closeCompanionTrustWindow?.(sessionId);
     return { ok: true, grants: deps.db.listCompanionCapabilityGrantsForSession(sessionId) };
   });
 

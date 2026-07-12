@@ -555,6 +555,14 @@ const DECISIONS_RELAY: CompanionCapability = {
         // propose/confirm round-trip at all. Scope/Primitive-A/allowlist checks above already ran; this
         // ONLY changes WHEN a confirm fires, never what's in scope.
         if (mayProceedWithoutConfirm(ctx.trustWindow, tier, friction, frictionScope)) {
+          // Fail-safe dead-branch guard (mirrors board_relocate's/session_spawn's own Tier-X guard):
+          // decision_resolve shares this low-friction block with Tier A, so a deploy/irreversible (Tier X)
+          // decision must NEVER reach it — mayProceedWithoutConfirm returns false unconditionally for "X"
+          // (see its own doc), so this is unreachable today. Kept so a regression there fails SAFE instead
+          // of silently resolving a deploy/irreversible decision with zero owner confirm.
+          if (tier === "X") {
+            return ok({ error: "internal: tier-X action reported a low-friction path" });
+          }
           if (!noteIsVerbatim) {
             return ok({ error: "note must be a verbatim quote of what the owner said this turn — you may not author it" });
           }

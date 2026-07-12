@@ -91,6 +91,38 @@ try {
     const badMode = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", mode: "delete-everything" } });
     check("POST: an invalid mode → 400", badMode.statusCode === 400);
 
+    // CR fix: `mode` must also be validated against the TARGET capability's own `supportsMode` — a
+    // well-formed "read"/"act" value that the capability itself doesn't support was previously accepted
+    // silently, producing an inert grant the UI shows as "granted" but that gates nothing.
+    const actOnReadOnly = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", mode: "act" } });
+    check("POST: mode:'act' on a read-only-only capability (session-status) → 400", actOnReadOnly.statusCode === 400);
+    // The rejected write must not have touched the EXISTING session-status/null grant (created at the
+    // top of this file) — still 'read', not silently flipped or duplicated.
+    check("POST: the existing session-status grant is unchanged (still 'read')", db.getCompanionCapabilityGrant(companionSessId, "session-status", null)?.mode === "read");
+
+    const readOnActOnly = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", mode: "read" } });
+    check("POST: mode:'read' on an act-only capability (media-out) → 400", readOnActOnly.statusCode === 400);
+    check("POST: no inert grant row was created (media-out)", db.getCompanionCapabilityGrant(companionSessId, "media-out", null) === undefined);
+
+    const readOnSessionSteer = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-steer", mode: "read" } });
+    check("POST: mode:'read' on another act-only capability (session-steer) → 400", readOnSessionSteer.statusCode === 400);
+
+    // A mode the capability DOES support still succeeds — this isn't a blanket mode rejection.
+    const actOnDecisionsRelay = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay", mode: "act" } });
+    check("POST: mode:'act' on a capability that supports it (decisions-relay) → 201", actOnDecisionsRelay.statusCode === 201);
+    const cleanupDecisionsRelay = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=decisions-relay` });
+    check("DELETE: cleanup the decisions-relay validation grant (test isolation)", cleanupDecisionsRelay.statusCode === 200);
+
+    // The SAME check applies to PUT (an act→read downgrade attempt on an act-only capability must also
+    // reject, not just a fresh POST) — set up an existing media-out grant via a supported mode first.
+    const seedMediaOut = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", mode: "act" } });
+    check("POST: seed a well-formed media-out grant for the PUT check → 201", seedMediaOut.statusCode === 201);
+    const putUnsupportedMode = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "media-out", mode: "read" } });
+    check("PUT: mode:'read' on an act-only capability (media-out) → 400", putUnsupportedMode.statusCode === 400);
+    check("PUT: the existing grant's mode is UNCHANGED after the rejected PUT", db.getCompanionCapabilityGrant(companionSessId, "media-out", null).mode === "act");
+    const cleanupMediaOutMode = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=media-out` });
+    check("DELETE: cleanup the media-out mode-validation grant (test isolation)", cleanupMediaOutMode.statusCode === 200);
+
     const badConfig = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", config: "not-an-object" } });
     check("POST: a non-object config → 400", badConfig.statusCode === 400);
 
@@ -149,59 +181,74 @@ try {
     check("DELETE: cleanup the board-reach validation grant (test isolation)", cleanupBoardReach.statusCode === 200);
   }
   // ============ POST: a second, project-scoped grant for the SAME capability coexists ============
+  // NOTE: this lifecycle section (through DELETE below) exercises a read→act flip mid-flow, so it uses
+  // "decisions-relay" (supportsMode: read+act) rather than "session-status" (CR fix, read-only) — flipping
+  // session-status to "act" is now correctly rejected (see the mode-vs-supportsMode block above). Unlike
+  // session-status (created at the top of this file), decisions-relay needs its OWN null-project grant
+  // created here first.
+  let decisionsRelayCreated;
   {
-    const res = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", projectId: otherProjId, mode: "read" } });
+    const base = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay" } });
+    decisionsRelayCreated = JSON.parse(base.payload);
+    check("POST: a fresh decisions-relay (null-project) grant → 201", base.statusCode === 201);
+
+    const res = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay", projectId: otherProjId, mode: "read" } });
     check("POST: a project-scoped grant for the same capability is a SEPARATE row from the NULL 'own project' one", res.statusCode === 201);
-    check("POST: the session now has 2 distinct session-status grants", db.listCompanionCapabilityGrantsForSession(companionSessId).length === 2);
+    check("POST: the session now has 2 distinct decisions-relay grants", db.listCompanionCapabilityGrantsForSession(companionSessId).filter((g) => g.capability === "decisions-relay").length === 2);
   }
   // ============ GET: list ============
   {
     const res = await app.inject({ method: "GET", url: `/api/companion/${companionSessId}/grants` });
     const body = JSON.parse(res.payload);
     check("GET: 200", res.statusCode === 200);
-    check("GET: lists both grants", body.grants.length === 2);
+    check("GET: lists all grants (the initial session-status + the two decisions-relay)", body.grants.length === 3);
     // Code Review Major #1: the GET exposes the live-process start time so the web panel can derive an
     // apply-pending state that survives a reload. The stub pty reports no live process ⇒ null.
     check("GET: carries liveProcessStartedAt (null with no live pty)", "liveProcessStartedAt" in body && body.liveProcessStartedAt === null);
   }
   // ============ PUT: update an EXISTING grant (read → act) ============
   {
-    const res = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", mode: "act" } });
+    const res = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay", mode: "act" } });
     const body = JSON.parse(res.payload);
     check("PUT: 200 on an existing (capability, projectId) grant", res.statusCode === 200);
     check("PUT: mode flipped to 'act'", body.mode === "act");
-    check("PUT: id is STABLE across the update (same row, not a new one)", body.id === created.id);
-    check("PUT: the OTHER (project-scoped) grant is untouched", db.getCompanionCapabilityGrant(companionSessId, "session-status", otherProjId).mode === "read");
+    check("PUT: id is STABLE across the update (same row, not a new one)", body.id === decisionsRelayCreated.id);
+    check("PUT: the OTHER (project-scoped) grant is untouched", db.getCompanionCapabilityGrant(companionSessId, "decisions-relay", otherProjId).mode === "read");
 
-    const missing = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", projectId: otherProjId, mode: "act", config: { x: 1 }, extra: "irrelevant" } });
+    const missing = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay", projectId: otherProjId, mode: "act", config: { x: 1 }, extra: "irrelevant" } });
     check("PUT: updates config too", JSON.parse(missing.payload).config.x === 1);
 
-    const noRow = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay" } });
+    const noRow = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "vault-read" } });
     check("PUT: no existing grant for that (capability, projectId) → 404 (must POST to create)", noRow.statusCode === 404);
   }
   // ============ POST: re-POSTing an EXISTING (capability, projectId) is an upsert → 200, not 201 (CR fix) ============
   {
-    const res = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "session-status", mode: "read" } });
+    const res = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "decisions-relay", mode: "read" } });
     const body = JSON.parse(res.payload);
     check("POST: re-POSTing an EXISTING grant → 200 (update), NOT 201 (would misreport it as freshly created)", res.statusCode === 200);
     check("POST: the update actually applied (mode flipped back to 'read')", body.mode === "read");
-    check("POST: id is STABLE across the upsert (same row)", body.id === created.id);
-    check("POST: still exactly 2 grants for the session (no duplicate row)", db.listCompanionCapabilityGrantsForSession(companionSessId).length === 2);
+    check("POST: id is STABLE across the upsert (same row)", body.id === decisionsRelayCreated.id);
+    check("POST: still exactly 2 decisions-relay grants for the session (no duplicate row)", db.listCompanionCapabilityGrantsForSession(companionSessId).filter((g) => g.capability === "decisions-relay").length === 2);
   }
   // ============ DELETE ============
   {
-    const res = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=session-status` });
+    const res = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=decisions-relay` });
     const body = JSON.parse(res.payload);
     check("DELETE: 200, ok:true", res.statusCode === 200 && body.ok === true);
-    check("DELETE: the NULL-project grant is gone", db.getCompanionCapabilityGrant(companionSessId, "session-status", null) === undefined);
+    check("DELETE: the NULL-project grant is gone", db.getCompanionCapabilityGrant(companionSessId, "decisions-relay", null) === undefined);
     check("DELETE: the project-scoped grant for the SAME capability survives (scoped by projectId too)",
-      db.getCompanionCapabilityGrant(companionSessId, "session-status", otherProjId) !== undefined);
+      db.getCompanionCapabilityGrant(companionSessId, "decisions-relay", otherProjId) !== undefined);
 
-    const idempotent = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=session-status` });
+    const idempotent = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=decisions-relay` });
     check("DELETE: re-deleting an already-gone grant is a safe 200 no-op (idempotent)", idempotent.statusCode === 200);
 
     const badCap = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=not-a-real-lever` });
     check("DELETE: an unknown capability query param → 400", badCap.statusCode === 400);
+
+    // Cleanup: remove the surviving project-scoped decisions-relay grant too (test isolation for the
+    // sessionId guards section below, which re-lists via a plain capability name check only, but keep the
+    // db tidy for anyone reading its final state).
+    await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=decisions-relay&projectId=${otherProjId}` });
   }
   // ============ resolve-by-sessionId guards (mirrors every other companion REST resource) ============
   {
@@ -221,6 +268,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — companion_capability_grants is human-REST-writable (GET/POST/PUT/DELETE), validates the capability slug/projectId existence/mode/config shape, POST creates + PUT updates-only (404 when nothing exists yet) + DELETE is idempotent, distinct (capability, projectId) rows coexist independently, and every route resolves by sessionId with the same 404/400 posture as every other companion REST resource."
+  ? "\n✅ ALL PASS — companion_capability_grants is human-REST-writable (GET/POST/PUT/DELETE), validates the capability slug/projectId existence/mode/config shape (including mode against the TARGET capability's own supportsMode, on both POST and PUT, so an unsupported mode never produces an inert grant), POST creates + PUT updates-only (404 when nothing exists yet) + DELETE is idempotent, distinct (capability, projectId) rows coexist independently, and every route resolves by sessionId with the same 404/400 posture as every other companion REST resource."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

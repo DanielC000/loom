@@ -460,11 +460,89 @@ try {
     await client.close();
     db.close();
   }
+
+  // ============ Tier-X fail-safe dead-branch guard (CR fix): an irreversible decision NEVER takes the
+  // low-friction path, even inside an otherwise-warm trust window — mirrors board_relocate's/
+  // session_spawn's own Tier-X guard tests. decision_resolve shares its low-friction commit block with
+  // Tier A (unlike board_relocate/session_spawn, which are ALWAYS Tier X), so this is the one lever where
+  // that shared block's own internal `tier === "X"` check is load-bearing, not just belt-and-suspenders. ==
+  {
+    const db = tmpDb();
+    const proj = "proj-tierx-warm";
+    seedProject(db, proj, "Tier X warm");
+    const companionSess = "companion-tierx-warm";
+    seedSession(db, companionSess, proj, "assistant");
+    seedSession(db, "asker-tierx-warm", proj, "manager");
+    seedQuestion(db, "q-tierx-warm", "asker-tierx-warm", proj, {
+      title: "Drop the old table", body: "delete the deprecated users_v1 table?", options: ["approve", "reject"],
+    });
+    db.upsertCompanionCapabilityGrant({
+      sessionId: companionSess, capability: "decisions-relay", projectId: proj, mode: "act",
+      config: { decisionClasses: ["irreversible"] },
+    });
+    const pty = makeFakePty("the owner said: go ahead and drop it");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    // Pre-warm the trust window directly (as if a PRIOR Tier-A "general" decision already armed it) —
+    // Tier X must still step up regardless of a warm window.
+    orch.trustWindow.arm({ sessionId: companionSess, route: DEFAULT_ROUTE, senderId: null });
+    check("window is warm going in", orch.trustWindow.isWarm({ sessionId: companionSess, route: DEFAULT_ROUTE, senderId: null }) === true);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const proposed = await call(client, "decision_resolve", { questionId: "q-tierx-warm", chosenOption: "approve" });
+    check("Tier X (irreversible) even-in-warm-window: proposes, does NOT resolve", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("Tier X even-in-warm-window: NO promptText/token returned to the companion", proposed.promptText === undefined && proposed.token === undefined);
+    check("Tier X even-in-warm-window: question still pending", db.getQuestion("q-tierx-warm").state === "pending");
+    check("Tier X even-in-warm-window: exactly one message delivered to the owner", companion.delivered.length === 1);
+
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const resolved = await call(client, "decision_resolve", { questionId: "q-tierx-warm", chosenOption: "approve" });
+    check("Tier X confirm: resolves exactly once", resolved.status === "resolved");
+    check("Tier X confirm: the question is answered", db.getQuestion("q-tierx-warm").state === "answered");
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ Tier-X fail-safe guard, cold window: an irreversible decision's commit does not arm ======
+  {
+    const db = tmpDb();
+    const proj = "proj-tierx-cold";
+    seedProject(db, proj, "Tier X cold");
+    const companionSess = "companion-tierx-cold";
+    seedSession(db, companionSess, proj, "assistant");
+    seedSession(db, "asker-tierx-cold", proj, "manager");
+    seedQuestion(db, "q-tierx-cold", "asker-tierx-cold", proj, {
+      title: "Ship the release", body: "deploy the new build to production?", options: ["approve", "reject"],
+    });
+    db.upsertCompanionCapabilityGrant({
+      sessionId: companionSess, capability: "decisions-relay", projectId: proj, mode: "act",
+      config: { decisionClasses: ["deploy"] },
+    });
+    const pty = makeFakePty("the owner said: ship it");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    check("window starts cold", orch.trustWindow.isWarm({ sessionId: companionSess, route: DEFAULT_ROUTE, senderId: null }) === false);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const proposed = await call(client, "decision_resolve", { questionId: "q-tierx-cold", chosenOption: "approve" });
+    check("Tier X (deploy) cold window: proposes, does NOT resolve", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const resolved = await call(client, "decision_resolve", { questionId: "q-tierx-cold", chosenOption: "approve" });
+    check("Tier X (deploy) confirm: resolves exactly once", resolved.status === "resolved");
+    check("Tier X (deploy) commit does NOT arm the trust window (stays cold for the next act)",
+      orch.trustWindow.isWarm({ sessionId: companionSess, route: DEFAULT_ROUTE, senderId: null }) === false);
+
+    await client.close();
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decision_resolve rejects an unoffered option, a non-verbatim note, act on a read-only-granted project, a decision class outside the project's allowlist, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; it never resolves on the first (propose) call, delivers the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and resolves EXACTLY ONCE via the existing db.answerQuestion write once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action."
+  ? "\n✅ ALL PASS — decision_resolve rejects an unoffered option, a non-verbatim note, act on a read-only-granted project, a decision class outside the project's allowlist, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; it never resolves on the first (propose) call, delivers the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and resolves EXACTLY ONCE via the existing db.answerQuestion write once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and an irreversible/deploy (Tier X) decision NEVER takes the low-friction path even inside an otherwise-warm trust window, and its commit never arms the window for the next act (the CR fix's fail-safe dead-branch guard)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
