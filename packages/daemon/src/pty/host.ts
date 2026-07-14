@@ -332,11 +332,11 @@ const RESUME_MODE_READ_POLL_MS = Number(process.env.LOOM_RESUME_MODE_POLL_MS) ||
 const RESUME_MODE_CHANGE_MAX_POLLS = Number(process.env.LOOM_RESUME_MODE_MAX_POLLS) || 15;
 const RESUME_MODE_MAX_PRESSES = Number(process.env.LOOM_RESUME_MODE_MAX_PRESSES) || 4;
 /**
- * `logLandedMode`'s auto-heal trigger set (card 9c03f5a6) — every DEFINITE `LandedMode` reading that is
- * NOT the healthy target `auto`. Deliberately an explicit enumeration, not `mode !== "auto"`: the latter
- * would also match `"unknown"` (no footer could be read at all), breaking the heal's load-bearing
- * invariant that no correction is EVER attempted without a definite read. `"unknown"` is excluded by
- * construction here, not by a separate runtime check.
+ * `logLandedMode`'s auto-heal trigger set (card 9c03f5a6) — every DEFINITE `LandedMode` reading short of
+ * the session's own configured target (`auto` for the platform default). Deliberately an explicit
+ * enumeration, not `mode !== target`: the latter would also match `"unknown"` (no footer could be read at
+ * all), breaking the heal's load-bearing invariant that no correction is EVER attempted without a
+ * definite read. `"unknown"` is excluded by construction here, not by a separate runtime check.
  */
 const HEALABLE_MODES: ReadonlySet<LandedMode> = new Set(["plan", "acceptEdits", "default", "bypassPermissions"]);
 /**
@@ -3646,16 +3646,18 @@ export class PtyHost {
    * resting in `acceptEdits` (the boot cycle's very first press never registers, so `runCycleToMode` gives
    * up at the RAW gate-free boot mode) — which is the OTHER stall the owner named: an unattended role
    * sitting in a mode that hasn't earned an allowlist entry for the command it needs stalls on that
-   * permission prompt exactly the same way. The heal's destination is hardcoded `auto` (not a per-session
-   * computed target) — every Loom-driven role this heal protects boots at the SAME platform default target
-   * (mirrors the pre-widening code, which also hardcoded `auto`); a session whose `startupModeCycles:0`
-   * deliberately configures NO cycling (stay at the gate-free boot mode) is excluded via
-   * `noCyclingConfigured` below rather than fighting that deliberate choice.
+   * permission prompt exactly the same way. The heal's destination is the session's ACTUAL configured
+   * target (`healTarget` below — the SAME `resumeModeTarget ?? modeAfterCyclesFromAcceptEdits(...)`
+   * expression the main SessionStart convergence path computes), not a hardcoded `auto` — every
+   * platform-default (`startupModeCycles:2`) session still converges there, but a project that deliberately
+   * sets `startupModeCycles:0` (stay at the gate-free acceptEdits boot mode) is honoured on BOTH fresh
+   * spawn and resume instead of resume alone getting force-cycled past its own target. `noCyclingConfigured`
+   * below excludes a null-or-acceptEdits target rather than fighting that deliberate choice.
    *
    * A single blind corrective press would have the same drop risk as the failure it's healing (card
    * 1658fc22): if IT also drops under load, the session stays stranded with no further retry. Routing
-   * through cycleToMode instead reads the footer and retries (bounded) until it reaches `auto` or the pty
-   * dies, exactly like the main path — so a dropped press just costs one more poll, not a permanent
+   * through cycleToMode instead reads the footer and retries (bounded) until it reaches the target or the
+   * pty dies, exactly like the main path — so a dropped press just costs one more poll, not a permanent
    * strand. This is a BACKSTOP, independent of cycleToMode's own convergence logic invoked from the main
    * SessionStart path (which stays unchanged for that caller — see cycleToMode's doc comment): it fires
    * off the mode ACTUALLY read from the footer, regardless of why the session ended up there. A
@@ -3676,10 +3678,15 @@ export class PtyHost {
     live.modeLogged = true; // claim it once, up front — a repeat markReady won't re-schedule this
     const isResume = live.isResume;
     const role = live.role;
-    // A project that deliberately configures NO cycling (startupModeCycles:0, no resumeModeTarget) wants
-    // its Loom-driven role to STAY at the gate-free acceptEdits boot mode — the heal must not force it
-    // toward auto anyway just because acceptEdits is in HEALABLE_MODES.
-    const noCyclingConfigured = live.startupModeCycles === 0 && live.resumeModeTarget == null;
+    // The heal's destination is the session's ACTUAL configured target, not a hardcoded "auto" — the
+    // SAME expression the main SessionStart convergence path uses (see the `target` computed there), so
+    // a project that deliberately configures NO cycling (startupModeCycles:0) converges to `acceptEdits`
+    // on BOTH fresh spawn and resume instead of resume alone getting force-cycled past it to `auto`. A
+    // resume always carries a definite `resumeModeTarget` (SessionService.resume derives it from the SAME
+    // `startupModeCycles`, so `cycles:0` → `acceptEdits`, never `null`) — the fresh path is the one that
+    // can genuinely have no target (`startupModeCycles:0` and no `resumeModeTarget`).
+    const healTarget = live.resumeModeTarget ?? (live.startupModeCycles > 0 ? modeAfterCyclesFromAcceptEdits(live.startupModeCycles) : null);
+    const noCyclingConfigured = healTarget == null || healTarget === "acceptEdits";
     let attempts = 0;
     const tryRead = (): void => {
       const l = this.live.get(sessionId);
@@ -3696,10 +3703,10 @@ export class PtyHost {
       const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
       // eslint-disable-next-line no-console
       console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
-      if (!noCyclingConfigured && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
+      if (!noCyclingConfigured && healTarget != null && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
-        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to auto`);
-        this.cycleToMode(sessionId, "auto", () => {});
+        console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to ${healTarget}`);
+        this.cycleToMode(sessionId, healTarget, () => {});
       }
     };
     setTimeout(tryRead, MODE_LOG_POLL_MS);

@@ -24,6 +24,19 @@
 //      press never registers gives up resting at `acceptEdits` (short of the `auto` target), the OTHER
 //      stall the owner named ("a worker in acceptEdits hitting a non-allowlisted command prompt"). The
 //      heal now fires for ANY landed mode that isn't the session's own computed target, not just `plan`.
+//   5. FIXED (card 67593ddd): the heal's destination is the session's ACTUAL configured target (the SAME
+//      `resumeModeTarget ?? modeAfterCyclesFromAcceptEdits(startupModeCycles)` expression the main
+//      convergence path computes), not a hardcoded `auto` — so a worker that cleanly reaches its OWN
+//      non-auto target (e.g. `startupModeCycles:3` → `default`) is left there (scenario 5 below).
+//   6. FIXED (card 67593ddd), the RESUME side of the same asymmetry: SessionService.resume ALWAYS pins
+//      `startupModeCycles:0` AND ALWAYS passes an explicit `resumeModeTarget` (never null — for a
+//      `startupModeCycles:0` config that's `modeAfterCyclesFromAcceptEdits(0)` = `acceptEdits`), so the OLD
+//      `noCyclingConfigured` guard (`startupModeCycles===0 && resumeModeTarget==null`) was structurally
+//      never-true on resume and the heal force-cycled such a session to hardcoded `auto` — contradicting a
+//      config that deliberately wants NO cycling, and contradicting a FRESH spawn of the identical config
+//      (which correctly stayed at `acceptEdits`). A resumed `startupModeCycles:0` session now stays at
+//      `acceptEdits` too (scenario 7), while a resumed shipping-default (`startupModeCycles:2`) session that
+//      gets stuck mid-cycle is still healed to `auto` exactly as before (scenario 8 — no regression).
 //
 // RUN: pnpm build (repo root) then `node test/pty-mode-convergence.mjs` from packages/daemon.
 import fs from "node:fs";
@@ -95,6 +108,19 @@ const spawnFresh = (id, role, startupModeCycles = 2) => {
   host.spawn({
     sessionId: id, cwd: tmpHome,
     permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles },
+    geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role,
+  });
+  return fakes[fakes.length - 1];
+};
+// Mirrors SessionService.resume's actual contract (service.ts): startupModeCycles is ALWAYS pinned to 0 on
+// the resume spawn, and resumeModeTarget is ALWAYS passed explicitly, derived from the PROJECT'S configured
+// cycles via the SAME modeAfterCyclesFromAcceptEdits map a fresh spawn uses — so `resumeTarget` here is what
+// a real caller would compute for a given `configuredCycles`, not an independent free choice.
+const spawnResume = (id, role, resumeTarget) => {
+  host.spawn({
+    sessionId: id, cwd: tmpHome, resumeId: `eng-${id}`,
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+    resumeModeTarget: resumeTarget,
     geometry: { cols: 120, rows: 40 }, sessionEnv: {}, role,
   });
   return fakes[fakes.length - 1];
@@ -201,12 +227,13 @@ try {
     countShiftTabs(fd) === healCountScenario4);
 
   // ============ 5) A role reaches `default` cleanly (its OWN configured target, startupModeCycles:3) ============
-  // ============    — the WIDENED heal STILL corrects it toward auto: HEALABLE_MODES (card 9c03f5a6) fires ============
-  // ============    on ANY of {plan,acceptEdits,default,bypassPermissions} UNCONDITIONALLY, not only a ============
-  // ============    give-up/failure landing — the heal's destination is hardcoded `auto`, not a per-session ============
-  // ============    computed target (mirrors the pre-widening code, which also hardcoded `auto`). ============
+  // ============    — the heal (card 67593ddd) now targets the session's ACTUAL configured target, not a ============
+  // ============    hardcoded `auto`, so it fires (HEALABLE_MODES still includes `default`, unconditionally, ============
+  // ============    not only on a give-up/failure landing) but its OWN cycleToMode sees current===target ============
+  // ============    immediately and presses NOTHING further — the old hardcoded-auto special case (which ============
+  // ============    would have chased this worker 3 more presses past its own correctly-reached target) is gone. ============
   const E = "sess-fresh-worker-default-target";
-  const fe = spawnFresh(E, "worker", 3); // startupModeCycles:3 → the RAW cycle's own target is "default"
+  const fe = spawnFresh(E, "worker", 3); // startupModeCycles:3 → the session's OWN target is "default"
   fe.feed(ACCEPT_EDITS_FOOTER);
   host.deliverHook(E, { hook_event_name: "SessionStart", session_id: "eng-E" });
   await sleep(750);
@@ -221,18 +248,10 @@ try {
   await sleep(150);
   check("5: the RAW cycler cleanly reached ITS OWN target `default` in exactly 3 presses (no give-up)",
     countShiftTabs(fe) === 3);
-  check("5: WIDENED heal fires a 4th Shift+Tab (default → acceptEdits attempt) even though the main cycle " +
-    "SUCCEEDED at reaching its own target — the trigger is the enumerated set, not a failure detector",
-    await waitUntil(() => countShiftTabs(fe) === 4, 2500));
-  fe.feed(ACCEPT_EDITS_FOOTER);
-  check("5: heal's 2nd corrective press issued (acceptEdits → plan attempt)",
-    await waitUntil(() => countShiftTabs(fe) === 5, 1000));
-  fe.feed(PLAN_FOOTER);
-  check("5: heal's 3rd corrective press issued (plan → auto attempt)",
-    await waitUntil(() => countShiftTabs(fe) === 6, 1000));
-  fe.feed(AUTO_FOOTER);
-  await sleep(150);
-  check("5: heal converged the worker to auto (3 corrective presses)", countShiftTabs(fe) === 6);
+  await sleep(1500); // MODE_LOG_POLL_MS(500) + MODE_CYCLE_SETTLE_MS(700) + slack — enough for a heal press to have fired if it would
+  check("5: NO further heal press — the heal's target IS `default` (this session's own config), " +
+    "not the hardcoded `auto` the pre-fix heal would have chased it toward",
+    countShiftTabs(fe) === 3);
 
   // ============ 6) A footer that NEVER becomes readable ("unknown") triggers NO auto-heal ============
   // ============    — the load-bearing invariant "no correction without a definite read" survives the widening ============
@@ -246,10 +265,49 @@ try {
     countShiftTabs(ff2) === 0);
   check("6: NO auto-heal press fires for an unreadable footer — HEALABLE_MODES excludes 'unknown' by construction",
     countShiftTabs(ff2) === 0);
+
+  // ============ 7) RESUME asymmetry FIX (card 67593ddd): a `startupModeCycles:0` config stays at ============
+  // ============    `acceptEdits` on RESUME too — no force-cycle to the old hardcoded `auto` ============
+  // configuredCycles:0 → resumeModeTarget = modeAfterCyclesFromAcceptEdits(0) = "acceptEdits" (never null),
+  // exactly as SessionService.resume computes it. Pre-fix this session would land here (noCyclingConfigured
+  // was structurally false on resume) and get force-cycled to "auto" despite the config wanting NO cycling.
+  const G = "sess-resume-worker-cycles0";
+  const fg = spawnResume(G, "worker", "acceptEdits");
+  fg.feed(ACCEPT_EDITS_FOOTER); // boot footer already painted before SessionStart fires
+  host.deliverHook(G, { hook_event_name: "SessionStart", session_id: "eng-G" });
+  await sleep(750); // > MODE_CYCLE_SETTLE_MS — main convergence reads acceptEdits === its own target, 0 presses
+  check("7: main convergence issued ZERO presses (resume already at its own configured target, acceptEdits)",
+    countShiftTabs(fg) === 0);
+  await sleep(1500); // MODE_LOG_POLL_MS + MODE_CYCLE_SETTLE_MS + slack — long enough for the OLD hardcoded-auto heal to have fired
+  check("7: FIXED — no auto-heal press on resume for a startupModeCycles:0 config (stays at acceptEdits, " +
+    "matching a FRESH spawn of the identical config — the asymmetry this task closes)",
+    countShiftTabs(fg) === 0);
+
+  // ============ 8) REGRESSION GUARD: a resumed shipping-default (startupModeCycles:2) session that gets ============
+  // ============    stuck mid-cycle is STILL healed to `auto` — the fix must not weaken the common case ============
+  const H = "sess-resume-worker-cycles2-stuck";
+  const fh = spawnResume(H, "worker", "auto"); // configuredCycles:2 → resumeModeTarget = "auto"
+  fh.feed(ACCEPT_EDITS_FOOTER);
+  host.deliverHook(H, { hook_event_name: "SessionStart", session_id: "eng-H" });
+  await sleep(750);
+  check("8: main convergence issued its 1st Shift+Tab (acceptEdits → plan attempt)", countShiftTabs(fh) === 1);
+  fh.feed(PLAN_FOOTER); // 1st press registers
+  await sleep(150);
+  check("8: main convergence issued its 2nd Shift+Tab (plan → auto attempt)", countShiftTabs(fh) === 2);
+  // Do NOT feed anything further — the 2nd press drops, main cycle gives up at plan (mirrors scenario 2).
+  await sleep(400);
+  check("8: main cycle gave up WITHOUT a 3rd blind press, landed at plan", countShiftTabs(fh) === 2);
+  check("8: the role-gated heal STILL fires and corrects a stuck RESUME to its configured target `auto`",
+    await waitUntil(() => countShiftTabs(fh) === 3, 2500));
+  fh.feed(AUTO_FOOTER);
+  await sleep(150);
+  check("8: resume converged to auto via the heal (1 corrective press) — the common case is not regressed",
+    countShiftTabs(fh) === 3);
 } finally {
   for (const s of [
     "sess-fresh-A", "sess-fresh-worker-stuck", "sess-fresh-manager-stuck", "sess-fresh-worker-stuck-start",
     "sess-fresh-worker-default-target", "sess-fresh-worker-unknown",
+    "sess-resume-worker-cycles0", "sess-resume-worker-cycles2-stuck",
   ]) {
     try { host.stop(s, "hard"); } catch { /* ignore */ }
   }
@@ -261,6 +319,8 @@ console.log(failures === 0
     + "a dropped press's worst case is caught by the role-gated auto-heal (fires once, worker-only, never "
     + "touches a manager) — WIDENED to correct ANY landed mode short of the session's target, not just a "
     + "plan landing — so a Loom-driven worker can never be silently stranded in plan OR left short at "
-    + "acceptEdits (the other unattended-prompt trap)."
+    + "acceptEdits (the other unattended-prompt trap). The heal's destination is now the session's OWN "
+    + "configured target, not a hardcoded auto, closing the fresh/resume asymmetry where a startupModeCycles:0 "
+    + "config was honoured fresh but force-cycled to auto on resume."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
