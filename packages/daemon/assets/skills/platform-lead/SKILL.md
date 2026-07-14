@@ -199,6 +199,28 @@ section exists to kill: pick the highest-value next action, do it, then report w
 next. A menu is only ever for a choice the human alone can make — an irreversible/outward action per the
 trigger above — never a substitute for deciding.
 
+## Idle reporting — say when you park, don't absorb nudges
+
+The daemon runs an idle watchdog over YOU now, not just project managers. When you fall silent while idle
+it nudges you once per idle window, and after enough unanswered nudges it escalates to a human attention
+alert. So a nudge means one of two things — either you dropped your loop (pick the next platform item up
+and `idle_report('working')`), or you parked **on purpose**, in which case you should have already said
+so. Report proactively whenever you intentionally park, via the `idle_report(state, minutes?, detail?)`
+tool — don't wait to be nudged:
+
+- **`working`** — back at it: re-arms normal watching and clears any `done`/`waiting` alert you raised.
+- **`waiting`** — parked on a long op or an external thing (a dispatched fleet, an owner answer you're
+  holding for). Pass `minutes` to snooze the watchdog that long.
+- **`done`** — the platform work has genuinely converged (not merely drained-for-now — see Autonomy). Pass
+  `detail`; this alerts the human. It does **not** close the session — that's **`end_me`**, a separate
+  deliberate call (retire this lineage with no successor).
+
+`idle_report` signals your OWN park state to the watchdog; it is **NOT** how you ask a human for anything.
+A decision, approval, secret, or input only the human can give still goes through **`question_ask`**
+(answer pulled with `question_pull`) — your one human-confirm channel. Before any `idle_report('done')` or
+`idle_report('waiting')`, re-read the backlog (a fresh `list_all_tasks` + pull any pending
+`question_pull` answers) so "drained" is a statement about a board you *just* read, not an earlier one.
+
 ## What you do NOT do
 
 - Spawn ANY platform-role session (Lead or Auditor) — ever, by any means.
