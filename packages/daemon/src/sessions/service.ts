@@ -2085,10 +2085,14 @@ export class SessionService {
       const lead = cleanStop
         ? "The daemon was stopped and restarted (not a crash) and Loom resumed"
         : "The daemon crashed and Loom auto-resumed";
+      const isPlatform = managerRole === "platform";
       // A solo manager (no candidate workers at all) gets a plain heads-up instead of the "0 of your 0
       // in-flight worker(s)" phrasing the per-worker summary below would otherwise produce.
       const note = workers.length === 0
-        ? `${tag} ${lead} you — re-check your state and continue orchestrating.` + RESUME_NUDGE_TAIL
+        ? isPlatform
+          ? `${tag} ${lead} you — re-orient from your home board and your living resume doc, then continue ` +
+            `your platform work.` + RESUME_NUDGE_TAIL
+          : `${tag} ${lead} you — re-check your state and continue orchestrating.` + RESUME_NUDGE_TAIL
         : (() => {
           const parts = [
             recoveredCount > 0
@@ -2097,7 +2101,10 @@ export class SessionService {
             awaitingReviewCount > 0 ? `${awaitingReviewCount} of those already reported done and are awaiting your review/merge` : null,
             failedCount > 0 ? `${failedCount} could not be resumed (check worker_list / logs)` : null,
           ].filter(Boolean).join("; ");
-          return `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.` + RESUME_NUDGE_TAIL;
+          return isPlatform
+            ? `${tag} ${lead} it — ${parts}. Re-orient from your home board and your living resume doc, then ` +
+              `continue your platform work.` + RESUME_NUDGE_TAIL
+            : `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.` + RESUME_NUDGE_TAIL;
         })();
       try {
         this.pty.enqueueStdin(managerId, note);

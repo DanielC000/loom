@@ -455,6 +455,23 @@ try {
   check("(9f) it resumes SILENTLY (no stake: 0 workers, board covered by the active idle-watcher, no answer) — SAME classification as a manager",
     pty.getPending(id9f.plat).length === 0);
 
+  // (9f2) PLATFORM WITH STRANDED BOARD WORK — genuine stake (escalated-suppressed idle policy, no
+  // natural re-arm) forces the FULL nudge, and its copy must be LEAD-APPROPRIATE (card 2ed72a24,
+  // Finding 1): Path B (this function) now mirrors Path A's role==='platform' branch instead of the
+  // manager-shaped "your workers'/worktrees" phrasing.
+  const id9f2 = { plat: `cow-plat9f2-${sfx}` };
+  mkSession({ id: id9f2.plat, projId: P.proj, agentId: P.agent, role: "platform", processState: "live" });
+  db.appendEvent({ id: `cow-9f2-esc-${sfx}`, ts: now, managerSessionId: id9f2.plat, kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  db.setIdleNudgePolicy(id9f2.plat, "suppressed");
+  const soloManagers9f2 = deriveCrashOrphanedManagers(db, [db.getSession(id9f2.plat)], []);
+  sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9f2 });
+  const nudge9f2 = pty.getPending(id9f2.plat).find((m) => m.includes("[loom:crash-recovered]"));
+  check("(9f2) a platform (Lead) with STRANDED board work gets the FULL nudge (genuine stake)", !!nudge9f2);
+  check("(9f2) the Lead nudge has NO manager-shaped 'workers'/'worktrees' text",
+    !!nudge9f2 && !/your workers|worktrees are intact|re-check their state/i.test(nudge9f2));
+  check("(9f2) the Lead nudge instead points at the home board + living resume doc",
+    !!nudge9f2 && /home board/i.test(nudge9f2) && /resume doc/i.test(nudge9f2));
+
   // (9g) PARKED SOLO MANAGER — a solo manager (zero worker candidates) that is usage-limit PARKED is
   // resumed live (so the rate-limit watcher can recover it on its own schedule) but withheld its summary
   // nudge, mirroring the with-workers park handling (section 5) — untested for the zero-worker path.

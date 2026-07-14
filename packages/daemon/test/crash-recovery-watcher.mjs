@@ -364,6 +364,12 @@ function cleanup(e) {
   const nudge = e.enqueued.find((x) => x.id === "s11d2");
   check("(11d2) a dead platform (Lead) with STRANDED board work (escalated-suppressed policy) still gets the FULL nudge",
     !!nudge && /auto-recovered/.test(nudge.text));
+  // card 2ed72a24 (Finding 1): Path C now mirrors Path A's role==='platform' copy branch — no
+  // manager-shaped "your workers'/worktrees" phrasing for a Lead; it points at the board + resume doc.
+  check("(11d2) the Lead nudge has NO manager-shaped 'workers'/'worktrees' text",
+    !!nudge && !/re-check your workers|your worktrees are intact/i.test(nudge.text));
+  check("(11d2) the Lead nudge instead points at the home board + living resume doc",
+    !!nudge && /home board/i.test(nudge.text) && /resume doc/i.test(nudge.text));
   cleanup(e);
 }
 

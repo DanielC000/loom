@@ -113,9 +113,9 @@ export function isWatcherActiveForSession(db: Db, id: string): boolean {
  * natural re-arm, so board work stays stranded. 'suppressed' via a deliberate idle_report('done') is the
  * session's own considered judgment call — re-litigating it every wake is waste, not a safety net. Only
  * 'suppressed' reached via the escalation-cap has no natural re-arm (better to over-nudge a stuck
- * manager/Lead than strand it). The `role` param is now used only to select which idle-nudge accessors
- * apply (they're role-agnostic columns, so in practice the SAME logic runs for both roles) — no more
- * role-conditional early return.
+ * manager/Lead than strand it). The `role` param is entirely UNUSED in this function's body (every
+ * accessor below takes only `db`/`id`, role-agnostic) — kept for signature stability / parity with
+ * {@link computeWakeImpact}'s `RestartWakeImpact` shape, not because it's consulted here.
  */
 export function strandedBoardWork(db: Db, id: string, role: SessionRole | null): boolean {
   if (!hasPendingBoardWork(db, id)) return false;

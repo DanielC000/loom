@@ -351,9 +351,13 @@ export class CrashRecoveryWatcher {
               ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
                 `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +
                 `review (the task is already in 'review'). Run the review→gate→merge loop on it, then continue orchestrating.`
-              : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
-                `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
-                `you left off.`;
+              : s.role === "platform"
+                ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — re-orient from ` +
+                  `your home board and your living resume doc, then continue your platform work from where you ` +
+                  `left off.`
+                : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
+                  `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
+                  `you left off.`;
             try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
           }
         }
