@@ -5,8 +5,9 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem } from "./questionTool.js";
+import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -38,6 +39,22 @@ import { CompanionTrustWindow } from "../companion/trust-window.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
+
+// ColumnRole (shared) mirror for the board_column_* tools below — kept in lockstep with the ColumnRole
+// union in shared/src/config.ts, same as mcp/platform.ts's own `columnRole` mirror.
+const columnRole = z.enum([
+  "intake", "defaultLanding", "workReady", "active", "review", "parked", "terminal", "mergeLanding",
+]);
+
+/** A stored column, carried through unchanged into a `sessions.updateBoardColumns` desired layout (no
+ *  `prevKey` — that's set only by board_column_rename for the one column being renamed). */
+const toDesiredColumn = (c: KanbanColumn): DesiredColumn => {
+  const d: DesiredColumn = { key: c.key, label: c.label };
+  if (c.role) d.role = c.role;
+  if (c.accentColor !== undefined) d.accentColor = c.accentColor;
+  if (c.wipLimit !== undefined) d.wipLimit = c.wipLimit;
+  return d;
+};
 
 /**
  * Orchestration MCP server (phase-2 §A2/§A3) — a ROLE-BASED surface, keyed by the URL-path
@@ -1810,6 +1827,90 @@ export class OrchestrationMcpRouter {
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
+      },
+    );
+
+    // --- Manager-driven board column create/rename/delete (owner-approved capability expansion) ------
+    // Three thin wrappers around the SAME atomic writer the human REST column editor uses
+    // (sessions.updateBoardColumns → planColumnLayout + db.applyBoardColumnLayout) — ZERO new mutation or
+    // validation logic. Each reads the project's CURRENT resolved columns (currentColumns), splices in the
+    // one create/rename/delete change, and delegates. Every hard invariant (no-orphan, ≥1-column floor,
+    // exactly-one-required-role, removed-column cards re-keyed to defaultLanding) is enforced by that
+    // shared writer, not here. MANAGER-ONLY: registered here (mcp/orchestration.ts), deliberately NOT on
+    // the worker-shared mcp/tasks.ts surface — a worker must never restructure a shared board.
+    server.registerTool(
+      "board_column_create",
+      {
+        description:
+          "Create a new board column in YOUR project — an alternative to platform_escalate-ing for a new " +
+          "lane. `key` must be unique (not already used by an existing column); `label` is the human-facing " +
+          "name; optional `role` assigns it a lifecycle role (intake/defaultLanding/workReady/active/review/" +
+          "parked/terminal/mergeLanding) — at most one column may hold a given role (except a NEW column " +
+          "can't claim defaultLanding/terminal since exactly one column must already hold each of those; " +
+          "reassign via board_column_rename on the existing holder first if you want to move one). The new " +
+          "column is appended after the existing ones. Delegates to the SAME atomic writer the human column " +
+          "editor uses — every existing card is untouched. Returns {ok:true, columns, warnings} or " +
+          "{ok:false, error} on a hard reject (e.g. a duplicate key).",
+        inputSchema: { key: z.string(), label: z.string(), role: columnRole.optional() },
+      },
+      async ({ key, label, role }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ ok: false, error: "no project for this session" });
+        const current = currentColumns(db, projectId);
+        const desired: DesiredColumn[] = [...current.map(toDesiredColumn), { key, label, ...(role ? { role } : {}) }];
+        return ok(sessions.updateBoardColumns(projectId, desired));
+      },
+    );
+
+    server.registerTool(
+      "board_column_rename",
+      {
+        description:
+          "Rename a board column's key and/or label in YOUR project. `key` must name an EXISTING column; " +
+          "pass `newKey` to change its key (every card on it follows old→new — never orphaned) and/or " +
+          "`newLabel` to change its display name (at least one of the two must be given). The column's role/" +
+          "accent/WIP-limit are preserved unchanged. Delegates to the SAME atomic writer the human column " +
+          "editor uses. Returns {ok:true, columns, warnings} or {ok:false, error} (e.g. `key` not found, or " +
+          "`newKey` collides with another existing column).",
+        inputSchema: { key: z.string(), newKey: z.string().optional(), newLabel: z.string().optional() },
+      },
+      async ({ key, newKey, newLabel }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ ok: false, error: "no project for this session" });
+        if (!newKey && !newLabel) return ok({ ok: false, error: "pass newKey and/or newLabel" });
+        const current = currentColumns(db, projectId);
+        if (!current.some((c) => c.key === key)) return ok({ ok: false, error: `no such column '${key}'` });
+        const desired: DesiredColumn[] = current.map((c) => {
+          if (c.key !== key) return toDesiredColumn(c);
+          const d = toDesiredColumn(c);
+          d.key = newKey ?? c.key;
+          d.label = newLabel ?? c.label;
+          if (d.key !== key) d.prevKey = key;
+          return d;
+        });
+        return ok(sessions.updateBoardColumns(projectId, desired));
+      },
+    );
+
+    server.registerTool(
+      "board_column_delete",
+      {
+        description:
+          "Delete a board column in YOUR project. `key` must name an EXISTING column. Every card still on " +
+          "it is re-keyed to the board's defaultLanding column (never orphaned) — the SAME safe re-key the " +
+          "human column editor performs. Deleting a column that holds a REQUIRED role (defaultLanding or " +
+          "terminal) is HARD-REJECTED unless another column already carries that role (reassign it first via " +
+          "board_column_rename, or on the column you're keeping, before deleting this one). A board must " +
+          "always keep at least one column. Returns {ok:true, columns, warnings} or {ok:false, error}.",
+        inputSchema: { key: z.string() },
+      },
+      async ({ key }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ ok: false, error: "no project for this session" });
+        const current = currentColumns(db, projectId);
+        if (!current.some((c) => c.key === key)) return ok({ ok: false, error: `no such column '${key}'` });
+        const desired: DesiredColumn[] = current.filter((c) => c.key !== key).map(toDesiredColumn);
+        return ok(sessions.updateBoardColumns(projectId, desired));
       },
     );
 
