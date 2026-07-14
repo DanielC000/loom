@@ -1745,10 +1745,11 @@ export class SessionService {
    *     backlog no longer forces the full nudge by itself — a 'watching' or 'snoozed' manager's ordinary
    *     backlog is ALREADY independently covered by the idle-watcher's own cadence regardless of this
    *     restart, so re-forcing it here was pure duplication (this was the dominant source of the reported
-   *     waste — see strandedBoardWork's doc for the full per-role/per-policy breakdown, incl. why a
-   *     platform/Lead session — not covered by IdleWatcher at all — keeps today's unconditional behavior).
-   *     Only board work NOTHING ELSE will ever re-surface (a 'suppressed'-via-escalation manager, or any
-   *     platform/Lead) still forces the full nudge — a no-op there would strand the queue. The deploy
+   *     waste — see strandedBoardWork's doc for the full per-role/per-policy breakdown; a platform/Lead
+   *     session now gets the SAME IdleWatcher coverage a manager does — card 98b3725c — so it's classified
+   *     identically, no more unconditional carve-out). Only board work NOTHING ELSE will ever re-surface (a
+   *     'suppressed'-via-escalation manager OR platform/Lead) still forces the full nudge — a no-op there
+   *     would strand the queue. The deploy
    *     REQUESTER is NEVER short-circuited — it always gets the full "code is live — continue/verify" nudge;
    *   - every worker gets the "your worktree WIP is intact, continue your task" nudge;
    *   - a standing reviewer (auditor/workspace-auditor/setup) gets a "you were resumed — continue your work"
@@ -1877,11 +1878,11 @@ export class SessionService {
           if (e.role === "platform") {
             // Lead-appropriate text: a Platform Lead has no worktrees and no workers, so the manager-shaped
             // "your worktrees are intact / resume orchestrating your workers" phrasing is nonsense it has to
-            // reason away on EVERY restart. A Lead is NOT covered by IdleWatcher at all (role='manager'-only),
-            // so unlike a manager, `strandedBoardWork` stays true unconditionally whenever it has ANY
-            // backlog (61cc91c6) — a Lead's near-always-nonempty home board still classifies it as "affected"
-            // almost every time, until a Lead-equivalent watchdog exists (tracked separately). Re-orient it
-            // from the board + its own living resume doc instead.
+            // reason away on EVERY restart. A Lead now gets the SAME IdleWatcher coverage a manager does
+            // (card 98b3725c) — `strandedBoardWork` is no longer unconditionally true for platform sessions,
+            // so this branch is reached only when the Lead genuinely has a stake in this restart, exactly
+            // like a manager. Re-orient it from the board + its own living resume doc instead of the
+            // manager-shaped worktree/worker phrasing.
             this.pty.enqueueStdin(
               e.sessionId,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
@@ -5055,9 +5056,10 @@ export class SessionService {
   }
 
   /**
-   * The manager-surface `idle_report` handler (Asleep-at-the-Wheel watchdog, §3 state→action table).
-   * A manager self-reports its idle disposition so the watchdog stops nudging it (or, later, knows to
-   * alert the human). Maps the reported state to a nudge policy on the P1 idle_nudge_* columns and, in
+   * The manager/platform-surface `idle_report` handler (Asleep-at-the-Wheel watchdog, §3 state→action
+   * table; platform coverage added by card 98b3725c). A manager or Lead self-reports its idle
+   * disposition so the watchdog stops nudging it (or, later, knows to alert the human). Maps the
+   * reported state to a nudge policy on the P1 idle_nudge_* columns and, in
    * EVERY case, leaves the unanswered-nudge counter at 0 (the manager engaged, so the escalation clock
    * resets). resetIdleNudgeState clears policy+snooze+unanswered to the watching baseline; for
    * snoozed/suppressed we reset FIRST (to zero the counter) then layer the target policy on — so we
@@ -5073,7 +5075,7 @@ export class SessionService {
   ): { recorded: boolean; state: string; policy: IdleNudgePolicy; snoozeUntil: string | null; unanswered: number } {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("unknown session");
-    if (session.role !== "manager") throw new Error("idle_report is a manager-only surface");
+    if (session.role !== "manager" && session.role !== "platform") throw new Error("idle_report is a manager/platform-only surface");
     const project = this.db.getProject(session.projectId);
     if (!project) throw new Error("project not found");
 

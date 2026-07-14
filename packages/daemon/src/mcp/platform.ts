@@ -1123,6 +1123,38 @@ export class PlatformMcpRouter {
       },
     );
 
+    // idle_report — the Lead-surface twin of the manager's orchestration.ts `idle_report` (card
+    // 98b3725c: platform sessions now get the SAME Asleep-at-the-Wheel watchdog coverage as managers).
+    // A platform session never reaches /mcp/:sessionId (resolveRole there gates manager/worker/
+    // assistant only), so without THIS registration a Lead would have no way to ever call it — mirrors
+    // the manager tool's schema/description/delegation exactly; both call the same
+    // SessionService.recordIdleReport (whose role gate now accepts 'platform' too).
+    server.registerTool(
+      "idle_report",
+      {
+        description:
+          "Tell Loom's idle watchdog your disposition so it stops nudging you — call it when you end a " +
+          "turn with no active work. `state`: 'working' = back at it (resumes normal watching); 'waiting' " +
+          "= nothing to do until something lands — optionally snooze for `minutes` (defaults to the " +
+          "per-project idle snooze); 'done' = this agent's work is complete. If you need the human, file " +
+          "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
+          "short `detail` to say why (recorded for the human).",
+        inputSchema: {
+          state: z.enum(["working", "waiting", "done"]),
+          detail: z.string().optional(),
+          minutes: z.number().optional(),
+        },
+      },
+      async ({ state, detail, minutes }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        try {
+          return ok(sessions.recordIdleReport(callerSessionId, state, { detail, minutes }));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // --- projects (cross-project structural edits; config changes go through project_configure) ---
     server.registerTool(
       "project_update",

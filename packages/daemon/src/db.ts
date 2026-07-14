@@ -3779,6 +3779,16 @@ export class Db {
       .all() as Row[]).map(toSession);
   }
   /**
+   * Currently-LIVE platform (Lead) sessions — IdleWatcher's SECOND work set, kept separate from
+   * listLiveManagers on purpose: ContextWatcher also reads listLiveManagers (recycle-by-context), and
+   * widening THAT method would silently pull Lead sessions into context-recycle nudging too — out of
+   * scope for the idle-watchdog coverage this method exists for (card 98b3725c).
+   */
+  listLivePlatformSessions(): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE role = 'platform' AND process_state = 'live'")
+      .all() as Row[]).map(toSession);
+  }
+  /**
    * The currently-LIVE session for an agent lineage (card f88e91f0) — resolves whoever is orchestrating
    * this agent RIGHT NOW, whether that's a recycle successor (already reparented via reparentQuestions)
    * OR a fresh, non-recycle respawn on the SAME agent (never reparented — a manual stop + fresh spawn is

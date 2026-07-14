@@ -79,11 +79,16 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
 const ANSWERED_QUESTION_STUCK_MINUTES = 15;
 
 /**
- * Asleep-at-the-Wheel watcher (idle-manager watchdog). Structural twin of ContextWatcher: each tick,
- * for every LIVE manager that is idle (`busy=false` + `lastActivity` older than the project's
- * `idleNudgeMinutes`) with NO live workers, it injects a ONE-TIME-per-episode busy-gated nudge asking
- * the manager WHY it is idle and to `idle_report` its state (then resume the loop). Agent-in-the-loop:
- * Loom can't know why a manager is idle, so it asks; the manager answers over MCP (`idle_report`).
+ * Asleep-at-the-Wheel watcher (idle-manager watchdog) — also covers platform (Lead) sessions (card
+ * 98b3725c). Structural twin of ContextWatcher: each tick, for every LIVE manager OR platform session
+ * that is idle (`busy=false` + `lastActivity` older than the project's `idleNudgeMinutes`) with NO live
+ * workers, it injects a ONE-TIME-per-episode busy-gated nudge asking it WHY it is idle and to
+ * `idle_report` its state (then resume the loop). Agent-in-the-loop: Loom can't know why a manager/Lead
+ * is idle, so it asks; it answers over MCP (`idle_report` — on the orchestration router for a manager,
+ * the platform router for a Lead, both backed by the same `SessionService.recordIdleReport`). A Lead
+ * never parents a worker (see `db.listLivePlatformSessions`'s doc), so the worker-shaped checks below
+ * (`db.listWorkers`, `tickIdleWorkers`) simply see an empty set for it — the manager loop is reused
+ * verbatim, not specialized.
  *
  * Unlike ContextWatcher's in-memory `nudged` Set, the "once per episode" mark is PERSISTED
  * (`last_idle_nudge_at`): a re-nudge only fires after another full `idleNudgeMinutes` of continued
@@ -124,7 +129,14 @@ export class IdleWatcher {
     const nowMs = now.getTime();
     const nowIso = now.toISOString();
 
-    for (const m of db.listLiveManagers()) {
+    // Platform (Lead) sessions get the SAME coverage as managers (card 98b3725c) — merged from a
+    // SEPARATE query rather than widening listLiveManagers, which ContextWatcher also reads (recycle-
+    // by-context) and must not silently start covering Lead sessions too. Reusing the manager loop
+    // verbatim is safe by construction: a Lead never parents a worker (spawnSessionAsPlatform spawns
+    // free-standing manager/plain sessions, no parentSessionId), so db.listWorkers(leadId) below is
+    // always [] for it — the manager-shaped worker-checks silently no-op instead of forcing a manager
+    // assumption onto the Lead.
+    for (const m of [...db.listLiveManagers(), ...db.listLivePlatformSessions()]) {
       const project = db.getProject(m.projectId);
       if (!project) continue;
       const cfg = resolveConfig(project.config).orchestration;

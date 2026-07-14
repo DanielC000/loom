@@ -105,20 +105,20 @@ export function isWatcherActiveForSession(db: Db, id: string): boolean {
 }
 
 /**
- * Board work is a wake STAKE only when NOTHING ELSE will ever re-surface it (61cc91c6). A 'manager'
- * session's idle-watchdog (idle-watcher.ts) already independently covers 'watching' (nudges on its own
- * cadence regardless of any wake) and 'snoozed' (self-expires via the SAME ticker) — PROVIDED the watcher
- * is actually active for that project ({@link isWatcherActiveForSession}); if idleNudgeMinutes is 0 for
- * the project, neither case has ANY natural re-arm, so board work stays stranded. 'suppressed' via a
- * deliberate idle_report('done') is the manager's own considered judgment call — re-litigating it every
- * wake is waste, not a safety net. Only 'suppressed' reached via the escalation-cap has no natural re-arm
- * (better to over-nudge a stuck manager than strand it). A 'platform' (Lead) session is NOT covered by
- * IdleWatcher AT ALL (role='manager'-only, and idle_report itself is a manager-only surface), so its
- * board work stays a stake unconditionally whenever it has ANY backlog.
+ * Board work is a wake STAKE only when NOTHING ELSE will ever re-surface it (61cc91c6). A 'manager' OR
+ * 'platform' session's idle-watchdog (idle-watcher.ts, platform coverage added by card 98b3725c) already
+ * independently covers 'watching' (nudges on its own cadence regardless of any wake) and 'snoozed'
+ * (self-expires via the SAME ticker) — PROVIDED the watcher is actually active for that project
+ * ({@link isWatcherActiveForSession}); if idleNudgeMinutes is 0 for the project, neither case has ANY
+ * natural re-arm, so board work stays stranded. 'suppressed' via a deliberate idle_report('done') is the
+ * session's own considered judgment call — re-litigating it every wake is waste, not a safety net. Only
+ * 'suppressed' reached via the escalation-cap has no natural re-arm (better to over-nudge a stuck
+ * manager/Lead than strand it). The `role` param is now used only to select which idle-nudge accessors
+ * apply (they're role-agnostic columns, so in practice the SAME logic runs for both roles) — no more
+ * role-conditional early return.
  */
 export function strandedBoardWork(db: Db, id: string, role: SessionRole | null): boolean {
   if (!hasPendingBoardWork(db, id)) return false;
-  if (role === "platform") return true;
   const state = db.getIdleNudgeState(id);
   if (!state) return true; // defensive: no idle-nudge row → can't confirm coverage, assume stranded
   if (state.policy === "watching" || state.policy === "snoozed") return !isWatcherActiveForSession(db, id);

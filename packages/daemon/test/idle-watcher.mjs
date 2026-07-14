@@ -60,6 +60,18 @@ function seedManager(e, id, { idleMin = 60, busy = false, model = null, ctx = nu
   });
   if (live) e.alive.add(id);
 }
+// Seed a platform (Lead) session — SAME shape as seedManager (card 98b3725c: IdleWatcher covers both
+// via listLiveManagers + listLivePlatformSessions), just role:"platform". A Lead is never parented to
+// (spawnSessionAsPlatform never sets parentSessionId), so db.listWorkers(id) is always [] for it — no
+// seedWorker call ever targets a platform id in these tests, by design.
+function seedPlatform(e, id, { idleMin = 60, busy = false, live = true } = {}) {
+  e.db.insertSession({
+    id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
+    processState: live ? "live" : "exited", resumability: "resumable", busy,
+    createdAt: minutesAgo(idleMin), lastActivity: minutesAgo(idleMin), lastError: null, role: "platform",
+  });
+  if (live) e.alive.add(id);
+}
 function seedWorker(e, id, parentId, { live = true, busy = false, idleMin = 0 } = {}) {
   e.db.insertSession({
     id, projectId: e.projId, agentId: e.agentId, engineSessionId: "eng-" + id, title: null, cwd: e.projId,
@@ -782,7 +794,77 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
+// ============================ (16) PLATFORM (Lead) coverage — card 98b3725c ============================
+// The SAME manager-loop code path now also iterates listLivePlatformSessions() — proving a platform
+// session gets the identical full-trigger / silent / escalate behavior a manager does, and that its
+// (always-empty) worker set naturally falls into the "no live workers" message branch.
+{
+  // (16a) full trigger fires for an idle, watching, unpaused, under-cap platform session — same shape as (1).
+  const e = makeEnv();
+  seedPlatform(e, "plat-idle");
+  seedTodo(e, 3);
+  e.watcher.tick(NOW);
+  check("(16a) idle platform (no workers / watching / unpaused / under cap) IS nudged", e.enqueued.length === 1 && e.enqueued[0].id === "plat-idle");
+  check("(16a) nudge steers to idle_report same as a manager's", e.enqueued[0]?.text.includes("idle_report"));
+  check("(16a) nudge falls into the 'no live workers' branch (a Lead is never parented-to)",
+    /no live workers/i.test(e.enqueued[0]?.text));
+  const s = e.db.getIdleNudgeState("plat-idle");
+  check("(16a) recordIdleNudge incremented unanswered 0→1 for the platform session too", s?.unanswered === 1);
+  cleanup(e);
+}
+{
+  // (16b) snoozed / suppressed platform sessions are silent — mirrors (4).
+  const e = makeEnv();
+  seedPlatform(e, "plat-snoozed");
+  seedPlatform(e, "plat-suppressed");
+  e.db.setIdleNudgePolicy("plat-snoozed", "snoozed", minutesAgo(-30));
+  e.db.setIdleNudgePolicy("plat-suppressed", "suppressed");
+  e.watcher.tick(NOW);
+  check("(16b) snoozed platform session is NOT nudged", !e.enqueued.some((x) => x.id === "plat-snoozed"));
+  check("(16b) suppressed platform session is NOT nudged", !e.enqueued.some((x) => x.id === "plat-suppressed"));
+  cleanup(e);
+}
+{
+  // (16c) escalate-once-at-cap — mirrors (7) exactly, role:"platform".
+  const e = makeEnv();
+  seedPlatform(e, "plat-capped");
+  e.db.recordIdleNudge("plat-capped", minutesAgo(120));
+  e.db.recordIdleNudge("plat-capped", minutesAgo(60)); // at cap (2)
+  const escalations = () => e.db.listEvents("plat-capped").filter((ev) => ev.kind === "idle_escalated");
+  e.watcher.tick(NOW);
+  check("(16c) at/over the cap → does NOT enqueue another nudge", e.enqueued.length === 0);
+  check("(16c) at/over the cap → emits exactly ONE idle_escalated event", escalations().length === 1);
+  check("(16c) escalation flips policy to 'suppressed'", e.db.getIdleNudgeState("plat-capped")?.policy === "suppressed");
+  e.watcher.tick(NOW);
+  check("(16c) a second tick does NOT re-emit idle_escalated", escalations().length === 1);
+  cleanup(e);
+}
+{
+  // (16d) db.listWorkers(leadId) is always [] (a Lead is never parented-to) — confirms the manager-shaped
+  // worker checks (liveBusyWorkers skip, tickIdleWorkers) silently no-op instead of ever engaging for it.
+  const e = makeEnv();
+  seedPlatform(e, "plat-noworkers");
+  seedTodo(e, 1);
+  check("(16d) precondition: db.listWorkers(leadId) is empty", e.db.listWorkers("plat-noworkers").length === 0);
+  e.watcher.tick(NOW);
+  check("(16d) it still nudges normally (empty worker set never blocks the platform-loop predicate)",
+    e.enqueued.length === 1 && e.enqueued[0].id === "plat-noworkers");
+  cleanup(e);
+}
+{
+  // (16e) manager and platform sessions in the SAME project tick independently in one pass — proves the
+  // merged [...listLiveManagers(), ...listLivePlatformSessions()] iteration doesn't drop or double-count.
+  const e = makeEnv();
+  seedManager(e, "mgr-and-plat");
+  seedPlatform(e, "plat-and-mgr");
+  seedTodo(e, 2);
+  e.watcher.tick(NOW);
+  check("(16e) both a manager and a platform session nudge independently in the SAME tick",
+    e.enqueued.some((x) => x.id === "mgr-and-plat") && e.enqueued.some((x) => x.id === "plat-and-mgr") && e.enqueued.length === 2);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); and the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; and a PLATFORM (Lead) session (card 98b3725c) gets the IDENTICAL full-trigger/silent/escalate coverage a manager does, correctly falling into the 'no live workers' message branch since a Lead is never parented-to, alongside a manager in the same project/tick without interference."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

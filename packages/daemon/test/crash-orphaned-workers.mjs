@@ -53,10 +53,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       path's own guards exactly: a manager already archived pre-crash (9c), superseded by a recycle
 //       successor (9d), or never having captured an engine id at all (9e, structurally unresumable —
 //       excluded up front rather than attempted-and-failed) is never resurrected. A `platform`-role solo
-//       session is derived + attempted identically to `manager` (9f) — and STILL gets the full nudge,
-//       since a platform/Lead's board work is a stake unconditionally (role-based, not idle-policy-based)
-//       — and a PARKED solo manager is resumed live but withheld its summary nudge, honoring the usage
-//       hold (9g).
+//       session is derived + attempted identically to `manager` (9f) — and, now that platform sessions get
+//       the SAME IdleWatcher coverage a manager does (card 98b3725c), it resumes SILENTLY too under the
+//       same zero-stake classification, no more role-based unconditional nudge — and a PARKED solo manager
+//       is resumed live but withheld its summary nudge, honoring the usage hold (9g).
 //   (11) STAKE-AWARE SILENCING (card c9e51581, Path B extension of 61cc91c6) — the full silent-vs-full
 //       matrix on a clean, dedicated project (no incidental board noise): a genuinely stakeless solo
 //       manager resumes silently; a manager with a recovered OR failed crash-orphaned worker candidate,
@@ -442,14 +442,18 @@ try {
 
   // (9f) PLATFORM ROLE — a `platform`-role session is derived + independently attempted exactly like a
   // `manager`-role one (the role check in deriveCrashOrphanedManagers handles both; this was untested).
+  // Card 98b3725c: a platform session now gets the SAME IdleWatcher coverage a manager does, so — exactly
+  // like id9.mgr above (0 worker candidates, default 'watching' policy, P.proj's active idle-watcher
+  // already covering its ordinary backlog) — it resumes SILENTLY too, no more role-based unconditional nudge.
   const id9f = { plat: `cow-plat9f-${sfx}` };
   mkSession({ id: id9f.plat, projId: P.proj, agentId: P.agent, role: "platform", processState: "live" });
   const soloManagers9f = deriveCrashOrphanedManagers(db, [db.getSession(id9f.plat)], []);
   check("(9f-pre) a PLATFORM-role solo session IS derived as a candidate", soloManagers9f.includes(id9f.plat));
   const result9f = sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9f });
-  check("(9f) it gets the SAME independent resume attempt + plain nudge as a manager-role session",
-    !result9f.managersFailed.includes(id9f.plat) &&
-    pty.getPending(id9f.plat).some((m) => m.includes("[loom:crash-recovered]") && /re-check your state and continue orchestrating/i.test(m)));
+  check("(9f) it gets the SAME independent resume attempt as a manager-role session, no failure",
+    !result9f.managersFailed.includes(id9f.plat));
+  check("(9f) it resumes SILENTLY (no stake: 0 workers, board covered by the active idle-watcher, no answer) — SAME classification as a manager",
+    pty.getPending(id9f.plat).length === 0);
 
   // (9g) PARKED SOLO MANAGER — a solo manager (zero worker candidates) that is usage-limit PARKED is
   // resumed live (so the rate-limit watcher can recover it on its own schedule) but withheld its summary

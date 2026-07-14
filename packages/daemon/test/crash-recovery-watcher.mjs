@@ -334,8 +334,11 @@ function cleanup(e) {
   cleanup(e);
 }
 
-// (11d) a platform (Lead) with pending board work gets the FULL nudge — a platform's board work is a
-// stake UNCONDITIONALLY (role-based, not idle-nudge-policy-based), same as Path A/B.
+// (11d) a platform (Lead) with ORDINARY pending board work (idle-nudge policy 'watching', watcher active)
+// now resumes SILENTLY — card 98b3725c gives platform sessions the SAME IdleWatcher coverage a manager
+// gets, so its backlog is independently covered by the idle-watcher's own cadence, exactly like (11a)'s
+// manager case. This REPLACES the old behavior, where a platform's board work was a stake UNCONDITIONALLY
+// (role-based, not idle-nudge-policy-based) because no watchdog covered it at all.
 {
   const e = makeEnv();
   seedSession(e, "s11d", { role: "platform" });
@@ -343,7 +346,24 @@ function cleanup(e) {
   die(e, "s11d", NOW);
   e.watcher.tick(at(100));
   const nudge = e.enqueued.find((x) => x.id === "s11d");
-  check("(11d) a dead platform (Lead) with pending board work gets the FULL nudge", !!nudge && /auto-recovered/.test(nudge.text));
+  check("(11d) a dead platform (Lead) with ORDINARY pending board work (policy 'watching') now resumes SILENTLY — idle-watcher covers it", !nudge);
+  cleanup(e);
+}
+
+// (11d2) a platform (Lead) with STRANDED board work (idle-nudge policy 'suppressed' via the escalation
+// cap — no natural re-arm) still gets the FULL nudge, exactly like (11e)'s manager case below — genuine
+// stake is still honored; only ordinary, independently-covered backlog goes silent.
+{
+  const e = makeEnv();
+  seedSession(e, "s11d2", { role: "platform" });
+  seedTask(e, "s11d2-task");
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "s11d2", kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  e.db.setIdleNudgePolicy("s11d2", "suppressed");
+  die(e, "s11d2", NOW);
+  e.watcher.tick(at(100));
+  const nudge = e.enqueued.find((x) => x.id === "s11d2");
+  check("(11d2) a dead platform (Lead) with STRANDED board work (escalated-suppressed policy) still gets the FULL nudge",
+    !!nudge && /auto-recovered/.test(nudge.text));
   cleanup(e);
 }
 

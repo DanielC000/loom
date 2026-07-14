@@ -1,7 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Asleep-at-the-Wheel idle-manager watchdog — Task 2 (the `idle_report` manager-surface tool + the
-// SessionService.recordIdleReport it calls). HERMETIC like idle-watch-foundation.mjs / profiles.mjs:
-// isolated temp DB, imports dist/* + @loom/shared, NO daemon, NO real claude, NO pty. Covers:
+// SessionService.recordIdleReport it calls). Extended by card 98b3725c to also cover platform (Lead)
+// sessions — the SAME idle-watchdog coverage a manager gets. HERMETIC like idle-watch-foundation.mjs /
+// profiles.mjs: isolated temp DB, imports dist/* + @loom/shared, NO daemon, NO real claude, NO pty. Covers:
 //   (S) SERVICE recordIdleReport — each of the 3 states writes the correct P1 idle_nudge_* policy +
 //       snooze columns and leaves the unanswered counter at 0:
 //         working → policy 'watching'  (reset)
@@ -11,8 +12,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (The retired `blocked_human` disposition — card fb888d49 — is gone; an agent that needs a
 //       human now files a Request via `question_ask` instead.)
 //       In ALL cases unanswered ends 0 (pre-seeded with recorded nudges first, to prove it's cleared).
+//       Proven for BOTH 'manager' and 'platform' roles — the role gate now accepts both.
 //   (T) TOOL SURFACE — `idle_report` is registered on the MANAGER tool surface and NOT on the worker
 //       surface (asserted at the McpServer tool-registration seam, where the role gate is applied).
+//   (P) PLATFORM ROUTER — `idle_report` is ALSO registered on the Lead's PlatformMcpRouter (mcp/platform.ts)
+//       — the critical wiring gap this card closes: a platform session never reaches /mcp/:sessionId at
+//       all (resolveRole there gates manager/worker/assistant only), so without this registration a Lead
+//       would have no way to ever call idle_report. Driven end-to-end over a real MCP InMemoryTransport,
+//       mirroring platform-mgmt-surface.mjs's pattern.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +35,10 @@ function rmDb(file) { for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // ============================ (S) SERVICE: recordIdleReport ============================
 {
@@ -122,7 +133,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
       evt.detail?.policy === "suppressed");
   }
 
-  // Defense: not-a-manager / unknown session are rejected (the service mirrors the manager-only gate).
+  // Defense: not-a-manager/platform / unknown session are rejected (the service's role gate).
   {
     db.insertSession({
       id: "wkr", projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
@@ -132,8 +143,40 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     let threwWorker = false, threwUnknown = false;
     try { svc.recordIdleReport("wkr", "done"); } catch { threwWorker = true; }
     try { svc.recordIdleReport("nope", "done"); } catch { threwUnknown = true; }
-    check("(S) recordIdleReport rejects a non-manager session", threwWorker);
+    check("(S) recordIdleReport rejects a non-manager/platform session", threwWorker);
     check("(S) recordIdleReport rejects an unknown session", threwUnknown);
+  }
+
+  // Card 98b3725c: a PLATFORM session is now ALSO accepted — same 3-state mapping as a manager, proven
+  // with a fresh helper mirroring freshManager but role:"platform".
+  {
+    let p = 0;
+    const freshPlatform = () => {
+      const id = `plat${++p}`;
+      db.insertSession({
+        id, projectId: "p", agentId: "t", engineSessionId: null, title: null, cwd: "/x",
+        processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+        lastError: null, role: "platform",
+      });
+      db.recordIdleNudge(id, now); db.recordIdleNudge(id, now);
+      return id;
+    };
+
+    const idW = freshPlatform();
+    const rW = svc.recordIdleReport(idW, "working");
+    check("(S-plat) working → policy 'watching', unanswered 0", rW.policy === "watching" && rW.unanswered === 0);
+
+    const idWait = freshPlatform();
+    const before = Date.now();
+    const rWait = svc.recordIdleReport(idWait, "waiting", { minutes: 15 });
+    const after = Date.now();
+    const msWait = new Date(rWait.snoozeUntil).getTime();
+    check("(S-plat) waiting(15) → policy 'snoozed', snoozeUntil ≈ now + 15m",
+      rWait.policy === "snoozed" && msWait >= before + 15 * 60_000 && msWait <= after + 15 * 60_000);
+
+    const idDone = freshPlatform();
+    const rDone = svc.recordIdleReport(idDone, "done");
+    check("(S-plat) done → policy 'suppressed', unanswered 0", rDone.policy === "suppressed" && rDone.unanswered === 0);
   }
 
   db.close();
@@ -169,7 +212,49 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   rmDb(file);
 }
 
+// ==================== (P) PLATFORM ROUTER — idle_report reachable + working end-to-end ====================
+// Card 98b3725c's critical wiring fix: a platform session never reaches /mcp/:sessionId (OrchestrationMcpRouter's
+// resolveRole gates manager/worker/assistant only) — so idle_report must be registered on the SEPARATE
+// PlatformMcpRouter (mcp/platform.ts) too, not just have its role-check loosened. Proven end-to-end over a
+// real MCP InMemoryTransport (mirrors platform-mgmt-surface.mjs's pattern), driving the SAME recordIdleReport.
+{
+  const file = tmpDbFile("platform");
+  const db = new Db(file);
+  const now = new Date().toISOString();
+  db.insertProject({ id: "pp", name: "PP", repoPath: "/x", vaultPath: "/x", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "pt", projectId: "pp", name: "t", startupPrompt: "x", position: 0 });
+  db.insertSession({
+    id: "PL", projectId: "pp", agentId: "pt", engineSessionId: null, title: null, cwd: "/x",
+    processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "platform",
+  });
+  db.recordIdleNudge("PL", now); db.recordIdleNudge("PL", now); // pre-seed unanswered=2, proves it's cleared
+
+  const svc = new SessionService(db, /* pty */ {}, new OrchestrationControl());
+  const router = new PlatformMcpRouter(db, svc);
+  const server = router.buildServer("PL"); // callerSessionId — mirrors end_me/recycle_me's self-scoping
+
+  check("(P) idle_report IS registered on the PlatformMcpRouter surface",
+    Object.keys(server._registeredTools).includes("idle_report"));
+
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverT);
+  const client = new Client({ name: "idle-report-platform-test", version: "0" });
+  await client.connect(clientT);
+  const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+  const r = await call("idle_report", { state: "done", detail: "platform board is drained" });
+  check("(P) idle_report('done') via the platform router succeeds (no error), mirrors the manager tool's shape",
+    r.recorded === true && r.policy === "suppressed" && r.unanswered === 0);
+  const s = db.getIdleNudgeState("PL");
+  check("(P) it actually persisted to the caller's OWN session row (self-scoped by callerSessionId, no id to spoof)",
+    s.policy === "suppressed" && s.unanswered === 0);
+
+  db.close();
+  rmDb(file);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — recordIdleReport maps each state to the correct P1 policy/snooze (explicit minutes vs idleDefaultSnoozeMinutes fallback) and always zeroes the unanswered counter; idle_report is registered MANAGER-only, never on the worker surface."
+  ? "\n✅ ALL PASS — recordIdleReport maps each state to the correct P1 policy/snooze (explicit minutes vs idleDefaultSnoozeMinutes fallback) and always zeroes the unanswered counter, for BOTH manager and platform roles; idle_report is registered on the manager surface (not the worker surface) AND on the Lead's PlatformMcpRouter, and works end-to-end there."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -136,11 +136,6 @@ function cleanup(e) {
   seedSession(e, "m5-empty");
   check("(strandedBoardWork) empty board → false regardless of role/policy", strandedBoardWork(e.db, "m5-empty", "manager") === false);
 
-  seedSession(e, "m5-plat", { role: "platform" });
-  seedTask(e, "t5-plat");
-  check("(strandedBoardWork) platform role with pending board → true UNCONDITIONALLY (no IdleWatcher coverage)",
-    strandedBoardWork(e.db, "m5-plat", "platform") === true);
-
   seedSession(e, "m5-watching");
   seedTask(e, "t5-watching");
   check("(strandedBoardWork) manager, policy 'watching' (default), watcher ACTIVE → false (idle-watcher covers it)",
@@ -164,6 +159,32 @@ function cleanup(e) {
   e.db.setIdleNudgePolicy("m5-escalated", "suppressed");
   check("(strandedBoardWork) manager suppressed via the ESCALATION cap → true (no natural re-arm)",
     strandedBoardWork(e.db, "m5-escalated", "manager") === true);
+
+  // Platform (Lead) parity (card 98b3725c): a platform session now runs through the EXACT SAME per-policy
+  // logic as a manager — no more unconditional-true role carve-out. Mirror every manager case above with
+  // role:"platform" to prove the two roles classify identically.
+  seedSession(e, "m5-plat-watching", { role: "platform" });
+  seedTask(e, "t5-plat-watching");
+  check("(strandedBoardWork) platform, policy 'watching' (default), watcher ACTIVE → false (idle-watcher covers it, SAME as a manager)",
+    strandedBoardWork(e.db, "m5-plat-watching", "platform") === false);
+
+  seedSession(e0, "m5-plat-watchingoff", { role: "platform" });
+  seedTask(e0, "t5-plat-watchingoff");
+  check("(strandedBoardWork) platform, policy 'watching', watcher DISABLED for the project → true (nothing re-engages it, SAME as a manager)",
+    strandedBoardWork(e0.db, "m5-plat-watchingoff", "platform") === true);
+
+  seedSession(e, "m5-plat-done", { role: "platform" });
+  seedTask(e, "t5-plat-done-board");
+  e.db.setIdleNudgePolicy("m5-plat-done", "suppressed");
+  check("(strandedBoardWork) platform suppressed via a deliberate idle_report('done')-shaped policy → false (SAME as a manager)",
+    strandedBoardWork(e.db, "m5-plat-done", "platform") === false);
+
+  seedSession(e, "m5-plat-escalated", { role: "platform" });
+  seedTask(e, "t5-plat-escalated-board");
+  e.db.appendEvent({ id: randomUUID(), ts: e.now, managerSessionId: "m5-plat-escalated", kind: "idle_escalated", detail: {} });
+  e.db.setIdleNudgePolicy("m5-plat-escalated", "suppressed");
+  check("(strandedBoardWork) platform suppressed via the ESCALATION cap → true (no natural re-arm, SAME as a manager)",
+    strandedBoardWork(e.db, "m5-plat-escalated", "platform") === true);
 
   cleanup(e); cleanup(e0);
 }

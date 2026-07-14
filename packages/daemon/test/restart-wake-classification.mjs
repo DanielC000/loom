@@ -19,9 +19,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     manager's own considered judgment — re-litigating it every restart WAS the reported waste). Only
 //     'suppressed' reached via the idle-watcher's unanswered-nudge-cap ESCALATION (no natural re-arm — the
 //     manager stopped responding, not a deliberate call) still forces the full nudge — better to over-nudge
-//     a stuck manager than strand it. A platform/Lead session is NOT covered by IdleWatcher at ALL (it's
-//     role='manager'-only, and idle_report itself is a manager-only surface), so a Lead's board work stays
-//     a stake UNCONDITIONALLY (today's behavior, unchanged) regardless of any idle-nudge state.
+//     a stuck manager than strand it. A platform/Lead session now gets the SAME IdleWatcher coverage a
+//     manager does (card 98b3725c) — idle_report is reachable on the platform MCP router too — so a Lead's
+//     board work classifies IDENTICALLY to a manager's: silent while 'watching'/'snoozed' with the watcher
+//     active, stranded (full nudge) only when genuinely uncovered (watcher disabled) or escalated-suppressed.
 //     REGRESSION GUARD (CR-caught): the 'watching'/'snoozed' silence above is conditioned on the project's
 //     idle-watcher ACTUALLY being active (`idleNudgeMinutes > 0`) — a project can set idleNudgeMinutes:0 to
 //     disable the watcher entirely, in which case NOTHING re-engages a 'watching'/'snoozed' manager, so
@@ -107,7 +108,7 @@ try {
   const home = `rwc-home-${sfx}`, homeAg = `rwc-home-ag-${sfx}`;
   const projX = `rwc-X-${sfx}`, xAg = `rwc-X-ag-${sfx}`;
   const projY = `rwc-Y-${sfx}`, yAg = `rwc-Y-ag-${sfx}`; // an affected bystander's project (pending board)
-  const projZ = `rwc-Z-${sfx}`, zAg = `rwc-Z-ag-${sfx}`; // an affected platform (Lead) session's project
+  const projZ = `rwc-Z-${sfx}`, zAg = `rwc-Z-ag-${sfx}`; // platform (Lead) sessions' shared project
   const projW = `rwc-W-${sfx}`, wAg = `rwc-W-ag-${sfx}`; // a deferred-only-board manager's project (card 345b1dcc)
   mkProject(home, PLATFORM_PROJECT_NAME, true); mkAgent(homeAg, home);
   mkProject(projX, projX); mkAgent(xAg, projX);
@@ -132,7 +133,7 @@ try {
   const id = {
     lead: `rwc-lead-${sfx}`, deployer: `rwc-deployer-${sfx}`,
     bystander: `rwc-bystander-${sfx}`, affMgr: `rwc-affMgr-${sfx}`, affWkr: `rwc-affWkr-${sfx}`,
-    pendMgr: `rwc-pendMgr-${sfx}`, affLead: `rwc-affLead-${sfx}`, deferredMgr: `rwc-deferredMgr-${sfx}`,
+    pendMgr: `rwc-pendMgr-${sfx}`, affLead: `rwc-affLead-${sfx}`, silentLead: `rwc-silentLead-${sfx}`, deferredMgr: `rwc-deferredMgr-${sfx}`,
     idleReviewer: `rwc-idleRev-${sfx}`, busyReviewer: `rwc-busyRev-${sfx}`,
     snoozedMgr: `rwc-snoozedMgr-${sfx}`, doneMgr: `rwc-doneMgr-${sfx}`, escalatedMgr: `rwc-escalatedMgr-${sfx}`,
     answerMgr: `rwc-answerMgr-${sfx}`,
@@ -149,7 +150,8 @@ try {
   mkSession({ id: id.snoozedMgr, projId: projY, agentId: yAg, role: "manager" });   // policy 'snoozed' (idle_report('waiting'))
   mkSession({ id: id.doneMgr, projId: projY, agentId: yAg, role: "manager" });      // policy 'suppressed' via idle_report('done')
   mkSession({ id: id.escalatedMgr, projId: projY, agentId: yAg, role: "manager" }); // policy 'suppressed' via idle-watcher's cap escalation
-  mkSession({ id: id.affLead, projId: projZ, agentId: zAg, role: "platform" });   // 0 workers, PENDING board
+  mkSession({ id: id.affLead, projId: projZ, agentId: zAg, role: "platform" });   // 0 workers, PENDING board, escalated-suppressed (genuinely stranded)
+  mkSession({ id: id.silentLead, projId: projZ, agentId: zAg, role: "platform" }); // 0 workers, SAME pending board, policy 'watching' (default) — parity with pendMgr
   mkSession({ id: id.deferredMgr, projId: projW, agentId: wAg, role: "manager" }); // 0 workers, board is deferred-only
   mkSession({ id: id.answerMgr, projId: projX, agentId: xAg, role: "manager" });  // 0 workers, EMPTY board, unconsumed answer
   // watcherOffMgr / watcherOffSnoozedMgr: same PENDING board as pendMgr/snoozedMgr, but in projV where
@@ -172,6 +174,14 @@ try {
   // with NO natural re-arm, so it must still be classified STRANDED.
   db.appendEvent({ id: `rwc-esc-evt-${sfx}`, ts: now, managerSessionId: id.escalatedMgr, kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
   db.setIdleNudgePolicy(id.escalatedMgr, "suppressed");
+
+  // affLead: the Lead-equivalent of escalatedMgr — SUPPRESSED via the idle-watcher's escalation cap
+  // (card 98b3725c: platform sessions now get the SAME IdleWatcher coverage a manager does, so this is
+  // the ONE policy that still genuinely strands a Lead too — no natural re-arm). silentLead (seeded above,
+  // sharing the SAME projZ pending board) is left at the default 'watching' policy on purpose, to prove
+  // the NEW parity: ordinary Lead backlog is now silent, exactly like pendMgr.
+  db.appendEvent({ id: `rwc-esc-lead-evt-${sfx}`, ts: now, managerSessionId: id.affLead, kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  db.setIdleNudgePolicy(id.affLead, "suppressed");
 
   // answerMgr: an ANSWERED, not-yet-question_pull'ed question of its own — genuinely new, forces the full
   // nudge even with ZERO backlog (projX has no tasks at all).
@@ -198,6 +208,7 @@ try {
       { sessionId: id.doneMgr, role: "manager", parentSessionId: null },
       { sessionId: id.escalatedMgr, role: "manager", parentSessionId: null },
       { sessionId: id.affLead, role: "platform", parentSessionId: null },
+      { sessionId: id.silentLead, role: "platform", parentSessionId: null },
       { sessionId: id.deferredMgr, role: "manager", parentSessionId: null },
       { sessionId: id.answerMgr, role: "manager", parentSessionId: null },
       { sessionId: id.watcherOffMgr, role: "manager", parentSessionId: null },
@@ -251,13 +262,20 @@ try {
     q(id.watcherOffMgr).length === 1 && /re-check your workers/i.test(q(id.watcherOffMgr)[0]) && /board has pending work/i.test(q(id.watcherOffMgr)[0]) && !/no action is needed/i.test(q(id.watcherOffMgr)[0]));
   check("(1) a 'snoozed' manager with the same backlog in the same idleNudgeMinutes:0 project ALSO gets the FULL re-check",
     q(id.watcherOffSnoozedMgr).length === 1 && /re-check your workers/i.test(q(id.watcherOffSnoozedMgr)[0]) && /board has pending work/i.test(q(id.watcherOffSnoozedMgr)[0]) && !/no action is needed/i.test(q(id.watcherOffSnoozedMgr)[0]));
-  // card 46a961a4: a non-causal PLATFORM (Lead) session with pending board work also gets the FULL re-check,
-  // but with LEAD-appropriate text — NO manager/worktree/worker phrasing (a Lead has neither).
-  check("(1) an affected platform (Lead) with a PENDING board gets a re-check nudge with the impact clause",
+  // card 98b3725c: a platform (Lead) session now classifies IDENTICALLY to a manager. affLead is
+  // SUPPRESSED via the escalation cap (genuinely stranded, no natural re-arm) → still gets the FULL
+  // re-check, with LEAD-appropriate text — NO manager/worktree/worker phrasing (a Lead has neither).
+  check("(1) an escalated-suppressed platform (Lead) with a PENDING board gets a re-check nudge with the impact clause",
     q(id.affLead).length === 1 && q(id.affLead)[0].includes("[loom:daemon-restarted]") && /board has pending work/i.test(q(id.affLead)[0]) && !/no action is needed/i.test(q(id.affLead)[0]));
   check("(1) the affected Lead nudge re-orients from the board + resume doc, NOT manager/worktree/worker phrasing",
     /re-orient from your home board and your living resume doc/i.test(q(id.affLead)[0]) &&
     !/worktree/i.test(q(id.affLead)[0]) && !/your workers/i.test(q(id.affLead)[0]) && !/orchestrating/i.test(q(id.affLead)[0]));
+  // silentLead: SAME pending board as affLead (projZ), but policy 'watching' (default, never idle_report'd)
+  // — the idle-watcher covers it on its own cadence, exactly like pendMgr. THIS is the regression the card
+  // fixes: before card 98b3725c, a Lead's board work was a stake UNCONDITIONALLY regardless of idle-nudge
+  // policy; now it resumes SILENTLY just like an ordinary manager with the same backlog shape.
+  check("(1) a non-causal platform (Lead) with ordinary backlog (policy 'watching') now resumes SILENTLY — idle-watcher covers it, SAME as a manager",
+    q(id.silentLead).length === 0);
   // card 345b1dcc: a non-causal manager whose board's ONLY card is `deferred` (manager's own sequencing
   // marker, discounted the same as `held`) resumes SILENTLY — NOT classified affected, same as an empty
   // board. Without the fix this manager would wrongly get the full re-check nudge like pendMgr above.
