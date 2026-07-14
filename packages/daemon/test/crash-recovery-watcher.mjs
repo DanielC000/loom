@@ -24,7 +24,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { Db } from "../dist/db.js";
-import { CrashRecoveryWatcher, recordUnexpectedExit } from "../dist/orchestration/crash-recovery-watcher.js";
+import { CrashRecoveryWatcher, recordUnexpectedExit, recordUndeliveredReport } from "../dist/orchestration/crash-recovery-watcher.js";
 import { RESUME_NUDGE_TAIL } from "../dist/orchestration/resume-nudge.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { validateProjectConfigOverride, validateAgentProjectConfigOverride } from "../dist/mcp/platform.js";
@@ -76,6 +76,9 @@ function die(e, id, when = NOW) {
   });
   e.db.setProcessState(id, "exited");
 }
+function seedTask(e, id, columnKey = "in_progress") {
+  e.db.insertTask({ id, projectId: e.projId, title: "T-" + id, body: "", columnKey, position: 0, priority: "p2", createdAt: NOW.toISOString(), updatedAt: NOW.toISOString() });
+}
 const evKinds = (e, id, kind) => e.db.listEventsForWorker(id).filter((ev) => ev.kind === kind);
 function cleanup(e) {
   try { e.db.close(); } catch { /* ignore */ }
@@ -121,6 +124,11 @@ function cleanup(e) {
 {
   const e = makeEnv();
   seedSession(e, "s2", { role: "manager" });
+  // card c9e51581: a manager/platform's continuation nudge is now stake-aware (silent when it has NO
+  // live workers / stranded board / unconsumed answer) — give s2 a genuine stake (a live worker) so this
+  // general-purpose "a continuation nudge is enqueued" test still exercises the nudge path. The dedicated
+  // silent-vs-full matrix lives in section (11) below.
+  seedSession(e, "s2-wkr", { role: "worker", parentSessionId: "s2", processState: "live" });
   die(e, "s2", NOW);
   e.watcher.tick(at(100));
   check("(2) a dead session with session_died is AUTO-RESUMED on tick", e.resumes.length === 1 && e.resumes[0] === "s2");
@@ -283,7 +291,93 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (11) STAKE-AWARE MANAGER/PLATFORM SILENCING (card c9e51581) ============
+// Extends Path A's stake-aware wake classification (61cc91c6, restart-wake-classification.mjs) to Path C
+// — an ISOLATED unexpected pty death. Worker/assistant nudges stay unconditional (proven above); only the
+// manager/platform decision is now silent-vs-full based on real stake (live workers / stranded board /
+// unconsumed answer / a worker_report_undelivered trigger).
+
+// (11a) a genuinely stakeless manager (0 live workers, empty board, no answer) resumes SILENTLY.
+{
+  const e = makeEnv();
+  seedSession(e, "s11a", { role: "manager" });
+  die(e, "s11a", NOW);
+  e.watcher.tick(at(100));
+  check("(11a) a dead manager with NO live workers/board/answer is still AUTO-RESUMED", e.resumes.includes("s11a"));
+  check("(11a) but it gets NO continuation nudge (silent — no stake)", e.enqueued.filter((x) => x.id === "s11a").length === 0);
+  cleanup(e);
+}
+
+// (11b) a manager with a LIVE worker (not itself dead) gets the FULL re-orient nudge.
+{
+  const e = makeEnv();
+  seedSession(e, "s11b", { role: "manager" });
+  seedSession(e, "s11b-wkr", { role: "worker", parentSessionId: "s11b", processState: "live" });
+  die(e, "s11b", NOW);
+  e.watcher.tick(at(100));
+  const nudge = e.enqueued.find((x) => x.id === "s11b");
+  check("(11b) a manager with a live worker gets the FULL re-orient nudge",
+    !!nudge && /auto-recovered/.test(nudge.text) && /re-check your workers/i.test(nudge.text));
+  cleanup(e);
+}
+
+// (11c) a manager resumed via the worker_report_undelivered trigger gets the FULL nudge even with
+// otherwise-zero stake (0 live workers of its own, empty board, no answer) — queuedIoReplayed:1 proof.
+{
+  const e = makeEnv();
+  seedSession(e, "s11c", { role: "manager", processState: "exited" });
+  recordUndeliveredReport(e.db, e.db.getSession("s11c"), { reportingWorkerId: "wkr-somewhere-else", taskId: null });
+  e.watcher.tick(at(100));
+  const nudge = e.enqueued.find((x) => x.id === "s11c");
+  check("(11c) a manager resumed via worker_report_undelivered gets the FULL review/merge nudge (queuedIoReplayed stake)",
+    !!nudge && /worker_list/.test(nudge.text) && /review/.test(nudge.text));
+  cleanup(e);
+}
+
+// (11d) a platform (Lead) with pending board work gets the FULL nudge — a platform's board work is a
+// stake UNCONDITIONALLY (role-based, not idle-nudge-policy-based), same as Path A/B.
+{
+  const e = makeEnv();
+  seedSession(e, "s11d", { role: "platform" });
+  seedTask(e, "s11d-task");
+  die(e, "s11d", NOW);
+  e.watcher.tick(at(100));
+  const nudge = e.enqueued.find((x) => x.id === "s11d");
+  check("(11d) a dead platform (Lead) with pending board work gets the FULL nudge", !!nudge && /auto-recovered/.test(nudge.text));
+  cleanup(e);
+}
+
+// (11e) a manager with STRANDED board work (idle-nudge policy 'suppressed' via the escalation cap — no
+// natural re-arm) gets the FULL nudge despite having no live workers of its own.
+{
+  const e = makeEnv();
+  seedSession(e, "s11e", { role: "manager" });
+  seedTask(e, "s11e-task");
+  e.db.appendEvent({ id: randomUUID(), ts: NOW.toISOString(), managerSessionId: "s11e", kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  e.db.setIdleNudgePolicy("s11e", "suppressed");
+  die(e, "s11e", NOW);
+  e.watcher.tick(at(100));
+  const nudge = e.enqueued.find((x) => x.id === "s11e");
+  check("(11e) a manager with STRANDED board work (escalated-suppressed policy) gets the FULL nudge", !!nudge && /re-check your workers/i.test(nudge.text));
+  cleanup(e);
+}
+
+// (11f) a manager with an unconsumed ANSWERED question (empty board, 0 workers) gets the FULL nudge.
+{
+  const e = makeEnv();
+  seedSession(e, "s11f", { role: "manager" });
+  e.db.insertQuestion({
+    id: `crw-11f-answered-${Date.now()}`, sessionId: "s11f", projectId: e.projId, type: "decision",
+    title: "pick an approach", body: "", state: "answered", chosenOption: "a", createdAt: NOW.toISOString(), answeredAt: NOW.toISOString(),
+  });
+  die(e, "s11f", NOW);
+  e.watcher.tick(at(100));
+  const nudge = e.enqueued.find((x) => x.id === "s11f");
+  check("(11f) a manager with an unconsumed ANSWERED question gets the FULL nudge despite an empty board", !!nudge);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged."
+  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

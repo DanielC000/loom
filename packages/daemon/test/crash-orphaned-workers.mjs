@@ -45,15 +45,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       task already landed) has no entry in the derived worker candidates at all, yet it was just as
 //       much a live/starting victim of the crash as any manager that kept a worker — it still gets ONE
 //       independent resume attempt (deriveCrashOrphanedManagers + recoverCrashOrphanedWorkers's
-//       `soloManagerIds`), with a plain nudge (not the "0 of your 0 in-flight worker(s)" phrasing a
-//       naive reuse of the per-worker summary would produce). And when a resume attempt genuinely
+//       `soloManagerIds`). Post-c9e51581, that zero-worker-candidate manager also has ZERO wake stake
+//       (its default 'watching' idle-nudge policy is already covered by the active idle-watcher) and now
+//       resumes SILENTLY rather than the old unconditional plain nudge. When a resume attempt genuinely
 //       fails (engine id set, transcript genuinely missing — 9b), the real thrown reason is logged
 //       (not silently swallowed into a bare boolean). deriveCrashOrphanedManagers mirrors the WORKER
 //       path's own guards exactly: a manager already archived pre-crash (9c), superseded by a recycle
 //       successor (9d), or never having captured an engine id at all (9e, structurally unresumable —
-//       excluded up front rather than attempted-and-failed) is never resurrected. A `platform`-role
-//       solo session is derived + attempted identically to `manager` (9f), and a PARKED solo manager is
-//       resumed live but withheld its summary nudge, honoring the usage hold (9g).
+//       excluded up front rather than attempted-and-failed) is never resurrected. A `platform`-role solo
+//       session is derived + attempted identically to `manager` (9f) — and STILL gets the full nudge,
+//       since a platform/Lead's board work is a stake unconditionally (role-based, not idle-policy-based)
+//       — and a PARKED solo manager is resumed live but withheld its summary nudge, honoring the usage
+//       hold (9g).
+//   (11) STAKE-AWARE SILENCING (card c9e51581, Path B extension of 61cc91c6) — the full silent-vs-full
+//       matrix on a clean, dedicated project (no incidental board noise): a genuinely stakeless solo
+//       manager resumes silently; a manager with a recovered OR failed crash-orphaned worker candidate,
+//       a stranded board, or an unconsumed answered question all still get the full summary nudge.
 // Run: 1) build daemon, 2) node test/crash-orphaned-workers.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -373,8 +380,15 @@ try {
   const result9 = sessions.recoverCrashOrphanedWorkers(derived9, { resumeOne: () => true, soloManagerIds: soloManagers9 });
   check("(9) the solo manager still gets an independent resume attempt (no worker candidates required)",
     !result9.managersFailed.includes(id9.mgr));
-  check("(9) it gets a PLAIN nudge, not the '0 of your 0 in-flight worker(s)' phrasing",
-    pty.getPending(id9.mgr).some((m) => m.includes("[loom:crash-recovered]") && /re-check your state and continue orchestrating/i.test(m) && !/in-flight worker/i.test(m)));
+  // card c9e51581 (Path B stake-aware classification): a solo manager (0 crash-orphaned worker
+  // candidates) with its idle-nudge policy at the default 'watching' (and the project's idle-watcher
+  // active — P.proj's default config has idleNudgeMinutes:45) has NO stake in this crash — its ordinary
+  // backlog is already independently covered by the idle-watcher's own cadence, same as Path A's
+  // 'watching'-policy silence (restart-wake-classification.mjs). It now resumes SILENTLY instead of the
+  // old unconditional plain nudge — see the dedicated crash-recovery-wake-classification.mjs for the
+  // full silent-vs-full matrix on a clean project.
+  check("(9) it resumes SILENTLY (no stake: 0 workers, board covered by the active idle-watcher, no answer)",
+    pty.getPending(id9.mgr).length === 0);
 
   // A solo manager whose OWN resume attempt genuinely fails (real resume(), no stub) lands in
   // `managersFailed`, with the actual thrown reason logged — never a silent no-op. RESUMABLE-BUT-BROKEN:
@@ -470,8 +484,15 @@ try {
     pty.getPending(id10a.wkr).some((m) => /not a crash/i.test(m) && /continue your assigned task/i.test(m)));
 
   // (10b) the solo-manager plain nudge (zero worker candidates) is also worded as a clean restart.
+  // card c9e51581: zero worker candidates alone is no longer enough to force the nudge (see section 9's
+  // silent solo manager above) — give it an unconsumed ANSWERED question so it has genuine stake and the
+  // clean-stop-worded plain-nudge code path is still exercised here.
   const id10b = { mgr: `cow-mgr10b-${sfx}` };
   mkSession({ id: id10b.mgr, projId: P.proj, agentId: P.agent, role: "manager", processState: "live" });
+  db.insertQuestion({
+    id: `cow-10b-answered-${sfx}`, sessionId: id10b.mgr, projectId: P.proj, type: "decision",
+    title: "pick an approach", body: "", state: "answered", chosenOption: "a", createdAt: now, answeredAt: now,
+  });
   const soloManagers10b = deriveCrashOrphanedManagers(db, [db.getSession(id10b.mgr)], []);
   sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers10b, shutdownMarker: cleanMarker });
   check("(10b) the solo-manager nudge uses [loom:daemon-restarted] and 'not a crash', not 'crashed'",
@@ -497,6 +518,68 @@ try {
   sessions.recoverCrashOrphanedWorkers(derived10d, { resumeOne: () => true, shutdownMarker: null });
   check("(10d) with NO shutdown marker, the worker still gets the original [loom:crash-recovered] nudge",
     pty.getPending(id10d.wkr).some((m) => m.includes("[loom:crash-recovered]") && /The daemon crashed/i.test(m)));
+
+  // ============================ (11) STAKE-AWARE SILENCING (card c9e51581) ============================
+  // The full silent-vs-full matrix on a DEDICATED, clean project (no incidental backlog from the shared
+  // P.proj above) — mirrors restart-wake-classification.mjs's Path-A matrix, extended to Path B.
+  const proj11 = `cow-proj11-${sfx}`, ag11 = `cow-ag11-${sfx}`;
+  mkProject(proj11, "/tmp/cow11"); mkAgent(ag11, proj11);
+
+  // (11a) a genuinely stakeless solo manager (0 candidates, EMPTY board, no answer) resumes SILENTLY.
+  const id11a = { mgr: `cow-mgr11a-${sfx}` };
+  mkSession({ id: id11a.mgr, projId: proj11, agentId: ag11, role: "manager", processState: "live" });
+  const soloManagers11a = deriveCrashOrphanedManagers(db, [db.getSession(id11a.mgr)], []);
+  sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers11a });
+  check("(11a) a stakeless solo manager (0 candidates, empty board, no answer) resumes SILENTLY",
+    pty.getPending(id11a.mgr).length === 0);
+
+  // (11b) a manager whose ONE candidate worker is successfully recovered gets the full summary nudge.
+  const id11b = { mgr: `cow-mgr11b-${sfx}`, wkr: `cow-wkr11b-${sfx}` };
+  const t11b = mkTask(`cow-t11b-${sfx}`, proj11);
+  mkSession({ id: id11b.mgr, projId: proj11, agentId: ag11, role: "manager", processState: "live" });
+  mkSession({ id: id11b.wkr, projId: proj11, agentId: ag11, role: "worker", parentSessionId: id11b.mgr, taskId: t11b, processState: "live" });
+  const derived11b = deriveCrashOrphanedWorkers(db, [db.getSession(id11b.mgr), db.getSession(id11b.wkr)]);
+  sessions.recoverCrashOrphanedWorkers(derived11b, { resumeOne: () => true });
+  check("(11b) a manager with a recovered worker candidate gets the FULL summary nudge",
+    pty.getPending(id11b.mgr).some((m) => m.includes("[loom:crash-recovered]") && /1 of your 1/i.test(m)));
+
+  // (11c) a manager whose ONE candidate worker FAILS to resume still gets the full summary nudge —
+  // liveWorkersResumed uses workers.length (recovered+failed), not recoveredCount-only, precisely so the
+  // "your workers are gone, check logs" visibility isn't silently dropped (see section (6) above too).
+  const id11c = { mgr: `cow-mgr11c-${sfx}`, wkr: `cow-wkr11c-${sfx}` };
+  const t11c = mkTask(`cow-t11c-${sfx}`, proj11);
+  mkSession({ id: id11c.mgr, projId: proj11, agentId: ag11, role: "manager", processState: "live" });
+  mkSession({ id: id11c.wkr, projId: proj11, agentId: ag11, role: "worker", parentSessionId: id11c.mgr, taskId: t11c, processState: "live" });
+  const derived11c = deriveCrashOrphanedWorkers(db, [db.getSession(id11c.mgr), db.getSession(id11c.wkr)]);
+  const resumeOne11c = (sid) => sid === id11c.mgr; // the manager resumes; its one worker fails
+  sessions.recoverCrashOrphanedWorkers(derived11c, { resumeOne: resumeOne11c });
+  check("(11c) a manager whose only candidate worker FAILS to resume still gets the FULL summary nudge",
+    pty.getPending(id11c.mgr).some((m) => m.includes("[loom:crash-recovered]") && /none of your 1/i.test(m)));
+
+  // (11d) a solo manager (0 candidates) with STRANDED board work (idle-nudge policy 'suppressed' via the
+  // escalation cap — no natural re-arm) gets the full nudge despite having no worker candidates.
+  const id11d = { mgr: `cow-mgr11d-${sfx}` };
+  mkTask(`cow-t11d-${sfx}`, proj11); // a pending card on proj11
+  mkSession({ id: id11d.mgr, projId: proj11, agentId: ag11, role: "manager", processState: "live" });
+  db.appendEvent({ id: `cow-11d-esc-${sfx}`, ts: now, managerSessionId: id11d.mgr, kind: "idle_escalated", detail: { reason: "unanswered_cap", unanswered: 2 } });
+  db.setIdleNudgePolicy(id11d.mgr, "suppressed");
+  const soloManagers11d = deriveCrashOrphanedManagers(db, [db.getSession(id11d.mgr)], []);
+  sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers11d });
+  check("(11d) a solo manager with STRANDED board work (escalated-suppressed policy) gets the FULL nudge",
+    pty.getPending(id11d.mgr).some((m) => m.includes("[loom:crash-recovered]") && /re-check your state and continue orchestrating/i.test(m)));
+
+  // (11e) a solo manager (0 candidates, empty board) with an unconsumed ANSWERED question gets the full
+  // nudge — genuinely new information distinct from generic board content.
+  const id11e = { mgr: `cow-mgr11e-${sfx}` };
+  mkSession({ id: id11e.mgr, projId: proj11, agentId: ag11, role: "manager", processState: "live" });
+  db.insertQuestion({
+    id: `cow-11e-answered-${sfx}`, sessionId: id11e.mgr, projectId: proj11, type: "decision",
+    title: "pick an approach", body: "", state: "answered", chosenOption: "a", createdAt: now, answeredAt: now,
+  });
+  const soloManagers11e = deriveCrashOrphanedManagers(db, [db.getSession(id11e.mgr)], []);
+  sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers11e });
+  check("(11e) a solo manager with an unconsumed ANSWERED question gets the FULL nudge despite an empty board",
+    pty.getPending(id11e.mgr).some((m) => m.includes("[loom:crash-recovered]")));
 } finally {
   console.log = realLog;
   console.warn = realWarn;

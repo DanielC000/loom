@@ -3,6 +3,8 @@ import { resolveConfig, type SessionRole, type OrchestrationEvent } from "@loom/
 import type { Db } from "../db.js";
 import type { OrchestrationControl } from "./control.js";
 import { RESUME_NUDGE_TAIL } from "./resume-nudge.js";
+import { isNoOpManagerWake } from "./restart.js";
+import { computeWakeImpact } from "./wake-impact.js";
 
 /**
  * Session roles the crash-recovery watchdog covers — coordination/work sessions worth auto-recovering.
@@ -306,26 +308,55 @@ export class CrashRecoveryWatcher {
       // resumeFleetOnBoot's per-role continuation nudges. Ready-gated (host.ts queues it until the resumed
       // TUI boots, then drains). Best-effort — the resume itself is the recovery; the nudge just re-engages it.
       if (started && pty) {
-        // Tailor the manager nudge to the trigger: a `worker_report_undelivered` wake means a worker's
-        // report reached nobody while this manager was stopped — point it straight at the review/merge it
-        // missed (the task is already in `review`), not the generic "died unexpectedly" recovery copy.
-        const note = s.role === "worker"
-          ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktree WIP is ` +
-            `intact. Continue your assigned task from where you left off. If you had already finished, call ` +
-            `worker_report (done/blocked) so your manager isn't left waiting.`
-          : s.role === "assistant"
-          ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
-            `off with the human.`
-          : lastTrigger.kind === "worker_report_undelivered"
-          ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
-            `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +
-            `review (the task is already in 'review'). Run the review→gate→merge loop on it, then continue orchestrating.`
-          : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
-            `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
-            `you left off.`;
-        // Same engine reality as resumeFleetOnBoot: a `claude --resume`'d session gets a bare "Continue"
-        // turn + a reset file-read set, so carry the SHARED RESUME_NUDGE_TAIL (PL Auditor #11) here too.
-        try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+        if (s.role === "worker" || s.role === "assistant") {
+          // Worker/assistant nudges stay UNCONDITIONAL (card c9e51581 scopes the stake-aware silencing to
+          // manager/platform only — a worker/assistant has no board/idle-nudge concept to classify against).
+          const note = s.role === "worker"
+            ? `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktree WIP is ` +
+              `intact. Continue your assigned task from where you left off. If you had already finished, call ` +
+              `worker_report (done/blocked) so your manager isn't left waiting.`
+            : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — pick up where you left ` +
+              `off with the human.`;
+          // Same engine reality as resumeFleetOnBoot: a `claude --resume`'d session gets a bare "Continue"
+          // turn + a reset file-read set, so carry the SHARED RESUME_NUDGE_TAIL (PL Auditor #11) here too.
+          try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+        } else {
+          // manager or platform — card c9e51581 (Path C extension of 61cc91c6): a manager/platform with NO
+          // stake in this isolated crash resumes SILENTLY instead of the unconditional re-orient nudge below.
+          // causal:false (an isolated pty death isn't self-requested, unlike a daemon_restart requester).
+          // liveWorkersResumed = the manager's CURRENT live worker count — this path has no "resume set"
+          // list like Path A/B (it resumes ONE dead session per candidate), so "workers resumed alongside
+          // it" doesn't exist; the natural analog is "does it have live workers to re-check right now".
+          // KNOWN, ACCEPTED gap: if this manager AND one of its workers crash-die in the SAME tick,
+          // db.listResumeCandidates()'s iteration order isn't guaranteed, so this query can undercount if
+          // the manager is processed before its worker's own resume (later in this same tick) lands — the
+          // manager would then resume silently for this ONE tick. Not a correctness bug: the worker still
+          // recovers independently via its own `session_died` trigger, and the manager learns about it
+          // shortly after via worker_list / the worker's own report — accepted rather than adding
+          // cross-candidate batching for a rare simultaneous-crash case.
+          // queuedIoReplayed: a `worker_report_undelivered` trigger IS a specific queued/undelivered worker
+          // report waiting on this manager — real work waiting, so it maps onto queuedIoReplayed and forces
+          // the full nudge through the standard field rather than a bolt-on special case.
+          const liveWorkersResumed = db.listWorkers(s.id).filter((w) => w.processState === "live").length;
+          const impact = computeWakeImpact(db, s.id, s.role ?? null, {
+            causal: false,
+            liveWorkersResumed,
+            queuedIoReplayed: lastTrigger.kind === "worker_report_undelivered" ? 1 : 0,
+          });
+          if (!isNoOpManagerWake(impact)) {
+            // Tailor the manager nudge to the trigger: a `worker_report_undelivered` wake means a worker's
+            // report reached nobody while this manager was stopped — point it straight at the review/merge
+            // it missed (the task is already in `review`), not the generic "died unexpectedly" copy.
+            const note = lastTrigger.kind === "worker_report_undelivered"
+              ? `[loom:auto-recovered] Loom resumed you because a worker reported while you were stopped — its report ` +
+                `reached nobody and its branch is waiting. Call worker_list: one or more workers are awaiting your ` +
+                `review (the task is already in 'review'). Run the review→gate→merge loop on it, then continue orchestrating.`
+              : `[loom:auto-recovered] Your session died unexpectedly and Loom auto-resumed it — your worktrees are ` +
+                `intact. Re-check your workers' state (some may need attention) and continue orchestrating from where ` +
+                `you left off.`;
+            try { pty.enqueueStdin(s.id, note + RESUME_NUDGE_TAIL); } catch { /* not ready yet — the resume stands */ }
+          }
+        }
       }
       // eslint-disable-next-line no-console
       console.log(`[crash-recovery-watcher] auto-resume ${s.id} (${s.role}) attempt ${attemptNo}/${maxAttempts} → ${started ? "started" : `failed${error ? ` (${error})` : ""}`}`);
