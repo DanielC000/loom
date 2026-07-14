@@ -126,6 +126,21 @@ export interface Profile {
    */
   dejaCorpus?: boolean;
   /**
+   * Opt-in Open Design (OD, github.com/nexu-io/open-design) capability: when true, a session under this
+   * rig is spawned with its OWN per-session stdio OD MCP server (mounted iff OD is ALSO installed +
+   * reachable on this host, via `LOOM_OPEN_DESIGN_BIN`) so a design/mockup-generating agent can use OD's
+   * design tooling. Default OFF (absent/false) and fully additive — a rig without it spawns
+   * byte-identically to today. Builtin (not an owner-catalog `capability_defs` row), resolved like
+   * dejaCorpus via an env-pointed absolute binary, clean-skipping the mount if unresolved. UNLIKE
+   * dejaCorpus, this is NOT additionally gated by `isLoomDev()` — OD is a public OSS project, not a
+   * private Loom product, so it ships to every loomctl user. HUMAN-set only (Profiles UI / REST) — NEVER
+   * exposed via an agent MCP tool: an MCP-server injection is an exfil-class grant, so this is rejected
+   * even on the Setup Assistant's/Platform Lead's own profile-writing MCP tools (see
+   * `profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) — the same stricter posture as
+   * `connections`/`capabilities`/`dejaCorpus`.
+   */
+  openDesign?: boolean;
+  /**
    * Opt-in RESTRICTED-tools capability (blast-radius control for a chat-reachable Companion): when true, a
    * session under this rig is spawned with a curated, HARDCODED set of dangerous NATIVE tools (raw shell +
    * host-writes: `Bash`/`Edit`/`Write`/`NotebookEdit`/`MultiEdit`) REMOVED from the model's tool list
@@ -550,6 +565,13 @@ export interface Session {
    * Absent/false on every existing session ⇒ no Deja MCP, byte-identical spawn.
    */
   dejaCorpus?: boolean;
+  /**
+   * Opt-in Open Design capability, resolved from the session's Profile at spawn and PINNED here (mirrors
+   * `dejaCorpus`): a per-session stdio OD MCP server is injected iff this is true AND OD resolves on this
+   * host. Persisted so EVERY respawn path (resume / fork / recycle) carries the capability forward
+   * unchanged. Absent/false on every existing session ⇒ no OD MCP, byte-identical spawn.
+   */
+  openDesign?: boolean;
   /**
    * Restricted-tools capability, resolved from the session's Profile at spawn and PINNED here (mirrors
    * `browserTesting`): when true, the curated dangerous NATIVE tools (Bash/Edit/Write/NotebookEdit/

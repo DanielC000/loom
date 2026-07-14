@@ -86,7 +86,7 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** The three legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
  *  row can never collide with or shadow a builtin. Duplicated as string literals (not imported) to keep
  *  this module's validation independent of the shared bridge helper's own location. */
-export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", "deja-corpus"] as const;
+export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", "deja-corpus", "open-design"] as const;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
@@ -219,6 +219,11 @@ export const BUILTIN_CAPABILITY_SUMMARIES: CapabilitySummary[] = [
   {
     slug: "deja-corpus", name: "Deja mockup corpus",
     description: "Inject a per-session Deja MCP so a mockup-generating rig can retrieve prior mockups (find_mockups) and submit the one it just wrote (submit_mockup/mark_reused).",
+    transport: "stdio", kind: "bundled", requiresConnection: false, builtin: true,
+  },
+  {
+    slug: "open-design", name: "Open Design",
+    description: "Inject a per-session Open Design (OD, github.com/nexu-io/open-design) MCP so a design/mockup rig can generate prototypes, dashboards, decks, and other design artifacts. Needs OD installed on this host (LOOM_OPEN_DESIGN_BIN pointed at its od entry) — Loom only mounts an OD the owner already installed, never bundles or auto-installs it. UNLIKE deja-corpus, this is a PUBLIC OSS capability — never hidden on a non-dev build.",
     transport: "stdio", kind: "bundled", requiresConnection: false, builtin: true,
   },
 ];

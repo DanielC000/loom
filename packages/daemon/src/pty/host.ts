@@ -720,6 +720,34 @@ export function dejaMcpServer(): { type: "stdio"; command: string; args: string[
 }
 
 /**
+ * The stdio MCP-config entry for an openDesign session, or null when `LOOM_OPEN_DESIGN_BIN` is unset or
+ * doesn't resolve to an existing absolute file — a CLEAN-SKIP mirroring {@link dejaMcpServer} exactly:
+ * an unresolvable open-design (OD, github.com/nexu-io/open-design) install never breaks the spawn.
+ * UNLIKE dejaMcpServer, this is NOT additionally gated by `isLoomDev()` — OD is a public, OSS project
+ * (not a private Loom-internal product like Deja), so it ships to every loomctl user.
+ *
+ * `LOOM_OPEN_DESIGN_BIN` must already be an ABSOLUTE path to OD's own `od` CLI/MCP entry — launched
+ * DIRECTLY (never wrapped in `process.execPath`, unlike Deja's `cli.js`): OD ships as a standalone `od`
+ * binary/executable, not a bare node script, so the daemon spawns it as-is with a single `"mcp"` arg
+ * (mirrors `od mcp`, OD's own documented stdio-MCP invocation). No venv/provisioning step — like Deja,
+ * OD is a host dependency the human installs and points `LOOM_OPEN_DESIGN_BIN` at once; Loom never
+ * bundles or auto-installs it (see the profile flag's own doc for the full trust posture).
+ *
+ * RISK NOTED, NOT YET VERIFIED (no OD install available to test against): OD's architecture pairs this
+ * stdio MCP process with OD's OWN separate local daemon (normally on `127.0.0.1:7456`); if OD's MCP
+ * process blocks/hangs its own handshake when that daemon isn't running (rather than degrading a tool
+ * call gracefully), a session that opts into `openDesign` with a present-but-daemon-down OD install could
+ * see its `claude` boot hang waiting on this MCP's initialize response — reported up as a fork per the
+ * task brief, since this resolver only ever gates on BINARY presence (fs.existsSync), never on OD's own
+ * daemon reachability (a network/handshake probe here would itself risk blocking the spawn hot path).
+ */
+export function openDesignMcpServer(): { type: "stdio"; command: string; args: string[] } | null {
+  const bin = process.env.LOOM_OPEN_DESIGN_BIN;
+  if (!bin || !path.isAbsolute(bin) || !fs.existsSync(bin)) return null;
+  return { type: "stdio", command: bin, args: ["mcp"] };
+}
+
+/**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
@@ -745,7 +773,7 @@ export function dejaMcpServer(): { type: "stdio"; command: string; args: string[
  * tool world, so a prompt-injection in an audited transcript has no outward/destructive tool to reach.
  */
 export function buildMcpServers(o: {
-  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean;
+  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; openDesign?: boolean;
   /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
   pythonInterpreterPath?: string;
   /** Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (raw, un-bridged —
@@ -868,6 +896,21 @@ export function buildMcpServers(o: {
       } else {
         // eslint-disable-next-line no-console
         console.warn(`[pty] ${o.sessionId} dejaCorpus set but LOOM_DEJA_BIN could not be resolved — spawning WITHOUT the Deja MCP. Is LOOM_DEJA_BIN set to an absolute path to Deja's cli.js?`);
+      }
+      continue;
+    }
+    if (grant.slug === "open-design") {
+      // Open Design (OD) is a PUBLIC OSS project (unlike Deja) — ships to every loomctl user, so this
+      // branch is deliberately NOT gated by isLoomDev(). A plain synchronous existence check (no venv/
+      // provisioning) — a null means LOOM_OPEN_DESIGN_BIN is unset or unresolvable, so THIS spawn just
+      // skips the MCP (logged, never crashes). No background kick: OD is a host-side install the human
+      // points LOOM_OPEN_DESIGN_BIN at once.
+      const od = openDesignMcpServer();
+      if (od) {
+        mcpServers["open-design"] = od;
+      } else {
+        // eslint-disable-next-line no-console
+        console.warn(`[pty] ${o.sessionId} openDesign set but LOOM_OPEN_DESIGN_BIN could not be resolved — spawning WITHOUT the Open Design MCP. Is LOOM_OPEN_DESIGN_BIN set to an absolute path to OD's od entry?`);
       }
       continue;
     }
@@ -1014,6 +1057,10 @@ export function capabilityToolAllowlist(grants: CapabilityGrant[], catalog: Capa
     if (grant.slug === "browser-testing") return ["mcp__playwright"];
     if (grant.slug === "document-conversion") return ["mcp__markitdown__convert_to_markdown"];
     if (grant.slug === "deja-corpus") return ["mcp__deja__find_mockups", "mcp__deja__submit_mockup", "mcp__deja__mark_reused"];
+    // OD's exact tool surface isn't known here (no live OD install to enumerate it against) — allow the
+    // WHOLE `mcp__open-design` server prefix, mirroring browser-testing's `mcp__playwright` whole-server
+    // allow (rather than deja-corpus's 3 named tools), so every tool OD's MCP actually advertises is usable.
+    if (grant.slug === "open-design") return ["mcp__open-design"];
     const def = catalog.find((c) => c.slug === grant.slug);
     if (!def) return [];
     try { return JSON.parse(def.toolAllowlistJson) as string[]; } catch { return []; }
@@ -1282,6 +1329,13 @@ export interface SpawnOpts {
    * every existing spawn is byte-identical when unset/false.
    */
   dejaCorpus?: boolean;
+  /**
+   * Opt-in Open Design (OD, resolved from the session's Profile, gated). When true AND `LOOM_OPEN_DESIGN_BIN`
+   * resolves, inject a per-session stdio OD MCP server and allowlist its tool surface. UNLIKE dejaCorpus,
+   * this is NOT additionally gated by isLoomDev() — OD is a public OSS project. Default OFF — every
+   * existing spawn is byte-identical when unset/false.
+   */
+  openDesign?: boolean;
   /**
    * Card C2 (Codescape wiring epic `369dde3c`): the project's RAW `codescape.enabled` config flag — NOT
    * yet combined with `isLoomDev()`/the supervisor port (buildMcpServers applies those gates itself,
@@ -2400,7 +2454,7 @@ export class PtyHost {
     // tool allowlist off the actual mount decision, rather than re-deriving the same isLoomDev()/port/
     // project-enabled condition a second time here.
     const mcpServers = buildMcpServers({
-      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus,
+      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus, openDesign: opts.openDesign,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
       codescapeEnabled: opts.codescapeEnabled, codescapePort: opts.codescapePort, projectId: opts.projectId, worktreeId: opts.worktreeId,

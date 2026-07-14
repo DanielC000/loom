@@ -315,18 +315,19 @@ check("(db) createCapabilityDef's summary carries the row id (the Settings UI's 
 // ===================== (gate) listCapabilitySummaries drops "deja-corpus" on a non-LOOM_DEV build =====
 // Deja is a PRIVATE product (Loom is public on npm) — a regular loomctl user's GET /api/capabilities
 // must never even NAME it, independent of the UI-level toggle hides (Profiles.tsx/Settings.tsx).
+// "open-design" is a PUBLIC OSS builtin (unlike deja-corpus) — it's NEVER dropped, dev build or not.
 check("(gate) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
 const summariesNonDev = listCapabilitySummaries(db);
-check("(gate) non-dev build: listCapabilitySummaries returns the 2 non-Deja builtins + the owner-added row (NO deja-corpus)",
-  summariesNonDev.length === 3 && summariesNonDev[0].slug === "browser-testing" && summariesNonDev[1].slug === "document-conversion" && summariesNonDev[2].slug === "gh-mcp");
+check("(gate) non-dev build: listCapabilitySummaries returns the 3 non-Deja builtins + the owner-added row (NO deja-corpus)",
+  summariesNonDev.length === 4 && summariesNonDev[0].slug === "browser-testing" && summariesNonDev[1].slug === "document-conversion" && summariesNonDev[2].slug === "open-design" && summariesNonDev[3].slug === "gh-mcp");
 
 process.env.LOOM_DEV = "1";
 check("(gate) isLoomDev() is TRUE once LOOM_DEV=1", isLoomDev() === true);
 const summaries = listCapabilitySummaries(db);
-check("(db) listCapabilitySummaries returns the 3 BUILTINS first, then the owner-added row (LOOM_DEV=1)",
-  summaries.length === 4 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "deja-corpus" && summaries[3].slug === "gh-mcp");
-check("(db) the 3 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
-  summaries[0].id === undefined && summaries[1].id === undefined && summaries[2].id === undefined);
+check("(db) listCapabilitySummaries returns the 4 BUILTINS first, then the owner-added row (LOOM_DEV=1)",
+  summaries.length === 5 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "deja-corpus" && summaries[3].slug === "open-design" && summaries[4].slug === "gh-mcp");
+check("(db) the 4 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
+  summaries[0].id === undefined && summaries[1].id === undefined && summaries[2].id === undefined && summaries[3].id === undefined);
 let dupThrew = false;
 try {
   createCapabilityDef(db, { slug: "gh-mcp", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });

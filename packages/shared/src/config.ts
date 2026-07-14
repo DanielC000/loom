@@ -757,6 +757,9 @@ export interface ResolvedProfile {
   documentConversion: boolean;
   /** Opt-in Deja mockup-corpus: inject a per-session `deja mcp` server at spawn. Backstops to false. */
   dejaCorpus: boolean;
+  /** Opt-in Open Design: inject a per-session OD MCP server at spawn iff OD resolves on this host.
+   *  Backstops to false. UNLIKE dejaCorpus, not additionally gated by isLoomDev() (OD is public OSS). */
+  openDesign: boolean;
   /** Restricted-tools: append the curated dangerous native tools to `--disallowedTools` at spawn
    *  (blast-radius control for a chat-reachable Companion). Backstops to false. */
   restrictedTools: boolean;
@@ -778,7 +781,7 @@ export interface ResolvedProfile {
 }
 
 /** The three permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
-export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion", dejaCorpus: "deja-corpus" } as const;
+export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion", dejaCorpus: "deja-corpus", openDesign: "open-design" } as const;
 
 /**
  * Bridge a profile/session's legacy `browserTesting`/`documentConversion`/`dejaCorpus` booleans + its
@@ -789,11 +792,12 @@ export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", docu
  * array verbatim. Called EXACTLY ONCE per resolution (buildMcpServers) — `capabilities` itself is never
  * pre-bridged (see the field doc above), so this is the only place legacy + new merge.
  */
-export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
+export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; openDesign?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
   const legacy: CapabilityGrant[] = [
     ...(p.browserTesting ? [{ slug: LEGACY_CAPABILITY_SLUGS.browserTesting }] : []),
     ...(p.documentConversion ? [{ slug: LEGACY_CAPABILITY_SLUGS.documentConversion }] : []),
     ...(p.dejaCorpus ? [{ slug: LEGACY_CAPABILITY_SLUGS.dejaCorpus }] : []),
+    ...(p.openDesign ? [{ slug: LEGACY_CAPABILITY_SLUGS.openDesign }] : []),
   ];
   return [...legacy, ...(p.capabilities ?? [])];
 }
@@ -816,7 +820,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, dejaCorpus: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, dejaCorpus: false, openDesign: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
   }
   return {
     role: profile.role ?? null,
@@ -829,6 +833,7 @@ export function resolveProfile(
     browserTesting: profile.browserTesting ?? false,
     documentConversion: profile.documentConversion ?? false,
     dejaCorpus: profile.dejaCorpus ?? false,
+    openDesign: profile.openDesign ?? false,
     // Restricted-tools (subtractive spawn effect: dangerous native tools → --disallowedTools). Backstop false.
     restrictedTools: profile.restrictedTools ?? false,
     // Declared no-commit role (lifecycle-only; no spawn-time effect). Backstop false.

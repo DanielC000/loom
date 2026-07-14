@@ -1431,7 +1431,7 @@ export class OrchestrationMcpRouter {
     // SERVER-SIDE from this manager's session (the agent passes no projectId), so it can never list
     // another project's agents. `role` is the agent's resolved PROFILE role (resolveProfile — the
     // canonical mechanism, exactly as the platform page derives it); null for a plain/profile-less agent.
-    // browserTesting/documentConversion/dejaCorpus/restrictedTools are the SAME resolveProfile output profile_get/
+    // browserTesting/documentConversion/dejaCorpus/openDesign/restrictedTools are the SAME resolveProfile output profile_get/
     // profile_list already surface (mcp/platform.ts) — reused here so a manager can match a worker prompt
     // to real provisioning without a spawn-and-inspect round-trip (Auditor finding 64430a50).
     server.registerTool(
@@ -1443,7 +1443,7 @@ export class OrchestrationMcpRouter {
           "worker_spawn. Your project is derived SERVER-SIDE from your session (you pass NO projectId, so " +
           "you can never list another project's agents — same scoping as worker_list). Returns each agent's " +
           "{id, name, role (resolved from its bound profile — null for a plain agent), profileId, position, " +
-          "browserTesting, documentConversion, dejaCorpus, restrictedTools (resolved from the assigned/default " +
+          "browserTesting, documentConversion, dejaCorpus, openDesign, restrictedTools (resolved from the assigned/default " +
           "profile — same resolution profile_get/profile_list use; false when profile-less or the profile " +
           "leaves a flag unset)}, ordered by position.",
         inputSchema: {},
@@ -1462,6 +1462,7 @@ export class OrchestrationMcpRouter {
             browserTesting: resolved.browserTesting,
             documentConversion: resolved.documentConversion,
             dejaCorpus: resolved.dejaCorpus,
+            openDesign: resolved.openDesign,
             restrictedTools: resolved.restrictedTools,
           };
         }));
@@ -1482,7 +1483,7 @@ export class OrchestrationMcpRouter {
         description:
           "Read ONE agent in YOUR project — the FULL record INCLUDING its startupPrompt (agent_list's " +
           "summary deliberately drops it — some prompts are large, e.g. ~6.6KB for a Code Reviewer rig), " +
-          "PLUS its resolved browserTesting/documentConversion/dejaCorpus/restrictedTools capability flags (from its " +
+          "PLUS its resolved browserTesting/documentConversion/dejaCorpus/openDesign/restrictedTools capability flags (from its " +
           "assigned/default profile — same resolution profile_get/profile_list use; false when profile-less " +
           "or the profile leaves a flag unset). Use this before a safe read-modify-write via agent_update " +
           "(its appendToStartupPrompt mode lets you add to what you read here without retyping the whole " +
@@ -1504,6 +1505,7 @@ export class OrchestrationMcpRouter {
             browserTesting: resolved.browserTesting,
             documentConversion: resolved.documentConversion,
             dejaCorpus: resolved.dejaCorpus,
+            openDesign: resolved.openDesign,
             restrictedTools: resolved.restrictedTools,
           };
         };
