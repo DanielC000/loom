@@ -344,6 +344,53 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ===== (1h) a column flagged excludeFromIdleWatchdog (a genuine dead-end/parking lane, e.g. "Dropped") =====
+// ===== is DISCOUNTED from the actionable count, same treatment as held/deferred/review (card ab30768a) =====
+const DROPPED_BOARD = {
+  kanbanColumns: [
+    { key: "backlog", label: "Backlog", role: "defaultLanding" },
+    { key: "todo", label: "Todo", role: "workReady" },
+    { key: "doing", label: "Doing", role: "active" },
+    { key: "review", label: "Review", role: "review" },
+    { key: "dropped", label: "Dropped", excludeFromIdleWatchdog: true },
+    { key: "done", label: "Done", role: "terminal" },
+  ],
+};
+{
+  const e = makeEnv({ projectConfig: DROPPED_BOARD });
+  seedManager(e, "mgr-dropped-only");
+  seedCard(e, "dropped"); // sole open card, sitting in the flagged parking lane
+  e.watcher.tick(NOW);
+  check("(1h) a card in an excludeFromIdleWatchdog column as the sole open card → NO idle nudge (discounted)", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // A genuinely-actionable card alongside a dropped-lane one → STILL nudges; count EXCLUDES the dropped card.
+  const e = makeEnv({ projectConfig: DROPPED_BOARD });
+  seedManager(e, "mgr-dropped-mixed");
+  seedCard(e, "dropped");                                          // discounted (flagged column)
+  seedTitled(e, "todo", "fix(web): real actionable task", false);  // counted
+  e.watcher.tick(NOW);
+  check("(1h) a dropped-lane card + a genuine card → STILL nudged (genuine work exists)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-dropped-mixed");
+  check("(1h) the reported actionable count EXCLUDES the dropped-lane card (1, not 2)", e.enqueued[0]?.text.includes("1 actionable"));
+  cleanup(e);
+}
+{
+  // Regression pin: the SAME board shape but WITHOUT the flag on that column → the card IS counted
+  // (byte-identical to today — absent/false must not change behavior).
+  const UNFLAGGED_BOARD = { kanbanColumns: DROPPED_BOARD.kanbanColumns.map((c) => {
+    const { excludeFromIdleWatchdog, ...rest } = c;
+    return rest;
+  }) };
+  const e = makeEnv({ projectConfig: UNFLAGGED_BOARD });
+  seedManager(e, "mgr-unflagged");
+  seedCard(e, "dropped"); // same column key, but NOT flagged this time
+  e.watcher.tick(NOW);
+  check("(1h) regression: the SAME column WITHOUT the flag → the card IS counted (unchanged)",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-unflagged" && e.enqueued[0].text.includes("1 actionable"));
+  cleanup(e);
+}
+
 // ============================ (2) SILENT — not idle long enough ============================
 {
   const e = makeEnv();

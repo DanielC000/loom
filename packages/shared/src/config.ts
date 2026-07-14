@@ -32,6 +32,12 @@ export interface KanbanColumn {
   accentColor?: string;
   /** SOFT (advisory, non-blocking) work-in-progress limit. Optional; absent = no limit. See accentColor. */
   wipLimit?: number;
+  /**
+   * Marks a genuine dead-end/parking lane (e.g. "Dropped") whose cards are discounted from the idle
+   * watchdog's "actionable" count, without per-card `deferred:true` toil. Optional; absent/false =
+   * today's behavior (byte-identical). See accentColor.
+   */
+  excludeFromIdleWatchdog?: boolean;
 }
 
 /**

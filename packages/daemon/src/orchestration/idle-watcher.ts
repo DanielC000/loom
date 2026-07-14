@@ -229,11 +229,17 @@ export class IdleWatcher {
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
       const reviewKey = columnKeyForRole(cols, "review");
+      // A column flagged excludeFromIdleWatchdog (e.g. a "Dropped" parking lane) is a genuine dead-end —
+      // its cards are discounted the same way held/deferred/pending-request cards are, so the lane never
+      // needs per-card deferred:true toil to stop nagging the idle watchdog. Mirrors hasPendingBoardWork
+      // (orchestration/wake-impact.ts) so the two "actionable board work" definitions stay consistent.
+      const excludedColumnKeys = new Set(cols.filter((c) => c.excludeFromIdleWatchdog === true).map((c) => c.key));
       const nonTerminal = db.listTasks(m.projectId).filter((t) => t.columnKey !== terminalKey);
       const openCards = nonTerminal.filter((t) =>
         t.held !== true
         && t.deferred !== true
         && t.columnKey !== reviewKey
+        && !excludedColumnKeys.has(t.columnKey)
         && !db.listQuestionsForTask(m.projectId, t.id).some((q) => q.state === "pending"),
       );
       // Narrow liveWorkers (all idle at this point — a live BUSY one would have skipped above) to

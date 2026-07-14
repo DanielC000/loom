@@ -22,9 +22,11 @@ import type { RestartWakeImpact } from "./restart.js";
  * Actionable board work: a task whose column is NOT the terminal lane AND is NOT held AND is NOT
  * deferred (every other non-held/non-deferred lane — intake/defaultLanding/workReady/active/review/
  * parked — is pending work a manager should drive; a held card is the owner's brake and `deferred` is
- * the manager's own sequencing marker, neither ever counts, in any column). Raw signal only — see
- * {@link strandedBoardWork} for whether it actually forces the restart nudge. Mirrors the idle-watcher's
- * actionable-count definition (orchestration/idle-watcher.ts) so the two stay consistent.
+ * the manager's own sequencing marker, neither ever counts, in any column) AND is NOT in a column
+ * flagged `excludeFromIdleWatchdog` (a genuine dead-end/parking lane, e.g. "Dropped" — discounted the
+ * same way, without per-card `deferred:true` toil). Raw signal only — see {@link strandedBoardWork} for
+ * whether it actually forces the restart nudge. Mirrors the idle-watcher's actionable-count definition
+ * (orchestration/idle-watcher.ts) so the two stay consistent.
  */
 export function hasPendingBoardWork(db: Db, id: string): boolean {
   try {
@@ -34,8 +36,9 @@ export function hasPendingBoardWork(db: Db, id: string): boolean {
     if (!project) return true;
     const cols = resolveConfig(project.config).kanbanColumns;
     const terminalKey = columnKeyForRole(cols, "terminal");
+    const excludedColumnKeys = new Set(cols.filter((c) => c.excludeFromIdleWatchdog === true).map((c) => c.key));
     return db.listTasks(projectId).some(
-      (t) => t.columnKey !== terminalKey && !t.held && t.deferred !== true,
+      (t) => t.columnKey !== terminalKey && !t.held && t.deferred !== true && !excludedColumnKeys.has(t.columnKey),
     );
   } catch {
     return true; // defensive: a board-read fault must never produce a false "no-op" stall

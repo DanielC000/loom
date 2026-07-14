@@ -61,6 +61,37 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ==================== hasPendingBoardWork: excludeFromIdleWatchdog column flag (card ab30768a) ====================
+{
+  const DROPPED_BOARD = { kanbanColumns: [
+    { key: "backlog", label: "Backlog", role: "defaultLanding" },
+    { key: "in_progress", label: "In Progress", role: "active" },
+    { key: "dropped", label: "Dropped", excludeFromIdleWatchdog: true },
+    { key: "done", label: "Done", role: "terminal" },
+  ] };
+  const e = makeEnv({ projectConfig: DROPPED_BOARD });
+  seedSession(e, "m1b");
+  check("(hasPendingBoardWork) no tasks → false", hasPendingBoardWork(e.db, "m1b") === false);
+  seedTask(e, "t1b-dropped", "dropped");
+  check("(hasPendingBoardWork) only a card in an excludeFromIdleWatchdog column → false (discounted)",
+    hasPendingBoardWork(e.db, "m1b") === false);
+  seedTask(e, "t1b-open", "in_progress");
+  check("(hasPendingBoardWork) + an ordinary open card in an UNFLAGGED column → true",
+    hasPendingBoardWork(e.db, "m1b") === true);
+
+  // Regression pin: the SAME column key WITHOUT the flag → the card IS counted (unchanged behavior).
+  const UNFLAGGED_BOARD = { kanbanColumns: DROPPED_BOARD.kanbanColumns.map((c) => {
+    const { excludeFromIdleWatchdog, ...rest } = c;
+    return rest;
+  }) };
+  const e2 = makeEnv({ projectConfig: UNFLAGGED_BOARD });
+  seedSession(e2, "m1c");
+  seedTask(e2, "t1c-dropped", "dropped");
+  check("(hasPendingBoardWork) regression: the SAME column WITHOUT the flag → the card IS counted (true)",
+    hasPendingBoardWork(e2.db, "m1c") === true);
+  cleanup(e); cleanup(e2);
+}
+
 // ============================ hasUnconsumedAnswer ============================
 {
   const e = makeEnv();

@@ -450,6 +450,7 @@ const desiredColumn = z.object({
   prevKey: z.string().min(1).optional(),
   accentColor: z.string().optional(),
   wipLimit: z.number().int().nonnegative().optional(),
+  excludeFromIdleWatchdog: z.boolean().optional(),
 }).strict();
 const columnLayoutSchema = z.object({ columns: z.array(desiredColumn).min(1) }).strict();
 

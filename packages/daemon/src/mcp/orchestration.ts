@@ -53,6 +53,7 @@ const toDesiredColumn = (c: KanbanColumn): DesiredColumn => {
   if (c.role) d.role = c.role;
   if (c.accentColor !== undefined) d.accentColor = c.accentColor;
   if (c.wipLimit !== undefined) d.wipLimit = c.wipLimit;
+  if (c.excludeFromIdleWatchdog !== undefined) d.excludeFromIdleWatchdog = c.excludeFromIdleWatchdog;
   return d;
 };
 

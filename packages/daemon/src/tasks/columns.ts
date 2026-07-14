@@ -168,6 +168,8 @@ export interface DesiredColumn {
   accentColor?: string;
   /** SOFT (advisory) work-in-progress limit. Optional — carried through to the stored KanbanColumn when present. */
   wipLimit?: number;
+  /** Marks a dead-end/parking lane discounted from the idle watchdog. Optional — carried through as-is. */
+  excludeFromIdleWatchdog?: boolean;
 }
 
 /** The outcome of planning a layout change: a hard reject, or the columns + card re-keys to apply. */
@@ -285,6 +287,7 @@ export function planColumnLayout(
     if (d.role) col.role = d.role;
     if (d.accentColor !== undefined) col.accentColor = d.accentColor;
     if (d.wipLimit !== undefined) col.wipLimit = d.wipLimit;
+    if (d.excludeFromIdleWatchdog !== undefined) col.excludeFromIdleWatchdog = d.excludeFromIdleWatchdog;
     return col;
   });
   return { ok: true, warnings, columns, rekeys, defaultLandingKey };
