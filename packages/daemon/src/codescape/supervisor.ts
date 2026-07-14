@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import net from "node:net";
+import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolveConfig, type ProjectConfigOverride } from "@loom/shared";
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin } from "../paths.js";
@@ -226,6 +227,34 @@ export class CodescapeSupervisor {
     const r = await runBounded(command, [...args, "ingest", repoPath], this.homeDir, this.ingestTimeoutMs);
     if (!r.ok) {
       console.warn(`[codescape] ingest ${repoPath} ${r.timedOut ? "timed out" : `failed (exit ${r.code})`}${r.output ? ` — ${r.output}` : ""}`);
+    }
+    return { ok: r.ok, outcome: r.ok ? "ready" : r.timedOut ? "timeout" : "failed", errorTail: r.output || undefined };
+  }
+
+  /**
+   * Card C2/C3 rewrite (`369dde3c`, card e068a2ab): ingest `repoPath` straight to an explicit `graphPath`
+   * (`codescape ingest <repoPath> --out <graphPath>`) — the file the per-session stdio MCP
+   * (`pty/host.ts` `codescapeMcpServer`) reads via `codescape mcp --graph <graphPath>`. DECOUPLED from
+   * the shared `serve`'s own `.codescape/projects/index.json` bookkeeping that {@link ingest} (no `--out`)
+   * feeds — this is the sole write path for the agent-read graph, independent of whether `serve` is
+   * running at all. Same async/bounded/never-throws discipline as {@link ingest}: gated on
+   * `isCodescapeSupervisorEnabled()` (the daemon-wide LOOM_CODESCAPE_ENABLED master switch — still the
+   * gate for the whole feature, not just the optional shared `serve` process), still runs from the
+   * shared `homeDir` (the CWD CONTRACT, even though `--out` itself is an absolute/caller-given path —
+   * consistency with every other codescape invocation, and ingest may still touch its own cwd-relative
+   * `.codescape/projects/index.json` bookkeeping as a side effect), creates `graphPath`'s parent dir
+   * first (a fresh `<LOOM_HOME>/codescape/<projectId>/` may not exist yet).
+   */
+  async ingestToGraph(repoPath: string, graphPath: string): Promise<CodescapeIngestResult> {
+    if (!isCodescapeSupervisorEnabled()) {
+      return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + LOOM_CODESCAPE_ENABLED=1)" };
+    }
+    fs.mkdirSync(this.homeDir, { recursive: true });
+    fs.mkdirSync(path.dirname(graphPath), { recursive: true });
+    const { command, args } = resolveCodescapeBin();
+    const r = await runBounded(command, [...args, "ingest", repoPath, "--out", graphPath], this.homeDir, this.ingestTimeoutMs);
+    if (!r.ok) {
+      console.warn(`[codescape] ingest ${repoPath} --out ${graphPath} ${r.timedOut ? "timed out" : `failed (exit ${r.code})`}${r.output ? ` — ${r.output}` : ""}`);
     }
     return { ok: r.ok, outcome: r.ok ? "ready" : r.timedOut ? "timeout" : "failed", errorTail: r.output || undefined };
   }

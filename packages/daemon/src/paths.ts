@@ -273,6 +273,18 @@ export function resolveCodescapeBin(): { command: string; args: string[] } {
   return { command: resolveExecutable(bin), args: [] };
 }
 
+/**
+ * Card C2 rewrite (`369dde3c`): the per-project graph file BOTH `codescape ingest <repo> --out
+ * <path>` (sessions/service.ts C3 hooks) and the per-session stdio `codescape mcp --graph <path>`
+ * (pty/host.ts `codescapeMcpServer`) agree on — replaces the old shared-`serve` HTTP-scope model
+ * (see codescape/supervisor.ts's CWD CONTRACT for the now-agent-path-decoupled shared-serve index,
+ * which this graph file is independent of). One graph per PROJECT (not per-worktree/session) —
+ * every session on a project reads the same always-current main graph.
+ */
+export function codescapeGraphPath(projectId: string): string {
+  return path.join(CODESCAPE_HOME_DIR, projectId, "graph.json");
+}
+
 export function ensureDirs(): void {
   for (const d of [LOOM_HOME, SETTINGS_DIR, LOGS_DIR, WORKTREES_DIR, RUNS_DIR, SKILLS_DIR, SKILL_BASE_DIR, WORKSPACE_ROOT]) fs.mkdirSync(d, { recursive: true });
   ensureLoomHomeGitignore();

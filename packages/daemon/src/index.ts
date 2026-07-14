@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
-import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR } from "./paths.js";
+import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, isCodescapeEnabled, codescapeGraphPath } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
@@ -811,6 +811,26 @@ async function main(): Promise<void> {
   // a real gap, not silently papered over, and intentionally NOT solved here (that's a deferred v2 feature).
   void codescapeSupervisor.start(codescapeBootRepoPaths(db.listProjects())).catch((err) => {
     console.warn(`[boot] codescape supervisor failed to start (continuing boot): ${(err as Error).message}`);
+  });
+
+  // Card C2/C3 rewrite (e068a2ab): ensure every codescape-enabled project's project-wide graph.json
+  // (the per-session stdio MCP's read path — see paths.ts `codescapeGraphPath`) exists, INDEPENDENT of
+  // the shared `serve` bootstrap above (a project's graph.json survives a `serve` outage/disable — it's
+  // just a file). Fire-and-forget, sequential (one project at a time — never a stampede of concurrent
+  // ingests on daemon boot), and SKIPS a project whose graph already exists (a restart shouldn't re-pay a
+  // big-repo ingest every time; a fresh graph is otherwise ensured lazily on that project's first worker
+  // spawn — see sessions/service.ts `fireCodescapeEnsureGraph` — or refreshed on the next merge).
+  void (async () => {
+    for (const project of db.listProjects()) {
+      const config = resolveConfig(project.config);
+      if (!isCodescapeEnabled(config)) continue;
+      const graphPath = codescapeGraphPath(project.id);
+      if (fs.existsSync(graphPath)) continue;
+      const res = await codescapeSupervisor.ingestToGraph(project.repoPath, graphPath);
+      if (!res.ok) console.warn(`[boot] codescape boot-ingest failed for project ${project.id} (continuing boot): ${res.errorTail ?? res.outcome}`);
+    }
+  })().catch((err) => {
+    console.warn(`[boot] codescape boot-ingest loop errored (continuing boot): ${(err as Error).message}`);
   });
 
   // §19c-b usage-limit RESUME watcher — ALWAYS ON (recovery ≠ autonomy; a manually-started session

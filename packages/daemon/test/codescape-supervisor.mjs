@@ -124,6 +124,41 @@ check("(a) CWD CONTRACT: ingest ran from the shared homeDir",
 check("(a) CWD CONTRACT: serve ran from the SAME shared homeDir as ingest",
   calls1[0]?.cwd === calls1[1]?.cwd);
 
+// ===================== (a2) ingestToGraph (C2/C3 rewrite, e068a2ab): --out flag, decoupled from serve =====================
+// The agent-read-path write method: `codescape ingest <repoPath> --out <graphPath>` — independent of
+// whether `serve` is running at all (unlike the CWD-CONTRACT-bound `.codescape/projects/index.json`
+// bookkeeping `ingest()` above feeds serve's own project index). Uses its OWN supervisor + homeDir (NOT
+// `sup`/`homeDir`) so its calls never land in `fake-codescape-calls.jsonl` under the shared `homeDir` —
+// section (b) below indexes that file by POSITION (calls1/calls2), and an extra call recorded there would
+// shift those indices.
+const graphSupHomeDir = path.join(tmpHome, "ingest-to-graph-home");
+const graphSup = new CodescapeSupervisor({ homeDir: graphSupHomeDir, ingestTimeoutMs: 15_000 });
+const graphOutPath = path.join(tmpHome, "graphs", "projA", "graph.json");
+check("(a2) graph file does not exist before ingestToGraph runs", !fs.existsSync(graphOutPath));
+const ingestResult = await graphSup.ingestToGraph("/fake/repo/two", graphOutPath);
+check("(a2) ingestToGraph resolves ok:true against the fixture CLI", ingestResult.ok === true && ingestResult.outcome === "ready");
+check("(a2) ingestToGraph creates the graph file's parent dir and writes a real file", fs.existsSync(graphOutPath));
+const graphSupCallsFile = path.join(graphSupHomeDir, "fake-codescape-calls.jsonl");
+const graphSupCalls = fs.existsSync(graphSupCallsFile)
+  ? fs.readFileSync(graphSupCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+  : [];
+const lastIngestCall = [...graphSupCalls].reverse().find((c) => c.cmd === "ingest" && c.out);
+check("(a2) the fixture recorded an 'ingest --out <graphPath>' call", lastIngestCall?.repoPath === "/fake/repo/two" && lastIngestCall?.out === graphOutPath);
+check("(a2) ingestToGraph ran from ITS OWN shared homeDir (the CWD CONTRACT, even for an explicit --out path)",
+  path.resolve(lastIngestCall?.cwd || "") === path.resolve(graphSupHomeDir));
+
+// Disabled-gate negative case: mirrors ingest()'s own disabled-gate check — ingestToGraph must refuse
+// (never spawn, never create dirs) when the daemon-wide switch is off.
+{
+  const disabledSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "ingest-to-graph-disabled-home") });
+  delete process.env.LOOM_CODESCAPE_ENABLED;
+  const disabledGraphPath = path.join(tmpHome, "disabled-graphs", "projB", "graph.json");
+  const disabledResult = await disabledSup.ingestToGraph("/fake/repo/three", disabledGraphPath);
+  check("(a2-neg) ingestToGraph refuses when isCodescapeSupervisorEnabled() is false", disabledResult.ok === false && disabledResult.outcome === "failed");
+  check("(a2-neg) it never creates the graph file when disabled", !fs.existsSync(disabledGraphPath));
+  process.env.LOOM_CODESCAPE_ENABLED = "1"; // restore for the rest of this test
+}
+
 // ===================== (b) restart-on-death: bounded, same port, new pid =====================
 const portBefore = sup.getPort();
 const pidBefore = sup.getPid();
@@ -253,6 +288,6 @@ delete process.env.LOOM_DEV;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor (C1): codescapeBootRepoPaths filters projects to only those with codescape.enabled resolved true; LOOM_DEV unset never spawns anything (getPort/getPid null, zero side effects); enabled ingest-then-serve run from the SAME shared cwd (CWD CONTRACT) on a real loopback port; killing the child triggers a bounded restart (same port, new pid); stop() disarms restart-on-death; the control-plane client (register/reingest/drop/overlay) hits the right method+URL+body, is bounded, and NEVER throws — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape supervisor (C1, + C2/C3 rewrite e068a2ab): codescapeBootRepoPaths filters projects to only those with codescape.enabled resolved true; LOOM_DEV unset never spawns anything (getPort/getPid null, zero side effects); enabled ingest-then-serve run from the SAME shared cwd (CWD CONTRACT) on a real loopback port; killing the child triggers a bounded restart (same port, new pid); stop() disarms restart-on-death; ingestToGraph writes an explicit --out graph file (decoupled from serve, still the CWD CONTRACT) and refuses cleanly when disabled; the control-plane client (register/reingest/drop/overlay, kept for a future C4) hits the right method+URL+body, is bounded, and NEVER throws — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

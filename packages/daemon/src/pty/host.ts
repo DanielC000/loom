@@ -13,7 +13,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, resolveCodescapeBin, codescapeGraphPath } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -748,6 +748,26 @@ export function openDesignMcpServer(): { type: "stdio"; command: string; args: s
 }
 
 /**
+ * The stdio MCP-config entry for a codescape-enabled session, or null when `graphPath` doesn't exist
+ * yet — a CLEAN-SKIP mirroring markitdownMcpServer's "venv not warm yet" fallback: an ingest that
+ * hasn't completed (or hasn't run at all) never breaks the spawn, it just skips the mount for THIS
+ * spawn — a later spawn (or the merge-triggered reingest landing) picks it up once the file exists.
+ *
+ * Card C2 REWRITE (`369dde3c`, card e068a2ab): replaces the old shared `codescape serve` HTTP mount
+ * (scoped by the LOOM projectId, which never matched codescape's OWN ingested project id — the MCP
+ * never registered) with a per-session STDIO `codescape mcp --graph <graphPath>` process, the SAME
+ * per-session-MCP shape as Playwright/markitdown/Deja/OD above. `resolveCodescapeBin()` already
+ * encodes the two spawn shapes (a `.js` checkout wrapped in `process.execPath`, exactly like
+ * {@link dejaMcpServer}; a resolved PATH/compiled binary launched directly, exactly like
+ * {@link openDesignMcpServer}) — reused here rather than re-derived.
+ */
+export function codescapeMcpServer(graphPath: string): { type: "stdio"; command: string; args: string[] } | null {
+  if (!fs.existsSync(graphPath)) return null;
+  const { command, args } = resolveCodescapeBin();
+  return { type: "stdio", command, args: [...args, "mcp", "--graph", graphPath] };
+}
+
+/**
  * Assemble the `--mcp-config` mcpServers map for a Claude spawn (extracted from createPty as the ONE
  * testable seam for the MCP surface). ALWAYS the project-scoped `loom-tasks` HTTP server; PLUS the
  * role-gated surface (manager/worker → loom-orchestration, platform → loom-platform, auditor → loom-audit,
@@ -787,12 +807,8 @@ export function buildMcpServers(o: {
   resolveConnectionSecret?: (connectionId: string) => string | undefined;
   /** Card C2: the project's raw `codescape.enabled` flag — see the "codescape" mount below. */
   codescapeEnabled?: boolean;
-  /** Card C2: the live Codescape supervisor port, or null/undefined when disabled/not running. */
-  codescapePort?: number | null;
-  /** Card C2: the session's project id (URL scope). */
+  /** Card C2: the session's project id — resolves to the project's graph file (`codescapeGraphPath`). */
   projectId?: string;
-  /** Card C2: `taskKey(taskId)` for a worktree (worker) session, else null/undefined (non-worktree scope). */
-  worktreeId?: string | null;
 }): Record<string, unknown> {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
@@ -946,24 +962,27 @@ export function buildMcpServers(o: {
   // hence outside the resolveProfileCapabilities loop above), mirroring the deja-corpus branch's gate
   // shape. `o.codescapeEnabled` is the RAW project flag — isLoomDev() is re-checked HERE (not pre-baked
   // by the caller) so this pure seam can assert the LOOM_DEV-off negative case directly.
-  if (o.codescapeEnabled) {
+  //
+  // C2 REWRITE (card e068a2ab): was a shared `codescape serve` HTTP mount scoped by the LOOM projectId —
+  // codescape ingested the repo under its OWN derived id, so scope lookups 400/404'd and the MCP never
+  // registered (agents got zero tools). NOW: a per-session STDIO `codescape mcp --graph <graph.json>`
+  // process reading a project-wide graph file the daemon keeps fresh via `codescape ingest --out`
+  // (sessions/service.ts C3 hooks) — no shared serve on the agent path, no scope multiplexing, no
+  // project-id mismatch possible. `isCodescapeSupervisorEnabled()` (LOOM_CODESCAPE_ENABLED=1) stays the
+  // daemon-wide master switch for the whole Codescape feature (ingest lifecycle included), not just the
+  // optional shared `serve` process a future C4 human canvas may still use.
+  if (o.codescapeEnabled && o.projectId) {
     if (isLoomDev()) {
-      const port = o.codescapePort;
-      if (port != null) {
-        // Q3: a worktree (worker) session scopes to <projectId>/<worktreeId> (3-segment); a non-worktree
-        // (manager/plain) session scopes to <projectId> alone (2-segment, no "main" sentinel) — both read
-        // the same always-current main graph.
-        const scope = o.worktreeId ? `${o.projectId}/${o.worktreeId}` : `${o.projectId}`;
-        mcpServers["codescape"] = { type: "http", url: `http://127.0.0.1:${port}/mcp/${scope}` };
-      } else if (isCodescapeSupervisorEnabled()) {
-        // The supervisor IS enabled (LOOM_DEV + LOOM_CODESCAPE_ENABLED=1) but has no live port — it gave
-        // up after exhausting its restart backoff (or hasn't finished starting yet). A real problem, worth
-        // a warning. Distinct from the benign "LOOM_CODESCAPE_ENABLED unset" case below, which every spawn
-        // on a codescape-enabled project would otherwise hit and spam on every single boot/spawn.
-        // eslint-disable-next-line no-console
-        console.warn(`[pty] ${o.sessionId} codescape enabled but the supervisor port is unavailable — spawning WITHOUT the Codescape MCP.`);
+      if (isCodescapeSupervisorEnabled()) {
+        const cs = codescapeMcpServer(codescapeGraphPath(o.projectId));
+        if (cs) {
+          mcpServers["codescape"] = cs;
+        } else {
+          // eslint-disable-next-line no-console
+          console.warn(`[pty] ${o.sessionId} codescape enabled but no graph.json is ready yet for project ${o.projectId} (or LOOM_CODESCAPE_BIN is unresolvable) — spawning WITHOUT the Codescape MCP. Ingest may still be in progress; a later spawn will pick it up once ready.`);
+        }
       }
-      // else: LOOM_CODESCAPE_ENABLED unset — the benign "supervisor disabled" case; no per-spawn warning.
+      // else: LOOM_CODESCAPE_ENABLED unset — the benign "feature disabled" case; no per-spawn warning.
     }
     // !isLoomDev(): silent skip, mirroring deja-corpus — the "missing" reason is the gate itself.
   }
@@ -1338,16 +1357,12 @@ export interface SpawnOpts {
   openDesign?: boolean;
   /**
    * Card C2 (Codescape wiring epic `369dde3c`): the project's RAW `codescape.enabled` config flag — NOT
-   * yet combined with `isLoomDev()`/the supervisor port (buildMcpServers applies those gates itself,
-   * mirroring the deja-corpus branch). Default OFF — every existing spawn is byte-identical when unset.
+   * yet combined with `isLoomDev()` (buildMcpServers applies that gate itself, mirroring the deja-corpus
+   * branch). Default OFF — every existing spawn is byte-identical when unset.
    */
   codescapeEnabled?: boolean;
-  /** Card C2: the live Codescape supervisor port, or null when disabled/not running (see `CodescapeSupervisor.getPort`). */
-  codescapePort?: number | null;
-  /** Card C2: the session's project id, needed to scope the Codescape MCP URL. */
+  /** Card C2: the session's project id — resolves to the project's graph file (`codescapeGraphPath`). */
   projectId?: string;
-  /** Card C2: `taskKey(taskId)` for a WORKTREE (worker) session, else null/undefined — see `codescapeWorktreeId`. */
-  worktreeId?: string | null;
   /**
    * Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (resolved from the
    * session's Profile/row, RAW — see resolveProfileCapabilities). Default [] — every existing spawn is
@@ -2457,7 +2472,7 @@ export class PtyHost {
       sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus, openDesign: opts.openDesign,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
-      codescapeEnabled: opts.codescapeEnabled, codescapePort: opts.codescapePort, projectId: opts.projectId, worktreeId: opts.worktreeId,
+      codescapeEnabled: opts.codescapeEnabled, projectId: opts.projectId,
     });
     // Card C2: the Codescape MCP tools ALSO need allowlisting (acceptEdits doesn't auto-approve MCP tools —
     // the §9 lesson), gated on the mcpServers map actually carrying the entry (not re-derived here).

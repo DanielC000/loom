@@ -9,8 +9,7 @@ export interface WorktreeInfo {
   worktreePath: string;
   branch: string;
   /** The repo's HEAD sha at the moment of this call — the worktree branch's FORK POINT off main, not the
-   *  worktree's own branch. Codescape's baseRef needs this (a worktree's own branch as its own base is
-   *  always a 0-diff no-op); see the CR fix at sessions/service.ts's fireCodescapeRegister call site. */
+   *  worktree's own branch (a worktree's own branch as its own base is always a 0-diff no-op). */
   mainSha: string;
 }
 

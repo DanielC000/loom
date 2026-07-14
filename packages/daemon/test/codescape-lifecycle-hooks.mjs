@@ -1,20 +1,28 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Codescape wiring epic `369dde3c`, card C3 — fire register/reingest/drop lifecycle hooks. DETERMINISTIC +
-// CLAUDE-FREE (a fake pty stub) + NETWORK-FREE (a spy CodescapeSupervisor duck-type injected via
+// Codescape wiring epic `369dde3c`, card C3 REWRITE (card e068a2ab) — fire the ensure-graph/reingest
+// lifecycle hooks that keep a project's graph.json fresh for the per-session stdio MCP (C2). DETERMINISTIC
+// + CLAUDE-FREE (a fake pty stub) + NETWORK-FREE (a spy CodescapeSupervisor duck-type injected via
 // SessionService's `opts.codescape`, mirroring codescape-mcp-spawn.mjs's C2 test), but a REAL Db + REAL
 // git worktree ops (mirroring worktree-process-reap.mjs) so spawnWorker/confirmWorkerMerge/gcWorktreeDir
 // run for real end-to-end.
 //
+// WAS: register/reingest/drop against a shared `codescape serve`'s per-worktree HTTP control plane. NOW:
+// ONE project-wide graph file, written via `ingestToGraph(repoPath, graphPath)` — spawnWorker ENSURES it
+// exists (lazily, existence-gated — skipped if it's already there), a landed merge REFRESHES it
+// (unconditional), and there is nothing left to "drop" per-worktree (fireCodescapeDrop is now an inert
+// no-op kept only for call-site compatibility — see its doc in sessions/service.ts).
+//
 // Proves the DoD:
-//   (1) register fires on spawnWorker, AFTER createWorktree resolves, with a non-empty baseRef
-//       (= the branch name) and worktreeId === codescapeWorktreeId(taskId) — but is SKIPPED for a
-//       taskless spawn (no stable id to register).
-//   (2) reingest fires after finalizeMerge succeeds, on BOTH the Green (normal squash) path and the
-//       ALREADY_MERGED (idempotent re-confirm) path — and is BACKGROUNDED: confirmWorkerMerge/finalizeMerge
-//       resolve BEFORE the fake's artificial delay elapses, proving it is never awaited inline.
-//   (3) drop fires when gcWorktreeDir GENUINELY removes a worktree (post-merge), with the SAME worktreeId
-//       used at register — but NEVER fires for recycleWorker (which reuses the worktree, never calling
-//       gcWorktreeDir at all).
+//   (1) ensure-graph fires on spawnWorker's create-worktree path, ingesting the PROJECT's MAIN repoPath
+//       (never the new worker's own worktree) to codescapeGraphPath(projectId) — and is EXISTENCE-GATED,
+//       not taskless-gated: it fires for a TASKLESS spawn too (unlike the old register hook), but a LATER
+//       spawn on the SAME project skips re-ingesting once the graph file already exists on disk.
+//   (2) reingest fires after finalizeMerge succeeds, UNCONDITIONALLY (refresh, not existence-gated), on
+//       BOTH the Green (normal squash) path and the ALREADY_MERGED (idempotent re-confirm) path — and is
+//       BACKGROUNDED: confirmWorkerMerge/finalizeMerge resolve BEFORE the fake's artificial delay elapses,
+//       proving it is never awaited inline.
+//   (3) gcWorktreeDir genuinely removing a worktree fires NO supervisor call at all (drop is an inert
+//       no-op in the new per-project-graph model — nothing per-worktree left to deregister).
 //   (4) NEGATIVE CASE: LOOM_DEV off, OR the project not codescape-enabled, ⇒ the spy client is called
 //       ZERO times across an equivalent spawn/merge/gc lifecycle — byte-identical otherwise.
 //
@@ -39,7 +47,7 @@ const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { taskKey, codescapeWorktreeId } = await import("../dist/git/worktrees.js");
+const { codescapeGraphPath } = await import("../dist/paths.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -54,25 +62,26 @@ function initRepo(repo, readme) {
   execSync(`git init -q && git config user.email clh@loom && git config user.name clh && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 }
 
-// A spy CodescapeSupervisor duck-type — only the 3 methods C3 calls. `reingestMain` artificially delays
-// so the test can prove finalizeMerge never awaits it inline (proof (2) above).
+// A spy CodescapeSupervisor duck-type — only the 1 method C3 now calls (both hooks converge on the same
+// ingestToGraph). Artificially delays so the test can prove finalizeMerge never awaits it inline (proof
+// (2) above), and ACTUALLY WRITES the graph file on completion (mirrors the real CLI) — required for
+// proof (1)'s existence-gating to engage for real, not just via a call counter.
 function makeFakeCodescape() {
-  const calls = { register: [], reingest: [], drop: [] };
-  let reingestInFlight = 0;
+  const calls = { ingest: [] };
+  let ingestInFlight = 0;
   return {
     calls,
-    getPort: () => 5555,
-    reingestInFlightCount: () => reingestInFlight,
-    async registerWorktree(projectId, info) { calls.register.push({ projectId, ...info }); return { ok: true }; },
-    async reingestMain(projectId) {
-      reingestInFlight++;
-      calls.reingest.push({ projectId });
-      await sleep(2000); // stands in for the real ~9-11s synchronous server-side reingest — long enough
-                          // that even a slow real git merge/gc finishes well within this window.
-      reingestInFlight--;
-      return { ok: true };
+    ingestInFlightCount: () => ingestInFlight,
+    async ingestToGraph(repoPath, graphPath) {
+      ingestInFlight++;
+      calls.ingest.push({ repoPath, graphPath });
+      await sleep(2000); // stands in for a real ingest's latency — long enough that even a slow real
+                          // git merge/gc finishes well within this window.
+      fs.mkdirSync(path.dirname(graphPath), { recursive: true });
+      fs.writeFileSync(graphPath, JSON.stringify({ nodes: [], edges: [], flows: [] }));
+      ingestInFlight--;
+      return { ok: true, outcome: "ready" };
     },
-    async dropWorktree(projectId, worktreeId) { calls.drop.push({ projectId, worktreeId }); return { ok: true }; },
   };
 }
 
@@ -99,6 +108,11 @@ function makeHost(db) {
   return new SeamHost(events);
 }
 
+async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
+  for (let i = 0; i < tries && !cond(); i++) await sleep(everyMs);
+  return cond();
+}
+
 // ===================== (1)-(3) POSITIVE: LOOM_DEV=1 + LOOM_CODESCAPE_ENABLED=1 + project opted in =====================
 {
   process.env.LOOM_DEV = "1";
@@ -110,80 +124,80 @@ function makeHost(db) {
     reapWorktreeProcesses: async () => ({ killedPids: [] }), // no real OS process enumeration needed here
   });
 
-  // maxConcurrentWorkers raised: this test spawns 4 workers under ONE manager, and the fake pty never
-  // fires a real onExit (no live process), so a merged/retired worker's row never flips off "live" — the
-  // default cap of 3 would reject the later spawns for a reason unrelated to what's under test here.
+  // maxConcurrentWorkers raised: this test spawns several workers under ONE manager, and the fake pty
+  // never fires a real onExit (no live process), so a merged/retired worker's row never flips off "live" —
+  // the default cap of 3 would reject the later spawns for a reason unrelated to what's under test here.
   const P = { projId: `clh-pos-${sfx}`, mgrAgentId: `clh-pos-mgr-${sfx}`, workerAgentId: `clh-pos-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-clh-pos-${sfx}`), config: { codescape: { enabled: true }, orchestration: { maxConcurrentWorkers: 10 } } };
   initRepo(P.repo, "# clh positive\n");
   seedProject(db, P);
+  const graphPath = codescapeGraphPath(P.projId);
 
   try {
     const mgr = sessions.startManager(P.mgrAgentId);
 
-    // --- (1) register fires on a TASKED spawn, AFTER createWorktree resolves ---
+    // --- (1) ensure-graph fires on a TASKED spawn's create-worktree path, ingesting the PROJECT'S MAIN
+    //     repoPath (not the new worktree) — because the graph doesn't exist yet ---
     const taskId = `clh-task-${sfx}`;
     db.insertTask({ id: taskId, projectId: P.projId, title: "CLH task", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
-    // The repo's HEAD at the moment of the spawn — the TRUE fork point the worker's branch was cut off.
-    // Captured BEFORE spawnWorker so it's unambiguously "main's tip", independent of anything the spawn does.
-    const repoHeadBeforeSpawn = execSync("git rev-parse HEAD", { cwd: P.repo }).toString().trim();
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: P.workerAgentId, kickoffPrompt: "GO" });
-    const expectedWorktreeId = codescapeWorktreeId(taskId);
 
-    check("(1) register fired exactly once for the tasked spawn", fake.calls.register.length === 1);
-    const reg = fake.calls.register[0];
-    check("(1) register: projectId matches", reg?.projectId === P.projId);
-    check("(1) register: worktreeId === codescapeWorktreeId(taskId) === taskKey(taskId)", reg?.worktreeId === expectedWorktreeId && reg?.worktreeId === taskKey(taskId));
-    check("(1) register: path === the real worktree path", reg?.path === worker.worktreePath);
-    // CR fix: baseRef must be the FORK POINT (main's HEAD sha at cut time), NOT the worktree's OWN branch —
-    // passing `branch` as `baseRef` makes any base-vs-worktree divergence always compute as `branch..branch`
-    // (empty), since createWorktree returns that same branch as the worktree's checked-out ref.
-    check("(1) register: baseRef is a non-empty string (main's fork-point sha)", typeof reg?.baseRef === "string" && reg.baseRef.length > 0 && reg.baseRef === repoHeadBeforeSpawn);
-    check("(1) register: baseRef is NOT the worktree's own branch (the bug this fixes)", reg?.baseRef !== worker.branch);
+    check("(1) ensure-graph fired at least once for the tasked spawn (graph didn't exist yet)",
+      await waitFor(() => fake.calls.ingest.length >= 1));
+    const ing = fake.calls.ingest[0];
+    check("(1) ensure-graph: repoPath is the PROJECT's main repo (not the worker's own worktree)", ing?.repoPath === P.repo && ing?.repoPath !== worker.worktreePath);
+    check("(1) ensure-graph: graphPath === codescapeGraphPath(projectId)", ing?.graphPath === graphPath);
+    // Wait for it to actually settle and write the file — subsequent spawns' existence-gate depends on
+    // the real file being there (avoids a race between two spawns both seeing "missing" concurrently).
+    check("(1) the graph file genuinely lands on disk once ingestToGraph settles", await waitFor(() => fs.existsSync(graphPath), { tries: 200, everyMs: 30 }));
 
-    // --- (1b) register is SKIPPED for a taskless spawn (no stable worktreeId) ---
-    const registerCountBeforeTaskless = fake.calls.register.length;
+    // --- (1b) a LATER spawn — even a TASKLESS one — does NOT re-fire ensure-graph: it's EXISTENCE-gated,
+    //     not taskless-gated (the old register hook skipped taskless spawns; this one doesn't care about
+    //     taskId at all, only whether the graph file is already there) ---
+    const ingestCountBeforeTaskless = fake.calls.ingest.length;
     const taskless = await sessions.spawnWorker(mgr.id, { agentId: P.workerAgentId, kickoffPrompt: "SPIKE" });
-    check("(1b) register did NOT fire for a taskless spawn (codescapeWorktreeId is null)", fake.calls.register.length === registerCountBeforeTaskless);
+    await sleep(150);
+    check("(1b) a taskless spawn does NOT re-fire ensure-graph once the graph already exists", fake.calls.ingest.length === ingestCountBeforeTaskless);
+    // cleanup the taskless worker's worktree by hand (not merged in this test)
+    try { const { removeWorktree } = await import("../dist/git/worktrees.js"); await removeWorktree(P.repo, taskless.worktreePath); } catch { /* best-effort */ }
 
-    // --- (2)+(3) confirmWorkerMerge (Green path): reingest fires BACKGROUNDED, drop fires with the SAME worktreeId ---
+    // --- (2)+(3) confirmWorkerMerge (Green path): reingest fires BACKGROUNDED (refresh, unconditional) ---
     fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: worker.worktreePath });
-    const reingestCountBefore = fake.calls.reingest.length;
+    const ingestCountBeforeMerge = fake.calls.ingest.length;
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(2) confirmWorkerMerge (Green) lands the merge", confirm.merged === true);
-    check("(2) reingest fired after the Green-path merge", fake.calls.reingest.length === reingestCountBefore + 1);
-    check("(2) reingest: projectId matches", fake.calls.reingest[fake.calls.reingest.length - 1]?.projectId === P.projId);
+    check("(2) reingest fired after the Green-path merge", fake.calls.ingest.length === ingestCountBeforeMerge + 1);
+    const reingestCall = fake.calls.ingest[fake.calls.ingest.length - 1];
+    check("(2) reingest: repoPath is the project's main repo", reingestCall?.repoPath === P.repo);
+    check("(2) reingest: graphPath === the SAME codescapeGraphPath (a refresh, same target)", reingestCall?.graphPath === graphPath);
     // Proves "not awaited inline" robustly (no elapsed-time margin to flake on a loaded runner): if
-    // finalizeMerge awaited reingestMain inline, confirmWorkerMerge could not have already resolved above
+    // finalizeMerge awaited ingestToGraph inline, confirmWorkerMerge could not have already resolved above
     // while the fake's 2000ms delay is still in flight.
-    check("(2) reingest was still IN FLIGHT right after confirmWorkerMerge resolved (proves it wasn't awaited inline)", fake.reingestInFlightCount() > 0);
-    await sleep(2200); // let the backgrounded reingest actually settle before asserting on it further
-    check("(2) reingest eventually settles (best-effort, not lost)", fake.reingestInFlightCount() === 0);
+    check("(2) reingest was still IN FLIGHT right after confirmWorkerMerge resolved (proves it wasn't awaited inline)", fake.ingestInFlightCount() > 0);
+    check("(2) reingest eventually settles (best-effort, not lost)", await waitFor(() => fake.ingestInFlightCount() === 0));
 
     check("(3) the merged worktree was genuinely removed", !fs.existsSync(worker.worktreePath));
-    check("(3) drop fired exactly once after the genuine removal", fake.calls.drop.length === 1);
-    check("(3) drop: worktreeId === the SAME id used at register", fake.calls.drop[0]?.worktreeId === expectedWorktreeId);
-    check("(3) drop: projectId matches", fake.calls.drop[0]?.projectId === P.projId);
+    check("(3) gcWorktreeDir's genuine removal fires NO further supervisor call (drop is an inert no-op — nothing per-worktree left to deregister)",
+      fake.calls.ingest.length === ingestCountBeforeMerge + 1);
 
     // --- (2b) ALREADY_MERGED path (a stale re-confirm on the already-fully-merged `worker`) also fires
     //     reingest — both the Green path (above) and ALREADY_MERGED converge in the SAME finalizeMerge ---
-    const registerCountBeforeRestale = fake.calls.register.length;
-    const reingestCountBeforeAM = fake.calls.reingest.length;
+    const ingestCountBeforeAM = fake.calls.ingest.length;
     const confirmAgain = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(2b) a stale re-confirm resolves ALREADY_MERGED", confirmAgain.merged === true && confirmAgain.emptyKind === "ALREADY_MERGED");
-    check("(2b) register never re-fires on a re-confirm", fake.calls.register.length === registerCountBeforeRestale);
-    await sleep(2200); // let the ALREADY_MERGED path's backgrounded reingest settle
-    check("(2b) reingest fired again for the ALREADY_MERGED path", fake.calls.reingest.length === reingestCountBeforeAM + 1);
+    check("(2b) reingest fires again for the ALREADY_MERGED path", await waitFor(() => fake.calls.ingest.length === ingestCountBeforeAM + 1));
+    check("(2b) it settles too", await waitFor(() => fake.ingestInFlightCount() === 0));
 
-    // --- (4) recycleWorker NEVER fires drop (the worktree persists — gcWorktreeDir is never called) ---
+    // --- (4) recycleWorker never triggers a fresh ensure-graph/reingest call (it never creates a new
+    //     worktree, and never calls gcWorktreeDir — the worktree persists, reused) ---
     const taskId3 = `clh-task3-${sfx}`;
     db.insertTask({ id: taskId3, projectId: P.projId, title: "CLH task 3", body: "", columnKey: "backlog", position: 3, priority: "p2", createdAt: now, updatedAt: now });
     const worker3 = await sessions.spawnWorker(mgr.id, { taskId: taskId3, agentId: P.workerAgentId, kickoffPrompt: "GO" });
-    const dropCountBeforeRecycle = fake.calls.drop.length;
-    const registerCountBeforeRecycle = fake.calls.register.length;
+    await sleep(150); // let worker3's own (existence-gated, no-op) ensure-graph settle before the baseline read
+    const ingestCountBeforeRecycle = fake.calls.ingest.length;
     await sessions.recycleWorker(mgr.id, worker3.id, "handoff: continue the work");
-    check("(4) recycleWorker never fires drop", fake.calls.drop.length === dropCountBeforeRecycle);
-    check("(4) recycleWorker never fires a fresh register (same worktree reused)", fake.calls.register.length === registerCountBeforeRecycle);
+    await sleep(150);
+    check("(4) recycleWorker triggers no fresh supervisor call at all (same worktree reused)", fake.calls.ingest.length === ingestCountBeforeRecycle);
     check("(4) recycled worker's worktree still exists on disk (reused, not removed)", fs.existsSync(worker3.worktreePath));
     // cleanup worker3's worktree by hand (not merged in this test)
     try { fs.rmSync(worker3.worktreePath, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
@@ -218,10 +232,8 @@ function makeHost(db) {
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(5) LOOM_DEV off: merge still lands normally (byte-identical lifecycle)", confirm.merged === true);
     await sleep(50);
-    check("(5) LOOM_DEV off: register never fired", fake.calls.register.length === 0);
-    check("(5) LOOM_DEV off: reingest never fired", fake.calls.reingest.length === 0);
-    check("(5) LOOM_DEV off: drop never fired (even though the worktree WAS genuinely removed)",
-      !fs.existsSync(worker.worktreePath) && fake.calls.drop.length === 0);
+    check("(5) LOOM_DEV off: no supervisor call ever fired (spawn+merge+gc lifecycle)",
+      !fs.existsSync(worker.worktreePath) && fake.calls.ingest.length === 0);
   } finally {
     db.close();
     try { fs.rmSync(N.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -251,10 +263,8 @@ function makeHost(db) {
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(6) project not codescape-enabled: merge still lands normally", confirm.merged === true);
     await sleep(50);
-    check("(6) project not enabled: register never fired", fake.calls.register.length === 0);
-    check("(6) project not enabled: reingest never fired", fake.calls.reingest.length === 0);
-    check("(6) project not enabled: drop never fired (even though the worktree WAS genuinely removed)",
-      !fs.existsSync(worker.worktreePath) && fake.calls.drop.length === 0);
+    check("(6) project not enabled: no supervisor call ever fired (spawn+merge+gc lifecycle)",
+      !fs.existsSync(worker.worktreePath) && fake.calls.ingest.length === 0);
   } finally {
     db.close();
     try { fs.rmSync(N.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -266,6 +276,6 @@ function makeHost(db) {
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape lifecycle hooks (card C3): register fires after createWorktree resolves in spawnWorker (skipped for a taskless spawn), with a non-empty baseRef and worktreeId === codescapeWorktreeId(taskId); reingest fires after finalizeMerge succeeds on BOTH the Green and ALREADY_MERGED paths, backgrounded (never awaited inline); drop fires only on a GENUINE gcWorktreeDir removal with the SAME worktreeId, and NEVER on a recycleWorker reuse; and the negative case (LOOM_DEV off, or the project not opted in) fires zero hooks across an otherwise byte-identical spawn/merge/gc lifecycle."
+  ? "\n✅ ALL PASS — Codescape lifecycle hooks (card C3 rewrite, e068a2ab): ensure-graph fires on spawnWorker's create-worktree path (ingesting the project's MAIN repo, not the new worktree) whenever the project's graph.json doesn't exist yet — EXISTENCE-gated, not taskless-gated (fires for a taskless spawn too, but a later spawn skips once the file is there); reingest fires unconditionally after finalizeMerge succeeds on BOTH the Green and ALREADY_MERGED paths, backgrounded (never awaited inline); a genuine gcWorktreeDir removal and a recycleWorker reuse both trigger NO further supervisor call (drop is an inert no-op — nothing per-worktree left to track); and the negative case (LOOM_DEV off, or the project not opted in) fires zero calls across an otherwise byte-identical spawn/merge/gc lifecycle."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
