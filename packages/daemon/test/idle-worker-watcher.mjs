@@ -143,7 +143,9 @@ function cleanup(e) {
   const e = makeEnv();
   seedManager(e, "mgr-c", { busy: false, idleMin: 60 });
   seedTask(e, "tk-c", "in_progress");
-  seedWorker(e, "wkr-c", "mgr-c", "tk-c", { idleMin: 60, rateLimitedUntil: new Date(NOW.getTime() + 6 * 24 * 60 * 60_000).toISOString() }); // capped 6 days out
+  // rateLimitedUntil is seeded relative to REAL Date.now(), not the fixed fake NOW above — classifyIdleWorker
+  // (service.ts) checks it against real wall-clock Date.now(), unlike the injected-NOW idle-timing fields.
+  seedWorker(e, "wkr-c", "mgr-c", "tk-c", { idleMin: 60, rateLimitedUntil: new Date(Date.now() + 6 * 24 * 60 * 60_000).toISOString() }); // capped 6 days out
 
   e.watcher.tick(NOW);
 
