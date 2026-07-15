@@ -4,8 +4,39 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.20.0] — 2026-07-15
+
+**Shared agent memory, an open-design capability, and a self-hosting host-load guard — plus manager board-column control, Platform/Lead idle coverage, and a broad orchestration/pty reliability pass.** Agents on the same project now accumulate and share durable notes across sessions via an FTS5-backed memory store injected into each kickoff; the removed Deja integration is replaced by an opt-in open-design MCP capability; and the daemon's merge/deploy gate path gains a concurrency guard so a heavy gate run can't starve a live sibling service on a self-hosting host.
+
+### Added
+- **Project-scoped shared agent memory.** A `project_memory` FTS5 store with `memory_write` (upsert) / `memory_forget` / `memory_list` / `memory_read` tools. Pinned-always plus top-K retrieval-relevant notes are injected into each session's kickoff under a token budget, with LRU-by-retrieval eviction — so agents working the same project build and share durable knowledge across sessions.
+- **Open Design (`openDesign`) capability.** An opt-in, per-session stdio [open-design](https://github.com/nexu-io/open-design) MCP server for design/mockup rigs, gated on OD being installed on the host (`LOOM_OPEN_DESIGN_BIN`). Default-off, human-only grant, and public (not dev-gated) — the forward design capability that replaces the removed Deja integration.
+- **Manager-driven board columns.** `board_column_create` / `board_column_rename` / `board_column_delete` let a manager restructure its own project board (an owner-gated capability-surface expansion), with a configurable **`mergeLanding`** column role so a merged card can land somewhere other than the terminal column (default terminal, byte-identical), and an **`excludeFromIdleWatchdog`** column flag so a parking lane needn't mark every card `deferred`.
+- **Platform/Lead idle-watchdog coverage.** The idle watcher now covers `role=platform`, so a parked Platform/Lead session gets the same idle nudges and `idle_report('waiting'/'done')` affordance as a manager.
+- **`skill_edit` (platform).** A patch/anchor skill edit, instead of requiring full-file reproduction for a one-line change.
+- **Patch-style `tasks_update`.** A column/priority-only card move no longer requires re-sending the full card body.
+- **Non-consuming `requests_list` for scheduled/autonomous agents** — list your own open requests without consuming them, so a scheduled agent doesn't re-file duplicates each cycle.
+- **Un-pushed-commits signal (vault).** A visible "N commits un-pushed" indicator for a vault with a remote, plus a documented commit-only auto-commit contract.
+
+### Changed
+- **Host-load guard on the daemon gate path (self-hosting).** A new daemon-global `orchestration.maxConcurrentGates` (default 1) serializes daemon-executed merge-confirm and scoped-deploy gate runs so concurrent gates can't pile up unbounded host load; and the daemon test runner (`test-daemon.mjs`) now defaults to **2** parallel lanes when `LOOM_TEST_CONCURRENCY` is unset (dial-up still available via the env), so a bare gate run can't spike to full core count and starve a live sibling service.
+- **`schedulerEnabled` is resolved daemon-global** — wired to the platform-global config so the owner's toggle actually enables scheduling (a stale per-project value is ignored).
+
+### Fixed
+- **Codescape MCP scope.** A per-session stdio `codescape mcp --graph <graph.json>` replaces the broken shared multiplexed serve, fixing a projectId scope mismatch (a 400/404 handshake failure that surfaced zero tools) so agents get the read tools.
+- **Worker plan-mode trap (pty).** A Loom-driven worker put in plan mode could hang — it can't self-approve the permission prompt a `worker_report` triggers; plan mode is now rejected for Loom-driven roles and `worker_set_mode` lands reliably.
+- **Auto-heal fresh/resume asymmetry (pty).** The permission-mode auto-heal drives a session to its own configured target instead of a hardcoded `auto`.
+- **Spurious session auto-resume.** A cleanly-parked platform/manager session is no longer auto-resumed (holding its non-terminal cards) on every unrelated daemon restart; and a crash-recovered manager no longer gets an unconditional full re-orientation nudge (no-op wake classification added to the crash-boot / recovery paths).
+- **Credential request provisioning.** A `type:"credential"` request's answer is now read by a consumer, so the promised env var is actually provisioned.
+- **`worker_merge` pathGlob** no longer silently returns an empty diff when a bare `*` should cross a `/` boundary.
+- **Idle/wake nudge accuracy.** `[loom:worker-idle]` no longer says a worker is "awaiting your reply" when it's parked on its own background gate; a finished taskless consultation worker no longer shows stale `busy:true`; and wake Paths B/C get Lead-appropriate nudge copy.
+
 ### Removed
 - **Deja integration removed.** The opt-in Deja mockup-corpus capability (`dejaCorpus`) and the Deja capture PostToolUse hook (`dejaCapture`) are gone from Loom's built-in surface — dedicated modules, config/DB fields, MCP wiring, and web UI all removed. [open-design](https://github.com/nexu-io/open-design) is the forward design capability that replaces it (see `openDesign` in `CLAUDE.md`). The Deja product itself is unaffected; only Loom's built-in integration is removed.
+
+### Internal
+- `pnpm build` (sync-claude-skills) no longer mutates tracked skill files with pure LF→CRLF churn.
+- Shipped-skill / doctrine refresh (orchestrate, ideate, the platform-lead idle affordance, companion session-lifecycle).
 
 ## [0.19.0] — 2026-07-12
 
