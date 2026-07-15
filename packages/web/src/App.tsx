@@ -444,6 +444,10 @@ export default function App() {
             <Route path="/setup" element={<Navigate to="/platform" replace />} />
             {/* /workspace was renamed + repositioned to /projects (card 274f9ba9) — redirect lingering links. */}
             <Route path="/workspace" element={<Navigate to="/projects" replace />} />
+            {/* /profiles + /skills were consolidated into the single /actors page (IA merge #1) — redirect any
+                lingering links/bookmarks to the right tab (/skills → the Skills tab via ?tab=skills). */}
+            <Route path="/profiles" element={<Navigate to="/actors" replace />} />
+            <Route path="/skills" element={<Navigate to="/actors?tab=skills" replace />} />
             <Route path="/review/:workerId" element={<ReviewPanel />} />
             <Route path="/question/:id" element={<QuestionAnswer />} />
             <Route path="/session/:id" element={<SessionView />} />

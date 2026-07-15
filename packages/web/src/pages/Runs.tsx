@@ -5,8 +5,8 @@ import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { TranscriptPane } from "../components/TranscriptPane";
 import { KeyAdmin } from "../components/KeyAdmin";
-import { Panel, Button, SectionLabel, StatusPill, Chip } from "../components/ui";
-import { color, font, radius, tone, type Tone } from "../theme";
+import { Panel, Button, SectionLabel, StatusPill, Chip, Segmented } from "../components/ui";
+import { color, font, tone, type Tone } from "../theme";
 
 // Agent Runs R4b — the project-scoped Runs observability view. Reads R4a's HUMAN run REST
 // (GET /api/projects/:id/runs[/:runId], POST .../cancel — unauthed loopback, full AgentRun rows
@@ -50,36 +50,12 @@ export default function Runs() {
 
   if (!projectId) return <p style={{ color: color.textMuted }}>No project selected.</p>;
 
+  // The Runs|Keys toggle — observability vs the trust-boundary admin, co-located but distinct.
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <Segmented tab={tab} onChange={setTab} />
+      <Segmented value={tab} onChange={setTab} ariaLabel="Runs or Keys & Endpoints"
+        items={[{ key: "runs", label: "Runs" }, { key: "keys", label: "Keys & Endpoints" }]} />
       {tab === "runs" ? <RunsView projectId={projectId} /> : <KeyAdmin projectId={projectId} />}
-    </div>
-  );
-}
-
-// The Runs|Keys segmented toggle — observability vs the trust-boundary admin, co-located but distinct.
-function Segmented({ tab, onChange }: { tab: RunsTab; onChange: (t: RunsTab) => void }) {
-  const items: { key: RunsTab; label: string }[] = [
-    { key: "runs", label: "Runs" },
-    { key: "keys", label: "Keys & Endpoints" },
-  ];
-  return (
-    <div style={{ display: "inline-flex", gap: 0, border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden", alignSelf: "flex-start" }}>
-      {items.map((it) => {
-        const active = tab === it.key;
-        return (
-          <button key={it.key} onClick={() => onChange(it.key)}
-            style={{
-              background: active ? color.phosphorDim : "transparent",
-              color: active ? color.phosphor : color.textDim,
-              border: "none", padding: "6px 14px", fontFamily: font.mono, fontSize: 12,
-              cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em",
-            }}>
-            {it.label}
-          </button>
-        );
-      })}
     </div>
   );
 }

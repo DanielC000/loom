@@ -160,7 +160,7 @@ test.describe("profiles & agents", () => {
   test("profile capability toggles render; documentConversion reveals the provisioning panel and browserTesting persists", async ({ page, loomDaemon }) => {
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Toggles ${Date.now()}` });
     // Profiles are a daemon-global store — no active-project pin needed (unlike Workspace).
-    await page.goto(`${loomDaemon.baseURL}/profiles`);
+    await page.goto(`${loomDaemon.baseURL}/actors`);
 
     // Open the seeded profile in the editor (sidebar rows are <button>s; the unique name pins one).
     await page.getByRole("button").filter({ hasText: profile.name }).first().click();
@@ -206,7 +206,7 @@ test.describe("profiles & agents", () => {
     // grant path (no agent MCP tool can set this field, unlike browserTesting/documentConversion).
     const connection = await seedConnection(loomDaemon.baseURL, { name: `E2E Conn ${Date.now()}`, host: "api.example.com", authScheme: "bearer", secret: "e2e-test-secret-not-real" });
     const profile = await seedProfile(loomDaemon.baseURL, { name: `Rig Connections ${Date.now()}` });
-    await page.goto(`${loomDaemon.baseURL}/profiles`);
+    await page.goto(`${loomDaemon.baseURL}/actors`);
     await page.getByRole("button").filter({ hasText: profile.name }).first().click();
 
     // The Connections section renders the seeded connection as a toggle button (mirrors the Skills subset

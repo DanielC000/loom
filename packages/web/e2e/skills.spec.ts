@@ -30,7 +30,7 @@ function skillButton(page: import("@playwright/test").Page, name: string) {
 // so no spec re-derives it.
 
 test("the skills list renders the seeded bundled skills", async ({ page, loomDaemon }) => {
-  await page.goto(`${loomDaemon.baseURL}/skills`);
+  await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 
   // The panel header renders.
   await expect(page.getByText("Skills", { exact: true }).first()).toBeVisible();
@@ -54,7 +54,7 @@ test("the skills list renders the seeded bundled skills", async ({ page, loomDae
 });
 
 test("opening a skill loads its SKILL.md body", async ({ page, loomDaemon }) => {
-  await page.goto(`${loomDaemon.baseURL}/skills`);
+  await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 
   // Before selecting anything, the editor pane shows its empty-state hint.
   await expect(page.getByText("Select a skill to edit its SKILL.md", { exact: false })).toBeVisible();
@@ -75,7 +75,7 @@ test("opening a skill loads its SKILL.md body", async ({ page, loomDaemon }) => 
 test("editing a bundled skill flips it from pristine to customized (observable before/after)", async ({ page, loomDaemon }) => {
   // Use a CORE skill and restore it at the end so the shared worker-scoped daemon stays pristine.
   const target = "pickup";
-  await page.goto(`${loomDaemon.baseURL}/skills`);
+  await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 
   await skillButton(page, target).click();
   const editor = page.locator("textarea");

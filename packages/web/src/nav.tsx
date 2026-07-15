@@ -12,8 +12,7 @@ import Board from "./pages/Board";
 import Runs from "./pages/Runs";
 import Vault from "./pages/Vault";
 import Git from "./pages/Git";
-import Skills from "./pages/Skills";
-import Profiles from "./pages/Profiles";
+import Actors from "./pages/Actors";
 import Companion from "./pages/Companion";
 import Schedules from "./pages/Schedules";
 import EventTriggers from "./pages/EventTriggers";
@@ -90,11 +89,13 @@ export const NAV_PAGES: NavPage[] = [
   // Projects — the definition/config layer: create/manage projects + define their agents (assign a
   // Profile, edit the startup prompt). Renamed + repositioned from the old "Workspace" page (card
   // 274f9ba9): it's config, not operate — it touches NO live sessions — so it sits with the other
-  // "define your actors" surfaces (Profiles, Skills). Its own project rail writes the active project,
+  // "define your actors" surfaces (Actors). Its own project rail writes the active project,
   // so it is deliberately NOT `scoped`. /workspace redirects here (App.tsx) for lingering links.
   { label: "Projects", to: "/projects", element: <Projects />, group: "config" },
-  { label: "Skills", to: "/skills", element: <Skills />, group: "config" },
-  { label: "Profiles", to: "/profiles", element: <Profiles />, group: "config" },
+  // Actors — the consolidated Profiles + Skills surface (IA merge #1). One destination with a Profiles |
+  // Skills segmented switch above the shared list→editor shell (see pages/Actors.tsx). Both are
+  // daemon-global + human-only. The old /profiles and /skills routes redirect here (App.tsx).
+  { label: "Actors", to: "/actors", element: <Actors />, group: "config" },
   // Companion management is daemon-GLOBAL (one companion config store, not project-scoped) — deliberately
   // not `scoped`. Declared here under Config alongside Profiles (the companion's restricted-tools toggle is
   // there); `useVisibleNavPages` promotes it to a primary header tab at runtime when a companion is ACTIVE

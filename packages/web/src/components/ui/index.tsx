@@ -192,3 +192,37 @@ export function NavTab({ to, end, children }: { to: string; end?: boolean; child
     </NavLink>
   );
 }
+
+// ── Segmented ──────────────────────────────────────────────────────────────────
+// A compact single-choice toggle (mono, uppercase) — the one primitive for the small "swap which body
+// mounts" switches, e.g. Runs' Runs|Keys and Actors' Profiles|Skills. The active segment fills with
+// phosphorDim + phosphor text; the rest read dim. Keyed generically so any string-union tab set fits.
+export function Segmented<T extends string>({
+  value, onChange, items, ariaLabel, style,
+}: {
+  value: T;
+  onChange: (value: T) => void;
+  items: { key: T; label: string }[];
+  ariaLabel?: string;
+  style?: CSSProperties;
+}) {
+  return (
+    <div role="tablist" aria-label={ariaLabel}
+      style={{ display: "inline-flex", gap: 0, border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden", alignSelf: "flex-start", ...style }}>
+      {items.map((it) => {
+        const active = value === it.key;
+        return (
+          <button key={it.key} role="tab" aria-selected={active} onClick={() => onChange(it.key)}
+            style={{
+              background: active ? color.phosphorDim : "transparent",
+              color: active ? color.phosphor : color.textDim,
+              border: "none", padding: "6px 14px", fontFamily: font.mono, fontSize: 12,
+              cursor: "pointer", textTransform: "uppercase", letterSpacing: "0.06em",
+            }}>
+            {it.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
