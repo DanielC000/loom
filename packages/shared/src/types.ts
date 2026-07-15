@@ -1545,6 +1545,40 @@ export interface EventTrigger {
   createdAt: string;
 }
 
+/**
+ * Inbound webhook receiver (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public-ingress sibling of
+ * `EventTrigger` above: instead of reacting to Loom's own internal bus, a `WebhookEndpoint` accepts a
+ * signed POST from an external provider (GitHub/Stripe/a Standard-Webhooks sender/Loom's own generic
+ * scheme) at its own opaque, non-guessable `path`, HMAC-verifies it against the endpoint's own signing
+ * secret, and wakes `targetSessionId` (mode "wake") or spawns a fresh session in `agentId` (mode "spawn")
+ * with the verified event as kickoff — mirroring `EventTrigger`'s own wake/spawn targeting exactly.
+ * `agentId` (spawn mode) is what PINS the endpoint's target project + role: `sessions.startNew` resolves
+ * both from the agent's own profile, so no separate projectId/role column is needed here.
+ */
+export type WebhookSourceType = "github" | "stripe" | "standard" | "generic";
+export const WEBHOOK_SOURCE_TYPES: readonly WebhookSourceType[] = ["github", "stripe", "standard", "generic"] as const;
+
+/**
+ * The MASKED, human-facing view of a stored WebhookEndpoint — metadata ONLY. The signing secret is
+ * ENCRYPTED at rest (envelope, mirrors `ConnectionMetadata`) and NEVER leaves the daemon: no REST read
+ * and no MCP tool ever returns it. There is intentionally NO MCP path (same human-only trust posture as
+ * `ConnectionMetadata`/`EventTrigger`): an agent in an ordinary project session must never create, list,
+ * or read a webhook endpoint or its secret.
+ */
+export interface WebhookEndpointMetadata {
+  id: string;
+  /** Opaque, non-guessable path segment this endpoint is mounted at (`POST /hooks/:path`). */
+  path: string;
+  name: string;
+  sourceType: WebhookSourceType;
+  mode: "wake" | "spawn";
+  targetSessionId: string | null;
+  agentId: string | null;
+  enabled: boolean;
+  createdAt: string;
+  lastFiredAt: string | null;
+}
+
 export const QUESTION_STATES = ["pending", "answered", "consumed"] as const;
 export type QuestionState = (typeof QUESTION_STATES)[number];
 

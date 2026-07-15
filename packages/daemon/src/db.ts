@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -122,6 +122,27 @@ export interface ConnectionRow {
   tokenExpiresAt: string | null;
   /** `oauth2` rows only — true when a refresh attempt failed and consent must be redone. Always false otherwise. */
   oauthNeedsReauth: boolean;
+}
+
+/**
+ * A stored WebhookEndpoint row (agent-tooling epic P5b, card 8fbedcac) as read at the DB layer — carries
+ * the ENCRYPTED `secretBlob` (envelope ciphertext, same shape as `ConnectionRow.secretBlob`). This shape
+ * is DAEMON-INTERNAL and must NEVER be returned over REST or to any MCP tool — the REST layer masks to
+ * `WebhookEndpointMetadata` (never the secret).
+ */
+export interface WebhookEndpointRow {
+  id: string;
+  path: string;
+  name: string;
+  sourceType: WebhookSourceType;
+  /** Envelope ciphertext (v1:iv:tag:ct) — NEVER plaintext. */
+  secretBlob: string;
+  mode: "wake" | "spawn";
+  targetSessionId: string | null;
+  agentId: string | null;
+  enabled: boolean;
+  createdAt: string;
+  lastFiredAt: string | null;
 }
 
 const SCHEMA = `
@@ -487,6 +508,43 @@ CREATE TABLE IF NOT EXISTS event_triggers (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_event_triggers_enabled ON event_triggers(enabled);
+-- Inbound webhook receiver (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public-ingress sibling of
+-- event_triggers above: reacts to a SIGNED EXTERNAL POST (GitHub/Stripe/Standard-Webhooks/Loom generic)
+-- at its own opaque path instead of the internal orchestration_events bus. 'path' is a random,
+-- non-guessable slug (generated at creation, never human-chosen) — it is mounted at the ONE fixed
+-- registered route pattern 'POST /hooks/:path' (gateway/trust-tier.ts classifies that pattern Tier-2).
+-- secret_blob is envelope ciphertext (v1:iv:tag:ct), same encrypt-at-rest path as connections.secret_blob
+-- — HMAC verification needs the PLAINTEXT secret to recompute against, so (unlike a verify-only salted
+-- hash) this must be reversibly stored. mode/target_session_id/agent_id mirror event_triggers exactly —
+-- agent_id (spawn mode) PINS the endpoint's target project + role via the agent's own profile. Brand-new
+-- table => CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER needed), exactly like
+-- connections/event_triggers. Human-configured only (REST) — no MCP path (mirrors connections/
+-- poll_jobs/event_triggers: an agent must never mint or list an inbound webhook endpoint or its secret).
+CREATE TABLE IF NOT EXISTS webhook_endpoints (
+  id TEXT PRIMARY KEY,
+  path TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  source_type TEXT NOT NULL,          -- 'github' | 'stripe' | 'standard' | 'generic'
+  secret_blob TEXT NOT NULL,          -- envelope ciphertext — NEVER plaintext
+  mode TEXT NOT NULL,                 -- 'wake' (nudge an existing target_session_id) or 'spawn' (fresh session in agent_id)
+  target_session_id TEXT REFERENCES sessions(id),
+  agent_id TEXT REFERENCES agents(id),
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  last_fired_at TEXT
+);
+-- Webhook delivery idempotency (per endpoint): every VERIFIED delivery's (endpoint_id, delivery_id) is
+-- recorded so a provider's at-least-once retry of the SAME delivery never double-fires a spawn/wake.
+-- DB-backed (not in-memory) so the dedupe survives a daemon restart within the verify recipe's 300s
+-- timestamp-tolerance window. Bounded via an opportunistic sweep of rows older than the tolerance window
+-- (webhooks/store.ts), so this never grows unbounded across a long-lived endpoint.
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+  endpoint_id TEXT NOT NULL REFERENCES webhook_endpoints(id),
+  delivery_id TEXT NOT NULL,
+  received_at TEXT NOT NULL,
+  PRIMARY KEY (endpoint_id, delivery_id)
+);
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_received_at ON webhook_deliveries(received_at);
 -- Daemon-GLOBAL platform tuning override (rate-limit numbers / watcher cadences / op timeouts), held
 -- as a single JSON blob in a SINGLETON row (id pinned to 1 by the CHECK). NOT per-project — the daemon
 -- shares one of these (like backup/schedulerEnabled). Persisted in SQLite so a backup captures it. The
@@ -4440,6 +4498,73 @@ export class Db {
     }
   }
 
+  // --- webhook endpoints (inbound webhook receiver, agent-tooling epic P5b, card 8fbedcac) ---
+  // Each endpoint pins its own target project (via agent_id, spawn mode), HUMAN-managed only over the
+  // loopback REST surface — NO MCP tool creates/lists/reads an endpoint or its secret (same trust posture
+  // as connections/event_triggers above). These accessors carry the raw `secretBlob` ciphertext (this
+  // layer is daemon-internal); `webhooks/store.ts` is the only caller and it never lets the ciphertext or
+  // a decrypted secret reach a REST response or an MCP tool. ---
+  listWebhookEndpoints(): WebhookEndpointRow[] {
+    return (this.db.prepare("SELECT * FROM webhook_endpoints ORDER BY created_at, rowid").all() as Row[]).map(toWebhookEndpointRow);
+  }
+  getWebhookEndpoint(id: string): WebhookEndpointRow | undefined {
+    const r = this.db.prepare("SELECT * FROM webhook_endpoints WHERE id = ?").get(id) as Row | undefined;
+    return r ? toWebhookEndpointRow(r) : undefined;
+  }
+  /** Read one endpoint by its opaque path segment — the ingress route's lookup key. */
+  getWebhookEndpointByPath(path: string): WebhookEndpointRow | undefined {
+    const r = this.db.prepare("SELECT * FROM webhook_endpoints WHERE path = ?").get(path) as Row | undefined;
+    return r ? toWebhookEndpointRow(r) : undefined;
+  }
+  /** Create a new webhook endpoint. The caller passes an ALREADY-ENCRYPTED `secretBlob` and an
+   *  ALREADY-GENERATED opaque `path` (this layer never sees the plaintext secret — encryption + path
+   *  generation happen in `webhooks/store.ts`, mirroring `createConnection`). */
+  createWebhookEndpoint(input: {
+    path: string; name: string; sourceType: WebhookSourceType; secretBlob: string;
+    mode: "wake" | "spawn"; targetSessionId: string | null; agentId: string | null;
+  }): WebhookEndpointRow {
+    const row: WebhookEndpointRow = {
+      id: randomUUID(), path: input.path, name: input.name, sourceType: input.sourceType,
+      secretBlob: input.secretBlob, mode: input.mode, targetSessionId: input.targetSessionId,
+      agentId: input.agentId, enabled: true, createdAt: new Date().toISOString(), lastFiredAt: null,
+    };
+    this.db.prepare(
+      `INSERT INTO webhook_endpoints (id, path, name, source_type, secret_blob, mode, target_session_id, agent_id, enabled, created_at, last_fired_at)
+       VALUES (@id, @path, @name, @sourceType, @secretBlob, @mode, @targetSessionId, @agentId, @enabled, @createdAt, @lastFiredAt)`,
+    ).run({ ...row, enabled: 1 });
+    return row;
+  }
+  /** Delete a webhook endpoint by id (idempotent — a missing id matches nothing). Its delivery-dedupe
+   *  rows are left as harmless orphans (webhook_deliveries carries no FK-cascade); a deleted endpoint's
+   *  path can never be reused (path is a random opaque slug, never recycled). */
+  deleteWebhookEndpoint(id: string): void {
+    this.db.prepare("DELETE FROM webhook_endpoints WHERE id = ?").run(id);
+  }
+  setWebhookEndpointEnabled(id: string, enabled: boolean): void {
+    this.db.prepare("UPDATE webhook_endpoints SET enabled = ? WHERE id = ?").run(enabled ? 1 : 0, id);
+  }
+  /** Stamp the last-fired watermark on an ACTUAL delivered wake/spawn (mirrors advanceEventTriggerSeq's
+   *  own last_fired_at stamp) — informational only (nothing reads it as an anti-hammer floor; the
+   *  per-endpoint spawn-rate cap that guards against a flood is the in-memory SlidingWindowCounter the
+   *  ingress route reuses from gateway/remote-rate-limit.ts). */
+  updateWebhookEndpointLastFired(id: string, firedAtIso: string): void {
+    this.db.prepare("UPDATE webhook_endpoints SET last_fired_at = ? WHERE id = ?").run(firedAtIso, id);
+  }
+
+  // --- webhook delivery idempotency (dedupe on the provider's own delivery/event id) ---
+  hasWebhookDelivery(endpointId: string, deliveryId: string): boolean {
+    return this.db.prepare("SELECT 1 FROM webhook_deliveries WHERE endpoint_id = ? AND delivery_id = ?").get(endpointId, deliveryId) !== undefined;
+  }
+  /** Record a verified delivery and opportunistically sweep rows older than `cutoffIso` FROM THE SAME
+   *  endpoint — bounds table growth without a separate timer (mirrors SlidingWindowCounter's
+   *  self-triggered sweep, DB-backed instead of in-memory so the dedupe survives a daemon restart within
+   *  the verify recipe's timestamp-tolerance window). INSERT OR IGNORE — a race between two concurrent
+   *  requests for the SAME delivery id must not throw on the (endpoint_id, delivery_id) primary key. */
+  recordWebhookDelivery(endpointId: string, deliveryId: string, receivedAtIso: string, cutoffIso: string): void {
+    this.db.prepare("INSERT OR IGNORE INTO webhook_deliveries (endpoint_id, delivery_id, received_at) VALUES (?, ?, ?)").run(endpointId, deliveryId, receivedAtIso);
+    this.db.prepare("DELETE FROM webhook_deliveries WHERE endpoint_id = ? AND received_at < ?").run(endpointId, cutoffIso);
+  }
+
   // --- questions (manager→human Requests object, card 8701bdbb generalized by card 695ebab0) ---
   insertQuestion(q: Question): void {
     this.db.prepare(
@@ -5318,6 +5443,17 @@ function toEventTrigger(r0: unknown): EventTrigger {
     targetSessionId: (r.target_session_id as string) ?? null, agentId: (r.agent_id as string) ?? null,
     enabled: (r.enabled as number) === 1, lastSeq: r.last_seq as number,
     lastFiredAt: (r.last_fired_at as string) ?? null, createdAt: r.created_at as string,
+  };
+}
+function toWebhookEndpointRow(r0: unknown): WebhookEndpointRow {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, path: r.path as string, name: r.name as string,
+    sourceType: r.source_type as WebhookSourceType, secretBlob: r.secret_blob as string,
+    mode: r.mode as WebhookEndpointRow["mode"],
+    targetSessionId: (r.target_session_id as string) ?? null, agentId: (r.agent_id as string) ?? null,
+    enabled: (r.enabled as number) === 1, createdAt: r.created_at as string,
+    lastFiredAt: (r.last_fired_at as string) ?? null,
   };
 }
 // NOTE: intentionally does NOT map `secret_blob` — the envelope-encrypted credential ciphertext must

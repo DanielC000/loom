@@ -132,6 +132,9 @@ const ALL_ROUTES = [
   ["GET", "/api/update-status"], ["POST", "/api/usage/clear-hold"],
   ["GET", "/api/usage/history"], ["GET", "/api/usage/limits"], ["GET", "/api/usage/sessions/history"],
   ["GET", "/api/version"],
+  ["GET", "/api/webhook-endpoints"], ["POST", "/api/webhook-endpoints"],
+  ["DELETE", "/api/webhook-endpoints/:id"], ["POST", "/api/webhook-endpoints/:id/enabled"],
+  ["POST", "/hooks/:endpointPath"],
   ["POST", "/internal/hook"], ["POST", "/internal/shutdown"],
   ["POST", "/internal/test/seed"], ["POST", "/internal/update"],
   ["DELETE", "/mcp-audit/:sessionId"], ["GET", "/mcp-audit/:sessionId"], ["PATCH", "/mcp-audit/:sessionId"],
@@ -178,16 +181,27 @@ const EXPECTED_TIER_1 = new Set([
   "GET /api/companion/voice-prefs/:sessionId",
 ]);
 
-check(`(1) TOTAL real registered routes classify correctly (${ALL_ROUTES.length} checked, ${EXPECTED_TIER_1.size} expected Tier-1)`,
+// Tier 2 (agent-tooling epic P5b, card 8fbedcac): the ONE fixed webhook-ingress pattern — PUBLIC,
+// signature-gated, deliberately NOT Tier 1 (it never accepts the gateway token).
+const EXPECTED_TIER_2 = new Set([
+  "POST /hooks/:endpointPath",
+]);
+
+check(`(1) TOTAL real registered routes classify correctly (${ALL_ROUTES.length} checked, ${EXPECTED_TIER_1.size} expected Tier-1, ${EXPECTED_TIER_2.size} expected Tier-2)`,
   ALL_ROUTES.every(([method, pattern]) => {
     const key = `${method} ${pattern}`;
-    const expected = EXPECTED_TIER_1.has(key) ? 1 : 0;
+    const expected = EXPECTED_TIER_1.has(key) ? 1 : EXPECTED_TIER_2.has(key) ? 2 : 0;
     const actual = routeTier(method, pattern);
     if (actual !== expected) { console.log(`  MISMATCH ${key}: expected tier ${expected}, got ${actual}`); return false; }
     return true;
   }));
 check("(1b) every EXPECTED_TIER_1 entry is actually a real registered route (no stale/typo'd allowlist entry)",
   [...EXPECTED_TIER_1].every((key) => ALL_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
+check("(1c) every EXPECTED_TIER_2 entry is actually a real registered route (no stale/typo'd allowlist entry)",
+  [...EXPECTED_TIER_2].every((key) => ALL_ROUTES.some(([m, p]) => `${m} ${p}` === key)));
+check("(1d) the webhook-endpoints ADMIN surface (a writer, not the ingress route) stays Tier-0 (loopback-only)",
+  routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
+  && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
 
 // --- (2) remoteAccess DISABLED (default): the hook never registers; a "remote" request to a writer still runs ---
 let killCallsOff = 0;

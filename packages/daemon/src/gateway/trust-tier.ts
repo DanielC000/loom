@@ -15,8 +15,14 @@ import type { RemoteAccessConfig } from "@loom/shared";
 
 /** Tier 0 = loopback-only (fail-closed default). Tier 1 = safe to allow over an authenticated remote
  *  bind — reads, plus the human answer/steer surfaces (Requests inbox answer, session input/stop/resume/
- *  end, rate-limit clear) and their two read-only WS terminals. */
-export type TrustTier = 0 | 1;
+ *  end, rate-limit clear) and their two read-only WS terminals. Tier 2 (agent-tooling epic P5b, card
+ *  8fbedcac) = the inbound webhook ingress: a DIFFERENT trust model from Tier 1 — PUBLIC (no gateway
+ *  token accepted at all) but SIGNATURE-gated (the route's own per-endpoint HMAC verify is the real
+ *  authorization, see webhooks/ingress.ts). A Tier-1 gateway token has no effect on a Tier-2 route, and a
+ *  Tier-2 request never grants Tier-1 access — the two tiers are isolated by construction, not by a
+ *  denylist check (see the onRequest hook in gateway/server.ts, which never reads Authorization for a
+ *  Tier-2 route in the first place). */
+export type TrustTier = 0 | 1 | 2;
 
 interface TierRule {
   method: string;
@@ -104,14 +110,28 @@ const TIER_1_ROUTES: readonly TierRule[] = [
 const TIER_1_SET: ReadonlySet<string> = new Set(TIER_1_ROUTES.map((r) => `${r.method} ${r.pattern}`));
 
 /**
+ * The COMPLETE Tier-2 allowlist (card 8fbedcac) — deliberately just the ONE fixed registered pattern the
+ * webhook ingress mounts every endpoint under (`webhooks/ingress.ts`); the actual per-instance endpoint
+ * identity lives in the DB row looked up by `:endpointPath`, never in the route pattern itself, so this
+ * classifier stays a static-table lookup exactly like Tier 1.
+ */
+const TIER_2_ROUTES: readonly TierRule[] = [
+  { method: "POST", pattern: "/hooks/:endpointPath" },
+];
+const TIER_2_SET: ReadonlySet<string> = new Set(TIER_2_ROUTES.map((r) => `${r.method} ${r.pattern}`));
+
+/**
  * Classify a route's trust tier. `routePattern` must be the Fastify-registered PATTERN (Fastify v5's
  * `req.routeOptions.url`), not the resolved request URL — so `/api/sessions/abc123/input` never matches;
  * only the literal registered pattern `/api/sessions/:id/input` does. DEFAULT-DENY: anything not an exact
- * `{method, pattern}` match in TIER_1_ROUTES is Tier 0, including every writer, `/internal/*`, and all
- * seven `/mcp*` mounts (none of which appear above).
+ * `{method, pattern}` match in TIER_1_ROUTES or TIER_2_ROUTES is Tier 0, including every writer,
+ * `/internal/*`, and all seven `/mcp*` mounts (none of which appear in either allowlist).
  */
 export function routeTier(method: string, routePattern: string): TrustTier {
-  return TIER_1_SET.has(`${method.toUpperCase()} ${routePattern}`) ? 1 : 0;
+  const key = `${method.toUpperCase()} ${routePattern}`;
+  if (TIER_1_SET.has(key)) return 1;
+  if (TIER_2_SET.has(key)) return 2;
+  return 0;
 }
 
 /** Loopback hostnames a human may reasonably set `remoteAccess.bindHost` to (meaning: not actually remote). */

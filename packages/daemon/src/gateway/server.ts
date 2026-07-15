@@ -5,8 +5,8 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
-import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -68,6 +68,8 @@ import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from ".
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
 import { routeTier, isTrustTierHookActive, tlsRequirementSatisfied } from "./trust-tier.js";
 import { createRemoteRateLimiter } from "./remote-rate-limit.js";
+import { registerWebhookIngress } from "../webhooks/ingress.js";
+import { listWebhookEndpoints, createWebhookEndpoint, deleteWebhookEndpoint, setWebhookEndpointEnabled } from "../webhooks/store.js";
 import { detectIntegrations } from "../integrations/detect.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
@@ -344,6 +346,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const routePattern = req.routeOptions.url;
       const tier = routePattern === undefined ? 0 : routeTier(req.method, routePattern);
       if (tier === 0) return reply.code(403).send({ error: "forbidden" });
+      if (tier === 2) {
+        // Tier 2 (card 8fbedcac): PUBLIC webhook ingress, signature-gated — NEVER reads Authorization at
+        // all, so a Tier-1 gateway token has no code path here (it cannot grant Tier-2 access) and this
+        // request can never grant Tier-1 access either — isolation by construction, not a denylist check.
+        // Still runs through the per-ip sliding-window cap for basic edge DoS protection; the route's own
+        // per-endpoint HMAC verify (webhooks/ingress.ts) is the real authorization gate.
+        if (!rateLimiter.allowRequest(ip, undefined, Date.now())) return reply.code(429).send({ error: "rate limit exceeded" });
+        return;
+      }
       // Tier 1: require a valid gateway token on a remote request (Phase B: gateway_tokens, verified via
       // deps.verifyGatewayToken — see index.ts). A browser cannot set an Authorization header on a
       // WebSocket upgrade, so the two WS routes ALSO accept the token via the Sec-WebSocket-Protocol
@@ -376,6 +387,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   }
 
   await app.register(websocket);
+
+  // --- Inbound webhook ingress (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public route
+  // (POST /hooks/:endpointPath, gateway/trust-tier.ts). Registered UNCONDITIONALLY (ships inert, mirrors
+  // every other REST route): no endpoints exist by default, and a missing OR disabled endpoint always
+  // 404s regardless of bind — the real gate is a valid+enabled endpoint AND a passing HMAC verify,
+  // independent of whether remoteAccess is configured. This is deliberately NOT coupled to
+  // isTrustTierHookActive: unlike Tier 1 (which needs the remote-bind hook live to mean anything), a
+  // Tier-2 endpoint is reachable from loopback too (useful for local testing) and stays fully
+  // HMAC-gated either way. ---
+  registerWebhookIngress(app, { db: deps.db, sessions: deps.sessions, pty: deps.pty });
 
   // --- Single-process mode (Releases v1, Part 1): serve the PREBUILT web viewport from the daemon's own
   // loopback origin, so the whole app runs as ONE process on one port (the prerequisite for `npx loomctl`).
@@ -2180,6 +2201,57 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   app.delete("/api/event-triggers/:id", async (req) => {
     deps.db.deleteEventTrigger((req.params as { id: string }).id);
+    return { ok: true };
+  });
+
+  // --- Inbound webhook endpoints (agent-tooling epic P5b, card 8fbedcac) — HUMAN-managed only over this
+  // loopback REST surface, INTENTIONALLY NO MCP path (mirrors connections/poll-jobs/event-triggers above):
+  // an agent must never mint or list an inbound webhook endpoint or its secret. Mirrors `connections`'
+  // OWN minimal CRUD surface (list/create/delete, no update route) — a signing-secret rotation is a
+  // delete+recreate (deferred fast-follow: accepting a second candidate secret during a rotation window),
+  // plus ONE narrow enable/disable toggle (pausing a noisy integration without losing its path/config). ---
+  app.get("/api/webhook-endpoints", async () => listWebhookEndpoints(deps.db));
+  app.post("/api/webhook-endpoints", async (req, reply) => {
+    const b = (req.body ?? {}) as {
+      name?: unknown; sourceType?: unknown; secret?: unknown; mode?: unknown;
+      targetSessionId?: unknown; agentId?: unknown;
+    };
+    if (typeof b.sourceType !== "string" || !(WEBHOOK_SOURCE_TYPES as readonly string[]).includes(b.sourceType)) {
+      return reply.code(400).send({ error: `sourceType must be one of: ${WEBHOOK_SOURCE_TYPES.join(", ")}` });
+    }
+    if (b.mode !== "wake" && b.mode !== "spawn") return reply.code(400).send({ error: "mode must be 'wake' or 'spawn'" });
+    let targetSessionId: string | null = null;
+    let agentId: string | null = null;
+    if (b.mode === "wake") {
+      if (typeof b.targetSessionId !== "string" || !deps.db.getSession(b.targetSessionId)) {
+        return reply.code(404).send({ error: "mode 'wake' requires an existing targetSessionId" });
+      }
+      targetSessionId = b.targetSessionId;
+    } else {
+      if (typeof b.agentId !== "string" || !deps.db.getAgent(b.agentId)) {
+        return reply.code(404).send({ error: "mode 'spawn' requires an existing agentId" });
+      }
+      agentId = b.agentId;
+    }
+    try {
+      const created = createWebhookEndpoint(deps.db, {
+        name: b.name as string, sourceType: b.sourceType as WebhookSourceType, secret: b.secret as string,
+        mode: b.mode, targetSessionId, agentId,
+      });
+      return reply.code(201).send(created);
+    } catch (err) {
+      return reply.code(400).send({ error: (err as Error).message });
+    }
+  });
+  app.post("/api/webhook-endpoints/:id/enabled", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const b = (req.body ?? {}) as { enabled?: unknown };
+    if (typeof b.enabled !== "boolean") return reply.code(400).send({ error: "enabled must be a boolean" });
+    setWebhookEndpointEnabled(deps.db, id, b.enabled);
+    return { ok: true };
+  });
+  app.delete("/api/webhook-endpoints/:id", async (req) => {
+    deleteWebhookEndpoint(deps.db, (req.params as { id: string }).id);
     return { ok: true };
   });
 
