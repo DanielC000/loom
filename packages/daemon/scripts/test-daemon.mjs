@@ -14,12 +14,14 @@
 // manually per the header comment in each file.
 //
 // Runs in a BOUNDED, port-safe worker pool (each test file is already hermetically isolated — own
-// temp LOOM_HOME, own port — so this is embarrassingly-parallel). Pool size defaults to
-// os.availableParallelism() capped at MAX_CONCURRENCY (concurrent temp-SQLite DBs thrash IO past a
-// point); override with LOOM_TEST_CONCURRENCY=<n> for tuning/debugging (e.g. =1 to force serial).
-// Each of the fixed pool "lanes" owns one port for its whole run (4400+laneIndex), so concurrent
-// workers never collide — unlike a file-index-derived port, which only avoided collisions when tests
-// ran strictly one-at-a-time.
+// temp LOOM_HOME, own port — so this is embarrassingly-parallel). Pool size, in order:
+// LOOM_TEST_CONCURRENCY env (explicit dial-up/down on a host you know can take it) ?? a bounded
+// DEFAULT_CONCURRENCY (safe when unset — see its own doc below) — either way clamped to the
+// MAX_CONCURRENCY ceiling (concurrent temp-SQLite DBs + in-process daemon boots thrash host
+// resources past a point; incident: this exact command, run with no env override, starved a live
+// self-hosting sibling service — card 301d8c01). Each of the fixed pool "lanes" owns one port for its
+// whole run (4400+laneIndex), so concurrent workers never collide — unlike a file-index-derived port,
+// which only avoided collisions when tests ran strictly one-at-a-time.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -44,11 +46,19 @@ const HERMETIC = fs.readdirSync(TEST_DIR)
   .filter((name) => !NOT_HERMETIC.has(name))
   .sort();
 
+// Ceiling — unchanged. `LOOM_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
 const MAX_CONCURRENCY = 8;
+// Safe DEFAULT when LOOM_TEST_CONCURRENCY is unset (card 301d8c01 — a bare `pnpm --filter @loom/daemon
+// test:daemon`, no env override, is exactly the command a worker or the daemon-run merge gate runs
+// unattended). Previously this fell back to `os.availableParallelism()`, which on a many-core
+// self-hosting box let this command spike to `MAX_CONCURRENCY` lanes of concurrent temp-SQLite/
+// in-process-daemon boots with nothing bounding it — that's what starved the live Codescape service.
+// 2 is a conservative default; a beefier/known-safe host can still override upward via the env.
+const DEFAULT_CONCURRENCY = 2;
 const POOL_SIZE = Math.max(
   1,
   Math.min(
-    Number(process.env.LOOM_TEST_CONCURRENCY) || os.availableParallelism(),
+    Number(process.env.LOOM_TEST_CONCURRENCY) || DEFAULT_CONCURRENCY,
     MAX_CONCURRENCY,
   ),
 );

@@ -253,6 +253,17 @@ export interface OrchestrationConfig {
    */
   maxConcurrentManagers: number;
   /**
+   * Host-load guard (card 301d8c01): hard cap on concurrently-RUNNING daemon-EXECUTED heavy gate runs
+   * (the merge-confirm gate + the scoped-deploy gate — both spawn a human-set build/test command via
+   * `runGateSequential`), across EVERY project on this daemon. A gate that can't acquire a slot QUEUES
+   * (awaits) rather than being rejected. Daemon-GLOBAL, like `schedulerEnabled` — NOT a per-project
+   * setting (there is no per-project equivalent; ProjectConfigOverride.orchestration deliberately omits
+   * it), since host resource contention is a whole-daemon concern, not a per-project one. Default 1
+   * (serialize daemon-run heavy gates) — set via the daemon-global PlatformConfigOverride, not a
+   * project's own config.
+   */
+  maxConcurrentGates: number;
+  /**
    * Pillar-B trigger gate (§19b): when false (default), the daemon does NOT start the cron
    * Scheduler, so no schedule auto-fires. Opt-in per the autonomy ladder — a daemon shouldn't
    * auto-spawn managers until explicitly switched on. The daemon reads the platform-default value
@@ -652,6 +663,9 @@ export interface PlatformConfigOverride {
    * env, which wins when set).
    */
   schedulerEnabled?: boolean;
+  /** See OrchestrationConfig.maxConcurrentGates. Daemon-GLOBAL host-load guard (card 301d8c01), like
+   *  schedulerEnabled — NOT a per-project setting. */
+  maxConcurrentGates?: number;
 }
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -689,7 +703,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentGates: 1, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1067,6 +1081,10 @@ export function resolveConfig(
       // arg) wins over the default. A stale per-project `orchestration.schedulerEnabled` (accepted
       // before this field moved to PlatformConfigOverride) is intentionally ignored here, not read.
       schedulerEnabled: platformOverride?.schedulerEnabled ?? d.orchestration.schedulerEnabled,
+      // Host-load guard (card 301d8c01): daemon-GLOBAL like schedulerEnabled — a per-project override
+      // is intentionally ignored here, not read (see the field's own doc for why host contention isn't
+      // a per-project concern).
+      maxConcurrentGates: platformOverride?.maxConcurrentGates ?? d.orchestration.maxConcurrentGates,
       recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
       // Context-recycle re-nudge cadence + escalation cap (per-project, no env layer). `??` so an explicit
       // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.

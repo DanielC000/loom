@@ -40,6 +40,7 @@ import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudg
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult } from "../orchestration/gate-runner.js";
+import { GateSemaphore } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
@@ -498,6 +499,14 @@ export class SessionService {
    * NOT prefix-resolved; a genuine retry replays the identical taskId string) / `merge:${workerSessionId}`.
    */
   private readonly pendingOps = new PendingOpRegistry();
+  /**
+   * HOST-LOAD guard (card 301d8c01): caps how many daemon-executed heavy gate runs (the merge-confirm
+   * gate + the scoped-deploy gate — both spawn a human-set build/test command via `runGateSequential`)
+   * may run AT ONCE across every project. Default cap 1 (`orchestration.maxConcurrentGates`,
+   * daemon-global) — a second concurrent gate QUEUES instead of running alongside the first, so
+   * concurrent merges/deploys can no longer pile up host load unbounded. See {@link GateSemaphore}.
+   */
+  private readonly gateSemaphore = new GateSemaphore();
   /**
    * msgIds of durable queued messages whose RE-DRIVE enqueue is currently HELD in a recipient's pty FIFO
    * — enqueued onto a now-live recipient but not yet drained, so the durable `session_message_queued`
@@ -1660,8 +1669,10 @@ export class SessionService {
     if (!project) throw new Error("project not found for this session");
 
     // RESOLVE-LIVE: read the deploy command AND its per-project timeout fresh here, so a human PATCH to
-    // either takes effect with no daemon restart (mirrors confirmWorkerMerge's gate resolution).
-    const orchestration = resolveConfig(project.config).orchestration;
+    // either takes effect with no daemon restart (mirrors confirmWorkerMerge's gate resolution). Also
+    // threads the daemon-global platform override so `orchestration.maxConcurrentGates` (host-load guard,
+    // card 301d8c01) resolves correctly below — that field has no per-project layer (like schedulerEnabled).
+    const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
     const deployCommand = orchestration.deployCommand;
     if (!deployCommand) {
       return { deployed: false, reason: "no deployCommand configured for this project — ask the owner to set orchestration.deployCommand" };
@@ -1675,7 +1686,11 @@ export class SessionService {
     }
 
     const runGateSeq = this.runGate ?? runGateSequential;
-    const result = await runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs);
+    // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
+    // rather than running alongside it unbounded. See GateSemaphore's class doc.
+    const result = await this.gateSemaphore.runExclusive(
+      orchestration.maxConcurrentGates, () => runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs),
+    );
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
@@ -5714,8 +5729,10 @@ export class SessionService {
     const taskId = worker.taskId ?? null;
     const branch = worker.branch;
     // RESOLVE-LIVE: read the gate command AND its per-project timeout fresh here, so a human PATCH to
-    // either takes effect with no daemon restart.
-    const orchestration = resolveConfig(project.config).orchestration;
+    // either takes effect with no daemon restart. Also threads the daemon-global platform override so
+    // `orchestration.maxConcurrentGates` (host-load guard, card 301d8c01) resolves correctly below —
+    // that field has no per-project layer (like schedulerEnabled).
+    const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
     const gate = orchestration.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
 
@@ -5882,7 +5899,11 @@ export class SessionService {
       }
 
       const runGateSeq = this.runGate ?? runGateSequential;
-      let gateResult = await runGateSeq(gate, worktreePath, gateTimeoutMs);
+      // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
+      // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
+      // actual gate spawn (and its retry below), not the surrounding git/notify bookkeeping.
+      const gateCap = orchestration.maxConcurrentGates;
+      let gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs));
       evt("build_gate", { passed: gateResult.passed });
       // TRANSIENT-KILL AUTO-RETRY (card bcba83a1 — the gate "lies" under memory pressure): an OOM/SIGKILL
       // (or our OWN gateTimeoutMs bound) killing a step used to surface identically to a genuine test/build
@@ -5897,7 +5918,7 @@ export class SessionService {
         gateRetried = true;
         evt("build_gate_retry_attempt", { priorClass: classifyGateFailure(gateResult) });
         await new Promise((resolve) => setTimeout(resolve, GATE_RETRY_SETTLE_MS));
-        gateResult = await runGateSeq(gate, worktreePath, gateTimeoutMs);
+        gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs));
         evt("build_gate_retry", { passed: gateResult.passed });
       }
       if (!gateResult.passed) {

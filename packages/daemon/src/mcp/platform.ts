@@ -120,6 +120,9 @@ const orchestrationOverride = z.object({
   // `.strict()` shape) makes a per-project `orchestration.schedulerEnabled` patch a REJECTED unknown key
   // on both the human REST path and the agent path (agentOrchestrationOverride derives from this object)
   // — closing the old no-op where setting it per-project silently did nothing.
+  // NOTE: no `maxConcurrentGates` here either, same reasoning — it's the daemon-GLOBAL host-load guard
+  // (card 301d8c01, see PlatformConfigOverride.maxConcurrentGates), not per-project; it lives on
+  // platformConfigOverrideSchema below.
   // Fraction of the model context window (0 disables); a ratio >1 or <0 is meaningless and would
   // corrupt the ContextWatcher's recycle trigger.
   recycleAtContextRatio: z.number().min(0).max(1).optional(),
@@ -420,6 +423,11 @@ const platformConfigOverrideSchema = z.object({
   // Pillar-B trigger gate (§19b), moved here from the per-project orchestration shape (see the removal
   // note on orchestrationOverride above) — schedulerEnabled is a daemon-wide service, not per-project.
   schedulerEnabled: z.boolean().optional(),
+  // Host-load guard (card 301d8c01): caps concurrently-running daemon-executed heavy gates (merge-confirm
+  // + scoped-deploy) across every project. Daemon-wide, same reasoning as schedulerEnabled above. Floor 1
+  // (a cap of 0 would deadlock every gate); generous ceiling so a fat-fingered value can't authorize an
+  // unbounded pile-up.
+  maxConcurrentGates: z.number().int().min(1).max(50).optional(),
 }).strict();
 
 /**
