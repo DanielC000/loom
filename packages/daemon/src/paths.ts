@@ -251,22 +251,64 @@ export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }):
 }
 
 /**
- * Card C1: resolve the `codescape` CLI as a `{command, args}` spawn pair (never a shell string — see
- * codescape/supervisor.ts for why). `LOOM_CODESCAPE_BIN` is a human-only override — but does not require
- * an absolute path: the supervisor spawns via plain `child_process.spawn` (not node-pty), so a bare
- * PATH-resolvable name is fine too (CONTRACT Q5: "PATH or absolute both acceptable"). Two forms:
- *   - a `.js`/`.mjs`/`.cjs` path (a source-installed codescape checkout, OR the fixture CLI the C1
- *     real-spawn test points this at) runs via node explicitly — since there's no reliable shebang/
- *     association to exec a JS file directly cross-platform;
+ * Shape-aware host-tool launch resolver — the ONE helper every optional host-tool resolver (Codescape,
+ * Open Design, and any future one) shares, so a new tool gets this for free instead of re-deriving it (or
+ * getting it wrong, as Open Design's original code did — see openDesignMcpServer in pty/host.ts: OD ships
+ * as `apps/daemon/bin/od.mjs`, a node ESM script, but was launched directly, which fails on Windows —
+ * there's no reliable shebang/association to exec a bare `.mjs` file cross-platform). Given ANY bin (a
+ * `.js`/`.mjs`/`.cjs` script path, an absolute compiled-binary path, or a bare PATH-resolvable name),
+ * returns the correct `{command, args}` spawn pair:
+ *   - a `.js`/`.mjs`/`.cjs` path runs via node explicitly (`process.execPath`, the script as its one arg);
  *   - anything else resolves through {@link resolveExecutable} (PATH + Windows PATHEXT, e.g. a `.cmd`
- *     npm shim or a compiled binary), so the caller can spawn it directly with NO shell — sidesteps the
- *     shell-quoting concerns `git/worktrees.ts:166` documents for its own `shell:true` installs (a repo
- *     path argument here never needs quoting since spawn takes it as a real argv element).
+ *     npm shim or a compiled binary) and launches directly with NO shell — sidesteps the shell-quoting
+ *     concerns `git/worktrees.ts:166` documents for its own `shell:true` installs (an argv element here
+ *     never needs quoting).
+ * The caller appends its OWN subcommand args (e.g. `["mcp"]`, `["mcp", "--graph", graphPath]`) after this
+ * resolves the base command+args.
  */
-export function resolveCodescapeBin(): { command: string; args: string[] } {
-  const bin = process.env.LOOM_CODESCAPE_BIN?.trim() || "codescape";
-  if (/\.[mc]?js$/.test(bin)) return { command: process.execPath, args: [bin] };
+const HOST_TOOL_SCRIPT_RE = /\.[mc]?js$/;
+export function resolveHostToolBin(bin: string): { command: string; args: string[] } {
+  if (HOST_TOOL_SCRIPT_RE.test(bin)) return { command: process.execPath, args: [bin] };
   return { command: resolveExecutable(bin), args: [] };
+}
+
+/**
+ * Card 8dc5ebb9: does `bin` (either of {@link resolveHostToolBin}'s two shapes) resolve to a file that
+ * actually EXISTS on disk? For a `.js`/`.mjs`/`.cjs` script, that's `bin` itself (the thing node would
+ * run); for anything else, {@link resolveExecutable}'s result (PATH+PATHEXT search, or the input
+ * unchanged when nothing resolves — `fs.existsSync` on the unresolved bare name then correctly reads
+ * false in the overwhelming common case). Used ONLY by the human-only `/api/integrations` detect
+ * endpoint (a live "is this configured tool actually there" check) — NEVER on the synchronous spawn hot
+ * path, which stays each resolver's own fast existsSync/isAbsolute check (openDesignMcpServer,
+ * codescapeMcpServer), unchanged.
+ */
+export function hostToolBinExists(bin: string): boolean {
+  const target = HOST_TOOL_SCRIPT_RE.test(bin) ? bin : resolveExecutable(bin);
+  return fs.existsSync(target);
+}
+
+/**
+ * The `codescape` bin CANDIDATE string (before shape resolution): DB-first (card 8dc5ebb9's
+ * `integrations.codescape.path`, threaded in by the caller), then `LOOM_CODESCAPE_BIN`, then the bare
+ * PATH-resolvable default name. Exported (not just inlined into {@link resolveCodescapeBin}) so the
+ * `/api/integrations` detect endpoint can run the SAME precedence through {@link hostToolBinExists}
+ * without duplicating it.
+ */
+export function codescapeBinCandidate(dbPath?: string): string {
+  return dbPath?.trim() || process.env.LOOM_CODESCAPE_BIN?.trim() || "codescape";
+}
+
+/**
+ * Card C1: resolve the `codescape` CLI as a `{command, args}` spawn pair (never a shell string — see
+ * codescape/supervisor.ts for why). `LOOM_CODESCAPE_BIN`/the DB path are human-only overrides — but do
+ * not require an absolute path: the supervisor spawns via plain `child_process.spawn` (not node-pty), so
+ * a bare PATH-resolvable name is fine too (CONTRACT Q5: "PATH or absolute both acceptable"). Card
+ * 8dc5ebb9: `dbPath` (the DB-persisted `integrations.codescape.path`, when the caller has one) wins over
+ * `LOOM_CODESCAPE_BIN`, mirroring `openDesignMcpServer`'s DB-first precedence — see
+ * {@link codescapeBinCandidate}. Shape resolution itself is the shared {@link resolveHostToolBin}.
+ */
+export function resolveCodescapeBin(dbPath?: string): { command: string; args: string[] } {
+  return resolveHostToolBin(codescapeBinCandidate(dbPath));
 }
 
 /**

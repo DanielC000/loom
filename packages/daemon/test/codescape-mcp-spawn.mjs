@@ -40,7 +40,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -69,7 +69,7 @@ const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, codescapeMcpServer, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled, codescapeGraphPath } = await import("../dist/paths.js");
+const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled, codescapeGraphPath, resolveCodescapeBin, codescapeBinCandidate, hostToolBinExists, resolveHostToolBin } = await import("../dist/paths.js");
 const { resolveConfig } = await import("@loom/shared");
 
 // ===================== shared config: codescape.enabled default-false / per-project override =====================
@@ -163,6 +163,50 @@ const graphPathA = codescapeGraphPath("projA");
     JSON.stringify(entry?.args) === JSON.stringify([fixtureCli, "mcp", "--graph", graphPathA]));
 }
 
+// ===================== DB-first, env-fallback precedence (card 8dc5ebb9) =====================
+{
+  // DB path set ⇒ wins over LOOM_CODESCAPE_BIN (still pointed at fixtureCli above).
+  const otherFixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli-2.mjs");
+  fs.copyFileSync(fixtureCli, otherFixtureCli);
+  check("(precedence) codescapeBinCandidate: a DB path wins over LOOM_CODESCAPE_BIN", codescapeBinCandidate(otherFixtureCli) === otherFixtureCli);
+  const viaDb = resolveCodescapeBin(otherFixtureCli);
+  check("(precedence) resolveCodescapeBin: DB path wins, still shape-resolved (.mjs wrapped in process.execPath)",
+    viaDb.command === process.execPath && JSON.stringify(viaDb.args) === JSON.stringify([otherFixtureCli]));
+  const entryViaDb = codescapeMcpServer(graphPathA, otherFixtureCli);
+  check("(precedence) codescapeMcpServer: a DB path wins over LOOM_CODESCAPE_BIN end-to-end",
+    JSON.stringify(entryViaDb?.args) === JSON.stringify([otherFixtureCli, "mcp", "--graph", graphPathA]));
+  // A blank/whitespace DB path is treated as absent — falls through to env, not a literal "" bin.
+  check("(precedence) a blank DB path falls back to the env var", codescapeBinCandidate("   ") === fixtureCli);
+  // Neither DB nor env set ⇒ the bare PATH-resolvable default name "codescape" (unchanged today-behavior).
+  const savedEnv = process.env.LOOM_CODESCAPE_BIN;
+  delete process.env.LOOM_CODESCAPE_BIN;
+  check("(precedence) neither DB path nor env set ⇒ the bare default name", codescapeBinCandidate(undefined) === "codescape");
+  process.env.LOOM_CODESCAPE_BIN = savedEnv;
+  fs.rmSync(otherFixtureCli, { force: true });
+
+  // hostToolBinExists: the /api/integrations detect endpoint's building block — proves existence for
+  // BOTH resolveHostToolBin shapes without re-deriving the shape logic.
+  check("(detect) hostToolBinExists: a real .mjs fixture exists", hostToolBinExists(fixtureCli) === true);
+  check("(detect) hostToolBinExists: a missing absolute path does not", hostToolBinExists(path.join(tmpHome, "no-such-file.mjs")) === false);
+  check("(detect) hostToolBinExists: process.execPath (a real, non-.mjs binary) exists", hostToolBinExists(process.execPath) === true);
+  check("(detect) hostToolBinExists: an unresolvable bare PATH name does not", hostToolBinExists("no-such-codescape-binary-xyz") === false);
+}
+
+// ===================== REAL cross-process spawn: the direct-launch (non-.mjs) shape actually runs =====================
+{
+  // The .mjs-shape real spawn is already proven for Codescape by the C1/C3 real-spawn coverage elsewhere
+  // (codescape-supervisor.mjs actually execs fixtureCli via the production spawn path) and by
+  // open-design-spawn.mjs's cross-process proof of the SAME resolveHostToolBin wrap. Here we prove the
+  // OTHER shape — a bare/compiled binary launched directly, unwrapped — using process.execPath as a
+  // stand-in real OS binary (it has no .js/.mjs/.cjs suffix, so resolveHostToolBin resolves it exactly
+  // like it would a real compiled `codescape` binary).
+  const direct = resolveHostToolBin(process.execPath);
+  check("(real-spawn) a non-.mjs bin resolves UNWRAPPED (direct-launch shape)", direct.command === process.execPath && direct.args.length === 0);
+  let directShapeRan = false;
+  try { execFileSync(direct.command, [...direct.args, "-e", "process.exit(0)"], { stdio: "pipe" }); directShapeRan = true; } catch { /* reported as a failed check below */ }
+  check("(real-spawn) the direct-launch shape {command,args} actually runs", directShapeRan);
+}
+
 // ===================== buildMcpServers: NEGATIVE CASES — byte-identical to a no-flag spawn =====================
 const noFlag = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker" });
 
@@ -212,6 +256,20 @@ check("(a) plain (role-less) session also gets it (orthogonal to role)",
 // ON adds exactly the codescape key, nothing else changes vs the negative-case map.
 check("(a) ON adds exactly the codescape key (everything else unchanged)",
   JSON.stringify({ ...workerOn, codescape: undefined }) === JSON.stringify({ ...notEnabled, codescape: undefined }));
+
+// ===================== byte-identical-when-absent + DB-path precedence through buildMcpServers (card 8dc5ebb9) ====
+{
+  const withEmptyIntegrationPaths = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA", integrationPaths: {} });
+  check("(byte-identical) integrationPaths:{} is byte-identical to integrationPaths omitted entirely",
+    JSON.stringify(withEmptyIntegrationPaths) === JSON.stringify(workerOn));
+  // A DB path threaded through integrationPaths wins over LOOM_CODESCAPE_BIN, end-to-end through buildMcpServers.
+  const otherFixtureCli2 = path.join(__dirname, "fixtures", "fake-codescape-cli-3.mjs");
+  fs.copyFileSync(fixtureCli, otherFixtureCli2);
+  const withDbPath = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA", integrationPaths: { codescape: otherFixtureCli2 } });
+  check("(precedence, e2e) integrationPaths.codescape wins over LOOM_CODESCAPE_BIN through buildMcpServers",
+    withDbPath.codescape?.args?.[0] === otherFixtureCli2);
+  fs.rmSync(otherFixtureCli2, { force: true });
+}
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
 const repo = path.join(os.tmpdir(), `loom-cs-repo-${Date.now()}`);
@@ -308,6 +366,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape MCP wiring (card C2 rewrite, e068a2ab): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeGraphPath derives ONE project-wide graph file; codescapeMcpServer clean-skips until that file exists then returns a real stdio entry (process.execPath-wrapped for a .mjs checkout); buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+graph-exists, with all 4 negative cases byte-identical off, orthogonally across worker/manager/plain roles; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's C3 hook ingests the project's MAIN repoPath (not the worktree) exactly once, after which buildMcpServers mounts it and a second spawn skips re-ingesting — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape MCP wiring (card C2 rewrite, e068a2ab): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeGraphPath derives ONE project-wide graph file; codescapeMcpServer clean-skips until that file exists then returns a real stdio entry (process.execPath-wrapped for a .mjs checkout); buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+graph-exists, with all 4 negative cases byte-identical off, orthogonally across worker/manager/plain roles; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's C3 hook ingests the project's MAIN repoPath (not the worktree) exactly once, after which buildMcpServers mounts it and a second spawn skips re-ingesting; card 8dc5ebb9: codescapeBinCandidate/resolveCodescapeBin are DB-first with an env fallback (proven at the resolver level AND end-to-end through buildMcpServers), a blank DB path or omitted/empty integrationPaths is byte-identical to today, hostToolBinExists backs the /api/integrations detect read for both resolver shapes, and a REAL cross-process spawn proves the direct-launch (non-.mjs) shape actually runs — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

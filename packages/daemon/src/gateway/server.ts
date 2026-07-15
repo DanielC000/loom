@@ -68,6 +68,7 @@ import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from ".
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
 import { routeTier, isTrustTierHookActive, tlsRequirementSatisfied } from "./trust-tier.js";
 import { createRemoteRateLimiter } from "./remote-rate-limit.js";
+import { detectIntegrations } from "../integrations/detect.js";
 
 const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
 
@@ -3219,6 +3220,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return { ok: true, override: mv.value };
   });
+
+  // --- Host-tool integrations (card 8dc5ebb9): live detect/validate. HUMAN-only loopback REST, NOT an
+  // MCP tool — no agent tool anywhere exposes this (mirrors the python-provisioning / capability status
+  // reads above). READ-ONLY: writing a path goes through the EXISTING PATCH /api/platform/config above
+  // (the `integrations` key just slots into that same validator) — no separate write endpoint needed.
+  // Derives each tool's state by calling the SAME resolver the real spawn path uses, so this can never
+  // drift from actual spawn behavior; the OD reachability probe is a bounded async TCP check that stays
+  // OFF the synchronous spawn hot path entirely (see integrations/detect.ts).
+  app.get("/api/integrations", async () => ({ integrations: await detectIntegrations(deps.db.getPlatformConfig()) }));
 
   app.post("/api/projects/:id/agents", async (req, reply) => {
     const projectId = (req.params as { id: string }).id;

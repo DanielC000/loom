@@ -380,6 +380,12 @@ async function main(): Promise<void> {
     // than throwing into the spawn hot path — the capability just spawns without its credential.
     getCapabilityCatalog: () => db.listCapabilityDefs(),
     resolveConnectionSecret: (connectionId: string) => { try { return getSecretForUse(db, connectionId); } catch { return undefined; } },
+    // Card 8dc5ebb9: DB-first host-tool integration paths — read LIVE per-spawn (like the capability
+    // catalog above), never boot-bound, so a Settings change reaches the very next new session.
+    getIntegrationPaths: () => {
+      const i = db.getPlatformConfig().integrations;
+      return { openDesign: i?.openDesign?.path, codescape: i?.codescape?.path };
+    },
   });
 
   const control = new OrchestrationControl(); // §17a safety rails (pause/kill); in-memory by design

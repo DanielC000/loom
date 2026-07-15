@@ -13,11 +13,11 @@ import {
   type CapabilityProvisionKind,
   GOOGLE_ANALYTICS_SCOPE_PRESETS,
 } from "@loom/shared";
-import { api, type ProjectPatchError } from "../lib/api";
+import { api, type ProjectPatchError, type IntegrationStatus } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Badge, Chip } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
-import { color, font } from "../theme";
+import { color, font, tone, type Tone } from "../theme";
 
 // Project-scoped settings — edit the per-project config OVERRIDE (deep-partial of ResolvedConfig).
 // Scoped to the header's active project; switching it re-scopes (the editor is keyed by project id).
@@ -452,6 +452,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Boot-time-gated by design: a flip here needs a daemon restart to start/stop the ticker (see the
   // banner above and the Schedules page hint).
   const [schedulerEnabled, setSchedulerEnabled] = useState(triStr(override.schedulerEnabled));
+  // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
+  // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
+  const [openDesignPath, setOpenDesignPath] = useState(override.integrations?.openDesign?.path ?? "");
+  const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
 
   // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
@@ -467,6 +471,18 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     if (coalesceAgentMsgs !== "inherit") o.coalesceAgentMessages = coalesceAgentMsgs === "true";
     if (operatorEnabled !== "inherit") o.operatorEnabled = operatorEnabled === "true";
     if (schedulerEnabled !== "inherit") o.schedulerEnabled = schedulerEnabled === "true";
+    // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
+    // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
+    // persisted one wholesale. Omitting it when both paths are blank (the old behavior) meant clearing the
+    // last configured path left the stale path persisted forever — an exec-surface path a user removed
+    // must actually clear. Always resending both tools' CURRENT state (blank ⇒ `{}`, no `path`) makes a
+    // clear-to-blank take effect, while a save that never touched integrations at all just resends the
+    // unchanged persisted value (idempotent, since openDesignPath/codescapePath are seeded from — and
+    // stay in sync with — the loaded override).
+    o.integrations = {
+      openDesign: openDesignPath.trim() ? { path: openDesignPath.trim() } : {},
+      codescape: codescapePath.trim() ? { path: codescapePath.trim() } : {},
+    };
     return o;
   }
 
@@ -578,6 +594,21 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         </label>
       </Panel>
 
+      <Panel>
+        <SectionLabel>Integrations</SectionLabel>
+        <Hint>
+          Optional host-tool paths (a host EXEC surface, human-only — never an agent MCP write). A new
+          session picks up a change here immediately, no daemon restart needed. Blank falls back to the
+          matching env var (LOOM_OPEN_DESIGN_BIN / LOOM_CODESCAPE_BIN) for headless/CI setups.
+        </Hint>
+        <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
+          <IntegrationRow slug="openDesign" label="Open Design" path={openDesignPath} setPath={setOpenDesignPath}
+            placeholder="absolute path to OD's od entry (od.mjs / od.exe)" />
+          <IntegrationRow slug="codescape" label="Codescape" path={codescapePath} setPath={setCodescapePath}
+            placeholder="inherit (PATH: codescape)" />
+        </div>
+      </Panel>
+
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save"}
@@ -593,6 +624,45 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         )}
       </div>
     </div>
+  );
+}
+
+// One row per host-tool integration (card 8dc5ebb9): a path Input (this row's slice of the shared
+// GlobalConfigForm save/dirty state above — no per-row save) + a live "detected/not-found/unreachable"
+// badge read from GET /api/integrations, polled while the Settings page is mounted (existsSync + OD's
+// bounded TCP probe are both cheap, so a light interval is fine — mirrors MarkitdownProvisioning's poll
+// in Profiles.tsx, though that one narrows to `installing` only since a venv build is a one-time event).
+const INTEGRATION_TONE: Record<IntegrationStatus["state"], Tone> = { detected: "phosphor", "not-found": "muted", unreachable: "amber" };
+const INTEGRATION_LABEL: Record<IntegrationStatus["state"], string> = { detected: "detected", "not-found": "not found", unreachable: "unreachable" };
+function IntegrationRow({ slug, label, path, setPath, placeholder }:
+  { slug: IntegrationStatus["slug"]; label: string; path: string; setPath: (v: string) => void; placeholder: string }) {
+  const q = useQuery({
+    queryKey: ["integrations"],
+    queryFn: api.integrations,
+    refetchInterval: 15000,
+  });
+  const status = q.data?.integrations.find((s) => s.slug === slug);
+  // A "not-found" badge reads as neutral (not an error) when nothing is configured at all (source
+  // "none") — that's the common case for most users (OD/Codescape simply aren't installed).
+  const t = status ? (status.state === "not-found" && status.source === "none" ? "muted" : INTEGRATION_TONE[status.state]) : "muted";
+  const accent = tone[t];
+  // The label span is a DIRECT child of this <label> (like every other field on this page) so the e2e
+  // spec's `label:has(> span:text-is(...))` locator convention finds this field precisely.
+  return (
+    <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+      <span style={fieldLabel}>{label}</span>
+      {status && (
+        <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11,
+          color: accent, textTransform: "uppercase", letterSpacing: "0.06em" }}>
+          <span aria-hidden style={{ width: 7, height: 7, borderRadius: 7, background: accent, display: "inline-block" }} />
+          {INTEGRATION_LABEL[status.state]}
+        </span>
+      )}
+      <Input value={path} onChange={(e) => setPath(e.target.value)} spellCheck={false} placeholder={placeholder} />
+      {status?.detail && (
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>{status.detail}</span>
+      )}
+    </label>
   );
 }
 

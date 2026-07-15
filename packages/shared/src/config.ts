@@ -470,6 +470,30 @@ export interface ConnectionsGuardConfig {
 }
 
 /**
+ * A single optional host-tool integration's DB-persisted configuration — today just an absolute PATH to
+ * the tool's own executable/entry script (a host EXEC fact, exactly like `obsidian.path`/
+ * `python.interpreterPath`). `path` unset means "no DB override" — the resolver falls back to its own
+ * `LOOM_*_BIN` env var (or, for a PATH-resolvable tool like Codescape, a bare default name), never to a
+ * hardcoded path. See card 8dc5ebb9 (host-tool integrations: DB-persisted paths + Settings UI).
+ */
+export interface HostToolIntegrationConfig {
+  path?: string;
+}
+
+/**
+ * Daemon-global optional host-tool integration paths (Open Design, Codescape, …) — HOST-MACHINE facts,
+ * not per-project. Each named key is its own resolver's concern; this is deliberately a fixed, named
+ * shape (like `obsidian`/`python`/`codescape` above), NOT a generic `Record<string,...>`, so it keeps the
+ * same `.strict()` typo-guard every other config domain gets — adding a future tool means adding a new
+ * named key here + its own resolver, exactly like every other integration in this file. Default `{}` per
+ * tool (no DB path set) — see PLATFORM_DEFAULTS.platform.integrations.
+ */
+export interface IntegrationsConfig {
+  openDesign: HostToolIntegrationConfig;
+  codescape: HostToolIntegrationConfig;
+}
+
+/**
  * Daemon-global "platform" tuning grouping: rate-limit numbers, watcher cadences, operation timeouts.
  * NOT per-project — like `backup`/`schedulerEnabled`, the daemon shares ONE of these. The daemon
  * supplies an optional global override (its SQLite-persisted singleton blob) as the 2nd arg to
@@ -481,6 +505,8 @@ export interface PlatformConfig {
   timeouts: TimeoutConfig;
   /** P2 authenticated-request bounds + per-connection rate guard. See ConnectionsGuardConfig. */
   connections: ConnectionsGuardConfig;
+  /** Host-tool integration paths (Open Design, Codescape, …). See IntegrationsConfig. */
+  integrations: IntegrationsConfig;
   /**
    * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
    * inbound messages queue, should an AGENT/human-authored message (a manager→worker direction, a
@@ -648,6 +674,8 @@ export interface PlatformConfigOverride {
   timeouts?: Partial<TimeoutConfig>;
   /** See PlatformConfig.connections. */
   connections?: Partial<ConnectionsGuardConfig>;
+  /** See PlatformConfig.integrations. Deep-partial: setting one tool's path leaves the other untouched. */
+  integrations?: { openDesign?: HostToolIntegrationConfig; codescape?: HostToolIntegrationConfig };
   /** See PlatformConfig.coalesceAgentMessages. */
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
@@ -715,6 +743,9 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
     // P2 authenticated-request bounds: 20s timeout, 1MB response cap, 30 req/5min per connection.
     connections: { requestTimeoutMs: 20000, maxResponseBytes: 1000000, rateLimitMax: 30, rateLimitWindowMs: 300000 },
+    // No DB path set for either tool by default — each resolver falls back to its own LOOM_*_BIN env var
+    // (card 8dc5ebb9). Byte-identical-when-absent: an empty override here changes nothing vs. today.
+    integrations: { openDesign: {}, codescape: {} },
     // Default false = deliver agent/human messages one-per-turn (the 2026-07-03 owner-directed fix).
     coalesceAgentMessages: false,
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
@@ -979,6 +1010,10 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       maxResponseBytes: po?.connections?.maxResponseBytes ?? d.connections.maxResponseBytes,
       rateLimitMax: po?.connections?.rateLimitMax ?? d.connections.rateLimitMax,
       rateLimitWindowMs: po?.connections?.rateLimitWindowMs ?? d.connections.rateLimitWindowMs,
+    },
+    integrations: {
+      openDesign: { path: po?.integrations?.openDesign?.path ?? d.integrations.openDesign.path },
+      codescape: { path: po?.integrations?.codescape?.path ?? d.integrations.codescape.path },
     },
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,

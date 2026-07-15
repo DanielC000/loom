@@ -27,7 +27,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { execSync } from "node:child_process";
+import { execSync, execFileSync } from "node:child_process";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -53,7 +53,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveProfile, resolveProfileCapabilities } = await import("@loom/shared");
 const { agentProfileKeyError, validateProfile } = await import("../dist/profiles/validate.js");
-const { isLoomDev } = await import("../dist/paths.js");
+const { isLoomDev, resolveHostToolBin } = await import("../dist/paths.js");
 
 const AGENT = { startupPrompt: "agent own prompt" };
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -79,8 +79,49 @@ check("(resolver) LOOM_OPEN_DESIGN_BIN absolute but missing on disk ⇒ null (cl
 process.env.LOOM_OPEN_DESIGN_BIN = fakeCli;
 const resolved = openDesignMcpServer();
 check("(resolver) LOOM_OPEN_DESIGN_BIN absolute + existing ⇒ a stdio entry", resolved?.type === "stdio");
-check("(resolver) command is the OD binary ITSELF (no process.execPath wrapper)", resolved?.command === fakeCli);
-check("(resolver) args are ['mcp']", JSON.stringify(resolved?.args) === JSON.stringify(["mcp"]));
+// Card 8dc5ebb9 fix (OD residual risk 1): OD ships as a node ESM script (apps/daemon/bin/od.mjs), which
+// direct-launch (the PRE-fix behavior) fails to exec on Windows — resolveHostToolBin now wraps a
+// `.js`/`.mjs`/`.cjs` bin in process.execPath instead of launching it directly.
+check("(resolver) a .mjs OD checkout is wrapped in process.execPath (NOT launched directly)", resolved?.command === process.execPath);
+check("(resolver) args are [<fakeCli>, 'mcp']", JSON.stringify(resolved?.args) === JSON.stringify([fakeCli, "mcp"]));
+
+// ===================== DB-first, env-fallback precedence (card 8dc5ebb9) =====================
+{
+  // DB path set ⇒ wins over LOOM_OPEN_DESIGN_BIN (still pointed at fakeCli above).
+  const otherFakeCli = path.join(__dirname, "fixtures", "fake-open-design-cli-2.mjs");
+  fs.copyFileSync(fakeCli, otherFakeCli);
+  const viaDb = openDesignMcpServer(otherFakeCli);
+  check("(precedence) a DB path wins over LOOM_OPEN_DESIGN_BIN", viaDb?.args?.[0] === otherFakeCli);
+  // A blank/whitespace DB path is treated as absent — falls through to env, not a literal "" bin.
+  const blankDb = openDesignMcpServer("   ");
+  check("(precedence) a blank DB path falls back to the env var", blankDb?.args?.[0] === fakeCli);
+  // Neither DB nor env set ⇒ null (today's clean-skip, unchanged).
+  const savedEnv = process.env.LOOM_OPEN_DESIGN_BIN;
+  delete process.env.LOOM_OPEN_DESIGN_BIN;
+  check("(precedence) neither DB path nor env set ⇒ null (clean-skip)", openDesignMcpServer(undefined) === null);
+  process.env.LOOM_OPEN_DESIGN_BIN = savedEnv;
+  fs.rmSync(otherFakeCli, { force: true });
+}
+
+// ===================== REAL cross-process spawn: both resolveHostToolBin shapes actually run =====================
+{
+  // Node-script shape: the resolved {command, args} for the .mjs fixture ACTUALLY runs via node when
+  // invoked for real (not just object-shape-asserted) — proves the process.execPath wrap genuinely works,
+  // the real substance of the Windows-OD fix (direct-launching a bare .mjs would fail here on Windows).
+  let scriptShapeRan = false;
+  try { execFileSync(resolved.command, resolved.args, { stdio: "pipe" }); scriptShapeRan = true; } catch { /* reported as a failed check below */ }
+  check("(real-spawn) the .mjs-shape {command,args} actually runs (node executes the fixture, exits 0)", scriptShapeRan);
+
+  // Plain-binary shape: process.execPath itself stands in for a compiled/PATH tool binary (it has no
+  // .js/.mjs/.cjs suffix, so resolveHostToolBin resolves it unwrapped — the SAME shape a real compiled OD
+  // `.exe`/PATH binary would take). Feed it a trivial exit script as OUR OWN test-side args (never part of
+  // resolveHostToolBin's returned args, which are always [] for this shape) to prove a direct launch works.
+  const direct = resolveHostToolBin(process.execPath);
+  check("(real-spawn) a non-.mjs bin resolves UNWRAPPED (direct-launch shape)", direct.command === process.execPath && direct.args.length === 0);
+  let directShapeRan = false;
+  try { execFileSync(direct.command, [...direct.args, "-e", "process.exit(0)"], { stdio: "pipe" }); directShapeRan = true; } catch { /* reported as a failed check below */ }
+  check("(real-spawn) the direct-launch shape {command,args} actually runs", directShapeRan);
+}
 
 // ===================== PUBLIC, un-gated: OD mounts on a plain non-dev build ========
 check("(public) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
@@ -110,6 +151,21 @@ check("(a) [PRIMARY CASE] openDesign=true + no OD install (LOOM_OPEN_DESIGN_BIN 
 check("(a) [PRIMARY CASE] the rest of the spawn config is otherwise byte-identical to a no-flag spawn",
   JSON.stringify(onNoBin) === JSON.stringify(noFlag));
 process.env.LOOM_OPEN_DESIGN_BIN = fakeCli; // restore for the rest of the test
+
+// ===================== byte-identical-when-absent: integrationPaths omitted vs. explicitly empty =====================
+{
+  const withEmptyIntegrationPaths = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", openDesign: true, integrationPaths: {} });
+  check("(byte-identical) integrationPaths:{} is byte-identical to integrationPaths omitted entirely",
+    JSON.stringify(withEmptyIntegrationPaths) === JSON.stringify(on));
+  // A DB path threaded through integrationPaths wins over the env var (still fakeCli) — mirrors the
+  // resolver-level precedence check above, but exercised end-to-end through buildMcpServers.
+  const otherFakeCli2 = path.join(__dirname, "fixtures", "fake-open-design-cli-3.mjs");
+  fs.copyFileSync(fakeCli, otherFakeCli2);
+  const withDbPath = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", openDesign: true, integrationPaths: { openDesign: otherFakeCli2 } });
+  check("(precedence, e2e) integrationPaths.openDesign wins over LOOM_OPEN_DESIGN_BIN through buildMcpServers",
+    withDbPath["open-design"]?.args?.[0] === otherFakeCli2);
+  fs.rmSync(otherFakeCli2, { force: true });
+}
 
 // a plain (role-null) OD session still gets the server (OD is orthogonal to role).
 const plainOd = buildMcpServers({ sessionId: "s2", port: 4317, openDesign: true });
@@ -220,6 +276,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — opt-in Open Design: resolveProfile backstops/passes openDesign; the open-design stdio MCP is injected iff openDesign AND LOOM_OPEN_DESIGN_BIN resolves (clean-skip otherwise, byte-identical off — the primary real-world case since OD isn't installed on most hosts); never gated by isLoomDev() (public OSS); the allowlist/profile-validation/agent-forbidden posture holds; the flag threads through startNew/resume/spawnWorker + the persisted row — claude-free, network-free."
+  ? "\n✅ ALL PASS — opt-in Open Design: resolveProfile backstops/passes openDesign; the open-design stdio MCP is injected iff openDesign AND LOOM_OPEN_DESIGN_BIN resolves (clean-skip otherwise, byte-identical off — the primary real-world case since OD isn't installed on most hosts); never gated by isLoomDev() (public OSS); the allowlist/profile-validation/agent-forbidden posture holds; the flag threads through startNew/resume/spawnWorker + the persisted row; card 8dc5ebb9: a DB-persisted path (integrations.openDesign.path) wins over the env fallback (resolver-level AND end-to-end through buildMcpServers), a blank DB path/absent integrationPaths is byte-identical to today, and resolveHostToolBin's shape-aware wrap is proven with a REAL cross-process spawn of both shapes (the .mjs script wrapped in process.execPath — the actual Windows-OD fix — and a direct-launch binary stand-in) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

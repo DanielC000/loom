@@ -408,11 +408,24 @@ const remoteAccessOverride = z.object({
     }).strict(),
   }).strict().optional(),
 }).strict();
+// Host-tool integration paths (card 8dc5ebb9): a HOST EXEC surface, exactly like obsidian.path /
+// python.interpreterPath above — HUMAN-only by construction, since `platformConfigOverrideSchema` has
+// (like every other `platform` sub-group) NO agent-facing variant at all: there is no agent MCP tool
+// anywhere that calls `db.setPlatformConfig` (only the human REST PATCH /api/platform/config does), so
+// `integrations` reaches an agent no differently than gateCommand reaches one via the project schema —
+// it simply isn't reachable. Named keys (not a generic record) mirror `obsidian`/`python`/`codescape`
+// above, keeping the `.strict()` typo-guard.
+const hostToolIntegrationOverride = z.object({ path: z.string().min(1).optional() }).strict();
+const integrationsOverride = z.object({
+  openDesign: hostToolIntegrationOverride.optional(),
+  codescape: hostToolIntegrationOverride.optional(),
+}).strict();
 const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),
   watchers: watchersOverride.optional(),
   timeouts: timeoutsOverride.optional(),
   connections: connectionsOverride.optional(),
+  integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
   companionVoiceEnabled: z.boolean().optional(),
   // Bucket 2b Elevated Operator gate. HUMAN-only, like every other `platform` sub-group — there is no
