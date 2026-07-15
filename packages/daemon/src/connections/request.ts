@@ -31,7 +31,7 @@
  * call directly in tests.
  */
 import type { ConnectionsGuardConfig } from "@loom/shared";
-import { getConnectionMetadata, getSecretForUse, type ConnectionsDbStore } from "./store.js";
+import { getConnectionMetadata, getSecretForUse, isConnectionUsableByProject, type ConnectionsDbStore } from "./store.js";
 import { ensureFreshOAuthToken } from "./oauth.js";
 
 export interface AuthenticatedRequestInput {
@@ -172,12 +172,20 @@ export interface AuthenticatedRequestDeps {
  * session's pinned allowlist (mcp/server.ts resolves it from the session row and passes it in) — this is
  * the server-side double-check that backstops the tools/list omission (defense in depth: even if a
  * session somehow reached this function for a connection outside its grant, it is rejected here too).
+ *
+ * `callerProjectId` (card f2abce7e, project-scoped connections) is the CALLING session's own project —
+ * threaded in server-side (mcp/server.ts's TaskMcpRouter already resolves session→project), never agent-
+ * supplied. A project-scoped connection resolves ONLY when it matches (`isConnectionUsableByProject`); a
+ * global (`projectId: null`) connection resolves regardless, exactly as every connection did before this
+ * card. Optional + defaults to `undefined` so every existing caller/test that omits it is unaffected
+ * (those connections are all created global, which passes the check for any caller).
  */
 export async function performAuthenticatedRequest(
   deps: AuthenticatedRequestDeps,
   sessionConnections: string[],
   guard: ConnectionsGuardConfig,
   input: AuthenticatedRequestInput,
+  callerProjectId?: string | null,
 ): Promise<AuthenticatedRequestResult> {
   const connectionId = input?.connection;
   if (typeof connectionId !== "string" || !connectionId) {
@@ -188,6 +196,13 @@ export async function performAuthenticatedRequest(
   }
   const meta = getConnectionMetadata(deps.db, connectionId);
   if (!meta) return { ok: false, error: "connection not found" };
+  // Fail-closed trust boundary: a cross-project session whose profile allowlists this id (e.g. a reused
+  // Profile, or an owner misconfiguration) must resolve NOTHING for a project-scoped connection it doesn't
+  // own. "connection not found" (not a scope-specific message) avoids confirming a scoped connection's
+  // existence to a caller outside its project.
+  if (!isConnectionUsableByProject(meta.projectId, callerProjectId ?? null)) {
+    return { ok: false, error: "connection not found" };
+  }
 
   const pathCheck = validatePath(input.path);
   if (!pathCheck.ok) return { ok: false, error: pathCheck.error };

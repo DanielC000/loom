@@ -839,7 +839,9 @@ export const api = {
   // human-only writers). Reads are ALWAYS metadata only (name/host/authScheme/createdAt); the secret is
   // write-only (accepted on create, never returned by any read). ---
   connections: () => get<ConnectionMetadata[]>("/api/connections"),
-  createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) =>
+  // `projectId` (card f2abce7e) scopes the connection to that ONE project — usable only by its own
+  // sessions; omitted/null creates a GLOBAL connection, reachable by any profile that allowlists it.
+  createConnection: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null }) =>
     postErr<ConnectionMetadata>("/api/connections", b),
   deleteConnection: (id: string) => delErr<{ ok: boolean }>(`/api/connections/${encodeURIComponent(id)}`),
   // agent-tooling P5a: register a new oauth2 connection (provider app registration — no token exchange
@@ -848,7 +850,7 @@ export const api = {
   // `GET /oauth/callback` completes the exchange once the provider redirects back). Both human-only REST.
   createOAuthConnection: (b: {
     name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string;
-    authUrl?: string; tokenUrl?: string; scopes?: string[];
+    authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId?: string | null;
   }) => postErr<ConnectionMetadata>("/api/connections/oauth", b),
   initiateOAuthConsent: (id: string) =>
     postErr<{ authUrl: string }>(`/api/connections/${encodeURIComponent(id)}/oauth/consent`),

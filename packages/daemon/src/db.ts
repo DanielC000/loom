@@ -122,6 +122,8 @@ export interface ConnectionRow {
   tokenExpiresAt: string | null;
   /** `oauth2` rows only — true when a refresh attempt failed and consent must be redone. Always false otherwise. */
   oauthNeedsReauth: boolean;
+  /** Project scope (card f2abce7e): null = global (every pre-f2abce7e row), else bound to one project. */
+  projectId: string | null;
 }
 
 /**
@@ -865,7 +867,16 @@ CREATE TABLE IF NOT EXISTS connections (
   token_url TEXT,
   scopes TEXT,
   token_expires_at TEXT,
-  oauth_needs_reauth INTEGER NOT NULL DEFAULT 0
+  oauth_needs_reauth INTEGER NOT NULL DEFAULT 0,
+  -- Project scope (card f2abce7e). NULL = GLOBAL — reachable by any profile that allowlists it, exactly as
+  -- every connection behaved before this column existed (every pre-f2abce7e row backfills to NULL here).
+  -- Set = usable ONLY by that project's own sessions (see connections/store.ts isConnectionUsableByProject
+  -- and the resolution seams in connections/request.ts + index.ts's resolveConnectionSecret) — fail-closed:
+  -- a cross-project session whose profile allowlists this id resolves NOTHING. Added to existing DBs by
+  -- migrateConnections() below (fresh installs already have it via this CREATE TABLE). No FK (matches
+  -- companion_capability_grants.project_id) — a deleted project simply orphans its scoped connections as
+  -- unreachable rather than needing a cascade.
+  project_id TEXT
 );
 -- Owner-added capability catalog rows (agent-tooling epic P4). The two BUILTIN capabilities
 -- (browser-testing/document-conversion) are NOT rows here — they stay special-cased in buildMcpServers,
@@ -1306,10 +1317,11 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   provision_binding_state: "TEXT",
 };
 
-/** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a); applied to existing DBs
- *  by migrateConnections() (fresh installs already have them via CREATE TABLE). All nullable/defaulted —
- *  a pre-P5a row (necessarily api-key/bearer) never had any oauth2-shaped state, so it backfills to
- *  NULL/0 in place, byte-identical to today. */
+/** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
+ *  phase (card f2abce7e); applied to existing DBs by migrateConnections() (fresh installs already have
+ *  them via CREATE TABLE). All nullable/defaulted — a pre-P5a row (necessarily api-key/bearer) never had
+ *  any oauth2-shaped state, and a pre-f2abce7e row never had a scope, so both backfill to NULL/0 in place,
+ *  byte-identical to today (every legacy connection reads as global). */
 const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
   provider: "TEXT",
   client_id: "TEXT",
@@ -1318,6 +1330,7 @@ const CONNECTION_ADDED_COLUMNS: Record<string, string> = {
   scopes: "TEXT",
   token_expires_at: "TEXT",
   oauth_needs_reauth: "INTEGER NOT NULL DEFAULT 0",
+  project_id: "TEXT",
 };
 
 type Row = Record<string, unknown>;
@@ -2538,10 +2551,11 @@ export class Db {
    * Read one connection by EXACT name match (with the ciphertext blob), or undefined when absent —
    * the update-existing-vs-create-new lookup for credential auto-provisioning v1 (card 193de09e): a
    * repeated `provisionTo` naming the same Connection rotates its secret in place instead of duplicating
-   * the row. `name` is currently matched GLOBALLY (connections have no scope yet) — card f2abce7e adds a
-   * project scope to this lookup later; this seam is deliberately narrow (name-only) so that extension
-   * doesn't need to restructure the caller. Case-sensitive exact match (mirrors createConnection's own
-   * trimmed-string identity, no fuzzy/collation matching).
+   * the row. `name` is matched GLOBALLY (across every scope) — the returned row's own `projectId` is what
+   * `provisionConnection` (connections/store.ts, card f2abce7e) inspects to decide collision-refuse vs.
+   * scoped-rotate; this lookup itself stays scope-blind by design so that caller owns the whole policy.
+   * Case-sensitive exact match (mirrors createConnection's own trimmed-string identity, no fuzzy/collation
+   * matching).
    */
   getConnectionByName(name: string): ConnectionRow | undefined {
     const r = this.db.prepare("SELECT * FROM connections WHERE name = ? ORDER BY created_at, rowid LIMIT 1").get(name) as Row | undefined;
@@ -2558,16 +2572,19 @@ export class Db {
   createConnection(input: {
     name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string;
     provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
+    /** Project scope (card f2abce7e); omitted/null = global (today's default behavior). */
+    projectId?: string | null;
   }): ConnectionRow {
     const row: ConnectionRow = {
       id: randomUUID(), name: input.name, host: input.host, authScheme: input.authScheme,
       secretBlob: input.secretBlob, createdAt: new Date().toISOString(),
       provider: input.provider ?? null, clientId: input.clientId ?? null, authUrl: input.authUrl ?? null,
       tokenUrl: input.tokenUrl ?? null, scopes: input.scopes ?? null, tokenExpiresAt: null, oauthNeedsReauth: false,
+      projectId: input.projectId ?? null,
     };
     this.db.prepare(
-      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth)
-       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth)`,
+      `INSERT INTO connections (id, name, host, auth_scheme, secret_blob, created_at, provider, client_id, auth_url, token_url, scopes, token_expires_at, oauth_needs_reauth, project_id)
+       VALUES (@id, @name, @host, @authScheme, @secretBlob, @createdAt, @provider, @clientId, @authUrl, @tokenUrl, @scopes, @tokenExpiresAt, @oauthNeedsReauth, @projectId)`,
     ).run({ ...row, oauthNeedsReauth: row.oauthNeedsReauth ? 1 : 0 });
     return row;
   }
@@ -5419,6 +5436,7 @@ function toConnectionRow(r0: unknown): ConnectionRow {
     scopes: (r.scopes as string | null) ?? null,
     tokenExpiresAt: (r.token_expires_at as string | null) ?? null,
     oauthNeedsReauth: (r.oauth_needs_reauth as number | null) === 1,
+    projectId: (r.project_id as string | null) ?? null,
   };
 }
 /** Canonical (lexicographically smaller-id-first) ordering for a symmetric project_links pair. */

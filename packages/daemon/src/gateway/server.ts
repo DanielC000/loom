@@ -1855,6 +1855,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // invalid input) — this handler only narrows the body's TYPE (so a non-string can't reach the store),
   // then maps the store's thrown validation error to a 400. See that module's doc for why the invariant
   // must not live only here. ---
+  // Card f2abce7e: an optional `projectId` on the body scopes the new connection to that ONE project
+  // (usable only by its own sessions — see `connections/store.ts` `isConnectionUsableByProject`); omitted
+  // (or explicit `null`) creates a GLOBAL connection, byte-identical to every pre-f2abce7e create. Rejects
+  // an unknown project id up front (404-style 400) rather than silently creating an unreachable orphan scope.
+  const resolveScopeProjectId = (b: Record<string, unknown>, reply: FastifyReply): { ok: true; projectId: string | null } | { ok: false } => {
+    if (b.projectId === undefined || b.projectId === null) return { ok: true, projectId: null };
+    if (typeof b.projectId !== "string" || !deps.db.getProject(b.projectId)) {
+      reply.code(400).send({ error: "projectId, when given, must be an existing project's id" });
+      return { ok: false };
+    }
+    return { ok: true, projectId: b.projectId };
+  };
   app.get("/api/connections", async () => listConnections(deps.db));
   app.post("/api/connections", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
@@ -1864,8 +1876,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.authScheme !== "api-key" && b.authScheme !== "bearer") {
       return reply.code(400).send({ error: "authScheme must be 'api-key' or 'bearer'" });
     }
+    const scope = resolveScopeProjectId(b, reply);
+    if (!scope.ok) return;
     try {
-      const created = createConnection(deps.db, { name: b.name, host: b.host, authScheme: b.authScheme, secret: b.secret });
+      const created = createConnection(deps.db, { name: b.name, host: b.host, authScheme: b.authScheme, secret: b.secret, projectId: scope.projectId });
       return reply.code(201).send(created);
     } catch (err) {
       return reply.code(400).send({ error: (err as Error).message });
@@ -1916,10 +1930,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof authUrl !== "string" || typeof tokenUrl !== "string") {
       return reply.code(400).send({ error: "authUrl and tokenUrl are required for a custom provider" });
     }
+    const scope = resolveScopeProjectId(b, reply);
+    if (!scope.ok) return;
     try {
       const created = createOAuthConnection(deps.db, {
         name: b.name, host: b.host, provider: b.provider, clientId: b.clientId, clientSecret: b.clientSecret,
-        authUrl, tokenUrl, scopes,
+        authUrl, tokenUrl, scopes, projectId: scope.projectId,
       });
       return reply.code(201).send(created);
     } catch (err) {

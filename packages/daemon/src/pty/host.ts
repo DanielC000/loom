@@ -788,8 +788,10 @@ export function buildMcpServers(o: {
    *  grant that isn't one of the two reserved legacy slugs. Default []. */
   capabilityCatalog?: CapabilityDefRow[];
   /** Resolve a P1 connection id to its DECRYPTED secret (injected callback, never a live db handle) —
-   *  consulted only for a grant whose def has `requiresConnection` AND that carries a `connectionId`. */
-  resolveConnectionSecret?: (connectionId: string) => string | undefined;
+   *  consulted only for a grant whose def has `requiresConnection` AND that carries a `connectionId`.
+   *  Passed THIS spawn's own `projectId` (below) so a project-scoped connection (card f2abce7e) only ever
+   *  resolves for the project it's bound to — the callback fails closed on a scope mismatch. */
+  resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
   /** Card C2: the project's raw `codescape.enabled` flag — see the "codescape" mount below. */
   codescapeEnabled?: boolean;
   /** Card C2: the session's project id — resolves to the project's graph file (`codescapeGraphPath`). */
@@ -919,7 +921,7 @@ export function buildMcpServers(o: {
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' is enabled but not found in the catalog — spawning without it.`);
       continue;
     }
-    const connectionSecret = def.requiresConnection && grant.connectionId ? o.resolveConnectionSecret?.(grant.connectionId) : undefined;
+    const connectionSecret = def.requiresConnection && grant.connectionId ? o.resolveConnectionSecret?.(grant.connectionId, o.projectId) : undefined;
     const server = resolveCapabilityServer(def, {
       scratchDir: def.wantsScratchDir ? sessionScratchDir(o.sessionId) : undefined,
       connectionSecret,
@@ -2014,7 +2016,7 @@ export class PtyHost {
    * behaves byte-identically: the two BUILTIN capabilities never consult either callback.
    */
   private readonly getCapabilityCatalog: () => CapabilityDefRow[];
-  private readonly resolveConnectionSecret: (connectionId: string) => string | undefined;
+  private readonly resolveConnectionSecret: (connectionId: string, projectId?: string) => string | undefined;
   /**
    * Card 8dc5ebb9: read access to the DB-persisted host-tool integration paths
    * (`PlatformConfigOverride.integrations`), wired in by index.ts at boot (it holds `db`; PtyHost
@@ -2029,7 +2031,7 @@ export class PtyHost {
     opts?: {
       busyStaleMs?: number; coalesceAgentMessages?: boolean;
       getCapabilityCatalog?: () => CapabilityDefRow[];
-      resolveConnectionSecret?: (connectionId: string) => string | undefined;
+      resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
       getIntegrationPaths?: () => { openDesign?: string; codescape?: string };
     },
   ) {

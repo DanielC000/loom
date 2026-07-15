@@ -42,7 +42,7 @@ import { WakeService } from "./orchestration/wake.js";
 import { PollService } from "./orchestration/poll.js";
 import { EventTriggerService } from "./orchestration/event-triggers.js";
 import { performAuthenticatedRequest } from "./connections/request.js";
-import { getSecretForUse } from "./connections/store.js";
+import { getConnectionMetadata, getSecretForUse, isConnectionUsableByProject } from "./connections/store.js";
 import { ContextWatcher } from "./orchestration/context-watcher.js";
 import { IdleWatcher } from "./orchestration/idle-watcher.js";
 import { BusyWorkerWatcher } from "./orchestration/busy-worker-watcher.js";
@@ -379,7 +379,17 @@ async function main(): Promise<void> {
     // the rate-limit callback above). A failed decrypt (corrupt/wrong key) degrades to "no secret" rather
     // than throwing into the spawn hot path — the capability just spawns without its credential.
     getCapabilityCatalog: () => db.listCapabilityDefs(),
-    resolveConnectionSecret: (connectionId: string) => { try { return getSecretForUse(db, connectionId); } catch { return undefined; } },
+    // Card f2abce7e: fail-closed project scope check BEFORE decrypting — a project-scoped connection
+    // resolves ONLY when this spawn's own projectId matches (isConnectionUsableByProject; null on the
+    // connection = global, unchanged from today). A cross-project grant (a reused Profile, an owner
+    // misconfiguration) silently gets no secret, exactly like an unresolvable/revoked connection.
+    resolveConnectionSecret: (connectionId: string, projectId?: string) => {
+      try {
+        const meta = getConnectionMetadata(db, connectionId);
+        if (!meta || !isConnectionUsableByProject(meta.projectId, projectId ?? null)) return undefined;
+        return getSecretForUse(db, connectionId);
+      } catch { return undefined; }
+    },
     // Card 8dc5ebb9: DB-first host-tool integration paths — read LIVE per-spawn (like the capability
     // catalog above), never boot-bound, so a Settings change reaches the very next new session.
     getIntegrationPaths: () => {

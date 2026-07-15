@@ -251,7 +251,7 @@ export class TaskMcpRouter {
             body: z.union([z.string(), z.record(z.string(), z.any())]).optional(),
           },
         },
-        async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args)),
+        async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args, projectId)),
       );
     }
 

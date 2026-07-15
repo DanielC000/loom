@@ -706,14 +706,18 @@ function ConnectionsPanel() {
     queryKey: ["connections"],
     queryFn: () => api.connections(),
   });
+  // Project scope (card f2abce7e): loaded once here for BOTH the create form's scope selector and the
+  // list row's scope badge (project id -> name), same pattern as ProjectLinksPanel below.
+  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
+  const projectName = (id: string) => projects?.find((p) => p.id === id)?.name ?? id;
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
   const create = useMutation({
-    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => api.createConnection(b),
+    mutationFn: (b: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null }) => api.createConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
   const createOAuth = useMutation({
-    mutationFn: (b: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[] }) =>
+    mutationFn: (b: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId: string | null }) =>
       api.createOAuthConnection(b),
     onSuccess: () => { setAdding(false); invalidate(); },
   });
@@ -755,6 +759,7 @@ function ConnectionsPanel() {
             <ConnectionForm
               pending={create.isPending || createOAuth.isPending}
               error={(create.error ? (create.error as Error).message : null) ?? (createOAuth.error ? (createOAuth.error as Error).message : null)}
+              projects={projects ?? []}
               onSubmit={(v) => create.mutate(v)}
               onSubmitOAuth={(v) => createOAuth.mutate(v)}
               onCancel={() => { setAdding(false); create.reset(); createOAuth.reset(); }}
@@ -775,6 +780,7 @@ function ConnectionsPanel() {
                 <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, textTransform: "uppercase", letterSpacing: "0.06em" }}>
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
+                <Badge tone={c.projectId ? "cyan" : "phosphor"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
                 {status && <Badge tone={status.tone}>{status.label}</Badge>}
                 {c.authScheme === "oauth2" && c.scopes && c.scopes.length > 0 && (
                   <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
@@ -816,16 +822,20 @@ type ConnectorMode = "google-analytics" | "custom";
 // metadata-only + unenforced today, so the preset pins the headline GA4 Data API host and hides the field.
 const GA_PRESET_HOST = "analyticsdata.googleapis.com";
 
-function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
+function ConnectionForm({ pending, error, projects, onSubmit, onSubmitOAuth, onCancel }: {
   pending: boolean; error: string | null;
-  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string }) => void;
-  onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[] }) => void;
+  projects: { id: string; name: string }[];
+  onSubmit: (v: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId: string | null }) => void;
+  onSubmitOAuth: (v: { name: string; host: string; provider: OAuthProviderSlug; clientId: string; clientSecret: string; authUrl?: string; tokenUrl?: string; scopes?: string[]; projectId: string | null }) => void;
   onCancel: () => void;
 }) {
   const [mode, setMode] = useState<ConnectorMode>("google-analytics");
   const [name, setName] = useState("Google Analytics");
   const [host, setHost] = useState("");
   const [authScheme, setAuthScheme] = useState<ConnectionAuthScheme>("api-key");
+  // Project scope (card f2abce7e): "" = Global (every profile that allowlists it), else one project's id —
+  // usable ONLY by that project's own sessions. Applies to BOTH the api-key/bearer and oauth2 branches.
+  const [scopeProjectId, setScopeProjectId] = useState("");
   const [secret, setSecret] = useState("");
   const [provider, setProvider] = useState<OAuthProviderSlug>("google");
   const [clientId, setClientId] = useState("");
@@ -859,6 +869,7 @@ function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
       onSubmitOAuth({
         name: name.trim(), host: GA_PRESET_HOST, provider: "google",
         clientId: clientId.trim(), clientSecret: clientSecret.trim(), scopes,
+        projectId: scopeProjectId || null,
       });
       return;
     }
@@ -879,6 +890,7 @@ function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
       onSubmitOAuth({
         name: name.trim(), host: host.trim(), provider, clientId: clientId.trim(), clientSecret: clientSecret.trim(),
         authUrl: authUrl.trim() || undefined, tokenUrl: tokenUrl.trim() || undefined, scopes: scopes.length > 0 ? scopes : undefined,
+        projectId: scopeProjectId || null,
       });
       return;
     }
@@ -886,7 +898,7 @@ function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
       setLocalErr("Secret is required.");
       return;
     }
-    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim() });
+    onSubmit({ name: name.trim(), host: host.trim(), authScheme, secret: secret.trim(), projectId: scopeProjectId || null });
   };
 
   const modeBtn = (m: ConnectorMode, label: string) => (
@@ -902,6 +914,15 @@ function ConnectionForm({ pending, error, onSubmit, onSubmitOAuth, onCancel }: {
           {modeBtn("custom", "Custom")}
         </div>
       </div>
+
+      <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={fieldLabel}>Scope</span>
+        <Select value={scopeProjectId} onChange={(e) => setScopeProjectId(e.target.value)}>
+          <option value="">Global — any profile that allowlists it</option>
+          {projects.map((p) => <option key={p.id} value={p.id}>This project: {p.name}</option>)}
+        </Select>
+        <Hint>Global is reachable daemon-wide, exactly like today. Scoping to a project bounds the credential to that project's own sessions only.</Hint>
+      </label>
 
       {mode === "google-analytics" ? (
         <>

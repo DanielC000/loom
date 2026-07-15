@@ -29,6 +29,7 @@ export interface ConnectionsDbStore {
   createConnection(input: {
     name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string;
     provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
+    projectId?: string | null;
   }): ConnectionRow;
   deleteConnection(id: string): void;
   updateConnectionTokens(id: string, patch: { secretBlob: string; tokenExpiresAt: string | null }): void;
@@ -38,7 +39,7 @@ export interface ConnectionsDbStore {
 }
 
 function toMetadata(row: ConnectionRow): ConnectionMetadata {
-  const base: ConnectionMetadata = { id: row.id, name: row.name, host: row.host, authScheme: row.authScheme, createdAt: row.createdAt };
+  const base: ConnectionMetadata = { id: row.id, name: row.name, host: row.host, authScheme: row.authScheme, projectId: row.projectId, createdAt: row.createdAt };
   if (row.authScheme !== "oauth2") return base;
   return {
     ...base,
@@ -71,6 +72,20 @@ const CREATE_CONNECTION_SCHEMES: readonly ConnectionAuthScheme[] = ["api-key", "
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
+}
+
+/**
+ * The project-scoping trust-boundary check (card f2abce7e): may a session belonging to `callerProjectId`
+ * resolve a connection whose stored scope is `connectionProjectId`? `null` on the connection means GLOBAL
+ * — usable by any caller, project-bound or not (today's behavior, unchanged). A non-null connection scope
+ * is usable ONLY by the EXACT matching project — a caller with no project (`null`/`undefined`, e.g. a
+ * platform-tier session) or a DIFFERENT project always fails closed. Called at every secret-resolution seam
+ * (`connections/request.ts`'s `performAuthenticatedRequest`, `index.ts`'s `resolveConnectionSecret` for a
+ * P4 capability grant) — never trust an allowlist alone, since a cross-project Profile could allowlist an
+ * id it has no business reaching.
+ */
+export function isConnectionUsableByProject(connectionProjectId: string | null, callerProjectId: string | null | undefined): boolean {
+  return connectionProjectId === null || connectionProjectId === (callerProjectId ?? null);
 }
 
 /**
@@ -118,7 +133,7 @@ export function getConnectionMetadata(db: ConnectionsDbStore, id: string): Conne
  */
 export function createConnection(
   db: ConnectionsDbStore,
-  input: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string },
+  input: { name: string; host: string; authScheme: ConnectionAuthScheme; secret: string; projectId?: string | null },
   keyPath?: string,
 ): ConnectionMetadata {
   const v = validateConnectionInput(input);
@@ -128,6 +143,7 @@ export function createConnection(
     host: input.host.trim(),
     authScheme: input.authScheme,
     secretBlob: encryptSecret(input.secret.trim(), keyPath),
+    projectId: input.projectId ?? null,
   });
   return toMetadata(row);
 }
@@ -162,22 +178,37 @@ export function deleteConnection(db: ConnectionsDbStore, id: string): void {
  * SAME question effectively impossible, and this create-only refusal narrows the window further to two
  * DIFFERENT questions racing to create the identical name at the identical instant. Not worth a transaction
  * for that.
+ *
+ * SCOPED ROTATION (card f2abce7e unlocks this): when the caller passes `projectId` AND the existing
+ * same-name row is scoped to that EXACT project, "the connection I own" is now well-defined — rotate its
+ * secret in place via `updateConnectionSecret` (the reserved db-layer seam) instead of refusing. Every
+ * OTHER collision still refuses exactly as before: a GLOBAL existing row, a row scoped to a DIFFERENT
+ * project, or a caller with no `projectId` at all — so a project can never rotate a connection it doesn't
+ * itself own, and the original create-only posture is unchanged for every caller that omits `projectId`.
+ * Still guards failure mode (a) from the original design: rotation is refused (same collision error) when
+ * the existing same-scope row isn't `api-key` — an `oauth2` row's secret_blob is a JSON token bundle, and
+ * overwriting it with a plain api-key envelope while `authScheme` stayed `"oauth2"` would break the next
+ * `getOAuthTokenBundle` (`JSON.parse` on now-api-key ciphertext).
  */
 export function provisionConnection(
   db: ConnectionsDbStore,
-  input: { name: string; host: string; secret: string },
+  input: { name: string; host: string; secret: string; projectId?: string | null },
   keyPath?: string,
 ): ConnectionMetadata {
   const v = validateConnectionInput({ name: input.name, host: input.host, authScheme: "api-key", secret: input.secret });
   if (!v.ok) throw new Error(v.error);
   const existing = db.getConnectionByName(input.name.trim());
   if (existing) {
+    if (input.projectId && existing.projectId === input.projectId && existing.authScheme === "api-key") {
+      db.updateConnectionSecret(existing.id, encryptSecret(input.secret.trim(), keyPath));
+      return getConnectionMetadata(db, existing.id)!;
+    }
     throw new Error(
       `a Connection named "${input.name.trim()}" already exists — provisioning only creates NEW connections in v1. ` +
         "Rotate an existing one via the Connections settings UI instead.",
     );
   }
-  return createConnection(db, { name: input.name, host: input.host, authScheme: "api-key", secret: input.secret }, keyPath);
+  return createConnection(db, { name: input.name, host: input.host, authScheme: "api-key", secret: input.secret, projectId: input.projectId ?? null }, keyPath);
 }
 
 /**
@@ -255,6 +286,7 @@ export function createOAuthConnection(
   input: {
     name: string; host: string; provider: OAuthProviderSlug;
     clientId: string; clientSecret: string; authUrl: string; tokenUrl: string; scopes: string[];
+    projectId?: string | null;
   },
   keyPath?: string,
 ): ConnectionMetadata {
@@ -288,7 +320,7 @@ export function createOAuthConnection(
     name: input.name.trim(), host: input.host.trim(), authScheme: "oauth2",
     secretBlob: encryptSecret(JSON.stringify(bundle), keyPath),
     provider: input.provider, clientId: input.clientId.trim(), authUrl: input.authUrl.trim(), tokenUrl: input.tokenUrl.trim(),
-    scopes: input.scopes.join(" "),
+    scopes: input.scopes.join(" "), projectId: input.projectId ?? null,
   });
   return toMetadata(row);
 }

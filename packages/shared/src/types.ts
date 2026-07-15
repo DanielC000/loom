@@ -1350,6 +1350,13 @@ export interface ConnectionMetadata {
   /** The target host this connection's secret is scoped to (metadata only in P1 — no enforcement here). */
   host: string;
   authScheme: ConnectionAuthScheme;
+  /**
+   * Project scope (card f2abce7e): `null` = GLOBAL — reachable by any profile that allowlists it, exactly
+   * as every connection behaved before this field existed. A project id BOUNDS this connection's blast
+   * radius to that one project — a session whose own project doesn't match resolves NOTHING for it, even
+   * if its profile allowlists the id (fail-closed; see `connections/store.ts` `isConnectionUsableByProject`).
+   */
+  projectId: string | null;
   createdAt: string;
   /** `oauth2` rows only — the provider template this connection was registered under. */
   provider?: OAuthProviderSlug;
