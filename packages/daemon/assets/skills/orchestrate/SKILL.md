@@ -414,6 +414,15 @@ mid-report — before sending anything.
    Maintain an **`_Index.md`** map-of-content at the vault root: **read `_Index.md` to locate a note
    instead of Globbing or Bash `find`/`ls`**, and add/update the note's line in it when you create or
    move a note. Wikilinks resolve by note name, so moving a note between folders never breaks a link.
+
+   **Project memory — the SHARED nugget store, distinct from your resume doc.** Your resume doc is YOUR lineage
+   handoff (full state, for your successor). `memory_write` (`mcp__loom-tasks__memory_write`) instead writes a
+   project-scoped note SHARED across EVERY agent/session and auto-injected into each kickoff. When you or a worker
+   establishes a durable cross-session fact any future agent should have — a verified invariant, a load-bearing
+   gotcha, a settled decision + why, a "this is already done/closed" fact — capture it as a compact titled note
+   under a stable `key` (same key UPDATES in place; ≤4000 bytes, curated, not task chatter). Pin only a rare
+   always-relevant fact; leave the rest unpinned to surface by relevance, and `memory_forget` a note gone stale.
+   The recall/injection side is automatic — writing the nuggets is the half that makes it pay off.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

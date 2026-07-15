@@ -158,6 +158,16 @@ map-of-content at the vault root (read `_Index.md` to find an existing note rath
 the `CLAUDE.md` pins by exact path stay at the root. Wikilinks resolve by note name, so the folder never
 breaks a `[[link]]`.
 
+**Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent on
+this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won root-cause or
+repro — capture it with `memory_write` (`mcp__loom-tasks__memory_write`): a stable `key` (re-writing the same
+key UPDATES in place — refine, don't mint near-duplicates), a short `title`, and a compact `text` (≤4000 bytes,
+a curated fact — not a dumping ground). This store is SHARED across every session on the project and its
+relevant notes auto-inject into each kickoff, so one small note spares a successor or sibling from re-deriving
+what you learned. Leave `pinned` off for the normal case (it surfaces by relevance); pin only a rare
+always-load-bearing fact. It's NOT task state (the board) or a design doc (a vault note) — just the durable,
+reusable nugget.
+
 **Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
 working tree, so a careless relative path can climb out of it. Use **absolute paths** for every
 git/build/file command. **Never `cd ..`** to climb above your worktree root — if you must change
