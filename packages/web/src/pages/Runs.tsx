@@ -14,7 +14,7 @@ import { color, font, tone, type Tone } from "../theme";
 // input/result/usage/error + the retained transcript via the shared TranscriptPane) → Cancel for
 // an in-flight run. READ-ONLY otherwise — issuing keys / flagging endpoints is NOT here (that admin
 // surface is a deferred follow-up tied to the Platform-vs-project placement decision). Scoped to the
-// header's active project, like Board / Git / Vault.
+// header's active project, like Board / Repository.
 
 // In-flight (queued/starting/running) glows amber/phosphor; terminal states map to their outcome.
 const IN_FLIGHT: ReadonlySet<RunStatus> = new Set<RunStatus>(["queued", "starting", "running"]);

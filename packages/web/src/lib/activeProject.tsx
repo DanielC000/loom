@@ -4,7 +4,7 @@ import type { Project, SessionListItem } from "@loom/shared";
 import { api } from "./api";
 import { mostRecentActivity } from "./sessions";
 
-// One persisted "active project" that scopes the detail pages (Overview / Board / Git / Vault),
+// One persisted "active project" that scopes the detail pages (Overview / Board / Repository),
 // woven into the App header. Backed by localStorage under the EXISTING `loom.projectId` key, so
 // Workspace's prior selection seeds it for free. Mission Control + Terminals stay god-eye and ignore it.
 const STORAGE_KEY = "loom.projectId";

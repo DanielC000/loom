@@ -10,8 +10,7 @@ import Terminals from "./pages/Terminals";
 import RequestsPage from "./pages/RequestsPage";
 import Board from "./pages/Board";
 import Runs from "./pages/Runs";
-import Vault from "./pages/Vault";
-import Git from "./pages/Git";
+import Repository from "./pages/Repository";
 import Actors from "./pages/Actors";
 import Companion from "./pages/Companion";
 import Automation from "./pages/Automation";
@@ -52,7 +51,8 @@ export type NavPage = {
 //
 // `scoped` was determined from `git grep -l useActiveProject packages/web/src/pages` and then
 // VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
-// Runs, Vault, Git, Settings (edits the active project's config override). Archive imports nothing
+// Runs, Repository (both its Files/Git panes rescope), Settings (edits the active project's config
+// override). Archive imports nothing
 // scoped (its `projectId` fields are its own grouping type), and Projects has its OWN project rail
 // (which writes the active project) — both intentionally NOT scoped. Automation is god-eye (both its
 // tables span every project) so NOT `scoped`, even though its Time builder's own agent picker is
@@ -84,8 +84,12 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", scoped: true },
   { label: "Archive", to: "/archive", element: <Archive />, group: "operate" },
   // ── More ▾ · Project ─────────────────────────────────────────────────────────
-  { label: "Vault", to: "/vault", element: <Vault />, group: "project", scoped: true },
-  { label: "Git", to: "/git", element: <Git />, group: "project", scoped: true },
+  // Repository — the consolidated Vault + Git surface (IA merge #3). One destination with a Files | Git
+  // segmented switch above the two verbatim-lifted panes (Files = the vault tree + type-aware viewer;
+  // Git = branches + commit-log + human-only write actions) — see pages/Repository.tsx. UNLIKE Automation,
+  // this IS `scoped`: both panes are project-scoped (enabled:!!projectId) and rescope on the active-project
+  // picker, so it keeps the scope dot. The old /vault and /git routes redirect here (App.tsx).
+  { label: "Repository", to: "/repository", element: <Repository />, group: "project", scoped: true },
   // ── More ▾ · Config ──────────────────────────────────────────────────────────
   // Projects — the definition/config layer: create/manage projects + define their agents (assign a
   // Profile, edit the startup prompt). Renamed + repositioned from the old "Workspace" page (card

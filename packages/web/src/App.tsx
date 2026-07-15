@@ -53,7 +53,7 @@ function Bell() {
 }
 
 // Header active-project selector. Persists the one project that scopes the detail pages
-// (the nav items marked with a scope dot — Overview / Board / Runs / Vault / Git /
+// (the nav items marked with a scope dot — Overview / Board / Runs / Repository /
 // Settings). Mission Control, Terminals and the other god-eye pages ignore it
 // — hence the quiet tooltip rather than hiding the control per route. Lives on the LEFT, right
 // after the logo, so the active scope reads before the destinations it scopes.
@@ -452,6 +452,10 @@ export default function App() {
                 redirect any lingering links/bookmarks to the right tab (/event-triggers → the Events tab). */}
             <Route path="/schedules" element={<Navigate to="/automation" replace />} />
             <Route path="/event-triggers" element={<Navigate to="/automation?tab=events" replace />} />
+            {/* /vault + /git were consolidated into the single /repository page (IA merge #3) — redirect any
+                lingering links/bookmarks to the right tab (/git → the Git tab via ?tab=git). */}
+            <Route path="/vault" element={<Navigate to="/repository" replace />} />
+            <Route path="/git" element={<Navigate to="/repository?tab=git" replace />} />
             <Route path="/review/:workerId" element={<ReviewPanel />} />
             <Route path="/question/:id" element={<QuestionAnswer />} />
             <Route path="/session/:id" element={<SessionView />} />
