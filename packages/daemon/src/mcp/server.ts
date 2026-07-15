@@ -9,6 +9,7 @@ import {
   listProjectTasks, getProjectTask, createProjectTask, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
   listProjectTaskRequests, getProjectTaskRequest,
 } from "./tasks.js";
+import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -140,6 +141,49 @@ export class TaskMcpRouter {
         },
       },
       async ({ id, ...patch }) => ok(updateProjectTask(db, projectId, id, patch)),
+    );
+
+    // Project-scoped SHARED memory (card 2fd9abf9) — universal, every project session, ANY worker may
+    // write (owner decision #1: it's notes, not code/secrets). Pinned + FTS5-related notes are injected
+    // into every kickoff (sessions/service.ts); these tools are the deliberate-capture write path.
+    server.registerTool(
+      "memory_write",
+      {
+        description:
+          "Write (or UPDATE) a project-scoped note into this project's SHARED memory — durable knowledge " +
+          "every worker/manager sees at kickoff, across sessions. `key` is a short stable slug (letters/" +
+          "digits/-/_ only) that identifies this note: writing the SAME key again UPDATES it in place " +
+          "(no duplicate accumulation) — prefer refining an existing key over minting a near-duplicate. " +
+          "`text` is the note body. `pinned:true` marks it especially important — pinned notes are " +
+          "injected IN FULL on EVERY kickoff and are never auto-evicted; leave it false/omitted for a note " +
+          "that should surface only when it's RELEVANT (matched by full-text search against the kickoff/" +
+          "task text). Optional `title` (short label, max 200 chars) and `tags` (string[]). Write " +
+          "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
+          "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground).",
+        inputSchema: {
+          key: z.string(),
+          text: z.string(),
+          title: z.string().optional(),
+          pinned: z.boolean().optional(),
+          tags: z.array(z.string()).optional(),
+        },
+      },
+      async (args) => ok(writeProjectMemory(db, projectId, args)),
+    );
+    server.registerTool(
+      "memory_forget",
+      { description: "Delete a project-scoped memory note by key. Idempotent — deleting a missing key returns {ok:true,deleted:false}, never an error.", inputSchema: { key: z.string() } },
+      async ({ key }) => ok(forgetProjectMemory(db, projectId, key)),
+    );
+    server.registerTool(
+      "memory_list",
+      { description: "List this project's SHARED memory notes (pinned first, then most-recently-updated). Returns NEWLINE-DELIMITED JSON, one note per line.", inputSchema: {} },
+      async () => okLines(listProjectMemoryEntries(db, projectId)),
+    );
+    server.registerTool(
+      "memory_read",
+      { description: "Read ONE project-scoped memory note in full by key.", inputSchema: { key: z.string() } },
+      async ({ key }) => ok(readProjectMemory(db, projectId, key)),
     );
 
     // Self-scheduled wake-ups (universal — every session, any role). Keyed to THIS session id.

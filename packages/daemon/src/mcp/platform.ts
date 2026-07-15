@@ -5,6 +5,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task } from "@loom/shared";
+import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem } from "./questionTool.js";
@@ -163,6 +164,16 @@ const pythonOverride = z.object({
 const codescapeOverride = z.object({
   enabled: z.boolean().optional(),
 }).strict();
+// Project-scoped shared-memory tuning (card 2fd9abf9): benign numeric knobs — no host-launch/exfil
+// capability, unlike gateCommand/alertWebhook — so this stays on the AGENT-facing shape too (not omitted
+// below, mirroring codescape).
+// Bounds hardening mirrors resolveConfig's MEMORY_CONFIG_MAX clamp — reject an out-of-range value with a
+// clear error here rather than silently clamping it at read time, so a caller finds out immediately.
+const memoryOverride = z.object({
+  budgetTokens: z.number().int().min(0).max(MEMORY_CONFIG_MAX.budgetTokens).optional(),
+  topK: z.number().int().min(1).max(MEMORY_CONFIG_MAX.topK).optional(),
+  maxNotes: z.number().int().min(0).max(MEMORY_CONFIG_MAX.maxNotes).optional(),
+}).strict();
 const projectConfigOverrideSchema = z.object({
   kanbanColumns: kanbanColumnsSchema.optional(),
   permission: permissionOverride.optional(),
@@ -173,6 +184,7 @@ const projectConfigOverrideSchema = z.object({
   codescape: codescapeOverride.optional(),
   obsidian: obsidianOverride.optional(),
   python: pythonOverride.optional(),
+  memory: memoryOverride.optional(),
 }).strict();
 
 /**

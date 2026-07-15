@@ -117,8 +117,10 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 ### Commit scopes
 Loom's commit scope vocabulary, derived from the real tree. Pick the one subsystem a change lands in; prefer the finest-grained scope that fits.
 - **Packages:** `daemon`, `web`, `shared`, `cli` (the `bin/loom.mjs` management CLI).
-- **Daemon subsystems** (`packages/daemon/src/*`): `companion`, `connections`, `gateway`, `git`, `mcp`, `orchestration`,
-  `platform`, `profiles`, `pty`, `runs`, `sessions`, `setup`, `skills`, `tasks` (the task board / cards domain), `update`, `vault`.
+- **Daemon subsystems** (`packages/daemon/src/*`): `companion`, `connections`, `gateway`, `git`, `mcp`,
+  `memory` (project-scoped shared agent memory — `project_memory` FTS5 store + kickoff injection),
+  `orchestration`, `platform`, `profiles`, `pty`, `runs`, `sessions`, `setup`, `skills`,
+  `tasks` (the task board / cards domain), `update`, `vault`.
 - **Cross-cutting / process:** `deps` (dependency bumps), `ci`, `release`, `docs`, `assets` (bundled
   skills / hook-relay / vault-lint under `assets/**`), `site` (the hand-authored GitHub Pages landing page under `site/**`).
 

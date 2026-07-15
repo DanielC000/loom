@@ -956,6 +956,30 @@ export interface Task {
 }
 
 /**
+ * A project-scoped SHARED memory note (card 2fd9abf9) — durable, fleet-shared project knowledge any
+ * worker/manager can write (`memory_write`) and every kickoff can retrieve (pinned always + FTS5-matched
+ * "related" notes). `key` is a stable slug: `memory_write` UPSERTS by `(projectId, key)`, so writing the
+ * same key again updates the note in place rather than accumulating a duplicate. `pinned` notes ride in
+ * full on EVERY kickoff and are NEVER evicted; unpinned notes are subject to the per-project `maxNotes`
+ * bounded-store eviction (least-recently-RETRIEVED first — see `evictProjectMemoryOverCap` in db.ts).
+ * `lastRetrievedAt`/`retrievalCount` are bumped only when a note is actually included in an injected
+ * kickoff (not on every read), so eviction reflects genuine usefulness, not raw age.
+ */
+export interface ProjectMemoryEntry {
+  id: string;
+  projectId: ProjectId;
+  key: string;
+  title: string;
+  text: string;
+  pinned: boolean;
+  tags: string[];
+  createdAt: string;
+  updatedAt: string;
+  lastRetrievedAt: string | null;
+  retrievalCount: number;
+}
+
+/**
  * LEGACY owner-gated / HOLD title heuristic — RETAINED ONLY for the one-time boot backfill that seeds the
  * structured `Task.held` flag from pre-existing cards (db.backfillHeldFromTitlesOnce). It is NO LONGER the
  * live idle-watchdog discount signal: that now keys SOLELY off `Task.held` (set explicitly by the owner via

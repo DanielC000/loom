@@ -148,6 +148,37 @@ export interface CodescapeConfig {
 }
 
 /**
+ * Project-scoped SHARED memory tuning (card 2fd9abf9) — the FTS5 kickoff-injection budget, per-project
+ * default `resolveConfig` layer → per-project override, exactly like every other numeric knob here (no ad
+ * hoc reads). All three are benign tuning numbers (no host-launch/exfil capability, unlike `gateCommand`/
+ * `alertWebhook`), so they stay on the AGENT-facing config validator too — see `platform.ts`.
+ */
+export interface MemoryConfig {
+  /** Approximate token budget for the injected pinned+related digest (byte-length / 4 heuristic — no
+   *  tokenizer/API call). Never exceeded; truncation is deterministic, mirroring the companion recall's
+   *  byte-bounded digest. */
+  budgetTokens: number;
+  /** Max "related" (FTS5-matched, unpinned) notes considered per kickoff, before the token budget itself
+   *  may truncate further. */
+  topK: number;
+  /** Per-project cap on UNPINNED notes; writing past it evicts the least-recently-RETRIEVED unpinned
+   *  row(s) (owner decision #2). Pinned notes are never evicted and never counted. `<= 0` disables the cap. */
+  maxNotes: number;
+}
+
+/**
+ * Hard ceilings `resolveConfig` clamps `MemoryConfig` to, regardless of what a per-project override (or a
+ * pathological operator-set value) asks for — bounds hardening so an accidental `memory_write`-in-a-loop
+ * misconfiguration, or a fat-fingered platform default, can't bloat every kickoff or grow the DB unbounded.
+ * `topK`'s floor is 1 (0 would silently disable related-note retrieval — use `budgetTokens:0` for that).
+ */
+export const MEMORY_CONFIG_MAX = {
+  budgetTokens: 8000,
+  topK: 50,
+  maxNotes: 1000,
+} as const;
+
+/**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
  * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
@@ -556,6 +587,8 @@ export interface ResolvedConfig {
   obsidian: ObsidianConfig;
   /** Python tooling (shared Loom-managed venv). Only `interpreterPath` is configurable — see PythonConfig. */
   python: PythonConfig;
+  /** Project-scoped shared-memory FTS5 kickoff-injection tuning (card 2fd9abf9) — see MemoryConfig. */
+  memory: MemoryConfig;
   /**
    * Session-usage telemetry sampler cadence (ms): how often the daemon's background sampler reads each
    * LIVE session's transcript and appends a usage DELTA sample (epic c9924bcd, card B). DAEMON-GLOBAL —
@@ -588,6 +621,8 @@ export interface ProjectConfigOverride {
   codescape?: Partial<CodescapeConfig>;
   obsidian?: Partial<ObsidianConfig>;
   python?: Partial<PythonConfig>;
+  /** See ResolvedConfig.memory. */
+  memory?: Partial<MemoryConfig>;
 }
 
 /**
@@ -687,6 +722,11 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // Python: no base-interpreter override by default — the daemon discovers python3/python/`py -3` on PATH.
   // Loom owns + provisions the shared venv on first use of a Python-backed capability (e.g. documentConversion).
   python: {},
+  // Project-scoped shared memory (card 2fd9abf9): ~4000 tokens is generous for a handful of pinned notes
+  // plus a sizeable related-tier slice without dominating a turn (mirrors MEMORY_RECALL_MAX_BYTES's
+  // sizing rationale); topK 8 related notes considered per kickoff; maxNotes 500 unpinned notes per
+  // project before LRU-by-retrieval eviction kicks in (small-corpus assumption from the design doc).
+  memory: { budgetTokens: 4000, topK: 8, maxNotes: 500 },
   // Session-usage telemetry (epic c9924bcd): daemon-global sampler cadence (5m) + sample retention (90d).
   usageSampleIntervalMs: 300000,
   usageSampleRetentionDays: 90,
@@ -1059,6 +1099,13 @@ export function resolveConfig(
     codescape: { enabled: override.codescape?.enabled ?? d.codescape.enabled },
     obsidian,
     python,
+    // Clamped to MEMORY_CONFIG_MAX (bounds hardening): an accidental memory_write-in-a-loop or a
+    // pathological override/platform-default value can never bloat every kickoff or grow the DB unbounded.
+    memory: {
+      budgetTokens: Math.min(override.memory?.budgetTokens ?? d.memory.budgetTokens, MEMORY_CONFIG_MAX.budgetTokens),
+      topK: Math.min(override.memory?.topK ?? d.memory.topK, MEMORY_CONFIG_MAX.topK),
+      maxNotes: Math.min(override.memory?.maxNotes ?? d.memory.maxNotes, MEMORY_CONFIG_MAX.maxNotes),
+    },
     // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Always the
     // platform default (HUMAN-only; not in ProjectConfigOverride, so an agent override can't reach them).
     usageSampleIntervalMs: d.usageSampleIntervalMs,

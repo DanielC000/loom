@@ -39,7 +39,7 @@ import type {
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
-  ProjectLink,
+  ProjectLink, ProjectMemoryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron } from "@loom/shared";
@@ -909,6 +909,48 @@ CREATE INDEX IF NOT EXISTS idx_companion_reminders_session ON companion_reminder
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
+-- Shared project memory (card 2fd9abf9): a project-scoped durable knowledge store any worker/manager can
+-- write to (memory_write), retrieved by FTS5 and injected into every kickoff (pinned always + top-K
+-- related-on-match), so fleet-shared decisions/facts survive across sessions instead of living only in
+-- hand-curated docs. UNIQUE(project_id, key) makes memory_write an upsert-by-key — a second write to the
+-- same key overwrites in place (see upsertProjectMemory), never a duplicate row. Brand-new table ⇒
+-- CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER needed, no migrate*() method) —
+-- an existing DB simply gains an empty table on next boot, mirroring api_keys/runs above.
+CREATE TABLE IF NOT EXISTS project_memory (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  key TEXT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  text TEXT NOT NULL,
+  pinned INTEGER NOT NULL DEFAULT 0,      -- pinned notes ride IN FULL on every kickoff, NEVER evicted
+  tags TEXT NOT NULL DEFAULT '[]',        -- JSON string[]
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  last_retrieved_at TEXT,                 -- NULL until first retrieved; feeds LRU-by-retrieval eviction
+  retrieval_count INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(project_id, key)
+);
+CREATE INDEX IF NOT EXISTS idx_project_memory_project ON project_memory(project_id, pinned, last_retrieved_at);
+-- FTS5 full-text index over title+text, kept in sync via the triggers below (an external-content table
+-- keyed by rowid, so the index can never drift from project_memory). Pure local BM25 ranking — no
+-- embedding endpoint, no metered API call (the v1 "zero metered tokens" constraint). This is the daemon's
+-- first FTS5 usage; confirm better-sqlite3's bundled SQLite has FTS5 compiled in (it does by default).
+CREATE VIRTUAL TABLE IF NOT EXISTS project_memory_fts USING fts5(
+  title, text, content='project_memory', content_rowid='rowid'
+);
+CREATE TRIGGER IF NOT EXISTS project_memory_ai AFTER INSERT ON project_memory BEGIN
+  INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
+CREATE TRIGGER IF NOT EXISTS project_memory_ad AFTER DELETE ON project_memory BEGIN
+  INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+END;
+-- Scoped to "OF title, text" so a pure retrieval-bump UPDATE (touchProjectMemoryRetrieved, which only
+-- ever writes last_retrieved_at/retrieval_count) never fires this trigger — no needless FTS churn on
+-- every retrieval.
+CREATE TRIGGER IF NOT EXISTS project_memory_au AFTER UPDATE OF title, text ON project_memory BEGIN
+  INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+  INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+END;
 `;
 
 /**
@@ -4097,6 +4139,110 @@ export class Db {
     })();
   }
 
+  // --- project memory (card 2fd9abf9: project-scoped SHARED agent memory, FTS5-retrieved at kickoff) ---
+  /** UPSERT by `(projectId, key)` — a second write to the same key overwrites in place (title/text/pinned/
+   *  tags + updated_at), never a duplicate row; `id`/`created_at`/`lastRetrievedAt`/`retrievalCount` are
+   *  preserved across an update (the INSERT's values for those only apply on a true first write — the
+   *  ON CONFLICT branch never references them). Runs the bounded-store eviction sweep afterward (owner
+   *  decision #2) so the store never grows past `maxNotes` unpinned rows. */
+  upsertProjectMemory(
+    projectId: string,
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[] },
+    maxNotes: number,
+  ): ProjectMemoryEntry {
+    const now = new Date().toISOString();
+    this.db.prepare(
+      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, created_at, updated_at, last_retrieved_at, retrieval_count)
+       VALUES (@id, @projectId, @key, @title, @text, @pinned, @tags, @now, @now, NULL, 0)
+       ON CONFLICT(project_id, key) DO UPDATE SET
+         title = @title, text = @text, pinned = @pinned, tags = @tags, updated_at = @now`,
+    ).run({
+      id: randomUUID(),
+      projectId,
+      key: input.key,
+      title: input.title ?? "",
+      text: input.text,
+      pinned: input.pinned ? 1 : 0,
+      tags: JSON.stringify(input.tags ?? []),
+      now,
+    });
+    this.evictProjectMemoryOverCap(projectId, maxNotes);
+    return this.getProjectMemoryByKey(projectId, input.key)!;
+  }
+  getProjectMemoryByKey(projectId: string, key: string): ProjectMemoryEntry | undefined {
+    const r = this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND key = ?").get(projectId, key) as Row | undefined;
+    return r ? toProjectMemoryEntry(r) : undefined;
+  }
+  listProjectMemory(projectId: string): ProjectMemoryEntry[] {
+    return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? ORDER BY pinned DESC, updated_at DESC")
+      .all(projectId) as Row[]).map(toProjectMemoryEntry);
+  }
+  /** Explicit curation (`memory_forget`). Idempotent on a missing key. Returns whether a row was deleted. */
+  deleteProjectMemory(projectId: string, key: string): boolean {
+    return this.db.prepare("DELETE FROM project_memory WHERE project_id = ? AND key = ?").run(projectId, key).changes > 0;
+  }
+  /** Always-injected tier (kickoff injection §3) — every pinned note, newest-updated first. Pinned rows are
+   *  never evicted and never counted against `maxNotes` (owner decision #2). */
+  listPinnedProjectMemory(projectId: string): ProjectMemoryEntry[] {
+    return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND pinned = 1 ORDER BY updated_at DESC")
+      .all(projectId) as Row[]).map(toProjectMemoryEntry);
+  }
+  /** "Related" tier (kickoff injection §3) — top-`limit` UNPINNED notes whose title/text FTS5-MATCH the
+   *  kickoff/task text, ranked by fts5's default bm25 `rank`. Deliberately excludes pinned rows (they
+   *  already ride in full via {@link listPinnedProjectMemory} — never inject the same note twice). Zero
+   *  metered tokens: this is a local SQLite FTS5 query, no embedding endpoint, no API call. `kickoffText`
+   *  is tokenized into a quoted OR-query (ftsProjectMemoryQuery) so free-form prose with FTS5-special
+   *  characters (quotes, colons, hyphens, boolean keywords) can never throw a query-syntax error; an
+   *  empty/all-stopword kickoff text or a genuine FTS5 error both degrade to "no related notes" (`[]`)
+   *  rather than surfacing an error to the caller. */
+  searchProjectMemory(projectId: string, kickoffText: string, limit: number): ProjectMemoryEntry[] {
+    if (limit <= 0) return [];
+    const match = ftsProjectMemoryQuery(kickoffText);
+    if (!match) return [];
+    try {
+      return (this.db.prepare(
+        `SELECT pm.* FROM project_memory pm
+         JOIN project_memory_fts fts ON fts.rowid = pm.rowid
+         WHERE pm.project_id = ? AND pm.pinned = 0 AND project_memory_fts MATCH ?
+         ORDER BY rank LIMIT ?`,
+      ).all(projectId, match, limit) as Row[]).map(toProjectMemoryEntry);
+    } catch {
+      return [];
+    }
+  }
+  /** Bump `lastRetrievedAt`/`retrievalCount` for notes actually INCLUDED in an injected kickoff (feeds the
+   *  LRU-by-retrieval eviction above — a rarely-matched-but-used note survives over a stale one). Small,
+   *  bounded id list (pinned + topK, never more than a handful) — one UPDATE per id inside a transaction
+   *  rather than a batched IN(...), keeping the call site a plain map. Deliberately does NOT touch
+   *  title/text, so the `AFTER UPDATE OF title, text` FTS sync trigger never fires for a pure retrieval
+   *  bump. */
+  touchProjectMemoryRetrieved(ids: string[]): void {
+    if (ids.length === 0) return;
+    const now = new Date().toISOString();
+    const stmt = this.db.prepare("UPDATE project_memory SET last_retrieved_at = ?, retrieval_count = retrieval_count + 1 WHERE id = ?");
+    this.db.transaction((rows: string[]) => { for (const id of rows) stmt.run(now, id); })(ids);
+  }
+  /** Bounded-store backstop (owner decision #2): when a project has more than `maxNotes` UNPINNED rows,
+   *  delete the least-recently-RETRIEVED unpinned rows down to the cap — pinned rows are NEVER evicted and
+   *  never counted. A never-retrieved row (`last_retrieved_at IS NULL`) sorts as the MOST evictable (treated
+   *  as older than any real retrieval), tie-broken by `created_at` — so eviction favors notes nobody has
+   *  found useful yet over one merely due for a refresh. `maxNotes <= 0` disables the cap entirely (an
+   *  explicit "unbounded" escape hatch, never the default). */
+  private evictProjectMemoryOverCap(projectId: string, maxNotes: number): void {
+    if (maxNotes <= 0) return;
+    const { c } = this.db.prepare("SELECT COUNT(*) AS c FROM project_memory WHERE project_id = ? AND pinned = 0")
+      .get(projectId) as { c: number };
+    const over = c - maxNotes;
+    if (over <= 0) return;
+    this.db.prepare(
+      `DELETE FROM project_memory WHERE id IN (
+         SELECT id FROM project_memory WHERE project_id = ? AND pinned = 0
+         ORDER BY last_retrieved_at IS NOT NULL, last_retrieved_at ASC, created_at ASC
+         LIMIT ?
+       )`,
+    ).run(projectId, over);
+  }
+
   // --- schedules (phase-2 Pillar B) ---
   insertSchedule(s: Schedule): void {
     this.db.prepare(
@@ -4966,6 +5112,29 @@ function toTask(r0: unknown): Task {
     deferred: (r.deferred as number) === 1,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
+}
+function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
+  const r = r0 as Row;
+  return {
+    id: r.id as string, projectId: r.project_id as string, key: r.key as string,
+    title: (r.title as string) ?? "", text: r.text as string,
+    pinned: (r.pinned as number) === 1,
+    tags: (() => { try { return JSON.parse((r.tags as string) || "[]") as string[]; } catch { return []; } })(),
+    createdAt: r.created_at as string, updatedAt: r.updated_at as string,
+    lastRetrievedAt: (r.last_retrieved_at as string | null) ?? null,
+    retrievalCount: (r.retrieval_count as number) ?? 0,
+  };
+}
+/** Turn free-form kickoff/task text into a safe FTS5 MATCH query: split into word tokens, drop short
+ *  (<3 char) tokens, dedupe, quote each as an FTS5 string literal (doubling embedded quotes) and OR them
+ *  together — so prose containing FTS5-special characters (quotes, hyphens, colons, boolean keywords)
+ *  can never throw a query-syntax error, and any matching token surfaces a note. Capped at 32 tokens
+ *  (small-corpus queries never need more; keeps the query cheap). Empty/all-short-token input ⇒ "" (the
+ *  caller's "nothing to search for" signal). */
+function ftsProjectMemoryQuery(text: string): string {
+  const tokens = (text.match(/[\p{L}\p{N}_]+/gu) ?? []).filter((t) => t.length >= 3).slice(0, 32);
+  const unique = Array.from(new Set(tokens.map((t) => t.toLowerCase())));
+  return unique.map((t) => `"${t.replace(/"/g, '""')}"`).join(" OR ");
 }
 function toPresetPrompt(r0: unknown): PresetPrompt {
   const r = r0 as Row;

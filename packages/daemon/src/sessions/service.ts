@@ -26,6 +26,7 @@ import { composeWorkerStartupPrompt } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
+import { retrieveProjectMemoryForKickoff } from "./project-memory-recall.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
@@ -755,6 +756,15 @@ export class SessionService {
     const composedStartupPrompt = opts.kickoffPrompt
       ? composeWorkerStartupPrompt(finalStartupPrompt, opts.kickoffPrompt)
       : finalStartupPrompt;
+    // Project memory (card 2fd9abf9, fresh-spawn half): pinned + FTS5-related notes, appended LAST (after
+    // any role/kickoff composition above) via the SAME generic append primitive the companion recall
+    // reuses. Search text is the kickoff prompt when present (a poll-triggered spawn), else the agent's
+    // own prompt — both empty ⇒ pinned-only. null (no project memory notes) ⇒ composedStartupPrompt is
+    // passed through UNCHANGED (incl. `undefined`, a plain agent with no prompt) — fully byte-identical.
+    const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt ?? startupPrompt ?? "");
+    const withProjectMemory = projectMemoryFramed
+      ? appendMemoryRecallToStartupPrompt(composedStartupPrompt ?? "", projectMemoryFramed)
+      : composedStartupPrompt;
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -764,7 +774,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
-      startupPrompt: composedStartupPrompt,
+      startupPrompt: withProjectMemory,
       role,
       browserTesting,
       documentConversion,
@@ -838,10 +848,18 @@ export class SessionService {
       // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
       // whether the vault-lint hook is on. Additive to the manager prompt only; every other spawn path
       // is untouched (byte-identical).
-      startupPrompt: appendScheduledPrompt(
-        composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name }),
-        prompt,
-      ),
+      // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, after the scheduled-prompt
+      // composition — search text is the schedule's own prompt when present, else the agent's own
+      // startup prompt (both empty ⇒ pinned-only). null (no notes) ⇒ the scheduled prompt is passed
+      // through UNCHANGED — byte-identical to today.
+      startupPrompt: ((): string | undefined => {
+        const scheduled = appendScheduledPrompt(
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name }),
+          prompt,
+        );
+        const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
+        return projectMemoryFramed ? appendMemoryRecallToStartupPrompt(scheduled ?? "", projectMemoryFramed) : scheduled;
+      })(),
       role,
       browserTesting,
       documentConversion,
@@ -1382,6 +1400,20 @@ export class SessionService {
     if (session.role === "assistant") {
       const recall = buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name));
       if (recall) this.pty.enqueueStdin(session.id, recall, "system");
+    }
+    // Project memory (card 2fd9abf9, resume half) — a DELIBERATE, DOCUMENTED exception to "resume
+    // injects no prompt", exactly like the companion recall above but generalized to EVERY role (not
+    // assistant-only): a long-lived worker/manager resumed after a restart would otherwise never see
+    // project notes written since its last fresh spawn. Enqueued via the SAME ordinary enqueueStdin
+    // turn-injection primitive — kind defaults to "warning" (operational/coalescible, never direction).
+    // Search text is the resumed session's own task (title+body) when it has one bound (the richest
+    // match source), else the agent's own startup prompt; both empty ⇒ pinned-only. null (no project
+    // memory notes match) ⇒ no enqueue, byte-identical to today.
+    {
+      const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
+      const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
+      const projectRecall = retrieveProjectMemoryForKickoff(this.db, session.projectId, kickoffText);
+      if (projectRecall) this.pty.enqueueStdin(session.id, projectRecall, "system");
     }
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
     // queued messages addressed to it that the ONE-SHOT boot scan couldn't deliver because it wasn't live
@@ -2944,7 +2976,13 @@ export class SessionService {
         // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
         // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
-        startupPrompt: composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath),
+        // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, searched against the manager's
+        // own kickoff text (which typically carries the task description — the richest match source of
+        // any spawn path); null (no notes) ⇒ byte-identical to today.
+        startupPrompt: appendMemoryRecallToStartupPrompt(
+          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath),
+          retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt),
+        ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
         browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
         documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
@@ -4737,7 +4775,14 @@ export class SessionService {
       // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
       // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
       // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
-      startupPrompt: composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath),
+      // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
+      // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
+      // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
+      // available here); null (no notes) ⇒ byte-identical to today.
+      startupPrompt: appendMemoryRecallToStartupPrompt(
+        composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath),
+        retrieveProjectMemoryForKickoff(this.db, project.id, framed),
+      ),
       role: "worker",
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
