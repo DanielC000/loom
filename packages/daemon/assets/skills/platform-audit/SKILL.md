@@ -71,7 +71,17 @@ a new occurrence as evidence only if it materially strengthens the case). Each f
   human or a Lead to act on it without re-deriving it).
 - **Severity** — how much it hurts (blocks work / causes rework / minor friction).
 - **Implicated skill / prompt / feature** — what to change.
-- **A concrete suggested improvement** — not just "this is bad" but a specific, actionable fix.
+- **A concrete suggested improvement** — not just "this is bad" but a specific, actionable fix — and one
+  that **eliminates the failure class, not one that merely asks agents to behave better.** "Tighten the
+  doctrine", "add a reminder/nudge", or "the agent should be more careful" is a *workaround* when the
+  failure stays structurally possible: prefer the missing **feature / affordance**, or the
+  **mechanical / structural enforcement**, that makes the failure impossible. (This is lens 4's
+  discipline-dependent gap seen from the FIX side — adding a soft rule to a soft-rule failure is a
+  non-fix.) When the honest root fix is a larger feature, **name it as the root fix and mark any
+  doctrine/prompt tweak as an explicit interim stopgap** — never let the stopgap read as the fix. A
+  doctrine/prompt change is the right fix ONLY when the root cause genuinely IS vague or wrong doctrine
+  (the vague-instructions category); when the root cause is a missing capability or an unenforced gate,
+  point the fix there instead.
 
 A finding a human can triage in one read is worth ten vague ones. Quality and dedup over volume.
 
