@@ -52,7 +52,7 @@ test.describe("event triggers UI", () => {
     const agentName = `Bugfix ${stamp}`;
     const agent = await seedAgent(loomDaemon.baseURL, project.id, agentName);
 
-    await page.goto(`${loomDaemon.baseURL}/event-triggers`);
+    await page.goto(`${loomDaemon.baseURL}/automation?tab=events`);
 
     // Open the modal.
     await page.getByRole("button", { name: /new trigger/i }).click();
@@ -102,7 +102,7 @@ test.describe("event triggers UI", () => {
     // target session" inline reason deterministic (the empty-picker case shows a different message).
     await loomDaemon.seedLiveSession({ agentName: `Coh ${stamp}`, title: `coh-sess-${stamp}` });
 
-    await page.goto(`${loomDaemon.baseURL}/event-triggers`);
+    await page.goto(`${loomDaemon.baseURL}/automation?tab=events`);
     await page.getByRole("button", { name: /new trigger/i }).click();
     await expect(dialog(page)).toBeVisible();
 
@@ -139,7 +139,7 @@ test.describe("event triggers UI", () => {
       body: JSON.stringify({ eventKind: "merge_request", projectId: null, mode: "wake", targetSessionId: seeded.sessionId }),
     }).then((r) => r.json()) as { id: string };
 
-    await page.goto(`${loomDaemon.baseURL}/event-triggers`);
+    await page.goto(`${loomDaemon.baseURL}/automation?tab=events`);
     // Locate the row by its unique target session label (project / agent · title).
     const row = page.locator("tr", { hasText: `wake-target-${stamp}` });
     await expect(row).toBeVisible();

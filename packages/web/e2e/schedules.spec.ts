@@ -43,7 +43,7 @@ test.describe("schedules UI (Direction B)", () => {
     await seedAgent(loomDaemon.baseURL, project.id, agentName);
     await pinActiveProject(page, project.id);
 
-    await page.goto(`${loomDaemon.baseURL}/schedules`);
+    await page.goto(`${loomDaemon.baseURL}/automation`);
 
     // BEFORE: the empty state (no schedules yet).
     await expect(page.getByText(/no schedules yet/i)).toBeVisible();
@@ -95,7 +95,7 @@ test.describe("schedules UI (Direction B)", () => {
     const agent = await seedAgent(loomDaemon.baseURL, project.id, agentName);
     await pinActiveProject(page, project.id);
 
-    await page.goto(`${loomDaemon.baseURL}/schedules`);
+    await page.goto(`${loomDaemon.baseURL}/automation`);
     await page.getByRole("button", { name: /new schedule/i }).click();
     await expect(dialog(page)).toBeVisible();
 
@@ -126,7 +126,7 @@ test.describe("schedules UI (Direction B)", () => {
     const project = await loomDaemon.createProject(`sched-off-${stamp}`);
     await pinActiveProject(page, project.id);
 
-    await page.goto(`${loomDaemon.baseURL}/schedules`);
+    await page.goto(`${loomDaemon.baseURL}/automation`);
 
     // The header status pill reflects the resolved OFF state (distinct from the notice's own badge below).
     await expect(page.getByText(/scheduler off/i).first()).toBeVisible();
@@ -155,7 +155,7 @@ test.describe("schedules UI (Direction B)", () => {
       body: JSON.stringify({ name, agentId: agent.id, cron: "0 0 1 1 *" }),
     }).then((r) => r.json()) as { id: string };
 
-    await page.goto(`${loomDaemon.baseURL}/schedules`);
+    await page.goto(`${loomDaemon.baseURL}/automation`);
     const row = page.locator("tr", { hasText: name });
     await expect(row).toBeVisible();
 

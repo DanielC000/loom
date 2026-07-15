@@ -537,11 +537,11 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
 }
 
 // The project's cron schedules — every Schedule whose agent belongs to this project (agent→project),
-// read-only here (create/enable/delete live on the dedicated Schedules page). Reuses GET /api/schedules.
+// read-only here (create/enable/delete live on the Automation page, Time tab). Reuses GET /api/schedules.
 function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string>; agentName: (id: string) => string }) {
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
   const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
-  if (mine.length === 0) return <Panel><span style={{ color: color.textMuted, fontSize: 12 }}>No schedules for this project. Add one on the Schedules page.</span></Panel>;
+  if (mine.length === 0) return <Panel><span style={{ color: color.textMuted, fontSize: 12 }}>No schedules for this project. Add one on the Automation page.</span></Panel>;
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       {mine.map((s) => <ScheduleRow key={s.id} s={s} agentName={agentName(s.agentId)} />)}

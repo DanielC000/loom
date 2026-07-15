@@ -14,8 +14,7 @@ import Vault from "./pages/Vault";
 import Git from "./pages/Git";
 import Actors from "./pages/Actors";
 import Companion from "./pages/Companion";
-import Schedules from "./pages/Schedules";
-import EventTriggers from "./pages/EventTriggers";
+import Automation from "./pages/Automation";
 import Usage from "./pages/Usage";
 import Platform from "./pages/Platform";
 import Settings from "./pages/Settings";
@@ -53,9 +52,11 @@ export type NavPage = {
 //
 // `scoped` was determined from `git grep -l useActiveProject packages/web/src/pages` and then
 // VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
-// Runs, Vault, Git, Schedules (per-project agents), Settings (edits the active project's config
-// override). Archive imports nothing scoped (its `projectId` fields are its own grouping type),
-// and Projects has its OWN project rail (which writes the active project) — both intentionally NOT scoped.
+// Runs, Vault, Git, Settings (edits the active project's config override). Archive imports nothing
+// scoped (its `projectId` fields are its own grouping type), and Projects has its OWN project rail
+// (which writes the active project) — both intentionally NOT scoped. Automation is god-eye (both its
+// tables span every project) so NOT `scoped`, even though its Time builder's own agent picker is
+// active-project-scoped — a builder-internal scope, not a page-level rescope.
 export const NAV_PAGES: NavPage[] = [
   // ── Primary tabs (header), in display order ──────────────────────────────────
   { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl />, group: "system", primary: true },
@@ -102,11 +103,12 @@ export const NAV_PAGES: NavPage[] = [
   // (UI-audit finding #4) — see `withCompanionNavGating`/`isCompanionActive` in lib/companion.ts. Inactive,
   // it stays right here under More ▾ · Config.
   { label: "Companion", to: "/companion", element: <Companion />, group: "config" },
-  { label: "Schedules", to: "/schedules", element: <Schedules />, group: "config", scoped: true },
-  // Event Triggers — the internal-event counterpart to cron Schedules. Daemon-GLOBAL (a trigger's project
-  // scope is an explicit field, and its wake/spawn target may live in any project), so deliberately NOT
-  // `scoped` — it does not respond to the active-project picker.
-  { label: "Event Triggers", to: "/event-triggers", element: <EventTriggers />, group: "config" },
+  // Automation — the consolidated Schedules + Event Triggers surface (IA merge #2). One destination with a
+  // Time (cron) | Events segmented switch above the shared trigger-table + builder-modal shell (see
+  // pages/Automation.tsx). Both tables are god-eye — they span every project — so deliberately NOT `scoped`
+  // (each builder scopes its OWN picker: the Time builder's target agent stays limited to the active
+  // project). The old /schedules and /event-triggers routes redirect here (App.tsx).
+  { label: "Automation", to: "/automation", element: <Automation />, group: "config" },
   // The standalone Orchestration page (its manager→worker→diff drill-down) was REMOVED (card bde7957f):
   // its two unique views — the per-manager orchestration_events timeline + the worker branch-diff — now
   // live as role-scoped tabs in the Overview fleet-card expansion (FleetAccordion → SessionCockpit), so
