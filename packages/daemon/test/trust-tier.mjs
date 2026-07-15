@@ -16,9 +16,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         attacker-controlled req.url); a spoofed X-Forwarded-For:127.0.0.1 does NOT count as loopback
 //         (card 77ade04c nit: the peer check reads req.socket.remoteAddress directly, immune to trustProxy).
 //      c. a REMOTE request to a Tier-1 route → 401 without a token, and passes with a (stubbed-valid) one.
-//      d. the two WS routes ALSO accept the token via Sec-WebSocket-Protocol (preferred) or a `?token=`
-//         query fallback (Phase B, card 56ffe50a) — proven via a REAL handshake through @fastify/
-//         websocket's injectWS (drives the SAME onRequest hook chain a genuine socket upgrade does).
+//      d. the two WS routes ALSO accept the token via the double-subprotocol contract (Phase B, card
+//         56ffe50a; the leak fix, card 42abca6a) — `[loom.v1, loom.bearer.<token>]`, preferred — or a
+//         `?token=` query fallback — proven via a REAL handshake through @fastify/websocket's injectWS
+//         (drives the SAME onRequest hook chain a genuine socket upgrade does).
+//   4. selectWsSubprotocol (the wired-in `handleProtocols`) NEVER echoes a token-carrying subprotocol back
+//      — always the fixed generic marker, or nothing — closing the card 42abca6a credential leak where
+//      ws@8's default handleProtocols echoed the first client-offered entry (which used to BE the token)
+//      verbatim into the 101 response's Sec-WebSocket-Protocol header.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -39,7 +44,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
-const { routeTier } = await import("../dist/gateway/trust-tier.js");
+const { routeTier, selectWsSubprotocol, resolveWsSubprotocolToken, WS_GENERIC_SUBPROTOCOL, WS_BEARER_PREFIX } = await import("../dist/gateway/trust-tier.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -203,6 +208,30 @@ check("(1d) the webhook-endpoints ADMIN surface (a writer, not the ingress route
   routeTier("GET", "/api/webhook-endpoints") === 0 && routeTier("POST", "/api/webhook-endpoints") === 0
   && routeTier("DELETE", "/api/webhook-endpoints/:id") === 0 && routeTier("POST", "/api/webhook-endpoints/:id/enabled") === 0);
 
+// --- (4) selectWsSubprotocol (the wired-in `handleProtocols`) + resolveWsSubprotocolToken — pure unit ----
+// checks against the actual functions gateway/server.ts wires in, so the assertion holds regardless of
+// whatever a raw handshake's response bytes look like (injectWS's client-side shim doesn't parse the raw
+// 101 response back into a `ws.protocol` the (3d) checks below could assert on directly — see the note
+// there). This is what closes the card 42abca6a gap: "trust-tier.mjs only acknowledges the echo, doesn't
+// assert against the leak."
+const TOKEN_LOOKING_STRING = "super-secret-gateway-token-should-never-be-echoed";
+check("(4) selectWsSubprotocol: generic offered alone → negotiates the generic marker",
+  selectWsSubprotocol(new Set([WS_GENERIC_SUBPROTOCOL])) === WS_GENERIC_SUBPROTOCOL);
+check("(4) selectWsSubprotocol: [generic, bearer(token)] offered → STILL negotiates the generic marker, NEVER the token",
+  selectWsSubprotocol(new Set([WS_GENERIC_SUBPROTOCOL, `${WS_BEARER_PREFIX}${TOKEN_LOOKING_STRING}`])) === WS_GENERIC_SUBPROTOCOL);
+check("(4) selectWsSubprotocol: a bearer-only offer (no generic) → false (never echoes the token)",
+  selectWsSubprotocol(new Set([`${WS_BEARER_PREFIX}${TOKEN_LOOKING_STRING}`])) === false);
+check("(4) selectWsSubprotocol: no subprotocol offered at all → false",
+  selectWsSubprotocol(new Set()) === false);
+check("(4) resolveWsSubprotocolToken: [generic, bearer(abc123)] → extracted BY PREFIX, order-independent",
+  JSON.stringify(resolveWsSubprotocolToken(`${WS_BEARER_PREFIX}abc123, ${WS_GENERIC_SUBPROTOCOL}`)) === JSON.stringify({ outcome: "token", token: "abc123" }));
+check("(4) resolveWsSubprotocolToken: a bearer-only offer (no generic) → rejected outright",
+  resolveWsSubprotocolToken(`${WS_BEARER_PREFIX}abc123`).outcome === "rejected");
+check("(4) resolveWsSubprotocolToken: generic offered alone (no bearer) → no-token (caller falls back to ?token=)",
+  resolveWsSubprotocolToken(WS_GENERIC_SUBPROTOCOL).outcome === "no-token");
+check("(4) resolveWsSubprotocolToken: no header at all → no-token",
+  resolveWsSubprotocolToken(undefined).outcome === "no-token");
+
 // --- (2) remoteAccess DISABLED (default): the hook never registers; a "remote" request to a writer still runs ---
 let killCallsOff = 0;
 const dbOff = new Db(path.join(TMP, "loom-off.db"));
@@ -214,6 +243,15 @@ const appOff = await buildServer({
 try {
   const r = await appOff.inject({ method: "POST", url: "/api/orchestration/kill", remoteAddress: "203.0.113.5" });
   check("(2) remoteAccess disabled: a 'remote' POST /api/orchestration/kill still runs (200, byte-identical)", r.statusCode === 200 && killCallsOff === 1);
+
+  // (2b) REGRESSION GUARD (card 42abca6a): the loopback cockpit WS — today's web client connects with NO
+  // Sec-WebSocket-Protocol header at all (see packages/web/src/components/Terminal.tsx) — must still
+  // upgrade cleanly under the new handleProtocols. ws only invokes handleProtocols when the client sent a
+  // subprotocol header at all, so a header-less offer never even reaches selectWsSubprotocol; this proves
+  // the byte-identical claim end-to-end rather than resting on that reasoning alone.
+  const loopbackNoProto = await appOff.injectWS("/ws/companion/sess1", { headers: { host: "127.0.0.1" } });
+  check("(2b) loopback WS upgrade with NO Sec-WebSocket-Protocol header at all → still upgrades (unaffected by the fix)", !!loopbackNoProto);
+  loopbackNoProto.close();
 } finally {
   await appOff.close();
   dbOff.close();
@@ -283,7 +321,7 @@ try {
   const spoofedXff = await appOn.inject({ method: "POST", url: "/api/orchestration/kill", remoteAddress: "203.0.113.5", headers: { "x-forwarded-for": "127.0.0.1" } });
   check("(3b) a remote peer spoofing X-Forwarded-For: 127.0.0.1 is NOT treated as loopback (403)", spoofedXff.statusCode === 403 && killCallsOn === 1 /* not re-invoked */);
 
-  // --- (3d) WS upgrade auth: Sec-WebSocket-Protocol (preferred) + ?token= (fallback) ------------------
+  // --- (3d) WS upgrade auth: the double-subprotocol contract (preferred) + ?token= (fallback) ----------
   // injectWS drives the request through the SAME fastify.routing() + onRequest hook chain a genuine
   // socket upgrade uses, so a REJECTED handshake (our hook 401s before the route ever hijacks the
   // socket) makes the client-side promise REJECT (no "101 Switching Protocols" ever comes back), and an
@@ -299,28 +337,48 @@ try {
     try { const ws = await appOn.injectWS(wsPath, { headers: { host: "127.0.0.1", ...headers }, socket: remoteSocket }); ws.close(); return false; }
     catch { return true; }
   };
+  const bearerProto = (token) => `${WS_GENERIC_SUBPROTOCOL}, ${WS_BEARER_PREFIX}${token}`;
   check("(3d) remote WS upgrade to /ws/companion with NO token → rejected before the 101 response",
     await wsReject("/ws/companion/sess1", {}));
   check("(3d) remote WS upgrade to /ws/term with NO token → rejected before the 101 response",
     await wsReject("/ws/term/sess1", {}));
-  check("(3d) remote WS upgrade to /ws/companion with a BAD Sec-WebSocket-Protocol token → rejected",
-    await wsReject("/ws/companion/sess1", { "sec-websocket-protocol": "wrong-token" }));
+  check("(3d) remote WS upgrade to /ws/companion with a [generic, bearer(WRONG)] offer → rejected",
+    await wsReject("/ws/companion/sess1", { "sec-websocket-protocol": bearerProto("wrong-token") }));
+  check("(3d) remote WS upgrade to /ws/companion with a BEARER-ONLY offer (no generic marker, valid token) → rejected outright",
+    await wsReject("/ws/companion/sess1", { "sec-websocket-protocol": `${WS_BEARER_PREFIX}${GOOD_TOKEN}` }));
   check("(3d) remote WS upgrade to /ws/companion with a BAD ?token= query → rejected",
     await wsReject("/ws/companion/sess1?token=wrong-token", {}));
 
-  // NOTE: the accepted-subprotocol-echo behavior (RFC 6455 §4.1 — required or a real browser client fails
-  // the connection) is handled entirely by `ws`'s WebSocketServer.handleUpgrade (verified by reading its
-  // source: absent a custom handleProtocols, it echoes back the first client-offered protocol
-  // automatically) — not by anything this daemon implements, and injectWS's client-side shim doesn't
-  // parse the raw handshake response to surface it back as `ws.protocol` for a test to assert on. What
-  // THIS daemon owns, and what matters here, is that the handshake actually completes for a valid token.
-  const wsOkProtocol = await appOn.injectWS("/ws/companion/sess1", { headers: { host: "127.0.0.1", "sec-websocket-protocol": GOOD_TOKEN }, socket: remoteSocket });
-  check("(3d) remote WS upgrade to /ws/companion with a VALID Sec-WebSocket-Protocol token → accepted (real handshake completes)", !!wsOkProtocol);
+  // NOTE: the accepted-subprotocol-echo VALUE (that it's the generic marker, never the token) is asserted
+  // directly against selectWsSubprotocol in section (4) above, not here — injectWS's client-side shim
+  // doesn't parse the raw 101 response back into a `ws.protocol` a test could read. What THIS check
+  // proves is the auth outcome: the handshake actually completes end-to-end for a conformant
+  // [generic, bearer(valid)] offer.
+  const wsOkProtocol = await appOn.injectWS("/ws/companion/sess1", { headers: { host: "127.0.0.1", "sec-websocket-protocol": bearerProto(GOOD_TOKEN) }, socket: remoteSocket });
+  check("(3d) remote WS upgrade to /ws/companion with a VALID [generic, bearer] offer → accepted (real handshake completes)", !!wsOkProtocol);
   wsOkProtocol.close();
 
   const wsOkQuery = await appOn.injectWS(`/ws/companion/sess1?token=${GOOD_TOKEN}`, { headers: { host: "127.0.0.1" }, socket: remoteSocket });
   check("(3d) remote WS upgrade to /ws/companion with a VALID ?token= query fallback → accepted", !!wsOkQuery);
   wsOkQuery.close();
+
+  // --- (3e) CR follow-up on card 42abca6a: a rejected bearer-only WS offer must share the SAME per-ip
+  // rate-limit/lockout gate as any other 401 — NOT bypass it via an early return before isIpLockedOut/
+  // allowRequest run. Plain .inject() (no real upgrade) is sufficient: the trust-tier onRequest hook
+  // terminates a rejected/locked-out request before Fastify ever attempts to hijack the socket, so the
+  // status code alone proves the gate. Uses a dedicated ip so its failure count can't mix with
+  // 203.0.113.5's use elsewhere in this file. maxAttempts=5 is the default authFailLockout policy
+  // (unset here, same as gateway/server.ts's own fallback).
+  const spamIp = "203.0.113.77";
+  const bearerOnlyRejectedHeaders = { host: "127.0.0.1", "sec-websocket-protocol": `${WS_BEARER_PREFIX}${GOOD_TOKEN}` };
+  let allFiveWere401 = true;
+  for (let i = 0; i < 5; i++) {
+    const r = await appOn.inject({ method: "GET", url: "/ws/companion/sess-spam", remoteAddress: spamIp, headers: bearerOnlyRejectedHeaders });
+    if (r.statusCode !== 401) allFiveWere401 = false;
+  }
+  check("(3e) 5 rejected bearer-only WS offers from one ip each 401 (folded into the rate-limited path, each counted as an auth failure)", allFiveWere401);
+  const sixthFromSameIp = await appOn.inject({ method: "GET", url: "/ws/companion/sess-spam", remoteAddress: spamIp, headers: bearerOnlyRejectedHeaders });
+  check("(3e) the 6th rejected bearer-only offer from the SAME ip is now LOCKED OUT (429) — proves the DoS-cap bypass the CR flagged is closed", sixthFromSameIp.statusCode === 429);
 } finally {
   await appOn.close();
   dbOn.close();

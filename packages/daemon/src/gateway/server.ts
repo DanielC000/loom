@@ -66,7 +66,7 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { ASSISTANT_BASE_BRIEF } from "../sessions/assistant-prompt.js";
 import { listCompanionSkills, readCompanionSkill, removeCompanionSkill } from "../skills/companion-store.js";
 import { listCompanionMemories, readCompanionMemory, removeCompanionMemory, authorCompanionMemory } from "../skills/companion-memory-store.js";
-import { routeTier, isTrustTierHookActive, tlsRequirementSatisfied } from "./trust-tier.js";
+import { routeTier, isTrustTierHookActive, tlsRequirementSatisfied, selectWsSubprotocol, resolveWsSubprotocolToken } from "./trust-tier.js";
 import { createRemoteRateLimiter } from "./remote-rate-limit.js";
 import { registerWebhookIngress } from "../webhooks/ingress.js";
 import { listWebhookEndpoints, createWebhookEndpoint, deleteWebhookEndpoint, setWebhookEndpointEnabled } from "../webhooks/store.js";
@@ -358,16 +358,29 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // Tier 1: require a valid gateway token on a remote request (Phase B: gateway_tokens, verified via
       // deps.verifyGatewayToken — see index.ts). A browser cannot set an Authorization header on a
       // WebSocket upgrade, so the two WS routes ALSO accept the token via the Sec-WebSocket-Protocol
-      // subprotocol (preferred — `ws`'s default handleProtocols echoes the offered protocol back, so the
-      // browser's handshake completes normally) or a documented `?token=` query-param fallback. Every
-      // other Tier-1 route stays Authorization-Bearer-only.
+      // subprotocol (preferred — the double-subprotocol contract, card 42abca6a: the client offers
+      // `[loom.v1, loom.bearer.<token>]`, resolveWsSubprotocolToken extracts the token BY PREFIX, and the
+      // 101 response's own echoed subprotocol is always the fixed `loom.v1` marker — see
+      // selectWsSubprotocol/handleProtocols above — never the token itself) or a documented `?token=`
+      // query-param fallback. Every other Tier-1 route stays Authorization-Bearer-only.
       const auth = req.headers.authorization;
       let token = typeof auth === "string" ? /^Bearer\s+(.+)$/i.exec(auth)?.[1] : undefined;
+      // A bearer-carrying subprotocol offered WITHOUT the generic marker (the malformed single-entry
+      // shape the old token-leak relied on) is a rejected offer — no falling back to `?token=` for it. It
+      // is NOT returned here (CR follow-up on card 42abca6a): an early return would bypass the
+      // isIpLockedOut/allowRequest gates below, letting a bearer-only spam loop dodge the per-ip DoS cap
+      // every other Tier-1 rejection respects. Instead it's folded into the SAME rate-limited 401 path as
+      // an unverified token, below.
+      let wsProtocolRejected = false;
       if (!token && (routePattern === "/ws/term/:sessionId" || routePattern === "/ws/companion/:sessionId")) {
         const proto = req.headers["sec-websocket-protocol"];
-        const fromProtocol = typeof proto === "string" ? proto.split(",")[0]?.trim() : undefined;
-        const q = req.query as { token?: unknown };
-        token = fromProtocol || (typeof q?.token === "string" ? q.token : undefined);
+        const resolved = resolveWsSubprotocolToken(typeof proto === "string" ? proto : undefined);
+        if (resolved.outcome === "rejected") {
+          wsProtocolRejected = true;
+        } else {
+          const q = req.query as { token?: unknown };
+          token = resolved.outcome === "token" ? resolved.token : (typeof q?.token === "string" ? q.token : undefined);
+        }
       }
       const now = Date.now();
       // Auth-failure lockout gate — reject BEFORE re-verifying while this ip is locked out (mirrors the
@@ -375,18 +388,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (rateLimiter.isIpLockedOut(ip, now)) return reply.code(429).send({ error: "too many failed attempts — try again later" });
       // Sliding-window request cap — per-ip AND (when presented) per-token.
       if (!rateLimiter.allowRequest(ip, token, now)) return reply.code(429).send({ error: "rate limit exceeded" });
-      if (!verifyGatewayToken(token)) {
-        // Only a non-empty PRESENTED token that fails to verify counts as a credential-guessing signal —
-        // an entirely absent token is ordinary unauthenticated first contact (a remote UI's first probe
-        // before it has a token to send) and must not itself march an ip toward lockout.
-        if (token) rateLimiter.recordAuthFailure(ip, now);
+      if (wsProtocolRejected || !verifyGatewayToken(token)) {
+        // Only a non-empty PRESENTED credential that fails to verify counts as a credential-guessing
+        // signal — an entirely absent token is ordinary unauthenticated first contact (a remote UI's first
+        // probe before it has a token to send) and must not itself march an ip toward lockout. A rejected
+        // WS subprotocol offer DID present a (malformed) credential, so it counts the same as a wrong one.
+        if (wsProtocolRejected || token) rateLimiter.recordAuthFailure(ip, now);
         return reply.code(401).send({ error: "unauthorized" });
       }
       rateLimiter.clearAuthFailures(ip);
     });
   }
 
-  await app.register(websocket);
+  // handleProtocols closes the gateway-token leak (card 42abca6a): absent this option, ws@8 echoes the
+  // FIRST client-offered Sec-WebSocket-Protocol entry verbatim into the 101 response — and that entry used
+  // to BE the token. selectWsSubprotocol always negotiates the fixed generic marker (or nothing, if the
+  // client didn't offer it), never the token-carrying `loom.bearer.*` entry — see gateway/trust-tier.ts.
+  await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol } });
 
   // --- Inbound webhook ingress (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public route
   // (POST /hooks/:endpointPath, gateway/trust-tier.ts). Registered UNCONDITIONALLY (ships inert, mirrors

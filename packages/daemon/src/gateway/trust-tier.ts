@@ -179,3 +179,65 @@ export function canOpenRemoteListener(remoteAccess: RemoteAccessConfig, tokenExi
   return remoteAccess.enabled && !isLoopbackBindHost(remoteAccess.bindHost) && tokenExists
     && tlsRequirementSatisfied(remoteAccess, tlsFilesExist);
 }
+
+/**
+ * WS double-subprotocol handshake (P5b hardening spike amendment #3, card 42abca6a). Fixed the ws@8 leak
+ * where, absent a custom `handleProtocols`, `WebSocketServer.completeUpgrade` echoes the FIRST
+ * client-offered subprotocol verbatim into the `101` response's `Sec-WebSocket-Protocol` header — and
+ * since the gateway token WAS that first/sole subprotocol (the old `proto.split(",")[0]` extraction in
+ * gateway/server.ts), the presented credential was reflected in a response header on every successful
+ * remote WS connect (capturable by any TLS-terminating proxy / log aggregator downstream). The fix: a
+ * remote client now offers TWO subprotocol entries — the fixed generic marker PLUS a token-carrying
+ * entry — and the server's own echoed choice (`selectWsSubprotocol`) is ALWAYS the generic marker, never
+ * the token-carrying one.
+ */
+export const WS_GENERIC_SUBPROTOCOL = "loom.v1";
+
+/** Prefix of the token-carrying subprotocol entry a remote WS client offers ALONGSIDE (never instead of)
+ *  `WS_GENERIC_SUBPROTOCOL` — see `resolveWsSubprotocolToken`. */
+export const WS_BEARER_PREFIX = "loom.bearer.";
+
+/**
+ * ws's own `handleProtocols` hook (wired into the `@fastify/websocket` registration in gateway/
+ * server.ts): given the set of subprotocols a client offered, choose what the `101` response echoes
+ * back. ALWAYS the fixed generic marker when the client offered it — NEVER a `WS_BEARER_PREFIX`-prefixed
+ * (token-carrying) entry, even if one was offered. Returns `false` (no protocol negotiated, matching ws's
+ * own no-`handleProtocols` behavior when the offered set is empty) when the client didn't offer the
+ * generic marker at all. ws only invokes this at all when the client sent a `Sec-WebSocket-Protocol`
+ * header in the first place — a loopback client that offers no subprotocol never reaches this hook, so
+ * that path is unaffected by construction, not by a special case here.
+ */
+export function selectWsSubprotocol(offered: ReadonlySet<string> | readonly string[]): string | false {
+  const set = offered instanceof Set ? offered : new Set(offered);
+  return set.has(WS_GENERIC_SUBPROTOCOL) ? WS_GENERIC_SUBPROTOCOL : false;
+}
+
+export type WsTokenResolution =
+  | { outcome: "token"; token: string }
+  /** No subprotocol-carried token to extract — caller falls back to the `?token=` query param (or, for a
+   *  loopback request, no token at all). NOT a rejection: a bare generic-only offer, or no
+   *  `Sec-WebSocket-Protocol` header at all, both land here. */
+  | { outcome: "no-token" }
+  /** A `WS_BEARER_PREFIX` entry was offered WITHOUT the generic marker alongside it — the malformed/legacy
+   *  single-subprotocol shape the old leak relied on. Rejected outright; the caller must NOT fall back to
+   *  the `?token=` query param for this case (an attacker can't dodge the rejection by adding a query
+   *  token to a non-conformant subprotocol offer). */
+  | { outcome: "rejected" };
+
+/**
+ * Resolve a gateway token from a WS upgrade's raw `Sec-WebSocket-Protocol` header value under the
+ * two-entry contract, replacing the old positional `proto.split(",")[0]` extraction (which trusted
+ * whatever the client put first). The token is only honored when the client offered
+ * `WS_GENERIC_SUBPROTOCOL` in the SAME list as the `WS_BEARER_PREFIX` entry — extracted BY PREFIX, not
+ * positionally, so entry order in the client's offer doesn't matter.
+ */
+export function resolveWsSubprotocolToken(headerValue: string | undefined): WsTokenResolution {
+  if (typeof headerValue !== "string") return { outcome: "no-token" };
+  const offered = headerValue.split(",").map((p) => p.trim()).filter(Boolean);
+  const hasGeneric = offered.includes(WS_GENERIC_SUBPROTOCOL);
+  const bearerEntry = offered.find((p) => p.startsWith(WS_BEARER_PREFIX));
+  if (!bearerEntry) return { outcome: "no-token" };
+  if (!hasGeneric) return { outcome: "rejected" };
+  const token = bearerEntry.slice(WS_BEARER_PREFIX.length);
+  return token ? { outcome: "token", token } : { outcome: "no-token" };
+}
