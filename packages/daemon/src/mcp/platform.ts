@@ -1549,7 +1549,9 @@ export class PlatformMcpRouter {
         if (!callerSessionId) return ok({ error: "no caller session" });
         const projectId = db.getSession(callerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId, db });
+        // This whole router is gated to role==="platform" (resolveRole above) — pass that literally rather
+        // than threading a role param through buildServer for a single caller that never varies.
+        const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId, db, role: "platform" });
         if ("error" in built) return ok({ error: built.error });
         db.insertQuestion(built.question);
         return ok({ questionId: built.question.id });

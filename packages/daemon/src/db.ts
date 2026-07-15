@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -935,6 +935,10 @@ CREATE TABLE IF NOT EXISTS questions (
   credential_env_var TEXT,
   secret_blob TEXT,                        -- envelope ciphertext (v1:iv:tag:ct), 'credential' type only —
                                             -- NEVER mapped into the Question object (see toQuestion)
+  provision_target TEXT,                   -- ask-time JSON {connection:{name,host},binding?:{profileId}} —
+                                            -- credential auto-provisioning v1 (card 193de09e), INTENT only
+  provision_connection_id TEXT,            -- set ONLY by the answer boundary once provisioned
+  provision_binding_state TEXT,            -- 'pending' | 'applied' once provisioned; NULL ('none') otherwise
   state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed'
   chosen_option TEXT,
   note TEXT,
@@ -1291,6 +1295,15 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   permission_expires_at: "TEXT",
   credential_env_var: "TEXT",
   secret_blob: "TEXT",
+  // Credential auto-provisioning v1 (card 193de09e). provision_target is the ask-time JSON
+  // {connection:{name,host},binding?:{profileId}} — INTENT only, never itself a grant. provision_*_id/
+  // *_state are written ONLY by the human-only answer boundary (answerCredentialQuestion), never by any
+  // agent path. provision_binding_state is nullable here (like every other added column) and read back as
+  // "none" by toQuestion for a legacy/non-provisioning row — matching Question.provisionBindingState's
+  // non-null TS type without forcing a NOT NULL DEFAULT migration quirk on this ALTER.
+  provision_target: "TEXT",
+  provision_connection_id: "TEXT",
+  provision_binding_state: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a); applied to existing DBs
@@ -2522,6 +2535,19 @@ export class Db {
     return r ? toConnectionRow(r) : undefined;
   }
   /**
+   * Read one connection by EXACT name match (with the ciphertext blob), or undefined when absent —
+   * the update-existing-vs-create-new lookup for credential auto-provisioning v1 (card 193de09e): a
+   * repeated `provisionTo` naming the same Connection rotates its secret in place instead of duplicating
+   * the row. `name` is currently matched GLOBALLY (connections have no scope yet) — card f2abce7e adds a
+   * project scope to this lookup later; this seam is deliberately narrow (name-only) so that extension
+   * doesn't need to restructure the caller. Case-sensitive exact match (mirrors createConnection's own
+   * trimmed-string identity, no fuzzy/collation matching).
+   */
+  getConnectionByName(name: string): ConnectionRow | undefined {
+    const r = this.db.prepare("SELECT * FROM connections WHERE name = ? ORDER BY created_at, rowid LIMIT 1").get(name) as Row | undefined;
+    return r ? toConnectionRow(r) : undefined;
+  }
+  /**
    * Create a new connection. The caller passes an ALREADY-ENCRYPTED `secretBlob` (this layer never sees
    * the plaintext secret — encryption happens in `connections/store.ts` via the envelope helper). The
    * `provider`/`clientId`/`authUrl`/`tokenUrl`/`scopes` fields are `oauth2`-only NON-SECRET metadata
@@ -2559,6 +2585,17 @@ export class Db {
     this.db.prepare(
       "UPDATE connections SET secret_blob = @secretBlob, token_expires_at = @tokenExpiresAt, oauth_needs_reauth = 0 WHERE id = @id",
     ).run({ id, secretBlob: patch.secretBlob, tokenExpiresAt: patch.tokenExpiresAt });
+  }
+  /**
+   * Rotate an api-key/bearer connection's secret in place — the "update" half of credential
+   * auto-provisioning v1's create-or-update (card 193de09e): re-answering a `provisionTo` that names an
+   * EXISTING connection overwrites its secret rather than creating a duplicate row. `secretBlob` is
+   * ALREADY envelope ciphertext (this layer never sees plaintext). Deliberately does NOT touch
+   * oauth-specific columns (token_expires_at/oauth_needs_reauth) — unlike `updateConnectionTokens`, this
+   * is for the plain api-key/bearer secret column only; callers should never target an oauth2 row with it.
+   */
+  updateConnectionSecret(id: string, secretBlob: string): void {
+    this.db.prepare("UPDATE connections SET secret_blob = ? WHERE id = ?").run(secretBlob, id);
   }
   /** Mark an `oauth2` connection as needing re-authentication (a refresh attempt failed — revoked/invalid). */
   markConnectionNeedsReauth(id: string): void {
@@ -4571,11 +4608,11 @@ export class Db {
       `INSERT INTO questions
         (id,session_id,project_id,type,title,body,options_json,recommendation,task_id,
          permission_action,permission_scope,permission_expires_at,credential_env_var,
-         state,chosen_option,note,created_at,answered_at,consumed_at)
+         provision_target,state,chosen_option,note,created_at,answered_at,consumed_at)
        VALUES
         (@id,@sessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
          @permissionAction,@permissionScope,@permissionExpiresAt,@credentialEnvVar,
-         @state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt)`,
+         @provisionTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt)`,
     ).run({
       // `type` defaults to "decision" at the RUNTIME layer too (not just TS's Question interface) — a
       // plain-JS caller (a hermetic test predating card 695ebab0, or any future untyped caller) that never
@@ -4585,6 +4622,9 @@ export class Db {
       taskId: q.taskId ?? null,
       permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
       permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
+      // provision_connection_id/provision_binding_state are deliberately NOT insertable here — they are
+      // written ONLY by answerCredentialQuestion (the human-only answer boundary), never at ask time.
+      provisionTarget: q.provisionTarget ? JSON.stringify(q.provisionTarget) : null,
       state: q.state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
       createdAt: q.createdAt, answeredAt: q.answeredAt ?? null, consumedAt: q.consumedAt ?? null,
     });
@@ -4618,20 +4658,36 @@ export class Db {
   }
   /**
    * The human-only REST answer write for a `type:"credential"` ask — the ONLY path that ever sets
-   * secret_blob. `secretBlob` MUST already be envelope ciphertext (the caller encrypts via
+   * secret_blob, and (card 193de09e) the ONLY path that ever sets provision_connection_id/
+   * provision_binding_state. `secretBlob` MUST already be envelope ciphertext (the caller encrypts via
    * `keys/envelope.ts` `encryptSecret` BEFORE calling this — mirrors `createConnection`, which never sees
-   * plaintext either); this layer never decrypts, logs, or otherwise touches the plaintext. Refuses (returns
-   * undefined without writing) unless the row is a still-`pending` `type:"credential"` ask, so this can never
-   * be used to smuggle a secret onto a decision/input/permission row. chosen_option/note are deliberately
-   * left untouched (stay NULL) — the credential's only answer payload is secret_blob, which `toQuestion`
-   * never maps into the agent-reachable `Question` object.
+   * plaintext either); this layer never decrypts, logs, or otherwise touches the plaintext. `secretBlob` is
+   * NULLABLE: when `patch.provision` is set, the gateway route deliberately does NOT duplicate the secret
+   * here — the just-created/updated Connection is the SOLE at-rest copy (no new at-rest location). The
+   * question still reads `state:"answered"` regardless — every agent-facing read (`question_pull`,
+   * `task_request_get`, the audit list) derives its ack purely from `state`/`provisionTarget`, never from
+   * `secret_blob` presence, so a NULL-blob provisioned row reads as answered exactly like a non-provisioned
+   * one. Refuses (returns undefined without writing) unless the row is a still-`pending` `type:"credential"`
+   * ask, so this can never be used to smuggle a secret onto a decision/input/permission row. chosen_option/
+   * note are deliberately left untouched (stay NULL) — the credential's only answer payloads are secret_blob
+   * and (when provisioning) provision_connection_id/provision_binding_state, none of which `toQuestion` ever
+   * maps `secret_blob` itself into the agent-reachable `Question` object.
    */
-  answerCredentialQuestion(id: string, patch: { secretBlob: string; answeredAt: string }): Question | undefined {
+  answerCredentialQuestion(
+    id: string,
+    patch: { secretBlob: string | null; answeredAt: string; provision?: { connectionId: string; bindingState: "none" | "pending" } },
+  ): Question | undefined {
     const existing = this.getQuestion(id);
     if (!existing || existing.state !== "pending" || existing.type !== "credential") return undefined;
     this.db.prepare(
-      "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ? WHERE id = ?",
-    ).run(patch.secretBlob, patch.answeredAt, id);
+      "UPDATE questions SET state = 'answered', secret_blob = ?, answered_at = ?, provision_connection_id = ?, provision_binding_state = ? WHERE id = ?",
+    ).run(
+      patch.secretBlob,
+      patch.answeredAt,
+      patch.provision?.connectionId ?? null,
+      patch.provision ? patch.provision.bindingState : null,
+      id,
+    );
     return this.getQuestion(id);
   }
   /**
@@ -5473,6 +5529,9 @@ function toQuestion(r0: unknown): Question {
     permissionScope: (r.permission_scope as PermissionScope | null) ?? null,
     permissionExpiresAt: (r.permission_expires_at as string | null) ?? null,
     credentialEnvVar: (r.credential_env_var as string | null) ?? null,
+    provisionTarget: r.provision_target ? (JSON.parse(r.provision_target as string) as ProvisionTarget) : null,
+    provisionConnectionId: (r.provision_connection_id as string | null) ?? null,
+    provisionBindingState: (r.provision_binding_state as "pending" | "applied" | null) ?? "none",
     state: r.state as QuestionState,
     chosenOption: (r.chosen_option as string | null) ?? null,
     note: (r.note as string | null) ?? null,

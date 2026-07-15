@@ -1611,6 +1611,21 @@ export const PERMISSION_ANSWERS = ["authorize", "deny"] as const;
 export type PermissionAnswer = (typeof PERMISSION_ANSWERS)[number];
 
 /**
+ * `type:"credential"`'s optional ask-time provisioning target (card 193de09e, credential auto-provisioning
+ * v1) — a superset of the older `envVar` hint. States INTENT only: naming this target never itself grants
+ * anything — the human-only answer boundary (`POST /api/questions/:id/answer`) is the sole writer that
+ * ever creates/updates a Connection or a pending binding from it. `connection` is deliberately a NESTED
+ * object (not flattened onto `Question`) so a later scope (card f2abce7e, project-scoped connections) can
+ * add a sibling key here without restructuring. `binding.profileId`, if given, requests that the answered
+ * secret's Connection be bound to that profile — but the binding only ever lands as a PENDING record
+ * (`Question.provisionBindingState`); it is never auto-applied to `Profile.connections`.
+ */
+export interface ProvisionTarget {
+  connection: { name: string; host: string };
+  binding?: { profileId: string };
+}
+
+/**
  * A manager→human DECISION INBOX entry (card 8701bdbb, daemon core / child A), generalized (card
  * 695ebab0) into a typed Requests object via the `type` discriminator. A manager/orchestrator hits a
  * mid-flight decision/input/permission/credential need, asks NON-BLOCKING (the ask tool returns
@@ -1651,6 +1666,22 @@ export interface Question {
    *  under once granted (a display hint, not itself wired to injection — see Question's own doc). Null for
    *  every other type. */
   credentialEnvVar: string | null;
+  /** `type:"credential"` ask-time payload (card 193de09e, credential auto-provisioning v1) — the agent
+   *  STATING INTENT to auto-provision the answered secret into a named Connection, never a grant: the
+   *  human answer boundary is what actually creates/updates the Connection (see `provisionConnectionId`
+   *  below). Only settable by manager/platform (lead) roles — see `buildQuestionAsk`'s role gate. Null for
+   *  every other type, and null for a plain (non-provisioning) credential ask. */
+  provisionTarget: ProvisionTarget | null;
+  /** Set by the human answer boundary when `provisionTarget` was requested and provisioning succeeded —
+   *  the id of the Connection the secret landed in (created, or updated if one by that name already
+   *  existed). Null until answered, and null for a non-provisioning ask. */
+  provisionConnectionId: string | null;
+  /** Set by the human answer boundary alongside `provisionConnectionId`: "pending" when a profile binding
+   *  was requested (`provisionTarget.binding`) but NOT YET applied — auto-binding is deliberately never
+   *  done here, a human must confirm it elsewhere (card 12dc7fc9); "applied" is reserved for that future
+   *  apply step (never written by the answer boundary itself). "none" when no provisioning was requested,
+   *  or a provisioning ask has no binding to apply. */
+  provisionBindingState: "none" | "pending" | "applied";
   state: QuestionState;
   /** Set by the human's answer; null for a pure-blocker/input/credential (or before answering). For
    *  `type:"permission"` this is `"authorize"` or `"deny"`. */

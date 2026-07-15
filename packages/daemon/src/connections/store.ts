@@ -24,12 +24,16 @@ import type { ConnectionAuthScheme, ConnectionMetadata, OAuthProviderSlug } from
 export interface ConnectionsDbStore {
   listConnections(): ConnectionRow[];
   getConnection(id: string): ConnectionRow | undefined;
+  /** Exact-name lookup — the create-or-update seam for credential auto-provisioning v1 (card 193de09e). */
+  getConnectionByName(name: string): ConnectionRow | undefined;
   createConnection(input: {
     name: string; host: string; authScheme: ConnectionAuthScheme; secretBlob: string;
     provider?: string | null; clientId?: string | null; authUrl?: string | null; tokenUrl?: string | null; scopes?: string | null;
   }): ConnectionRow;
   deleteConnection(id: string): void;
   updateConnectionTokens(id: string, patch: { secretBlob: string; tokenExpiresAt: string | null }): void;
+  /** Rotate an api-key/bearer connection's secret in place (card 193de09e's re-provisioning path). */
+  updateConnectionSecret(id: string, secretBlob: string): void;
   markConnectionNeedsReauth(id: string): void;
 }
 
@@ -131,6 +135,49 @@ export function createConnection(
 /** Revoke (delete) a connection by id — idempotent, mirrors the db layer. */
 export function deleteConnection(db: ConnectionsDbStore, id: string): void {
   db.deleteConnection(id);
+}
+
+/**
+ * CREATE-ONLY: provision a named api-key/bearer Connection with a plaintext secret — credential
+ * auto-provisioning v1's core write (card 193de09e), called ONLY from the human-only answer boundary
+ * (`POST /api/questions/:id/answer`'s credential branch in `gateway/server.ts`), never from an agent path.
+ *
+ * REFUSES (throws) if a connection by this EXACT name already exists, of ANY auth scheme — v1 deliberately
+ * does NOT rotate-in-place (CR finding on this card): `getConnectionByName`'s lookup is GLOBAL and
+ * scheme-agnostic, so silently rotating whatever it finds had two live failure modes — (a) provisioning an
+ * api-key secret over an EXISTING `oauth2` connection of the same name would overwrite its token-bundle
+ * blob with an api-key envelope while `authScheme` stayed `"oauth2"`, so a later `getOAuthTokenBundle`
+ * (`JSON.parse` on now-api-key ciphertext) throws — a silent, hard-to-diagnose break; (b) connections have
+ * no scope yet, so ANY manager could overwrite an UNRELATED project's api-key connection's secret just by
+ * naming it, consent the human never gave. Refusing collision entirely closes both. `updateConnectionSecret`
+ * stays on the db layer for a FUTURE scoped-rotation path once card f2abce7e (project-scoped connections)
+ * makes "the connection I own" well-defined — a human can always rotate an existing connection today via
+ * the Connections settings UI/REST in the meantime. Validates via the SAME `validateConnectionInput` bounds
+ * `createConnection` enforces — throws a descriptive Error on invalid input, mirroring `createConnection`'s
+ * own structural backstop. The plaintext `secret` is encrypted only inside the delegated `createConnection`
+ * call, never here.
+ *
+ * Concurrency: a race between two answers naming the same new connection (both pass the collision check,
+ * both create) is left unhandled in v1 — a single-human loopback daemon makes concurrent answers to the
+ * SAME question effectively impossible, and this create-only refusal narrows the window further to two
+ * DIFFERENT questions racing to create the identical name at the identical instant. Not worth a transaction
+ * for that.
+ */
+export function provisionConnection(
+  db: ConnectionsDbStore,
+  input: { name: string; host: string; secret: string },
+  keyPath?: string,
+): ConnectionMetadata {
+  const v = validateConnectionInput({ name: input.name, host: input.host, authScheme: "api-key", secret: input.secret });
+  if (!v.ok) throw new Error(v.error);
+  const existing = db.getConnectionByName(input.name.trim());
+  if (existing) {
+    throw new Error(
+      `a Connection named "${input.name.trim()}" already exists — provisioning only creates NEW connections in v1. ` +
+        "Rotate an existing one via the Connections settings UI instead.",
+    );
+  }
+  return createConnection(db, { name: input.name, host: input.host, authScheme: "api-key", secret: input.secret }, keyPath);
 }
 
 /**

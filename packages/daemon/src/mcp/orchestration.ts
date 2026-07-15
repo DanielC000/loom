@@ -1092,7 +1092,7 @@ export class OrchestrationMcpRouter {
       async (input) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
         if (!projectId) return ok({ error: "no project for this session" });
-        const built = buildQuestionAsk(input, { sessionId: managerSessionId, projectId, db });
+        const built = buildQuestionAsk(input, { sessionId: managerSessionId, projectId, db, role });
         if ("error" in built) return ok({ error: built.error });
         const { question } = built;
         db.insertQuestion(question);

@@ -1,17 +1,25 @@
 import { randomUUID } from "node:crypto";
 import { z } from "zod";
-import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope } from "@loom/shared";
+import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db } from "../db.js";
+
+/** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
+ *  platform (the Lead) only. Enforced in `buildQuestionAsk` below so both `question_ask` registrations
+ *  (`mcp/orchestration.ts`, `mcp/platform.ts`) share the ONE check and can never drift. Today `question_ask`
+ *  itself is only ever registered for these two roles anyway (a worker's MCP surface has no `question_ask`
+ *  at all — see `mcp/orchestration.ts`'s `role === "worker"` branch), so this is a structural belt-and-
+ *  suspenders backstop against a future surface change, not a live workaround. */
+const PROVISIONING_ROLES: readonly SessionRole[] = ["manager", "platform"];
 
 /**
  * `question_ask`'s Requests-object input shape (card 695ebab0), shared verbatim by the manager
  * (`mcp/orchestration.ts`) and Platform Lead (`mcp/platform.ts`) tool surfaces so their validation
  * behavior can never drift. `type` defaults to "decision" (today's exact shape) for backward compat — an
  * existing caller that never passes it is byte-identical to before this card. The per-type fields
- * (`options`/`recommendation` for "decision"; `action`/`scope`/`expiresAt` for "permission"; `envVar` for
- * "credential") are all optional here — `buildQuestionAsk` below is what enforces which are REQUIRED for
- * the resolved type, and silently drops any that don't apply to it.
+ * (`options`/`recommendation` for "decision"; `action`/`scope`/`expiresAt` for "permission"; `envVar`/
+ * `provisionTo` for "credential") are all optional here — `buildQuestionAsk` below is what enforces which
+ * are REQUIRED for the resolved type, and silently drops any that don't apply to it.
  */
 export const QUESTION_ASK_INPUT_SHAPE = {
   type: z.enum(QUESTION_TYPES).optional(),
@@ -24,6 +32,14 @@ export const QUESTION_ASK_INPUT_SHAPE = {
   scope: z.enum(PERMISSION_SCOPES).optional(),
   expiresAt: z.string().optional(),
   envVar: z.string().optional(),
+  // Credential auto-provisioning v1 (card 193de09e) — STATING INTENT only; see ProvisionTarget's own doc.
+  // Restricted to manager/platform roles (buildQuestionAsk's role gate below).
+  provisionTo: z
+    .object({
+      connection: z.object({ name: z.string(), host: z.string() }),
+      binding: z.object({ profileId: z.string() }).optional(),
+    })
+    .optional(),
 } as const;
 
 export interface QuestionAskInput {
@@ -37,6 +53,7 @@ export interface QuestionAskInput {
   scope?: PermissionScope;
   expiresAt?: string;
   envVar?: string;
+  provisionTo?: ProvisionTarget;
 }
 
 /**
@@ -55,11 +72,22 @@ export interface QuestionAskInput {
  */
 export function buildQuestionAsk(
   input: QuestionAskInput,
-  ctx: { sessionId: string; projectId: string; db: Db },
+  ctx: { sessionId: string; projectId: string; db: Db; role: SessionRole },
 ): { question: Question } | { error: string } {
   const type: QuestionType = input.type ?? "decision";
   if (type === "permission" && !input.action?.trim()) {
     return { error: 'type:"permission" requires a non-empty `action` describing what you want authorized' };
+  }
+  if (input.provisionTo && !PROVISIONING_ROLES.includes(ctx.role)) {
+    return { error: `provisionTo (auto-provisioning) is restricted to ${PROVISIONING_ROLES.join("/")} roles` };
+  }
+  if (type === "credential" && input.provisionTo) {
+    if (!input.provisionTo.connection?.name?.trim() || !input.provisionTo.connection?.host?.trim()) {
+      return { error: "provisionTo.connection requires non-empty `name` and `host`" };
+    }
+    if (input.provisionTo.binding && !input.provisionTo.binding.profileId?.trim()) {
+      return { error: "provisionTo.binding requires a non-empty `profileId`" };
+    }
   }
   let taskId: string | null = null;
   if (input.taskId) {
@@ -88,6 +116,9 @@ export function buildQuestionAsk(
       permissionScope: type === "permission" ? (input.scope ?? null) : null,
       permissionExpiresAt: type === "permission" ? (input.expiresAt ?? null) : null,
       credentialEnvVar: type === "credential" ? (input.envVar ?? null) : null,
+      provisionTarget: type === "credential" ? (input.provisionTo ?? null) : null,
+      provisionConnectionId: null,
+      provisionBindingState: "none",
       state: "pending",
       chosenOption: null,
       note: null,
@@ -101,12 +132,30 @@ export function buildQuestionAsk(
 /**
  * The `type:"credential"` ack text — factored out of `questionPullItem` (card 988bb585) so
  * `taskRequestGetItem`'s full-detail read can share the EXACT same never-echo phrasing without
- * duplicating it and risking drift. Never touches `secret_blob` — it only ever reads `credentialEnvVar`,
- * the ask-time hint (not the answer). Deliberately does NOT promise auto-provisioning (card 3f8bd560):
- * nothing in the daemon reads `secret_blob` back out and injects it into a session env, so the wording
- * must say a human still has to wire it in — auto-wiring is a separate, unbuilt feature.
+ * duplicating it and risking drift. Never touches `secret_blob` — it only ever reads `credentialEnvVar`/
+ * `provisionTarget`/`provisionConnectionId`/`provisionBindingState`, all ask-time-hint or non-secret
+ * answer-time metadata (never the answer itself).
+ *
+ * Branches on whether auto-provisioning was requested (card 193de09e): with no `provisionTarget`, the
+ * wording is UNCHANGED from before this card — a human still has to wire it in by hand, auto-wiring is a
+ * separate, unbuilt path (card 3f8bd560's honest-ack lesson). With a `provisionTarget`, the answer boundary
+ * has already created/updated a Connection by the time this reads `answered` — the ack names it, and is
+ * explicit that a requested profile binding is only ever PENDING human confirmation here, never applied:
+ * it must never read as "wired up and ready to use."
  */
 function credentialAck(q: Question): string {
+  if (q.provisionTarget) {
+    const bindingNote =
+      q.provisionBindingState === "pending"
+        ? ` A binding to profile "${q.provisionTarget.binding?.profileId}" is PENDING human confirmation — ` +
+          "it is NOT yet wired to any session; an operator must apply it before an agent can use it."
+        : " No profile binding was requested — an operator must still bind this Connection to a profile " +
+          "before any agent session can use it.";
+    return (
+      `Provided and stored securely — not returned via this tool. It was provisioned into Connection ` +
+      `"${q.provisionTarget.connection.name}" (id ${q.provisionConnectionId}).` + bindingNote
+    );
+  }
   return q.credentialEnvVar
     ? `Provided and stored securely — not returned via this tool. It is NOT auto-injected into any ` +
       `session env; a human must wire it into a Connection or this project's config (as ${q.credentialEnvVar}) ` +
@@ -161,6 +210,12 @@ export function questionAnswerByType(q: Question): Record<string, unknown> {
  * "credential" request — mirrors `questionPullItem`'s credential branch exactly (shared `credentialAck`);
  * structurally guaranteed too, since the `Question` object this reads never carries it in the first place
  * (db.ts's `toQuestion` deliberately never maps `secret_blob`).
+ *
+ * `provisioning` (card 193de09e) surfaces the non-secret auto-provisioning audit trail — the REQUESTED
+ * target (name/host/binding, ask-time) plus the RESULT (connectionId/bindingState, answer-time) — for the
+ * Platform Auditor and the board's connected-requests read. Always present (even for a non-provisioning
+ * credential ask, or a non-credential type) so callers don't have to branch on its absence; every field is
+ * null/"none" when provisioning was never requested.
  */
 export function taskRequestGetItem(q: Question): Record<string, unknown> {
   return {
@@ -169,6 +224,22 @@ export function taskRequestGetItem(q: Question): Record<string, unknown> {
     state: q.state, taskId: q.taskId,
     createdAt: q.createdAt, answeredAt: q.answeredAt,
     ...questionAnswerByType(q),
+    provisioning: provisioningAudit(q),
+  };
+}
+
+/**
+ * The non-secret auto-provisioning audit shape (card 193de09e) shared by `taskRequestGetItem` and
+ * `auditRequestItem` — NEVER the secret value, only the requested target + the created/updated
+ * Connection's id + the binding's pending/applied/none state.
+ */
+function provisioningAudit(q: Question): Record<string, unknown> {
+  return {
+    requested: q.provisionTarget
+      ? { connectionName: q.provisionTarget.connection.name, host: q.provisionTarget.connection.host, bindingProfileId: q.provisionTarget.binding?.profileId ?? null }
+      : null,
+    connectionId: q.provisionConnectionId,
+    bindingState: q.provisionBindingState,
   };
 }
 
@@ -189,5 +260,6 @@ export function auditRequestItem(q: Question & { agentId: string | null }): Reco
     type: q.type, title: q.title, state: q.state,
     createdAt: q.createdAt, answeredAt: q.answeredAt, consumedAt: q.consumedAt,
     ...questionAnswerByType(q),
+    provisioning: provisioningAudit(q),
   };
 }

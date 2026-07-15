@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -36,7 +36,7 @@ import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
 import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, computeCoGrantWarnings } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
-import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES } from "../connections/store.js";
+import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
@@ -2414,6 +2414,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           options?: string[] | null; recommendation?: string | null; taskId?: string | null;
           permissionAction?: string | null; permissionScope?: PermissionScope | null; permissionExpiresAt?: string | null;
           credentialEnvVar?: string | null;
+          // Ask-time only (card 193de09e) — `insertQuestion` only ever binds `provisionTarget` at insert
+          // time; `provisionConnectionId`/`provisionBindingState` are answer-time fields written EXCLUSIVELY
+          // by `answerCredentialQuestion` (the human-only answer boundary), so this seed has no field for
+          // them — a spec that needs an already-provisioned row must seed pending, then answer it via the
+          // real REST route below, not by pre-setting those two here.
+          provisionTarget?: ProvisionTarget | null;
           state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
           // Optional instant overrides — backdate `answeredAt` to drive the client-side watchdog (an
           // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
@@ -2648,6 +2654,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,
           permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
           permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
+          // provisionConnectionId/provisionBindingState are answer-time-only (see the seed body type's own
+          // comment above) — always the pre-answer defaults here; insertQuestion itself only ever binds
+          // provisionTarget at insert time regardless.
+          provisionTarget: q.provisionTarget ?? null, provisionConnectionId: null, provisionBindingState: "none",
           state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
           createdAt: q.createdAt ?? now,
           answeredAt: q.answeredAt ?? (state === "answered" || state === "consumed" ? now : null),
@@ -3961,7 +3971,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const body = (req.body ?? {}) as { secret?: string };
       const secret = typeof body.secret === "string" ? body.secret : "";
       if (!secret.trim()) return reply.code(400).send({ error: "a secret value is required" });
-      updated = deps.db.answerCredentialQuestion(id, { secretBlob: encryptSecret(secret), answeredAt });
+      // Credential auto-provisioning v1 (card 193de09e) — the SECRETS TRUST BOUNDARY: when the asking
+      // manager/lead requested a `provisionTo` target at ask time, create-or-update that Connection with
+      // this SAME plaintext BEFORE marking the question answered (`provisionConnection` reuses
+      // `connections/store.ts`'s encrypt-then-store path — the plaintext still never returns, logs, or
+      // reaches an agent). Provisioning failure (e.g. an oversized name/host) 400s here and the question
+      // stays 'pending' — it must NEVER read as answered-but-unprovisioned, so this runs strictly BEFORE
+      // `answerCredentialQuestion` below.
+      let provision: { connectionId: string; bindingState: "none" | "pending" } | undefined;
+      if (question.provisionTarget) {
+        try {
+          const target = question.provisionTarget;
+          const connection = provisionConnection(deps.db, { name: target.connection.name, host: target.connection.host, secret });
+          provision = { connectionId: connection.id, bindingState: target.binding ? "pending" : "none" };
+        } catch (e) {
+          return reply.code(400).send({ error: `credential provisioning failed: ${(e as Error).message}` });
+        }
+      }
+      // When provisioning succeeded, the Connection just created/updated above is the SOLE at-rest copy of
+      // this secret — deliberately pass secretBlob:null rather than ALSO encrypting it onto the question
+      // row (no new at-rest location). Without a provisionTarget, behavior is byte-identical to before this
+      // card: the question's own secret_blob is the only copy, exactly as today.
+      updated = deps.db.answerCredentialQuestion(id, {
+        secretBlob: provision ? null : encryptSecret(secret),
+        answeredAt,
+        provision,
+      });
     } else if (question.type === "permission") {
       const body = (req.body ?? {}) as { decision?: string; note?: string };
       const isPermissionAnswer = (v: string | undefined): v is PermissionAnswer =>
