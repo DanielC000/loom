@@ -10,9 +10,9 @@
  * python-venv AND github-binary (so N provisioning capabilities — of either kind — provision independently,
  * never sharing one in-flight flag).
  *
- * The three BUILTIN capabilities (browser-testing/document-conversion/deja-corpus) are NOT rows in this
+ * The BUILTIN capabilities (browser-testing/document-conversion/open-design) are NOT rows in this
  * table — they stay special-cased in `buildMcpServers` (pty/host.ts), reusing their existing,
- * already-hardened resolution code (`playwrightMcpServer`/`markitdownMcpServer`/`dejaMcpServer`)
+ * already-hardened resolution code (`playwrightMcpServer`/`markitdownMcpServer`/`openDesignMcpServer`)
  * UNTOUCHED. Their reserved slugs are
  * rejected here (`RESERVED_CAPABILITY_SLUGS`) so an owner can never shadow/rename over them.
  *
@@ -40,7 +40,6 @@ import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } fr
 import { loomGithubMcpBin, ensureGithubMcpBinaryAsync } from "./github-binary.js";
 import type { EnsureGithubBinaryOpts, EnsureGithubBinaryResult, GithubBinaryProvisionOutcome } from "./github-binary.js";
 import { resolveExecutable } from "../pty/resolve-bin.js";
-import { isLoomDev } from "../paths.js";
 
 /** One owner-added catalog row as stored/read at the DB layer (mirrors ConnectionRow's shape). */
 export interface CapabilityDefRow {
@@ -86,7 +85,7 @@ const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
 /** The three legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
  *  row can never collide with or shadow a builtin. Duplicated as string literals (not imported) to keep
  *  this module's validation independent of the shared bridge helper's own location. */
-export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", "deja-corpus", "open-design"] as const;
+export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", "open-design"] as const;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
@@ -201,7 +200,7 @@ function toSummary(row: CapabilityDefRow): CapabilitySummary {
 }
 
 /**
- * The two BUILTIN capabilities' REST-facing summaries — hardcoded (not catalog rows; see the module doc)
+ * The BUILTIN capabilities' REST-facing summaries — hardcoded (not catalog rows; see the module doc)
  * so the Settings UI's catalog panel and the Profile editor's picker can list them alongside owner-added
  * ones in ONE unified view, without a client-side special case for "the first two are different."
  */
@@ -217,26 +216,15 @@ export const BUILTIN_CAPABILITY_SUMMARIES: CapabilitySummary[] = [
     transport: "stdio", kind: "python-venv", requiresConnection: false, builtin: true,
   },
   {
-    slug: "deja-corpus", name: "Deja mockup corpus",
-    description: "Inject a per-session Deja MCP so a mockup-generating rig can retrieve prior mockups (find_mockups) and submit the one it just wrote (submit_mockup/mark_reused).",
-    transport: "stdio", kind: "bundled", requiresConnection: false, builtin: true,
-  },
-  {
     slug: "open-design", name: "Open Design",
-    description: "Inject a per-session Open Design (OD, github.com/nexu-io/open-design) MCP so a design/mockup rig can generate prototypes, dashboards, decks, and other design artifacts. Needs OD installed on this host (LOOM_OPEN_DESIGN_BIN pointed at its od entry) — Loom only mounts an OD the owner already installed, never bundles or auto-installs it. UNLIKE deja-corpus, this is a PUBLIC OSS capability — never hidden on a non-dev build.",
+    description: "Inject a per-session Open Design (OD, github.com/nexu-io/open-design) MCP so a design/mockup rig can generate prototypes, dashboards, decks, and other design artifacts. Needs OD installed on this host (LOOM_OPEN_DESIGN_BIN pointed at its od entry) — Loom only mounts an OD the owner already installed, never bundles or auto-installs it. A PUBLIC OSS capability — never hidden on a non-dev build.",
     transport: "stdio", kind: "bundled", requiresConnection: false, builtin: true,
   },
 ];
 
-/**
- * List every capability — the builtins FIRST, then every owner-added row — as REST-facing summaries.
- * "deja-corpus" is dropped on a non-`LOOM_DEV` build: Deja is a PRIVATE product (Loom is public on npm),
- * so a regular `loomctl` user's GET /api/capabilities must never even NAME it, independent of the two
- * UI-level toggle hides in Profiles.tsx/Settings.tsx (same isLoomDev() gate as the Platform layer).
- */
+/** List every capability — the builtins FIRST, then every owner-added row — as REST-facing summaries. */
 export function listCapabilitySummaries(db: CapabilitiesDbStore): CapabilitySummary[] {
-  const builtins = isLoomDev() ? BUILTIN_CAPABILITY_SUMMARIES : BUILTIN_CAPABILITY_SUMMARIES.filter((c) => c.slug !== "deja-corpus");
-  return [...builtins, ...db.listCapabilityDefs().map(toSummary)];
+  return [...BUILTIN_CAPABILITY_SUMMARIES, ...db.listCapabilityDefs().map(toSummary)];
 }
 
 /** Create an owner-added capability def. Throws a descriptive Error on invalid/duplicate input. */
@@ -435,8 +423,8 @@ export function resolveCapabilityServer(row: CapabilityDefRow, ctx: ResolveCapab
     if (bin) server = { command: bin, args: [] };
   } else if (provision.kind === "bundled" || provision.kind === "command") {
     // bundled: a Loom-curated recipe — `command` may be an ALREADY-ABSOLUTE path, or a BARE PATH-searched
-    // name (e.g. "npx", the github capability seed) that must self-heal like the three hardcoded builtins
-    // (Playwright/markitdown/deja) already do, each re-resolving live at every spawn. CODE-REVIEW FIX: a
+    // name (e.g. "npx", the github capability seed) that must self-heal like the hardcoded builtins
+    // (Playwright/markitdown) already do, each re-resolving live at every spawn. CODE-REVIEW FIX: a
     // bare command must NOT be resolved once and frozen (a stripped-PATH boot would never mount it again
     // even after the real binary becomes installed; a moved fnm/nvm/volta shim would 404 silently forever;
     // a DB restored on another machine would carry a dead path) — so re-run `resolveExecutable` EVERY

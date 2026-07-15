@@ -1509,7 +1509,7 @@ const VAULT_READ: CompanionCapability = {
  * granted project admits NOTHING (conservative default, matching decisions-relay's own absent-allowlist
  * posture): the owner must explicitly configure at least one root before anything is deliverable. (Owner
  * sign-off 1039e892 named the recommended defaults for that config — vault `Assets/`, the session scratch
- * dir, the deja store — but this lever's own code applies no implicit fallback: an empty configured
+ * dir — but this lever's own code applies no implicit fallback: an empty configured
  * allowlist delivers nothing, exactly like an empty `decisionClasses`.)
  *
  * DELIVERY was TELEGRAM-FIRST v1 (owner decision 2026-07-09): `ctx.outbound.deliverMediaToOwner` resolves

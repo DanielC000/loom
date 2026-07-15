@@ -998,8 +998,6 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
   // opt-in document-conversion (pinned at spawn from the Profile; carried across respawns); legacy rows ⇒ 0.
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
-  // opt-in Deja mockup-corpus (pinned at spawn from the Profile; carried across respawns); legacy rows ⇒ 0 (off).
-  deja_corpus: "INTEGER NOT NULL DEFAULT 0",
   // opt-in Open Design (pinned at spawn from the Profile; carried across respawns); legacy rows ⇒ 0 (off).
   open_design: "INTEGER NOT NULL DEFAULT 0",
   // restricted-tools (pinned at spawn from the Profile; appends dangerous native tools to --disallowedTools); legacy rows ⇒ 0 (off).
@@ -1064,8 +1062,6 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   browser_testing: "INTEGER NOT NULL DEFAULT 0",
   // opt-in document-conversion flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
-  // opt-in Deja mockup-corpus flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
-  deja_corpus: "INTEGER NOT NULL DEFAULT 0",
   // opt-in Open Design flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   open_design: "INTEGER NOT NULL DEFAULT 0",
   // restricted-tools flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
@@ -3216,8 +3212,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,deja_corpus,open_design,restricted_tools,no_commit,connections,capabilities)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@dejaCorpus,@openDesign,@restrictedTools,@noCommit,@connections,@capabilities)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,open_design,restricted_tools,no_commit,connections,capabilities)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@openDesign,@restrictedTools,@noCommit,@connections,@capabilities)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -3226,7 +3222,6 @@ export class Db {
       model: p.model ?? null, icon: p.icon ?? null,
       browserTesting: p.browserTesting ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       documentConversion: p.documentConversion ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
-      dejaCorpus: p.dejaCorpus ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       openDesign: p.openDesign ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       restrictedTools: p.restrictedTools ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
@@ -3246,7 +3241,6 @@ export class Db {
       icon: patch.icon,
       browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
       document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
-      deja_corpus: patch.dejaCorpus === undefined ? undefined : patch.dejaCorpus ? 1 : 0,
       open_design: patch.openDesign === undefined ? undefined : patch.openDesign ? 1 : 0,
       restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
@@ -3454,12 +3448,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,deja_corpus,open_design,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,open_design,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@dejaCorpus,@openDesign,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@openDesign,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -3469,7 +3463,6 @@ export class Db {
       role: s.role ?? null,
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
       documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
-      dejaCorpus: s.dejaCorpus ? 1 : 0, // off (0) on every plain session literal
       openDesign: s.openDesign ? 1 : 0, // off (0) on every plain session literal
       restrictedTools: s.restrictedTools ? 1 : 0, // off (0) on every plain session literal
       noCommit: s.noCommit ? 1 : 0, // off (0) on every plain session literal
@@ -3546,14 +3539,13 @@ export class Db {
    * the sole caller's comment), so pinning it here would be a misleading no-op.
    */
   setSessionCapabilitySurface(id: string, patch: {
-    browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; openDesign?: boolean;
+    browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean;
     capabilities?: CapabilityGrant[]; restrictedTools?: boolean; noCommit?: boolean;
     skills?: string[] | null;
   }): void {
     const cols: Record<string, unknown> = {
       browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
       document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
-      deja_corpus: patch.dejaCorpus === undefined ? undefined : patch.dejaCorpus ? 1 : 0,
       open_design: patch.openDesign === undefined ? undefined : patch.openDesign ? 1 : 0,
       restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
@@ -4905,7 +4897,6 @@ function toProfile(r0: unknown): Profile {
     icon: (r.icon as string) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
     documentConversion: (r.document_conversion as number) === 1,
-    dejaCorpus: (r.deja_corpus as number) === 1,
     openDesign: (r.open_design as number) === 1,
     restrictedTools: (r.restricted_tools as number) === 1,
     noCommit: (r.no_commit as number) === 1,
@@ -4929,7 +4920,6 @@ function toSession(r0: unknown): Session {
     role: (r.role as SessionRole) ?? null,
     browserTesting: (r.browser_testing as number) === 1,
     documentConversion: (r.document_conversion as number) === 1,
-    dejaCorpus: (r.deja_corpus as number) === 1,
     openDesign: (r.open_design as number) === 1,
     restrictedTools: (r.restricted_tools as number) === 1,
     noCommit: (r.no_commit as number) === 1,

@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import type { PermissionPolicy } from "@loom/shared";
-import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, DEJA_CAPTURE_SCRIPT, PORT, isLoomDev } from "../paths.js";
+import { SETTINGS_DIR, RELAY_SCRIPT, VAULT_LINT_SCRIPT, PORT } from "../paths.js";
 
 /**
  * Loom NEVER wants Claude Code's "resume from summary / as-is" gate (isResumeSummaryGate in host.ts) to
@@ -57,19 +57,11 @@ const AUTO_MODE_ENTRY_WARNING_OVERRIDE = { skipAutoPermissionPrompt: true } as c
  *
  * When `vaultPath` is given (docLint on), a PostToolUse hook (matcher Write|Edit) runs the
  * mechanical vault-lint on .md writes under that vault (Pillar D). Advisory only — it never blocks.
- *
- * When `dejaCapture` is on AND this is a `LOOM_DEV` build (card b3bd4841), a SECOND PostToolUse(Write|Edit)
- * hook group runs the deja-capture.mjs relay, which auto-ingests an agent-written .html mockup into Deja
- * with the driving prompt as `origin_prompt` — resolved DAEMON-SIDE by the relay itself (sessionId + port,
- * mirroring the hook-relay.mjs invocation shape). Opt-in, advisory-only, never blocks. Deja is a PRIVATE
- * product, so the hook stays a no-op on a non-dev build even when `dejaCapture:true` is stored on a project
- * (same gate as the "deja-corpus" MCP grant in pty/host.ts).
  */
 export function writeSessionSettings(
   sessionId: string,
   permission: PermissionPolicy,
   vaultPath?: string,
-  dejaCapture?: boolean,
 ): string {
   const hookCmd = {
     hooks: [{ type: "command", command: `node "${RELAY_SCRIPT}" ${sessionId} ${PORT}` }],
@@ -85,12 +77,6 @@ export function writeSessionSettings(
     postToolUse.push({
       matcher: "Write|Edit",
       hooks: [{ type: "command", command: `node "${VAULT_LINT_SCRIPT}" "${vaultPath}"` }],
-    });
-  }
-  if (dejaCapture && isLoomDev()) {
-    postToolUse.push({
-      matcher: "Write|Edit",
-      hooks: [{ type: "command", command: `node "${DEJA_CAPTURE_SCRIPT}" ${sessionId} ${PORT}` }],
     });
   }
   if (postToolUse.length) hooks.PostToolUse = postToolUse;

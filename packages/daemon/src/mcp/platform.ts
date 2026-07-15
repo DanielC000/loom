@@ -156,7 +156,7 @@ const obsidianOverride = z.object({
 const pythonOverride = z.object({
   interpreterPath: z.string().min(1).optional(),
 }).strict();
-// Codescape wiring (card C2): per-project opt-in, agent-settable — unlike dejaCapture, this flag alone
+// Codescape wiring (card C2): per-project opt-in, agent-settable — this flag alone
 // has no host-launch capability (it only conditionally mounts an HTTP MCP entry pointing at the
 // already-running daemon-owned supervisor, itself gated behind the daemon-wide isCodescapeSupervisorEnabled()
 // an agent can never flip), so it's a benign on/off toggle like docLint — NOT omitted from the agent shape.
@@ -170,11 +170,6 @@ const projectConfigOverrideSchema = z.object({
   sessionEnv: z.record(z.string(), z.string()).optional(),
   orchestration: orchestrationOverride.optional(),
   docLint: z.boolean().optional(),
-  // Opt-in Deja capture hook (card b3bd4841). HUMAN-only (dropped from the agent shape below) — see
-  // the rejection-site comment on agentProjectConfigOverrideSchema's `.omit()` for the full rationale:
-  // its hook shells out to an external host binary that receives file content + the driving prompt, a
-  // host-process + data-exfiltration surface, NOT the benign docLint precedent it might look like.
-  dejaCapture: z.boolean().optional(),
   codescape: codescapeOverride.optional(),
   obsidian: obsidianOverride.optional(),
   python: pythonOverride.optional(),
@@ -218,16 +213,8 @@ const agentPythonOverride = pythonOverride.omit({ interpreterPath: true }).stric
 // and the default merge (config.ts) lets an agent-set raw value survive. Allowing raw `sessionEnv` would
 // re-open exactly the host-exec/exfil capability those field rejections close (NODE_OPTIONS=--require,
 // PATH, etc.). Agents have no business setting raw session env; the human/REST path keeps it.
-// `dejaCapture` is HUMAN-only too and DROPPED from the agent shape (card b3bd4841, Lead-confirmed
-// FINAL — not a placeholder pending review). docLint is NOT a valid precedent for treating this as a
-// benign toggle: docLint's hook runs a Loom-BUNDLED PURE-NODE relay (vault-lint.mjs) with no external
-// process. dejaCapture's hook instead SHELLS OUT to an EXTERNAL host binary (`deja`) that RECEIVES the
-// written mockup's file content plus the driving prompt — a HOST-PROCESS-EXECUTION surface (like
-// gateCommand/obsidian.path/python.interpreterPath) that is ALSO a DATA-EXFILTRATION vector (like
-// alertWebhook): an agent that could self-enable it would pipe file contents + prompts into an
-// out-of-Loom process of its own choosing. Only the human enables capture, per project.
 const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
-  .omit({ sessionEnv: true, dejaCapture: true })
+  .omit({ sessionEnv: true })
   .extend({ orchestration: agentOrchestrationOverride.optional(), obsidian: agentObsidianOverride.optional(), python: agentPythonOverride.optional() })
   .strict();
 
@@ -819,7 +806,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_profiles",
       {
-        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, dejaCorpus, openDesign, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
+        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, openDesign, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
         inputSchema: {},
       },
       async () => ok(db.listProfiles()),
@@ -860,7 +847,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_get",
       {
-        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, dejaCorpus, openDesign, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, openDesign, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: { profileId: z.string() },
       },
       async ({ profileId }) =>
@@ -883,7 +870,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections`/`capabilities`/`dejaCorpus`/`openDesign` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, and `capabilities`/`dejaCorpus` can launch a host process / inject an MCP server; not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections`/`capabilities`/`openDesign` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, and `capabilities`/`openDesign` can launch a host process / inject an MCP server; not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
@@ -900,7 +887,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`dejaCorpus`/`openDesign` (authenticated-egress grants / registry-capability grants / the Deja mockup-corpus / Open Design MCP-injection flags — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`openDesign` (authenticated-egress grants / registry-capability grants / the Open Design MCP-injection flag — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {

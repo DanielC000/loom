@@ -12,7 +12,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves:
 //   1. The NEW tool surface is present post-upgrade: the re-resolved capabilities/browserTesting/
-//      documentConversion/dejaCorpus/restrictedTools/skills/connections land on BOTH the session row and the
+//      documentConversion/restrictedTools/skills/connections land on BOTH the session row and the
 //      freshly-captured pty.spawn() opts — and capabilityToolAllowlist (the real, pure allow-list builder)
 //      shows a brand-new capability's tool name present after upgrade, absent before.
 //   2. The engine session id (conversation) is PRESERVED: the post-upgrade spawn is a `--resume
@@ -108,7 +108,7 @@ const engineId = "eng-companion-conversation-1";
 db.insertSession({
   id: sessionId, projectId: projId, agentId, engineSessionId: engineId, title: null, cwd,
   processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null,
-  role: "assistant", browserTesting: false, documentConversion: false, dejaCorpus: false, restrictedTools: false,
+  role: "assistant", browserTesting: false, documentConversion: false, restrictedTools: false,
   noCommit: false, skills: null, connections: [], capabilities: [],
 });
 // The engine transcript must exist for resume() to proceed (its dead-ID + cwd-missing backstops).
@@ -131,7 +131,7 @@ try {
   db.setProcessState(sessionId, "starting"); // resume()'s isAlive short-circuit needs the pty to actually be live
   host.spawn({
     sessionId, cwd, permission: { allow: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 },
-    resumeId: engineId, role: "assistant", browserTesting: false, documentConversion: false, dejaCorpus: false,
+    resumeId: engineId, role: "assistant", browserTesting: false, documentConversion: false,
     capabilities: [], restrictedTools: false, skills: null,
   });
   check("setup: the companion pty is alive before upgrade", host.isAlive(sessionId));
@@ -225,7 +225,7 @@ try {
     scriptDb.insertSession({
       id: scriptSessionId, projectId: scriptProjId, agentId: scriptAgentId, engineSessionId: scriptEngineId, title: null, cwd,
       processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null,
-      role: "assistant", browserTesting: false, documentConversion: false, dejaCorpus: false, restrictedTools: false,
+      role: "assistant", browserTesting: false, documentConversion: false, restrictedTools: false,
       noCommit: false, skills: null, connections: [], capabilities: [],
     });
     const raceTpath = engineTranscriptPath(cwd, scriptEngineId);

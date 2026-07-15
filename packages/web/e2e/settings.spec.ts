@@ -84,22 +84,6 @@ test("editing the project gate command persists (REST read-back + reload)", asyn
   await expect(field(page, "Gate command")).toHaveValue("pnpm build");
 });
 
-test("Deja Capture panel is absent under this fixture's default LOOM_DEV=0 boot", async ({ page, loomDaemon }) => {
-  // Deja is a PRIVATE product (Loom is public on npm) — its per-project capture toggle is a HUMAN-ONLY
-  // field dropped from the agent config schema, but it must also be HIDDEN from the web UI entirely
-  // unless this is a LOOM_DEV build (mirrors platform.spec.ts's dev-surface-absent assertion). The fixture
-  // boots LOOM_DEV=0 (fixtures/daemon.ts), so /api/platform/home 404s and the panel never mounts — the
-  // daemon-side hook (writeSessionSettings) is ALSO gated, covered by the hermetic deja-capture.mjs test.
-  const project = await loomDaemon.createProject(`settings-deja-${Date.now()}`);
-  await pinActiveProject(page, project.id);
-
-  await page.goto(`${loomDaemon.baseURL}/settings`);
-  await expect(page.getByText("Project Settings", { exact: true })).toBeVisible();
-
-  await expect(page.getByText("Deja Capture", { exact: true })).toHaveCount(0);
-  await expect(field(page, "Ingest agent-written mockups into Deja")).toHaveCount(0);
-});
-
 test("editing a daemon-global setting persists to the platform override", async ({ page, loomDaemon }) => {
   // Pin a project so the page is fully populated, though the global section is project-independent.
   const project = await loomDaemon.createProject(`settings-global-${Date.now()}`);

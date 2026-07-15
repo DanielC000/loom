@@ -185,13 +185,6 @@ function ConfigEditor({ project }: { project: Project }) {
   const qc = useQueryClient();
   const ov = project.config; // the stored override
   const resolved = resolveConfig(ov); // effective values, shown as hints
-  // Deja is a PRIVATE product (Loom is public on npm) — the Deja Capture panel is hidden unless this is a
-  // LOOM_DEV build. Same isDev signal Platform.tsx/Skills.tsx derive from the reserved "Loom Platform"
-  // home's existence (GET /api/platform/home only 200s under LOOM_DEV=1). A project that already has an
-  // explicit dejaCapture override just loses its visible control here — the daemon-side hook is ALSO
-  // gated (writeSessionSettings), so it never wires regardless.
-  const platformHome = useQuery({ queryKey: ["platformHome"], queryFn: api.platformHome, retry: false });
-  const isDev = platformHome.isSuccess && !!platformHome.data?.project;
   // The true PLATFORM default (resolveConfig with NO override) — what blanking/inheriting a field
   // reverts to. Inherit/default hints must show THIS, not the current override-effective value, or
   // they'd misrepresent the revert target. (CLAUDE.md: defaults come only from resolveConfig.)
@@ -211,10 +204,6 @@ function ConfigEditor({ project }: { project: Project }) {
   const [maxUnanswered, setMaxUnanswered] = useState(numStr(ov.orchestration?.maxUnansweredNudges));
   const [idleSnooze, setIdleSnooze] = useState(numStr(ov.orchestration?.idleDefaultSnoozeMinutes));
   const [docLint, setDocLint] = useState(triStr(ov.docLint));
-  // Opt-in Deja capture hook (card b3bd4841) — a per-project HUMAN-ONLY toggle (dropped from the agent
-  // config schema, like sessionEnv), so it round-trips ONLY through this REST PATCH (the full validator),
-  // never an agent write. Sibling of docLint: another PostToolUse(Write|Edit) hook, off by default.
-  const [dejaCapture, setDejaCapture] = useState(triStr(ov.dejaCapture));
   // Human-only base-Python override for the shared venv (document conversion). Like gateCommand it points
   // at a host executable, so the AGENT config validator rejects it — only this REST path accepts it. Blank
   // inherits PATH discovery (python3 → python → py -3).
@@ -263,7 +252,6 @@ function ConfigEditor({ project }: { project: Project }) {
     if (Object.keys(orch).length) o.orchestration = orch; else delete o.orchestration;
 
     if (docLint !== "inherit") o.docLint = docLint === "true"; else delete o.docLint;
-    if (dejaCapture !== "inherit") o.dejaCapture = dejaCapture === "true"; else delete o.dejaCapture;
 
     // python.interpreterPath: set when non-blank, else drop the key (and the now-empty python block) so a
     // blank field inherits PATH discovery rather than persisting an empty override.
@@ -360,17 +348,6 @@ function ConfigEditor({ project }: { project: Project }) {
         </label>
       </Panel>
 
-      {isDev && (
-        <Panel>
-          <SectionLabel>Deja Capture</SectionLabel>
-          <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 280 }}>
-            <span style={fieldLabel}>Ingest agent-written mockups into Deja</span>
-            <TriSelect value={dejaCapture} set={setDejaCapture} def={defaults.dejaCapture} />
-            <Hint>opt-in: a PostToolUse hook auto-ingests an agent-authored .html mockup into Deja with the driving prompt as origin_prompt · off by default</Hint>
-            {resolved.dejaCapture && <DejaCaptureStatusLine />}
-          </label>
-        </Panel>
-      )}
 
       <Panel>
         <SectionLabel>Python</SectionLabel>
@@ -1646,28 +1623,6 @@ function Hint({ children }: { children: ReactNode }) {
 }
 function effHint(v: unknown): string {
   return `effective: ${String(v)}`;
-}
-
-// Deja capture status line (card 1c0c1a2c) — turns a silently-empty dejaCapture toggle into a
-// self-explaining state: an empty-state line at 0 captures, a heartbeat count once there's at
-// least one. Rendered only while the effective toggle is ON (see the Deja Capture panel above).
-// Polls gently (10s) so a capture landing mid-session shows up without a manual page reload.
-function DejaCaptureStatusLine() {
-  const q = useQuery({
-    queryKey: ["dejaCaptureStatus"],
-    queryFn: api.dejaCaptureStatus,
-    retry: false,
-    refetchInterval: 10_000,
-  });
-  if (!q.data) return null;
-  const { count } = q.data;
-  return (
-    <span style={{ color: count > 0 ? color.text : color.textMuted, fontSize: 11, fontFamily: font.mono }}>
-      {count > 0
-        ? `${count} mockup${count === 1 ? "" : "s"} captured`
-        : "Capture on, 0 mockups seen yet — mockups appear once a generating agent writes one."}
-    </span>
-  );
 }
 
 // `effective` = the current resolved value (shown as the "effective:" hint); `def` = the platform

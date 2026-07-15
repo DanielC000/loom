@@ -85,15 +85,14 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   installed + reachable on this host, else a silent no-op (a rig opts in, OD is absent → no injection, no
   error, byte-identical spawn — the primary shipping case since Loom does not bundle or auto-install OD).
   Host gate is `LOOM_OPEN_DESIGN_BIN` (an absolute path to OD's own `od` entry), checked via a plain
-  `fs.existsSync` at spawn time (`pty/host.ts` › `openDesignMcpServer`) — mirrors `LOOM_DEJA_BIN`'s shape
-  exactly, EXCEPT the binary is launched DIRECTLY (`{command: bin, args: ["mcp"]}`), not wrapped in
-  `process.execPath` (OD ships as a standalone `od` executable, not a bare node script like Deja's
-  `cli.js`). **UNLIKE `dejaCorpus`, this is a PUBLIC capability — NOT gated by `isLoomDev()`**: Deja is a
-  private Loom-internal product (hidden from a non-dev build); open-design is a public OSS project, so it
-  ships to every `loomctl` user. Structurally identical to `browserTesting`/`documentConversion` otherwise:
-  default OFF + fully additive; pinned on the session row so resume/fork/recycle keep it. HUMAN-set only
-  (Profiles UI/REST) — like `dejaCorpus` (not the milder `browserTesting`/`documentConversion` posture), an
-  MCP-server injection is an exfil-class grant, so `openDesign` is rejected even on the Setup Assistant's/
+  `fs.existsSync` at spawn time (`pty/host.ts` › `openDesignMcpServer`), EXCEPT the binary is launched
+  DIRECTLY (`{command: bin, args: ["mcp"]}`), not wrapped in `process.execPath` (OD ships as a standalone
+  `od` executable, not a bare node script). **This is a PUBLIC capability — NOT gated by `isLoomDev()`**:
+  open-design is a public OSS project, so it ships to every `loomctl` user. Structurally identical to
+  `browserTesting`/`documentConversion` otherwise: default OFF + fully additive; pinned on the session row
+  so resume/fork/recycle keep it. HUMAN-set only (Profiles UI/REST) — an MCP-server injection is an
+  exfil-class grant (the same stricter posture as `connections`/`capabilities`, not the milder
+  `browserTesting`/`documentConversion` one), so `openDesign` is rejected even on the Setup Assistant's/
   Platform Lead's own profile-writing MCP tools (`profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) —
   no agent-facing grant/self-elevation path exists. **UNVERIFIED RISK (no OD install available to test
   against):** OD pairs this MCP process with OD's OWN separate local daemon (normally on
@@ -101,7 +100,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   degrading a tool call gracefully), a session could see its `claude` boot hang; this resolver only ever
   gates on binary PRESENCE, never OD's own daemon reachability (a network/handshake probe on the spawn hot
   path would itself risk freezing the daemon, the same footgun documented below for a synchronous
-  venv-create). Deja (the capability this replaces) is removed in a sibling follow-on card.
+  venv-create).
 - **Shared Loom-managed Python venv (`python/venv.ts`) + `python.interpreterPath`:** Loom owns ONE shared
   venv under `<LOOM_HOME>/python/venv` — NOT a venv-per-tool. **Event-loop discipline (load-bearing):** the spawn HOT PATH (`createPty` → `buildMcpServers`) does NO blocking work — only `fs.existsSync(loomVenvBin( binary))` (instant). Creating the venv + `pip install markitdown[all]` takes minutes, so provisioning is fully ASYNC (`child_process.spawn`, never `spawnSync`) and BEST-EFFORT, off the event loop — mirroring `git/worktrees.ts` `createWorktree`. A synchronous `spawnSync` venv-create/pip on the spawn path would FREEZE the whole daemon (every spawn/resume, the web UI, all HTTP/MCP) for the entire install; that bug is what this split avoids. `ensurePythonPackageAsync({ package, binary, probeImport?, timeoutMs?, interpreterOverride? })` is the reusable surface EVERY Python-backed capability calls OFF the hot path (e.g. from a background job): it creates the venv if missing (from a discovered base Python via async `discoverBasePythonAsync` — `python.interpreterPath` FIRST, then `python3` → `python` → win32 `py -3`), pip-installs, and returns a CLASSIFIED `{ binary, outcome, errorTail }` — the ABSOLUTE console-script path + `ready` on success, else `binary:null` with the SPECIFIC failure (`no-base-python` / `venv-create-failed` / `pip-failed` / `timeout` / `disabled`) and the captured ~4KB stdout+stderr tail. venv/pip run with PIPED stdio (NOT `stdio:'ignore'`), so the REAL cause (proxy / SSL / resolver / timeout) is logged + surfaced, not lumped into one opaque "venv/pip failed". Idempotent (a ready venv hits a fast path via an import probe), BOUNDED (every spawn has a timeout; the markitdown `pip install` gets a ~15-min / `900_000`ms bound — `markitdown[all]` is heavy: onnxruntime + many converters — killed-on-exceed ⇒ classified `timeout`, while venv-create/probe keep their fast bounds), NEVER throws. The markitdown consumer kicks it RETRYABLY — deduped ONLY while a job is genuinely IN-FLIGHT (concurrent spawns never launch parallel installs), but a fresh kick is allowed after a TERMINAL outcome, so a profile-save pre-warm, a later spawn, or the human-only retry below all actually retry (NOT the old PERMANENT one-shot that dead-ended every retry until a daemon restart). It
   tracks a status `{ state: idle|installing|ready|failed, reason, errorTail, binary, lastAttemptAt }` read via

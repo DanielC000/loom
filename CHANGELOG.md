@@ -4,6 +4,9 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Removed
+- **Deja integration removed.** The opt-in Deja mockup-corpus capability (`dejaCorpus`) and the Deja capture PostToolUse hook (`dejaCapture`) are gone from Loom's built-in surface — dedicated modules, config/DB fields, MCP wiring, and web UI all removed. [open-design](https://github.com/nexu-io/open-design) is the forward design capability that replaces it (see `openDesign` in `CLAUDE.md`). The Deja product itself is unaffected; only Loom's built-in integration is removed.
+
 ## [0.19.0] — 2026-07-12
 
 **Security hardening and reliability.** The opt-in browserTesting browser surface is locked down so an untrusted-chat Companion can't reach host-code-execution or host-file-read tools; the Companion's in-app delivery path gets several route-fallback fixes; and managers gain peer discovery, a board-wide Requests view, and delivery-channel introspection — plus orchestration observability, config-write resilience under load, and a flaky-test hardening pass.

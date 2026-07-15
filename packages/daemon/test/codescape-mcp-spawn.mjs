@@ -1,12 +1,12 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Codescape wiring epic `369dde3c`, card C2 REWRITE (card e068a2ab) — inject the built-in Codescape MCP
 // for agents on a LOOM_DEV Codescape-enabled project. DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE,
-// hermetic like deja-corpus-spawn.mjs: isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService
+// hermetic like open-design-spawn.mjs: isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService
 // driven against a FAKE pty injected via PtyHost's createPty() seam, and a FAKE CodescapeSupervisor (just
 // `ingestToGraph`) injected via SessionService's `opts.codescape` — no real supervisor/serve process, no
 // real claude spawn. `LOOM_CODESCAPE_BIN` points at the fixture CLI (test/fixtures/fake-codescape-cli.mjs)
-// so `codescapeMcpServer`'s spawn-shape assertions are real (mirrors deja-corpus-spawn.mjs's
-// LOOM_DEJA_BIN pattern) without needing a real `codescape` install.
+// so `codescapeMcpServer`'s spawn-shape assertions are real (mirrors open-design-spawn.mjs's
+// LOOM_OPEN_DESIGN_BIN pattern) without needing a real `codescape` install.
 //
 // WAS: a shared `codescape serve` HTTP mount scoped by the LOOM projectId — codescape ingested the repo
 // under its OWN derived id, so scope lookups 400/404'd and the MCP never registered (agents got zero
@@ -20,8 +20,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       with the per-project flag; paths.ts's `codescapeGraphPath` derives the ONE project-wide graph path.
 //   (resolver) `codescapeMcpServer(graphPath)` returns null when the graph file doesn't exist yet
 //       (clean-skip, mirrors markitdown's "venv not warm" fallback), and a real `{type:"stdio", command,
-//       args}` entry — command wrapped in `process.execPath` for a `.js`/`.mjs` codescape checkout
-//       (mirrors dejaMcpServer's shape), args ending `mcp --graph <graphPath>` — once it exists.
+//       args}` entry — command wrapped in `process.execPath` for a `.js`/`.mjs` codescape checkout,
+//       args ending `mcp --graph <graphPath>` — once it exists.
 //   (a) buildMcpServers mounts that stdio entry for "codescape" iff codescapeEnabled && isLoomDev() &&
 //       isCodescapeSupervisorEnabled() && the project's graph.json exists — orthogonal to role: worker,
 //       manager, and plain all get the SAME project-wide entry (no more worktree-scoped 2-/3-segment URL).
@@ -56,7 +56,7 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 // The isLoomDev() gate check below needs the TRUE default-off state — delete any inherited LOOM_DEV=1
-// (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell; mirrors deja-corpus-spawn.mjs).
+// (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell; mirrors open-design-spawn.mjs).
 delete process.env.LOOM_DEV;
 delete process.env.LOOM_CODESCAPE_ENABLED;
 
@@ -157,7 +157,7 @@ const graphPathA = codescapeGraphPath("projA");
   fs.writeFileSync(graphPathA, JSON.stringify({ nodes: [], edges: [], flows: [] }));
   const entry = codescapeMcpServer(graphPathA);
   check("(resolver) returns a stdio entry once the graph file exists", entry?.type === "stdio");
-  check("(resolver) a .mjs codescape checkout is wrapped in process.execPath (mirrors dejaMcpServer's shape)",
+  check("(resolver) a .mjs codescape checkout is wrapped in process.execPath",
     entry?.command === process.execPath);
   check("(resolver) args are [<cli.js>, 'mcp', '--graph', <graphPath>]",
     JSON.stringify(entry?.args) === JSON.stringify([fixtureCli, "mcp", "--graph", graphPathA]));
@@ -206,7 +206,7 @@ check("(a) manager gets the EXACT SAME project-wide entry as a worker (no more w
   JSON.stringify(managerOn.codescape) === JSON.stringify(workerOn.codescape));
 
 const plainOn = buildMcpServers({ sessionId: "s1", port: 4317, codescapeEnabled: true, projectId: "projA" });
-check("(a) plain (role-less) session also gets it (orthogonal to role, like deja)",
+check("(a) plain (role-less) session also gets it (orthogonal to role)",
   JSON.stringify(plainOn.codescape) === JSON.stringify(workerOn.codescape));
 
 // ON adds exactly the codescape key, nothing else changes vs the negative-case map.
@@ -308,6 +308,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape MCP wiring (card C2 rewrite, e068a2ab): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeGraphPath derives ONE project-wide graph file; codescapeMcpServer clean-skips until that file exists then returns a real stdio entry (process.execPath-wrapped for a .mjs checkout, mirroring dejaMcpServer); buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+graph-exists, with all 4 negative cases byte-identical off, orthogonally across worker/manager/plain roles; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's C3 hook ingests the project's MAIN repoPath (not the worktree) exactly once, after which buildMcpServers mounts it and a second spawn skips re-ingesting — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape MCP wiring (card C2 rewrite, e068a2ab): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeGraphPath derives ONE project-wide graph file; codescapeMcpServer clean-skips until that file exists then returns a real stdio entry (process.execPath-wrapped for a .mjs checkout); buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+graph-exists, with all 4 negative cases byte-identical off, orthogonally across worker/manager/plain roles; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's C3 hook ingests the project's MAIN repoPath (not the worktree) exactly once, after which buildMcpServers mounts it and a second spawn skips re-ingesting — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

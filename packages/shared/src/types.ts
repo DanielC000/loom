@@ -113,31 +113,18 @@ export interface Profile {
    */
   documentConversion?: boolean;
   /**
-   * Opt-in Deja mockup-corpus capability: when true, a session under this rig is spawned with its OWN
-   * per-session stdio `deja mcp` server (`find_mockups`/`submit_mockup`/`mark_reused`) so a mockup-
-   * generating agent can retrieve prior mockups mid-generation and submit the one it just wrote. Default
-   * OFF (absent/false) and fully additive — a rig without it spawns byte-identically to today. Builtin
-   * (not an owner-catalog `capability_defs` row), resolved like browserTesting/documentConversion via
-   * `LOOM_DEJA_BIN`, clean-skipping the mount if unresolved. HUMAN-set only (Profiles UI / REST) — NEVER
-   * exposed via an agent MCP tool: an MCP-server injection is an exfil-class grant, so unlike
-   * browserTesting/documentConversion this is rejected even on the Setup Assistant's/Platform Lead's own
-   * profile-writing MCP tools (see `profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) — the same
-   * stricter posture as `connections`/`capabilities`.
-   */
-  dejaCorpus?: boolean;
-  /**
    * Opt-in Open Design (OD, github.com/nexu-io/open-design) capability: when true, a session under this
    * rig is spawned with its OWN per-session stdio OD MCP server (mounted iff OD is ALSO installed +
    * reachable on this host, via `LOOM_OPEN_DESIGN_BIN`) so a design/mockup-generating agent can use OD's
    * design tooling. Default OFF (absent/false) and fully additive — a rig without it spawns
    * byte-identically to today. Builtin (not an owner-catalog `capability_defs` row), resolved like
-   * dejaCorpus via an env-pointed absolute binary, clean-skipping the mount if unresolved. UNLIKE
-   * dejaCorpus, this is NOT additionally gated by `isLoomDev()` — OD is a public OSS project, not a
+   * browserTesting/documentConversion via an env-pointed absolute binary, clean-skipping the mount if
+   * unresolved. NOT additionally gated by `isLoomDev()` — OD is a public OSS project, not a
    * private Loom product, so it ships to every loomctl user. HUMAN-set only (Profiles UI / REST) — NEVER
    * exposed via an agent MCP tool: an MCP-server injection is an exfil-class grant, so this is rejected
    * even on the Setup Assistant's/Platform Lead's own profile-writing MCP tools (see
    * `profiles/validate.ts`'s `AGENT_FORBIDDEN_PROFILE_KEYS`) — the same stricter posture as
-   * `connections`/`capabilities`/`dejaCorpus`.
+   * `connections`/`capabilities`.
    */
   openDesign?: boolean;
   /**
@@ -559,15 +546,8 @@ export interface Session {
    */
   documentConversion?: boolean;
   /**
-   * Opt-in Deja mockup-corpus capability, resolved from the session's Profile at spawn and PINNED here
-   * (mirrors `browserTesting`): a per-session stdio `deja mcp` server is injected iff this is true.
-   * Persisted so EVERY respawn path (resume / fork / recycle) carries the capability forward unchanged.
-   * Absent/false on every existing session ⇒ no Deja MCP, byte-identical spawn.
-   */
-  dejaCorpus?: boolean;
-  /**
    * Opt-in Open Design capability, resolved from the session's Profile at spawn and PINNED here (mirrors
-   * `dejaCorpus`): a per-session stdio OD MCP server is injected iff this is true AND OD resolves on this
+   * `browserTesting`): a per-session stdio OD MCP server is injected iff this is true AND OD resolves on this
    * host. Persisted so EVERY respawn path (resume / fork / recycle) carries the capability forward
    * unchanged. Absent/false on every existing session ⇒ no OD MCP, byte-identical spawn.
    */

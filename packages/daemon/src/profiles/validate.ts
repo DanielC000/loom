@@ -41,17 +41,11 @@ const profileSchema = z
     // Opt-in document-conversion capability (default off). Human-gated identically to browserTesting —
     // it launches a host markitdown process, so it is never an agent MCP write surface.
     documentConversion: z.boolean().optional(),
-    // Opt-in Deja mockup-corpus capability (default off): injects a per-session `deja mcp` server so a
-    // mockup-generating rig can retrieve prior mockups + submit the one it just wrote. STRICTER than
-    // browserTesting/documentConversion — an MCP-server injection is an exfil-class grant, so this is
-    // rejected even on the elevated Setup Assistant's/Platform Lead's own profile-writing MCP tools (see
-    // AGENT_FORBIDDEN_PROFILE_KEYS below), the SAME posture as `connections`/`capabilities`.
-    dejaCorpus: z.boolean().optional(),
     // Opt-in Open Design (OD) capability (default off): injects a per-session OD MCP server (see
     // pty/host.ts's openDesignMcpServer) so a design/mockup-generating rig can use OD's design tooling.
-    // SAME stricter posture as dejaCorpus (see AGENT_FORBIDDEN_PROFILE_KEYS below) — an MCP-server
-    // injection is an exfil-class grant, rejected even on the elevated Setup Assistant's/Platform Lead's
-    // own profile-writing MCP tools. UNLIKE dejaCorpus, OD is a public OSS capability (not gated by
+    // STRICTER than browserTesting/documentConversion (see AGENT_FORBIDDEN_PROFILE_KEYS below) — an
+    // MCP-server injection is an exfil-class grant, rejected even on the elevated Setup Assistant's/
+    // Platform Lead's own profile-writing MCP tools. OD is a public OSS capability (not gated by
     // isLoomDev() at spawn time) — but the GRANT itself stays human-only regardless.
     openDesign: z.boolean().optional(),
     // Opt-in RESTRICTED-tools (default off). Blast-radius control for a chat-reachable Companion: when on,
@@ -95,10 +89,10 @@ const profileSchema = z
  * `capabilities` (agent-tooling P4) gets the SAME stricter posture, not the milder `browserTesting`/
  * `documentConversion` one: a capability grant launches a host process and can bind egress via a P1
  * connection, so it is owner-only end-to-end, never delegable to an elevated profile-writing agent.
- * `dejaCorpus` gets the SAME stricter posture too: an MCP-server injection is an exfil-class grant, not
+ * `openDesign` gets the SAME stricter posture too: an MCP-server injection is an exfil-class grant, not
  * the milder `browserTesting`/`documentConversion` posture.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "dejaCorpus", "openDesign"] as const;
+const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "openDesign"] as const;
 
 /**
  * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a
@@ -178,7 +172,6 @@ export function validateProfile(
       icon: d.icon ?? null,
       browserTesting: d.browserTesting ?? false, // normalize to the stored default (off)
       documentConversion: d.documentConversion ?? false, // normalize to the stored default (off)
-      dejaCorpus: d.dejaCorpus ?? false, // normalize to the stored default (off)
       openDesign: d.openDesign ?? false, // normalize to the stored default (off)
       restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)

@@ -68,7 +68,7 @@ check("(resolver) resolveCodescapeBin() with no override falls back to the bare 
   (() => { const r = resolveCodescapeBin(); return r.command !== process.execPath && r.args.length === 0; })());
 process.env.LOOM_CODESCAPE_BIN = fixtureCli;
 const resolvedBin = resolveCodescapeBin();
-check("(resolver) a .mjs override resolves to {command: node, args:[fixture]} (mirrors dejaMcpServer's node-invocation shape)",
+check("(resolver) a .mjs override resolves to {command: node, args:[fixture]} (node-invocation shape)",
   resolvedBin.command === process.execPath && JSON.stringify(resolvedBin.args) === JSON.stringify([fixtureCli]));
 
 // ===================== (neg) LOOM_DEV unset — the hard negative case =====================

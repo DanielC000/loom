@@ -550,14 +550,6 @@ export interface ResolvedConfig {
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
    */
   docLint: boolean;
-  /**
-   * Opt-in Deja capture hook (card b3bd4841): wire a SECOND PostToolUse(Write|Edit) hook —
-   * sibling of the docLint vault-lint hook above — that auto-ingests an agent-written .html
-   * mockup into Deja with the driving prompt as `origin_prompt`. Default false (opt-in): the
-   * relay resolves origin_prompt + project DAEMON-SIDE (sessionId → task), never widening the
-   * agent-facing config surface beyond a benign on/off boolean, mirroring docLint.
-   */
-  dejaCapture: boolean;
   /** Codescape fleet-daemon MCP wiring, per-project opt-in (card C2). Default false — see CodescapeConfig. */
   codescape: CodescapeConfig;
   /** Obsidian auto-start (self-healing vault tooling). Default OFF — see ObsidianConfig. */
@@ -592,8 +584,6 @@ export interface ProjectConfigOverride {
   // NOTE: no `platform` key either — platform tuning is daemon-GLOBAL (one shared daemon), supplied as
   // resolveConfig's SEPARATE 2nd arg (PlatformConfigOverride), never nested in a per-project override.
   docLint?: boolean;
-  /** See ResolvedConfig.dejaCapture. */
-  dejaCapture?: boolean;
   /** See ResolvedConfig.codescape. */
   codescape?: Partial<CodescapeConfig>;
   obsidian?: Partial<ObsidianConfig>;
@@ -691,7 +681,6 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     rateLimit: { perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
   },
   docLint: true, // Pillar D vault-lint hook on by default
-  dejaCapture: false, // opt-in Deja capture hook (card b3bd4841) — off by default
   codescape: { enabled: false }, // opt-in Codescape MCP wiring (card C2) — off by default
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
   obsidian: { autoStart: false },
@@ -755,10 +744,8 @@ export interface ResolvedProfile {
   browserTesting: boolean;
   /** Opt-in document-conversion: inject a per-session markitdown MCP at spawn. Backstops to false. */
   documentConversion: boolean;
-  /** Opt-in Deja mockup-corpus: inject a per-session `deja mcp` server at spawn. Backstops to false. */
-  dejaCorpus: boolean;
   /** Opt-in Open Design: inject a per-session OD MCP server at spawn iff OD resolves on this host.
-   *  Backstops to false. UNLIKE dejaCorpus, not additionally gated by isLoomDev() (OD is public OSS). */
+   *  Backstops to false. Not gated by isLoomDev() (OD is public OSS). */
   openDesign: boolean;
   /** Restricted-tools: append the curated dangerous native tools to `--disallowedTools` at spawn
    *  (blast-radius control for a chat-reachable Companion). Backstops to false. */
@@ -780,23 +767,22 @@ export interface ResolvedProfile {
   capabilities: CapabilityGrant[];
 }
 
-/** The three permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
-export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion", dejaCorpus: "deja-corpus", openDesign: "open-design" } as const;
+/** The permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
+export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion", openDesign: "open-design" } as const;
 
 /**
- * Bridge a profile/session's legacy `browserTesting`/`documentConversion`/`dejaCorpus` booleans + its
+ * Bridge a profile/session's legacy `browserTesting`/`documentConversion` booleans + its
  * `capabilities` array into ONE resolved grant list (agent-tooling P4) — the back-compat seam that lets
  * `buildMcpServers` iterate a single list while every existing profile/session row (booleans set,
  * `capabilities` unset) keeps resolving to EXACTLY its pre-P4 grants, with zero data migration. Order:
- * legacy slots first (stable, matches today's browser-then-document-then-deja mount order), then the
+ * legacy slots first (stable, matches today's mount order), then the
  * array verbatim. Called EXACTLY ONCE per resolution (buildMcpServers) — `capabilities` itself is never
  * pre-bridged (see the field doc above), so this is the only place legacy + new merge.
  */
-export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; openDesign?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
+export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
   const legacy: CapabilityGrant[] = [
     ...(p.browserTesting ? [{ slug: LEGACY_CAPABILITY_SLUGS.browserTesting }] : []),
     ...(p.documentConversion ? [{ slug: LEGACY_CAPABILITY_SLUGS.documentConversion }] : []),
-    ...(p.dejaCorpus ? [{ slug: LEGACY_CAPABILITY_SLUGS.dejaCorpus }] : []),
     ...(p.openDesign ? [{ slug: LEGACY_CAPABILITY_SLUGS.openDesign }] : []),
   ];
   return [...legacy, ...(p.capabilities ?? [])];
@@ -820,7 +806,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, dejaCorpus: false, openDesign: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, openDesign: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
   }
   return {
     role: profile.role ?? null,
@@ -832,7 +818,6 @@ export function resolveProfile(
     // Pass the flag through when the profile sets it; backstop false for an unset/absent flag.
     browserTesting: profile.browserTesting ?? false,
     documentConversion: profile.documentConversion ?? false,
-    dejaCorpus: profile.dejaCorpus ?? false,
     openDesign: profile.openDesign ?? false,
     // Restricted-tools (subtractive spawn effect: dangerous native tools → --disallowedTools). Backstop false.
     restrictedTools: profile.restrictedTools ?? false,
@@ -1071,7 +1056,6 @@ export function resolveConfig(
     // Daemon-global (no per-project layer): global override (2nd arg) ?? default. See RemoteAccessConfig.
     remoteAccess: resolveRemoteAccess(platformOverride),
     docLint: override.docLint ?? d.docLint,
-    dejaCapture: override.dejaCapture ?? d.dejaCapture,
     codescape: { enabled: override.codescape?.enabled ?? d.codescape.enabled },
     obsidian,
     python,

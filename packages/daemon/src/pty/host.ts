@@ -696,40 +696,16 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 }
 
 /**
- * The stdio MCP-config entry for a dejaCorpus session, or null when `LOOM_DEJA_BIN` is unset or doesn't
- * resolve to an existing absolute file — a CLEAN-SKIP (like the missing-Playwright-package / not-yet-warm
- * markitdown-venv fallbacks above) so an unresolvable Deja install never breaks the spawn. Callers MUST
- * also gate on `isLoomDev()` (see the "deja-corpus" branch in `buildMcpServers` below) — Deja is a
- * PRIVATE product and this resolver alone doesn't know about that gate.
- *
- * `LOOM_DEJA_BIN` is the SAME human-only override the Deja capture relay resolves (`assets/deja-capture.mjs`
- * `resolveDejaBin`), but here it MUST already be an ABSOLUTE path to Deja's `cli.js` — this entry launches it
- * directly via the daemon's own absolute node binary (`process.execPath`) + `["<cli.js>", "mcp"]`, the same
- * node-pty-can't-search-%PATH% lesson as Playwright/markitdown (never a bare `"deja"` command). No venv/
- * provisioning step: unlike markitdown this is a synchronous existence check only — Deja is a daemon
- * dependency the human installs and points `LOOM_DEJA_BIN` at once, not something Loom provisions.
- *
- * `deja mcp` (no extra flags) defaults to the global `~/.deja/store.sqlite` (`os.homedir()`) — the SAME
- * store the dejaCapture PostToolUse hook writes into, so retrieval and capture line up with zero extra
- * config.
- */
-export function dejaMcpServer(): { type: "stdio"; command: string; args: string[] } | null {
-  const bin = process.env.LOOM_DEJA_BIN;
-  if (!bin || !path.isAbsolute(bin) || !fs.existsSync(bin)) return null;
-  return { type: "stdio", command: process.execPath, args: [bin, "mcp"] };
-}
-
-/**
  * The stdio MCP-config entry for an openDesign session, or null when `LOOM_OPEN_DESIGN_BIN` is unset or
- * doesn't resolve to an existing absolute file — a CLEAN-SKIP mirroring {@link dejaMcpServer} exactly:
- * an unresolvable open-design (OD, github.com/nexu-io/open-design) install never breaks the spawn.
- * UNLIKE dejaMcpServer, this is NOT additionally gated by `isLoomDev()` — OD is a public, OSS project
- * (not a private Loom-internal product like Deja), so it ships to every loomctl user.
+ * doesn't resolve to an existing absolute file — a CLEAN-SKIP mirroring markitdownMcpServer's "not warm
+ * yet" fallback: an unresolvable open-design (OD, github.com/nexu-io/open-design) install never breaks
+ * the spawn. NOT additionally gated by `isLoomDev()` — OD is a public, OSS project, so it ships to every
+ * loomctl user.
  *
  * `LOOM_OPEN_DESIGN_BIN` must already be an ABSOLUTE path to OD's own `od` CLI/MCP entry — launched
- * DIRECTLY (never wrapped in `process.execPath`, unlike Deja's `cli.js`): OD ships as a standalone `od`
+ * DIRECTLY (never wrapped in `process.execPath`): OD ships as a standalone `od`
  * binary/executable, not a bare node script, so the daemon spawns it as-is with a single `"mcp"` arg
- * (mirrors `od mcp`, OD's own documented stdio-MCP invocation). No venv/provisioning step — like Deja,
+ * (mirrors `od mcp`, OD's own documented stdio-MCP invocation). No venv/provisioning step —
  * OD is a host dependency the human installs and points `LOOM_OPEN_DESIGN_BIN` at once; Loom never
  * bundles or auto-installs it (see the profile flag's own doc for the full trust posture).
  *
@@ -756,10 +732,9 @@ export function openDesignMcpServer(): { type: "stdio"; command: string; args: s
  * Card C2 REWRITE (`369dde3c`, card e068a2ab): replaces the old shared `codescape serve` HTTP mount
  * (scoped by the LOOM projectId, which never matched codescape's OWN ingested project id — the MCP
  * never registered) with a per-session STDIO `codescape mcp --graph <graphPath>` process, the SAME
- * per-session-MCP shape as Playwright/markitdown/Deja/OD above. `resolveCodescapeBin()` already
- * encodes the two spawn shapes (a `.js` checkout wrapped in `process.execPath`, exactly like
- * {@link dejaMcpServer}; a resolved PATH/compiled binary launched directly, exactly like
- * {@link openDesignMcpServer}) — reused here rather than re-derived.
+ * per-session-MCP shape as Playwright/markitdown/OD above. `resolveCodescapeBin()` already
+ * encodes the two spawn shapes (a `.js` checkout wrapped in `process.execPath`; a resolved PATH/compiled
+ * binary launched directly, exactly like {@link openDesignMcpServer}) — reused here rather than re-derived.
  */
 export function codescapeMcpServer(graphPath: string): { type: "stdio"; command: string; args: string[] } | null {
   if (!fs.existsSync(graphPath)) return null;
@@ -774,11 +749,11 @@ export function codescapeMcpServer(graphPath: string): { type: "stdio"; command:
  * workspace-auditor → loom-user-audit, setup → loom-setup);
  * PLUS — one generalized capability-registry loop (agent-tooling P4) that mounts EVERY resolved
  * registry-capability grant (`resolveProfileCapabilities(o)`, bridging the legacy `browserTesting`/
- * `documentConversion`/`dejaCorpus` booleans + the new `capabilities` array into ONE list). The legacy
- * slugs ("browser-testing"/"document-conversion"/"deja-corpus") are special-cased to their EXISTING,
- * already-hardened resolvers (`playwrightMcpServer`/`markitdownMcpServer`/`dejaMcpServer`, untouched) so
+ * `documentConversion` booleans + the new `capabilities` array into ONE list). The legacy
+ * slugs ("browser-testing"/"document-conversion") are special-cased to their EXISTING,
+ * already-hardened resolvers (`playwrightMcpServer`/`markitdownMcpServer`, untouched) so
  * this generalization is byte-identical for every caller that still passes the booleans directly (every
- * existing test + call site) — the mounted map keys stay "playwright"/"markitdown"/"deja" exactly as
+ * existing test + call site) — the mounted map keys stay "playwright"/"markitdown" exactly as
  * before. Any OTHER slug is an
  * owner-added catalog capability, resolved via the injected `o.capabilityCatalog` + the generic
  * node-package/python-venv/bundled dispatcher (`resolveCapabilityServer`), with its bound connection's
@@ -793,7 +768,7 @@ export function codescapeMcpServer(graphPath: string): { type: "stdio"; command:
  * tool world, so a prompt-injection in an audited transcript has no outward/destructive tool to reach.
  */
 export function buildMcpServers(o: {
-  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; dejaCorpus?: boolean; openDesign?: boolean;
+  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean;
   /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
   pythonInterpreterPath?: string;
   /** Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (raw, un-bridged —
@@ -897,26 +872,8 @@ export function buildMcpServers(o: {
       }
       continue;
     }
-    if (grant.slug === "deja-corpus") {
-      // Deja is a PRIVATE product (Loom itself is public on npm) — never wire its MCP on a non-dev build,
-      // even when a profile carries a stored dejaCorpus:true (e.g. from before this gate existed). Same
-      // gate as the Platform layer (paths.ts isLoomDev). Silent skip: no warn, since the "missing" reason
-      // here is the gate itself, not a misconfigured LOOM_DEJA_BIN.
-      if (!isLoomDev()) continue;
-      // The Deja mockup-corpus capability: a plain synchronous existence check (no venv/provisioning) — a
-      // null means LOOM_DEJA_BIN is unset or unresolvable, so THIS spawn just skips the MCP (logged, never
-      // crashes). No background kick: Deja is a daemon-side install the human points LOOM_DEJA_BIN at once.
-      const dj = dejaMcpServer();
-      if (dj) {
-        mcpServers["deja"] = dj;
-      } else {
-        // eslint-disable-next-line no-console
-        console.warn(`[pty] ${o.sessionId} dejaCorpus set but LOOM_DEJA_BIN could not be resolved — spawning WITHOUT the Deja MCP. Is LOOM_DEJA_BIN set to an absolute path to Deja's cli.js?`);
-      }
-      continue;
-    }
     if (grant.slug === "open-design") {
-      // Open Design (OD) is a PUBLIC OSS project (unlike Deja) — ships to every loomctl user, so this
+      // Open Design (OD) is a PUBLIC OSS project — ships to every loomctl user, so this
       // branch is deliberately NOT gated by isLoomDev(). A plain synchronous existence check (no venv/
       // provisioning) — a null means LOOM_OPEN_DESIGN_BIN is unset or unresolvable, so THIS spawn just
       // skips the MCP (logged, never crashes). No background kick: OD is a host-side install the human
@@ -959,8 +916,8 @@ export function buildMcpServers(o: {
     }
   }
   // Card C2 (Codescape wiring epic `369dde3c`): a per-PROJECT opt-in (NOT a profile capability grant,
-  // hence outside the resolveProfileCapabilities loop above), mirroring the deja-corpus branch's gate
-  // shape. `o.codescapeEnabled` is the RAW project flag — isLoomDev() is re-checked HERE (not pre-baked
+  // hence outside the resolveProfileCapabilities loop above). `o.codescapeEnabled` is the RAW project
+  // flag — isLoomDev() is re-checked HERE (not pre-baked
   // by the caller) so this pure seam can assert the LOOM_DEV-off negative case directly.
   //
   // C2 REWRITE (card e068a2ab): was a shared `codescape serve` HTTP mount scoped by the LOOM projectId —
@@ -984,7 +941,7 @@ export function buildMcpServers(o: {
       }
       // else: LOOM_CODESCAPE_ENABLED unset — the benign "feature disabled" case; no per-spawn warning.
     }
-    // !isLoomDev(): silent skip, mirroring deja-corpus — the "missing" reason is the gate itself.
+    // !isLoomDev(): silent skip — the "missing" reason is the gate itself.
   }
   return mcpServers;
 }
@@ -993,7 +950,7 @@ export function buildMcpServers(o: {
  * Card C2: the `--allowedTools` contribution for a mounted Codescape MCP entry — ONLY the 7 read tools
  * (list_flows/trace_flow/what_touches/describe_symbol/render_tree/boundary_map/scenario_space), NEVER the
  * 5 control/write tools (focus_flow/highlight/open_view/annotate/show_diff). Read-only "agent orients
- * itself" integration (Q4). Named per-tool (mirrors deja-corpus's 3-tool allow), not the whole `mcp__codescape`
+ * itself" integration (Q4). Named per-tool, not the whole `mcp__codescape`
  * server prefix, so the write surface stays unreachable even though the server itself exposes it.
  */
 export const CODESCAPE_TOOL_ALLOW: readonly string[] = [
@@ -1075,10 +1032,9 @@ export function capabilityToolAllowlist(grants: CapabilityGrant[], catalog: Capa
   return grants.flatMap((grant) => {
     if (grant.slug === "browser-testing") return ["mcp__playwright"];
     if (grant.slug === "document-conversion") return ["mcp__markitdown__convert_to_markdown"];
-    if (grant.slug === "deja-corpus") return ["mcp__deja__find_mockups", "mcp__deja__submit_mockup", "mcp__deja__mark_reused"];
     // OD's exact tool surface isn't known here (no live OD install to enumerate it against) — allow the
     // WHOLE `mcp__open-design` server prefix, mirroring browser-testing's `mcp__playwright` whole-server
-    // allow (rather than deja-corpus's 3 named tools), so every tool OD's MCP actually advertises is usable.
+    // allow, so every tool OD's MCP actually advertises is usable.
     if (grant.slug === "open-design") return ["mcp__open-design"];
     const def = catalog.find((c) => c.slug === grant.slug);
     if (!def) return [];
@@ -1286,18 +1242,6 @@ interface Live {
   // The session's role — used ONLY by logLandedMode's auto-heal to know whether ExitPlanMode is
   // disallowed for this session (see disallowedToolsForRole). null for a shell / a role-less spawn.
   role: SessionRole | null;
-  // Deja origin_prompt v2 (card d4b48f31): whether THIS session opted into dejaCapture (pinned from
-  // SpawnOpts.dejaCapture at spawn) — gates whether the UserPromptSubmit hook case below retains
-  // `lastPromptText` at all. False for every session that never set dejaCapture — byte-identical to
-  // before this card (lastPromptText stays null forever, nothing is retained).
-  dejaCapture: boolean;
-  // IN-MEMORY ONLY, MOST-RECENT-TURN ONLY — deliberately NOT a log/array and NEVER persisted to the DB
-  // (privacy constraint: Loom is a public product and must not grow an at-rest raw-prompt store).
-  // Overwritten on every UserPromptSubmit while dejaCapture is on; null otherwise or before the first
-  // turn. Read by getLastPromptText for the /internal/deja-context/:sessionId enrichment (server.ts) —
-  // capturing the literal triggering human/agent turn text, distinct from `lastPrompt` above (which is
-  // Loom's OWN submitted-turn cache for usage-cap replay, not necessarily what the hook itself reports).
-  lastPromptText: string | null;
 }
 
 export interface SpawnOpts {
@@ -1326,9 +1270,6 @@ export interface SpawnOpts {
   model?: string;
   /** When set (docLint on), wires the vault-lint PostToolUse hook scoped to this vault (Pillar D). */
   vaultPath?: string;
-  /** When true (dejaCapture on, card b3bd4841), wires a second opt-in PostToolUse hook that
-   *  auto-ingests an agent-written .html mockup into Deja. Default OFF — byte-identical when unset. */
-  dejaCapture?: boolean;
   /**
    * Opt-in browser-automation (resolved from the session's Profile, gated). When true, inject a
    * per-session stdio Playwright MCP (@playwright/mcp) so the agent can drive a headless browser, and
@@ -1342,23 +1283,16 @@ export interface SpawnOpts {
    */
   documentConversion?: boolean;
   /**
-   * Opt-in Deja mockup-corpus (resolved from the session's Profile, gated). When true, inject a per-session
-   * stdio `deja mcp` server so a mockup-generating agent can retrieve prior mockups (find_mockups) and
-   * submit the one it just wrote (submit_mockup/mark_reused), and allowlist its tool surface. Default OFF —
-   * every existing spawn is byte-identical when unset/false.
-   */
-  dejaCorpus?: boolean;
-  /**
    * Opt-in Open Design (OD, resolved from the session's Profile, gated). When true AND `LOOM_OPEN_DESIGN_BIN`
-   * resolves, inject a per-session stdio OD MCP server and allowlist its tool surface. UNLIKE dejaCorpus,
-   * this is NOT additionally gated by isLoomDev() — OD is a public OSS project. Default OFF — every
+   * resolves, inject a per-session stdio OD MCP server and allowlist its tool surface. NOT additionally
+   * gated by isLoomDev() — OD is a public OSS project. Default OFF — every
    * existing spawn is byte-identical when unset/false.
    */
   openDesign?: boolean;
   /**
    * Card C2 (Codescape wiring epic `369dde3c`): the project's RAW `codescape.enabled` config flag — NOT
-   * yet combined with `isLoomDev()` (buildMcpServers applies that gate itself, mirroring the deja-corpus
-   * branch). Default OFF — every existing spawn is byte-identical when unset.
+   * yet combined with `isLoomDev()` (buildMcpServers applies that gate itself). Default OFF — every
+   * existing spawn is byte-identical when unset.
    */
   codescapeEnabled?: boolean;
   /** Card C2: the session's project id — resolves to the project's graph file (`codescapeGraphPath`). */
@@ -2128,8 +2062,6 @@ export class PtyHost {
       modeLogged: false,
       resumeModeTarget: opts.resumeModeTarget ?? null,
       role: opts.role ?? null,
-      dejaCapture: !!opts.dejaCapture,
-      lastPromptText: null,
     };
     this.live.set(opts.sessionId, live);
 
@@ -2259,7 +2191,6 @@ export class PtyHost {
       isResume: false, modeLogged: true, // a shell has no claude footer/permission mode to read
       resumeModeTarget: null, // a shell never cycles a permission mode
       role: null, // a shell has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
-      dejaCapture: false, lastPromptText: null, // a shell never fires UserPromptSubmit — inert
     };
     this.live.set(opts.id, live);
     // Shell onData is minimal: NO boot-prompt / resume-gate scanning (those are Claude-TUI artifacts).
@@ -2328,7 +2259,6 @@ export class PtyHost {
       resumeGateHandled: true, resumeGateDetected: true, resumeGateScan: "",
       isResume: false, modeLogged: true,
       resumeModeTarget: null,
-      dejaCapture: false, lastPromptText: null, // a canned entry never fires UserPromptSubmit — inert
     };
     if (opts.bytes.length) this.appendRing(live, opts.bytes);
     this.live.set(opts.id, live);
@@ -2469,7 +2399,7 @@ export class PtyHost {
     // tool allowlist off the actual mount decision, rather than re-deriving the same isLoomDev()/port/
     // project-enabled condition a second time here.
     const mcpServers = buildMcpServers({
-      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, dejaCorpus: opts.dejaCorpus, openDesign: opts.openDesign,
+      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, openDesign: opts.openDesign,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
       codescapeEnabled: opts.codescapeEnabled, projectId: opts.projectId,
@@ -2484,7 +2414,7 @@ export class PtyHost {
     const permission = extraAllow.length
       ? { ...opts.permission, allow: [...opts.permission.allow, ...extraAllow] }
       : opts.permission;
-    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath, opts.dejaCapture);
+    const settingsPath = writeSessionSettings(opts.sessionId, permission, opts.vaultPath);
     // Role-scoped disallow of the interactive human-prompt tools (AskUserQuestion / Exit|EnterPlanMode):
     // a Loom-driven role (worker/setup/auditor/workspace-auditor) must never block on a human — UNIONed with
     // the curated dangerous native tools when this session's Profile set restrictedTools (Companion
@@ -2549,9 +2479,7 @@ export class PtyHost {
     sessionId: string,
     // StopFailure also carries error/error_details (and a future claude may carry resetsAt) — the
     // relay + /internal/hook forward the whole hook object; we read them for §19c usage-limit detect.
-    // UserPromptSubmit carries `prompt` (the literal triggering turn text) — read ONLY when
-    // dejaCapture is on (see the UserPromptSubmit case / Live.lastPromptText).
-    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string },
+    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number },
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
@@ -2604,10 +2532,6 @@ export class PtyHost {
         live.firstTurnStarted = true;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
         this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
-        // Deja origin_prompt v2 (card d4b48f31): retain ONLY the most-recent turn's literal text, and
-        // ONLY when this session opted into dejaCapture — overwritten every turn, never appended, never
-        // persisted (see Live.lastPromptText for the privacy rationale).
-        if (live.dejaCapture && typeof hook.prompt === "string") live.lastPromptText = hook.prompt;
         break;
       case "Stop":
       case "StopFailure": {
@@ -2771,15 +2695,6 @@ export class PtyHost {
     return (this.live.get(sessionId)?.pending ?? []).map((m) => m.text);
   }
 
-  /**
-   * Deja origin_prompt v2 (card d4b48f31): the most-recent UserPromptSubmit turn's literal text for a
-   * dejaCapture-on session, or null when dejaCapture is off, no turn has landed yet, or the session is
-   * unknown/dead. IN-MEMORY, MOST-RECENT-ONLY — see Live.lastPromptText. Read by
-   * GET /internal/deja-context/:sessionId (server.ts) to enrich origin_prompt beyond task title+body.
-   */
-  getLastPromptText(sessionId: string): string | null {
-    return this.live.get(sessionId)?.lastPromptText ?? null;
-  }
 
   /**
    * Loom Companion (multi-channel reply routing): the ORIGINATING route of the session's IN-FLIGHT turn, or

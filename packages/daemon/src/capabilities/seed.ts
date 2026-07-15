@@ -4,7 +4,7 @@
  * credential-tied capability, proving the `requiresConnection`/`{slug, connectionId}` connection-bind path
  * end-to-end — and "image-gen" (board card b93cfd10, provider decided a4058e7a), the SECOND. Both are
  * seeded as ordinary `capability_defs` ROWS — not a fourth/fifth hardcoded builtin slug like
- * browser-testing/document-conversion/deja-corpus, which bypass the credential-tie injection entirely (see
+ * browser-testing/document-conversion/open-design, which bypass the credential-tie injection entirely (see
  * `buildMcpServers` in `pty/host.ts`) — so binding either exercises the SAME generic node-package/
  * python-venv/bundled/command/github-binary dispatch + spawn-time secret-env-injection an owner-added row
  * gets. Nothing in `pty/host.ts` needed to change: `getCapabilityCatalog`/`resolveConnectionSecret` already

@@ -60,7 +60,6 @@ import { cloneAgentCore } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
 import { prewarmMarkitdown, resolvePrewarmInterpreterPath, getMarkitdownProvisionStatus } from "../python/prewarm.js";
-import { getDejaCaptureCount } from "../deja/store.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME, COMPANION_AGENT_NAME, seedOperatorAgent } from "../setup/seed.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
@@ -608,17 +607,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const row = deps.db.getCapabilityDefBySlug("github");
     if (row) resolveCapabilityServer(row, {});
     return getCapabilityProvisionStatus("github") ?? { state: "idle" };
-  });
-
-  // --- Deja capture status (card 1c0c1a2c): the count of mockups ever captured into Deja's global
-  // store, read for the dejaCapture toggle's self-explaining status line (empty-state vs a heartbeat
-  // count) — see deja/store.ts for the read itself. HUMAN/REST-ONLY, READ-ONLY, no agent MCP tool.
-  // Deja is a PRIVATE, LOOM_DEV-only product (mirrors the /api/skills/:name/publish gate above) — a
-  // non-dev build 403s so this never widens the Deja surface to a regular loomctl user, even though
-  // the web toggle/section that would call this already doesn't render there either.
-  app.get("/api/deja/capture-status", async (_req, reply) => {
-    if (!isLoomDev()) return reply.code(403).send({ error: "Deja is a dev/self-host-only feature" });
-    return { count: getDejaCaptureCount() };
   });
 
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
@@ -2200,35 +2188,6 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const body = req.body as { sessionId?: string; hook?: Record<string, unknown> };
     if (body?.sessionId && body.hook) deps.pty.deliverHook(body.sessionId, body.hook);
     return reply.send({ ok: true });
-  });
-
-  // --- Deja capture context target (loopback only; opt-in, card b3bd4841) — the daemon-side
-  // origin_prompt + project resolution the deja-capture.mjs PostToolUse relay calls (behind its
-  // injectable `resolveOriginContext(sessionId, port, fetchImpl)` seam). Trust posture mirrors
-  // /internal/hook EXACTLY: loopback-gated, NOT an agent MCP tool, unreachable by any agent session.
-  // Resolves sessionId -> the worker session's taskId -> the persisted task's title+body as the
-  // origin_prompt base (404s — never throws — on anything unresolvable so the relay's best-effort
-  // caller degrades to a null context, never blocking the write). origin_prompt v2 (card d4b48f31):
-  // when PtyHost holds a retained UserPromptSubmit turn for this session (dejaCapture-gated, in-memory,
-  // most-recent-only — see PtyHost.getLastPromptText/Live.lastPromptText), APPEND it after the
-  // title+body base so a Deja-captured mockup's origin_prompt differentiates sibling A/B/C variants
-  // generated from one task. Falls back CLEANLY to title+body alone when no turn is retained yet (a
-  // fresh session, or dejaCapture off) — the always-call guarantee (relay's `resolveOriginContext`)
-  // is unaffected either way; the relay itself needs no change.
-  app.get("/internal/deja-context/:sessionId", async (req, reply) => {
-    if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
-    const { sessionId } = req.params as { sessionId: string };
-    const session = deps.db.getSession(sessionId);
-    if (!session?.taskId) return reply.code(404).send({ error: "no task associated with this session" });
-    const task = deps.db.getTask(session.taskId);
-    if (!task) return reply.code(404).send({ error: "task not found" });
-    const project = deps.db.getProject(session.projectId);
-    if (!project) return reply.code(404).send({ error: "project not found" });
-    const triggeringTurn = deps.pty.getLastPromptText(sessionId);
-    const originPrompt = triggeringTurn
-      ? `${task.title}\n\n${task.body}\n\n---\nTriggering prompt:\n${triggeringTurn}`
-      : `${task.title}\n\n${task.body}`;
-    return reply.send({ originPrompt, project: project.name });
   });
 
   // --- Graceful shutdown control hook (loopback only) — the cross-platform stop path for `loom stop`.

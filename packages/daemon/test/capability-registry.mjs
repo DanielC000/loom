@@ -20,8 +20,6 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       requiresConnection needing secretEnvVar, and a well-formed input.
 //   (f) DB round-trip: createCapabilityDef/listCapabilitySummaries (builtins first)/duplicate-slug
 //       rejection/deleteCapabilityDef.
-//   (gate) listCapabilitySummaries drops "deja-corpus" on a non-LOOM_DEV build (Deja is a PRIVATE
-//       product) and includes it once LOOM_DEV=1 — independent of the UI-level toggle hides.
 //   (g) the per-slug python-venv provisioning tracker: COLD resolves null + kicks background provisioning
 //       (a FAKE provisioner, never a real pip install); a LATER call resolves the now-warm binary.
 //   (h) CODE-REVIEW FIX (critical): a capability secret must NEVER ride claude's own argv or the daemon
@@ -46,17 +44,13 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const tmpHome = path.join(os.tmpdir(), `loom-cr-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
-// listCapabilitySummaries' isLoomDev() gate check below needs the TRUE default-off state — delete any
-// inherited LOOM_DEV=1 (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell;
-// mirrors platform-dev-flag.mjs).
-delete process.env.LOOM_DEV;
 
 const { resolveProfileCapabilities } = await import("@loom/shared");
 const {
   buildMcpServers, buildSpawnArgs, collectMcpEnvSecrets, mcpConfigHasSecret, redactSecrets, capabilityToolAllowlist,
 } = await import("../dist/pty/host.js");
 const { writeSessionMcpConfig } = await import("../dist/pty/claude-settings.js");
-const { SETTINGS_DIR, isLoomDev } = await import("../dist/paths.js");
+const { SETTINGS_DIR } = await import("../dist/paths.js");
 const { Db } = await import("../dist/db.js");
 const {
   validateCapabilityDefInput, createCapabilityDef, listCapabilitySummaries, deleteCapabilityDef,
@@ -312,22 +306,12 @@ check("(db) createCapabilityDef persists + returns a REST summary (never the raw
   created.slug === "gh-mcp" && created.builtin === false && !("provision" in created) && !("provisionJson" in created));
 check("(db) createCapabilityDef's summary carries the row id (the Settings UI's DELETE target)", typeof created.id === "string" && created.id.length > 0);
 
-// ===================== (gate) listCapabilitySummaries drops "deja-corpus" on a non-LOOM_DEV build =====
-// Deja is a PRIVATE product (Loom is public on npm) — a regular loomctl user's GET /api/capabilities
-// must never even NAME it, independent of the UI-level toggle hides (Profiles.tsx/Settings.tsx).
-// "open-design" is a PUBLIC OSS builtin (unlike deja-corpus) — it's NEVER dropped, dev build or not.
-check("(gate) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
-const summariesNonDev = listCapabilitySummaries(db);
-check("(gate) non-dev build: listCapabilitySummaries returns the 3 non-Deja builtins + the owner-added row (NO deja-corpus)",
-  summariesNonDev.length === 4 && summariesNonDev[0].slug === "browser-testing" && summariesNonDev[1].slug === "document-conversion" && summariesNonDev[2].slug === "open-design" && summariesNonDev[3].slug === "gh-mcp");
-
-process.env.LOOM_DEV = "1";
-check("(gate) isLoomDev() is TRUE once LOOM_DEV=1", isLoomDev() === true);
+// ===================== listCapabilitySummaries: builtins first, then owner-added rows =====================
 const summaries = listCapabilitySummaries(db);
-check("(db) listCapabilitySummaries returns the 4 BUILTINS first, then the owner-added row (LOOM_DEV=1)",
-  summaries.length === 5 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "deja-corpus" && summaries[3].slug === "open-design" && summaries[4].slug === "gh-mcp");
-check("(db) the 4 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
-  summaries[0].id === undefined && summaries[1].id === undefined && summaries[2].id === undefined && summaries[3].id === undefined);
+check("(db) listCapabilitySummaries returns the 3 BUILTINS first, then the owner-added row",
+  summaries.length === 4 && summaries[0].slug === "browser-testing" && summaries[1].slug === "document-conversion" && summaries[2].slug === "open-design" && summaries[3].slug === "gh-mcp");
+check("(db) the 3 BUILTIN summaries carry NO id (they aren't capability_defs rows and can't be deleted)",
+  summaries[0].id === undefined && summaries[1].id === undefined && summaries[2].id === undefined);
 let dupThrew = false;
 try {
   createCapabilityDef(db, { slug: "gh-mcp", name: "x", description: "", transport: "stdio", kind: "bundled", provision: { command: process.execPath }, toolAllowlist: [] });
@@ -349,7 +333,6 @@ const warmAttempt = resolveCapabilityServer(venvDef, {});
 check("(venv) a LATER call resolves the now-warm binary (no re-provisioning)", warmAttempt?.command === "/fake/venv/bin/a-fake-pypi-pkg");
 __setCapabilityProvisionerForTest(); // restore + reset all per-slug state
 
-delete process.env.LOOM_DEV;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0

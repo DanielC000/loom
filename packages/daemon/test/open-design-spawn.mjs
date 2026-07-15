@@ -1,16 +1,15 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Opt-in Open Design (OD, github.com/nexu-io/open-design) capability (per-session OD MCP server, opt-in
-// via profile flag). DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like deja-corpus-spawn.mjs:
+// via profile flag). DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic:
 // isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService driven against a FAKE pty injected via
 // PtyHost's createPty() seam. A real temp git repo backs spawnWorker's createWorktree; the only thing
 // faked is the claude pty (and LOOM_OPEN_DESIGN_BIN, pointed at a fixture file so the resolver's existence
 // check passes without a real OD install).
 //
 // Proves the DoD point + the load-bearing threading:
-//   (public, unlike deja-corpus) OD is a PUBLIC OSS project (github.com/nexu-io/open-design), NOT a
-//       private Loom product like Deja — buildMcpServers' "open-design" grant is NEVER gated by
-//       isLoomDev(): it mounts on a plain non-dev build (LOOM_DEV unset) as long as openDesign=true AND
-//       LOOM_OPEN_DESIGN_BIN resolves.
+//   (public) OD is a PUBLIC OSS project (github.com/nexu-io/open-design) — buildMcpServers'
+//       "open-design" grant is NEVER gated by isLoomDev(): it mounts on a plain non-dev build (LOOM_DEV
+//       unset) as long as openDesign=true AND LOOM_OPEN_DESIGN_BIN resolves.
 //   (a) the spawn mcp-config (buildMcpServers) INCLUDES the per-session open-design stdio server when
 //       openDesign=true and LOOM_OPEN_DESIGN_BIN resolves, and OMITS it when openDesign=false
 //       (byte-identical to a no-flag spawn) OR when LOOM_OPEN_DESIGN_BIN is unset/unresolvable
@@ -18,10 +17,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) resolveProfile backstops openDesign to FALSE for a null/absent profile and for a profile that
 //       doesn't set it, and PASSES IT THROUGH when set;
 //   (c) capabilityToolAllowlist contributes the whole `mcp__open-design` server-prefix allow iff
-//       openDesign is granted (unlike deja-corpus's 3 named tools — OD's exact tool surface isn't known);
+//       openDesign is granted (OD's exact tool surface isn't known);
 //   plus end-to-end: an OD-profile agent threads openDesign=true through startNew → spawn opts + the
 //       persisted session row; a plain agent stays false (byte-identical); RESUME re-passes it; a
-//       agent MCP profile write REJECTS openDesign (exfil-class, human-only, same posture as dejaCorpus).
+//       agent MCP profile write REJECTS openDesign (exfil-class, human-only).
 //
 // Run: 1) build (turbo builds shared first), 2) node test/open-design-spawn.mjs
 import fs from "node:fs";
@@ -42,7 +41,7 @@ const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
-// OD is deliberately NOT isLoomDev()-gated (unlike Deja) — but delete any inherited LOOM_DEV=1 anyway
+// OD is deliberately NOT isLoomDev()-gated — but delete any inherited LOOM_DEV=1 anyway
 // (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell) so the "public, un-gated"
 // assertion below is proven against the TRUE default-off state, not accidentally masked by an ambient flag.
 delete process.env.LOOM_DEV;
@@ -80,10 +79,10 @@ check("(resolver) LOOM_OPEN_DESIGN_BIN absolute but missing on disk ⇒ null (cl
 process.env.LOOM_OPEN_DESIGN_BIN = fakeCli;
 const resolved = openDesignMcpServer();
 check("(resolver) LOOM_OPEN_DESIGN_BIN absolute + existing ⇒ a stdio entry", resolved?.type === "stdio");
-check("(resolver) command is the OD binary ITSELF (unlike Deja, no process.execPath wrapper)", resolved?.command === fakeCli);
+check("(resolver) command is the OD binary ITSELF (no process.execPath wrapper)", resolved?.command === fakeCli);
 check("(resolver) args are ['mcp']", JSON.stringify(resolved?.args) === JSON.stringify(["mcp"]));
 
-// ===================== PUBLIC, un-gated: OD mounts on a plain non-dev build (unlike deja-corpus) ========
+// ===================== PUBLIC, un-gated: OD mounts on a plain non-dev build ========
 check("(public) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
 const nonDevOn = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", openDesign: true });
 check("(public) non-dev build: openDesign=true + LOOM_OPEN_DESIGN_BIN resolvable ⇒ 'open-design' server IS mounted (public OSS, never gated)",
@@ -221,6 +220,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — opt-in Open Design: resolveProfile backstops/passes openDesign; the open-design stdio MCP is injected iff openDesign AND LOOM_OPEN_DESIGN_BIN resolves (clean-skip otherwise, byte-identical off — the primary real-world case since OD isn't installed on most hosts); UNLIKE deja-corpus, never gated by isLoomDev() (public OSS); the allowlist/profile-validation/agent-forbidden posture holds; the flag threads through startNew/resume/spawnWorker + the persisted row — claude-free, network-free."
+  ? "\n✅ ALL PASS — opt-in Open Design: resolveProfile backstops/passes openDesign; the open-design stdio MCP is injected iff openDesign AND LOOM_OPEN_DESIGN_BIN resolves (clean-skip otherwise, byte-identical off — the primary real-world case since OD isn't installed on most hosts); never gated by isLoomDev() (public OSS); the allowlist/profile-validation/agent-forbidden posture holds; the flag threads through startNew/resume/spawnWorker + the persisted row — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

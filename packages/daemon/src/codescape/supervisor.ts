@@ -21,7 +21,7 @@ import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCod
  *   - Async best-effort subprocess discipline (spawn not spawnSync, bounded, ~4KB output tail, never
  *     throws) — `python/venv.ts` `runAsync` (120-153) / `ensurePythonPackageAsync` (240-271).
  *   - Absolute/PATH binary resolution + the node-invocation special case for a JS entrypoint —
- *     `pty/host.ts` `dejaMcpServer` (626-630) and `pty/resolve-bin.ts` `resolveExecutable`.
+ *     `pty/resolve-bin.ts` `resolveExecutable`.
  *   - "Broken stays visibly down, never crash-loop" restart ethos — `scripts/daemon-supervisor.mjs`
  *     (its OUTER daemon-process supervision only restarts on an explicit sentinel; this INNER supervisor
  *     restarts on any death but gives up — and STAYS down — after a bounded number of attempts).
@@ -215,8 +215,8 @@ export class CodescapeSupervisor {
    */
   async ingest(repoPath: string): Promise<CodescapeIngestResult> {
     if (!isCodescapeSupervisorEnabled()) {
-      // Silent skip (no warn — the "missing" reason here is the gate itself, not a real failure), mirrors
-      // dejaMcpServer's isLoomDev() skip (pty/host.ts:759-760). CR fix: ingest() is public and callable
+      // Silent skip (no warn — the "missing" reason here is the gate itself, not a real failure). CR
+      // fix: ingest() is public and callable
       // independently of start() (C2/C3's "onboard a newly-enabled project" path) — it must NEVER create
       // CODESCAPE_HOME_DIR (or spawn anything) on a disabled daemon, matching start()'s own zero-side-effects
       // guarantee.

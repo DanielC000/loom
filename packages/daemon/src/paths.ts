@@ -144,8 +144,6 @@ export function resolveWebDistDir(): string {
 export const RELAY_SCRIPT = path.join(__dirname, "..", "assets", "hook-relay.mjs");
 /** vault-lint.mjs (Pillar D PostToolUse hook) ships as an asset too. */
 export const VAULT_LINT_SCRIPT = path.join(__dirname, "..", "assets", "vault-lint.mjs");
-/** deja-capture.mjs (opt-in Deja capture PostToolUse hook, card b3bd4841) ships as an asset too. */
-export const DEJA_CAPTURE_SCRIPT = path.join(__dirname, "..", "assets", "deja-capture.mjs");
 /**
  * ensure-obsidian.mjs (Obsidian auto-start vault preflight) ships as an asset too. Injected into a
  * session's env as LOOM_OBSIDIAN_PREFLIGHT only when obsidian.autoStart is on, so a vault skill can run
@@ -230,7 +228,7 @@ export const CODESCAPE_HOME_DIR = path.join(LOOM_HOME, "codescape");
 
 /**
  * Card C1: whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a HARD
- * prerequisite — Codescape supervision lives in the same LOOM_DEV-gated layer as the Deja / Platform Lead
+ * prerequisite — Codescape supervision lives in the same LOOM_DEV-gated layer as the Platform Lead
  * builtins and NEVER runs for a regular `loomctl` user, flag or not. Within dev, `LOOM_CODESCAPE_ENABLED=1`
  * narrows it further (default OFF, mirroring the scheduler's own opt-in env var `LOOM_SCHEDULER_ENABLED`,
  * index.ts:680-681) so `LOOM_DEV=1` alone doesn't spawn an extra host process. Read at CALL time (like
@@ -254,13 +252,11 @@ export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }):
 
 /**
  * Card C1: resolve the `codescape` CLI as a `{command, args}` spawn pair (never a shell string — see
- * codescape/supervisor.ts for why). `LOOM_CODESCAPE_BIN` is a human-only override, mirroring
- * `LOOM_DEJA_BIN` (pty/host.ts:627) — but UNLIKE it, does not require an absolute path: the supervisor
- * spawns via plain `child_process.spawn` (not node-pty), so a bare PATH-resolvable name is fine too
- * (CONTRACT Q5: "PATH or absolute both acceptable"). Two forms:
+ * codescape/supervisor.ts for why). `LOOM_CODESCAPE_BIN` is a human-only override — but does not require
+ * an absolute path: the supervisor spawns via plain `child_process.spawn` (not node-pty), so a bare
+ * PATH-resolvable name is fine too (CONTRACT Q5: "PATH or absolute both acceptable"). Two forms:
  *   - a `.js`/`.mjs`/`.cjs` path (a source-installed codescape checkout, OR the fixture CLI the C1
- *     real-spawn test points this at) runs via node explicitly — mirrors dejaMcpServer's
- *     `[process.execPath, cli.js]` shape (pty/host.ts:626-630) — since there's no reliable shebang/
+ *     real-spawn test points this at) runs via node explicitly — since there's no reliable shebang/
  *     association to exec a JS file directly cross-platform;
  *   - anything else resolves through {@link resolveExecutable} (PATH + Windows PATHEXT, e.g. a `.cmd`
  *     npm shim or a compiled binary), so the caller can spawn it directly with NO shell — sidesteps the

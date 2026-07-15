@@ -26,14 +26,14 @@ try {
   const perm = { mode: "acceptEdits", allow: ["mcp__loom-tasks"], deny: [], startupModeCycles: 2 };
 
   const plain = JSON.parse(fs.readFileSync(writeSessionSettings("sam-plain", perm), "utf8"));
-  check("skipAutoPermissionPrompt:true is present on a plain (no vault/dejaCapture) session",
+  check("skipAutoPermissionPrompt:true is present on a plain (no vault) session",
     plain.skipAutoPermissionPrompt === true);
   check("it did NOT displace any existing field — permissions.defaultMode still wired",
     plain.permissions.defaultMode === "acceptEdits");
   check("it did NOT displace the resume-gate env override", plain.env.CLAUDE_CODE_RESUME_THRESHOLD_MINUTES !== undefined);
   check("includeCoAuthoredBy is unaffected (still false)", plain.includeCoAuthoredBy === false);
 
-  // Additive regardless of the vault-lint / dejaCapture options too — same key, same value, every path.
+  // Additive regardless of the vault-lint option too — same key, same value, every path.
   const withVault = JSON.parse(fs.readFileSync(writeSessionSettings("sam-vault", perm, os.tmpdir()), "utf8"));
   check("skipAutoPermissionPrompt:true is present alongside a vaultPath (docLint) session too",
     withVault.skipAutoPermissionPrompt === true);
@@ -48,7 +48,7 @@ try {
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — every written --settings file carries skipAutoPermissionPrompt:true (additive, "
-    + "doesn't displace any existing field), regardless of permission mode or the vault-lint/dejaCapture "
-    + "options."
+    + "doesn't displace any existing field), regardless of permission mode or the vault-lint "
+    + "option."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
