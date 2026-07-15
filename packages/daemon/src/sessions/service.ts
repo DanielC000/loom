@@ -2694,11 +2694,27 @@ export class SessionService {
   // kept for the Archive UI's view-only/dead path) + permanent delete (drop the row + snapshot).
   // ---------------------------------------------------------------------------------------------
 
-  /** Restore an archived session back to the rail (single row — not a cascade). */
+  /**
+   * Restore an archived session back to the rail (single row — not a cascade). A session already
+   * confirmed `resumability === "dead"` has nothing to resume — a pure view-only un-archive, matching
+   * the Archive UI's documented "Restore (view-only)" affordance. Anything else — including a session
+   * that's never been probed (the common case for a day-old archived session) — routes through the SAME
+   * atomic `resume()` the live rail's Resume button uses: it validates the engine is actually alive
+   * BEFORE touching `archived_at`, so a session that turns out unresumable (an expired/missing engine
+   * transcript, a GC'd worktree) gets flagged dead and its `archived_at` is left untouched — it stays
+   * safely IN the Archive instead of being cleared unconditionally and orphaned off both the Archive
+   * (no longer archived) and the live rail (never actually resumed) — the 2026-07-15 "restore vanished
+   * the session" bug. `allowSuperseded` mirrors the manual REST /resume endpoint: a human restoring from
+   * the Archive may deliberately force-resurrect a recycled predecessor.
+   */
   restoreSession(sessionId: string): { restored: string } {
     const s = this.db.getSession(sessionId);
     if (!s) throw new Error("session not found");
-    this.db.restoreSession(sessionId);
+    if (s.resumability === "dead") {
+      this.db.restoreSession(sessionId);
+      return { restored: sessionId };
+    }
+    this.resume(sessionId, { allowSuperseded: true });
     return { restored: sessionId };
   }
 

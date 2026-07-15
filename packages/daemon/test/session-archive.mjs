@@ -204,6 +204,57 @@ try {
   check("C: a fast-failing resume ends RE-ARCHIVED (clear-before-spawn ordering holds)",
     typeof db.getSession("failSess").archivedAt === "string" && db.listAllSessions().every((s) => s.id !== "failSess"));
 
+  // ════════ C2. ARCHIVE-PAGE RESTORE routes through the atomic resume() — no more vanish-on-restore ════════
+  // Owner report 2026-07-15: resuming a day-old archived session from the Archive page did NOT resume it
+  // AND removed it from the Archive — it vanished (un-archived, but never actually made live, so it was
+  // invisible on the primary Terminals rail too, which shows only processState==='live'). Root cause: the
+  // OLD sessions.restoreSession() body was an UNCONDITIONAL `db.restoreSession()` (bare archived_at clear)
+  // with no resume attempt and no dead-check — reproduced below via that same raw db primitive, which is
+  // exactly the old service method's body. The FIX routes a not-yet-known-dead session through the SAME
+  // atomic resume() the live rail's Resume button already uses, which validates the engine BEFORE touching
+  // archived_at and throws instead of silently orphaning the row.
+  db.insertSession(mkSession("vanishSess", { engineSessionId: "no-such-engine-id-for-vanish", cwd: fakeCwd }));
+  db.archiveSession("vanishSess");
+  check("C2: vanishSess starts archived, resumability not yet flagged dead (mirrors a never-probed day-old session)",
+    !!db.getSession("vanishSess").archivedAt && db.getSession("vanishSess").resumability === "resumable");
+
+  // Pre-fix repro: the OLD restoreSession() body — an unconditional archived_at clear — orphans the row.
+  db.restoreSession("vanishSess"); // raw db primitive == the OLD sessions.restoreSession() body
+  check("C2 (pre-fix repro): the naive clear leaves the session ORPHANED — un-archived but never made live",
+    db.getSession("vanishSess").archivedAt === null && db.getSession("vanishSess").processState !== "live");
+  check("C2 (pre-fix repro): resumability was never even flagged dead (no dead-check ever ran)",
+    db.getSession("vanishSess").resumability === "resumable");
+
+  // Re-archive it and drive the SAME scenario through the FIXED sessions.restoreSession(), which now
+  // must refuse instead of silently orphaning it.
+  db.archiveSession("vanishSess");
+  let restoreThrew = false;
+  try { sessions.restoreSession("vanishSess"); }
+  catch (e) { restoreThrew = /no longer resumable/.test(e.message); }
+  check("C2 (post-fix): sessions.restoreSession() on a dead-engine session THROWS instead of orphaning it", restoreThrew);
+  check("C2 (post-fix): the failed restore leaves the session SAFELY STILL IN THE ARCHIVE (rolled back)",
+    typeof db.getSession("vanishSess").archivedAt === "string" &&
+    db.listArchivedSessions("pA").some((s) => s.id === "vanishSess"));
+  check("C2 (post-fix): the failed resume attempt flags it dead (so the Archive page next shows Restore/view-only)",
+    db.getSession("vanishSess").resumability === "dead");
+
+  // A GENUINELY resumable archived session (never probed, resumability still 'resumable') restored via
+  // sessions.restoreSession() now ACTUALLY resumes — matching the Archive button's "Resume — return this
+  // session to the live rail" promise, not just an archived_at clear.
+  db.insertSession(mkSession("goodRestore", { engineSessionId: engineId, cwd: fakeCwd }));
+  db.archiveSession("goodRestore");
+  sessions.restoreSession("goodRestore");
+  check("C2: a genuinely resumable session is ACTUALLY resumed (processState live, not just un-archived)",
+    db.getSession("goodRestore").processState === "live" && db.getSession("goodRestore").archivedAt === null);
+
+  // An ALREADY-dead-flagged session (the documented view-only case) still gets the plain, no-resume-
+  // attempted un-archive — restoreSession must not try to spawn a pty for a session it already knows is dead.
+  db.insertSession(mkSession("deadRestore", { resumability: "dead" }));
+  db.archiveSession("deadRestore");
+  sessions.restoreSession("deadRestore");
+  check("C2: an already-dead session restores view-only (un-archived, NOT flipped live)",
+    db.getSession("deadRestore").archivedAt === null && db.getSession("deadRestore").processState !== "live");
+
   // ════════ D. snapshot helpers ════════
   const okSnap = snapshotTranscript(fakeCwd, engineId, "pA", "snapSess");
   check("D: snapshotTranscript returns true when the JSONL exists", okSnap === true);
@@ -220,9 +271,13 @@ try {
 
   // ════════ E. restore + permanent delete (cascade to ARCHIVED workers, snapshot dropped) ════════
   // Build a stopped (auto-archived) manager + 2 workers, give mgr + w2 real snapshots so delete proves
-  // it removes them, then exercise restore (single row) + cascade delete.
+  // it removes them, then exercise restore (single row) + cascade delete. w1 is pre-flagged 'dead' (a
+  // resume attempt already proved it unresumable in an earlier session) — this section is about the
+  // restore/delete-cascade ROW mechanics, not resume; the resume-vs-view-only-restore branching itself is
+  // covered by C2 above. A no-engine-id session (mkSession's default) would otherwise hit resume()'s
+  // "no engine id" guard now that restoreSession() routes non-dead rows through resume().
   db.insertSession(mkSession("mgr", { role: "manager" }));
-  db.insertSession(mkSession("w1", { role: "worker", parentSessionId: "mgr", taskId: "t1", branch: "loom/w1" }));
+  db.insertSession(mkSession("w1", { role: "worker", parentSessionId: "mgr", taskId: "t1", branch: "loom/w1", resumability: "dead" }));
   db.insertSession(mkSession("w2", { role: "worker", parentSessionId: "mgr", taskId: "t2", branch: "loom/w2" }));
   for (const id of ["mgr", "w1", "w2"]) db.archiveSession(id); // each auto-archived on its own exit
   snapshotTranscript(fakeCwd, engineId, "pA", "mgr");
@@ -232,7 +287,7 @@ try {
     archivedTranscriptExists("pA", "mgr") && archivedTranscriptExists("pA", "w2"));
 
   sessions.restoreSession("w1");
-  check("E: restore brings w1 back to the rail", db.getSession("w1").archivedAt === null && db.listWorkers("mgr").some((w) => w.id === "w1"));
+  check("E: restore brings w1 back to the rail (view-only — it's dead)", db.getSession("w1").archivedAt === null && db.listWorkers("mgr").some((w) => w.id === "w1"));
 
   let notArchived = false;
   try { sessions.deleteArchivedSession("w1"); } catch (e) { notArchived = /only an archived session/.test(e.message); }
