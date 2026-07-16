@@ -18,6 +18,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) The tightened validator: bindHost host/IP shape + rateLimit upper bounds.
 //   (5) No agent-facing config surface (the project-config override schema) can set `remoteAccess` — only
 //       the human-only platform-config override can.
+//   (9) P5b hardening follow-ups (card 80e2093f): isAllInterfacesBindHost (0.0.0.0/:: bind-posture
+//       visibility) and GATEWAY_LOG_SERIALIZERS (the Authorization/Sec-WebSocket-Protocol redaction seam).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -37,8 +39,8 @@ process.env.HOME = sandboxHome;        // POSIX
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
-const { buildServer } = await import("../dist/gateway/server.js");
-const { canOpenRemoteListener, tlsRequirementSatisfied, isTailnetHost, isTrustTierHookActive } = await import("../dist/gateway/trust-tier.js");
+const { buildServer, GATEWAY_LOG_SERIALIZERS } = await import("../dist/gateway/server.js");
+const { canOpenRemoteListener, tlsRequirementSatisfied, isTailnetHost, isTrustTierHookActive, isAllInterfacesBindHost } = await import("../dist/gateway/trust-tier.js");
 const { validatePlatformConfigOverride, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
 
 let failures = 0;
@@ -316,6 +318,34 @@ try {
     await appV6.close();
     dbV6.close();
   }
+}
+
+// ===================== (9) CR follow-up (card 80e2093f) — 0.0.0.0/:: bind-posture visibility + the =====
+// ===================== gateway log-redaction serializer =================================================
+{
+  check("(9) isAllInterfacesBindHost recognizes IPv4 0.0.0.0", isAllInterfacesBindHost("0.0.0.0") === true);
+  check("(9) isAllInterfacesBindHost recognizes IPv6 ::", isAllInterfacesBindHost("::") === true);
+  check("(9) isAllInterfacesBindHost rejects loopback 127.0.0.1", isAllInterfacesBindHost("127.0.0.1") === false);
+  check("(9) isAllInterfacesBindHost rejects a specific LAN IP", isAllInterfacesBindHost("192.168.1.50") === false);
+  check("(9) isAllInterfacesBindHost rejects a tailnet/hostname bind", isAllInterfacesBindHost("myhost.tailnet-abc.ts.net") === false);
+
+  const req = GATEWAY_LOG_SERIALIZERS.req({
+    method: "GET",
+    url: "/api/version",
+    headers: {
+      host: "example.com",
+      authorization: "Bearer lgw_secret-token-value",
+      "sec-websocket-protocol": "loom.v1, loom.bearer.secret-token-value",
+      "user-agent": "test-agent/1.0",
+    },
+  });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts the Authorization header", req.headers.authorization === "[redacted]");
+  check("(9) GATEWAY_LOG_SERIALIZERS.req redacts the Sec-WebSocket-Protocol header", req.headers["sec-websocket-protocol"] === "[redacted]");
+  check("(9) GATEWAY_LOG_SERIALIZERS.req leaves unrelated headers untouched", req.headers["user-agent"] === "test-agent/1.0");
+  check("(9) GATEWAY_LOG_SERIALIZERS.req preserves method/url", req.method === "GET" && req.url === "/api/version");
+
+  const reqNoAuth = GATEWAY_LOG_SERIALIZERS.req({ method: "GET", url: "/api/version", headers: { host: "example.com" } });
+  check("(9) GATEWAY_LOG_SERIALIZERS.req is a no-op when no sensitive header is present", reqNoAuth.headers.authorization === undefined && reqNoAuth.headers["sec-websocket-protocol"] === undefined);
 }
 
 // cleanup (retry for the WAL handle on Windows)

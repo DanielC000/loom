@@ -2933,7 +2933,16 @@ export class Db {
   }
 
   /** Rotate a token's SECRET: mint a fresh secret for the SAME row id, overwrite salt+hash, stamp
-   *  rotated_at. The old plaintext stops verifying immediately; the new plaintext is returned ONCE. */
+   *  rotated_at. The old plaintext stops verifying immediately; the new plaintext is returned ONCE.
+   *
+   *  Immediate cutover is INTENTIONAL (P5b hardening follow-up, card 80e2093f, item 1) — this in-place
+   *  overwrite means ANY remote client still holding the old token breaks the moment rotation happens, until
+   *  it picks up the new plaintext. There is deliberately no dual-accept grace TTL (keeping "one valid
+   *  secret per token row" simple). If a live remote client needs a gap-free switch, don't rotate the token
+   *  it's using — this store already supports many concurrently-active tokens, so the manual grace path is:
+   *  mint a SECOND token (`createGatewayToken`) → distribute its plaintext to every remote client → confirm
+   *  they've all switched → THEN revoke/delete the OLD token (`updateGatewayToken(id,{status:'revoked'})` or
+   *  `deleteGatewayToken`) instead of rotating it. Every other token stays valid throughout. */
   rotateGatewayToken(id: string): { token: GatewayToken; plaintext: string } | null {
     const existing = this.getGatewayTokenRecord(id);
     if (!existing) return null;

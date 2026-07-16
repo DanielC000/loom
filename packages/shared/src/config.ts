@@ -584,11 +584,33 @@ export const OPERATOR_ENABLED_DEFAULT = false;
  * gateway/trust-tier.ts `canOpenRemoteListener`). `tls`/`rateLimit` are Phase C concerns (TLS material +
  * a remote-request limiter), actually consumed starting Phase C (card 6bc02f50). The gateway TOKEN
  * itself does NOT live here — Phase B stores it in a keyed table, never in config.
+ *
+ * **Token rotation (P5b hardening follow-up, card 80e2093f, item 1):** rotating a gateway token
+ * (`Db.rotateGatewayToken`) is an IMMEDIATE cutover — the old token's salt+hash is overwritten in place, so
+ * it stops verifying the instant rotation happens, breaking any remote client still presenting it until it
+ * picks up the new one. This is INTENTIONAL, not a bug — the store deliberately does not do a dual-accept
+ * grace TTL, keeping the auth surface simple (exactly one valid secret per token row at a time). If a
+ * live remote client needs to switch tokens without a connectivity gap, use the store's existing
+ * multi-token support as a manual grace procedure instead: mint a SECOND gateway token, distribute it to
+ * every remote client, confirm they've all switched over, THEN revoke/delete the OLD token (rather than
+ * rotating it) — every other token stays valid throughout. See `Db.rotateGatewayToken`'s own doc comment.
+ *
+ * **`bindHost` all-interfaces mode (item 2):** `0.0.0.0` (and its IPv6 counterpart `::`) is an explicit,
+ * OWNER-DECIDED supported bind target — see `bindHost`'s own doc below.
  */
 export interface RemoteAccessConfig {
   /** Master switch — a non-loopback bind is only ever attempted when true. Default false. */
   enabled: boolean;
-  /** Interface a later phase binds when `enabled`. Default "127.0.0.1" (loopback — no-op today). */
+  /**
+   * Interface a later phase binds when `enabled`. Default "127.0.0.1" (loopback — no-op today).
+   * `0.0.0.0` (or IPv6 `::`) is explicitly ACCEPTED and supported: it binds ALL interfaces, putting every
+   * device on the local network in scope to reach the gateway (not just this host). This is NOT an auth
+   * bypass — every non-loopback peer, LAN or otherwise, still has to clear the same gateway-token +
+   * TLS-or-tailnet wall as any other remote bind (see `canOpenRemoteListener`/`tlsRequirementSatisfied` in
+   * gateway/trust-tier.ts) — but it IS a deliberately broad exposure surface, so a daemon that actually
+   * opens it logs a plain startup warning (see `isAllInterfacesBindHost`, consumed in index.ts) rather than
+   * doing it silently, and the Settings UI surfaces the same "reachable from your LAN" note.
+   */
   bindHost: string;
   /**
    * TLS material for the remote listener (Phase C). MANDATORY whenever `bindHost` is non-loopback AND

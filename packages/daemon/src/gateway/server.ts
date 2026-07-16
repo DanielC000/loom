@@ -192,6 +192,25 @@ export function sanitizeCompanionName(raw: string): string {
   return printable.replace(/\s+/g, " ").trim();
 }
 
+/**
+ * Log-redaction serializer for the gateway's Fastify request logger (P5b hardening follow-up, card
+ * 80e2093f, item 3) — a cheap STANDING guard, not currently wired to anything live. Every `Fastify(...)`
+ * call below constructs with `logger: false`, so nothing is logged today and this seam is satisfied only
+ * vacuously. If the logger is EVER turned on, pass this as `logger: { serializers: GATEWAY_LOG_SERIALIZERS
+ * }` so the `Authorization` header and the echoed `Sec-WebSocket-Protocol` subprotocol (which carries the
+ * gateway token as its `loom.bearer.<token>` entry on a WS upgrade — see trust-tier.ts's `WS_BEARER_PREFIX`)
+ * can never land in a log line in cleartext. Pure + exported so a hermetic test can assert the redaction
+ * directly without booting a real pino logger.
+ */
+export const GATEWAY_LOG_SERIALIZERS = {
+  req(request: { method?: string; url?: string; headers?: Record<string, unknown> }) {
+    const headers = { ...(request.headers ?? {}) };
+    if (headers.authorization !== undefined) headers.authorization = "[redacted]";
+    if (headers["sec-websocket-protocol"] !== undefined) headers["sec-websocket-protocol"] = "[redacted]";
+    return { method: request.method, url: request.url, headers };
+  },
+};
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // trustProxy is DELIBERATELY left at its default (false) — LOAD-BEARING for every `req.ip` loopback
   // gate in this file (the /internal/* checks below, and the trust-tier onRequest hook's own peer check).
@@ -229,6 +248,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       console.warn(`[gateway] failed to read remoteAccess.tls cert/key (${(err as Error).message}) — opening WITHOUT HTTPS; the remote bind will refuse and fall back to loopback (see onHttpsResolved).`);
     }
   }
+  // `logger: false` below (every branch): see GATEWAY_LOG_SERIALIZERS's doc above for the redaction seam
+  // to plug in FIRST if this is ever flipped to a real logger.
   let app: FastifyInstance;
   let httpsActive = false;
   if (httpsOptions) {

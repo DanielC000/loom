@@ -139,6 +139,18 @@ export function isLoopbackBindHost(host: string): boolean {
   return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
+/**
+ * The "all interfaces" bind targets (P5b hardening follow-up, card 80e2093f, item 2) — `0.0.0.0` (IPv4
+ * any-address) and its IPv6 counterpart `::`. `isValidBindHostShape` (mcp/platform.ts) has always accepted
+ * these (LAN-in-scope is an explicit, owner-decided supported mode, NOT an auth bypass — every non-loopback
+ * peer still hits the same token+TLS wall), but binding every interface deserves to be VISIBLE rather than
+ * silent. Used at the boot `.listen()` call site (index.ts) to log when this mode is actually opened, and by
+ * the Settings UI to show a "reachable from your LAN" hint next to the resolved bindHost.
+ */
+export function isAllInterfacesBindHost(host: string): boolean {
+  return host === "0.0.0.0" || host === "::";
+}
+
 /** A Tailscale (`.ts.net`) tailnet address — already end-to-end encrypted by the tailnet itself, so the
  *  Phase C TLS mandate (see `tlsRequirementSatisfied`) does not apply to it. v1 is direct-bind + Tailscale
  *  only (no reverse-proxy), so a suffix match is sufficient — never treated as loopback. */

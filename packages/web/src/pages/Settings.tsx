@@ -8,6 +8,7 @@ import {
   type OrchestrationConfig,
   type PlatformConfig,
   type PlatformConfigOverride,
+  type RemoteAccessConfig,
   type HostToolMcpSpec,
   type ConnectionAuthScheme,
   type OAuthProviderSlug,
@@ -463,7 +464,12 @@ function GlobalConfigEditor() {
   return <GlobalConfigForm override={data.override} resolved={data.resolved} />;
 }
 
-function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOverride; resolved: PlatformConfig }) {
+/** Bind targets that open EVERY interface (IPv4 `0.0.0.0` / IPv6 `::`) — mirrors the daemon's own
+ *  `gateway/trust-tier.ts` `isAllInterfacesBindHost`, kept as a tiny local check here since web doesn't
+ *  depend on the daemon package. Used only to show the "reachable from your LAN" hint below. */
+const isAllInterfacesBindHost = (host: string): boolean => host === "0.0.0.0" || host === "::";
+
+function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOverride; resolved: PlatformConfig & { remoteAccess: RemoteAccessConfig } }) {
   const qc = useQueryClient();
   // The platform DEFAULT group (resolveConfig with no override) — what blanking a field reverts to, shown
   // in the "inherit (…)" placeholder. Browser-pure (no daemon read), like the per-project `defaults`.
@@ -644,6 +650,23 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             for you.
           </Hint>
         </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Remote Access</SectionLabel>
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span style={fieldLabel}>Bind host (read-only — set via remoteAccess.bindHost)</span>
+          <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text }}>
+            {resolved.remoteAccess.enabled ? resolved.remoteAccess.bindHost : "disabled (loopback only)"}
+          </span>
+        </div>
+        {resolved.remoteAccess.enabled && isAllInterfacesBindHost(resolved.remoteAccess.bindHost) && (
+          <Hint>
+            Bound to all interfaces (<code>{resolved.remoteAccess.bindHost}</code>) — reachable from any
+            device on your local network, not just this machine. Still gated by the access token + TLS;
+            this is a supported mode, just a broad one worth knowing about.
+          </Hint>
+        )}
       </Panel>
 
       <Panel>

@@ -385,6 +385,12 @@ const connectionsOverride = z.object({
 // label) — this is what a tailnet name (`foo.tailnet-name.ts.net`) and a plain LAN hostname both look
 // like. Rejects garbage (spaces, a URL, a CIDR) BEFORE it ever reaches gateway/trust-tier.ts's Host
 // comparison or a `.listen()` call.
+//
+// This deliberately ACCEPTS `0.0.0.0`/`::` (binds ALL interfaces, LAN in scope) — an owner-decided posture
+// call (P5b hardening follow-up, card 80e2093f, item 2), NOT an auth bypass (every non-loopback peer still
+// hits the same token+TLS wall). See RemoteAccessConfig.bindHost's doc (@loom/shared) for the full posture
+// note, and gateway/trust-tier.ts `isAllInterfacesBindHost` for where this mode is made VISIBLE (a boot log
+// line + a Settings UI hint) rather than silent.
 const HOSTNAME_RE = /^(?!-)[A-Za-z0-9-]{1,63}(?<!-)(\.(?!-)[A-Za-z0-9-]{1,63}(?<!-))*$/;
 const isValidBindHostShape = (h: string): boolean => {
   if (h.length > 253) return false;

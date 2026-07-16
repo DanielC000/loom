@@ -7,7 +7,7 @@ import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, isCodescapeEnabled, codescapeGra
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
-import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied } from "./gateway/trust-tier.js";
+import { canOpenRemoteListener, isTrustTierHookActive, tlsRequirementSatisfied, isAllInterfacesBindHost } from "./gateway/trust-tier.js";
 import { sweepDeadSessions, watchClaudeProjects } from "./sessions/liveness.js";
 import { snapshotTranscript } from "./sessions/transcript.js";
 import { snapshotAndArchiveRecovered } from "./sessions/boot-backstop.js";
@@ -729,6 +729,12 @@ async function main(): Promise<void> {
   const boundAddress = await app.listen({ port: PORT, host: remoteListenerOk ? remoteAccessConfig.bindHost : "127.0.0.1" });
   // eslint-disable-next-line no-console
   console.log(`Loom daemon v${loomVersion()} listening on ${boundAddress}`); // boundAddress reflects the OS-assigned port when PORT is 0
+  // P5b hardening follow-up (card 80e2093f, item 2): 0.0.0.0/:: is an explicit, owner-decided supported
+  // LAN-in-scope bind mode (still gated by the token+TLS wall above) — but binding every interface should
+  // never be SILENT. Log it plainly the one time it's actually opened, distinct from the routine listen line.
+  if (remoteListenerOk && isAllInterfacesBindHost(remoteAccessConfig.bindHost)) {
+    console.warn(`[gateway] Loom gateway bound to all interfaces (${remoteAccessConfig.bindHost}) — reachable from your local network (still gated by the access token + TLS).`);
+  }
 
   // Boot-time orchestration reconcile (#22 run-2 + audit M4): finish any merge whose bookkeeping was
   // interrupted (branch merged but task/worktree not reconciled) and GC orphaned worktrees from
