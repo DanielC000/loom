@@ -479,6 +479,12 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // makes at boot (index.ts), so this hint can never drift from what a restart will actually pick up.
   const schedulerDefault = resolveConfig(undefined).orchestration.schedulerEnabled;
   const schedulerResolved = resolveConfig(undefined, override).orchestration.schedulerEnabled;
+  // maxConcurrentGates is likewise a top-level PlatformConfigOverride key surfaced on
+  // ResolvedConfig.orchestration (not the `platform` sub-group), so its default/effective values are
+  // resolved separately via the same pure resolveConfig call — this hint can't drift from the cap the
+  // gate semaphore actually reads (it re-reads `cap` on every gate run, so no restart is involved).
+  const gatesDefault = resolveConfig(undefined).orchestration.maxConcurrentGates;
+  const gatesResolved = resolveConfig(undefined, override).orchestration.maxConcurrentGates;
 
   // One flat string dict keyed by field key (unique across groups). "" = inherit. Seeded from the loaded
   // override, each value displayed in its human unit (canonical ms ÷ the unit).
@@ -497,6 +503,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Boot-time-gated by design: a flip here needs a daemon restart to start/stop the ticker (see the
   // banner above and the Schedules page hint).
   const [schedulerEnabled, setSchedulerEnabled] = useState(triStr(override.schedulerEnabled));
+  // Host-load gate cap (card 301d8c01, 13eda2eb) — daemon-global top-level int, its OWN control (not the
+  // ms-keyed GLOBAL_FIELDS grid). Blank = inherit the default. A non-numeric entry sends NaN → the
+  // strict-zod PATCH 400s with a readable reason (same demonstrable invalid path as the other fields).
+  const [maxConcurrentGates, setMaxConcurrentGates] = useState(numStr(override.maxConcurrentGates));
   // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
   const [openDesignPath, setOpenDesignPath] = useState(override.integrations?.openDesign?.path ?? "");
@@ -526,6 +536,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     if (coalesceAgentMsgs !== "inherit") o.coalesceAgentMessages = coalesceAgentMsgs === "true";
     if (operatorEnabled !== "inherit") o.operatorEnabled = operatorEnabled === "true";
     if (schedulerEnabled !== "inherit") o.schedulerEnabled = schedulerEnabled === "true";
+    // Emit only when non-blank; Number("") would be 0 (a deadlocking cap) so blank MUST inherit, not send
+    // 0. A non-numeric entry becomes NaN (→ null over JSON) and the strict-zod PATCH 400s readably.
+    if (maxConcurrentGates.trim() !== "") o.maxConcurrentGates = Number(maxConcurrentGates);
     // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
     // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
     // persisted one wholesale. Omitting it when both paths are blank (the old behavior) meant clearing the
@@ -629,6 +642,20 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             When on, the daemon starts the cron Scheduler so due schedules auto-spawn a manager session.
             Daemon-wide (one shared daemon), not per-project. Boot-time-gated: a flip here takes effect on
             the next daemon restart, same as the watcher cadences above.
+          </Hint>
+        </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Gate Concurrency</SectionLabel>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
+          <span style={fieldLabel}>Max concurrent merge/deploy gates</span>
+          <Input value={maxConcurrentGates} onChange={(e) => setMaxConcurrentGates(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${gatesDefault})`} />
+          <Hint>{effHint(gatesResolved)}</Hint>
+          <Hint>
+            Caps how many heavy merge/deploy gate runs execute at once across the whole host. Default 1
+            (fully serialized). Takes effect on the next gate run, no daemon restart. Whole number, 1–50.
           </Hint>
         </label>
       </Panel>

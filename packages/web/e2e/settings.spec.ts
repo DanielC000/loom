@@ -113,6 +113,65 @@ test("editing a daemon-global setting persists to the platform override", async 
     .toBe(47_000);
 });
 
+test("editing maxConcurrentGates: blank inherits, a set value persists, a bad value surfaces a readable 400 (card 13eda2eb)", async ({ page, loomDaemon }) => {
+  // The daemon-global gate-concurrency cap surfaced as its own control. Per the card the field OMITS on
+  // blank (a top-level scalar, like schedulerEnabled) — a blank field is not overridden, so it inherits the
+  // platform default. This proves the three DoD behaviors: blank = inherit, a set value PATCHes + persists,
+  // and a bad value 400s readably. (A daemon-global setting has no per-test isolation on this shared
+  // worker-scoped daemon, so the field is exercised on whatever state prior tests left; the assertions read
+  // the override + effective hint directly rather than assuming a pristine start.)
+  const project = await loomDaemon.createProject(`settings-gates-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const gates = field(page, "Max concurrent merge/deploy gates");
+  await expect(gates).toBeVisible();
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  // The field's own label container, so the "effective: N" hint assertion can't match another field's hint.
+  const gatesLabel = page.locator('label:has(> span:text-is("Max concurrent merge/deploy gates"))');
+
+  const readGatesOverride = async (): Promise<number | null> => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+    const body = (await res.json()) as { override?: { maxConcurrentGates?: number } };
+    return body?.override?.maxConcurrentGates ?? null;
+  };
+
+  // BLANK = INHERIT: clear the field (its own save row is independent) and confirm the resolved value the
+  // hint shows is the platform default (1) — a blank field resolves to the inherited default. The placeholder
+  // states the same revert target.
+  await gates.fill("");
+  await expect(gatesLabel.getByText("effective: 1")).toBeVisible();
+  await expect(gates).toHaveAttribute("placeholder", "inherit (default 1)");
+
+  // SET: 4 is a valid in-bounds, non-default value so the read-back is unambiguous.
+  await gates.fill("4");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  // Observable #1: the platform override now carries maxConcurrentGates = 4 (a top-level key, not nested).
+  await expect.poll(readGatesOverride).toBe(4);
+  // Observable #2: a reload re-seeds the field from the persisted override — not just optimistic state.
+  await page.reload();
+  await expect(field(page, "Max concurrent merge/deploy gates")).toHaveValue("4");
+
+  // BAD VALUE: 99 is outside the control's advertised 1–50 bound. buildGlobalOverride sends it verbatim; the
+  // strict-zod PATCH 400s with a field-named reason (formatZodIssues prefixes the path), surfaced inline —
+  // never silently accepted, and the persisted value is unchanged.
+  const gatesAfterReload = field(page, "Max concurrent merge/deploy gates");
+  await gatesAfterReload.fill("99");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/maxConcurrentGates/).first()).toBeVisible();
+  await expect.poll(readGatesOverride).toBe(4);
+
+  // NON-NUMERIC is likewise rejected (NaN → null over JSON → the strict validator 400s), not treated as 0.
+  await gatesAfterReload.fill("abc");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/maxConcurrentGates/).first()).toBeVisible();
+  await expect.poll(readGatesOverride).toBe(4);
+});
+
 test("editing a host-tool integration path persists to the platform override (card 8dc5ebb9)", async ({ page, loomDaemon }) => {
   const project = await loomDaemon.createProject(`settings-integrations-${Date.now()}`);
   await pinActiveProject(page, project.id);
