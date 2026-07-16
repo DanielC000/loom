@@ -8,6 +8,8 @@ import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, Capabi
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
+import { meetsMinVersion } from "./session-name.js";
+import { getCachedClaudeVersion } from "../orchestration/usage-status.js";
 import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.js";
 import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
@@ -1370,6 +1372,15 @@ export interface SpawnOpts {
    * one short of auto. Omit for fresh/fork/recycle spawns (they use the blind relative count and work).
    */
   resumeModeTarget?: LandedMode;
+  /**
+   * Card f9b47cd1: the `-n <name>` session name (see pty/session-name.ts) — a legible resume-picker
+   * label, computed UPSTREAM by the caller (sessions/service.ts) from role/agent/project/task, exactly
+   * like `model`/`startupPrompt`. Threaded on every FRESH-spawn path; omitted on `--resume`/
+   * `--fork-session` (the caller never computes one there — see buildSpawnArgs' doc). createPty
+   * ADDITIONALLY gates this on the installed claude version (meetsMinVersion) before it ever reaches
+   * buildSpawnArgs, so an old claude's argv is byte-identical regardless of what the caller passed.
+   */
+  sessionName?: string;
 }
 
 export interface PtyHostEvents {
@@ -1607,6 +1618,15 @@ export function buildSpawnArgs(o: {
    * Empty/absent ⇒ NO `--disallowedTools` (byte-identical to today for every out-of-scope role).
    */
   disallowedTools?: string[];
+  /**
+   * Card f9b47cd1: `-n <name>` — a legible resume-picker label (Claude Code's own session-naming
+   * feature). The CALLER (createPty) has ALREADY version-gated this against the installed claude
+   * (meetsMinVersion(getCachedClaudeVersion())) before it ever reaches this pure function, so this
+   * itself does no gating — it just emits when present. Emitted ONLY when set, so a resume/fork spawn
+   * (the caller never computes one there) or a pre-2.1.196 claude (the caller passes undefined) stays
+   * byte-identical to before this option existed.
+   */
+  sessionName?: string;
 }): string[] {
   const args: string[] = [];
   if (o.resumeId) args.push("--resume", o.resumeId);
@@ -1630,6 +1650,9 @@ export function buildSpawnArgs(o: {
   // its value sitting right before the `--` separator (the H2 ordering invariant). Emitted ONLY when
   // non-empty, so every out-of-scope role's argv is byte-identical (additive-when-applicable discipline).
   if (o.disallowedTools && o.disallowedTools.length) args.push("--disallowedTools", ...o.disallowedTools);
+  // Card f9b47cd1 session naming: also BEFORE --strict-mcp-config, so `-n`'s single value can never eat
+  // into the variadic `--mcp-config` that follows. Emitted ONLY when present (see this param's doc).
+  if (o.sessionName) args.push("-n", o.sessionName);
   // Agent-tooling P4: a secret-bearing spawn passes the FILE PATH (never the JSON, never the secret);
   // every other spawn stays the byte-identical inline JSON form (o.mcpConfigPath undefined).
   args.push("--strict-mcp-config", "--mcp-config", o.mcpConfigPath ?? JSON.stringify({ mcpServers: o.mcpServers }));
@@ -2483,6 +2506,13 @@ export class PtyHost {
     // restrictedTools off and codescape/playwright unmounted this is exactly disallowedToolsForRole(role) ⇒
     // byte-identical argv. See disallowedToolsForSpawn.
     const disallowedTools = disallowedToolsForSpawn(opts.role, opts.restrictedTools, !!mcpServers.codescape, !!mcpServers.playwright);
+    // Card f9b47cd1: gate `-n <name>` on the installed claude version HERE (the single spawn chokepoint),
+    // NOT in the caller — an older claude REJECTS the unknown flag and would break EVERY spawn (the
+    // load-bearing gate-free recipe). getCachedClaudeVersion() is a NON-BLOCKING read (see its doc) —
+    // never a fresh `execSync` probe from this hot path. opts.sessionName is already undefined on every
+    // resume/fork spawn (the caller never computes one there), so this is the ONLY place version-gating
+    // needs to happen.
+    const sessionName = opts.sessionName && meetsMinVersion(getCachedClaudeVersion()) ? opts.sessionName : undefined;
     // Agent-tooling P4 credential-tie hardening: a capability secret must NEVER ride the claude process's
     // own argv. Diverting to a 0600 per-session FILE is CONDITIONAL on the map actually carrying one —
     // every secret-free spawn (every session today) keeps the byte-identical inline --mcp-config <json>
@@ -2490,7 +2520,7 @@ export class PtyHost {
     // recycle all call createPty, which rebuilds mcpServers fresh each time), mirroring writeSessionSettings.
     const capabilitySecrets = collectMcpEnvSecrets(mcpServers);
     const mcpConfigPath = capabilitySecrets.length ? writeSessionMcpConfig(opts.sessionId, mcpServers) : undefined;
-    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools });
+    const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools, sessionName });
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
     // keep an unattended worker pty from wedging on a pager / credential prompt. See buildSpawnEnv.

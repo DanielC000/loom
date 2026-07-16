@@ -84,7 +84,47 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
   check("fork without resumeId: no --fork-session (nothing to fork from)", !args.includes("--fork-session"));
 }
 
+// --- Session naming (card f9b47cd1) — `-n <name>` ------------------------------------------------
+// buildSpawnArgs itself does NO version-gating (that happens once, at the createPty chokepoint, on the
+// installed claude version) — it just emits `-n <name>` when the caller passes one. These tests exercise
+// that pure emission/placement/omission contract.
+{
+  const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", sessionName: "loom-loom-dev-fix-thing" });
+  const n = args.indexOf("-n");
+  const sep = args.indexOf("--");
+  const cfg = args.indexOf("--mcp-config");
+  check("sessionName set: `-n` is present", n !== -1);
+  check("sessionName set: `-n` is immediately followed by the name", args[n + 1] === "loom-loom-dev-fix-thing");
+  check("sessionName set: `-n` precedes the `--` separator (it's a real flag)", n < sep);
+  check("sessionName set: `-n` precedes `--strict-mcp-config`/`--mcp-config` (H2 ordering)", n < cfg);
+  check("sessionName set: the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "build it");
+}
+// Omitted/undefined/empty ⇒ byte-identical to before this option existed: NO `-n` anywhere.
+{
+  const base = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it" });
+  const withUndef = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", sessionName: undefined });
+  const withEmpty = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", sessionName: "" });
+  check("sessionName omitted: no `-n` in argv", !base.includes("-n"));
+  check("sessionName undefined: argv is byte-identical to the no-name argv", JSON.stringify(withUndef) === JSON.stringify(base));
+  check("sessionName empty-string: treated as absent — byte-identical, no `-n`", JSON.stringify(withEmpty) === JSON.stringify(base));
+}
+// Both `--model` and `-n` set together: both present, in the documented relative order (model, then the
+// role disallow list if any, then sessionName, then --strict-mcp-config).
+{
+  const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", model: "claude-opus-4-8", sessionName: "loom-loom-mgr" });
+  check("model + sessionName: --model precedes -n", args.indexOf("--model") < args.indexOf("-n"));
+  check("model + sessionName: -n precedes --mcp-config", args.indexOf("-n") < args.indexOf("--mcp-config"));
+}
+// A resume/fork spawn CAN still thread sessionName through this pure function if a caller passed one
+// (the real caller — createPty via sessions/service.ts — never does on resume/fork; this just asserts
+// buildSpawnArgs itself imposes no such restriction, keeping the two concerns separate).
+{
+  const args = buildSpawnArgs({ resumeId: "engine-123", settingsPath: "S", mode: "acceptEdits", mcpServers, sessionName: "loom-loom-mgr" });
+  check("resume + sessionName (hypothetical): -n still emitted correctly", args[args.indexOf("-n") + 1] === "loom-loom-mgr");
+  check("resume + sessionName (hypothetical): still no `--` separator (no prompt)", !args.includes("--"));
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator, --fork-session follows --resume, and --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model)."
+  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator, --fork-session follows --resume, --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model), and -n <name> emits/omits the same way (byte-identical when absent, always ahead of --mcp-config)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

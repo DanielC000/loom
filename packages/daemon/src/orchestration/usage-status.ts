@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execSync } from "node:child_process";
+import { execSync, execFile } from "node:child_process";
 import type { UsageLimitsStatus, UsageWindow, UsageExtra } from "@loom/shared";
 import { resolveExecutable } from "../pty/resolve-bin.js";
 
@@ -59,6 +59,40 @@ function claudeVersion(): string {
   }
   cachedClaudeVersion = v;
   return v;
+}
+
+/**
+ * NON-BLOCKING read of whatever version is already cached (or null if nothing has warmed it yet) — NEVER
+ * triggers the synchronous `execSync` probe above. Consumed by the session-naming version gate
+ * (pty/session-name.ts's `meetsMinVersion`) from the createPty spawn chokepoint, which — per CLAUDE.md's
+ * load-bearing "no blocking work on the spawn hot path" invariant (the same class of bug the async
+ * markitdown/venv provisioning split avoids) — must NEVER risk an up-to-8s `execSync` stall on a session
+ * spawn. See {@link prewarmClaudeVersionAsync} for what actually populates this cache off that hot path.
+ */
+export function getCachedClaudeVersion(): string | null {
+  return cachedClaudeVersion;
+}
+
+/**
+ * Best-effort, ASYNC warm of the cached claude version (mirrors the async discipline of the python venv/
+ * markitdown provisioning — never `execSync`/`spawnSync` off a path that must stay non-blocking). Called
+ * ONCE at daemon boot (index.ts), independent of the usage poller/OAuth credentials — the version probe
+ * needs neither — so `getCachedClaudeVersion()` is warm by the time any real session spawn reaches
+ * createPty in the overwhelmingly common case (a `claude --version` child process resolves in well under
+ * a second). A cold read before this resolves just means that ONE spawn's session-naming gate sees
+ * `null` (⇒ `meetsMinVersion` returns false ⇒ `-n` omitted for that spawn only) — never a hang, never a
+ * thrown error. No-op if already cached (idempotent; safe to call more than once). Failures are swallowed
+ * — the cache simply stays unset and the next opportunistic caller (this function, or the usage poller's
+ * own lazy `claudeVersion()`) can retry.
+ */
+export function prewarmClaudeVersionAsync(): void {
+  if (cachedClaudeVersion) return;
+  const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+  execFile(bin, ["--version"], { timeout: 8000, windowsHide: true }, (err, stdout) => {
+    if (err) return;
+    const v = stdout.match(/(\d+\.\d+\.\d+)/)?.[1];
+    if (v) cachedClaudeVersion = v;
+  });
 }
 
 /** The graceful-degrade state. fetchedAt = when we last *tried* (null if never). */

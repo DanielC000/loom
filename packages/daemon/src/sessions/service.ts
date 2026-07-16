@@ -11,6 +11,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
+import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
@@ -774,6 +775,12 @@ export class SessionService {
     const withProjectMemory = projectMemoryFramed
       ? appendMemoryRecallToStartupPrompt(composedStartupPrompt ?? "", projectMemoryFramed)
       : composedStartupPrompt;
+    // Card f9b47cd1: a profile can confer role "worker" here too (PROFILE_SPAWNABLE_ROLES) — this path
+    // never runs in a worktree/has a task, so it names as a TASKLESS worker ("adhoc" segment); every
+    // other role (incl. undefined ⇒ "Plain/run") uses the fixed per-role tag.
+    const sessionName = role === "worker"
+      ? composeWorkerSessionName(project.name, agent.name, null, session.id)
+      : composeRoleSessionName(role, project.name);
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -792,6 +799,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName, // card f9b47cd1: `-n <name>` resume-picker label (version-gated at createPty)
     });
     return { ...session, processState: "live" };
   }
@@ -877,6 +885,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: `loom-<project>-mgr`
     });
     return { ...session, processState: "live" };
   }
@@ -961,6 +970,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — no project segment
     });
     return { ...session, processState: "live" };
   }
@@ -1034,6 +1044,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: composeRoleSessionName("auditor", project.name), // card f9b47cd1: `loom-<project>-audit`
     });
     return { ...session, processState: "live" };
   }
@@ -1114,6 +1125,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: composeRoleSessionName("workspace-auditor", project.name), // card f9b47cd1: `loom-<project>-wsaudit`
     });
     return { ...session, processState: "live" };
   }
@@ -1195,6 +1207,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: composeRoleSessionName("setup", project.name), // card f9b47cd1: `loom-<project>-setup`
     });
     return { ...session, processState: "live" };
   }
@@ -1279,6 +1292,7 @@ export class SessionService {
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: composeRoleSessionName("operator", project.name), // card f9b47cd1: `loom-<project>-operator`
     });
     return { ...session, processState: "live" };
   }
@@ -2459,6 +2473,7 @@ export class SessionService {
       restrictedTools: false,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
       skills, // profile-pinned skill subset → injectSkills delivers only these (null ⇒ all, byte-identical)
+      sessionName: composeRoleSessionName("run", project.name), // card f9b47cd1: `loom-<project>-run`
     });
     this.db.setRunStatus(runId, "running"); // the startup-prompt turn is in flight
     // Arm the hard run-timeout (capstone BUG 2): if the agent finishes WITHOUT submit_result, nothing
@@ -2735,6 +2750,36 @@ export class SessionService {
       this.db.deleteSession(id);
     }
     return { deleted: ids };
+  }
+
+  /**
+   * Card f9b47cd1: the session names THIS manager's LIVE worker siblings would compute to (RECOMPUTED
+   * fresh each call, never stored — see composeWorkerSessionName's doc) — consulted ONLY to detect a
+   * naming collision before a fresh/recycled worker's own `-n` name is finalized ("if two live cards
+   * slugify identically, append the 4-char task-id" per the card). Scoped to the SAME manager (not
+   * project-wide): the manager's own fleet is where a same-agent, similarly-titled dispatch is most
+   * likely, and `listWorkers(managerSessionId)` is the exact query spawnWorker already runs for its
+   * concurrency-cap check.
+   *
+   * `excludeIds` MUST include the CALLER'S OWN fresh session id — spawnWorker/recycleWorker both insert +
+   * flip their fresh row `live` BEFORE computing the collision set (M5: flip-live-before-pty is load-
+   * bearing elsewhere too), so `listWorkers` already returns that fresh row by the time this runs; without
+   * excluding it explicitly, a worker always "collides with itself" and every worker gets a spurious
+   * suffix (code review finding on the first cut of this — the fresh id was left to be implicitly excluded
+   * by insert-ordering, which insert-ordering doesn't actually guarantee). recycleWorker additionally
+   * excludes the PREDECESSOR (its row can still show `live` mid-teardown) — its name must never count
+   * as its own successor's collision either.
+   */
+  private siblingWorkerSessionNames(managerSessionId: string, projectName: string, excludeIds: ReadonlySet<string>): Set<string> {
+    const names = new Set<string>();
+    for (const w of this.db.listWorkers(managerSessionId)) {
+      if (w.processState !== "live" || excludeIds.has(w.id)) continue;
+      const wAgent = this.db.getAgent(w.agentId);
+      if (!wAgent) continue;
+      const wTask = w.taskId ? this.db.getTask(w.taskId) : null;
+      names.add(composeWorkerSessionName(projectName, wAgent.name, wTask?.title ?? null, w.id));
+    }
+    return names;
   }
 
   /**
@@ -3022,6 +3067,11 @@ export class SessionService {
         restrictedTools, // union the dangerous-native-tool disallow into --disallowedTools iff this worker's profile opted in
         model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
         skills, // deliver only the worker profile's skill subset (null ⇒ all)
+        // Card f9b47cd1: `loom-<project>-<agent>-<taskslug>` (or "-adhoc" for a taskless spawn), collision
+        // suffix appended only if it matches a currently-live sibling worker under this same manager.
+        // EXCLUDE worker.id itself — the row is already inserted+live by this point (M5 ordering above),
+        // so listWorkers would otherwise see this very spawn as its own "collision" (code review fix).
+        sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
       });
       // Move the task into the `active` lane (role-resolved off the manager-project config, not the
       // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
@@ -4857,6 +4907,15 @@ export class SessionService {
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+      // Card f9b47cd1: RECOMPUTED (not carried from `old`) from the CURRENT agent name + task title, so a
+      // recycled worker "keeps its name" for free as long as neither changed — the same agent/task pair
+      // always slugs identically. EXCLUDE both fresh.id (already inserted+live by this point — the row
+      // would otherwise "collide with itself", code review fix) and workerSessionId (the predecessor,
+      // which can still show `live` mid-teardown and must never count as its successor's collision).
+      sessionName: composeWorkerSessionName(
+        project.name, agent?.name ?? "worker", taskId ? this.db.getTask(taskId)?.title ?? null : null, fresh.id,
+        this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([fresh.id, workerSessionId])),
+      ),
     });
     // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
     // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
@@ -4960,6 +5019,7 @@ export class SessionService {
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+      sessionName: composeRoleSessionName("manager", project.name), // card f9b47cd1: unchanged across recycle
     });
 
     // Re-parent live workers onto the successor BEFORE closing the old manager, so they're never
@@ -5113,6 +5173,7 @@ export class SessionService {
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)
       skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+      sessionName: PLATFORM_LEAD_SESSION_NAME, // card f9b47cd1: "loom-lead" — unchanged across recycle
     });
     // === END ATOMIC LINEAGE HANDOFF ===============================================================
 

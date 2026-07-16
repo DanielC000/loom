@@ -37,7 +37,7 @@ import { RunMcpRouter } from "./mcp/run.js";
 import { OrchestrationControl } from "./orchestration/control.js";
 import { Scheduler } from "./orchestration/scheduler.js";
 import { RateLimitWatcher } from "./orchestration/rate-limit-watcher.js";
-import { UsageStatusPoller } from "./orchestration/usage-status.js";
+import { UsageStatusPoller, prewarmClaudeVersionAsync } from "./orchestration/usage-status.js";
 import { WakeService } from "./orchestration/wake.js";
 import { PollService } from "./orchestration/poll.js";
 import { EventTriggerService } from "./orchestration/event-triggers.js";
@@ -631,6 +631,12 @@ async function main(): Promise<void> {
   // cache; started below (after listen). BOOT-BOUND cadence from the resolved platform config
   // (LOOM_USAGE_POLL_INTERVAL_MS env read + floor-clamped inside resolveConfig; default 60s).
   const usageStatus = new UsageStatusPoller({ intervalMs: watchers.usagePollMs });
+  // Session-naming version gate (pty/session-name.ts): warm the cached `claude --version` read NOW, off
+  // the spawn hot path, so createPty's gate almost never sees a cold cache. ASYNC + best-effort — never
+  // blocks boot; a spawn that races ahead of this just omits `-n` for that one session (see
+  // prewarmClaudeVersionAsync's doc). Independent of the usage poller/credentials below (the version
+  // probe needs neither).
+  prewarmClaudeVersionAsync();
 
   // The graceful-shutdown path, shared by the SIGINT/SIGTERM handlers and the loopback
   // POST /internal/shutdown control hook (`loom stop`). Assigned BELOW, after the watchers it closes
