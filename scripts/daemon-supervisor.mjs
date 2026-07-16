@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRotatingLog } from "./lib/rotating-log.mjs";
+import { loadDotEnvFile, fillEnvDefaults } from "./lib/env-file.mjs";
 
 const RESTART_EXIT_CODE = 75; // must match packages/daemon/src/orchestration/restart.ts
 const here = path.dirname(fileURLToPath(import.meta.url));
@@ -28,6 +29,12 @@ const daemonDir = path.join(repoRoot, "packages", "daemon");
 // before each launch, rotate any existing crash.log to crash.log.prev — keeping the last two — so a
 // restart (or a human re-run after a crash) never clobbers the previous crash signature. Best-effort.
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
+
+// File-based feature-flag toggles (card b22f9ef2): a `daemon_restart` (in-process, exit 75) reuses
+// THIS process's env, so a flag only ever set via a fresh shell is invisible to it — a full Ctrl-C +
+// relaunch was the only way to pick one up. Load <LOOM_HOME>/.env once, before the daemon child's env
+// is ever constructed, and fill in any var the real shell env doesn't already set (shell always wins).
+fillEnvDefaults(process.env, loadDotEnvFile(path.join(LOOM_HOME, ".env")));
 const CRASHLOG = path.join(LOOM_HOME, "crash.log");
 function rotateCrashlog() {
   try {
