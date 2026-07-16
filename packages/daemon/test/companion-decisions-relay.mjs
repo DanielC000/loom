@@ -16,6 +16,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) a mode:'read' grant never registers decision_resolve (byte-identical read-only surface); a
 //       mode:'act' grant DOES register it (card a8ddd6d2 — the ACT half's own guards are tested
 //       separately in companion-decision-resolve.mjs).
+//   (f) decisions-relay dedup (card 0c1365d0): each decision carries `alreadySurfaced` — false on its
+//       first-ever read, true on a repeat read with an unchanged state, reset to false the instant its
+//       state genuinely changes (answered) or a brand-new decision shows up; and a surfaced-marker
+//       read/write failure never breaks the decisions_list READ it backs (degrades to false).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-decisions-relay.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -202,11 +206,89 @@ try {
     check("(e) decision_resolve is NOT registered under a mode:'read' grant (byte-identical to before card a8ddd6d2)", !tools.includes("decision_resolve"));
     db.close();
   }
+
+  // ============ decisions-relay dedup (card 0c1365d0): alreadySurfaced flips on read, resets on state change ============
+  {
+    const db = tmpDb();
+    const proj = "proj-dedup";
+    seedProject(db, proj, "Dedup");
+    const companionSess = "companion-dedup";
+    seedSession(db, companionSess, proj, "assistant");
+    const asker = "asker-dedup";
+    seedSession(db, asker, proj, "manager");
+    seedQuestion(db, "q-dedup", asker, proj, { title: "Ship it?", options: ["yes", "no"] });
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const first = await call(client, "decisions_list", {});
+    const firstRow = first.decisions.find((d) => d.questionId === "q-dedup");
+    check("dedup: first-ever read of a decision is alreadySurfaced:false", firstRow?.alreadySurfaced === false);
+
+    const second = await call(client, "decisions_list", {});
+    const secondRow = second.decisions.find((d) => d.questionId === "q-dedup");
+    check("dedup: a repeat read of the SAME unchanged decision comes back alreadySurfaced:true", secondRow?.alreadySurfaced === true);
+
+    const third_ = await call(client, "decisions_list", {});
+    check("dedup: a THIRD repeat read of the still-unchanged decision stays alreadySurfaced:true (no flapping)",
+      third_.decisions.find((d) => d.questionId === "q-dedup")?.alreadySurfaced === true);
+
+    // Answer it — a genuine state change must reset alreadySurfaced to false on the NEXT read.
+    db.answerQuestion("q-dedup", { chosenOption: "yes", note: null, answeredAt: new Date().toISOString() });
+    const fourth = await call(client, "decisions_list", {});
+    const fourthRow = fourth.decisions.find((d) => d.questionId === "q-dedup");
+    check("dedup: answering the decision (a real state change) re-fires — alreadySurfaced:false", fourthRow?.alreadySurfaced === false);
+
+    const fifth = await call(client, "decisions_list", {});
+    const fifthRow = fifth.decisions.find((d) => d.questionId === "q-dedup");
+    check("dedup: a repeat read of the NEW (answered) state is alreadySurfaced:true again", fifthRow?.alreadySurfaced === true);
+
+    // A brand-new decision, never read before, is never suppressed.
+    seedQuestion(db, "q-dedup-2", asker, proj, { title: "Second decision" });
+    const sixth = await call(client, "decisions_list", {});
+    const freshRow = sixth.decisions.find((d) => d.questionId === "q-dedup-2");
+    check("dedup: a brand-new decision is alreadySurfaced:false on its first read", freshRow?.alreadySurfaced === false);
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ dedup bookkeeping failures never break the READ (card 0c1365d0 steer #1) ============
+  {
+    const db = tmpDb();
+    const proj = "proj-dedup-fail-safe";
+    seedProject(db, proj, "Dedup fail-safe");
+    const companionSess = "companion-dedup-fail-safe";
+    seedSession(db, companionSess, proj, "assistant");
+    const asker = "asker-dedup-fail-safe";
+    seedSession(db, asker, proj, "manager");
+    seedQuestion(db, "q-fail", asker, proj, { title: "Still readable?" });
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj });
+
+    // Simulate the surfaced-marker read AND write both throwing — decisions_list must still return the
+    // decision (the read it backs must never fail), degrading alreadySurfaced to false (the safe direction).
+    db.markQuestionSurfaced = () => { throw new Error("boom: marker write failed"); };
+    db.getQuestionSurfacedSignatures = () => { throw new Error("boom: marker read failed"); };
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const result = await call(client, "decisions_list", {});
+    check("fail-safe: decisions_list still returns the decision when the surfaced-marker read/write throws",
+      result.decisions?.some((d) => d.questionId === "q-fail"));
+    const row = result.decisions.find((d) => d.questionId === "q-fail");
+    check("fail-safe: a marker read/write failure degrades alreadySurfaced to false (never wrongly suppresses)", row?.alreadySurfaced === false);
+
+    await client.close();
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical)."
+  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical). Decisions-relay dedup (card 0c1365d0): a decision's `alreadySurfaced` flag is false on first read, true on an unchanged repeat read, and resets to false the moment its state genuinely changes (answered) or a brand-new decision appears — and a surfaced-marker read/write failure never breaks the read itself (degrades to false, never wrongly suppresses)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

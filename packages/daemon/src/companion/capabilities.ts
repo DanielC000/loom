@@ -510,6 +510,19 @@ function pendingResolveKey(sessionId: string, route: CompanionRoute | null): str
  * this way, is the actual defense: the owner sees the EXACT daemon-authored action description and only
  * their own reply (which the daemon re-derives server-side via Primitive A) can commit it.
  */
+/**
+ * Decisions-relay dedup signature (card 0c1365d0): deterministic "as of this state" fingerprint used to
+ * tell a genuine re-alert (state/answer changed) apart from a repeat read of an unchanged pending decision.
+ * Only the answer tuple is folded in — a question's title/body/options/recommendation are set once at
+ * `question_ask` and NEVER mutated afterward (confirmed: db.ts's only `UPDATE questions` statements touch
+ * session_id/project_id reparenting or the state/chosen_option/note/answered_at/consumed_at/provision_*
+ * columns — never title/body/options_json/recommendation), so folding those in would never change the
+ * signature and would just be dead weight.
+ */
+function decisionSurfaceSignature(q: Pick<Question, "state" | "chosenOption" | "answeredAt" | "consumedAt">): string {
+  return `${q.state}|${q.chosenOption ?? ""}|${q.answeredAt ?? ""}|${q.consumedAt ?? ""}`;
+}
+
 const DECISIONS_RELAY: CompanionCapability = {
   slug: "decisions-relay",
   supportsMode: ["read", "act"],
@@ -521,7 +534,11 @@ const DECISIONS_RELAY: CompanionCapability = {
           "Read-only view of PENDING decision-inbox questions (manager asks awaiting a human answer) in " +
           "your granted project(s). Optionally pass `project` (a project id) to narrow to ONE of your " +
           "granted projects — passing a project you were NOT granted is rejected with an {error}; " +
-          "omitting it returns every granted project's pending decisions.",
+          "omitting it returns every granted project's pending decisions. Each entry carries " +
+          "`alreadySurfaced`: true means you already read this EXACT decision (same state, same answer) on " +
+          "a prior call — do NOT re-narrate it to the owner again on its own; only mention it if the owner " +
+          "asks or something else prompts it. false means it's new or its state/answer changed since you " +
+          "last saw it (e.g. it was just answered) — that's genuinely worth surfacing.",
         inputSchema: { project: z.string().optional() },
       },
       async ({ project }) => {
@@ -531,13 +548,29 @@ const DECISIONS_RELAY: CompanionCapability = {
           return ok({ error: `project "${project}" is not in your granted scope` });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
-        const decisions = db.listOpenQuestions()
-          .filter((q) => targetProjects.has(q.projectId))
-          .map((q) => ({
+        const rows = db.listOpenQuestions().filter((q) => targetProjects.has(q.projectId));
+        // Decisions-relay dedup (card 0c1365d0): batch-read each row's last-surfaced signature, diff it
+        // against the CURRENT signature to derive `alreadySurfaced`, then stamp the current signature back
+        // so the NEXT read of an unchanged decision comes back alreadySurfaced:true. Both steps are
+        // best-effort bookkeeping around an otherwise read-only tool: a failure here must never break the
+        // read itself — it just degrades every entry to alreadySurfaced:false (the safe direction: "narrate
+        // it," never "wrongly suppress it").
+        let surfaced = new Map<string, string>();
+        try {
+          surfaced = db.getQuestionSurfacedSignatures(rows.map((q) => q.id));
+        } catch { /* degrade to "nothing surfaced yet" below */ }
+        const now = new Date().toISOString();
+        const decisions = rows.map((q) => {
+          const signature = decisionSurfaceSignature(q);
+          const alreadySurfaced = surfaced.get(q.id) === signature;
+          try { db.markQuestionSurfaced(q.id, signature, now); } catch { /* best-effort bookkeeping only */ }
+          return {
             questionId: q.id, projectId: q.projectId, projectName: q.projectName,
             sessionId: q.sessionId, title: q.title, body: q.body, options: q.options,
             recommendation: q.recommendation, state: q.state, createdAt: q.createdAt,
-          }));
+            alreadySurfaced,
+          };
+        });
         return ok({ decisions });
       },
     );

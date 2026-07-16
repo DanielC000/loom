@@ -959,7 +959,9 @@ CREATE TABLE IF NOT EXISTS questions (
   note TEXT,
   created_at TEXT NOT NULL,
   answered_at TEXT,
-  consumed_at TEXT
+  consumed_at TEXT,
+  last_surfaced_state TEXT,                -- decisions-relay dedup signature (card 0c1365d0), NULL = never surfaced
+  last_surfaced_at TEXT
 );
 -- Serves both the manager's pull (session_id + state='answered') and a future project-scoped inbox read.
 CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state);
@@ -1327,6 +1329,13 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   provision_target: "TEXT",
   provision_connection_id: "TEXT",
   provision_binding_state: "TEXT",
+  // Decisions-relay dedup (card 0c1365d0): the signature (state+chosenOption+answeredAt+consumedAt) as of
+  // the last time this question was read via the Companion's decisions_list, so a repeat read of an
+  // unchanged pending decision can be told apart from a genuinely new/state-changed one. Both nullable —
+  // a legacy row (or one never yet read via decisions_list) has never been surfaced, so NULL correctly
+  // reads back as "not yet surfaced" (see getQuestionSurfacedSignatures) rather than a false match.
+  last_surfaced_state: "TEXT",
+  last_surfaced_at: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -4895,6 +4904,31 @@ export class Db {
        ORDER BY q.created_at DESC`,
     ).all() as Row[];
     return rows.map(toQuestionInboxItem);
+  }
+  /**
+   * Decisions-relay dedup (card 0c1365d0): batch-read `last_surfaced_state` for the given question ids,
+   * keyed by id — a row that was never surfaced (or whose id doesn't exist) is simply absent from the
+   * returned map, never a false "" match. Batched (one query for the whole decisions_list page) rather than
+   * one lookup per row.
+   */
+  getQuestionSurfacedSignatures(ids: string[]): Map<string, string> {
+    const map = new Map<string, string>();
+    if (ids.length === 0) return map;
+    const placeholders = ids.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT id, last_surfaced_state FROM questions WHERE id IN (${placeholders})`,
+    ).all(...ids) as { id: string; last_surfaced_state: string | null }[];
+    for (const r of rows) if (r.last_surfaced_state != null) map.set(r.id, r.last_surfaced_state);
+    return map;
+  }
+  /**
+   * Decisions-relay dedup (card 0c1365d0): idempotently stamp a question's last-surfaced signature —
+   * pure bookkeeping, never touches `state`/`chosen_option`/`answered_at`/`consumed_at` or any other field
+   * a reader relies on. Silently no-ops on a vanished id (a 0-row UPDATE) rather than throwing — this backs
+   * a READ tool (decisions_list) and must never be the reason that read fails.
+   */
+  markQuestionSurfaced(id: string, signature: string, at: string): void {
+    this.db.prepare("UPDATE questions SET last_surfaced_state = ?, last_surfaced_at = ? WHERE id = ?").run(signature, at, id);
   }
   /** One question enriched with the same display fields (the answer page), any state; undefined if unknown. */
   getQuestionInboxItem(id: string): QuestionInboxItem | undefined {
