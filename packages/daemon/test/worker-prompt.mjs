@@ -83,6 +83,8 @@ const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 const order = (s, a, b) => s.includes(a) && s.includes(b) && s.indexOf(a) < s.indexOf(b);
 
 const worktrees = [];
+const worktreesR = [];
+let repoR = null;
 try {
   // ===================== (1) pure composeWorkerStartupPrompt =====================
   const composed = composeWorkerStartupPrompt("BRIEF", "DYNAMIC");
@@ -100,6 +102,18 @@ try {
   const composedEmptyCwd = composeWorkerStartupPrompt("", "DYNAMIC", "/wt/path");
   check("(1) pure: empty brief + cwd ⇒ block still present, leads the dynamic part", composedEmptyCwd.includes("`/wt/path`") && order(composedEmptyCwd, "/wt/path", "DYNAMIC"));
 
+  // ===================== (1e) reference-repos epic Phase 3: referenceRepos block =====================
+  check("(1e) pure: no referenceRepos (undefined) ⇒ byte-identical to the pre-Phase-3 composition", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path") === composedCwd);
+  check("(1e) pure: empty referenceRepos ⇒ byte-identical to omitted", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", []) === composedCwd);
+  check("(1e) pure: no referenceRepos ⇒ no 'Also referenced' block", !composedCwd.includes("Also referenced"));
+  const composedWithRefs = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", ["/abs/refA", "/abs/refB"]);
+  check("(1e) pure: non-empty referenceRepos ⇒ 'Also referenced' block present", composedWithRefs.includes("Also referenced"));
+  check("(1e) pure: both reference repo paths listed", composedWithRefs.includes("/abs/refA") && composedWithRefs.includes("/abs/refB"));
+  check("(1e) pure: read-only framing present (never commit there)", /never commit there/i.test(composedWithRefs));
+  check("(1e) pure: worktree location block + brief + dynamic all still present alongside the ref block", composedWithRefs.includes("/wt/path") && composedWithRefs.includes("BRIEF") && composedWithRefs.includes("DYNAMIC"));
+  // no cwd ⇒ no location block ⇒ referenceRepos is moot too (there's nowhere to anchor it) — still byte-identical to the 2-arg form.
+  check("(1e) pure: no cwd ⇒ referenceRepos is ignored, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, ["/abs/refA"]) === "BRIEF\n\n---\n\nDYNAMIC");
+
   // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
   worktrees.push(wA.worktreePath);
@@ -111,6 +125,7 @@ try {
   worktrees.push(wQ.worktreePath);
   const oWQ = optsFor(wQ.id);
   check("(2) spawn (empty brief): startupPrompt is the worktree block THEN the kickoff (block present even with empty brief)", (oWQ?.startupPrompt ?? "").includes(wQ.worktreePath) && (oWQ?.startupPrompt ?? "").includes("KICKOFF_B") && order(oWQ?.startupPrompt ?? "", wQ.worktreePath, "KICKOFF_B"));
+  check("(2) project pW has no referenceRepos ⇒ worker spawns carry NO 'Also referenced' block (byte-identical guarantee)", !(oWA?.startupPrompt ?? "").includes("Also referenced") && !(oWQ?.startupPrompt ?? "").includes("Also referenced"));
 
   // ===================== (3) RECYCLE composes the worktree block + brief ahead of the handoff =====================
   const rA = await svc.recycleWorker("mgr1", wA.id, "HANDOFF_A");
@@ -122,11 +137,53 @@ try {
   const rQ = await svc.recycleWorker("mgr1", wQ.id, "HANDOFF_B");
   const oRQ = optsFor(rQ.id);
   check("(3) recycle (empty brief): successor startupPrompt is the worktree block THEN the handoff (block present, no brief prefix)", (oRQ?.startupPrompt ?? "").includes(rQ.worktreePath) && (oRQ?.startupPrompt ?? "").includes("[loom:handoff]") && (oRQ?.startupPrompt ?? "").includes("HANDOFF_B") && order(oRQ?.startupPrompt ?? "", rQ.worktreePath, "[loom:handoff]"));
+  check("(3) project pW has no referenceRepos ⇒ recycle successors carry NO 'Also referenced' block (byte-identical guarantee)", !(oRA?.startupPrompt ?? "").includes("Also referenced") && !(oRQ?.startupPrompt ?? "").includes("Also referenced"));
+
+  // ===================== (4) reference-repos epic Phase 3: a project WITH referenceRepos injects the =====
+  // 'Also referenced (read-only)' block into REAL worker spawn AND recycle (not just the pure function).
+  const refRepoA = path.join(os.tmpdir(), `loom-wprompt-refA-${Date.now()}`);
+  const refRepoB = path.join(os.tmpdir(), `loom-wprompt-refB-${Date.now()}`);
+  fs.mkdirSync(refRepoA, { recursive: true });
+  fs.mkdirSync(refRepoB, { recursive: true });
+  repoR = path.join(os.tmpdir(), `loom-wprompt-repoR-${Date.now()}`);
+  fs.mkdirSync(repoR, { recursive: true });
+  fs.writeFileSync(path.join(repoR, "README.md"), "# ref-repos worker test\n");
+  execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repoR });
+  db.insertProject({ id: "pWR", name: "WRefProj", repoPath: repoR, vaultPath: repoR, config: {}, createdAt: now, archivedAt: null, referenceRepos: [refRepoA, refRepoB] });
+  db.insertAgent({ id: "agentDevRef", projectId: "pWR", name: "Dev", startupPrompt: "DEV_REF_BRIEF", position: 0, profileId: null });
+  db.insertSession({
+    id: "mgrR", projectId: "pWR", agentId: "agentDevRef", engineSessionId: null, title: null,
+    cwd: repoR, processState: "live", resumability: "unknown", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager",
+  });
+  const taskR = "33333333-3333-3333-8333-333333333333";
+  db.insertTask({ id: taskR, projectId: "pWR", title: "R", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
+
+  const wR = await svc.spawnWorker("mgrR", { taskId: taskR, agentId: "agentDevRef", kickoffPrompt: "KICKOFF_R" });
+  worktreesR.push(wR.worktreePath);
+  const oWR = optsFor(wR.id);
+  check("(4) referenceRepos worker spawn carries the 'Also referenced' block", (oWR?.startupPrompt ?? "").includes("Also referenced"));
+  check("(4) referenceRepos worker spawn lists BOTH reference repo absolute paths", (oWR?.startupPrompt ?? "").includes(refRepoA) && (oWR?.startupPrompt ?? "").includes(refRepoB));
+  check("(4) referenceRepos worker spawn carries the read-only framing (never commit there)", /never commit there/i.test(oWR?.startupPrompt ?? ""));
+  check("(4) referenceRepos worker spawn still carries its own worktree edit-dir block + brief + kickoff", (oWR?.startupPrompt ?? "").includes(wR.worktreePath) && (oWR?.startupPrompt ?? "").includes("DEV_REF_BRIEF") && (oWR?.startupPrompt ?? "").includes("KICKOFF_R"));
+
+  const rR = await svc.recycleWorker("mgrR", wR.id, "HANDOFF_R");
+  worktreesR.push(rR.worktreePath);
+  const oRR = optsFor(rR.id);
+  check("(4) referenceRepos recycle successor carries the 'Also referenced' block", (oRR?.startupPrompt ?? "").includes("Also referenced"));
+  check("(4) referenceRepos recycle successor lists BOTH reference repo absolute paths", (oRR?.startupPrompt ?? "").includes(refRepoA) && (oRR?.startupPrompt ?? "").includes(refRepoB));
+  check("(4) referenceRepos recycle successor still carries its handoff + worktree edit-dir block", (oRR?.startupPrompt ?? "").includes("[loom:handoff]") && (oRR?.startupPrompt ?? "").includes(rR.worktreePath));
+  try { fs.rmSync(refRepoA, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(refRepoB, { recursive: true, force: true }); } catch { /* best-effort */ }
+  // repoR itself is removed in `finally`, AFTER its worktrees are torn down (git worktree remove needs
+  // the main repo present).
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
+  if (repoR) { for (const wt of worktreesR) { try { await removeWorktree(repoR, wt); } catch { /* best-effort */ } } }
   db.close(); // free the WAL handle before removing the temp dir (Windows)
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  if (repoR) { try { fs.rmSync(repoR, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0

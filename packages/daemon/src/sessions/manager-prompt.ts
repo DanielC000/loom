@@ -22,7 +22,7 @@ import path from "node:path";
  */
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
-  loc: { repoPath: string; vaultPath: string; name: string },
+  loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[] },
 ): string {
   // Same path-join the daemon uses for the vault (handles spaces correctly — no string concatenation).
   const resumeDoc = path.join(loc.vaultPath, "Orchestrator Log.md");
@@ -34,8 +34,20 @@ export function composeManagerStartupPrompt(
     "Read project files by ABSOLUTE path from these roots — never Glob from your home directory " +
     "for them (a broad Glob hits the search timeout). Read your resume doc from the exact absolute " +
     "path above, verbatim — do not reconstruct it.";
+  // Reference-repos epic Phase 3 ("Interpretation A"): additional repos this project's manager may
+  // READ but never owns — no worktree/branch/gate exists for them, so they're never a cwd or a merge
+  // target. Omitted entirely when the project sets none, so the additive guarantee holds.
+  const refs = loc.referenceRepos?.filter((r) => r.trim());
+  const refBlock = refs && refs.length > 0
+    ? "\n\n**Also referenced (read-only, not your cwd):**\n" +
+      refs.map((r) => `- \`${r}\``).join("\n") +
+      "\n\nYou may read/inspect these repos, but never commit there — there is no worktree, branch, " +
+      "or gate for a reference repo. If a task turns out to need changes IN a reference repo, that's " +
+      "out of scope here; surface it instead of committing there."
+    : "";
+  const full = block + refBlock;
   const own = startupPrompt?.trim();
-  return own ? `${block}\n\n${own}` : block;
+  return own ? `${full}\n\n${own}` : full;
 }
 
 /**

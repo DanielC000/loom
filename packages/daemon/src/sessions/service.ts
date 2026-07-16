@@ -757,7 +757,7 @@ export class SessionService {
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name)))
       : role === "manager"
-      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name })
+      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos })
       : startupPrompt;
     // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
     // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
@@ -863,7 +863,7 @@ export class SessionService {
       // through UNCHANGED — byte-identical to today.
       startupPrompt: ((): string | undefined => {
         const scheduled = appendScheduledPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name }),
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos }),
           prompt,
         );
         const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
@@ -3011,7 +3011,7 @@ export class SessionService {
         // own kickoff text (which typically carries the task description — the richest match source of
         // any spawn path); null (no notes) ⇒ byte-identical to today.
         startupPrompt: appendMemoryRecallToStartupPrompt(
-          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath),
+          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos),
           retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt),
         ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
@@ -4846,7 +4846,7 @@ export class SessionService {
       // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
       // available here); null (no notes) ⇒ byte-identical to today.
       startupPrompt: appendMemoryRecallToStartupPrompt(
-        composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath),
+        composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos),
         retrieveProjectMemoryForKickoff(this.db, project.id, framed),
       ),
       role: "worker",
@@ -4911,7 +4911,7 @@ export class SessionService {
         `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
         `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
         `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name },
+      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos },
     );
 
     const now = new Date().toISOString();

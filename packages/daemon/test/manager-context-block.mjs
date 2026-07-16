@@ -100,6 +100,19 @@ try {
   const blankCase = composeManagerStartupPrompt("   ", { repoPath: "/r", vaultPath: "/v", name: "Demo" });
   check("(3) pure: blank/whitespace own-prompt → block-only (trimmed away)", blankCase.includes("## Where things live") && blankCase.trimEnd().endsWith("reconstruct it."));
 
+  // ===================== (3c) reference-repos epic Phase 3: referenceRepos block =====================
+  const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  const emptyRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: [] });
+  check("(3c) pure: no referenceRepos ⇒ byte-identical to the pre-Phase-3 composition", noRefs === composed);
+  check("(3c) pure: empty referenceRepos ⇒ byte-identical to omitted", emptyRefs === composed);
+  check("(3c) pure: no referenceRepos ⇒ no 'Also referenced' block", !composed.includes("Also referenced"));
+  const withRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: ["/abs/refA", "/abs/refB"] });
+  check("(3c) pure: non-empty referenceRepos ⇒ 'Also referenced' block present", withRefs.includes("Also referenced"));
+  check("(3c) pure: both reference repo paths listed", withRefs.includes("/abs/refA") && withRefs.includes("/abs/refB"));
+  check("(3c) pure: read-only framing present (never commit there)", /never commit there/i.test(withRefs));
+  check("(3c) pure: own doctrine still preserved after the ref block", withRefs.includes("DOCTRINE_BODY"));
+  check("(3c) pure: primary repoPath block still present alongside the ref block", withRefs.includes("## Where things live") && withRefs.includes("/abs/repo"));
+
   // ===================== (3b) DoD: a vault folder WITH A SPACE → emitted resume-doc path matches the real on-disk path EXACTLY =====================
   // The bug: managers reconstruct the path from memory and mis-spell the vault root ("Obsidian\Vault" vs the
   // real "Obsidian Vault" with a space), then fall back to the forbidden Glob. The fix builds it server-side
@@ -126,6 +139,7 @@ try {
   check("(1) manager spawn opts.startupPrompt carries the resolved resume-doc path (vaultPath is already the project's vault dir — not doubled)", oM?.startupPrompt?.includes(path.join(vault, "Orchestrator Log.md")));
   check("(1) manager spawn preserves the agent's OWN doctrine after the block", oM?.startupPrompt?.includes("AGENT_MGR_DOCTRINE"));
   check("(1) manager session is live + role manager", db.getSession(sM.id).processState === "live" && oM?.role === "manager");
+  check("(1) project pM has no referenceRepos ⇒ manager spawn carries NO 'Also referenced' block (byte-identical guarantee)", !oM?.startupPrompt?.includes("Also referenced"));
 
   // ===================== (1b) MANAGER RECYCLE (successor spawn) also gets the block — the fix: a =====
   // recycle-successor manager is a fresh boot exactly like startManager's first spawn, and used to
@@ -150,6 +164,31 @@ try {
   check("(1c) profile-derived manager spawn opts.startupPrompt carries the 'Where things live' block", oMP?.startupPrompt?.includes("## Where things live"));
   check("(1c) profile-derived manager spawn opts.startupPrompt carries the resolved absolute resume-doc path", oMP?.startupPrompt?.includes(path.join(vault, "Orchestrator Log.md")));
   check("(1c) profile-derived manager spawn preserves the agent's OWN doctrine after the block", oMP?.startupPrompt?.includes("AGENT_MGR_PROFILE_DOCTRINE"));
+
+  // ===================== (1d) reference-repos epic Phase 3: a project WITH referenceRepos injects the =====
+  // 'Also referenced (read-only)' block into a real manager spawn (not just the pure function above).
+  const refRepoA = path.join(os.tmpdir(), `loom-mctxblk-refA-${Date.now()}`);
+  const refRepoB = path.join(os.tmpdir(), `loom-mctxblk-refB-${Date.now()}`);
+  fs.mkdirSync(refRepoA, { recursive: true });
+  fs.mkdirSync(refRepoB, { recursive: true });
+  const repoR = path.join(os.tmpdir(), `loom-mctxblk-repoR-${Date.now()}`);
+  fs.mkdirSync(repoR, { recursive: true });
+  fs.writeFileSync(path.join(repoR, "README.md"), "# ref-repos manager test\n");
+  execSync(`git init -q && git add . && git -c user.email=mc@loom -c user.name=mc commit -q -m init`, { cwd: repoR });
+  const vaultR = path.join(os.tmpdir(), `loom-mctxblk-vaultR-${Date.now()}`);
+  fs.mkdirSync(vaultR, { recursive: true });
+  db.insertProject({ id: "pR", name: "RefProj", repoPath: repoR, vaultPath: vaultR, config: {}, createdAt: now, archivedAt: null, referenceRepos: [refRepoA, refRepoB] });
+  db.insertAgent({ id: "agentMgrRef", projectId: "pR", name: "Orchestrator", startupPrompt: "AGENT_MGR_REF_DOCTRINE", position: 0, profileId: null });
+  const sMRef = svc.startManager("agentMgrRef");
+  const oMRef = optsFor(sMRef.id);
+  check("(1d) referenceRepos manager spawn carries the 'Also referenced' block", oMRef?.startupPrompt?.includes("Also referenced"));
+  check("(1d) referenceRepos manager spawn lists BOTH reference repo absolute paths", oMRef?.startupPrompt?.includes(refRepoA) && oMRef?.startupPrompt?.includes(refRepoB));
+  check("(1d) referenceRepos manager spawn carries the read-only framing (never commit there)", /never commit there/i.test(oMRef?.startupPrompt ?? ""));
+  check("(1d) referenceRepos manager spawn still carries the primary repo's 'Where things live' block + own doctrine", oMRef?.startupPrompt?.includes("## Where things live") && oMRef?.startupPrompt?.includes(repoR) && oMRef?.startupPrompt?.includes("AGENT_MGR_REF_DOCTRINE"));
+  try { fs.rmSync(refRepoA, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(refRepoB, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(repoR, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(vaultR, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (2) WORKER spawn does NOT get the MANAGER block (card af902717: it DOES now carry its agent brief) =====================
   const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });
