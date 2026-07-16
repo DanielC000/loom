@@ -286,13 +286,17 @@ export const api = {
   setupTemplates: () => get<SetupTemplate[]>("/api/setup/templates"),
   applyTemplate: (projectId: string, templateName: string) =>
     postErr<TemplateApplyResult>("/api/setup/templates/apply", { projectId, templateName }),
-  createProject: (b: { name: string; repoPath: string; vaultPath: string }) =>
-    post<Project>("/api/projects", b),
+  // `referenceRepos` (optional) binds read-only sibling repos at creation — each validated absolute +
+  // isGitRepo server-side; a bad entry 400s with a reason. postErr (not post) surfaces that `{ error }`
+  // body verbatim so the wizard/creation UI can show it inline instead of a bare `-> 400`.
+  createProject: (b: { name: string; repoPath: string; vaultPath: string; referenceRepos?: string[] }) =>
+    postErr<Project>("/api/projects", b),
   // The wizard's "Create new" mode: init a BRAND-NEW project dir under Loom's sanctioned workspace base
   // (confined + traversal-rejected server-side — see setup/bootstrap.ts) instead of registering a
   // user-typed path. kind "git" (default) `git init`s it; kind "vault" leaves a plain notes folder.
-  // postErr surfaces the confinement/traversal-rejection `{ error }` body verbatim.
-  projectInit: (b: { name: string; kind?: "git" | "vault" }) =>
+  // `referenceRepos` binds read-only sibling repos (same absolute + isGitRepo validation as POST
+  // /api/projects). postErr surfaces the confinement/traversal-rejection/ref-repo `{ error }` verbatim.
+  projectInit: (b: { name: string; kind?: "git" | "vault"; referenceRepos?: string[] }) =>
     postErr<Project & { identityWarning?: string }>("/api/setup/project-init", b),
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
   // delete). DESTRUCTIVE, loopback-only — there is NO agent MCP path to any of these (same posture as

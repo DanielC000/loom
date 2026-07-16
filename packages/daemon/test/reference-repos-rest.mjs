@@ -141,6 +141,28 @@ try {
       const patchClear = await app.inject({ method: "PATCH", url: `/api/projects/${p1.id}`, payload: { referenceRepos: [] } });
       check("(A8) PATCH with [] clears referenceRepos → 200", patchClear.statusCode === 200);
       check("(A8) referenceRepos cleared in the Db", Array.isArray(db.getProject(p1.id)?.referenceRepos) && db.getProject(p1.id).referenceRepos.length === 0);
+
+      // (A9) POST /api/setup/project-init (the human wizard "Create new" path — distinct from the AGENT
+      // project_init in PART B, which IGNORES a smuggled ref) round-trips a valid referenceRepos: it
+      // bootstraps a brand-new dir AND binds the ref, with the SAME absolute + isGitRepo validation.
+      const initOk = await app.inject({
+        method: "POST", url: "/api/setup/project-init",
+        payload: { name: "InitWithRefs", referenceRepos: [refA] },
+      });
+      check("(A9) project-init with a valid referenceRepos → 201", initOk.statusCode === 201);
+      check("(A9) project-init round-trips referenceRepos", JSON.stringify(initOk.json().referenceRepos) === JSON.stringify([refA]));
+      check("(A9) project-init persisted to the Db", JSON.stringify(db.getProject(initOk.json().id)?.referenceRepos) === JSON.stringify([refA]));
+
+      // (A10) project-init with a NON-REPO entry is REJECTED (400) — and, because it validates BEFORE
+      // bootstrapping the dir, no project row is created (and no stray folder is left behind).
+      const beforeInit = db.listAllProjects().length;
+      const initBad = await app.inject({
+        method: "POST", url: "/api/setup/project-init",
+        payload: { name: "InitBad", referenceRepos: [nonRepo] },
+      });
+      check("(A10) project-init with a non-repo referenceRepos entry → 400", initBad.statusCode === 400);
+      check("(A10) project-init error names the offending entry", /not an existing git repository/.test(initBad.json().error ?? ""));
+      check("(A10) no project row was created on rejection", db.listAllProjects().length === beforeInit);
     } finally {
       db.close();
     }
@@ -237,6 +259,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — referenceRepos round-trips on the HUMAN-only REST create/update (isGitRepo + absolute-path validated, rejection leaves the stored value unchanged), is absent from every agent-facing MCP write surface's inputSchema (loom-setup + the elevated loom-platform's project_create/project_init/project_update), a smuggled value is never persisted on any of them, and the profile validator rejects it outright as an unrecognized key — claude-free, network-free."
+  ? "\n✅ ALL PASS — referenceRepos round-trips on the HUMAN-only REST create/update/project-init (isGitRepo + absolute-path validated, rejection leaves the stored value unchanged / creates no row), is absent from every agent-facing MCP write surface's inputSchema (loom-setup + the elevated loom-platform's project_create/project_init/project_update), a smuggled value is never persisted on any of them, and the profile validator rejects it outright as an unrecognized key — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

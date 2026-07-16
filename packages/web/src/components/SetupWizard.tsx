@@ -68,6 +68,10 @@ function WizardBody({ onClose }: { onClose: () => void }) {
   const [nameTouched, setNameTouched] = useState(false);
   const [repoPath, setRepoPath] = useState("");
   const [vaultPath, setVaultPath] = useState("");
+  // Read-only sibling repos to bind at creation (reference-repos epic, Interpretation A). Optional in
+  // both modes; trimmed + blanks dropped before submit, so a stray empty row never reaches the server.
+  const [referenceRepos, setReferenceRepos] = useState<string[]>([]);
+  const cleanRefs = referenceRepos.map((r) => r.trim()).filter(Boolean);
   const [created, setCreated] = useState<{ projectId: string; projectName: string; result: TemplateApplyResult | null } | null>(null);
   const narrow = useNarrowViewport();
 
@@ -84,9 +88,11 @@ function WizardBody({ onClose }: { onClose: () => void }) {
     mutationFn: async (): Promise<{ projectId: string; projectName: string; result: TemplateApplyResult | null }> => {
       // "Create new" inits a real directory (host-write, confined to the sanctioned base); "Bind
       // existing" registers a project at the path the user already has on disk.
+      // Bind read-only reference repos in BOTH modes (empty list → omitted, byte-identical to before).
+      const refs = cleanRefs.length ? { referenceRepos: cleanRefs } : {};
       const project = mode === "new"
-        ? await api.projectInit({ name: name.trim() })
-        : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim() });
+        ? await api.projectInit({ name: name.trim(), ...refs })
+        : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim(), ...refs });
       // "Start empty" registers the project only — no template to apply.
       const result = choice && choice !== "empty" ? await api.applyTemplate(project.id, choice) : null;
       return { projectId: project.id, projectName: project.name, result };
@@ -165,11 +171,13 @@ function WizardBody({ onClose }: { onClose: () => void }) {
             name={name} onName={(v) => { setName(v); setNameTouched(true); }}
             repoPath={repoPath} onRepoPath={onRepoPath}
             vaultPath={vaultPath} onVaultPath={setVaultPath}
+            referenceRepos={referenceRepos} onReferenceRepos={setReferenceRepos}
           />
         )}
         {step === 3 && (
           <StepReview
             mode={mode} name={name.trim()} repoPath={repoPath.trim()} vaultPath={vaultPath.trim()}
+            referenceRepos={cleanRefs}
             template={chosenTemplate} isEmpty={choice === "empty"} profileByName={profileByName}
             error={apply.isError ? (apply.error as Error).message : null}
           />
@@ -377,12 +385,13 @@ function TemplateCard({
 
 // ── Screen 2 — Project step ─────────────────────────────────────────────────────────────────────────────
 function StepProject({
-  mode, onMode, name, onName, repoPath, onRepoPath, vaultPath, onVaultPath,
+  mode, onMode, name, onName, repoPath, onRepoPath, vaultPath, onVaultPath, referenceRepos, onReferenceRepos,
 }: {
   mode: ProjectMode; onMode: (m: ProjectMode) => void;
   name: string; onName: (v: string) => void;
   repoPath: string; onRepoPath: (v: string) => void;
   vaultPath: string; onVaultPath: (v: string) => void;
+  referenceRepos: string[]; onReferenceRepos: (r: string[]) => void;
 }) {
   return (
     <div>
@@ -422,6 +431,48 @@ function StepProject({
               placeholder="aurora-api" aria-label="Project name" style={{ width: "100%", boxSizing: "border-box" }} />
           </Field>
         )}
+
+        {/* Read-only reference repos — optional in both modes, a distinct field from the primary repo. */}
+        <ReferenceReposField repos={referenceRepos} onChange={onReferenceRepos} />
+      </div>
+    </div>
+  );
+}
+
+// ── Reference-repos editor (wizard variant) ─────────────────────────────────────────────────────────────
+// A repo-list add/remove for the project's read-only sibling repos (reference-repos epic, Interpretation
+// A) — the SAME shape as the Projects "Manage project" ReferenceReposEditor, but with NO Save button: the
+// wizard collects the rows into its own state and binds them at Apply (createProject / projectInit). The
+// primary repoPath stays a DISTINCT field above. A bad entry surfaces its server 400 on the Review screen.
+function ReferenceReposField({ repos, onChange }: { repos: string[]; onChange: (r: string[]) => void }) {
+  const edit = (i: number, v: string) => onChange(repos.map((r, j) => (j === i ? v : r)));
+  const remove = (i: number) => onChange(repos.filter((_, j) => j !== i));
+  const add = () => onChange([...repos, ""]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6, paddingTop: 16, borderTop: `1px solid ${color.border}` }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <label style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: color.textDim }}>
+          Reference repos <span style={{ color: color.textMuted, textTransform: "none", letterSpacing: 0 }}>· optional</span>
+        </label>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+          Read-only sibling repos agents can consult. Absolute git paths — never committed to.
+        </span>
+      </div>
+      {repos.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>None — this project reads only its primary repo.</span>
+      ) : (
+        repos.map((r, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <Input value={r} onChange={(e) => edit(i, e.target.value)} spellCheck={false}
+              placeholder="/Users/you/code/shared-lib" aria-label={`Reference repo ${i + 1}`}
+              style={{ flex: 1, boxSizing: "border-box" }} />
+            <Button variant="ghost" title="Remove this reference repo" aria-label={`Remove reference repo ${i + 1}`}
+              onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+          </div>
+        ))
+      )}
+      <div>
+        <Button onClick={add}>＋ Add reference repo</Button>
       </div>
     </div>
   );
@@ -457,9 +508,10 @@ function Field({ label, hint, children }: { label: string; hint: string; childre
 
 // ── Screen 3 — Review & confirm ─────────────────────────────────────────────────────────────────────────
 function StepReview({
-  mode, name, repoPath, vaultPath, template, isEmpty, profileByName, error,
+  mode, name, repoPath, vaultPath, referenceRepos, template, isEmpty, profileByName, error,
 }: {
-  mode: ProjectMode; name: string; repoPath: string; vaultPath: string; template: SetupTemplate | null; isEmpty: boolean;
+  mode: ProjectMode; name: string; repoPath: string; vaultPath: string; referenceRepos: string[];
+  template: SetupTemplate | null; isEmpty: boolean;
   profileByName: Map<string, Profile>; error: string | null;
 }) {
   const needsBrowserInstall = !!template?.agents.some((a) => profileByName.get(a.profileName)?.browserTesting);
@@ -482,6 +534,9 @@ function StepReview({
               Loom will create and git-initialize a new directory for this project in a Loom-managed folder.
             </p>
           )}
+          {referenceRepos.map((r, i) => (
+            <ReceiptLine key={r + i} k={i === 0 ? "refs" : ""} v={r} mono />
+          ))}
         </ReceiptSection>
 
         <ReceiptSection title={isEmpty ? "Template · none" : `Template · ${template?.name ?? ""}`}
@@ -518,7 +573,7 @@ function StepReview({
         )}
       </div>
       {error && (
-        <p style={{ maxWidth: 640, margin: "14px auto 0", fontFamily: font.mono, fontSize: 12, color: color.red, textAlign: "center" }}>{error}</p>
+        <p role="alert" style={{ maxWidth: 640, margin: "14px auto 0", fontFamily: font.mono, fontSize: 12, color: color.red, textAlign: "center" }}>{error}</p>
       )}
     </div>
   );

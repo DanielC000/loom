@@ -2823,8 +2823,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // plain notes folder. Same trust posture as the other setup REST writers — loopback, human-only, NO MCP
   // router (orchestration/platform/setup/audit) exposes this path.
   app.post("/api/setup/project-init", async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride };
+    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride; referenceRepos?: unknown };
     if (!b.name || !b.name.trim()) return reply.code(400).send({ error: "name required" });
+    // referenceRepos: HUMAN-only on this REST create path, same validation + trust class as POST
+    // /api/projects — each entry MUST be an absolute path to an existing git repo (validateReferenceRepos).
+    // Validate BEFORE bootstrapping the new dir so a bad ref path fails fast without leaving a stray folder.
+    let referenceRepos: string[] = [];
+    if (b.referenceRepos !== undefined) {
+      const check = await validateReferenceRepos(b.referenceRepos);
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      referenceRepos = check.value;
+    }
     const isGit = (b.kind ?? "git") === "git";
     const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
     if (!boot.ok) return reply.code(400).send({ error: boot.error });
@@ -2832,7 +2841,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath: boot.dir,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
-      referenceRepos: [],
+      referenceRepos,
     };
     deps.db.insertProject(project);
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
