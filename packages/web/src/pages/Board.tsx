@@ -2,10 +2,10 @@ import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem } from "@loom/shared";
+import type { Task, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { Button, Input, SectionLabel, StatusPill, Chip, Badge } from "../components/ui";
+import { Button, Input, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
 import { useOpenRequest, RequestTypeTag } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
@@ -355,13 +355,85 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
   return w.busy ? { tone: "amber", label: "working", glow: true } : { tone: "phosphor", label: "idle" };
 }
 
+// Direction C — the merge-gate hairline sweep meter + live timer (card 7b7fa6d). A worker with a
+// `pendingMerge` op gets a 2px hairline flush at the card's BOTTOM edge — an amber oscilloscope sweep
+// while the gate RUNS, a solid full-width fill once settled — plus a live M:SS timer riding the right
+// edge of the worker row. Compact by construction: the hairline is absolutely positioned over the card's
+// existing bottom edge, so it adds NO card height.
+//
+// The source op-state is evicted from the registry the instant the gate settles, so live this is
+// effectively always the RUNNING sweep; the settled fills render for the terminal states the type
+// carries (exercised via synthetic states). The op-state collapses a merge SUCCESS and a REJECTION into
+// "done" (a rejection resolves; only an exception → "failed"), so "done" reads here as "merged".
+type MergeDisplay = { state: "running" | "merged" | "failed"; tone: Tone; label: string; startedAt: string };
+function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null {
+  if (!pm) return null;
+  if (pm.state === "running") return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
+  if (pm.state === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
+  return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "done" ⇒ merged
+}
+
+// Live M:SS elapsed since `startedAt`, ticking once a second. Shown only while the gate is RUNNING — it's
+// a liveness cue, and a settled merge carries no end time to compute a final duration from. tabular-nums
+// so ticking digits never jitter the row width.
+function MergeTimer({ startedAt }: { startedAt: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  const started = Date.parse(startedAt);
+  const secs = Number.isFinite(started) ? Math.max(0, Math.floor((now - started) / 1000)) : 0;
+  return (
+    <span style={{ fontVariantNumeric: "tabular-nums", letterSpacing: "0.02em" }}>
+      {Math.floor(secs / 60)}:{String(secs % 60).padStart(2, "0")}
+    </span>
+  );
+}
+
+// The merge-state pill for the worker row: a StatusPill-shaped unit (dot + uppercase label) that also
+// carries the live timer INLINE while running. Bundling the timer into the pill (rather than a separate
+// far-right flex item) is what keeps the merging card the SAME height as a plain worker card — both rows
+// then hold exactly two flex items (pill + branch chip), so they wrap identically on a tight lane. Mirrors
+// StatusPill's own styling so it reads as one system.
+function MergePill({ merge }: { merge: MergeDisplay }) {
+  return (
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: tone[merge.tone], textTransform: "uppercase", letterSpacing: "0.06em" }}>
+      <Dot tone={merge.tone} glow />
+      <span>{merge.label}</span>
+      {merge.state === "running" && <MergeTimer startedAt={merge.startedAt} />}
+    </span>
+  );
+}
+
+// The bottom-edge hairline itself. RUNNING → an amber segment sweeping left↔right (the CSS keyframes
+// degrade to a static amber bar under prefers-reduced-motion); settled → a solid full-width fill,
+// phosphor (merged, with a faint CRT glow) or red (failed). aria-hidden — the worker-row pill already
+// names the state in text.
+function MergeTrack({ merge }: { merge: MergeDisplay }) {
+  return (
+    <div className="loom-merge-track" aria-hidden>
+      {merge.state === "running"
+        ? <span className="loom-merge-sweep" />
+        : <span className="loom-merge-fill" style={merge.state === "merged"
+            ? { background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }
+            : { background: color.red }} />}
+    </div>
+  );
+}
+
 function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; worker?: SessionListItem; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
   const st = worker ? workerStatus(worker) : null;
+  const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
   const hasBody = !!task.body?.trim();
   return (
     <div ref={setNodeRef}
+      className="loom-board-card"
       style={{
+        // position:relative anchors the merge-gate hairline (MergeTrack), which is absolutely positioned
+        // flush at the card's bottom edge so it adds no height.
+        position: "relative",
         // Held reads as braked WHEREVER the card sits — its amber left-border overrides the column's
         // own role accent, so a held card never blends into an ordinary lane.
         border: `1px solid ${task.held ? color.amber : color.border}`,
@@ -407,12 +479,22 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
           </div>
           {worker && st && (
             <div style={{ marginTop: 5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-              <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
-              {worker.branch && <Chip label="branch" value={worker.branch} tone="cyan" />}
+              {/* While a merge gate is in flight the pill speaks the MERGE state (merging/merged/failed)
+                  plus a live timer, and the branch chip yields to it — a merge pill + branch chip would
+                  overflow a tight (~240px) lane and wrap, growing the card. Keeping the row to the single
+                  merge pill holds the card at the SAME height as a plain worker card; the branch chip
+                  returns the instant the op settles + evicts (pendingMerge → null). */}
+              {merge
+                ? <MergePill merge={merge} />
+                : <>
+                    <StatusPill tone={st.tone} label={st.label} glow={st.glow} />
+                    {worker.branch && <Chip label="branch" value={worker.branch} tone="cyan" />}
+                  </>}
             </div>
           )}
         </div>
       </div>
+      {merge && <MergeTrack merge={merge} />}
     </div>
   );
 }

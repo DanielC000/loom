@@ -514,6 +514,27 @@ export interface RunEvent {
   createdAt: string;
 }
 
+/**
+ * A worker's in-flight merge-gate op, surfaced read-only onto its session (card 7b7fa6d — the Board
+ * merge-gate hairline). This is the shared-type mirror of the daemon's `PendingOpView` subset that
+ * `worker_list` already exposes, projected onto `/api/sessions` from the in-memory PendingOpRegistry
+ * (NOT a DB column). Non-null ONLY while a `worker_merge_confirm` gate is genuinely RUNNING: the source
+ * op is EVICTED from the registry the instant it settles, so a settled/terminal op is never surfaced
+ * here and the field returns to null. Consequently `state` is effectively always `"running"` while the
+ * field is present — the `"done"`/`"failed"` terminals are part of the faithful op-state union but are
+ * evicted before they can surface live (the Board renders them for completeness / synthetic states).
+ * Note the source op-state collapses a merge SUCCESS and a merge REJECTION into `"done"` (a rejection
+ * resolves; only an exception → `"failed"`), so this field alone cannot distinguish merged-vs-rejected.
+ */
+export interface PendingMerge {
+  /** The PendingOpRegistry op id — lets a viewer correlate this to its `worker_merge_confirm`. */
+  opId: string;
+  /** Raw op state. Live: effectively always "running" (settled ops evict before surfacing). */
+  state: "running" | "done" | "failed";
+  /** ISO instant the gate started — drives the live elapsed (M:SS) timer on the Board card. */
+  startedAt: string;
+}
+
 export interface Session {
   id: SessionId;
   projectId: ProjectId;
@@ -643,6 +664,13 @@ export interface Session {
    * worker is still live).
    */
   archivedAt?: string | null;
+  /**
+   * A worker's in-flight merge-gate op (see {@link PendingMerge}). Projected onto `/api/sessions` from
+   * the in-memory PendingOpRegistry — non-null only while a `worker_merge_confirm` gate is RUNNING;
+   * absent/null on every other session (byte-identical to before for a non-merging session). Read-only,
+   * never consumed. Drives the Board card's bottom-edge sweep meter + live timer.
+   */
+  pendingMerge?: PendingMerge | null;
 }
 
 /**

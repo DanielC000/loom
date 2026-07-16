@@ -444,6 +444,45 @@ body {
   transform: translateX(-50%) translateY(0);
 }
 
+/* Direction C — merge-gate hairline sweep meter on a Board card's bottom edge (card 7b7fa6d).
+   A 2px track flush at the card's bottom, absolutely positioned so it adds no card height. */
+.loom-merge-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  overflow: hidden;
+  border-bottom-left-radius: var(--loom-radius);
+  border-bottom-right-radius: var(--loom-radius);
+  pointer-events: none;
+}
+/* Running: an amber segment sweeps left↔right like an oscilloscope pulse — the liveness cue. */
+.loom-merge-sweep {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 38%;
+  background: linear-gradient(90deg, transparent, var(--loom-amber), transparent);
+  animation: loom-merge-sweep 1.5s ease-in-out infinite;
+}
+@keyframes loom-merge-sweep {
+  0% {
+    left: -40%;
+  }
+  100% {
+    left: 100%;
+  }
+}
+/* Settled: a solid full-width fill (color set inline — phosphor merged / red failed). */
+.loom-merge-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+}
+
 /* Honor reduced-motion: drop the cosmetic hover/active transitions + the mic pulse + overlay entrance. */
 @media (prefers-reduced-motion: reduce) {
   .loom-btn,
@@ -475,5 +514,13 @@ body {
   }
   .loom-skeleton {
     animation: none;
+  }
+  /* The oscilloscope sweep degrades to a static, dimmed full-width amber segment — still a clear
+     "merge in flight" cue, no motion. */
+  .loom-merge-sweep {
+    animation: none;
+    left: 0;
+    width: 100%;
+    opacity: 0.5;
   }
 }

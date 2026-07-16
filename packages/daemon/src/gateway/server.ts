@@ -3117,7 +3117,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/agents/:id/sessions", async (req) =>
     deps.db.listSessions((req.params as { id: string }).id));
   // All running/known sessions across projects — for the global Live Terminals grid.
-  app.get("/api/sessions", async () => deps.db.listAllSessions());
+  // Enrich each row with its in-flight merge-gate op (`pendingMerge`), read straight from the in-memory
+  // PendingOpRegistry via the SAME read-only peek `worker_list` uses (never consumes; a settled op is
+  // evicted, so this is non-null only while a merge gate is genuinely running). Not a DB column — it
+  // lives in the registry, so it's folded on here rather than in listAllSessions. Subset to the shared
+  // `PendingMerge` shape {opId, state, startedAt}; null on every non-merging session (byte-identical).
+  app.get("/api/sessions", async () =>
+    deps.db.listAllSessions().map((s) => {
+      const pm = deps.sessions.peekPendingMerge(s.id);
+      return { ...s, pendingMerge: pm ? { opId: pm.opId, state: pm.state, startedAt: pm.startedAt } : null };
+    }));
 
   // Read-only vault browser (§7: no editing from the UI in phase 1).
   app.get("/api/projects/:id/vault", async (req, reply) => {
