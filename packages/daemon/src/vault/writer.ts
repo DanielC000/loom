@@ -5,9 +5,12 @@ import { commitVault } from "./versioner.js";
 // Sibling to browser.ts: the WRITE side of the vault. Every operation is confined to the
 // project's vault dir by a mandatory path-traversal guard (see resolveInVault), and on success
 // flows through the SAME commit path as the auto-committer (versioner.commitVault) so vault
-// history stays consistent. Reached from the human REST path and — as a role-gated trust elevation
-// (Platform Manager P3) — from the platform MCP `vault_write`, gated strictly to role==="platform".
-// Ordinary agents (loom-tasks/orchestration) never call this — they write via their session cwd.
+// history stays consistent. Reached from the human REST path; from the platform MCP `vault_write`
+// as a role-gated trust elevation (Platform Manager P3, gated strictly to role==="platform"); and
+// from the loom-tasks TaskMcpRouter's own `vault_write` (mcp/server.ts), exposed to an ordinary
+// project session ONLY when its resolved Profile sets `vaultWrite` — a human-only grant
+// (AGENT_FORBIDDEN_PROFILE_KEYS rejects it on every agent-facing profile writer) — and even then
+// confined to the project's own vault root via resolveInVault, same as every other caller.
 
 export type VaultWriteOutcome =
   | { ok: true; committed: boolean }

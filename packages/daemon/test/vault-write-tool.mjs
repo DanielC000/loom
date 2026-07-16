@@ -11,7 +11,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) off (no profile grant): vault_write OMITTED from tools/list entirely (not merely denied).
 //   (b) on: vault_write PRESENT, and a real call lands a UTF-8 file under the project's vault root.
 //   (c) a traversal/absolute/backslash path is REJECTED (the reused vault/writer.ts confinement).
-//   (d) an agent-facing profile writer (setup profile_create/update) REJECTS vaultWrite:true.
+//   (d) an agent-facing profile writer (setup AND platform profile_create/update) REJECTS
+//       vaultWrite:true, and the underlying agentProfileKeyError unit rejects/allows correctly.
 //   (e) the tool's inputSchema carries no projectId param — the write can only ever address the
 //       caller's OWN session-derived project (server-derived, never agent-passed).
 //
@@ -30,9 +31,11 @@ process.env.LOOM_HOME = tmpHome;
 const { Db } = await import("../dist/db.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
+const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { agentProfileKeyError } = await import("../dist/profiles/validate.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -144,6 +147,15 @@ try {
   }
 
   // --- (d) an agent-facing profile writer REJECTS vaultWrite:true (AGENT_FORBIDDEN_PROFILE_KEYS) ---
+  // (d0) the underlying agentProfileKeyError unit itself, mirroring open-design-spawn.mjs's coverage
+  // of the same guard for `openDesign` — both setup's and platform's profile_create/update funnel
+  // through this ONE function, so this direct unit assertion is the load-bearing one.
+  {
+    check("(d0) agentProfileKeyError REJECTS a payload setting vaultWrite:true",
+      typeof agentProfileKeyError({ vaultWrite: true }) === "string");
+    check("(d0) agentProfileKeyError allows a payload that doesn't touch vaultWrite",
+      agentProfileKeyError({ name: "x" }) === null);
+  }
   {
     const setupRouter = new SetupMcpRouter(db, svc);
     // The Setup router is role-gated to role==="setup" — spawn one plain "setup" session row directly
@@ -173,10 +185,33 @@ try {
     await client.close();
   }
 
+  // --- (d) platform-router surface: same guard, same rejection (share agentProfileKeyError with setup,
+  // but the load-bearing agent-forbidden guard deserves direct coverage on BOTH elevated routers) ---
+  {
+    const platformRouter = new PlatformMcpRouter(db, svc);
+    const server = platformRouter.buildServer("platLeadForVaultWriteTest");
+    const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+    await server.connect(serverT);
+    const client = new Client({ name: "vault-write-platform-test", version: "0" });
+    await client.connect(clientT);
+    const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+
+    const nProfBefore = db.listProfiles().length;
+    const created = await call("profile_create", { profile: { name: "SneakyPlatformRig", vaultWrite: true } });
+    check("(d) platform profile_create REJECTS a payload setting vaultWrite:true", typeof created.error === "string" && !created.id);
+    check("(d) the rejected platform profile_create persisted NOTHING", db.listProfiles().length === nProfBefore);
+
+    const updated = await call("profile_update", { profileId: "profNoVault", patch: { vaultWrite: true } });
+    check("(d) platform profile_update REJECTS a patch setting vaultWrite:true", typeof updated.error === "string");
+    check("(d) the rejected platform profile_update left the profile's vaultWrite untouched (still off)", !db.getProfile("profNoVault").vaultWrite);
+
+    await client.close();
+  }
+
   db.close();
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — vault_write: OMITTED from tools/list when the profile didn't opt in, PRESENT + writes land under the project vault root when it did, traversal/absolute/backslash paths rejected (inherited confinement), no projectId param exists to address another project, and the agent-facing setup profile writer REJECTS vaultWrite:true."
+    ? "\n✅ ALL PASS — vault_write: OMITTED from tools/list when the profile didn't opt in, PRESENT + writes land under the project vault root when it did, traversal/absolute/backslash paths rejected (inherited confinement), no projectId param exists to address another project, agentProfileKeyError itself rejects vaultWrite:true, and BOTH the agent-facing setup and platform profile writers REJECT vaultWrite:true with nothing persisted."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
