@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -4871,6 +4871,93 @@ export class Db {
        WHERE q.id = ?`,
     ).get(id) as Row | undefined;
     return r ? toQuestionInboxItem(r) : undefined;
+  }
+  /**
+   * Every PENDING profile→connection grant (credential auto-provisioning v1 binding UX, card 12dc7fc9) —
+   * the answered credential questions whose `provision_binding_state` is 'pending'. READ-ONLY display
+   * model for the Settings "Pending bindings" queue; never a write path (the grant reuses the human-only
+   * profile-edit REST). Each row is enriched with the live connection name/host (via
+   * `provision_connection_id`, falling back to the ask-time `provision_target` for a since-revoked
+   * connection), the requested profile's current name + whether the connection is ALREADY on its allowlist
+   * (grant satisfied), and the asking agent's name. The binding's `profileId` lives inside the
+   * `provision_target` JSON (SQL can't JOIN on it), so profile names are resolved via one `listProfiles`
+   * map. Newest-answered first; a row without a binding profileId is skipped defensively.
+   */
+  listPendingBindings(): PendingBinding[] {
+    const rows = this.db.prepare(
+      `SELECT q.id AS question_id, q.provision_target, q.provision_connection_id, q.project_id,
+              q.created_at, q.answered_at,
+              c.name AS connection_name, c.host AS connection_host,
+              a.name AS agent_name, p.name AS project_name
+       FROM questions q
+       LEFT JOIN connections c ON q.provision_connection_id = c.id
+       LEFT JOIN sessions s ON q.session_id = s.id
+       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN projects p ON q.project_id = p.id
+       WHERE q.provision_binding_state = 'pending'
+       ORDER BY q.answered_at DESC, q.created_at DESC`,
+    ).all() as Row[];
+    const profiles = new Map(this.listProfiles().map((pr) => [pr.id, pr] as const));
+    const out: PendingBinding[] = [];
+    for (const r of rows) {
+      const target = r.provision_target ? (JSON.parse(r.provision_target as string) as ProvisionTarget) : null;
+      const profileId = target?.binding?.profileId;
+      const connectionId = (r.provision_connection_id as string | null) ?? null;
+      if (!profileId || !connectionId) continue; // a pending state should always carry both — skip a malformed row
+      const profile = profiles.get(profileId);
+      out.push({
+        questionId: r.question_id as string,
+        connectionId,
+        connectionName: (r.connection_name as string | null) ?? target?.connection.name ?? connectionId,
+        connectionHost: (r.connection_host as string | null) ?? target?.connection.host ?? null,
+        profileId,
+        profileName: profile?.name ?? profileId,
+        alreadyGranted: !!profile?.connections?.includes(connectionId),
+        agentName: (r.agent_name as string | null) ?? "?",
+        projectId: r.project_id as string,
+        projectName: (r.project_name as string | null) ?? "?",
+        requestedAt: (r.answered_at as string | null) ?? (r.created_at as string),
+      });
+    }
+    return out;
+  }
+  /**
+   * Reconcile PENDING bindings to 'applied' at the GRANT boundary (card 12dc7fc9): when the owner saves a
+   * profile's connection allowlist (`PUT /api/profiles/:id`), any pending binding requesting exactly that
+   * profile→connection is now satisfied and must leave the "Pending bindings" queue. Flips
+   * provision_binding_state 'pending'→'applied' for every credential Question whose binding targets
+   * `profileId` AND whose provisioned connection is in `connectionIds`. The binding's profileId lives inside
+   * the provision_target JSON (SQL can't match on it), so this narrows by connection id in SQL then confirms
+   * the profileId in TS. 'applied' is TERMINAL — a later removal of the connection is a separate deliberate
+   * action and never reverts it. Only touches 'pending' rows (idempotent; re-saving an already-applied grant
+   * is a no-op). Returns the count flipped. An empty `connectionIds` is a fast no-op.
+   */
+  markBindingsApplied(profileId: string, connectionIds: string[]): number {
+    if (connectionIds.length === 0) return 0;
+    const placeholders = connectionIds.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT id, provision_target FROM questions
+       WHERE provision_binding_state = 'pending' AND provision_connection_id IN (${placeholders})`,
+    ).all(...connectionIds) as Row[];
+    const flip = this.db.prepare("UPDATE questions SET provision_binding_state = 'applied' WHERE id = ? AND provision_binding_state = 'pending'");
+    let flipped = 0;
+    for (const r of rows) {
+      let target;
+      try { target = r.provision_target ? JSON.parse(r.provision_target as string) : null; } catch { target = null; }
+      if (target?.binding?.profileId === profileId) flipped += flip.run(r.id as string).changes;
+    }
+    return flipped;
+  }
+  /**
+   * The DISTINCT set of connection ids auto-provisioned at a credential-answer boundary (card 193de09e) —
+   * every non-null `provision_connection_id` across all questions. The cheap derivation `GET
+   * /api/connections` folds into each `ConnectionMetadata.autoProvisioned`. May include ids whose
+   * connection row was since revoked — harmless, the caller intersects against the live connection list.
+   */
+  listAutoProvisionedConnectionIds(): string[] {
+    return (this.db.prepare(
+      "SELECT DISTINCT provision_connection_id AS id FROM questions WHERE provision_connection_id IS NOT NULL",
+    ).all() as Row[]).map((r) => r.id as string);
   }
 
   // --- companion reminders (Companion Memory & Reminders Design, Surface 2 s3 — the recurring engine) ---

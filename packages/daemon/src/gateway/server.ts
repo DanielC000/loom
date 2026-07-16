@@ -1867,7 +1867,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     return { ok: true, projectId: b.projectId };
   };
-  app.get("/api/connections", async () => listConnections(deps.db));
+  app.get("/api/connections", async () => {
+    // Fold in the auto-provisioned flag (credential auto-provisioning v1, cards 193de09e/12dc7fc9): a
+    // connection reads `autoProvisioned` when any Question's provisionConnectionId points at it. Display
+    // hint only — the base metadata is byte-identical otherwise.
+    const autoIds = new Set(deps.db.listAutoProvisionedConnectionIds());
+    return listConnections(deps.db).map((c) => ({ ...c, autoProvisioned: autoIds.has(c.id) }));
+  });
   app.post("/api/connections", async (req, reply) => {
     const b = (req.body ?? {}) as Record<string, unknown>;
     if (typeof b.name !== "string" || typeof b.host !== "string" || typeof b.secret !== "string") {
@@ -2943,6 +2949,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const bindingError = capabilityGrantBindingError(v.value.capabilities ?? [], deps.db);
     if (bindingError) return reply.code(400).send({ error: bindingError });
     deps.db.updateProfile(id, v.value);
+    // Grant-boundary reconcile (card 12dc7fc9): saving a connection onto this profile's allowlist IS the
+    // deliberate owner grant, so any PENDING binding requesting exactly that profile→connection is now
+    // satisfied — flip it 'pending'→'applied' so it leaves the "Pending bindings" queue (listPendingBindings
+    // filters WHERE provision_binding_state='pending'). 'applied' is terminal: removing the connection later
+    // is a separate deliberate action and never reverts it. A no-op when the save granted nothing new.
+    deps.db.markBindingsApplied(id, v.value.connections ?? []);
     // Same cold-skip-window pre-warm as POST: if this save turns documentConversion ON, kick the shared
     // markitdown venv now (deduped async background job; no-op when already warm).
     if (v.value.documentConversion) prewarmMarkitdown(resolvePrewarmInterpreterPath(deps.db.listAllProjects()));
@@ -3968,6 +3980,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!question) return reply.code(404).send({ error: "question not found" });
     return reply.send(question);
   });
+  // Pending profile→connection grants awaiting the owner's deliberate approval (credential
+  // auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B"). READ-ONLY display list for the
+  // Settings "Pending bindings" queue; human-only loopback, like every other read here. There is NO write
+  // surface — the grant is committed by an explicit Save on the Profile's connection allowlist (the
+  // existing human-only profile-edit REST), never a side effect here (binding stays an owner-only trust
+  // decision). Includes answered AND consumed questions (a binding stays pending after the agent consumes
+  // its answer), so this deliberately does NOT reuse listOpenQuestions' open-only filter.
+  app.get("/api/pending-bindings", async () => deps.db.listPendingBindings());
   app.post("/api/questions/:id/answer", async (req, reply) => {
     const { id } = req.params as { id: string };
     const question = deps.db.getQuestion(id);

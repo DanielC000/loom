@@ -1,4 +1,5 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, SessionRole, CapabilityGrant } from "@loom/shared";
 import { api, type ProfileFieldResolution, type PythonProvisioning, type PythonProvisioningReason } from "../lib/api";
@@ -20,7 +21,18 @@ import { RoleBadge, roleDisplay, roleColor } from "../lib/roleDisplay";
 // Loom's field changes onto the user's edits, resolving any all-three-differ conflict per field.
 export default function Profiles() {
   const qc = useQueryClient();
-  const [selected, setSelected] = useState<string | null>(null);
+  // Deep-link support for the Settings "Pending bindings" queue's "Review & grant" (card 12dc7fc9):
+  // /actors?tab=profiles&profile=<id>&grant=<connectionId> opens that profile's editor with the connection
+  // pre-selected in its allowlist (unsaved — the owner commits it with an explicit Save). `profileParam`
+  // drives the selection; `grantParam` is handed to the editor and keyed into its remount so a fresh
+  // deep-link (different grant) re-applies the pre-selection.
+  const [params] = useSearchParams();
+  const profileParam = params.get("profile");
+  const grantParam = params.get("grant");
+  const [selected, setSelected] = useState<string | null>(profileParam);
+  // Apply the deep-link when it changes (mount, or a new "Review & grant" while already on this page).
+  // Keyed on the param only — a manual sidebar click doesn't touch the URL, so it's never overridden.
+  useEffect(() => { if (profileParam) setSelected(profileParam); }, [profileParam]);
   const [newName, setNewName] = useState("");
   const [reloadNonce, setReloadNonce] = useState(0); // bumped on revert/adopt to remount the editor onto fresh fields
 
@@ -97,7 +109,8 @@ export default function Profiles() {
 
       <Panel style={{ minHeight: "72vh", padding: 12 }}>
         {selected && current.data ? (
-          <ProfileEditor key={`${selected}:${reloadNonce}`} profile={current.data}
+          <ProfileEditor key={`${selected}:${grantParam ?? ""}:${reloadNonce}`} profile={current.data}
+            grantConnectionId={selected === profileParam ? grantParam : null}
             onSave={(patch) => save.mutate({ id: selected, patch })} saving={save.isPending}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
             onRevert={() => revert.mutate(selected)} reverting={revert.isPending}
@@ -230,8 +243,8 @@ function MarkitdownProvisioning() {
 
 // Remounted per profile (key=id:nonce) so the fields reset on switch / revert / adopt; after Save the
 // query updates and `dirty` clears against the new values. Mirrors the Skills / agent-preset editors.
-function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
-  { profile: ProfileSummary; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
+function ProfileEditor({ profile, grantConnectionId, onSave, saving, onDelete, deleting, onRevert, reverting, onAdopt, adopting, adoptError }:
+  { profile: ProfileSummary; grantConnectionId?: string | null; onSave: (patch: Partial<Omit<Profile, "id">>) => void; saving: boolean;
     onDelete: () => void; deleting: boolean; onRevert: () => void; reverting: boolean;
     onAdopt: (resolutions?: Record<string, ProfileFieldResolution>) => void; adopting: boolean; adoptError: Error | null }) {
   const bundled = profile.bundled;
@@ -253,7 +266,14 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const [skills, setSkills] = useState<string[]>(profile.skills ?? []);
   // Authenticated-egress connection-id allowlist (empty = NO access, the secure default — UNLIKE skills,
   // empty here never means "all"). Human-set only, here or via REST — never an agent MCP tool.
-  const [connections, setConnections] = useState<string[]>(profile.connections ?? []);
+  // A `grantConnectionId` deep-link (from the Settings "Pending bindings" queue, card 12dc7fc9)
+  // PRE-SELECTS that connection here — it lands in local state (making the editor dirty) but is NOT saved
+  // until the owner clicks Save. That deliberate Save is the whole point of Direction B; pre-selection is
+  // never a committed grant. A connection already on the allowlist is left as-is (nothing to grant).
+  const [connections, setConnections] = useState<string[]>(() => {
+    const base = profile.connections ?? [];
+    return grantConnectionId && !base.includes(grantConnectionId) ? [...base, grantConnectionId] : base;
+  });
   // Registry-capability grants BEYOND browserTesting/documentConversion above (agent-tooling P4) — raw,
   // never pre-bridged with the two legacy booleans (mirrors the daemon's resolveProfileCapabilities split).
   const [capabilities, setCapabilities] = useState<CapabilityGrant[]>(profile.capabilities ?? []);
@@ -278,6 +298,14 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
   const connectionList = useQuery({ queryKey: ["connections"], queryFn: api.connections });
   const availableConnections = connectionList.data ?? [];
   const toggleConnection = (id: string) => setConnections((cur) => (cur.includes(id) ? cur.filter((c) => c !== id) : [...cur, id]));
+  // Pending bindings the owner hasn't granted yet (card 12dc7fc9) → which connections some agent requested
+  // for THIS profile, and who asked. Drives the "requested by <agent>" hint on the matching chip below.
+  const pendingBindings = useQuery({ queryKey: ["pendingBindings"], queryFn: api.pendingBindings });
+  const requestedBy = new Map(
+    (pendingBindings.data ?? [])
+      .filter((b) => b.profileId === profile.id && !b.alreadyGranted)
+      .map((b) => [b.connectionId, b.agentName] as const),
+  );
 
   // The capability registry catalog (agent-tooling P4): builtins + owner-added, ONE unified list — the
   // Profile editor's picker renders every entry as a checkbox, transparently backed by browserTesting/
@@ -514,16 +542,32 @@ function ProfileEditor({ profile, onSave, saving, onDelete, deleting, onRevert, 
           Lead's own profile-writing tools may touch this field (it grants access to real external secrets). */}
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         <span style={fieldLabel}>Connections <span style={{ fontWeight: 400, textTransform: "none", letterSpacing: 0, color: color.textMuted }}>· {connections.length === 0 ? "none selected → NO authenticated_request access (default)" : `${connections.length} selected → authenticated_request may use only these`}</span></span>
+        {/* Review & grant deep-link (card 12dc7fc9): a connection was pre-selected from a pending binding.
+            Highlighted below; the grant only lands when the owner clicks Save. */}
+        {grantConnectionId && !(profile.connections ?? []).includes(grantConnectionId) && (
+          <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber }}>
+            {(availableConnections.find((c) => c.id === grantConnectionId)?.name ?? grantConnectionId)} is pre-selected below — click Save to grant it, or deselect to decline.
+          </span>
+        )}
         <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
           {availableConnections.map((c) => {
             const on = connections.includes(c.id);
+            // A pending binding an agent requested for THIS profile (card 12dc7fc9) → amber ring + a
+            // "requested by <agent>" caption, so the owner knows why this connection is here. When it's the
+            // deep-linked grant, `on` is already true (pre-selected) so the chip reads phosphor-✓ with the
+            // caption still shown — selected but not yet saved.
+            const reqBy = requestedBy.get(c.id);
             return (
-              <button key={c.id} type="button" onClick={() => toggleConnection(c.id)}
-                style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
-                  border: `1px solid ${on ? color.phosphor : color.border}`, background: on ? color.panel2 : "transparent",
-                  color: on ? color.phosphor : color.textMuted }}>
-                {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.host})</span>
-              </button>
+              <span key={c.id} style={{ display: "inline-flex", flexDirection: "column", gap: 2 }}>
+                <button type="button" onClick={() => toggleConnection(c.id)}
+                  title={reqBy ? `Requested by ${reqBy} — Save to grant` : undefined}
+                  style={{ cursor: "pointer", fontFamily: font.mono, fontSize: 12, padding: "3px 9px", borderRadius: 12,
+                    border: `1px solid ${on ? color.phosphor : reqBy ? color.amber : color.border}`, background: on ? color.panel2 : "transparent",
+                    color: on ? color.phosphor : reqBy ? color.amber : color.textMuted }}>
+                  {on ? "✓ " : ""}{c.name} <span style={{ opacity: 0.7 }}>({c.host})</span>
+                </button>
+                {reqBy && <span style={{ fontFamily: font.mono, fontSize: 10, color: color.amber, paddingLeft: 4 }}>requested by {reqBy}</span>}
+              </span>
             );
           })}
           {availableConnections.length === 0 && <span style={{ color: color.textMuted, fontSize: 12, fontFamily: font.mono }}>No connections in the credential store yet — add one in Settings.</span>}

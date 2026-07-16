@@ -1372,6 +1372,14 @@ export interface ConnectionMetadata {
   tokenExpiresAt?: string | null;
   /** `oauth2` rows only — true when the refresh token is absent/revoked and consent must be redone. */
   needsReauth?: boolean;
+  /**
+   * True when this connection was AUTO-PROVISIONED at a credential-answer boundary (credential
+   * auto-provisioning v1, card 193de09e) rather than hand-created in the Connections form — derived
+   * server-side by checking whether any Question's `provisionConnectionId` points at this row. A display
+   * hint only (the Connections page badges it), never a behavioral distinction. Absent/false for a
+   * hand-created connection, byte-identical to before this field existed.
+   */
+  autoProvisioned?: boolean;
 }
 
 /**
@@ -1721,6 +1729,45 @@ export interface QuestionInboxItem extends Question {
    * only THIS flag means the normal pending→answered→consumed lifecycle can structurally never complete.
    */
   sessionOrphaned: boolean;
+}
+
+/**
+ * A PENDING profile→connection grant awaiting the owner's deliberate approval (credential
+ * auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B"). Derived, READ-ONLY display model: one
+ * per answered credential Question whose `provisionBindingState === "pending"` — i.e. the asking agent
+ * requested (at ask time, via `provisionTarget.binding.profileId`) that the just-provisioned Connection be
+ * allowlisted onto a Profile, but auto-binding was DELIBERATELY never done. The owner reviews these in the
+ * Settings "Pending bindings" queue and grants one only by an explicit Save on the Profile's connection
+ * allowlist — the binding is never a side effect of answering. Surfaced by the human-only loopback read
+ * `GET /api/pending-bindings`; there is NO write surface here (the grant reuses the existing human-only
+ * profile-edit REST — writing `Profile.connections` stays an owner-only trust decision).
+ */
+export interface PendingBinding {
+  /** The answered credential Question this pending binding was recorded on. */
+  questionId: string;
+  /** The Connection the answered secret was provisioned into (created at the answer boundary). */
+  connectionId: string;
+  /** The Connection's current name (from the live row; falls back to the ask-time `provisionTarget` name
+   *  if the connection was since revoked). */
+  connectionName: string;
+  /** The Connection's target host, for display; null if the connection row is gone. */
+  connectionHost: string | null;
+  /** The Profile the grant was requested for (`provisionTarget.binding.profileId`). */
+  profileId: string;
+  /** That Profile's current name; falls back to the raw id if the profile was since deleted. */
+  profileName: string;
+  /** True when the connection is ALREADY on the profile's allowlist — the grant is effectively satisfied
+   *  and "Review & grant" is a no-op the owner can dismiss (nothing left to Save). */
+  alreadyGranted: boolean;
+  /** Display name of the agent whose session asked for the credential (who requested the grant); "?" if
+   *  the asking session/agent was since hard-deleted. */
+  agentName: string;
+  /** The owning project's id + name (a credential ask is always project-scoped). */
+  projectId: string;
+  projectName: string;
+  /** When the credential was answered (the moment the binding became pending); falls back to the ask's
+   *  createdAt for a legacy row with no answeredAt. */
+  requestedAt: string;
 }
 
 /**

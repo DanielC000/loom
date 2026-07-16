@@ -1,4 +1,5 @@
 import { useRef, useState, type ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   resolveConfig,
@@ -60,6 +61,15 @@ export default function Settings() {
       <div>
         <SectionLabel>Connections</SectionLabel>
         <ConnectionsPanel />
+      </div>
+
+      {/* Pending bindings (credential auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B"):
+          the queue of agent-requested profile→connection grants awaiting the owner's deliberate approval.
+          A grant is committed only by an explicit Save on the profile's allowlist ("Review & grant" opens
+          it pre-selected), never a side effect of answering — binding stays an owner-only trust decision. */}
+      <div>
+        <SectionLabel>Pending bindings</SectionLabel>
+        <PendingBindingsPanel />
       </div>
 
       {/* Poll-job triggers (agent-tooling epic P3) — daemon-global scheduled polls that wake or spawn a
@@ -710,6 +720,11 @@ function ConnectionsPanel() {
   // list row's scope badge (project id -> name), same pattern as ProjectLinksPanel below.
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: () => api.projects() });
   const projectName = (id: string) => projects?.find((p) => p.id === id)?.name ?? id;
+  // Bound/unbound state (card 12dc7fc9): a connection is "bound" once at least one profile allowlists it.
+  // Derived client-side from the profile store (each ProfileSummary carries its `connections` allowlist) —
+  // no dedicated backend surface needed. An auto-provisioned connection reads `unbound` until granted.
+  const { data: profileRows } = useQuery({ queryKey: ["profiles"], queryFn: () => api.profiles() });
+  const boundConnectionIds = new Set((profileRows ?? []).flatMap((p) => p.connections ?? []));
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["connections"] });
   const create = useMutation({
@@ -781,6 +796,14 @@ function ConnectionsPanel() {
                   {c.authScheme}{c.provider ? ` · ${c.provider}` : ""}
                 </span>
                 <Badge tone={c.projectId ? "cyan" : "phosphor"}>{c.projectId ? projectName(c.projectId) : "Global"}</Badge>
+                {c.autoProvisioned && <Badge tone="cyan">Auto-provisioned</Badge>}
+                {/* Bound/unbound (api-key/bearer): an oauth2 row's status is its own connectedness, so the
+                    allowlist-binding badge only reads for the secret-injection schemes. */}
+                {c.authScheme !== "oauth2" && (
+                  boundConnectionIds.has(c.id)
+                    ? <Badge tone="phosphor">Bound</Badge>
+                    : <Badge tone="amber">Unbound</Badge>
+                )}
                 {status && <Badge tone={status.tone}>{status.label}</Badge>}
                 {c.authScheme === "oauth2" && c.scopes && c.scopes.length > 0 && (
                   <span style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
@@ -805,6 +828,67 @@ function ConnectionsPanel() {
               </div>
             );
           })}
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
+// --- Pending bindings (credential auto-provisioning v1 binding UX, card 12dc7fc9 — "Direction B") -------
+// The owner-approval queue: each row is an agent-requested profile→connection grant recorded when a
+// credential Request was answered (the secret was stored + a Connection auto-provisioned, but the binding
+// was DELIBERATELY never applied). "Review & grant" deep-links to the profile's connection allowlist with
+// the connection pre-selected (via ?profile=&grant= query on /actors) — the grant is committed there by an
+// explicit Save, never here. HUMAN-only read (GET /api/pending-bindings); the grant reuses the human-only
+// profile-edit REST. Binding stays the deliberate owner-only trust decision — the whole point of Direction B.
+function PendingBindingsPanel() {
+  const navigate = useNavigate();
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["pendingBindings"],
+    queryFn: () => api.pendingBindings(),
+  });
+  const rows = data ?? [];
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+      <Panel>
+        <p style={{ color: color.textMuted, fontSize: 12, margin: 0, fontFamily: font.mono, lineHeight: 1.5 }}>
+          When you answer a credential an agent asked for, Loom stores the secret and creates a Connection —
+          but it never grants that Connection to a profile on its own. Each grant an agent requested waits
+          here for your explicit approval. "Review &amp; grant" opens the profile's connection allowlist with
+          the connection pre-selected; nothing is granted until you Save there.
+        </p>
+      </Panel>
+
+      <Panel>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+          <SectionLabel style={{ margin: 0 }}>Pending bindings ({rows.length})</SectionLabel>
+        </div>
+
+        {isLoading && <Hint>loading pending bindings…</Hint>}
+        {isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error)?.message ?? "failed to load /api/pending-bindings"}</span>}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {rows.length === 0 && !isLoading && !isError && (
+            <span style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono }}>No pending bindings — nothing waiting for your approval.</span>
+          )}
+          {rows.map((b) => (
+            <div key={b.questionId} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 10px", background: color.panel2, border: `1px solid ${color.border}`, borderRadius: 6, flexWrap: "wrap" }}>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.text }}>{b.connectionName}</span>
+              {b.connectionHost && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted }}>{b.connectionHost}</span>}
+              <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>→</span>
+              <span style={{ fontFamily: font.mono, fontSize: 13, color: color.cyan }}>{b.profileName}</span>
+              <Badge tone="muted">by {b.agentName}</Badge>
+              <Badge tone="cyan">{b.projectName}</Badge>
+              {b.alreadyGranted && <Badge tone="phosphor">Granted</Badge>}
+              <span style={{ flex: 1 }} />
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{new Date(b.requestedAt).toLocaleString()}</span>
+              <Button variant={b.alreadyGranted ? "ghost" : "primary"}
+                onClick={() => navigate(`/actors?tab=profiles&profile=${encodeURIComponent(b.profileId)}&grant=${encodeURIComponent(b.connectionId)}`)}>
+                {b.alreadyGranted ? "View profile" : "Review & grant"}
+              </Button>
+            </div>
+          ))}
         </div>
       </Panel>
     </div>
