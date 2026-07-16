@@ -310,6 +310,30 @@ export function archivedTranscriptExists(projectId: string, sessionId: string): 
 }
 
 /**
+ * Session ids (within one project's archive dir) that have a captured snapshot — ONE `readdir` instead
+ * of a per-row `fs.existsSync` stat. Built for bulk-enriching an archived-sessions list page: a caller
+ * enriching N rows across P distinct projects does P readdirs total, not N stats (the archived-sessions
+ * gateway routes were measured doing N synchronous stats per request, 2137 rows ⇒ 500ms+ of blocked
+ * event loop — see project-memory `perf-profile-2026-07-16-findings`). Empty set if the project has no
+ * archive dir yet or `projectId` fails the same confinement check `archivedTranscriptPath` applies
+ * (never throws). Mirrors that function's root — keep the two in sync if the archive layout changes.
+ */
+export function archivedSnapshotIds(projectId: string): Set<string> {
+  const rawRoot = path.resolve(LOOM_HOME, "archives");
+  let root: string;
+  try { root = fs.realpathSync(rawRoot); } catch { root = rawRoot; }
+  const dir = path.resolve(root, projectId);
+  const ids = new Set<string>();
+  if (dir !== root && !dir.startsWith(root + path.sep)) return ids; // confinement escape — same as archivedTranscriptPath
+  let entries: string[];
+  try { entries = fs.readdirSync(dir); } catch { return ids; }
+  for (const name of entries) {
+    if (name.endsWith(".jsonl")) ids.add(name.slice(0, -".jsonl".length));
+  }
+  return ids;
+}
+
+/**
  * Best-effort snapshot of a session's engine transcript into the archive store. Called on the
  * onExit transition (while the JSONL still exists). NEVER throws — the exit path must not be
  * blocked. Idempotent: re-copies only when the snapshot is missing or older than the source (so a

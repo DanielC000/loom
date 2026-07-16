@@ -40,7 +40,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { snapshotAndArchiveRecovered } = await import("../dist/sessions/boot-backstop.js");
 const {
   encodeProjectDir, snapshotTranscript, readArchivedTranscript,
-  archivedTranscriptPath, archivedTranscriptExists, deleteArchivedTranscript,
+  archivedTranscriptPath, archivedTranscriptExists, archivedSnapshotIds, deleteArchivedTranscript,
 } = await import("../dist/sessions/transcript.js");
 
 let failures = 0;
@@ -268,6 +268,17 @@ try {
     snapshotTranscript(fakeCwd, "no-such-engine-id", "pA", "deadSess") === false && !archivedTranscriptExists("pA", "deadSess"));
   deleteArchivedTranscript("pA", "snapSess");
   check("D: deleteArchivedTranscript removes the snapshot", !archivedTranscriptExists("pA", "snapSess"));
+
+  // ════════ D2. archivedSnapshotIds — the bulk readdir replacing the per-row fs.existsSync N+1 ════════
+  check("D2: empty set for a project with no archive dir yet", archivedSnapshotIds("neverArchivedProject").size === 0);
+  snapshotTranscript(fakeCwd, engineId, "pA", "bulkA");
+  snapshotTranscript(fakeCwd, engineId, "pA", "bulkB");
+  const bulkIds = archivedSnapshotIds("pA");
+  check("D2: one readdir finds every snapshotted id in the project's archive dir",
+    bulkIds.has("bulkA") && bulkIds.has("bulkB"));
+  check("D2: agrees with the per-row existsSync check for a NOT-snapshotted id", !bulkIds.has("neverSnapshotted"));
+  check("D2: rejects a traversal-shaped projectId (confinement, like archivedTranscriptPath)",
+    archivedSnapshotIds("../escape").size === 0);
 
   // ════════ E. restore + permanent delete (cascade to ARCHIVED workers, snapshot dropped) ════════
   // Build a stopped (auto-archived) manager + 2 workers, give mgr + w2 real snapshots so delete proves

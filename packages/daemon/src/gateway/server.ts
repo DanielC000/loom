@@ -12,7 +12,7 @@ import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
-import { readTranscript, readArchivedTranscript, archivedTranscriptExists, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
 import type { Db } from "../db.js";
 import { inTestMode } from "../db.js";
@@ -4231,13 +4231,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/projects/:id/archive", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
-    return deps.db.listArchivedSessions(id).map((s) => ({ ...s, snapshotExists: archivedTranscriptExists(id, s.id) }));
+    const snapshotIds = archivedSnapshotIds(id); // ONE readdir instead of a per-row fs.existsSync stat
+    return deps.db.listArchivedSessions(id).map((s) => ({ ...s, snapshotExists: snapshotIds.has(s.id) }));
   });
   // Cross-project Archive (god-eye): archived sessions across ALL projects, each enriched with
   // projectId/projectName (already on the SessionListItem) + snapshotExists, newest-archived first.
   // Read-only; the cross-project Archive page groups these Project → Agent.
-  app.get("/api/archived-sessions", async () =>
-    deps.db.listAllArchivedSessions().map((s) => ({ ...s, snapshotExists: archivedTranscriptExists(s.projectId, s.id) })));
+  app.get("/api/archived-sessions", async () => {
+    const rows = deps.db.listAllArchivedSessions();
+    // One readdir PER DISTINCT project (not per row) — a bulk-existence cache keyed by projectId, since
+    // rows span many projects here (unlike the single-project route above).
+    const snapshotIdsByProject = new Map<string, Set<string>>();
+    return rows.map((s) => {
+      let ids = snapshotIdsByProject.get(s.projectId);
+      if (!ids) { ids = archivedSnapshotIds(s.projectId); snapshotIdsByProject.set(s.projectId, ids); }
+      return { ...s, snapshotExists: ids.has(s.id) };
+    });
+  });
 
   // --- Plain SHELL terminals (human-only): spawn pwsh/cmd/bash in a project's repo cwd ---
   //
