@@ -213,15 +213,20 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian. The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path/python (host-launch) — and any unknown key — are REJECTED and the stored config is left unchanged.",
+        description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian. The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path/python (host-launch) — and any unknown key — are REJECTED and the stored config is left unchanged.",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough(),
         },
       },
       async ({ projectId, config }) => {
-        const project = db.getProject(projectId);
-        if (!project) return ok({ error: "project not found" });
+        // Accepts a full id OR an unambiguous 8-char id-prefix (mirrors project_get / list_all_agents) —
+        // resolve ONCE up front so every subsequent use (merge base + the writer + the final re-read) is
+        // keyed off the resolved FULL id, never the raw (possibly-prefix) input.
+        const resolved = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in resolved) return ok(resolved);
+        const project = resolved;
+        const resolvedProjectId = project.id;
         // FAIL-CLOSED: the AGENT validator — gateCommand/alertWebhook are rejected (unlike the Lead's
         // project_configure, which uses the full human-equivalent validator). This is the load-bearing
         // posture difference of the setup surface.
@@ -241,9 +246,9 @@ export class SetupMcpRouter {
         // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
         // non-existent column. A non-column / same-key-set patch stays byte-identical to the blind path.
         // (tasks/columns.ts — mirrors the Lead's project_configure + the REST PATCH.)
-        const wrote = setProjectConfigSafe(db, projectId, merged);
+        const wrote = setProjectConfigSafe(db, resolvedProjectId, merged);
         if (!wrote.ok) return ok({ error: wrote.error });
-        return ok({ ok: true, projectId, config: db.getProject(projectId)?.config ?? merged });
+        return ok({ ok: true, projectId: resolvedProjectId, config: db.getProject(resolvedProjectId)?.config ?? merged });
       },
     );
 

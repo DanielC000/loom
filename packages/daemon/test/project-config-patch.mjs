@@ -15,6 +15,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       e63874e9, mirrors project_get): a full id is unaffected even with a shared-prefix sibling; an
 //       unambiguous prefix resolves + patches the right project; an AMBIGUOUS prefix returns a named "did
 //       you mean" error and writes nothing; an unknown id still returns "project not found", unchanged.
+//   (4) SETUP project_configure's projectId accepts the SAME id-prefix resolution (card 163dc93f, mirrors
+//       the platform fix in (3) exactly): unambiguous prefix resolves + patches; ambiguous errors + writes
+//       nothing; full id unchanged.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like surface-subset.mjs: a REAL Db + SessionService
 // against a FAKE pty, the REAL Platform + Setup routers driven over an in-process MCP InMemoryTransport (no
@@ -171,12 +174,38 @@ try {
   // An unknown id still errors exactly as before.
   const unknownPatch = await platform("project_configure", { projectId: "0000000000000000", config: { docLint: true } });
   check("(3) an unknown id still returns 'project not found', unchanged", unknownPatch.error === "project not found");
+
+  // ============ (4) SETUP project_configure: projectId accepts the SAME full-id-or-8-char-prefix
+  // resolution (card 163dc93f, mirrors the platform fix in (3) exactly). ============
+  const uniqueId2 = "f00dcafe-4444-4444-8444-444444444444";
+  db.insertProject({ id: uniqueId2, name: "PX-Unique2", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+
+  // A FULL id resolves + patches correctly, unchanged.
+  const setupFullIdPatch = await setup("project_configure", { projectId: pxAId, config: { docLint: false } });
+  check("(4) a FULL id resolves + patches correctly on the setup surface",
+    setupFullIdPatch.ok === true && setupFullIdPatch.projectId === pxAId && db.getProject(pxAId).config.docLint === false);
+
+  // An UNAMBIGUOUS 8-char prefix resolves to the right project and patches it.
+  const setupPrefixPatch = await setup("project_configure", { projectId: uniqueId2.slice(0, 8), config: { docLint: true } });
+  check("(4) ★ an unambiguous 8-char id-PREFIX resolves to the right project and patches it (setup surface)",
+    setupPrefixPatch.ok === true && setupPrefixPatch.projectId === uniqueId2 && db.getProject(uniqueId2).config.docLint === true);
+
+  // An AMBIGUOUS prefix (shared by pxAId/pxBId) returns a named "did you mean" error — no silent pick, no write.
+  const setupAmbiguousPatch = await setup("project_configure", { projectId: "deadbeef", config: { docLint: false } });
+  check("(4) ★ an AMBIGUOUS id-prefix returns a named 'did you mean' error, not a silent pick (setup surface)",
+    typeof setupAmbiguousPatch.error === "string" && setupAmbiguousPatch.error.includes(pxAId) && setupAmbiguousPatch.error.includes(pxBId) && setupAmbiguousPatch.ok === undefined);
+  check("(4) the ambiguous patch wrote to NEITHER candidate (setup surface)",
+    db.getProject(pxAId).config.docLint === false && db.getProject(pxBId).config.docLint === undefined);
+
+  // An unknown id still errors exactly as before.
+  const setupUnknownPatch = await setup("project_configure", { projectId: "0000000000000000", config: { docLint: true } });
+  check("(4) an unknown id still returns 'project not found', unchanged (setup surface)", setupUnknownPatch.error === "project not found");
 } finally {
   db.close();
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry WAL handle on Windows */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project_configure PATCHES (deep-merges) into the existing override on BOTH the platform (full) and setup (agent) surfaces: a single-key change preserves kanbanColumns + nested siblings (arrays/scalars replace, objects merge); a rejected patch leaves the store unchanged; and the trust boundary is intact through the patch path — the agent validator still rejects gateCommand/obsidian.path, an agent can never introduce or overwrite a human-only key, while a pre-existing human-set key is preserved. The platform surface's projectId now also accepts a full id OR an unambiguous 8-char id-prefix (ambiguous named, unknown unchanged)."
+  ? "\n✅ ALL PASS — project_configure PATCHES (deep-merges) into the existing override on BOTH the platform (full) and setup (agent) surfaces: a single-key change preserves kanbanColumns + nested siblings (arrays/scalars replace, objects merge); a rejected patch leaves the store unchanged; and the trust boundary is intact through the patch path — the agent validator still rejects gateCommand/obsidian.path, an agent can never introduce or overwrite a human-only key, while a pre-existing human-set key is preserved. BOTH surfaces' projectId now also accepts a full id OR an unambiguous 8-char id-prefix (ambiguous named, unknown unchanged)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
