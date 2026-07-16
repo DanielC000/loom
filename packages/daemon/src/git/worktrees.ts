@@ -11,6 +11,30 @@ export interface WorktreeInfo {
   /** The repo's HEAD sha at the moment of this call — the worktree branch's FORK POINT off main, not the
    *  worktree's own branch (a worktree's own branch as its own base is always a 0-diff no-op). */
   mainSha: string;
+  /**
+   * Set ONLY when this call REUSED an existing worktree dir (a checkout retained from a prior
+   * hard-stopped or rejected-merge attempt on the same task — the `fs.existsSync(worktreePath)` branch of
+   * {@link createWorktree}) AND it still carries real leftover uncommitted work after the existing reuse
+   * lifecycle (the stale-branch recut) has run. Absent for a freshly-created worktree, a
+   * reattached-branch-only worktree (always a clean fresh checkout), or a reused-but-clean worktree —
+   * byte-identical to before this field existed. Board card 2250836c: read-only signal — createWorktree
+   * never cleans the tree on account of this (Loom never silently discards a hard-stopped worker's
+   * leftover edits; they may be a nearly-complete change worth finishing).
+   */
+  reusedDirtyWorktree?: ReusedDirtyWorktreeInfo;
+}
+
+/** {@link WorktreeInfo.reusedDirtyWorktree} — a bounded summary of a reused worktree's leftover uncommitted work. */
+export interface ReusedDirtyWorktreeInfo {
+  /** Bounded (~30 lines / ~2KB) list of leftover uncommitted paths, one per line — daemon-injected
+   *  `.claude/` noise filtered out (see {@link uncommittedWorkFiles}), so this only ever names real
+   *  worker-authored changes. */
+  statusSummary: string;
+  /** Total count of real uncommitted paths found — may exceed the number of lines actually shown in
+   *  `statusSummary` when `truncated` is true. */
+  fileCount: number;
+  /** True when `statusSummary` was capped (by line count or byte length) and does not list every path. */
+  truncated: boolean;
 }
 
 /**
@@ -468,6 +492,40 @@ async function recutStaleReusedBranch(repoPath: string, worktreePath: string, br
   await simpleGit(worktreePath).raw(["reset", "--hard", mainSha]);
 }
 
+/** Cap on {@link ReusedDirtyWorktreeInfo.statusSummary} — enough for a manager (or an injected worker
+ *  kickoff note) to see real leftover changes without growing the spawn result/prompt unboundedly. */
+const REUSED_DIRTY_SUMMARY_MAX_LINES = 30;
+const REUSED_DIRTY_SUMMARY_MAX_CHARS = 2000;
+
+/**
+ * Read-only check (board card 2250836c) for the `fs.existsSync(worktreePath)` REUSE branch of {@link
+ * createWorktree}: does this retained worktree still carry real leftover uncommitted work? Called AFTER
+ * {@link recutStaleReusedBranch} has already run, so it reports whatever is genuinely still dirty once the
+ * existing reuse lifecycle has had its say — this function itself never writes to the tree, only reads
+ * `git status --porcelain` and reuses {@link uncommittedWorkFiles}'s daemon-noise filter (so injected
+ * `.claude/` churn never false-positives a clean reuse as dirty).
+ *
+ * FAILS SAFE: any git error/timeout is read as "not dirty" (`undefined`) rather than blocking the spawn —
+ * the worst case is a missed flag, never a spawn failure. Plain (unbounded) `simpleGit` call to match this
+ * function's existing style (`recutStaleReusedBranch` above is equally unbounded on the same hot path).
+ */
+async function detectReusedDirtyWorktree(worktreePath: string): Promise<ReusedDirtyWorktreeInfo | undefined> {
+  try {
+    const porcelain = await simpleGit(worktreePath).raw(["status", "--porcelain"]);
+    const files = uncommittedWorkFiles(porcelain);
+    if (files.length === 0) return undefined;
+    let truncated = files.length > REUSED_DIRTY_SUMMARY_MAX_LINES;
+    let statusSummary = files.slice(0, REUSED_DIRTY_SUMMARY_MAX_LINES).join("\n");
+    if (statusSummary.length > REUSED_DIRTY_SUMMARY_MAX_CHARS) {
+      statusSummary = statusSummary.slice(0, REUSED_DIRTY_SUMMARY_MAX_CHARS);
+      truncated = true;
+    }
+    return { statusSummary, fileCount: files.length, truncated };
+  } catch {
+    return undefined; // FAIL SAFE — a status-check hiccup must never block or alter the spawn
+  }
+}
+
 /**
  * Create (or re-attach) an isolated git worktree for a worker (phase-2 §A5): a checkout under
  * ~/.loom/worktrees on branch `loom/<key>` off the repo's current HEAD. Worktrees share the repo's
@@ -497,7 +555,10 @@ export async function createWorktree(
     // Retained worktree → reuse (already provisioned). Re-cut an empty/stale branch onto current main
     // first; a recovery branch (unmerged work) is left exactly as-is.
     await recutStaleReusedBranch(repoPath, worktreePath, branch);
-    return { worktreePath, branch, mainSha };
+    // Board card 2250836c: surface (never clean) any real leftover uncommitted work on this reused
+    // worktree — read-only, runs after the recut above so it reports the ACTUAL post-recut state.
+    const reusedDirtyWorktree = await detectReusedDirtyWorktree(worktreePath);
+    return reusedDirtyWorktree ? { worktreePath, branch, mainSha, reusedDirtyWorktree } : { worktreePath, branch, mainSha };
   }
 
   const git = simpleGit(repoPath);

@@ -12,7 +12,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -2791,7 +2791,7 @@ export class SessionService {
   async spawnWorker(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -3000,7 +3000,7 @@ export class SessionService {
       // guaranteeing its own ISOLATED worktree/branch that can never collide with a task's worktree or
       // with another taskless spawn's (this is also how a read-only reviewer avoids ever sharing the
       // author's worktree — see the guard note above).
-      const { worktreePath, branch } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
+      const { worktreePath, branch, reusedDirtyWorktree } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
       // Codescape C3: ensure the project's graph.json exists yet (lazily, on first worker spawn) —
       // fire-and-forget, NEVER blocks the spawn (isCodescapeEnabled folds in isLoomDev(), so a non-dev/
       // disabled daemon fires nothing; a graph that already exists is a no-op — see
@@ -3056,7 +3056,7 @@ export class SessionService {
         // own kickoff text (which typically carries the task description — the richest match source of
         // any spawn path); null (no notes) ⇒ byte-identical to today.
         startupPrompt: appendMemoryRecallToStartupPrompt(
-          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos),
+          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree),
           retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt),
         ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
@@ -3094,7 +3094,7 @@ export class SessionService {
       // worker_list placeholder doesn't linger alongside the now-real worker row.
       if (taskId) this.capQueue.clearForTask(taskId);
       else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
-      return { ...worker, processState: "live", shippedMatch };
+      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -3126,10 +3126,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null }>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }>(
       key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.spawnWorker(managerSessionId, opts),
     );

@@ -108,8 +108,74 @@ try {
     fs.existsSync(reattach.worktreePath) && git(reattach.worktreePath, "rev-parse --abbrev-ref HEAD") === brG);
   check("(g2) the retained branch kept the worker's commit (g.txt present in the re-attached tree)",
     fs.existsSync(path.join(reattach.worktreePath, "g.txt")));
+  check("(g1) a CLEAN reuse never sets reusedDirtyWorktree", reuse.reusedDirtyWorktree === undefined);
+  check("(g2) a re-attached (freshly-checked-out) worktree never sets reusedDirtyWorktree", reattach.reusedDirtyWorktree === undefined);
   await removeWorktree(repo, reattach.worktreePath);
   await deleteBranch(repo, brG);
+
+  // (h) board card 2250836c — a REUSED worktree that still carries real leftover uncommitted work (the
+  //     hard-stop-mid-edit scenario: a prior worker was killed before committing, or committed some work
+  //     and left more on top) is FLAGGED, never auto-cleaned.
+  {
+    // (h0) a FRESH worktree (never reused) never sets reusedDirtyWorktree.
+    const tH0 = "fresh-dddd-6666";
+    const freshH = await createWorktree(repo, "projWT", tH0);
+    check("(h0) a freshly-created worktree never sets reusedDirtyWorktree", freshH.reusedDirtyWorktree === undefined);
+    await removeWorktree(repo, freshH.worktreePath);
+    await deleteBranch(repo, freshH.branch);
+
+    // (h1) RECOVERY-branch case (>0 ahead, so recutStaleReusedBranch leaves it untouched): commit one
+    //      file, then leave BOTH a modified tracked file AND a new untracked file uncommitted — mirrors a
+    //      worker hard-stopped mid-edit after already landing some work. Re-create (reuse) must surface
+    //      exactly those leftovers, read-only (git status only — no reset/clean performed by the detector).
+    const tH1 = "reuseddirty-eeee-7777";
+    const { worktreePath: wtH1, branch: brH1 } = await createWorktree(repo, "projWT", tH1);
+    commitInto(wtH1, "h.txt", "h v1\n", "h commit"); // >0 ahead ⇒ recut is a no-op (recovery branch)
+    fs.writeFileSync(path.join(wtH1, "h.txt"), "h v2 UNCOMMITTED\n"); // tracked, modified, not committed
+    fs.writeFileSync(path.join(wtH1, "h2.txt"), "new untracked file\n"); // untracked, never added
+    const reuseH1 = await createWorktree(repo, "projWT", tH1);
+    check("(h1) reuse still returns the same worktree/branch", reuseH1.worktreePath === wtH1 && reuseH1.branch === brH1);
+    check("(h1) reusedDirtyWorktree IS set for a dirty reuse", reuseH1.reusedDirtyWorktree !== undefined);
+    check("(h1) statusSummary names the modified tracked file", reuseH1.reusedDirtyWorktree?.statusSummary.includes("h.txt"));
+    check("(h1) statusSummary names the new untracked file", reuseH1.reusedDirtyWorktree?.statusSummary.includes("h2.txt"));
+    check("(h1) fileCount reflects both leftover paths", reuseH1.reusedDirtyWorktree?.fileCount === 2);
+    check("(h1) not truncated (well under the cap)", reuseH1.reusedDirtyWorktree?.truncated === false);
+    check("(h1) the leftover changes are STILL ON DISK — detection never cleans/resets the tree",
+      fs.readFileSync(path.join(wtH1, "h.txt"), "utf8") === "h v2 UNCOMMITTED\n" && fs.existsSync(path.join(wtH1, "h2.txt")));
+    await removeWorktree(repo, wtH1);
+    await deleteBranch(repo, brH1);
+
+    // (h2) STALE-branch case (0 ahead ⇒ recutStaleReusedBranch DOES `reset --hard` the worktree onto
+    //      main): a worker hard-stopped WITHOUT ever committing. The reset discards the tracked
+    //      modification (pre-existing recut behavior, unchanged by this fix) but an UNTRACKED file
+    //      survives `reset --hard` — exactly the residue a manager would see running `git status`
+    //      themselves post-respawn. Detection must still flag it.
+    const tH2 = "reuseddirty-ffff-8888";
+    const { worktreePath: wtH2, branch: brH2 } = await createWorktree(repo, "projWT", tH2); // 0 commits ahead
+    fs.writeFileSync(path.join(wtH2, "h2-untracked.txt"), "leftover from a hard-stop\n");
+    const reuseH2 = await createWorktree(repo, "projWT", tH2);
+    check("(h2) reusedDirtyWorktree IS set for the untracked-only stale-branch case", reuseH2.reusedDirtyWorktree !== undefined);
+    check("(h2) statusSummary names the untracked leftover", reuseH2.reusedDirtyWorktree?.statusSummary.includes("h2-untracked.txt"));
+    await removeWorktree(repo, wtH2);
+    await deleteBranch(repo, brH2);
+
+    // (h3) BOUNDED summary — many leftover paths must cap the surfaced summary (~30 lines / ~2KB) rather
+    //      than growing the worker_spawn result/kickoff injection unboundedly, while fileCount still
+    //      reports the TRUE total (nothing silently dropped from the count, only from the displayed list).
+    const tH3 = "reuseddirty-gggg-9999";
+    const { worktreePath: wtH3, branch: brH3 } = await createWorktree(repo, "projWT", tH3);
+    commitInto(wtH3, "seed.txt", "seed\n", "seed commit"); // >0 ahead ⇒ recut is a no-op
+    const MANY = 40;
+    for (let i = 0; i < MANY; i++) fs.writeFileSync(path.join(wtH3, `leftover-${String(i).padStart(3, "0")}.txt`), "x\n");
+    const reuseH3 = await createWorktree(repo, "projWT", tH3);
+    check("(h3) reusedDirtyWorktree IS set", reuseH3.reusedDirtyWorktree !== undefined);
+    check(`(h3) fileCount reflects the TRUE total (${MANY})`, reuseH3.reusedDirtyWorktree?.fileCount === MANY);
+    check("(h3) truncated:true once the cap is exceeded", reuseH3.reusedDirtyWorktree?.truncated === true);
+    check("(h3) statusSummary line count capped at 30", reuseH3.reusedDirtyWorktree?.statusSummary.split("\n").length <= 30);
+    check("(h3) statusSummary byte length capped at ~2KB", reuseH3.reusedDirtyWorktree?.statusSummary.length <= 2000);
+    await removeWorktree(repo, wtH3);
+    await deleteBranch(repo, brH3);
+  }
 
   // (i) H1.3 — two distinct task ids sharing the first 8 chars get DISTINCT branches/worktrees.
   const a = "abcd1234-1111", b = "abcd1234-2222"; // identical first 8 chars

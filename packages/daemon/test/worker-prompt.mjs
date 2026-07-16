@@ -114,6 +114,20 @@ try {
   // no cwd ⇒ no location block ⇒ referenceRepos is moot too (there's nowhere to anchor it) — still byte-identical to the 2-arg form.
   check("(1e) pure: no cwd ⇒ referenceRepos is ignored, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, ["/abs/refA"]) === "BRIEF\n\n---\n\nDYNAMIC");
 
+  // ===================== (1f) board card 2250836c: reusedDirtyWorktree reconcile-note block =====================
+  check("(1f) pure: no reusedDirtyWorktree (undefined) ⇒ byte-identical to the pre-card composition", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", ["/abs/refA", "/abs/refB"]) === composedWithRefs);
+  check("(1f) pure: no reusedDirtyWorktree ⇒ no reconcile block", !composedCwd.includes("Reused worktree"));
+  const dirtyInfo = { statusSummary: "?? leftover.txt\n M modified.txt", fileCount: 2, truncated: false };
+  const composedDirty = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, dirtyInfo);
+  check("(1f) pure: reusedDirtyWorktree set ⇒ reconcile block present", composedDirty.includes("Reused worktree"));
+  check("(1f) pure: reconcile block names the leftover paths", composedDirty.includes("leftover.txt") && composedDirty.includes("modified.txt"));
+  check("(1f) pure: reconcile block tells the worker to finish or revert before new edits", /finish|revert/i.test(composedDirty));
+  check("(1f) pure: worktree location block + brief + dynamic still all present alongside the reconcile block", composedDirty.includes("/wt/path") && composedDirty.includes("BRIEF") && composedDirty.includes("DYNAMIC"));
+  check("(1f) pure: no cwd ⇒ reusedDirtyWorktree is ignored too, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, undefined, dirtyInfo) === "BRIEF\n\n---\n\nDYNAMIC");
+  const truncatedInfo = { statusSummary: "?? a.txt\n?? b.txt", fileCount: 40, truncated: true };
+  const composedTruncated = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, truncatedInfo);
+  check("(1f) pure: truncated summary surfaces the true total count", composedTruncated.includes("40"));
+
   // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
   worktrees.push(wA.worktreePath);
@@ -177,6 +191,38 @@ try {
   try { fs.rmSync(refRepoB, { recursive: true, force: true }); } catch { /* best-effort */ }
   // repoR itself is removed in `finally`, AFTER its worktrees are torn down (git worktree remove needs
   // the main repo present).
+
+  // ===================== (5) board card 2250836c: a HARD-STOPPED worker's retained worktree, re-spawned =====
+  // onto the SAME task, surfaces reusedDirtyWorktree on the result AND injects a reconcile note into the
+  // new worker's OWN kickoff — end-to-end through the real spawnWorker/createWorktree path (no fakes for
+  // the git side), same style as the referenceRepos section above.
+  const taskD = "44444444-4444-4444-8444-444444444444";
+  db.insertTask({ id: taskD, projectId: "pW", title: "D", body: "", columnKey: "todo", position: 3, createdAt: now, updatedAt: now });
+
+  // First spawn: fresh worktree — must NOT carry any reconcile note.
+  const wD1 = await svc.spawnWorker("mgr1", { taskId: taskD, agentId: "agentDev", kickoffPrompt: "KICKOFF_D1" });
+  worktrees.push(wD1.worktreePath);
+  check("(5) fresh spawn never sets reusedDirtyWorktree", wD1.reusedDirtyWorktree === undefined);
+  const oWD1 = optsFor(wD1.id);
+  check("(5) fresh spawn's kickoff carries NO reconcile block", !(oWD1?.startupPrompt ?? "").includes("Reused worktree"));
+
+  // Simulate worker_stop(hard): the worktree is RETAINED (never removed) and the worker just leaves
+  // real uncommitted work behind mid-edit — the exact card 2250836c repro shape.
+  fs.writeFileSync(path.join(wD1.worktreePath, "leftover.txt"), "in-progress edit from the hard-stopped worker\n");
+  db.setProcessState(wD1.id, "exited"); // frees the one-live-worker-per-task guard for the re-spawn below
+
+  // Re-spawn onto the SAME task → reuses the SAME worktree (dirty).
+  const wD2 = await svc.spawnWorker("mgr1", { taskId: taskD, agentId: "agentDev", kickoffPrompt: "KICKOFF_D2" });
+  check("(5) re-spawn reuses the SAME worktree path", wD2.worktreePath === wD1.worktreePath);
+  check("(5) re-spawn RESULT carries reusedDirtyWorktree", wD2.reusedDirtyWorktree !== undefined);
+  check("(5) reusedDirtyWorktree names the leftover file", wD2.reusedDirtyWorktree?.statusSummary.includes("leftover.txt"));
+  check("(5) reusedDirtyWorktree.fileCount is 1", wD2.reusedDirtyWorktree?.fileCount === 1);
+
+  const oWD2 = optsFor(wD2.id);
+  check("(5) the NEW worker's OWN kickoff carries the reconcile note", (oWD2?.startupPrompt ?? "").includes("Reused worktree"));
+  check("(5) the reconcile note names the leftover file", (oWD2?.startupPrompt ?? "").includes("leftover.txt"));
+  check("(5) the reconcile note still leads into the manager's kickoff", order(oWD2?.startupPrompt ?? "", "Reused worktree", "KICKOFF_D2"));
+  check("(5) the leftover file is STILL ON DISK — spawning never cleaned it", fs.existsSync(path.join(wD2.worktreePath, "leftover.txt")));
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
   if (repoR) { for (const wt of worktreesR) { try { await removeWorktree(repoR, wt); } catch { /* best-effort */ } } }
