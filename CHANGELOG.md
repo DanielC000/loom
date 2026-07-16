@@ -4,6 +4,35 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.21.0] — 2026-07-16
+
+**Reference repos, a per-project memory explorer, a navigation consolidation, and the credential/connections + inbound-webhook story — plus a WebSocket token-leak security fix.** A project can now bind read-only *reference repos* its manager and workers may read but never own; the new **Lore** page makes a project's shared agent memory legible; the top nav collapses into **Actors** / **Automation** / **Repository**; answered credentials auto-provision into project-scoped Connections with a review-and-grant binding UX; and an HMAC-verified inbound-webhook receiver can wake or spawn a session.
+
+### Added
+- **Reference repos (multi-repo, "Interpretation A").** A project can bind additional **`referenceRepos`** — absolute paths to sibling git repos its manager and workers may READ but never own (no worktree, branch, gate, or commit; the primary `repoPath` is unchanged). Human-only to set via `POST`/`PATCH /api/projects` with each entry `isGitRepo`-validated, and rejected on every agent config-write surface; injected read-only into manager and worker kickoffs; a Project-settings repo-list editor; and a read-only per-reference-repo git-log in the Repository page's Git tab (index-by-construction allowlist). Additive and byte-identical until a repo is bound.
+- **Lore — the per-project memory explorer.** A read-only `/lore` page (a primary Project tab) that makes a project's shared agent memory (the `project_memory` store) legible: pinned "always in context" cards, an all-entries list sortable by recall / recent / title with a per-entry recall signal, a note-detail panel with markdown + `[[wikilink]]` rendering, and search — backed by a new human-only, project-scoped `GET /api/projects/:id/memory` read.
+- **Navigation consolidation.** Profiles + Skills merge into **Actors**, Schedules + Event Triggers into **Automation**, and Vault + Git into **Repository** — each a single destination with a linkable segmented sub-tab (`?tab=`), with redirects from the old routes.
+- **Credential auto-provisioning into Connections (v1).** An answered `type:"credential"` request provisions a Connection at the answer boundary (role-gated to managers/leads, create-only), with **project-scoped Connections** (`project_id` nullable = global) + a resolution scope-check + a Settings scope selector, and a **Pending-bindings queue** with a human "Review & grant" binding UX (Direction B).
+- **Inbound webhook receiver (remote-access Tier-2 ingress).** An HMAC-verified inbound webhook endpoint (github / stripe / standard / generic schemes, per-scheme replay defense, DB-backed dedupe, per-endpoint spawn cap) that can wake or spawn a session — human-only endpoint management; ships inert (no endpoints by default).
+- **Host-tool integrations, UI-configurable.** Optional host-tool paths (Open Design, Codescape, …) are DB-persisted and human-configurable in Settings instead of daemon launch-script env vars, with a live "resolved" badge; and Open Design's integration expresses its real desktop-app MCP invocation as a full stdio spec (command + args + env).
+- **`/codescape` bundled skill.** Codescape orientation ships as a bundled Loom skill (mirroring `/graphify`), with a Codescape-first orientation + structural-fix audit lens in the shipped doctrine.
+
+### Changed
+- **"Workspace" → "Project"** in the new-project / setup wizard, aligning the user-facing terminology with the rest of the app.
+- **codescape host-tool config is path-only.** `codescape.mcpConfig` is now REJECTED at validation (fail-closed) rather than silently accepted-and-ignored — codescape resolves via a bin path only; Open Design keeps the full stdio spec.
+- **Remote-access hardening.** Token-rotation grace, an explicit `0.0.0.0` bind posture, and an Authorization / `Sec-WebSocket-Protocol` log-redaction seam.
+
+### Fixed
+- **WebSocket gateway-token leak (security).** The gateway token no longer echoes in the `101` `Sec-WebSocket-Protocol` response header — a double-subprotocol handshake keeps the token out of the reflected response. (Inert while remote access is off, but a must-fix before enabling it.)
+- **`POST /api/projects` now `isGitRepo`-validates the primary `repoPath`** — closing a two-path asymmetry (the elevated MCP create and the PATCH rebind already validated it).
+- **Zombie merge-op recovery.** A daemon restart — or a manager that dies / recycles — mid-merge no longer orphans the `pendingMerge` op forever; a fresh `worker_merge_confirm` no longer dedup-attaches to a dead op, with a settle-clobber identity guard.
+- **Archive-page resume.** A failed resume from the Archive no longer drops the session out of the archive.
+- **Untrusted-data envelope.** The poll-format and webhook untrusted-payload envelopes share one collision-proof helper hardened against code-fence breakout.
+
+### Internal
+- Test-fidelity: extracted `resolveScopedConnectionSecret` as the single tested owner of the P4 cross-project scope-guard.
+- Doctrine: agents are taught to write durable learnings to project memory (`/worker`, `/orchestrate`).
+
 ## [0.20.0] — 2026-07-15
 
 **Shared agent memory, an open-design capability, and a self-hosting host-load guard — plus manager board-column control, Platform/Lead idle coverage, and a broad orchestration/pty reliability pass.** Agents on the same project now accumulate and share durable notes across sessions via an FTS5-backed memory store injected into each kickoff; the removed Deja integration is replaced by an opt-in open-design MCP capability; and the daemon's merge/deploy gate path gains a concurrency guard so a heavy gate run can't starve a live sibling service on a self-hosting host.
