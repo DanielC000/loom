@@ -407,6 +407,12 @@ mid-report — before sending anything.
    spend a consumed owner decision) re-deriving what already exists. The same check applies to a build
    card scoped from an eval or inference of a "missing" capability — confirm the feature isn't already
    merged (`git log` / grep the code) before spawning a builder to (re)discover it.
+   **Record merged work by its durable MAINLINE identity, not an ephemeral branch SHA.** When you note a
+   task as merged/shipped, record the mainline squash-commit SUBJECT — which, under the card-title =
+   commit-subject convention, equals the card title — not the worker-branch SHA. A squash merge collapses
+   the branch's commits into one NEW mainline commit, so the old branch SHA is never on the mainline and a
+   later "already shipped?" check by that SHA reports a false "not merged". The subject survives on durable
+   mainline history, so a successor's shipped-state check is a reliable `git log --grep "<subject>"`.
    **Other vault notes — shallow taxonomy, not flat.** Your resume doc (and any note the project's
    `CLAUDE.md` pins by exact path) stays at the vault root; **every other note goes in a one-level
    taxonomy folder** named in that project's `CLAUDE.md` **"Vault structure"** section (mirrors the
