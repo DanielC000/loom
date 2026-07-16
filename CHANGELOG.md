@@ -4,6 +4,16 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.21.1] — 2026-07-16
+
+**Bind reference repos when creating a project from the setup wizard.** The "New project from Template" wizard's Project step now carries a reference-repos editor, so read-only sibling repos can be bound at creation time — previously `referenceRepos` (shipped in 0.21.0) could only be added afterwards from Project settings.
+
+### Added
+- **Reference repos in the setup wizard.** The wizard's Project step gains an optional reference-repos list editor — a field distinct from the primary repo path — wired through BOTH creation modes. `POST /api/setup/project-init` (the "Create new project" path) now accepts and `isGitRepo`-validates `referenceRepos` with the same validator as `POST /api/projects`, run before the directory bootstrap so a bad reference leaves no stray folder. A server validation error surfaces inline on the review screen. Additive and byte-identical when no reference repo is added.
+
+### Fixed
+- Setup-wizard e2e specs updated to real fixture git-repo paths — the `isGitRepo` validation added in 0.21.0 had left the old `/tmp`-path specs failing.
+
 ## [0.21.0] — 2026-07-16
 
 **Reference repos, a per-project memory explorer, a navigation consolidation, and the credential/connections + inbound-webhook story — plus a WebSocket token-leak security fix.** A project can now bind read-only *reference repos* its manager and workers may read but never own; the new **Lore** page makes a project's shared agent memory legible; the top nav collapses into **Actors** / **Automation** / **Repository**; answered credentials auto-provision into project-scoped Connections with a review-and-grant binding UX; and an HMAC-verified inbound-webhook receiver can wake or spawn a session.
