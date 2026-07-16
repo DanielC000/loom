@@ -243,20 +243,24 @@ worker FIRST reconciles its working tree (`git status`; finish or revert the hal
 acting on the new direction.
 
 **Drive a worker's permission mode with `worker_set_mode`.** Beyond messaging, you can set the worker's
-permission posture to fit the task: `plan` to hold a worker to a read-only, propose-first spike (no edits
-until you've seen the plan); `acceptEdits` / `auto` to open a trusted, low-risk fast path so the worker
-isn't stopping for routine confirmations. Match the mode to the risk — a tight spike plans, a well-scoped
-mechanical change can run fast.
+permission posture to fit the task — valid values for a worker are `acceptEdits` / `auto`: open a trusted,
+low-risk fast path so the worker isn't stopping for routine confirmations. Match the mode to the risk — a
+well-scoped mechanical change can run fast. You **cannot** hold a worker in `plan` mode: the daemon rejects
+`worker_set_mode('plan')` for a worker, because plan mode gates the worker's own `worker_report` behind a
+permission prompt nobody can answer, which would trap it. For an investigate-first gate, use a kickoff
+instruction (next).
 
-**An investigate-first / plan-approval instruction given as PROSE is NOT a gate — make it one with
-`plan` mode.** Telling a worker in the kickoff to "report your root cause + fix plan before you edit; I'll
-sanity-check first" is only advisory: a worker can (and does) treat it as optional narration — write the
-plan as chat prose and edit in the very next step, and the checkpoint you wanted never happens. To make it
-a REAL gate, set the worker to `plan` mode (`worker_set_mode('plan')`, or spawn it that way) so it
-structurally *cannot* edit until you've reviewed and approved the plan — don't rely on the prose request
-alone. And never pair the plan-request with a contradictory "stay in your normal working mode, not plan
-mode" caveat: that directly licenses the worker to skip the checkpoint, defeating the very gate you asked
-for.
+**An investigate-first / plan-approval instruction given as loose PROSE is NOT a gate — make it a
+required checkpoint in the kickoff.** Telling a worker in the kickoff to "report your root cause + fix plan
+before you edit; I'll sanity-check first" is only advisory if phrased loosely: a worker can (and does)
+treat it as optional narration — write the plan as chat prose and edit in the very next step, and the
+checkpoint you wanted never happens. You **cannot** fall back to `plan` mode to force it — the daemon
+rejects `worker_set_mode('plan')` for a worker (it would trap the worker's own `worker_report`). Enforce
+the gate with an EXPLICIT kickoff instruction instead: require the worker to `worker_report` its root
+cause + plan as a `progress` (or `blocked`) checkpoint and then STOP and wait for your approval before
+making any edit. That report-and-stop is a real checkpoint (the `/worker` doctrine backs it — a plan
+narrated as prose followed by edits does not satisfy it); a loosely-worded "let me know your plan" does
+not.
 
 **Verify a steering message actually landed — but read the result precisely.** After
 `worker_message`/`worker_redirect`, check the result it returns and distinguish two "not delivered"
