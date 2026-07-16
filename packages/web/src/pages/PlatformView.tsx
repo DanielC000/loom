@@ -101,7 +101,7 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
       }}>
         <span style={{ color: color.phosphor, display: "inline-flex", flexShrink: 0 }}><LogoMark size={26} /></span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>New workspace from a template</div>
+          <div style={{ fontFamily: font.head, fontSize: 14, color: color.text }}>New project from a template</div>
           <div style={{ fontFamily: font.mono, fontSize: 11.5, color: color.textMuted, marginTop: 3, lineHeight: 1.5 }}>
             Pick a workflow template, point Loom at a repo, and get a ready-to-run team plus a starter board card — in four quick steps.
           </div>

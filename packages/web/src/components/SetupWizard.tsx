@@ -12,7 +12,7 @@ import { roleDisplay, roleColor } from "../lib/roleDisplay";
 // ── Guided onboarding WIZARD (onboarding C5, visual direction B · Guided Flow) ────────────────────────
 //
 // A full-bleed, 4-screen guided flow — Template → Project → Review → Done — that stands up a ready-to-run
-// workspace from a bundled workflow template, wired end-to-end to the setup REST:
+// project from a bundled workflow template, wired end-to-end to the setup REST:
 //   1. Template gallery  → GET /api/setup/templates (+ GET /api/profiles to resolve each agent's role /
 //      browser / no-commit rig for its roster chip). "Start empty" skips the template apply entirely.
 //   2. Project step      → a "Bind existing / Create new" segmented toggle picks between two DISTINCT
@@ -126,7 +126,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
 
   return (
     <div
-      role="dialog" aria-modal="true" aria-label="Set up a new workspace"
+      role="dialog" aria-modal="true" aria-label="Set up a new project"
       style={{
         position: "fixed", inset: 0, zIndex: 1600, display: "flex", flexDirection: "column",
         background: `radial-gradient(1100px 460px at 50% -8%, ${color.phosphorDim}, transparent 60%), ${color.bg}`,
@@ -417,7 +417,7 @@ function StepProject({
             </Field>
           </>
         ) : (
-          <Field label="Project name" hint="Loom derives a folder name from this and creates a git-initialized directory under its own workspace folder — no path to type.">
+          <Field label="Project name" hint="Loom derives a folder name from this and creates a git-initialized directory in a Loom-managed folder — no path to type.">
             <Input value={name} onChange={(e) => onName(e.target.value)} spellCheck={false}
               placeholder="aurora-api" aria-label="Project name" style={{ width: "100%", boxSizing: "border-box" }} />
           </Field>
@@ -479,7 +479,7 @@ function StepReview({
             </>
           ) : (
             <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: "2px 0 0", lineHeight: 1.5 }}>
-              Loom will create and git-initialize a new directory for this project under its own workspace folder.
+              Loom will create and git-initialize a new directory for this project in a Loom-managed folder.
             </p>
           )}
         </ReceiptSection>
