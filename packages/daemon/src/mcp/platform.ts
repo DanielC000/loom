@@ -431,13 +431,22 @@ const hostToolMcpSpecOverride = z.object({
   args: z.array(z.string()).optional(),
   env: z.record(z.string(), z.string()).optional(),
 }).strict();
+// openDesign's full stdio-spec schema (command/args/env via mcpConfig, or a bare path).
 const hostToolIntegrationOverride = z.object({
   path: z.string().min(1).optional(),
   mcpConfig: hostToolMcpSpecOverride.optional(),
 }).strict();
+// codescape is PATH-only: `codescapeMcpServer` (pty/host.ts) only ever reads a resolved bin path, never
+// an `mcpConfig` — sharing `hostToolIntegrationOverride` let a hand-authored `mcpConfig` VALIDATE,
+// PERSIST, and thread through `resolvePlatform` while silently never being read (a silent no-op trap).
+// Rejecting it here at validation is strictly better than accepting-and-ignoring: a config author gets a
+// clear error instead of a feature that quietly does nothing.
+const codescapeIntegrationOverride = z.object({
+  path: z.string().min(1).optional(),
+}).strict();
 const integrationsOverride = z.object({
   openDesign: hostToolIntegrationOverride.optional(),
-  codescape: hostToolIntegrationOverride.optional(),
+  codescape: codescapeIntegrationOverride.optional(),
 }).strict();
 const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),

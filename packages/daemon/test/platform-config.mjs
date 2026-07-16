@@ -456,8 +456,10 @@ const dbFile = path.join(TMP, "loom.db");
     validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { command: "/abs/od.exe", bogus: 1 } } } }).ok === false);
   check("(14b) path and mcpConfig coexist on the same tool (path is the fallback, mcpConfig wins at spawn time)",
     validatePlatformConfigOverride({ integrations: { openDesign: { path: "/abs/od", mcpConfig: odMcpSpec } } }).ok === true);
-  check("(14b) codescape (no mcpConfig usage) still accepts an mcpConfig at the SCHEMA level (shared shape; its resolver simply never reads it)",
-    validatePlatformConfigOverride({ integrations: { codescape: { mcpConfig: odMcpSpec } } }).ok === true);
+  check("(14b) codescape is path-only: an mcpConfig is REJECTED at validation (fail-closed, not silently ignored)",
+    validatePlatformConfigOverride({ integrations: { codescape: { mcpConfig: odMcpSpec } } }).ok === false);
+  check("(14b) codescape still accepts a bare path override",
+    validatePlatformConfigOverride({ integrations: { codescape: { path: "/abs/codescape" } } }).ok === true);
 
   // --- (14b) resolvePlatform threads mcpConfig through, deep-partial-isolated from codescape/path ---
   const withOdMcp = resolveConfig(undefined, { integrations: { openDesign: { mcpConfig: odMcpSpec } } });

@@ -489,16 +489,28 @@ export interface HostToolMcpSpec {
  * A single optional host-tool integration's DB-persisted configuration. `path` is an absolute PATH to
  * the tool's own executable/entry script (a host EXEC fact, exactly like `obsidian.path`/
  * `python.interpreterPath`) — unset means "no DB override," and the resolver falls back to its own
- * `LOOM_*_BIN` env var (or, for a PATH-resolvable tool like Codescape, a bare default name), never to a
- * hardcoded path. `mcpConfig` (card e8eee68c) is the escape hatch for a tool whose real invocation needs
- * more than a bin path — see {@link HostToolMcpSpec}; when set it wins over `path`/the env fallback
- * entirely. Currently consumed by openDesign's resolver only; the shape is shared so a future host tool
- * with the same need doesn't re-derive it. See card 8dc5ebb9 (host-tool integrations: DB-persisted paths
- * + Settings UI).
+ * `LOOM_*_BIN` env var, never to a hardcoded path. `mcpConfig` (card e8eee68c) is the escape hatch for a
+ * tool whose real invocation needs more than a bin path — see {@link HostToolMcpSpec}; when set it wins
+ * over `path`/the env fallback entirely. Consumed by openDesign's resolver ONLY — Codescape is
+ * PATH-only (see {@link CodescapeIntegrationConfig}) since `codescapeMcpServer` only ever resolves a bin
+ * path, never a full stdio spec. See card 8dc5ebb9 (host-tool integrations: DB-persisted paths + Settings
+ * UI).
  */
 export interface HostToolIntegrationConfig {
   path?: string;
   mcpConfig?: HostToolMcpSpec;
+}
+
+/**
+ * Codescape's integration config: PATH-only, deliberately narrower than {@link HostToolIntegrationConfig}.
+ * `codescapeMcpServer` (pty/host.ts) resolves via a bin path (DB override → `LOOM_CODESCAPE_BIN` → a bare
+ * PATH-resolvable default name) and never reads a full stdio spec, so `mcpConfig` is REJECTED at
+ * validation (`mcp/platform.ts`'s `codescapeIntegrationOverride`) rather than silently accepted-and-
+ * ignored — a hand-authored `mcpConfig` on codescape used to validate, persist, and thread through
+ * `resolvePlatform` while never actually being read.
+ */
+export interface CodescapeIntegrationConfig {
+  path?: string;
 }
 
 /**
@@ -511,7 +523,7 @@ export interface HostToolIntegrationConfig {
  */
 export interface IntegrationsConfig {
   openDesign: HostToolIntegrationConfig;
-  codescape: HostToolIntegrationConfig;
+  codescape: CodescapeIntegrationConfig;
 }
 
 /**
@@ -718,7 +730,7 @@ export interface PlatformConfigOverride {
   /** See PlatformConfig.connections. */
   connections?: Partial<ConnectionsGuardConfig>;
   /** See PlatformConfig.integrations. Deep-partial: setting one tool's path leaves the other untouched. */
-  integrations?: { openDesign?: HostToolIntegrationConfig; codescape?: HostToolIntegrationConfig };
+  integrations?: { openDesign?: HostToolIntegrationConfig; codescape?: CodescapeIntegrationConfig };
   /** See PlatformConfig.coalesceAgentMessages. */
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
