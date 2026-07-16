@@ -413,6 +413,11 @@ export const api = {
     get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
   gitBranches: (projectId: string) =>
     get<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
+  // Read-only git log for a bound reference repo (reference-repos epic Phase 5). `index` is the position
+  // in the project's OWN referenceRepos[] — the server resolves the path server-side, so this can never
+  // reach an arbitrary host path. An out-of-range index 404s.
+  referenceRepoGitLog: (projectId: string, index: number) =>
+    get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/reference-repos/${index}/log`),
   // Git WRITE (HUMAN-only; mirrors the vault writer — no agent MCP surface). Each returns a structured
   // { ok, error? } so the UI shows an expected git failure (dirty tree, no upstream, conflict) instead
   // of a generic throw. commit takes ONLY a message (repo-configured identity, no overrides/trailer).

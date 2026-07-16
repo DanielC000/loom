@@ -82,6 +82,7 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/orchestration/events" },
   { method: "GET", pattern: "/api/projects/:id/git/log" },
   { method: "GET", pattern: "/api/projects/:id/git/branches" },
+  { method: "GET", pattern: "/api/projects/:id/git/reference-repos/:index/log" },
   { method: "GET", pattern: "/api/profiles" },
   { method: "GET", pattern: "/api/profiles/:id" },
   { method: "GET", pattern: "/api/skills" },

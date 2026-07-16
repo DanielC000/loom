@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -10,7 +10,8 @@ import { color, font } from "../theme";
 // MCP tool); each returns a structured { ok, error } the UI shows. Scoped to the header's active project.
 export default function Git() {
   const qc = useQueryClient();
-  const { projectId } = useActiveProject();
+  const { projectId, projects } = useActiveProject();
+  const project = projects.find((p) => p.id === projectId) ?? null;
   const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId });
   const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId });
 
@@ -97,20 +98,75 @@ export default function Git() {
 
           <Panel style={{ maxHeight: "50vh", overflow: "auto" }}>
             <SectionLabel>Commits</SectionLabel>
-            <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 13 }}>
-              <tbody>
-                {log.data?.map((c) => (
-                  <tr key={c.hash} style={{ borderTop: `1px solid ${color.border}` }}>
-                    <td style={{ color: color.cyan, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
-                    <td style={{ color: color.text, padding: "3px 8px 3px 0" }}>{c.message}</td>
-                    <td style={{ color: color.textMuted, padding: "3px 0", whiteSpace: "nowrap" }}>{c.author}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
+            <CommitTable commits={log.data} />
           </Panel>
+
+          {/* Reference repos (reference-repos epic Phase 5, card f4888775) — read-only git log per bound
+              sibling repo, reusing the SAME CommitTable rendering as the primary repo above. Each panel is
+              collapsed by default and fetches its log lazily (enabled:open) so mounting the Git tab doesn't
+              eagerly shell out to git for every reference repo. */}
+          {project && project.referenceRepos.length > 0 && (
+            <Panel>
+              <SectionLabel>Reference Repos</SectionLabel>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                {project.referenceRepos.map((path, i) => (
+                  <ReferenceRepoLog key={path} projectId={projectId} index={i} path={path} />
+                ))}
+              </div>
+            </Panel>
+          )}
         </>
       )}
     </div>
   );
+}
+
+// Shared commit-table rendering, reused by both the primary repo's log and each reference repo's log below.
+function CommitTable({ commits }: { commits: { hash: string; date: string; message: string; author: string }[] | undefined }) {
+  return (
+    <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 13 }}>
+      <tbody>
+        {commits?.map((c) => (
+          <tr key={c.hash} style={{ borderTop: `1px solid ${color.border}` }}>
+            <td style={{ color: color.cyan, padding: "3px 8px 3px 0", whiteSpace: "nowrap" }}>{c.hash.slice(0, 7)}</td>
+            <td style={{ color: color.text, padding: "3px 8px 3px 0" }}>{c.message}</td>
+            <td style={{ color: color.textMuted, padding: "3px 0", whiteSpace: "nowrap" }}>{c.author}</td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
+// One collapsible read-only git log for a single bound reference repo. `index` is the repo's position in
+// project.referenceRepos — the daemon resolves the actual path SERVER-side from that index, so this client
+// never sends a host path over the wire (see the endpoint's security note in gateway/server.ts).
+function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index: number; path: string }) {
+  const [open, setOpen] = useState(false);
+  const log = useQuery({
+    queryKey: ["reference-repo-git-log", projectId, index],
+    queryFn: () => api.referenceRepoGitLog(projectId, index),
+    enabled: open,
+  });
+  return (
+    <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
+          background: "transparent", border: "none", padding: 0,
+          fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>{path}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }}>
+          {log.isLoading && <Hint>loading log…</Hint>}
+          {log.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(log.error as Error).message}</span>}
+          <CommitTable commits={log.data} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Hint({ children }: { children: ReactNode }) {
+  return <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{children}</span>;
 }

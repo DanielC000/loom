@@ -3190,6 +3190,22 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return new GitReader(p.repoPath).branches();
   });
 
+  // Reference-repo git log (reference-repos epic Phase 5, card f4888775, "Interpretation A") — read-only,
+  // reusing the SAME GitReader as the primary-repo log above. SECURITY: the client passes an INDEX into
+  // the project's OWN `referenceRepos` array, resolved server-side — it can never supply an arbitrary host
+  // path (a git-log of an arbitrary path would be a read-any-git-repo-on-host info leak). An out-of-range
+  // index (including a non-integer) 404s BEFORE GitReader is ever constructed. No write surface.
+  app.get("/api/projects/:id/git/reference-repos/:index/log", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const idx = Number((req.params as { index: string }).index);
+    const refRepoPath = Number.isInteger(idx) ? p.referenceRepos[idx] : undefined;
+    if (idx < 0 || refRepoPath === undefined) {
+      return reply.code(404).send({ error: "reference repo not found at that index" });
+    }
+    return new GitReader(refRepoPath).log();
+  });
+
   // Git WRITE — HUMAN/REST + the role-gated PLATFORM exception. This is a TRUST-BOUNDARY surface like
   // the vault writer and gateCommand: checkout/commit and ESPECIALLY push (outward-facing, network,
   // irreversible) are absent from the loom-tasks/orchestration (manager/worker) MCP servers — no

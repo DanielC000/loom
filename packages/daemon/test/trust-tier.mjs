@@ -108,6 +108,7 @@ const ALL_ROUTES = [
   ["POST", "/api/projects/:id/git/branch"], ["GET", "/api/projects/:id/git/branches"],
   ["POST", "/api/projects/:id/git/checkout"], ["POST", "/api/projects/:id/git/commit"],
   ["GET", "/api/projects/:id/git/log"], ["POST", "/api/projects/:id/git/push"],
+  ["GET", "/api/projects/:id/git/reference-repos/:index/log"],
   ["GET", "/api/projects/:id/keys"], ["POST", "/api/projects/:id/keys"],
   ["DELETE", "/api/projects/:id/permanent"], ["POST", "/api/projects/:id/restore"],
   ["GET", "/api/projects/:id/run-events"], ["GET", "/api/projects/:id/runs"], ["GET", "/api/projects/:id/runs/:runId"],
@@ -174,6 +175,7 @@ const EXPECTED_TIER_1 = new Set([
   // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
   "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
   "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
+  "GET /api/projects/:id/git/reference-repos/:index/log",
   "GET /api/profiles", "GET /api/profiles/:id", "GET /api/skills", "GET /api/skills/:name",
   "GET /api/archived-sessions", "GET /api/projects/:id/archive", "GET /api/projects/archived",
   "GET /api/companion/:sessionId/grants", "GET /api/companion/allowed-senders", "GET /api/companion/bindings",
