@@ -420,6 +420,15 @@ const GRACEFUL_STOP_KILL_MS = Number(process.env.LOOM_GRACEFUL_KILL_MS) || 6_000
 const REDIRECT_SETTLE_MS = Number(process.env.LOOM_REDIRECT_SETTLE_MS) || 1_500;
 
 /**
+ * Companion injection-guard Primitive A widening (card 2b26035c): how many RECENT authenticated
+ * owner-turns `Live.recentOwnerTurns` retains for a "recent-turns verbatim acceptance" check. Small and
+ * bounded on purpose — wide enough to cover a cross-turn correction/re-phrase in the SAME live exchange
+ * (owner: "Creative projects…" → owner: "no, creating…") without widening "recent" into "anything the
+ * owner ever said in this conversation", which would erode the guard's whole point.
+ */
+const RECENT_OWNER_TURNS_WINDOW = 5;
+
+/**
  * Resolve the per-session Playwright MCP (`@playwright/mcp`) stdio server entry, injected at spawn
  * ONLY for a browserTesting session (opt-in, gated). Built with ABSOLUTE paths — the same lesson as
  * the absolute-claude-path invariant: node-pty's Windows agent does NOT search %PATH%, and a bare
@@ -1250,6 +1259,22 @@ interface Live {
   // mirrors lastPromptRoute so a rate-limit-killed companion turn replays with its attestation intact.
   activeTurnOwnerText: string | null;
   lastPromptOwnerText: string | null;
+  // Companion injection-guard Primitive A WIDENING (card 2b26035c, "recent-turns verbatim acceptance"): a
+  // BOUNDED, most-recent-first ring of the last RECENT_OWNER_TURNS_WINDOW authenticated owner-turn texts.
+  // Pushed alongside activeTurnOwnerText in submit() whenever a turn carries real ownerText — so it is
+  // built from the EXACT SAME server-attested owner inbound bytes as Primitive A, just retained across
+  // turn boundaries instead of being cleared at Stop. A proactive/heartbeat/system turn (ownerText
+  // undefined) never pushes an entry, so this can never accumulate model-authored or injected text —
+  // only the TURN SCOPE widens, never the source. Lets a lever accept a candidate that's a verbatim
+  // substring of a RECENT turn (e.g. a cross-turn correction/re-phrase), not just the one in flight.
+  // GROUP companion note: in a group-scope route, each turn's ownerText is already whichever ALLOWLISTED
+  // sender's message formed it (chat-gateway.ts's per-turn sender-authz gate, unchanged by this card) —
+  // so this window can span MULTIPLE allowlisted senders' recent turns, not just one person's. This is
+  // intentional, not an escalation: every entry is still an authenticated, authorized-user turn (never
+  // model-authored/injected), and a lever committing content still separately requires the COMMITTING
+  // turn's own current-turn owner-auth (Primitive A) plus the trust window/confirm round-trip — the
+  // widened quote-source never substitutes for either of those.
+  recentOwnerTurns: string[];
   // Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
   // sender id of the IN-FLIGHT turn's inbound message, for a GROUP-scope companion route only — null for a
   // DM route (the chatId alone already identifies the single owner, mirroring VoicePrefRoute's own
@@ -2121,6 +2146,7 @@ export class PtyHost {
       lastPromptRoute: null,
       activeTurnOwnerText: null,
       lastPromptOwnerText: null,
+      recentOwnerTurns: [],
       activeTurnSenderId: null,
       lastPromptSenderId: null,
       activeTurnProactive: false,
@@ -2257,7 +2283,7 @@ export class PtyHost {
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null,
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -2326,7 +2352,7 @@ export class PtyHost {
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
       activeTurnRoute: null, lastPromptRoute: null,
-      activeTurnOwnerText: null, lastPromptOwnerText: null,
+      activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
       activeTurnProactive: false, lastPromptProactive: false,
       startupModeCycles: 0, startupCyclesDone: true,
@@ -2819,6 +2845,21 @@ export class PtyHost {
   }
 
   /**
+   * Companion injection-guard Primitive A WIDENING (card 2b26035c, "recent-turns verbatim acceptance") —
+   * sibling to {@link getActiveTurnOwnerText}: the bounded, most-recent-first ring of the last
+   * {@link RECENT_OWNER_TURNS_WINDOW} authenticated owner-turn texts, so a lever can accept a candidate
+   * that's a verbatim substring of a RECENT turn (a cross-turn correction/re-phrase), not just the one
+   * currently in flight. UNLIKE `getActiveTurnOwnerText`, this does NOT clear at Stop — that's the whole
+   * point (the window must survive past the turn it was formed on). Every entry is still literal,
+   * server-attested owner inbound bytes from the SAME source as Primitive A (see Live.recentOwnerTurns'
+   * doc) — only the turn scope widens, never the authentication. Empty array for an unknown/dead session
+   * or one with no owner-authored turn yet.
+   */
+  getRecentOwnerTurns(sessionId: string): string[] {
+    return this.live.get(sessionId)?.recentOwnerTurns.slice() ?? [];
+  }
+
+  /**
    * Companion Trust Window (Companion Capability & Permission-Lever Framework, card 0): the AUTHENTICATED
    * sender id of the session's IN-FLIGHT turn, for a GROUP-scope companion route only — null for a DM
    * route or a non-companion-inbound turn (see Live.activeTurnSenderId). Read by the trust-window/friction
@@ -3267,6 +3308,14 @@ export class PtyHost {
     // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
     live.activeTurnOwnerText = ownerText ?? null;
     live.lastPromptOwnerText = ownerText ?? null;
+    // Companion injection-guard Primitive A widening (card 2b26035c): append this turn's owner text to
+    // the bounded recent-turns ring, UNLESS it's undefined (no owner-authored turn — same guard as
+    // activeTurnOwnerText above). Unlike activeTurnOwnerText, this is NEVER cleared at Stop — it's meant
+    // to persist across the turn boundary so a later turn's lever call can still see it.
+    if (ownerText !== undefined) {
+      live.recentOwnerTurns.unshift(ownerText);
+      if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
+    }
     // Companion Trust Window: pin the turn's authenticated sender id the SAME way — undefined/null for
     // every non-group-companion caller, so activeTurnSenderId stays null exactly like activeTurnOwnerText
     // does for a non-owner-authored turn. lastPromptSenderId mirrors lastPromptOwnerText for replay.

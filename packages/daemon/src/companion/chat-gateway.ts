@@ -468,6 +468,15 @@ export class ChatGateway {
    *   (c) HISTORY CLEAR — best-effort, via the optional injected `historyReset` (undefined ⇒ no-op: e.g. a
    *       Telegram-only gateway, or a test that doesn't inject one). Clears whatever durable chat-history
    *       record exists for `sessionId` and pushes a live "cleared" notice to an attached web viewer.
+   *   (d) TRUST WINDOW / GRANT CLOSE (card 2b26035c CR follow-up) — via the SAME `closeTrustWindow` dep the
+   *       DM-pairing/group-sender re-pair paths above already use (undefined ⇒ no-op, e.g. a test that
+   *       doesn't inject one). A fresh "/new"/"/reset" is a deliberate clean-slate boundary — it must not
+   *       silently carry over a warm Tier-A trust window OR a live inline authored-content grant (Direction
+   *       (a), card 2b26035c) from the conversation just wiped: `closeCompanionTrustWindow` (mcp/
+   *       orchestration.ts) closes BOTH in one call (it clears `AuthoredContentGrantStore` alongside the
+   *       trust window — see its own doc). This is what makes `authored_content_grant`'s "session" scope
+   *       doc-promise ("until reset/recycle") actually true; without this call the grant used to survive a
+   *       reset since the sessionId is unchanged across "/new".
    * Runs BEFORE the command's ack is sent (see handleInbound) — the persisted history is already empty and
    * any live viewer already cleared by the time the ack is recorded+pushed as the first message of the new,
    * empty conversation. Never throws.
@@ -479,6 +488,7 @@ export class ChatGateway {
       this.debug(`resetConversation: /clear submit failed for ${sessionId}: ${describeError(err)}`);
     }
     this.refreshPersona(sessionId);
+    this.closeTrustWindow?.(sessionId);
     if (!this.historyReset) return;
     try {
       await this.historyReset.clear(sessionId);

@@ -24,7 +24,7 @@ import { spawnableRoleError } from "../mcp/spawnable-role.js";
 import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
 import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
-import type { OwnerAttestation } from "./attestation.js";
+import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -726,8 +726,8 @@ const BOARD_REACH_SLUG = "board-reach";
  *  kind always overwrites any prior pending entry for that route, matching `OwnerConfirmStore`'s own
  *  one-pending-per-(session,route,capability) semantics. */
 type PendingBoardWrite =
-  | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority }
-  | { action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean }
+  | { action: "create"; projectId: string; title: string; body: string; columnKey?: string; priority?: TaskPriority; grantBacked: boolean }
+  | { action: "update"; taskId: string; title?: string; body?: string; columnKey?: string; priority?: TaskPriority; held?: boolean; grantBacked: boolean }
   | { action: "relocate"; taskId: string; toProject: string; fromProject: string };
 const pendingBoardWrites = new Map<string, PendingBoardWrite>();
 
@@ -737,6 +737,24 @@ function pendingBoardKey(sessionId: string, route: CompanionRoute | null): strin
 }
 
 const BOARD_PRIORITY_SCHEMA = z.enum(["p0", "p1", "p2", "p3"]);
+
+/** Direction (a), card 2b26035c ("inline authored-content grant") — its OWN Primitive C namespace,
+ *  separate from `BOARD_REACH_SLUG` so a pending board-write confirmation and a pending grant
+ *  confirmation on the SAME (session, route) can never clobber each other (mirrors why board-reach
+ *  itself is namespaced apart from decisions-relay — see `BOARD_REACH_SLUG`'s doc). */
+const AUTHORED_CONTENT_GRANT_SLUG = "authored-content-grant";
+
+/** A validated, NOT-YET-CONFIRMED inline authored-content grant, keyed by (sessionId, route) — mirrors
+ *  `PendingBoardWrite`/`pendingBoardKey` exactly, just namespaced by `AUTHORED_CONTENT_GRANT_SLUG`. */
+interface PendingAuthoredGrant {
+  projectId: string;
+  scope: AuthoredContentGrantScope;
+}
+const pendingAuthoredGrants = new Map<string, PendingAuthoredGrant>();
+
+function pendingAuthoredGrantKey(sessionId: string, route: CompanionRoute | null): string {
+  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${AUTHORED_CONTENT_GRANT_SLUG}`;
+}
 
 /**
  * A per-project `config_json.authoredContent` opt-in (Framework §4.5's Tier-A residual, this card) —
@@ -975,11 +993,20 @@ const BOARD_REACH: CompanionCapability = {
         const normalizedBody = hasBody ? (body as string) : "";
         // Primitive B applies on EVERY path that can actually commit title/body content THIS call (the
         // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
-        // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc): then
-        // the verbatim requirement is skipped entirely and the companion may author real card text.
-        const contentIsVerbatim = authoredContentAllowed(cfg)
-          || (ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)
-            && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody)));
+        // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc), OR
+        // an inline authored-content grant (card 2b26035c, Direction a) is live for (session, project):
+        // either way the verbatim requirement is skipped and the companion may author real card text.
+        // `verbatimOk` is checked BEFORE the inline grant so `grantAllows` only reads true when the grant
+        // is what actually decided this — see `grantAllows`' own doc for why that matters for consumption.
+        const cfgAllows = authoredContentAllowed(cfg);
+        const verbatimOk = ctx.attest.isVerbatimOwnerText(ctx.sessionId, title)
+          && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody));
+        // `grantAllows` is a non-mutating PEEK (hasAuthoredContentGrant) — only true when NEITHER the
+        // persistent per-project toggle NOR a verbatim quote already covers this call, so a "once" grant
+        // is only ever CONSUMED (below, after an actual commit) when it was genuinely the deciding factor
+        // — an owner who happens to grant AND quote verbatim in the same call doesn't burn their grant.
+        const grantAllows = !cfgAllows && !verbatimOk && ctx.attest.hasAuthoredContentGrant(ctx.sessionId, project);
+        const contentIsVerbatim = cfgAllows || verbatimOk || grantAllows;
 
         // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
         // propose/confirm round-trip at all.
@@ -989,6 +1016,7 @@ const BOARD_REACH: CompanionCapability = {
           }
           const created = createProjectTask(db, project, { title, body: normalizedBody, columnKey, priority });
           if ("error" in created) return ok({ error: created.error });
+          if (grantAllows) ctx.attest.consumeAuthoredContentGrantIfOnce(ctx.sessionId, project);
           return ok({
             status: "created",
             task: { id: created.id, title: created.title, columnKey: created.columnKey, priority: created.priority, projectId: project },
@@ -1008,6 +1036,12 @@ const BOARD_REACH: CompanionCapability = {
           }
           const created = createProjectTask(db, project, { title, body: normalizedBody, columnKey, priority });
           if ("error" in created) return ok({ error: created.error });
+          // Consume based on `pending.grantBacked` (decided ONCE, at PROPOSE time) — NOT a fresh
+          // `grantAllows` recompute here. This turn's OWN owner text is the CONFIRM reply itself (e.g.
+          // "CONFIRM ABC123"), which is never a verbatim match for the title — recomputing here would
+          // wrongly read `grantAllows: true` (and burn a live "once" grant) even when the ORIGINAL
+          // propose was verbatim-satisfied and never needed the grant at all.
+          if (pending.grantBacked) ctx.attest.consumeAuthoredContentGrantIfOnce(ctx.sessionId, project);
           onStepUpCommitted(ctx.trustWindow, "A", friction, frictionScope);
           return ok({
             status: "created",
@@ -1038,7 +1072,9 @@ const BOARD_REACH: CompanionCapability = {
         if (!delivered) {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
-        pendingBoardWrites.set(key, { action: "create", projectId: project, title, body: normalizedBody, columnKey, priority });
+        // `grantBacked` freezes THIS call's `grantAllows` verdict for the later confirm to replay — see
+        // the confirm branch's own doc for why it must not be recomputed there.
+        pendingBoardWrites.set(key, { action: "create", projectId: project, title, body: normalizedBody, columnKey, priority, grantBacked: grantAllows });
         return ok({ status: "proposed" });
       },
     );
@@ -1119,13 +1155,16 @@ const BOARD_REACH: CompanionCapability = {
         const normalizedBody = hasBody ? (body as string) : undefined;
         // Primitive B applies to `title`/`body` on EVERY path that can actually commit them THIS call (the
         // low-friction direct-commit below, and the fresh-propose path further down) — never on a bare
-        // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc): then
-        // the verbatim requirement is skipped entirely. `columnKey`/`priority`/`held` are closed-vocabulary
-        // fields, unaffected either way — mirrors decision_resolve's own chosenOption (validated, not
-        // verbatim-checked).
-        const contentIsVerbatim = authoredContentAllowed(cfg)
-          || ((!hasTitle || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedTitle as string))
-            && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string)));
+        // CONFIRM reply — UNLESS this project's grant has opted into `authoredContent` (see its doc), OR
+        // an inline authored-content grant (card 2b26035c, Direction a) is live for (session, project).
+        // `columnKey`/`priority`/`held` are closed-vocabulary fields, unaffected either way — mirrors
+        // decision_resolve's own chosenOption (validated, not verbatim-checked). See board_create's own
+        // `grantAllows` doc for why `verbatimOk` is checked first.
+        const cfgAllows = authoredContentAllowed(cfg);
+        const verbatimOk = (!hasTitle || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedTitle as string))
+          && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string));
+        const grantAllows = !cfgAllows && !verbatimOk && ctx.attest.hasAuthoredContentGrant(ctx.sessionId, task.projectId);
+        const contentIsVerbatim = cfgAllows || verbatimOk || grantAllows;
         const applyPatch = (): { error: string } | { updated: Task | TaskUpdateAck } => {
           const patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "priority" | "held">> = {};
           if (hasTitle) patch.title = normalizedTitle;
@@ -1145,6 +1184,7 @@ const BOARD_REACH: CompanionCapability = {
           }
           const result = applyPatch();
           if ("error" in result) return ok({ error: result.error });
+          if (grantAllows) ctx.attest.consumeAuthoredContentGrantIfOnce(ctx.sessionId, task.projectId);
           const updated = result.updated;
           return ok({
             status: "updated",
@@ -1166,6 +1206,10 @@ const BOARD_REACH: CompanionCapability = {
           }
           const result = applyPatch();
           if ("error" in result) return ok({ error: result.error });
+          // See board_create's own confirm-branch doc for why this reads `pending.grantBacked` (frozen
+          // at propose time) rather than recomputing `grantAllows` against THIS turn's owner text (the
+          // confirm reply itself, never a verbatim match).
+          if (pending.grantBacked) ctx.attest.consumeAuthoredContentGrantIfOnce(ctx.sessionId, task.projectId);
           onStepUpCommitted(ctx.trustWindow, "A", friction, frictionScope);
           const updated = result.updated;
           return ok({
@@ -1200,7 +1244,99 @@ const BOARD_REACH: CompanionCapability = {
         if (!delivered) {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
-        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held });
+        pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held, grantBacked: grantAllows });
+        return ok({ status: "proposed" });
+      },
+    );
+
+    /**
+     * `authored_content_grant` (Direction (a), card 2b26035c — "inline authored-content grant"). Lets the
+     * owner grant board_create/board_update permission to author real card text on ONE project, from
+     * chat itself, instead of hunting the project's Settings "authored content" toggle. This tool ITSELF
+     * NEVER authors or commits any card content — it only ever flips the grant used by board_create/
+     * board_update's own `contentIsVerbatim` check above.
+     *
+     * ALWAYS Tier-X-shaped: unlike board_create/board_update's Tier A, there is NO low-friction direct-
+     * commit path here at all, even inside an otherwise-warm trust window — granting authored-content
+     * capability is itself the sensitive act, so it ALWAYS goes through Primitive C propose/confirm
+     * (mirrors board_relocate's own always-confirm posture). This is what keeps the grant an EXPLICIT
+     * owner act: the Companion can request it, but only the owner's own next authenticated confirming
+     * turn can commit it (Primitive C, via `ctx.attest.confirmPending`) — there is no code path from a
+     * bare tool call (however phrased) straight to `ctx.attest.grantAuthoredContent`.
+     */
+    server.registerTool(
+      "authored_content_grant",
+      {
+        description:
+          "Ask the owner, from THIS chat, to let you author real card text for board_create/board_update " +
+          "on `project` — instead of quoting them verbatim — without them needing to change that " +
+          "project's Settings toggle. `scope`: \"once\" grants it for the very NEXT board_create/" +
+          "board_update call on that project only; \"session\" keeps it granted for the rest of this " +
+          "conversation (until reset/recycle). This tool never authors or creates/updates a card itself " +
+          "— it ALWAYS requires the owner's explicit confirmation, even inside an otherwise-warm trust " +
+          "window: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see " +
+          "or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
+          "returns {status:'proposed'}. Only once the owner replies to THAT message do you call " +
+          "authored_content_grant AGAIN with the SAME arguments to actually apply it " +
+          "({status:'granted'}) — Loom detects the owner's confirming reply itself. A mismatched confirm " +
+          "reply returns {status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. " +
+          "Requires an act-mode grant on `project` and an owner-authored turn on a channel Loom can " +
+          "reply to — a proactive/heartbeat turn is always rejected.",
+        inputSchema: { project: z.string(), scope: z.enum(["once", "session"]).default("once") },
+      },
+      async ({ project, scope }) => {
+        if (!ctx.scope.projectIds.has(project)) {
+          return ok({ error: `project "${project}" is not in your granted scope` });
+        }
+        if (!ctx.scope.mayAct(project)) {
+          return ok({ error: "you only have a read-mode grant on this project — authored_content_grant needs act-mode" });
+        }
+        // Primitive A — every call (propose OR confirm) must be on an owner-authored turn.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — authored_content_grant can only act on an owner-authored turn" });
+        }
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+        const key = pendingAuthoredGrantKey(ctx.sessionId, route);
+        const scopeTyped = scope as AuthoredContentGrantScope;
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first. No
+        // low-friction branch before this: granting authored-content is ALWAYS a fresh propose/confirm.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, AUTHORED_CONTENT_GRANT_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingAuthoredGrants.get(key);
+          pendingAuthoredGrants.delete(key); // single-use, whether or not it still matches below.
+          if (!pending || pending.projectId !== project || pending.scope !== scopeTyped) {
+            return ok({ error: "the confirmed grant no longer matches what was proposed — call authored_content_grant again to re-propose" });
+          }
+          ctx.attest.grantAuthoredContent(ctx.sessionId, project, scopeTyped);
+          return ok({ status: "granted", project, scope: scopeTyped });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        // An EXPIRED (or never-existed) proposal's payload is dead weight — evict before the fresh
+        // propose below unconditionally overwrites this key.
+        pendingAuthoredGrants.delete(key);
+
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: AUTHORED_CONTENT_GRANT_SLUG,
+          summary: scopeTyped === "session"
+            ? `Let me author real card text (instead of quoting you verbatim) for project ${project}, for the rest of this chat?`
+            : `Let me author real card text (instead of quoting you verbatim) for your next card on project ${project}?`,
+        });
+        // CR hardening (inherited from decision_resolve/board_create) — deliver DIRECTLY to the owner;
+        // never hand promptText/the token back to the companion. Fail closed on a delivery failure.
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingAuthoredGrants.set(key, { projectId: project, scope: scopeTyped });
         return ok({ status: "proposed" });
       },
     );

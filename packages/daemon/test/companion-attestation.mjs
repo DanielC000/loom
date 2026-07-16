@@ -13,7 +13,7 @@
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const { isVerbatimOwnerSubstring, OwnerConfirmStore } = await import("../dist/companion/attestation.js");
+const { isVerbatimOwnerSubstring, isVerbatimOwnerSubstringRecent, OwnerConfirmStore, AuthoredContentGrantStore } = await import("../dist/companion/attestation.js");
 
 // ===== Primitive B — isVerbatimOwnerSubstring =====
 {
@@ -99,7 +99,50 @@ const { isVerbatimOwnerSubstring, OwnerConfirmStore } = await import("../dist/co
   }
 }
 
+// ===== Primitive A/B widening (card 2b26035c) — isVerbatimOwnerSubstringRecent =====
+{
+  const recent = ["Creative projects for the new client", "no, creating a new project structure", "ok thanks"];
+  check("recent: a candidate verbatim in an OLDER (not the most-recent) turn matches", isVerbatimOwnerSubstringRecent("creating a new project structure", recent) === true);
+  check("recent: a candidate verbatim in the MOST-recent turn also matches", isVerbatimOwnerSubstringRecent("ok thanks", recent) === true);
+  check("recent: a candidate that appears in NO recent turn is REJECTED", isVerbatimOwnerSubstringRecent("delete the production database", recent) === false);
+  check("recent: an empty window (no owner turns yet) REJECTS everything", isVerbatimOwnerSubstringRecent("anything", []) === false);
+  check("recent: an empty candidate is REJECTED (mirrors Primitive B)", isVerbatimOwnerSubstringRecent("", recent) === false);
+  // Security regression: candidates must be checked against EACH turn independently, never a
+  // concatenation — so a phrase that only exists by stitching the END of one turn to the START of
+  // another must NOT match (a real owner never said that contiguously in one authenticated turn).
+  const boundary = ["please approve the", "merge request now"];
+  check("recent: a candidate spanning a TURN BOUNDARY (never said contiguously) is REJECTED — no cross-turn concatenation", isVerbatimOwnerSubstringRecent("approve the merge request", boundary) === false);
+}
+
+// ===== Direction (a), card 2b26035c — AuthoredContentGrantStore =====
+{
+  const store = new AuthoredContentGrantStore();
+  const sid = "sess-grant";
+  const proj = "proj-a";
+
+  check("grant: no grant yet ⇒ hasGrant false", store.hasGrant(sid, proj) === false);
+  store.grant(sid, proj, "once");
+  check("grant: hasGrant true after granting 'once'", store.hasGrant(sid, proj) === true);
+  check("grant: a PEEK (hasGrant) does not consume it — still true on a second peek", store.hasGrant(sid, proj) === true);
+  store.consumeIfOnce(sid, proj);
+  check("grant: 'once' scope is consumed after consumeIfOnce", store.hasGrant(sid, proj) === false);
+
+  store.grant(sid, proj, "session");
+  store.consumeIfOnce(sid, proj);
+  check("grant: 'session' scope survives consumeIfOnce (only 'once' is consumed)", store.hasGrant(sid, proj) === true);
+
+  const otherProj = "proj-b";
+  check("grant: scoped per-project — a grant on proj-a does NOT leak to proj-b", store.hasGrant(sid, otherProj) === false);
+
+  const otherSess = "sess-other";
+  store.grant(sid, proj, "session");
+  check("grant: scoped per-session too — a grant for sess-grant does NOT leak to sess-other", store.hasGrant(otherSess, proj) === false);
+
+  store.clearSession(sid);
+  check("grant: clearSession revokes every grant held for that session", store.hasGrant(sid, proj) === false);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Primitive B (verbatim-substring) and Primitive C (owner-confirm round-trip) behave per the Companion Capability & Permission-Lever Framework §3."
+  ? "\n✅ ALL PASS — Primitive B (verbatim-substring, including its recent-turns widening) and Primitive C (owner-confirm round-trip) behave per the Companion Capability & Permission-Lever Framework §3; the inline authored-content grant store (Direction (a), card 2b26035c) scopes per (session, project) and honors once/session semantics."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

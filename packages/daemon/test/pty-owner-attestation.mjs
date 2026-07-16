@@ -115,6 +115,43 @@ try {
     check("6: the replayed turn re-attests the SAME owner text", host.getActiveTurnOwnerText(sid) === ownerBody);
   }
 
+  // ===== 7. Primitive A widening (card 2b26035c): getRecentOwnerTurns retains a bounded, most-recent-
+  //          first window that SURVIVES Stop (unlike getActiveTurnOwnerText, which clears every turn) =====
+  {
+    const sid = newSession("G"); SIDS.push(sid);
+    check("7: empty window before any owner turn", JSON.stringify(host.getRecentOwnerTurns(sid)) === "[]");
+    const turn1 = "Creative projects for the new client";
+    host.enqueueStdin(sid, turn1, "system", undefined, IN_APP, "agent", undefined, turn1);
+    stop(sid);
+    check("7: getActiveTurnOwnerText cleared after Stop (unchanged Primitive A behavior)", host.getActiveTurnOwnerText(sid) === null);
+    check("7: getRecentOwnerTurns still has turn 1 AFTER Stop — it does not clear like the active field", JSON.stringify(host.getRecentOwnerTurns(sid)) === JSON.stringify([turn1]));
+    const turn2 = "no, creating a new project structure";
+    host.enqueueStdin(sid, turn2, "system", undefined, IN_APP, "agent", undefined, turn2);
+    stop(sid);
+    check("7: a SECOND owner turn is prepended (most-recent-first), turn 1 still present", JSON.stringify(host.getRecentOwnerTurns(sid)) === JSON.stringify([turn2, turn1]));
+    // A non-owner (proactive) turn must NEVER be pushed into the window — only server-attested owner
+    // bytes may ever satisfy Primitive A, even in its widened form.
+    host.enqueueStdin(sid, "[loom:heartbeat] proactive check-in", "system", undefined, IN_APP, "agent");
+    stop(sid);
+    check("7: a proactive/non-owner turn does NOT get pushed into the recent-owner window", JSON.stringify(host.getRecentOwnerTurns(sid)) === JSON.stringify([turn2, turn1]));
+  }
+
+  // ===== 8. Bounded window — an old-enough turn falls out once it exceeds the retained window =====
+  {
+    const sid = newSession("H"); SIDS.push(sid);
+    // Push more owner turns than the window retains, and confirm the OLDEST one is evicted while the
+    // window stays bounded (never unboundedly growing across a long conversation).
+    const turns = ["turn one", "turn two", "turn three", "turn four", "turn five", "turn six", "turn seven"];
+    for (const t of turns) {
+      host.enqueueStdin(sid, t, "system", undefined, IN_APP, "agent", undefined, t);
+      stop(sid);
+    }
+    const window = host.getRecentOwnerTurns(sid);
+    check("8: the recent-owner window is BOUNDED (does not grow past its configured size)", window.length > 0 && window.length < turns.length);
+    check("8: the MOST RECENT turn is retained", window[0] === "turn seven");
+    check("8: an OLD-ENOUGH turn (the very first one) has fallen out of the window", !window.includes("turn one"));
+  }
+
   await sleep(200); // let async paste-ends/Enters flush before teardown
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -122,6 +159,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn)."
+  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

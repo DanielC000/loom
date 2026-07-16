@@ -34,7 +34,7 @@ import {
   removeCompanionMemory,
 } from "../skills/companion-memory-store.js";
 import { registerCompanionCapabilities } from "../companion/capabilities.js";
-import { createOwnerAttestation, OwnerConfirmStore } from "../companion/attestation.js";
+import { createOwnerAttestation, OwnerConfirmStore, AuthoredContentGrantStore } from "../companion/attestation.js";
 import { CompanionTrustWindow } from "../companion/trust-window.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
@@ -123,6 +123,11 @@ export class OrchestrationMcpRouter {
   // buildServer below) somewhere durable to keep state across requests once one does.
   private readonly ownerConfirmStore = new OwnerConfirmStore();
 
+  // Direction (a), card 2b26035c ("inline authored-content grant"): ONE per router instance, same
+  // lifetime/rationale as `ownerConfirmStore` above — an explicit, Primitive-C-confirmed grant must
+  // survive across the propose call and the owner's later confirming call, both separate requests.
+  private readonly authoredContentGrants = new AuthoredContentGrantStore();
+
   // Companion Trust Window (Framework Card 0) — ONE per router instance, same lifetime/rationale as
   // `ownerConfirmStore` above (in-memory, lost on restart is a fail-safe). Public so gateway/server.ts's
   // REST handlers can revoke every window for a session on the documented close paths (recycle/unbind/
@@ -132,9 +137,12 @@ export class OrchestrationMcpRouter {
 
   /** Revoke every trust window held for `sessionId`, across every route/sender — called from the REST
    *  layer's own close paths (session recycle/unbind, a binding/allowlist change, a re-pair); a daemon
-   *  restart closes every window automatically (in-memory). */
+   *  restart closes every window automatically (in-memory). Also clears any inline authored-content
+   *  grant (card 2b26035c) held for the same session — a grant must never outlive the session it was
+   *  explicitly granted to, mirroring the trust window's own close-path lifetime. */
   closeCompanionTrustWindow(sessionId: string): void {
     this.trustWindow.closeAllForSession(sessionId);
+    this.authoredContentGrants.clearSession(sessionId);
   }
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown.
@@ -548,8 +556,16 @@ export class OrchestrationMcpRouter {
     // is a no-op for every session (additive, byte-identical to today). ALSO role-gated to "assistant"
     // (belt-and-suspenders — see registerCompanionCapabilities' doc).
     const attest = createOwnerAttestation(
-      { getActiveTurnOwnerText: (sid) => pty?.getActiveTurnOwnerText(sid) ?? null },
+      {
+        getActiveTurnOwnerText: (sid) => pty?.getActiveTurnOwnerText(sid) ?? null,
+        // Primitive A widening (card 2b26035c) — optional-chained on the METHOD too (not just `pty`): a
+        // test double built before this card added getRecentOwnerTurns must not THROW here; it degrades
+        // to an empty recent-turns window exactly like a real dead/unknown session would, never breaking
+        // an existing test (isVerbatimOwnerText's current-turn check runs regardless — see its doc).
+        getRecentOwnerTurns: (sid) => pty?.getRecentOwnerTurns?.(sid) ?? [],
+      },
       this.ownerConfirmStore,
+      this.authoredContentGrants,
     );
     // `pty` is optional on this router (see the constructor's own doc) — every method below degrades to a
     // harmless no-op/null when it's absent, exactly like the `attest` wiring just above. `outbound` wraps

@@ -209,7 +209,11 @@ const COMMANDS: Record<string, CommandDef> = {
     // Companion Trust Window (Framework Card 0): the owner's explicit "step down" — closes every warm
     // window this session holds, across every route/sender, so a subsequent Tier-A act (decision_resolve/
     // board_create/board_update) falls back to a fresh propose/confirm round-trip. Never destructive to
-    // anything else (the conversation, grants, and scope are all untouched).
+    // the conversation or the session's CAPABILITY grants/scope (those stay untouched) — but since card
+    // 2b26035c, `closeCompanionTrustWindow` ALSO clears any live INLINE authored-content grant (Direction
+    // (a), a separate, chat-granted thing from the capability grants above) alongside the trust window, so
+    // "/lock" is a real step-down for that too: a subsequent board_create/board_update needs either a
+    // fresh grant or a verbatim quote again, not just a fresh confirm.
     handler(_args, route, _prefs, deps) {
       deps.closeTrustWindow?.(route.sessionId);
       return { ack: "🔒 Locked — I'll need your confirmation again before I take any action." };
