@@ -18,12 +18,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       project still sees the escalation its predecessor filed (scoped by originProjectId, not by
 //       managerSessionId).
 //   (d) escalation_status is on the manager surface; absent from the worker surface.
+//   (e) taskId accepts a full id OR an unambiguous 8-char id-PREFIX (card e63874e9), resolved STRICTLY
+//       against the caller's OWN escalation set: an in-scope prefix resolves; that same prefix queried
+//       from a different project still returns found:false (no leak); an AMBIGUOUS in-scope prefix
+//       returns a named "did you mean" error rather than a silent pick; a full id is unaffected even when
+//       its prefix collides with another escalation's.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/escalation-status.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -184,6 +190,39 @@ try {
   check("(b) an unknown taskId ALSO returns found:false — indistinguishable from 'another project's real id'",
     bGhost.found === false);
 
+  // ===================== (e) taskId accepts a full id OR an unambiguous 8-char id-PREFIX (card e63874e9) ====
+  const prefixOfT2 = t2.slice(0, 8);
+  const st2Prefix = await callAs("MGR_A2", "manager", "escalation_status", { taskId: prefixOfT2 });
+  check("(e) an 8-char PREFIX of a real, in-scope taskId resolves to the SAME escalation as the full id",
+    st2Prefix.found === true && st2Prefix.escalation.taskId === t2 && st2Prefix.escalation.status === "pending");
+
+  // That same prefix, queried from a DIFFERENT project's manager, must still never resolve or leak —
+  // scoping is enforced on the CANDIDATE SET (this project's own events), not just on the full-id path.
+  const bPrefix = await callAs("MGR_B", "manager", "escalation_status", { taskId: prefixOfT2 });
+  check("(e) that SAME prefix queried from a DIFFERENT project's manager still returns found:false (scoped, no leak)",
+    bPrefix.found === false && bPrefix.error === undefined);
+
+  // An AMBIGUOUS prefix — two of project A's OWN escalations sharing an 8-char prefix — returns a named
+  // "did you mean" error instead of silently picking one. Craft two synthetic events directly (real
+  // randomUUID taskIds essentially never collide on a shared 8-char prefix by chance).
+  const dupPrefix = "deadbeef";
+  const dupId1 = `${dupPrefix}-aaaa-4aaa-8aaa-aaaaaaaaaaaa`;
+  const dupId2 = `${dupPrefix}-bbbb-4bbb-8bbb-bbbbbbbbbbbb`;
+  for (const id of [dupId1, dupId2]) {
+    db.appendEvent({
+      id: randomUUID(), ts: now, managerSessionId: "MGR_A", taskId: id, kind: "platform_escalate",
+      detail: { originProjectId: "pA", severity: "low", platformProjectId: "pHome", title: `synthetic ${id}` },
+    });
+  }
+  const ambiguous = await callAs("MGR_A", "manager", "escalation_status", { taskId: dupPrefix });
+  check("(e) an AMBIGUOUS in-scope prefix returns a named 'did you mean' error, not a silent pick",
+    typeof ambiguous.error === "string" && ambiguous.error.includes(dupId1) && ambiguous.error.includes(dupId2) && ambiguous.found === undefined);
+
+  // A full id still resolves unambiguously even though it happens to share an 8-char prefix with another.
+  const fullDespiteCollision = await callAs("MGR_A", "manager", "escalation_status", { taskId: dupId1 });
+  check("(e) a FULL id still resolves unambiguously even when its prefix is shared with another escalation",
+    fullDespiteCollision.found === true && fullDespiteCollision.escalation.taskId === dupId1);
+
   // Defense in depth: the service method itself rejects a non-manager caller.
   let svcRejected = false;
   try { svc.escalationStatus("W_A", {}); } catch (e) { svcRejected = /manager-only/.test(e.message); }
@@ -195,6 +234,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — escalation_status is manager-gated and origin-project-scoped: a manager reads its own project's filed escalations (status pending→in_progress→resolved→closed as the Platform task's column/existence changes, current title read back live), a different project's manager gets found:false for both a real foreign taskId and an unknown one (never leaking which), and a different managerSessionId in the SAME project (recycle) still sees escalations its predecessor filed — claude-free, network-free."
+  ? "\n✅ ALL PASS — escalation_status is manager-gated and origin-project-scoped: a manager reads its own project's filed escalations (status pending→in_progress→resolved→closed as the Platform task's column/existence changes, current title read back live), a different project's manager gets found:false for both a real foreign taskId and an unknown one (never leaking which), a different managerSessionId in the SAME project (recycle) still sees escalations its predecessor filed, and taskId now accepts an unambiguous 8-char id-prefix scoped to the caller's own escalation set (ambiguous named, out-of-scope still found:false) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

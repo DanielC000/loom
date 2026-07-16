@@ -11,6 +11,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //            left unchanged on rejection.
 //       (2b) a PRE-EXISTING human-set gateCommand (set by the Lead via the full validator) is PRESERVED
 //            when the agent patches a DIFFERENT key — merge keeps the human key, but the agent never set it.
+//   (3) PLATFORM project_configure's projectId accepts a full id OR an unambiguous 8-char id-PREFIX (card
+//       e63874e9, mirrors project_get): a full id is unaffected even with a shared-prefix sibling; an
+//       unambiguous prefix resolves + patches the right project; an AMBIGUOUS prefix returns a named "did
+//       you mean" error and writes nothing; an unknown id still returns "project not found", unchanged.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE, hermetic like surface-subset.mjs: a REAL Db + SessionService
 // against a FAKE pty, the REAL Platform + Setup routers driven over an in-process MCP InMemoryTransport (no
@@ -137,12 +141,42 @@ try {
   const agentOverwrite = await setup("project_configure", { projectId: "pCfg", config: { orchestration: { gateCommand: "rm -rf /" } } });
   check("(2b) ★ agent CANNOT overwrite gateCommand through the patch path (rejected)", typeof agentOverwrite.error === "string" && !agentOverwrite.ok);
   check("(2b) gateCommand value untouched after the rejected overwrite", db.getProject("pCfg").config.orchestration?.gateCommand === "pnpm build && pnpm test");
+
+  // ============ (3) PLATFORM project_configure: projectId accepts a full id OR an unambiguous 8-char
+  // id-PREFIX (card e63874e9) — mirrors project_get / list_all_agents. ============
+  const pxAId = "deadbeef-1111-4111-8111-111111111111";
+  const pxBId = "deadbeef-2222-4222-8222-222222222222";
+  const uniqueId = "cafef00d-3333-4333-8333-333333333333";
+  db.insertProject({ id: pxAId, name: "PX-A", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  db.insertProject({ id: pxBId, name: "PX-B", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  db.insertProject({ id: uniqueId, name: "PX-Unique", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
+
+  // A FULL id resolves + patches correctly (unchanged) even when it happens to share an 8-char prefix
+  // with another project (pxAId/pxBId both start "deadbeef").
+  const fullIdPatch = await platform("project_configure", { projectId: pxAId, config: { docLint: true } });
+  check("(3) a FULL id resolves + patches correctly even with a shared-prefix sibling",
+    fullIdPatch.ok === true && fullIdPatch.projectId === pxAId && db.getProject(pxAId).config.docLint === true);
+
+  // An UNAMBIGUOUS 8-char prefix resolves to the right project and patches it.
+  const prefixPatch = await platform("project_configure", { projectId: uniqueId.slice(0, 8), config: { docLint: true } });
+  check("(3) ★ an unambiguous 8-char id-PREFIX resolves to the right project and patches it",
+    prefixPatch.ok === true && prefixPatch.projectId === uniqueId && db.getProject(uniqueId).config.docLint === true);
+
+  // An AMBIGUOUS prefix (shared by pxAId/pxBId) returns a named "did you mean" error — no silent pick, no write.
+  const ambiguousPatch = await platform("project_configure", { projectId: "deadbeef", config: { docLint: true } });
+  check("(3) ★ an AMBIGUOUS id-prefix returns a named 'did you mean' error, not a silent pick",
+    typeof ambiguousPatch.error === "string" && ambiguousPatch.error.includes(pxAId) && ambiguousPatch.error.includes(pxBId) && ambiguousPatch.ok === undefined);
+  check("(3) the ambiguous patch wrote to NEITHER candidate", db.getProject(pxAId).config.docLint === true && db.getProject(pxBId).config.docLint === undefined);
+
+  // An unknown id still errors exactly as before.
+  const unknownPatch = await platform("project_configure", { projectId: "0000000000000000", config: { docLint: true } });
+  check("(3) an unknown id still returns 'project not found', unchanged", unknownPatch.error === "project not found");
 } finally {
   db.close();
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry WAL handle on Windows */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project_configure PATCHES (deep-merges) into the existing override on BOTH the platform (full) and setup (agent) surfaces: a single-key change preserves kanbanColumns + nested siblings (arrays/scalars replace, objects merge); a rejected patch leaves the store unchanged; and the trust boundary is intact through the patch path — the agent validator still rejects gateCommand/obsidian.path, an agent can never introduce or overwrite a human-only key, while a pre-existing human-set key is preserved."
+  ? "\n✅ ALL PASS — project_configure PATCHES (deep-merges) into the existing override on BOTH the platform (full) and setup (agent) surfaces: a single-key change preserves kanbanColumns + nested siblings (arrays/scalars replace, objects merge); a rejected patch leaves the store unchanged; and the trust boundary is intact through the patch path — the agent validator still rejects gateCommand/obsidian.path, an agent can never introduce or overwrite a human-only key, while a pre-existing human-set key is preserved. The platform surface's projectId now also accepts a full id OR an unambiguous 8-char id-prefix (ambiguous named, unknown unchanged)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

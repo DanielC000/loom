@@ -3882,19 +3882,34 @@ export class SessionService {
    * that set — whether it belongs to another project's escalation or is simply unknown — returns
    * `{ found: false }` uniformly; it never confirms or denies that a given Platform task exists, so a
    * manager can't use this to probe another project's escalations.
+   *
+   * `taskId` accepts EITHER a full id or an unambiguous id-PREFIX (reuses the shared `resolveIdPrefix`
+   * helper, card e63874e9) — the SAME paste-able 8-char short id every other `*_get`-shaped read already
+   * accepts. Resolution is scoped STRICTLY to `events` (already origin-project-scoped above) — never
+   * `db.listTasks()`/`getTask`, which would leak whether an out-of-scope id exists. An ambiguous prefix
+   * names the candidate ids (still project-scoped); a true miss — unknown OR simply out-of-scope — still
+   * returns `{ found: false }` uniformly, unchanged.
    */
   escalationStatus(
     managerSessionId: string,
     input: { taskId?: string },
-  ): { found: false } | { found: true; escalation: EscalationStatusItem } | { found: true; escalations: EscalationStatusItem[] } {
+  ): { found: false } | { found: true; escalation: EscalationStatusItem } | { found: true; escalations: EscalationStatusItem[] } | { error: string } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("escalation_status is a manager-only surface");
 
     const events = this.db.listEscalationsForProject(caller.projectId);
     if (input.taskId) {
-      const match = events.find((e) => e.taskId === input.taskId);
-      if (!match) return { found: false };
-      return { found: true, escalation: this.describeEscalation(match) };
+      const ref = input.taskId;
+      // platform_escalate always sets taskId (service method above), but the field is nullable on the
+      // shared OrchestrationEvent type — filter defensively so resolveIdPrefix's candidates are always
+      // real strings rather than coercing a null/undefined into a matchable "" prefix.
+      const withId = events.filter((e): e is typeof e & { taskId: string } => typeof e.taskId === "string");
+      const r = resolveIdPrefix(withId.map((e) => ({ id: e.taskId, event: e })), ref);
+      if (r.kind === "ambiguous") {
+        return { error: `ambiguous escalation id-prefix '${ref}' — it matches ${r.ids.join(", ")}; pass more characters or the full id` };
+      }
+      if (r.kind === "none") return { found: false };
+      return { found: true, escalation: this.describeEscalation(r.record.event) };
     }
     return { found: true, escalations: events.map((e) => this.describeEscalation(e)) };
   }

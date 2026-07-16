@@ -750,7 +750,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_configure",
       {
-        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian, python. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset.",
+        description: "PATCH a project's config override: by default the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the FULL project-config schema; resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian, python. As an ELEVATED platform-role tool (P3, trust boundary) this may ALSO set the human-only keys the agent path rejects — orchestration.gateCommand / alertWebhook (+ their timeouts) — bounded EXACTLY as the human REST PATCH path (e.g. gateCommandTimeoutMs 1000–1800000, alertWebhookTimeoutMs 500–60000, alertWebhook.url must be a real URL; unknown keys rejected). UNSET/REPLACE: pass unset:[\"orchestration.gateCommand\",\"obsidian\"] (dot-paths) to REMOVE a misconfigured key after the merge (an absent path is a no-op); pass replace:true to make `config` REPLACE the whole stored override (clear keys by omission) instead of merging. config may be omitted/{} when you only want to unset.",
         inputSchema: {
           projectId: z.string(),
           config: z.object({}).passthrough().optional(),
@@ -759,8 +759,13 @@ export class PlatformMcpRouter {
         },
       },
       async ({ projectId, config, unset, replace }) => {
-        const project = db.getProject(projectId);
-        if (!project) return ok({ error: "project not found" });
+        // Accepts a full id OR an unambiguous 8-char id-prefix (mirrors project_get / list_all_agents) —
+        // resolve ONCE up front so every subsequent use (merge base + the writer + the final re-read) is
+        // keyed off the resolved FULL id, never the raw (possibly-prefix) input.
+        const resolved = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+        if ("error" in resolved) return ok(resolved);
+        const project = resolved;
+        const resolvedProjectId = project.id;
         // P3 ELEVATION (trust boundary): the platform role is HUMAN-EQUIVALENT, so config-set on THIS
         // platform-route tool goes through the FULL human/REST validator (validateProjectConfigOverride) —
         // NOT validateAgentProjectConfigOverride. The full validator carries the SAME bounds the REST PATCH
@@ -783,9 +788,9 @@ export class PlatformMcpRouter {
         // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/
         // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
         // non-existent column. A non-column patch stays byte-identical to the blind path. (columns.ts.)
-        const wrote = setProjectConfigSafe(db, projectId, merged);
+        const wrote = setProjectConfigSafe(db, resolvedProjectId, merged);
         if (!wrote.ok) return ok({ error: wrote.error });
-        return ok({ ok: true, projectId, config: db.getProject(projectId)?.config ?? merged });
+        return ok({ ok: true, projectId: resolvedProjectId, config: db.getProject(resolvedProjectId)?.config ?? merged });
       },
     );
 

@@ -1828,11 +1828,14 @@ export class OrchestrationMcpRouter {
         description:
           "READ-ONLY: check whether the Platform Lead has picked up / resolved an escalation YOUR PROJECT " +
           "filed via platform_escalate — closes the gap where a manager re-escalates work the Lead already " +
-          "claimed. Pass `taskId` (the id platform_escalate returned) to check one escalation; omit it to " +
+          "claimed. Pass `taskId` (the id platform_escalate returned, OR an unambiguous 8-char id-prefix — " +
+          "the paste-able short id Loom displays) to check one escalation; omit it to " +
           "list every escalation ever filed from your project, most-recent first. Scoped server-side to " +
           "YOUR OWN project's origin — a taskId outside that set (another project's escalation, or unknown) " +
           "returns `{found:false}` uniformly, never an error, so this can't be used to probe another " +
-          "project's escalations. Each escalation reports its CURRENT title (the Lead may have refined it — " +
+          "project's escalations; an AMBIGUOUS prefix that matches more than one of YOUR OWN escalations " +
+          "returns a \"did you mean\" error naming the candidates (pass more characters or the full id) — " +
+          "still never leaking anything outside your project. Each escalation reports its CURRENT title (the Lead may have refined it — " +
           "itself a sign it was seen), a `status` of pending (still in the landing lane — not yet picked " +
           "up), in_progress (moved into a working lane — picked up), resolved (in a done/terminal column), " +
           "or closed (the task was deleted/archived), its columnKey, and updatedAt. No writes.",
