@@ -1072,6 +1072,19 @@ async function main(): Promise<void> {
     console.warn(`[boot] queued-message recovery failed (continuing boot): ${(err as Error).message}`);
   }
 
+  // Dead-owner merge-op sweep (card 27ea069e): the in-memory PendingOpRegistry is reset by an actual
+  // process restart, so this is usually a no-op the moment it runs — it exists as belt-and-suspenders
+  // for any orphaned-owner shape that survives to this point (e.g. a harness/host that doesn't fully
+  // reconstruct SessionService across a "restart"). Runs AFTER the fleet-resume passes above so a
+  // manager that was successfully re-resumed reads back as live, not dead, and its own in-flight merge is
+  // left untouched. Never gates boot.
+  try {
+    const cleared = sessions.reconcileDeadOwnerMergeOps();
+    if (cleared > 0) console.log(`[boot] dead-owner merge-op sweep: cleared ${cleared} orphaned merge op(s)`);
+  } catch (err) {
+    console.warn(`[boot] dead-owner merge-op sweep failed (continuing boot): ${(err as Error).message}`);
+  }
+
   // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
   // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker
   // is stamped at launch so it never re-fires — not after a daemon_restart, not after the user later

@@ -3103,6 +3103,41 @@ export class SessionService {
     });
   }
 
+  /** DEAD-OWNER CHECK (card 27ea069e): a manager session is "dead" for pending-merge-op purposes when it
+   *  no longer exists, has exited, or has been archived — none of these can ever come back to observe a
+   *  pending op's outcome through the normal attach()/settle path. Deliberately conservative: a session
+   *  mid-`starting` (e.g. a boot-time resume attempt still in flight) is NOT dead — only a definitively
+   *  gone session is, so a legitimately-resuming manager's own in-flight op is never touched. */
+  private isManagerSessionDead(managerSessionId: string): boolean {
+    const mgr = this.db.getSession(managerSessionId);
+    return !mgr || mgr.processState === "exited" || !!mgr.archivedAt;
+  }
+
+  /**
+   * Boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops (card 27ea069e — a daemon
+   * restart mid-merge used to leave `worker_merge_confirm` dedup-attaching to a zombie op forever, keyed
+   * `merge:${workerSessionId}`, because nothing ever reconciled/expired an entry whose owning manager
+   * session was gone). Evicts any RUNNING merge op whose `managerSessionId` is {@link isManagerSessionDead}
+   * — never a live/still-resuming owner's op, so the healthy case (a manager legitimately mid-merge, or
+   * one still being resumed at boot) is completely untouched. This registry is in-memory (reset on an
+   * actual process restart), so in production this sweep is usually a no-op the moment it runs — its real
+   * value is BELT-AND-SUSPENDERS for any orphaned-owner shape the per-call defensive check in
+   * {@link confirmWorkerMergeTracked} doesn't itself observe (e.g. nobody re-calls `worker_merge_confirm`
+   * for that worker before some other reconcile pass wants to know). Returns the number evicted, for a
+   * boot-log line; never throws.
+   */
+  reconcileDeadOwnerMergeOps(): number {
+    let cleared = 0;
+    for (const op of this.pendingOps.listAllOfKind("merge")) {
+      if (!this.isManagerSessionDead(op.managerSessionId)) continue;
+      if (this.pendingOps.evictDeadOwner(op.key)) {
+        cleared++;
+        console.warn(`[orchestration] merge op ${op.opId} (${op.key}) had a dead owner (manager ${op.managerSessionId.slice(0, 8)}) — evicted so a fresh worker_merge_confirm can proceed`);
+      }
+    }
+    return cleared;
+  }
+
   /** Read-only listing of cap-rejected spawn intents for worker_list's cap-queued placeholder rows —
    *  see {@link CapQueueRegistry}. Distinct from {@link listPendingSpawns}: a pending spawn is
    *  IN-FLIGHT (still provisioning); a cap-queued entry never started at all. */
@@ -6164,6 +6199,20 @@ export class SessionService {
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
   ): Promise<AttachResult<ConfirmMergeResult>> {
     const key = `merge:${workerSessionId}`;
+    // DEAD-OWNER RECOVERY (card 27ea069e): an existing RUNNING op for this key whose owning manager
+    // session is gone (exited/archived/missing — see isManagerSessionDead) can never settle for a LIVE
+    // caller again — its original manager, the only session that could ever have been pushed its
+    // outcome, no longer exists. Without this check, attach() below would dedup-attach THIS fresh call to
+    // that zombie op forever ({status:"pending"} on every retry, no gate ever actually running — the
+    // exact incident this card fixes). Evict it so this call starts a genuinely fresh confirm instead.
+    // SCOPED TO A CONFIRMED-DEAD OWNER ONLY: a live (or still-resuming) owner's op is left completely
+    // alone, so the healthy path — two managers/retries racing a genuinely in-flight merge — is
+    // byte-identical to before this card.
+    const existing = this.pendingOps.peek(key);
+    if (existing && this.isManagerSessionDead(existing.managerSessionId)) {
+      console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
+      this.pendingOps.evictDeadOwner(key);
+    }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
     const who = (opId: string) => `worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${opId}]`;
     return this.pendingOps.attach<ConfirmMergeResult>(

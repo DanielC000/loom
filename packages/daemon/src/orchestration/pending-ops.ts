@@ -81,6 +81,14 @@ function view(e: Entry<unknown>): PendingOpView {
  * never started) safely re-invokes the real operation — safe because BOTH callers of this registry lean
  * on their OWN pre-existing idempotency: confirmWorkerMerge's ALREADY_MERGED re-derive-from-clean-index,
  * and spawnWorker's `liveSessionIdForTask` live-worker guard — neither of which this registry duplicates.
+ *
+ * DEAD-OWNER RECOVERY (card 27ea069e, the ONE exception to evict-on-settle-only): a `run()` invocation
+ * can outlive the manager session that started it (that manager crashed, was stopped, or is otherwise
+ * gone) with no live caller left who could ever be handed its outcome through the normal settle path —
+ * so `evictDeadOwner()` force-removes such an entry ahead of its own settlement, letting a fresh
+ * `attach()` on the same `key` start a genuinely new invocation instead of dedup-attaching to (or
+ * spin-polling) one that can never be delivered. See `SessionService.confirmWorkerMergeTracked`
+ * (per-call defensive check) and `reconcileDeadOwnerMergeOps` (boot-time sweep).
  */
 export class PendingOpRegistry {
   private readonly entries = new Map<string, Entry<unknown>>();
@@ -104,6 +112,45 @@ export class PendingOpRegistry {
       if (e.kind === kind && e.managerSessionId === managerSessionId && e.state === "running") out.push(view(e));
     }
     return out;
+  }
+
+  /** Read-only listing of every RUNNING `kind` op regardless of owning manager — for the dead-owner
+   *  recovery sweep (SessionService.reconcileDeadOwnerMergeOps / confirmWorkerMergeTracked), which needs
+   *  to check EVERY outstanding op's `managerSessionId` against current session state, not just one
+   *  manager's own. Never consumes (mirrors peek()/listByManager()). */
+  listAllOfKind(kind: PendingOpKind): PendingOpView[] {
+    const out: PendingOpView[] = [];
+    for (const e of this.entries.values()) if (e.kind === kind && e.state === "running") out.push(view(e));
+    return out;
+  }
+
+  /** Force-remove a RUNNING entry keyed `key`, WITHOUT waiting for its `run()` to settle — the dead-owner
+   *  recovery path (see the class doc's "DEAD-OWNER RECOVERY" note and SessionService's
+   *  `confirmWorkerMergeTracked`/`reconcileDeadOwnerMergeOps`): once the op's owning manager session is
+   *  confirmed gone (exited/archived/missing), nothing will ever consume this op's outcome through the
+   *  normal attach()/settle path — the caller that could receive it no longer exists — so a fresh caller
+   *  must be able to start a NEW invocation under the SAME key instead of dedup-attaching to (or
+   *  spin-polling) one that can never be delivered. Returns `false` (no-op) if there's no RUNNING entry
+   *  for `key` — e.g. it already settled naturally in the race, or there was never one. Never touches a
+   *  settled entry (already evicted on settle — see the class doc), so this can't resurrect/duplicate a
+   *  result that already landed.
+   *
+   *  ACCEPTED TRADEOFF (CR finding, card 27ea069e): this can only remove the MAP ENTRY, never cancel the
+   *  orphaned `run()` itself (there's no handle to cancel a bare Promise) — the old op's real work keeps
+   *  executing in the background, unreachable, until it eventually settles on its own. That late settle is
+   *  now harmless: `attach()`'s identity-guarded delete (`this.entries.get(key) === fresh`) means it can
+   *  only clear its OWN (already-detached) entry, never the successor `evictDeadOwner` made room for — so
+   *  the tradeoff this trades "stuck pending forever" for is just a lingering, functionally-inert
+   *  background call, not a resurrected/duplicated result. The remaining host-load question — could the
+   *  orphaned run and its successor both drive a real gate command CONCURRENTLY — is bounded by the
+   *  daemon-global {@link GateSemaphore} (`orchestration.maxConcurrentGates`, default 1): it serializes
+   *  actual gate RUNS across the whole daemon, so the orphaned run and the fresh one can't execute gates
+   *  at the same time even though both are technically "in flight" JS-side. */
+  evictDeadOwner(key: string): boolean {
+    const e = this.entries.get(key);
+    if (!e || e.state !== "running") return false;
+    this.entries.delete(key);
+    return true;
   }
 
   /**
@@ -148,14 +195,33 @@ export class PendingOpRegistry {
         state: "running", settle: Promise.resolve(), surfacedPending: false,
       };
       this.entries.set(key, fresh);
+      // IDENTITY-GUARDED delete (card 27ea069e CR finding): a bare `this.entries.delete(key)` here was
+      // safe ONLY under the old invariant that a new entry could never be created under `key` while an
+      // older one for that same key was still settling — evictDeadOwner breaks that invariant on purpose
+      // (it force-removes a RUNNING entry so a fresh attach() can start a genuinely new op under the SAME
+      // key while the evicted op's own `run()` is still executing in the background, unreachable but not
+      // cancellable). Without this guard, that orphaned run's EVENTUAL settle would delete-by-key and wipe
+      // out the SUCCESSOR entry that replaced it — clearing worker_list's pendingMerge mid-merge, losing
+      // dedup, and letting a further retry start a THIRD concurrent confirmWorkerMerge on one worktree.
+      // `this.entries.get(key) === fresh` confirms THIS settle's own entry is still the one installed under
+      // `key` before mutating/deleting it — a superseded (evicted) op's late settle then finds a DIFFERENT
+      // object there and does nothing, touching only its own (already-detached) `fresh` reference. Applied
+      // to both the delete AND the `surfacedPending` push below, so an evicted op's late settle can't
+      // spuriously surface a completion nudge against its successor's op either.
       fresh.settle = run(fresh.opId).then(
         (value) => {
-          fresh.state = "done"; fresh.result = value; this.entries.delete(key);
-          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
+          fresh.state = "done"; fresh.result = value;
+          if (this.entries.get(key) === fresh) {
+            this.entries.delete(key);
+            if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
+          }
         },
         (err) => {
-          fresh.state = "failed"; fresh.error = err; this.entries.delete(key);
-          if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
+          fresh.state = "failed"; fresh.error = err;
+          if (this.entries.get(key) === fresh) {
+            this.entries.delete(key);
+            if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
+          }
         },
       );
       e = fresh;

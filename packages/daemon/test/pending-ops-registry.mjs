@@ -158,7 +158,47 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("(nudge retry) only the ORIGINAL (entry-creating) call's callback ever fires", calls1.length === 1 && calls2.length === 0);
 }
 
+// --- CLOBBER GUARD (card 27ea069e Code Review finding): evictDeadOwner() lets a fresh attach() start a
+// NEW op under a key whose PRIOR op is still orphaned/in-flight in the background (unreachable, but not
+// cancellable — see evictDeadOwner's doc). That prior op's EVENTUAL settle must not clobber the successor
+// installed under the same key. Manually-resolved `run()`s (no timers) give exact control over which
+// settles when, so this proves the identity-guarded delete rather than merely exercising a race. ---
+{
+  const reg = new PendingOpRegistry();
+  const nudgesA = [];
+  let resolveA;
+  const runA = () => new Promise((resolve) => { resolveA = resolve; }); // never settles on its own — orphaned by eviction below
+
+  const pendingA = await reg.attach("k6", "merge", "deadMgr", 10, runA, (o) => nudgesA.push(o));
+  check("(clobber guard) the dead-owner op (run_A) degrades to pending", pendingA.settled === false);
+
+  const evicted = reg.evictDeadOwner("k6");
+  check("(clobber guard) evictDeadOwner removes the dead-owner entry", evicted === true);
+  check("(clobber guard) peek shows nothing immediately after eviction", reg.peek("k6") === undefined);
+
+  // A fresh attach() under the SAME key starts run_C — a genuinely new, live-owner op (mirrors
+  // confirmWorkerMergeTracked's fresh confirm after evicting a dead-owner zombie).
+  let runCStarted = false;
+  const runC = async () => { runCStarted = true; await sleep(30); return { fromC: true }; };
+  const pendingC = await reg.attach("k6", "merge", "liveMgr", 10, runC);
+  check("(clobber guard) run_C actually started under the same key", runCStarted === true);
+  check("(clobber guard) run_C is tracked as running (the successor), NOT re-attached to run_A", pendingC.settled === false && pendingC.op.managerSessionId === "liveMgr");
+
+  // NOW resolve the OLD orphaned run_A. Its settle callback must find a DIFFERENT entry (run_C's)
+  // installed under "k6" and do NOTHING — neither deleting it nor firing run_A's own completion nudge
+  // against it. THIS is the exact clobber the CR flagged: without the identity guard, this delete-by-key
+  // wipes out run_C's live entry out from under it.
+  resolveA({ fromA: true });
+  await sleep(5); // let run_A's .then() microtask actually run
+  check("(clobber guard) run_C's entry SURVIVES run_A's late settle — NOT clobbered", reg.peek("k6") !== undefined && reg.peek("k6").managerSessionId === "liveMgr");
+  check("(clobber guard) run_A's own completion nudge does NOT spuriously fire against the successor", nudgesA.length === 0);
+
+  // Let run_C itself actually settle — ITS OWN settle (identity matches) correctly evicts.
+  await sleep(40);
+  check("(clobber guard) run_C's OWN settle correctly evicts once IT finishes", reg.peek("k6") === undefined);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, and onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry)."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), and an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
