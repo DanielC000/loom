@@ -1877,14 +1877,20 @@ export class Db {
     });
   }
   /**
-   * Partial STRUCTURAL edit of a project (name / vaultPath / repoPath). Provided fields are written;
-   * omitted are left as-is. Deliberately does NOT touch config (that goes through the validated
-   * setProjectConfig path). `repoPath` is editable ONLY via the elevated platform MCP project_update +
-   * the human REST PATCH path, both fronted by checkRepoRebind (isGitRepo + live-worktree guard) — it is
-   * NEVER exposed on any agent-facing surface (loom-setup / loom-orchestration).
+   * Partial STRUCTURAL edit of a project (name / vaultPath / repoPath / referenceRepos). Provided fields
+   * are written; omitted are left as-is. Deliberately does NOT touch config (that goes through the
+   * validated setProjectConfig path). `repoPath` is editable ONLY via the elevated platform MCP
+   * project_update + the human REST PATCH path, both fronted by checkRepoRebind (isGitRepo +
+   * live-worktree guard) — it is NEVER exposed on any agent-facing surface (loom-setup / loom-orchestration).
+   * `referenceRepos` (reference-repos epic Phase 2, card f4888775) is editable ONLY via the HUMAN-only
+   * REST create/update paths, fronted by `validateReferenceRepos` (absolute path + isGitRepo per entry) —
+   * same trust posture as repoPath, and likewise never exposed on any agent-facing surface.
    */
-  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string }): void {
-    const cols: Record<string, unknown> = { name: patch.name, vault_path: patch.vaultPath, repo_path: patch.repoPath };
+  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[] }): void {
+    const cols: Record<string, unknown> = {
+      name: patch.name, vault_path: patch.vaultPath, repo_path: patch.repoPath,
+      reference_repos: patch.referenceRepos === undefined ? undefined : JSON.stringify(patch.referenceRepos),
+    };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
     const set = names.map((c) => `${c} = ?`).join(", ");

@@ -50,6 +50,7 @@ import { GitWriter } from "../git/writer.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { workerDiff } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
+import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
@@ -3227,14 +3228,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride };
+    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown };
     if (!b.name || !b.repoPath || !b.vaultPath)
       return reply.code(400).send({ error: "name, repoPath, vaultPath required" });
+    // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST create path —
+    // each entry MUST be an absolute path to an existing git repo (validateReferenceRepos), never a
+    // relative one (meaningless to a worker whose cwd is a worktree elsewhere on disk).
+    let referenceRepos: string[] = [];
+    if (b.referenceRepos !== undefined) {
+      const check = await validateReferenceRepos(b.referenceRepos);
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      referenceRepos = check.value;
+    }
     const project: Project = {
       id: randomUUID(), name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
-      referenceRepos: [],
+      referenceRepos,
     };
     deps.db.insertProject(project);
     return reply.code(201).send(project);
@@ -3251,13 +3261,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Two GUARDS, server-side with clear 4xx: (a) the reserved "Loom Platform" home is NEVER archivable
   // or deletable; (b) a project/agent with any LIVE session is blocked ("stop the fleet first"). ---
 
-  // STRUCTURAL edit of a project (name / vaultPath). Distinct from the config PATCH below (the
-  // validated machine config). Allowed on a reserved project (metadata only — not a removal).
+  // STRUCTURAL edit of a project (name / vaultPath / referenceRepos). Distinct from the config PATCH
+  // below (the validated machine config). Allowed on a reserved project (metadata only — not a removal).
   app.patch("/api/projects/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     const p = deps.db.getProject(id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown };
+    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown; referenceRepos?: unknown };
     if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && (typeof b.vaultPath !== "string" || !b.vaultPath.trim()))
@@ -3275,10 +3285,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const check = await checkRepoRebind(deps.db, id, repoPath);
       if (!check.ok) return reply.code(400).send({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
     }
+    // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST PATCH path —
+    // same validator + trust posture as the REST create path above.
+    let referenceRepos: string[] | undefined;
+    if (b.referenceRepos !== undefined) {
+      const check = await validateReferenceRepos(b.referenceRepos);
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      referenceRepos = check.value;
+    }
     deps.db.updateProject(id, {
       name: b.name === undefined ? undefined : (b.name as string).trim(),
       vaultPath: b.vaultPath === undefined ? undefined : (b.vaultPath as string).trim(),
       repoPath,
+      referenceRepos,
     });
     return deps.db.getProject(id);
   });

@@ -1200,7 +1200,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. 404 if the project is unknown. Returns the updated project.",
+        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos is NOT settable even here — it is REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project.",
         inputSchema: { projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional(), repoPath: z.string().optional() },
       },
       async ({ projectId, name, vaultPath, repoPath }) => {
