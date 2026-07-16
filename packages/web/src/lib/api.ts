@@ -301,7 +301,7 @@ export const api = {
   // STRUCTURAL edit (name / vaultPath / repoPath rebind) — distinct from updateProjectConfig (the
   // validated machine config). A repoPath rebind goes through the daemon's shared guard (isGitRepo +
   // live-worktree refusal); patchProject surfaces both the `{ error }` reason AND the named liveSessions[].
-  updateProject: (id: string, body: { name?: string; vaultPath?: string; repoPath?: string }) =>
+  updateProject: (id: string, body: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[] }) =>
     patchProject(`/api/projects/${id}`, body),
   // Soft-archive (reversible "delete"). 400s on the reserved home or a live fleet (surfaced via delErr).
   archiveProject: (id: string) => delErr<{ ok: boolean }>(`/api/projects/${id}`),

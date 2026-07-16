@@ -396,6 +396,7 @@ function ProjectManage(
           <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
           <Button variant="primary" disabled={!dirty || saving}
             onClick={() => onSave({ name: name.trim(), vaultPath: vaultPath.trim() })}>{saving ? "Saving…" : "Save changes"}</Button>
+          <ReferenceReposEditor project={project} />
           <Button disabled={live || archiving} title={liveTitle}
             onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
             {archiving ? "Archiving…" : "Archive (reversible)"}
@@ -416,6 +417,68 @@ function ProjectManage(
               </div>
             )}
         </div>
+      )}
+    </div>
+  );
+}
+
+// The reference-repos list editor (reference-repos epic Phase 4, card f4888775). Edits a project's
+// `referenceRepos` — the read-only SIBLING repos a worker may consult, DISTINCT from the one load-bearing
+// primary `repoPath` (its own field, shown as a Chip above, never merged into this list). Add / remove
+// rows, then Save persists via the phase-2 PATCH /api/projects/:id; the server validates each entry
+// (absolute path + existing git repo) and 400s with a clear reason we surface INLINE (not an alert).
+// An empty list renders a quiet "none" line, never a phantom blank row — a blank row appears only when
+// the human deliberately ＋ Adds one. Blank/whitespace rows are trimmed out at save, so an all-blank add
+// is not "dirty" and never round-trips a bogus entry to the validator.
+function ReferenceReposEditor({ project }: { project: Project }) {
+  const qc = useQueryClient();
+  const saved = project.referenceRepos ?? [];
+  const [repos, setRepos] = useState<string[]>(saved);
+  const [error, setError] = useState<string | null>(null);
+  // The persisted candidate: trimmed, blanks dropped. Dirty (and the payload) both key off this, so a
+  // stray empty row neither enables Save nor reaches the server.
+  const clean = repos.map((r) => r.trim()).filter(Boolean);
+  const dirty = JSON.stringify(clean) !== JSON.stringify(saved);
+
+  const save = useMutation({
+    mutationFn: () => api.updateProject(project.id, { referenceRepos: clean }),
+    onMutate: () => setError(null),
+    // Sync local rows to what the server actually stored (the source of truth) so `dirty` settles cleanly.
+    onSuccess: (updated) => { setRepos(updated.referenceRepos ?? []); qc.invalidateQueries({ queryKey: ["projects"] }); },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  // Any edit clears a stale server error so it never lingers past the input it referred to.
+  const edit = (i: number, v: string) => { setError(null); setRepos((rs) => rs.map((r, j) => (j === i ? v : r))); };
+  const remove = (i: number) => { setError(null); setRepos((rs) => rs.filter((_, j) => j !== i)); };
+  const add = () => { setError(null); setRepos((rs) => [...rs, ""]); };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <div>
+        <SectionLabel style={{ margin: 0 }}>Reference repos</SectionLabel>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>read-only sibling repos · absolute git paths</span>
+      </div>
+      {repos.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>No reference repos.</span>
+      ) : (
+        repos.map((r, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "center" }}>
+            <Input placeholder="/absolute/path/to/repo" value={r} onChange={(e) => edit(i, e.target.value)}
+              aria-label={`Reference repo ${i + 1}`} style={{ flex: 1 }} />
+            <Button variant="ghost" title="Remove this reference repo" aria-label={`Remove reference repo ${i + 1}`}
+              onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+          </div>
+        ))
+      )}
+      <div style={{ display: "flex", gap: 6 }}>
+        <Button onClick={add}>＋ Add repo</Button>
+        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Save reference repos"}
+        </Button>
+      </div>
+      {error && (
+        <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>{error}</span>
       )}
     </div>
   );
