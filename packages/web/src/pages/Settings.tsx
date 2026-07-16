@@ -8,6 +8,7 @@ import {
   type OrchestrationConfig,
   type PlatformConfig,
   type PlatformConfigOverride,
+  type HostToolMcpSpec,
   type ConnectionAuthScheme,
   type OAuthProviderSlug,
   type PollJob,
@@ -110,6 +111,34 @@ const ta = {
 
 function parseLines(text: string): string[] {
   return text.split("\n").map((l) => l.trim()).filter(Boolean);
+}
+
+// Card e8eee68c: client-side shape validation for the Open Design full-MCP-config JSON textarea, so an
+// obviously-wrong paste (bad JSON, missing "command", a non-string arg) is caught before Save rather
+// than round-tripping to the daemon's 400. Mirrors the daemon's own hostToolMcpSpecOverride zod shape
+// (mcp/platform.ts) — kept in sync by hand since the web package doesn't import zod schemas from the
+// daemon. Blank input is valid (⇒ no override, value undefined).
+function parseOpenDesignMcpConfig(json: string): { ok: true; value?: HostToolMcpSpec } | { ok: false; error: string } {
+  const s = json.trim();
+  if (!s) return { ok: true, value: undefined };
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(s);
+  } catch (e) {
+    return { ok: false, error: `invalid JSON: ${(e as Error).message}` };
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ok: false, error: "must be a JSON object" };
+  const o = parsed as Record<string, unknown>;
+  if (typeof o.command !== "string" || !o.command.trim()) return { ok: false, error: '"command" must be a non-empty string' };
+  if (o.args !== undefined && (!Array.isArray(o.args) || !o.args.every((x) => typeof x === "string"))) {
+    return { ok: false, error: '"args" must be a string array when present' };
+  }
+  if (o.env !== undefined) {
+    if (typeof o.env !== "object" || o.env === null || Array.isArray(o.env) || !Object.values(o.env as Record<string, unknown>).every((v) => typeof v === "string")) {
+      return { ok: false, error: '"env" must be an object of string values when present' };
+    }
+  }
+  return { ok: true, value: { command: o.command, args: o.args as string[] | undefined, env: o.env as Record<string, string> | undefined } };
 }
 
 // Repository binding — the one place a project's `repoPath` changes after creation. Distinct from the
@@ -466,6 +495,16 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
   const [openDesignPath, setOpenDesignPath] = useState(override.integrations?.openDesign?.path ?? "");
   const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
+  // Card e8eee68c: Open Design's full stdio MCP spec (command + args[] + env{}) — the escape hatch for a
+  // host tool whose real invocation isn't "one bin path + one hardcoded arg" (OD's desktop-app
+  // distribution needs a two-arg command plus env vars). Free-text JSON, exactly the payload OD's own
+  // settings emit (`claude mcp add-json`) — parsed client-side so an invalid shape is caught before Save
+  // rather than round-tripping to a 400. Blank = no override; `mcpConfig` wins over the path field above
+  // when both are set (see openDesignMcpServer).
+  const [openDesignMcpConfigJson, setOpenDesignMcpConfigJson] = useState(
+    override.integrations?.openDesign?.mcpConfig ? JSON.stringify(override.integrations.openDesign.mcpConfig, null, 2) : "",
+  );
+  const odMcpParsed = parseOpenDesignMcpConfig(openDesignMcpConfigJson);
 
   // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
@@ -490,7 +529,10 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     // unchanged persisted value (idempotent, since openDesignPath/codescapePath are seeded from — and
     // stay in sync with — the loaded override).
     o.integrations = {
-      openDesign: openDesignPath.trim() ? { path: openDesignPath.trim() } : {},
+      openDesign: {
+        ...(openDesignPath.trim() ? { path: openDesignPath.trim() } : {}),
+        ...(odMcpParsed.ok && odMcpParsed.value ? { mcpConfig: odMcpParsed.value } : {}),
+      },
       codescape: codescapePath.trim() ? { path: codescapePath.trim() } : {},
     };
     return o;
@@ -614,13 +656,28 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
           <IntegrationRow slug="openDesign" label="Open Design" path={openDesignPath} setPath={setOpenDesignPath}
             placeholder="absolute path to OD's od entry (od.mjs / od.exe)" />
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Open Design — full MCP config (JSON)</span>
+            <textarea value={openDesignMcpConfigJson} onChange={(e) => setOpenDesignMcpConfigJson(e.target.value)}
+              spellCheck={false} style={{ ...ta, minHeight: 90 }}
+              placeholder={'{\n  "command": "C:\\\\...\\\\Open Design.exe",\n  "args": ["C:\\\\...\\\\daemon-cli.mjs", "mcp"],\n  "env": { "OD_DATA_DIR": "...", "OD_SIDECAR_IPC_PATH": "...", "ELECTRON_RUN_AS_NODE": "1" }\n}'} />
+            {!odMcpParsed.ok
+              ? <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>{odMcpParsed.error}</span>
+              : <Hint>
+                  Optional — for a host tool whose real invocation needs more than a bin path (e.g. Open
+                  Design&apos;s desktop-app distribution: a two-arg command plus env vars). Paste the exact
+                  MCP-server-config JSON the tool&apos;s own settings emit (a &quot;command&quot;/&quot;args&quot;/&quot;env&quot; object —
+                  the <code>claude mcp add-json</code> payload). When set, it wins over the path field above
+                  entirely. Blank clears it.
+                </Hint>}
+          </label>
           <IntegrationRow slug="codescape" label="Codescape" path={codescapePath} setPath={setCodescapePath}
             placeholder="inherit (PATH: codescape)" />
         </div>
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!dirty || save.isPending || !odMcpParsed.ok} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty

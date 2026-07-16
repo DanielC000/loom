@@ -192,3 +192,42 @@ test("clearing a host-tool integration path actually clears it (code-review fix,
   await page.reload();
   await expect(field(page, "Open Design")).toHaveValue("");
 });
+
+test("Open Design's full MCP config JSON round-trips and gates Save on invalid shape (card e8eee68c)", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-integrations-odmcp-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const odMcpConfig = field(page, "Open Design — full MCP config (JSON)");
+  await expect(odMcpConfig).toBeVisible();
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+
+  // Invalid JSON gates Save off (client-side validation, before it ever reaches the daemon's 400).
+  await odMcpConfig.fill("{not valid json");
+  await expect(globalSave).toBeDisabled();
+
+  // A valid full stdio spec (the exact shape OD's own `claude mcp add-json` export takes) enables Save
+  // and persists to integrations.openDesign.mcpConfig — the SAME PATCH surface the plain path field uses.
+  const spec = {
+    command: `C:\\fake\\Open Design-${Date.now()}.exe`,
+    args: ["C:\\fake\\daemon-cli.mjs", "mcp"],
+    env: { OD_DATA_DIR: "C:\\fake\\data", OD_SIDECAR_IPC_PATH: "\\\\.\\pipe\\fake-od-daemon", ELECTRON_RUN_AS_NODE: "1" },
+  };
+  await odMcpConfig.fill(JSON.stringify(spec));
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+
+  await expect
+    .poll(async () => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+      const body = (await res.json()) as { override?: { integrations?: { openDesign?: { mcpConfig?: unknown } } } };
+      return body?.override?.integrations?.openDesign?.mcpConfig ?? null;
+    })
+    .toEqual(spec);
+
+  // A reload re-seeds the field from the persisted override (pretty-printed, so compare parsed content).
+  await page.reload();
+  const reseeded = await field(page, "Open Design — full MCP config (JSON)").inputValue();
+  expect(JSON.parse(reseeded)).toEqual(spec);
+});

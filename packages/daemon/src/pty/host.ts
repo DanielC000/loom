@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
 import { spawn, type IPty } from "node-pty";
-import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
+import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant, HostToolMcpSpec } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
@@ -696,35 +696,56 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 }
 
 /**
- * The stdio MCP-config entry for an openDesign session, or null when neither a DB path nor
- * `LOOM_OPEN_DESIGN_BIN` resolves to an existing absolute file — a CLEAN-SKIP mirroring
- * markitdownMcpServer's "not warm yet" fallback: an unresolvable open-design (OD,
+ * The stdio MCP-config entry for an openDesign session, or null when nothing resolves — a CLEAN-SKIP
+ * mirroring markitdownMcpServer's "not warm yet" fallback: an unresolvable open-design (OD,
  * github.com/nexu-io/open-design) install never breaks the spawn. NOT additionally gated by
  * `isLoomDev()` — OD is a public, OSS project, so it ships to every loomctl user.
  *
- * Card 8dc5ebb9: `dbPath` (the DB-persisted `integrations.openDesign.path`, when the caller has one —
- * threaded in per-spawn from PtyHost's `getIntegrationPaths` seam) wins over `LOOM_OPEN_DESIGN_BIN`,
- * mirroring every other host-tool resolver's DB-first-env-fallback precedence. Either way, the resolved
- * bin must be an ABSOLUTE path to OD's own `od` CLI/MCP entry. Launch shape is resolved via the shared
- * {@link resolveHostToolBin} (card 8dc5ebb9's fix for OD residual risk 1) — OD ships as a node ESM script
- * (`apps/daemon/bin/od.mjs`), which this now wraps in `process.execPath` rather than launching directly
- * (direct launch of a bare `.mjs` file fails on Windows); a compiled/PATH binary still launches directly.
- * Either way the daemon appends a single `"mcp"` arg (mirrors `od mcp`, OD's own documented stdio-MCP
- * invocation). No venv/provisioning step — OD is a host dependency the human installs and points a path
- * at once (DB or env); Loom never bundles or auto-installs it (see the profile flag's own doc for the
- * full trust posture).
+ * Card e8eee68c: `dbMcpConfig` (the DB-persisted `integrations.openDesign.mcpConfig`, when the caller has
+ * one) wins over EVERYTHING below and is injected VERBATIM — no `resolveHostToolBin` shape-guessing, no
+ * appended `"mcp"` arg. This is the shape OD's DESKTOP-APP distribution actually needs: a two-arg command
+ * (`[daemon-cli.mjs, "mcp"]`) plus env vars (its data dir, its sidecar named-pipe IPC path, an
+ * Electron-run-as-node flag) that a single bin path could never express. The only gate is
+ * `fs.existsSync(dbMcpConfig.command)` — same synchronous, non-blocking, binary-presence-only posture as
+ * every other host-tool resolver below (see the risk note at the end of this comment for why nothing
+ * heavier belongs on this hot path).
  *
- * RISK NOTED, NOT YET VERIFIED (no OD install available to test against): OD's architecture pairs this
- * stdio MCP process with OD's OWN separate local daemon (normally on `127.0.0.1:7456`); if OD's MCP
- * process blocks/hangs its own handshake when that daemon isn't running (rather than degrading a tool
- * call gracefully), a session that opts into `openDesign` with a present-but-daemon-down OD install could
- * see its `claude` boot hang waiting on this MCP's initialize response. This resolver only ever gates on
- * BINARY presence (fs.existsSync) here, never on OD's own daemon reachability (a network/handshake probe
- * on this synchronous spawn hot path would itself risk blocking the daemon) — the reachability check is
+ * Absent an `mcpConfig`, this falls back to the ORIGINAL card 8dc5ebb9 behavior for a plain host-installed
+ * `od` CLI/MCP entry: `dbPath` (`integrations.openDesign.path`) wins over `LOOM_OPEN_DESIGN_BIN`,
+ * mirroring every other host-tool resolver's DB-first-env-fallback precedence. Either way, the resolved
+ * bin must be an ABSOLUTE path. Launch shape is resolved via the shared {@link resolveHostToolBin} (card
+ * 8dc5ebb9's fix for OD residual risk 1) — a node ESM script bin is wrapped in `process.execPath` rather
+ * than launched directly (direct launch of a bare `.mjs` file fails on Windows); a compiled/PATH binary
+ * still launches directly. Either way the daemon appends a single `"mcp"` arg (mirrors `od mcp`, OD's own
+ * documented from-source stdio-MCP invocation) — this appended-arg behavior is exactly what `dbMcpConfig`
+ * exists to bypass, since the desktop app's real invocation isn't that shape. No venv/provisioning step —
+ * OD is a host dependency the human installs and points a path/spec at once (DB or env); Loom never
+ * bundles or auto-installs it (see the profile flag's own doc for the full trust posture).
+ *
+ * RESIDUAL RISK (unverified — no OD install available to test against at the time this resolver was
+ * written; now narrowed by card e8eee68c): OD's desktop-app distribution pairs this stdio MCP process
+ * with OD's own running desktop app via a Windows named-pipe sidecar (`OD_SIDECAR_IPC_PATH`) — if OD's MCP
+ * process blocks/hangs its own handshake when that app isn't running (rather than degrading a tool call
+ * gracefully), a session that opts into `openDesign` with a present-but-not-running OD install could see
+ * its `claude` boot hang waiting on this MCP's initialize response. This resolver only ever gates on
+ * BINARY presence (fs.existsSync) here, never on OD's own app/daemon reachability (a handshake probe on
+ * this synchronous spawn hot path would itself risk blocking the daemon) — the reachability check is
  * instead surfaced OFF this hot path, in the human-only `/api/integrations` detect endpoint (see
  * integrations/detect.ts), covering the same risk as a Settings-page warning rather than a spawn guard.
  */
-export function openDesignMcpServer(dbPath?: string): { type: "stdio"; command: string; args: string[] } | null {
+export function openDesignMcpServer(
+  dbPath?: string,
+  dbMcpConfig?: HostToolMcpSpec,
+): { type: "stdio"; command: string; args: string[]; env?: Record<string, string> } | null {
+  if (dbMcpConfig) {
+    if (!path.isAbsolute(dbMcpConfig.command) || !fs.existsSync(dbMcpConfig.command)) return null;
+    return {
+      type: "stdio",
+      command: dbMcpConfig.command,
+      args: dbMcpConfig.args ?? [],
+      ...(dbMcpConfig.env ? { env: dbMcpConfig.env } : {}),
+    };
+  }
   const bin = dbPath?.trim() || process.env.LOOM_OPEN_DESIGN_BIN;
   if (!bin || !path.isAbsolute(bin) || !fs.existsSync(bin)) return null;
   const { command, args } = resolveHostToolBin(bin);
@@ -800,9 +821,11 @@ export function buildMcpServers(o: {
    * Card 8dc5ebb9: DB-persisted host-tool integration paths (`PlatformConfigOverride.integrations`),
    * resolved PER-SPAWN (not boot-bound) via PtyHost's `getIntegrationPaths` seam and threaded straight
    * into `openDesignMcpServer`/`codescapeMcpServer` below — DB path wins, env var falls back, neither set
-   * is the byte-identical today-behavior. Default `{}` (no DB path for either tool).
+   * is the byte-identical today-behavior. Default `{}` (no DB path for either tool). `openDesignMcpConfig`
+   * (card e8eee68c) is the full verbatim stdio spec escape hatch (`integrations.openDesign.mcpConfig`) —
+   * when set it wins over `openDesign`/`LOOM_OPEN_DESIGN_BIN` entirely inside `openDesignMcpServer`.
    */
-  integrationPaths?: { openDesign?: string; codescape?: string };
+  integrationPaths?: { openDesign?: string; codescape?: string; openDesignMcpConfig?: HostToolMcpSpec };
 }): Record<string, unknown> {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
@@ -897,12 +920,12 @@ export function buildMcpServers(o: {
       // provisioning) — a null means neither the DB path nor LOOM_OPEN_DESIGN_BIN resolves, so THIS spawn
       // just skips the MCP (logged, never crashes). No background kick: OD is a host-side install the
       // human points a path at once (DB, or the env fallback for headless/CI/reproducible deploys).
-      const od = openDesignMcpServer(o.integrationPaths?.openDesign);
+      const od = openDesignMcpServer(o.integrationPaths?.openDesign, o.integrationPaths?.openDesignMcpConfig);
       if (od) {
         mcpServers["open-design"] = od;
       } else {
         // eslint-disable-next-line no-console
-        console.warn(`[pty] ${o.sessionId} openDesign set but LOOM_OPEN_DESIGN_BIN could not be resolved — spawning WITHOUT the Open Design MCP. Is LOOM_OPEN_DESIGN_BIN set to an absolute path to OD's od entry?`);
+        console.warn(`[pty] ${o.sessionId} openDesign set but neither the DB path/mcpConfig nor LOOM_OPEN_DESIGN_BIN resolved to an existing command — spawning WITHOUT the Open Design MCP. Configure Settings › Integrations › Open Design (a path, or the full command+args+env spec), or LOOM_OPEN_DESIGN_BIN.`);
       }
       continue;
     }
@@ -2025,14 +2048,14 @@ export class PtyHost {
    * Defaults to a harmless no-op (`{}`) so a PtyHost built without this opt — every existing hermetic
    * test — behaves byte-identically: both resolvers fall back to their env var exactly as before.
    */
-  private readonly getIntegrationPaths: () => { openDesign?: string; codescape?: string };
+  private readonly getIntegrationPaths: () => { openDesign?: string; codescape?: string; openDesignMcpConfig?: HostToolMcpSpec };
   constructor(
     private events: PtyHostEvents,
     opts?: {
       busyStaleMs?: number; coalesceAgentMessages?: boolean;
       getCapabilityCatalog?: () => CapabilityDefRow[];
       resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
-      getIntegrationPaths?: () => { openDesign?: string; codescape?: string };
+      getIntegrationPaths?: () => { openDesign?: string; codescape?: string; openDesignMcpConfig?: HostToolMcpSpec };
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;

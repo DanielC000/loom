@@ -54,16 +54,26 @@ function probeTcp(port: number, timeoutMs: number): Promise<boolean> {
 }
 
 async function detectOpenDesign(override: PlatformConfigOverride, odDaemonPort: number): Promise<IntegrationStatus> {
+  const dbMcpConfig = override.integrations?.openDesign?.mcpConfig;
   const dbPath = override.integrations?.openDesign?.path;
   const envPath = process.env.LOOM_OPEN_DESIGN_BIN;
-  const path = dbPath?.trim() || envPath || null;
-  const source: IntegrationSource = dbPath?.trim() ? "db" : envPath ? "env" : "none";
-  const resolved = openDesignMcpServer(dbPath);
+  const path = dbMcpConfig?.command ?? (dbPath?.trim() || envPath || null);
+  const source: IntegrationSource = dbMcpConfig || dbPath?.trim() ? "db" : envPath ? "env" : "none";
+  const resolved = openDesignMcpServer(dbPath, dbMcpConfig);
   if (!resolved) {
     return {
       slug: "openDesign", label: "Open Design", path, source, state: "not-found",
-      detail: path ? "path set but not an existing absolute file" : "no path configured (Settings, or LOOM_OPEN_DESIGN_BIN)",
+      detail: path ? "path/command set but not an existing absolute file" : "no path or MCP config configured (Settings, or LOOM_OPEN_DESIGN_BIN)",
     };
+  }
+  // Card e8eee68c: a full mcpConfig targets OD's DESKTOP-APP distribution, which connects to its running
+  // app over a Windows named-pipe sidecar — OD_DAEMON_PORT's TCP-daemon probe is a leftover from the
+  // from-source single-bin assumption and doesn't apply here (and probing a named pipe cross-platform is
+  // out of scope for this best-effort, never-load-bearing UX signal — see openDesignMcpServer's own doc
+  // for why a spawn-time handshake probe has no place at all). Report "detected" on binary presence
+  // alone; actual liveness surfaces via the real MCP connection at spawn.
+  if (dbMcpConfig) {
+    return { slug: "openDesign", label: "Open Design", path, source, state: "detected" };
   }
   const reachable = await probeTcp(odDaemonPort, OD_PROBE_TIMEOUT_MS);
   if (!reachable) {

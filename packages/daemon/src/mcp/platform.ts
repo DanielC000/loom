@@ -415,7 +415,20 @@ const remoteAccessOverride = z.object({
 // `integrations` reaches an agent no differently than gateCommand reaches one via the project schema —
 // it simply isn't reachable. Named keys (not a generic record) mirror `obsidian`/`python`/`codescape`
 // above, keeping the `.strict()` typo-guard.
-const hostToolIntegrationOverride = z.object({ path: z.string().min(1).optional() }).strict();
+// `mcpConfig` (card e8eee68c): the full verbatim stdio MCP spec escape hatch — same human-only-by-
+// construction reasoning applies (this whole subtree is unreachable to any agent), so no separate
+// forbidden-key split is needed here the way AGENT_FORBIDDEN_PROFILE_KEYS guards the profile-level
+// `openDesign` boolean grant. `command` is required WITHIN an mcpConfig object (a spec with no command
+// is meaningless), but the object itself stays optional at the parent level.
+const hostToolMcpSpecOverride = z.object({
+  command: z.string().min(1),
+  args: z.array(z.string()).optional(),
+  env: z.record(z.string(), z.string()).optional(),
+}).strict();
+const hostToolIntegrationOverride = z.object({
+  path: z.string().min(1).optional(),
+  mcpConfig: hostToolMcpSpecOverride.optional(),
+}).strict();
 const integrationsOverride = z.object({
   openDesign: hostToolIntegrationOverride.optional(),
   codescape: hostToolIntegrationOverride.optional(),

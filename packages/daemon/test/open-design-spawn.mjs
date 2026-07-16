@@ -103,6 +103,53 @@ check("(resolver) args are [<fakeCli>, 'mcp']", JSON.stringify(resolved?.args) =
   fs.rmSync(otherFakeCli, { force: true });
 }
 
+// ===================== Full stdio MCP spec (card e8eee68c): verbatim injection =====================
+// odFullSpec/odFullSpecResolved are module-scoped (not block-local) so the buildMcpServers threading
+// checks further down — after `on`/`off` exist — can reuse the SAME configured spec without redeclaring it.
+let odFullSpec, odFullSpecResolved;
+{
+  const echoCli = path.join(__dirname, "fixtures", "fake-open-design-echo-cli.mjs");
+  const fullSpec = {
+    command: process.execPath, // stands in for Open Design.exe run as node (ELECTRON_RUN_AS_NODE)
+    args: [echoCli, "mcp"],
+    env: { OD_DATA_DIR: "C:\\fake\\data", OD_SIDECAR_IPC_PATH: "\\\\.\\pipe\\fake-od-daemon", ELECTRON_RUN_AS_NODE: "1" },
+  };
+  odFullSpec = fullSpec;
+  const viaFullSpec = openDesignMcpServer(undefined, fullSpec);
+  odFullSpecResolved = viaFullSpec;
+  check("(full-spec) mcpConfig is injected VERBATIM: command unchanged", viaFullSpec?.command === fullSpec.command);
+  check("(full-spec) mcpConfig is injected VERBATIM: args unchanged (NO appended 'mcp', no resolveHostToolBin wrap)",
+    JSON.stringify(viaFullSpec?.args) === JSON.stringify(fullSpec.args));
+  check("(full-spec) mcpConfig is injected VERBATIM: env passed through untouched", JSON.stringify(viaFullSpec?.env) === JSON.stringify(fullSpec.env));
+
+  // mcpConfig wins over BOTH a DB path and LOOM_OPEN_DESIGN_BIN when all three are present.
+  const savedEnvForWin = process.env.LOOM_OPEN_DESIGN_BIN;
+  process.env.LOOM_OPEN_DESIGN_BIN = fakeCli;
+  const viaFullSpecWins = openDesignMcpServer(fakeCli, fullSpec);
+  check("(full-spec) mcpConfig wins over a DB path AND LOOM_OPEN_DESIGN_BIN", viaFullSpecWins?.command === fullSpec.command);
+  process.env.LOOM_OPEN_DESIGN_BIN = savedEnvForWin;
+
+  // A spec whose command doesn't exist on disk ⇒ null (clean-skip), same posture as the path form.
+  check("(full-spec) mcpConfig.command missing on disk ⇒ null (clean-skip)",
+    openDesignMcpServer(undefined, { command: path.join(tmpHome, "nope.exe") }) === null);
+
+  // No env block on the spec ⇒ the resolved entry omits `env` entirely (never an empty {}).
+  const noEnvSpec = { command: process.execPath, args: [echoCli, "mcp"] };
+  const viaNoEnv = openDesignMcpServer(undefined, noEnvSpec);
+  check("(full-spec) no env on the spec ⇒ resolved entry has no `env` key", !("env" in (viaNoEnv ?? {})) && viaNoEnv?.args?.length === 2);
+
+  // REAL cross-process spawn: the full spec's command+args+env actually reach a child process end-to-end
+  // (a fixture that ECHOES its own argv + env back) — not just object-shape-asserted. This is the
+  // mandatory real-spawn coverage: mocking the exec impl would never catch an argv/env-plumbing bug.
+  const out = execFileSync(viaFullSpec.command, viaFullSpec.args, { env: { ...process.env, ...viaFullSpec.env }, stdio: "pipe" }).toString("utf8");
+  const echoed = JSON.parse(out);
+  check("(full-spec, real-spawn) the child received the EXACT configured args", JSON.stringify(echoed.argv) === JSON.stringify(["mcp"]));
+  check("(full-spec, real-spawn) the child received the EXACT configured env vars",
+    echoed.env.OD_DATA_DIR === fullSpec.env.OD_DATA_DIR &&
+    echoed.env.OD_SIDECAR_IPC_PATH === fullSpec.env.OD_SIDECAR_IPC_PATH &&
+    echoed.env.ELECTRON_RUN_AS_NODE === fullSpec.env.ELECTRON_RUN_AS_NODE);
+}
+
 // ===================== REAL cross-process spawn: both resolveHostToolBin shapes actually run =====================
 {
   // Node-script shape: the resolved {command, args} for the .mjs fixture ACTUALLY runs via node when
@@ -165,6 +212,15 @@ process.env.LOOM_OPEN_DESIGN_BIN = fakeCli; // restore for the rest of the test
   check("(precedence, e2e) integrationPaths.openDesign wins over LOOM_OPEN_DESIGN_BIN through buildMcpServers",
     withDbPath["open-design"]?.args?.[0] === otherFakeCli2);
   fs.rmSync(otherFakeCli2, { force: true });
+
+  // Full stdio MCP spec (card e8eee68c), threaded end-to-end through integrationPaths.openDesignMcpConfig
+  // — byte-identical when omitted, and the mounted server matches openDesignMcpServer's own resolution.
+  const withFullSpecOmitted = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", openDesign: true, integrationPaths: { openDesignMcpConfig: undefined } });
+  check("(full-spec, e2e) integrationPaths.openDesignMcpConfig omitted is byte-identical to today's path-only resolution",
+    JSON.stringify(withFullSpecOmitted["open-design"]) === JSON.stringify(on["open-design"]));
+  const withFullSpec = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", openDesign: true, integrationPaths: { openDesignMcpConfig: odFullSpec } });
+  check("(full-spec, e2e) integrationPaths.openDesignMcpConfig reaches the mounted 'open-design' server verbatim",
+    JSON.stringify(withFullSpec["open-design"]) === JSON.stringify(odFullSpecResolved));
 }
 
 // a plain (role-null) OD session still gets the server (OD is orthogonal to role).
@@ -276,6 +332,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — opt-in Open Design: resolveProfile backstops/passes openDesign; the open-design stdio MCP is injected iff openDesign AND LOOM_OPEN_DESIGN_BIN resolves (clean-skip otherwise, byte-identical off — the primary real-world case since OD isn't installed on most hosts); never gated by isLoomDev() (public OSS); the allowlist/profile-validation/agent-forbidden posture holds; the flag threads through startNew/resume/spawnWorker + the persisted row; card 8dc5ebb9: a DB-persisted path (integrations.openDesign.path) wins over the env fallback (resolver-level AND end-to-end through buildMcpServers), a blank DB path/absent integrationPaths is byte-identical to today, and resolveHostToolBin's shape-aware wrap is proven with a REAL cross-process spawn of both shapes (the .mjs script wrapped in process.execPath — the actual Windows-OD fix — and a direct-launch binary stand-in) — claude-free, network-free."
+  ? "\n✅ ALL PASS — opt-in Open Design: resolveProfile backstops/passes openDesign; the open-design stdio MCP is injected iff openDesign AND LOOM_OPEN_DESIGN_BIN resolves (clean-skip otherwise, byte-identical off — the primary real-world case since OD isn't installed on most hosts); never gated by isLoomDev() (public OSS); the allowlist/profile-validation/agent-forbidden posture holds; the flag threads through startNew/resume/spawnWorker + the persisted row; card 8dc5ebb9: a DB-persisted path (integrations.openDesign.path) wins over the env fallback (resolver-level AND end-to-end through buildMcpServers), a blank DB path/absent integrationPaths is byte-identical to today, and resolveHostToolBin's shape-aware wrap is proven with a REAL cross-process spawn of both shapes (the .mjs script wrapped in process.execPath — the actual Windows-OD fix — and a direct-launch binary stand-in) — claude-free, network-free; card e8eee68c: a full stdio MCP spec (integrations.openDesign.mcpConfig — command+args[]+env{}) is injected VERBATIM (no appended \"mcp\" arg, no resolveHostToolBin shape-guessing), wins over both the path field and LOOM_OPEN_DESIGN_BIN, omits an empty env block, clean-skips on a missing command, threads byte-identically through buildMcpServers' integrationPaths.openDesignMcpConfig, and a REAL cross-process spawn proves the exact configured args+env reach the child (an echo fixture, not just object-shape-asserted)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

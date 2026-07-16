@@ -470,14 +470,35 @@ export interface ConnectionsGuardConfig {
 }
 
 /**
- * A single optional host-tool integration's DB-persisted configuration — today just an absolute PATH to
+ * A full stdio MCP server invocation spec — command + optional args[] + optional env{} — exactly the
+ * shape a host tool's OWN "add this MCP server" export takes (e.g. Open Design's `claude mcp add-json`
+ * payload). Card e8eee68c: some host tools' real invocation can't be expressed as a single bin path plus
+ * one hardcoded subcommand arg — Open Design's desktop-app distribution needs a two-arg command
+ * (`[daemon-cli.mjs, "mcp"]`) PLUS three env vars (its data dir, its sidecar IPC pipe, an
+ * Electron-run-as-node flag) to reach its running desktop app's sidecar. When a tool's
+ * `HostToolIntegrationConfig.mcpConfig` is set, its resolver injects this VERBATIM instead of deriving
+ * `{command, args}` from `path` via `resolveHostToolBin` — no "mcp" arg is appended, no shape-guessing.
+ */
+export interface HostToolMcpSpec {
+  command: string;
+  args?: string[];
+  env?: Record<string, string>;
+}
+
+/**
+ * A single optional host-tool integration's DB-persisted configuration. `path` is an absolute PATH to
  * the tool's own executable/entry script (a host EXEC fact, exactly like `obsidian.path`/
- * `python.interpreterPath`). `path` unset means "no DB override" — the resolver falls back to its own
+ * `python.interpreterPath`) — unset means "no DB override," and the resolver falls back to its own
  * `LOOM_*_BIN` env var (or, for a PATH-resolvable tool like Codescape, a bare default name), never to a
- * hardcoded path. See card 8dc5ebb9 (host-tool integrations: DB-persisted paths + Settings UI).
+ * hardcoded path. `mcpConfig` (card e8eee68c) is the escape hatch for a tool whose real invocation needs
+ * more than a bin path — see {@link HostToolMcpSpec}; when set it wins over `path`/the env fallback
+ * entirely. Currently consumed by openDesign's resolver only; the shape is shared so a future host tool
+ * with the same need doesn't re-derive it. See card 8dc5ebb9 (host-tool integrations: DB-persisted paths
+ * + Settings UI).
  */
 export interface HostToolIntegrationConfig {
   path?: string;
+  mcpConfig?: HostToolMcpSpec;
 }
 
 /**
@@ -1012,7 +1033,10 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       rateLimitWindowMs: po?.connections?.rateLimitWindowMs ?? d.connections.rateLimitWindowMs,
     },
     integrations: {
-      openDesign: { path: po?.integrations?.openDesign?.path ?? d.integrations.openDesign.path },
+      openDesign: {
+        path: po?.integrations?.openDesign?.path ?? d.integrations.openDesign.path,
+        mcpConfig: po?.integrations?.openDesign?.mcpConfig ?? d.integrations.openDesign.mcpConfig,
+      },
       codescape: { path: po?.integrations?.codescape?.path ?? d.integrations.codescape.path },
     },
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
