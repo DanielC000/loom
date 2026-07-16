@@ -9,6 +9,7 @@ import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import RequestsPage from "./pages/RequestsPage";
 import Board from "./pages/Board";
+import Lore from "./pages/Lore";
 import Runs from "./pages/Runs";
 import Repository from "./pages/Repository";
 import Actors from "./pages/Actors";
@@ -51,8 +52,8 @@ export type NavPage = {
 //
 // `scoped` was determined from `git grep -l useActiveProject packages/web/src/pages` and then
 // VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
-// Runs, Repository (both its Files/Git panes rescope), Settings (edits the active project's config
-// override). Archive imports nothing
+// Lore (its project_memory read is enabled:!!projectId), Runs, Repository (both its Files/Git panes
+// rescope), Settings (edits the active project's config override). Archive imports nothing
 // scoped (its `projectId` fields are its own grouping type), and Projects has its OWN project rail
 // (which writes the active project) — both intentionally NOT scoped. Automation is god-eye (both its
 // tables span every project) so NOT `scoped`, even though its Time builder's own agent picker is
@@ -74,6 +75,12 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Platform", to: "/platform", element: <Platform />, group: "system", primary: true },
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate", primary: true },
   { label: "Board", to: "/board", element: <Board />, group: "project", primary: true, scoped: true },
+  // Lore — the read-only, per-project window into project_memory (the durable knowledge the fleet writes
+  // + recalls via the `memory` MCP). A flagship, project-scoped surface, so it earns a PRIMARY header tab
+  // in the Project group (alongside Overview + Board) rather than hiding under More ▾ — the owner-approved
+  // mockup shows it as a primary tab. `scoped: true`: it rescopes on the active-project picker (its one
+  // read, api.projectMemory, is `enabled: !!projectId`).
+  { label: "Lore", to: "/lore", element: <Lore />, group: "project", primary: true, scoped: true },
   // ── More ▾ · Operate ─────────────────────────────────────────────────────────
   // The GLOBAL manager→human Requests inbox (card 695ebab0, generalizing the decision inbox 8701bdbb) — a
   // cross-project "waiting on me" queue of typed requests (decision · input · permission · credential), a

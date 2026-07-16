@@ -2468,6 +2468,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
           createdAt?: string; answeredAt?: string;
         }[];
+        // Project memory (Lore) rows — the ONLY way an e2e spec can seed project_memory for the /lore page
+        // (there is no REST/agent write path — writing stays the memory MCP's job). Upserted via the SAME
+        // db.upsertProjectMemory the memory_write MCP tool uses; `retrievalCount` (optional) is applied by
+        // touching the row that many times (the real retrieval-bump path), so the /lore recall badge + meter
+        // render a non-zero usage signal.
+        projectMemory?: { projectId: string; key: string; text: string; title?: string; pinned?: boolean; retrievalCount?: number }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -2708,11 +2714,29 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
         questionIds.push(id);
       }
+      // Project memory (Lore) rows — upserted via db.upsertProjectMemory (the memory_write path), then
+      // retrieval-bumped `retrievalCount` times (touchProjectMemoryRetrieved, the real usage-count path) so
+      // the /lore page renders a genuine recall signal. No agent/REST write surface exists, so this seed is
+      // the only way an e2e can populate the read.
+      const projectMemoryIds: string[] = [];
+      for (const m of b.projectMemory ?? []) {
+        if (typeof m.projectId !== "string" || typeof m.key !== "string" || typeof m.text !== "string") {
+          return reply.code(400).send({ error: "projectMemory[].projectId, key, and text are required strings" });
+        }
+        const project = deps.db.getProject(m.projectId);
+        if (!project) return reply.code(400).send({ error: `projectMemory[]: no project ${m.projectId}` });
+        const maxNotes = resolveConfig(project.config).memory.maxNotes;
+        const row = deps.db.upsertProjectMemory(m.projectId, { key: m.key, title: m.title, text: m.text, pinned: m.pinned }, maxNotes);
+        const bumps = Math.max(0, Math.floor(m.retrievalCount ?? 0));
+        if (bumps > 0) deps.db.touchProjectMemoryRetrieved(Array.from({ length: bumps }, () => row.id));
+        projectMemoryIds.push(row.id);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
         companionMessageIds,
         liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
+        projectMemoryIds,
       });
     });
   }
@@ -3037,6 +3061,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
     return { columns: resolveConfig(p.config).kanbanColumns, tasks: deps.db.listTasks(p.id) };
+  });
+  // Lore — the read-only, per-project window into project_memory (the durable knowledge the fleet
+  // writes + recalls via the `memory` MCP: memory_write/read/list/forget). PROJECT-SCOPED: the db
+  // query filters by projectId (WHERE project_id = ?), so this ONLY ever returns THIS project's own
+  // memory — never another project's. REUSES db.listProjectMemory (the same method backing the
+  // memory_list MCP tool), returning full entries — pinned flag + retrievalCount + updatedAt + the
+  // note text — so a single list read backs BOTH the entry list and the note-detail body (the corpus
+  // is small by design: dozens to low-hundreds of short ≤4KB notes). HUMAN-only loopback read, same
+  // trust posture as the sibling /board + /vault project reads; READ-ONLY — no write/forget surface
+  // here (curation stays the memory MCP's job).
+  app.get("/api/projects/:id/memory", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return deps.db.listProjectMemory(p.id);
   });
   // Transcript = Claude's session JSONL rendered to clean turns (canonical history). For an ARCHIVED
   // session the live JSONL is usually gone, so prefer the on-exit snapshot; fall through to the live

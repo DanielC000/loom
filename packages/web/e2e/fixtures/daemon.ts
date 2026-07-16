@@ -152,6 +152,17 @@ export interface LoomDaemon {
     task: { title: string; body?: string; columnKey?: string; priority?: "p0" | "p1" | "p2" | "p3" },
   ) => Promise<SeededTask>;
   /**
+   * Seed project_memory (Lore) rows via the test-only POST /internal/test/seed (card 7ea6ce71) — the ONLY
+   * way an e2e spec can put data on the /lore page, since project_memory has NO REST/agent write path (it's
+   * written only by the memory MCP). Upserted via db.upsertProjectMemory (the memory_write path); each
+   * entry's optional `retrievalCount` is applied as that many real retrieval-bumps so the recall badge +
+   * magnitude meter render a non-zero usage signal. Returns the inserted row ids.
+   */
+  seedProjectMemory: (
+    projectId: string,
+    entries: { key: string; text: string; title?: string; pinned?: boolean; retrievalCount?: number }[],
+  ) => Promise<string[]>;
+  /**
    * Seed one `session_usage_samples` row via the test-only POST /internal/test/seed (card 32fd6f4c) — the
    * ONLY way an e2e spec can put data on the Usage page's "Interactive sessions" plane, since that table
    * is otherwise written ONLY by the internal daemon sampler. `LOOM_TEST=1` (set on this fixture's daemon)
@@ -444,6 +455,13 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
     // lingering PENDING question keeps pushing a global "DECISION NEEDED" toast onto every later spec's page.
     const seededQuestionIds: string[] = [];
 
+    const seedProjectMemory: LoomDaemon["seedProjectMemory"] = async (projectId, entries) => {
+      const res = await apiPost<{ projectMemoryIds: string[] }>(baseURL, "/internal/test/seed", {
+        projectMemory: entries.map((e) => ({ projectId, ...e })),
+      });
+      return res.projectMemoryIds;
+    };
+
     const seedUsageSample: LoomDaemon["seedUsageSample"] = async (sample) => {
       const res = await apiPost<{ usageSampleIds: string[] }>(baseURL, "/internal/test/seed", {
         usageSamples: [{ sessionId: `e2e-session-${randomUUID()}`, ...sample }],
@@ -606,7 +624,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.
