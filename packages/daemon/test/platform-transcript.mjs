@@ -20,7 +20,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (no live engine file at all) still reads its captured snapshot, with no `archived` flag passed;
 //   (e) id-prefix resolution mirrors transcript_read's own: an unambiguous 8-char prefix resolves, a
 //       too-short prefix and a genuinely ambiguous prefix both return the distinct error (not a
-//       misleading "session not found"), and a well-formed-but-unknown id returns "session not found".
+//       misleading "session not found"), and a well-formed-but-unknown id returns "session not found";
+//   (f) finalMessageOnly:true (card 71a5c034) returns ONLY the session's final written assistant
+//       message as a bare 1-element array, excluding the tool_use/tool_result noise earlier in the
+//       trace; the default (no finalMessageOnly arg) behavior stays byte-identical to today.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/platform-transcript.mjs
 import fs from "node:fs";
@@ -97,6 +100,22 @@ fs.mkdirSync(path.dirname(archFile), { recursive: true });
 fs.writeFileSync(archFile, Array.from({ length: 4 }, (_, i) =>
   JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: `arch-turn-${i}` }] } })
 ).join("\n") + "\n");
+
+// S-MIXED: LIVE, project p1 — a realistic trace with tool_use / tool_result noise BEFORE the final
+// written assistant message, proving finalMessageOnly filters out the mid-trace tail rather than just
+// returning the transcript's last turn regardless of role.
+db.insertSession({
+  id: "44444444-mixed", projectId: "p1", agentId: "a1", engineSessionId: "eng-mixed", title: null, cwd: repo1,
+  processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: null,
+});
+const mixedFile = engineTranscriptPath(repo1, "eng-mixed");
+fs.mkdirSync(path.dirname(mixedFile), { recursive: true });
+fs.writeFileSync(mixedFile, [
+  { type: "user", message: { content: [{ type: "text", text: "do the thing" }] } },
+  { type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_1", name: "Bash", input: { command: "ls" } }] } },
+  { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_1", content: "file1\nfile2" }] } },
+  { type: "assistant", message: { content: [{ type: "text", text: "Final answer: done." }] } },
+].map((o) => JSON.stringify(o)).join("\n") + "\n");
 
 // Two sessions sharing an identical 8-char id-prefix — the AMBIGUOUS resolution fixture.
 db.insertSession({
@@ -191,6 +210,28 @@ try {
   check("(e) session_transcript: a well-formed but unknown id returns 'session not found'",
     unknown.error === "session not found");
 
+  // (f) finalMessageOnly:true -> ONLY the final written assistant message, excluding the earlier
+  // tool_use turn and the tool_result turn entirely.
+  const finalOnly = await call("session_transcript", { sessionId: "44444444-mixed", finalMessageOnly: true });
+  check("(f) session_transcript(S-MIXED, finalMessageOnly:true) returns a bare 1-element array",
+    Array.isArray(finalOnly) && finalOnly.length === 1);
+  check("(f) finalMessageOnly result is the LAST assistant turn's text, not the earlier tool_use turn",
+    finalOnly[0]?.role === "assistant" && finalOnly[0]?.text === "Final answer: done.");
+  check("(f) finalMessageOnly result excludes tool_result / tool_use noise from earlier in the trace",
+    !finalOnly[0]?.text.includes("tool result") && !finalOnly[0]?.text.includes("file1") && !finalOnly[0]?.text.includes("[tool]"));
+
+  // (f) the default (no finalMessageOnly arg) behavior on the SAME session stays byte-identical to
+  // today: the full 4-turn transcript, including the tool_use/tool_result turns.
+  const mixedDefault = await call("session_transcript", { sessionId: "44444444-mixed" });
+  check("(f) session_transcript(S-MIXED) default (no finalMessageOnly) still returns the FULL 4-turn transcript",
+    Array.isArray(mixedDefault) && mixedDefault.length === 4 &&
+    mixedDefault[2].role === "tool_result" && mixedDefault[3].text === "Final answer: done.");
+
+  // (f) finalMessageOnly takes precedence even when other paging args are passed alongside it.
+  const finalOnlyWithOffset = await call("session_transcript", { sessionId: "44444444-mixed", finalMessageOnly: true, offset: 0, limit: 1 });
+  check("(f) finalMessageOnly:true takes precedence over offset/limit passed alongside it",
+    Array.isArray(finalOnlyWithOffset) && finalOnlyWithOffset.length === 1 && finalOnlyWithOffset[0].text === "Final answer: done.");
+
   await client.close();
 } finally {
   db.close();
@@ -198,6 +239,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session_transcript reads ANY session's transcript cross-project by sessionId alone (no projectId/parent scoping), shares the same bounded page envelope as transcript_read/worker_transcript with no gaps/overlaps, stays backward-compatible on a small transcript, lastN still works and takes precedence, live vs. archived is auto-detected off the session row, and id-prefix resolution (unambiguous/ambiguous/too-short/unknown) mirrors transcript_read's own — claude-free, network-free."
+  ? "\n✅ ALL PASS — session_transcript reads ANY session's transcript cross-project by sessionId alone (no projectId/parent scoping), shares the same bounded page envelope as transcript_read/worker_transcript with no gaps/overlaps, stays backward-compatible on a small transcript, lastN still works and takes precedence, live vs. archived is auto-detected off the session row, id-prefix resolution (unambiguous/ambiguous/too-short/unknown) mirrors transcript_read's own, and finalMessageOnly:true returns just the final assistant message (excluding tool_use/tool_result noise) while the default stays byte-identical — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
