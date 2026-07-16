@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Db } from "../db.js";
 import type { Session } from "@loom/shared";
+import { resumeDocSizeWarning } from "./resume-doc-notes.js";
 
 /**
  * Card 2fed1663 — lineage-scope the Platform Lead resume doc so concurrent Leads never contend on one
@@ -120,12 +121,6 @@ export function composePlatformLeadStartupPrompt(startupPrompt: string | undefin
   return own ? `${withNotes}\n\n${own}` : withNotes;
 }
 
-/** A harness `Read` starts risking failure near these caps — mirrors the /platform-lead doctrine's own
- *  size budget (~150 lines target, ~400 hard cap, "well under the 256KB / ~25k-token Read caps"). Warn
- *  comfortably below both — 25k tokens is the tighter cap for prose (~4 bytes/token ≈ 100KB) — so a
- *  successor sees the nudge before its first Read of the doc can actually fail. */
-const RESUME_DOC_WARN_BYTES = 80 * 1024;
-
 /** How far a resolved doc's mtime must lag the freshest sibling's before it's "material" enough to flag
  *  (not every few-hour gap — a Lead legitimately idling overnight shouldn't trigger this every morning). */
 const SIBLING_STALENESS_MS = 48 * 60 * 60 * 1000;
@@ -171,7 +166,9 @@ export function findFreshestSiblingResumeDoc(homePath: string, excludePath: stri
  * spawn — every fs call is guarded. Two independent checks, either/both/neither may fire:
  *
  * 1. **Size** — the resolved doc is nearing the harness Read caps, so a successor sees the warning
- *    BEFORE its first Read fails rather than silently exceeding it.
+ *    BEFORE its first Read fails rather than silently exceeding it. Delegates to the shared
+ *    `resumeDocSizeWarning` (`resume-doc-notes.ts`) — the SAME check a project manager's
+ *    `Orchestrator Log.md` gets, card 809cc4b5.
  * 2. **Staleness** — the resolved doc's own mtime materially lags a sibling resume doc (the shared base,
  *    or another lineage's own file) living in the same home. Surfaced as a DIRECTED pointer — the
  *    daemon already knows which sibling is freshest — so the agent needn't hand-sort the directory
@@ -184,21 +181,14 @@ export function findFreshestSiblingResumeDoc(homePath: string, excludePath: stri
 export function composeResumeDocOperationalNotes(homePath: string, resumeDocPath: string): string {
   const notes: string[] = [];
 
+  const sizeNote = resumeDocSizeWarning(resumeDocPath);
+  if (sizeNote) notes.push(sizeNote);
+
   let resolvedMtimeMs: number | null = null;
   try {
-    const stat = fs.statSync(resumeDocPath);
-    resolvedMtimeMs = stat.mtimeMs;
-    if (stat.size >= RESUME_DOC_WARN_BYTES) {
-      const kb = Math.round(stat.size / 1024);
-      notes.push(
-        `[loom:resume-doc-size] Your resume doc (\`${resumeDocPath}\`) is ~${kb}KB, nearing the harness ` +
-        `Read caps (~256KB / ~25k tokens) — a successor's first Read of it could fail. Rotate it now per ` +
-        `your doctrine's size budget: move the current doc to \`<name>.archive/<YYYY-MM-DD>-NN.md\`, then ` +
-        `start a fresh active doc holding only current state.`,
-      );
-    }
+    resolvedMtimeMs = fs.statSync(resumeDocPath).mtimeMs;
   } catch {
-    /* doc doesn't exist yet (a fresh, unseeded lineage) — nothing to size-check */
+    /* doc doesn't exist yet (a fresh, unseeded lineage) — nothing to stale-check against */
   }
 
   const sibling = findFreshestSiblingResumeDoc(homePath, resumeDocPath);

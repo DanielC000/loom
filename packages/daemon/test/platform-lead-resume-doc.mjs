@@ -21,7 +21,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       base file, a secondary lineage's successor still reads its own seeded file.
 //   (4) PURE-ish composeResumeDocOperationalNotes / findFreshestSiblingResumeDoc — the optional read-cap
 //       + freshest-sibling hardening on top of the doctrine above: a healthy small doc with no siblings
-//       emits nothing; a doc past the ~80KB warn threshold emits a size-warning note naming its own path;
+//       emits nothing; a doc past the ~45KB warn threshold (RESUME_DOC_WARN_BYTES, shared with the
+//       manager-side check — card 809cc4b5) emits a size-warning note naming its own path;
 //       a sibling resume doc whose mtime materially (>=48h) leads the resolved doc's own mtime emits a
 //       staleness note pointing at that freshest sibling; a sibling only slightly fresher stays silent;
 //       the sibling finder ignores non-matching filenames and never throws on a missing dir.
@@ -199,7 +200,7 @@ try {
   fs.writeFileSync(doc4, "# Platform Lead Resume\n\nSTATE: nothing notable.\n");
   check("(4) a small doc + no siblings ⇒ empty notes", composeResumeDocOperationalNotes(home4, doc4) === "");
 
-  // A doc past the ~80KB warn threshold ⇒ the size note fires and names the path.
+  // A doc past the ~45KB warn threshold ⇒ the size note fires and names the path.
   fs.writeFileSync(doc4, "x".repeat(90 * 1024));
   const sizeNotes = composeResumeDocOperationalNotes(home4, doc4);
   check("(4) an oversized doc ⇒ the size-warning note fires", sizeNotes.includes("[loom:resume-doc-size]"));

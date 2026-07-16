@@ -16,6 +16,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        path, startManager, applied it), so the most common real-world manager spawn cold-booted blind;
 //   (2) a WORKER spawn does NOT get the MANAGER block (its opening is its agent brief + the kickoff — card af902717);
 //   (3) the pure composeManagerStartupPrompt wraps/derives correctly (incl. the no-own-prompt case);
+//   (3e) card 809cc4b5: an oversized on-disk resume doc gets a [loom:resume-doc-size] note PREPENDED
+//        ahead of the "Where things live" block (mirrors the Platform Lead's own size-warning, now
+//        shared via resume-doc-notes.ts); a missing or small doc emits no note;
 //   (4) the pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/manager-context-block.mjs
@@ -39,6 +42,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { composeManagerStartupPrompt } = await import("../dist/sessions/manager-prompt.js");
+const { RESUME_DOC_WARN_BYTES } = await import("../dist/sessions/resume-doc-notes.js");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off, and a
 //     SEPARATE vault dir so we can prove BOTH absolute roots land in the block (not one path twice) ---
@@ -129,6 +133,31 @@ try {
   check("(3b) space-in-vault: that emitted path actually exists on disk (it's the real file)", fs.existsSync(realResumeDoc) && spaceComposed.includes(realResumeDoc));
   check("(3b) space-in-vault: the space in the vault folder is PRESERVED (not collapsed/escaped)", spaceComposed.includes("Obsidian Vault"));
   try { fs.rmSync(path.dirname(path.dirname(path.dirname(path.dirname(realResumeDoc)))), { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (3e) card 809cc4b5: an oversized resume doc ⇒ the size-warning note fires
+  // (SPAWN-time half of the proactive nudge; ResumeDocWatcher covers the mid-session half separately) =====
+  const sizeVault = path.join(os.tmpdir(), `loom-mctxblk-sizevault-${Date.now()}`);
+  fs.mkdirSync(sizeVault, { recursive: true });
+  const sizeResumeDoc = path.join(sizeVault, "Orchestrator Log.md");
+
+  // No doc on disk yet (a fresh project) ⇒ no note, no crash.
+  const noteNone = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" });
+  check("(3e) no resume doc on disk ⇒ no size-warning note", !noteNone.includes("[loom:resume-doc-size]"));
+
+  // A small, healthy doc, well under the warn threshold ⇒ still no note.
+  fs.writeFileSync(sizeResumeDoc, "# Orchestrator Log\n\nSTATE: nothing notable.\n");
+  const noteSmall = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" });
+  check("(3e) a small resume doc ⇒ no size-warning note", !noteSmall.includes("[loom:resume-doc-size]"));
+
+  // A doc at/over RESUME_DOC_WARN_BYTES ⇒ the note fires, names the doc's own path, and PRECEDES the
+  // "Where things live" pointer block (mirrors the Platform Lead's ordering — warn before pointing).
+  fs.writeFileSync(sizeResumeDoc, "x".repeat(RESUME_DOC_WARN_BYTES + 1024));
+  const noteOversized = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: sizeVault, name: "SizeDemo" });
+  check("(3e) an oversized resume doc ⇒ the size-warning note fires", noteOversized.includes("[loom:resume-doc-size]"));
+  check("(3e) the size-warning note names the doc's own absolute path", noteOversized.includes(sizeResumeDoc));
+  check("(3e) the size-warning note precedes the 'Where things live' pointer block", noteOversized.indexOf("[loom:resume-doc-size]") < noteOversized.indexOf("Where things live"));
+  check("(3e) the agent's own doctrine still rides along after everything", noteOversized.includes("BODY"));
+  try { fs.rmSync(sizeVault, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (1) MANAGER spawn → composed startupPrompt CONTAINS both absolute roots =====================
   const sM = svc.startManager("agentMgr");
