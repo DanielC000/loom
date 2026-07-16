@@ -174,6 +174,15 @@ export class IdleWatcher {
       // idle≥window-since-last-nudge, alive — so a human/recycle-owned manager is never escalated).
       if (control.isPaused(m.id)) continue;                              // human-paused
 
+      // OWN pending owner Request (card cb56cf80): a manager/Lead correctly parked on an OPEN
+      // owner-facing question_ask it filed is not idle — it's blocked on the owner, and the answer
+      // already fires a push-nudge as the wake, so an idle nudge here is pure noise. Lineage-scoped
+      // (db.hasPendingQuestionForAgent, the same sessions.agent_id join pullAnsweredQuestionsForAgent
+      // uses) and taskId-INDEPENDENT — unlike the per-card listQuestionsForTask discount below, this
+      // catches Requests filed with taskId:null, which owner Requests very often are. A session with
+      // no pending own-Request (or whose Request has since been answered) still nudges normally.
+      if (db.hasPendingQuestionForAgent(m.agentId)) continue;
+
       // Live BUSY worker — a manager waiting on a building/turning worker is legitimately idle (don't
       // nudge). Board card b9d479b0 (two-path asymmetry): this used to skip on ANY live worker, busy OR
       // idle — silencing the manager exactly when its worker was idle-and-stranded and needed it most.
@@ -241,6 +250,14 @@ export class IdleWatcher {
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
       const reviewKey = columnKeyForRole(cols, "review");
+      // Card cb56cf80/f98f3e43: a platform (Lead) session is driven through this SAME manager loop
+      // (see the class doc), but its board's "parked" lane is where the Lead's own doctrine puts
+      // decision-gated / owner-flow work — waiting on an owner call, not a task the Lead itself can
+      // drive. Counting those as "actionable" pressures the Lead to drain exactly the owner-gated
+      // backlog /platform-lead forbids. Manager behavior is UNCHANGED (isPlatform is false, so the
+      // extra parked-role exclusion below never applies to a manager's own board).
+      const isPlatform = m.role === "platform";
+      const parkedKey = columnKeyForRole(cols, "parked");
       // A column flagged excludeFromIdleWatchdog (e.g. a "Dropped" parking lane) is a genuine dead-end —
       // its cards are discounted the same way held/deferred/pending-request cards are, so the lane never
       // needs per-card deferred:true toil to stop nagging the idle watchdog. Mirrors hasPendingBoardWork
@@ -252,6 +269,7 @@ export class IdleWatcher {
         && t.deferred !== true
         && t.columnKey !== reviewKey
         && !excludedColumnKeys.has(t.columnKey)
+        && !(isPlatform && t.columnKey === parkedKey)
         && !db.listQuestionsForTask(m.projectId, t.id).some((q) => q.state === "pending"),
       );
       // Narrow liveWorkers (all idle at this point — a live BUSY one would have skipped above) to
@@ -280,7 +298,19 @@ export class IdleWatcher {
       // Three honest cases: a genuinely-stranded live worker (say so specifically); a live worker that's
       // NOT stranded (rate-limited/reported/parked — say nothing false about it either way); or no live
       // workers at all. Never assert "unreported" or "no live workers" when it isn't true (99efaab3).
-      const msg = strandedWorkers.length > 0
+      // A platform (Lead) session gets its OWN copy (card f98f3e43): a Lead never parents a worker (the
+      // class doc), so it always falls into the "no live workers" shape below — but the MANAGER copy
+      // there ("dropped the orchestration loop / pick up the next task NOW") pressures exactly the
+      // owner-backlog-drain anti-pattern /platform-lead forbids. Swap in copy that just asks it to
+      // confirm its actual disposition (parked-waiting on an owner call, or genuinely converged) instead
+      // of framing idleness as a dropped dispatch loop. The MANAGER branches below are byte-identical.
+      const msg = isPlatform
+        ? `[loom:idle] You've been idle ~${n} min. Confirm your disposition: are you parked-waiting on an ` +
+          `owner decision (or other external thing), or has your loop genuinely converged with nothing left ` +
+          `to drive? Call idle_report with your state: 'working' (back at it), 'waiting' (parked — optionally ` +
+          `pass minutes), or 'done' (converged, nothing left to drive). Need an owner decision? File a Request ` +
+          `via question_ask instead.`
+        : strandedWorkers.length > 0
         ? `[loom:idle] You've been idle ~${n} min and your ${strandedWorkers.length} live worker(s) are ALSO idle and unreported — ` +
           `nobody else watches this. Check on them first: worker_transcript / worker_status, then worker_message or ` +
           `worker_merge as appropriate. ${openTodos} other actionable task(s) pending. Then call idle_report with your ` +

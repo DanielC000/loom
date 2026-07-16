@@ -344,11 +344,24 @@ function cleanup(e) {
 }
 {
   // Mixed: a pending-request card + a genuine card → still nudges, count excludes only the gated one.
+  // The Request is filed by a session under an UNRELATED agent lineage (not "mgr-pending-mixed" itself)
+  // so this isolates the per-card discount from the SESSION-level suppression card cb56cf80 added below
+  // (18) — that one only fires for a session's OWN pending Request, which would otherwise fully suppress
+  // this manager regardless of its other actionable cards, confounding this test's card-count assertion.
   const e = makeEnv();
   seedManager(e, "mgr-pending-mixed");
   seedCard(e, "todo");
   const pendingTask = e.db.listTasks(e.projId)[0];
-  seedQuestion(e, "mgr-pending-mixed", pendingTask.id, "pending");
+  const askerAgentId = `it-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertAgent({ id: askerAgentId, projectId: e.projId, name: "asker", startupPrompt: "orchestrate", position: 1 });
+  e.db.insertSession({
+    id: "mgr-pending-mixed-asker", projectId: e.projId, agentId: askerAgentId, engineSessionId: "eng-asker", title: null, cwd: e.projId,
+    processState: "live", resumability: "resumable", busy: false,
+    createdAt: minutesAgo(60), lastActivity: minutesAgo(60), lastError: null, role: "manager",
+    ctxInputTokens: null, ctxTurns: null, model: null,
+  });
+  e.alive.add("mgr-pending-mixed-asker");
+  seedQuestion(e, "mgr-pending-mixed-asker", pendingTask.id, "pending");
   seedTitled(e, "todo", "fix(web): real actionable task", false);
   e.watcher.tick(NOW);
   check("(1g) a pending-request card + a genuine card → STILL nudged, count excludes only the gated one",
@@ -806,8 +819,6 @@ const DROPPED_BOARD = {
   e.watcher.tick(NOW);
   check("(16a) idle platform (no workers / watching / unpaused / under cap) IS nudged", e.enqueued.length === 1 && e.enqueued[0].id === "plat-idle");
   check("(16a) nudge steers to idle_report same as a manager's", e.enqueued[0]?.text.includes("idle_report"));
-  check("(16a) nudge falls into the 'no live workers' branch (a Lead is never parented-to)",
-    /no live workers/i.test(e.enqueued[0]?.text));
   const s = e.db.getIdleNudgeState("plat-idle");
   check("(16a) recordIdleNudge incremented unanswered 0→1 for the platform session too", s?.unanswered === 1);
   cleanup(e);
@@ -864,7 +875,131 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
+// ==== (17) platform-role idle-nudge COPY diverges from the manager's (card f98f3e43) ====
+// The manager copy ("dropped the orchestration loop / pick up the next task NOW / N actionable
+// task(s)") pressures a Lead to drain the owner's decision-gated backlog — the exact anti-pattern
+// /platform-lead forbids. A platform-role session must get its OWN copy; the manager's stays untouched.
+{
+  const e = makeEnv();
+  seedPlatform(e, "plat-copy");
+  seedManager(e, "mgr-copy-same-proj");
+  seedTodo(e, 3); // shared board — both sessions see the same 3 actionable cards
+  e.watcher.tick(NOW);
+  const platMsg = e.enqueued.find((x) => x.id === "plat-copy")?.text ?? "";
+  const mgrMsg = e.enqueued.find((x) => x.id === "mgr-copy-same-proj")?.text ?? "";
+  check("(17a) platform copy drops the 'orchestration loop' framing", !/orchestration loop/i.test(platMsg));
+  check("(17a) platform copy drops 'pick up the next task NOW'", !/pick up the next task/i.test(platMsg));
+  check("(17a) platform copy drops the 'N actionable task(s)' framing entirely", !/actionable task/i.test(platMsg));
+  check("(17a) platform copy asks it to confirm parked-waiting or converged, matching the Lead's own loop",
+    /parked-waiting/i.test(platMsg) && /converged/i.test(platMsg));
+  check("(17a) platform copy still steers to idle_report and question_ask", /idle_report/.test(platMsg) && /question_ask/.test(platMsg));
+  check("(17b) the MANAGER copy on the identical idle shape stays BYTE-IDENTICAL to today",
+    mgrMsg.includes("Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW.") &&
+    mgrMsg.includes("3 actionable"));
+  cleanup(e);
+}
+
+// ==== (17c) a PARKED-role card (decision-gated / owner-flow work) is discounted from a platform ====
+// ==== session's actionable count, but STILL counts as actionable for a manager (card f98f3e43) ====
+{
+  const e = makeEnv();
+  seedPlatform(e, "plat-parked-only");
+  seedCard(e, "waiting"); // default board's sole parked-role column — sole open card
+  e.watcher.tick(NOW);
+  check("(17c) a platform session with ONLY a parked-lane card → NO idle nudge (decision-gated, discounted)",
+    e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // Contrast: the IDENTICAL board shape for a MANAGER still nudges — mirrors (1b), unchanged by this fix.
+  const e = makeEnv();
+  seedManager(e, "mgr-parked-only");
+  seedCard(e, "waiting");
+  e.watcher.tick(NOW);
+  check("(17c-mgr) the SAME board for a MANAGER still nudges (parked lane counts as actionable — unchanged)",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-parked-only" && e.enqueued[0].text.includes("1 actionable"));
+  cleanup(e);
+}
+
+// ==== (18) session-level suppression on an OWN pending owner Request, lineage-scoped (card cb56cf80) ====
+{
+  // (18a) an OPEN (pending) owner-facing question_ask FILED BY the session itself — even with taskId:null,
+  // invisible to the per-card listQuestionsForTask discount — suppresses the idle nudge for that filer.
+  const e = makeEnv();
+  seedManager(e, "mgr-own-pending-request");
+  seedTodo(e, 5); // genuine actionable board work — would normally nudge
+  seedQuestion(e, "mgr-own-pending-request", null, "pending");
+  e.watcher.tick(NOW);
+  check("(18a) a session with its OWN pending (taskId:null) Request is NOT idle-nudged", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // (18b) once that Request is answered, the SAME session resumes idle-nudging normally.
+  const e = makeEnv();
+  seedManager(e, "mgr-own-answered-request");
+  seedTodo(e, 5);
+  seedQuestion(e, "mgr-own-answered-request", null, "answered");
+  e.watcher.tick(NOW);
+  check("(18b) once the OWN Request is answered, the session resumes idle-nudging normally",
+    e.enqueued.some((x) => x.id === "mgr-own-answered-request"));
+  cleanup(e);
+}
+{
+  // (18c) baseline: a session with no pending own-Request at all still nudges normally (unaffected).
+  const e = makeEnv();
+  seedManager(e, "mgr-no-own-request");
+  seedTodo(e, 5);
+  e.watcher.tick(NOW);
+  check("(18c) a session with no pending own-Request still nudges normally", e.enqueued.some((x) => x.id === "mgr-no-own-request"));
+  cleanup(e);
+}
+{
+  // (18d) lineage-scoped, not global: a PENDING Request filed by an unrelated agent lineage must NOT
+  // suppress a different session's own nudge.
+  const e = makeEnv();
+  seedManager(e, "mgr-unrelated-pending");
+  seedTodo(e, 5);
+  const otherAgentId = `it-${Math.random().toString(36).slice(2, 8)}`;
+  e.db.insertAgent({ id: otherAgentId, projectId: e.projId, name: "other", startupPrompt: "orchestrate", position: 1 });
+  e.db.insertSession({
+    id: "mgr-other-agent", projectId: e.projId, agentId: otherAgentId, engineSessionId: "eng-other", title: null, cwd: e.projId,
+    processState: "live", resumability: "resumable", busy: false,
+    createdAt: minutesAgo(60), lastActivity: minutesAgo(60), lastError: null, role: "manager",
+    ctxInputTokens: null, ctxTurns: null, model: null,
+  });
+  e.alive.add("mgr-other-agent");
+  seedQuestion(e, "mgr-other-agent", null, "pending");
+  e.watcher.tick(NOW);
+  check("(18d) a PENDING Request filed by an unrelated agent lineage does NOT suppress this session's nudge",
+    e.enqueued.some((x) => x.id === "mgr-unrelated-pending"));
+  cleanup(e);
+}
+{
+  // (18e) the same suppression covers a PLATFORM (Lead) session too — the finding explicitly covers "manager/Lead".
+  const e = makeEnv();
+  seedPlatform(e, "plat-own-pending-request");
+  seedTodo(e, 3);
+  seedQuestion(e, "plat-own-pending-request", null, "pending");
+  e.watcher.tick(NOW);
+  check("(18e) a platform (Lead) session with its OWN pending Request is NOT idle-nudged either", e.enqueued.length === 0);
+  cleanup(e);
+}
+{
+  // (18f) agent-LINEAGE reachability: a fresh (non-recycle) successor session on the SAME agentId must
+  // still see a still-exited predecessor's own pending Request as ITS OWN (mirrors
+  // pullAnsweredQuestionsForAgent's reachability definition).
+  const e = makeEnv();
+  seedManager(e, "mgr-predecessor", { live: false }); // exited, row still present (FK target for the question)
+  seedQuestion(e, "mgr-predecessor", null, "pending"); // filed by the (now-exited) predecessor
+  seedManager(e, "mgr-successor"); // fresh session, SAME e.agentId
+  seedTodo(e, 4);
+  e.watcher.tick(NOW);
+  check("(18f) a fresh non-recycle successor on the SAME agent lineage is ALSO suppressed by a predecessor's own pending Request",
+    e.enqueued.length === 0);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; and a PLATFORM (Lead) session (card 98b3725c) gets the IDENTICAL full-trigger/silent/escalate coverage a manager does, correctly falling into the 'no live workers' message branch since a Lead is never parented-to, alongside a manager in the same project/tick without interference."
+  ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge lineage-scoped across a fresh non-recycle successor, resuming normally once answered or when there's no pending own-Request, without being fooled by an unrelated agent's pending Request (card cb56cf80)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

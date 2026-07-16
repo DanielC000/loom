@@ -4814,6 +4814,22 @@ export class Db {
     })();
   }
   /**
+   * Whether AGENT LINEAGE `agentId` has ANY still-`pending` (unanswered) question_ask outstanding —
+   * the idle-watcher's session-level suppression predicate (card cb56cf80): a manager/Lead correctly
+   * parked on its OWN open owner-facing Request should not be idle-nudged, regardless of whether that
+   * Request carries a `taskId` (owner Requests are often filed with `taskId:null`, invisible to the
+   * per-card `listQuestionsForTask` discount). Lineage-scoped via `sessions.agent_id` — the SAME
+   * ownership join `pullAnsweredQuestionsForAgent` uses — so a fresh (non-recycle) successor session
+   * still sees a predecessor's still-open Request. Deliberately NON-CONSUMING (never touches `state`).
+   */
+  hasPendingQuestionForAgent(agentId: string): boolean {
+    const row = this.db.prepare(
+      `SELECT 1 FROM questions q JOIN sessions s ON s.id = q.session_id
+       WHERE s.agent_id = ? AND q.state = 'pending' LIMIT 1`,
+    ).get(agentId);
+    return row !== undefined;
+  }
+  /**
    * Every request (any state) connected to ONE task via `task_id`, chronological (created_at) — the
    * backing read for tasks_get's connected-requests summary and the task_requests_list/task_request_get
    * pair (card 988bb585). Deliberately NON-CONSUMING (never touches `state`/`consumed_at`) — the durable,
