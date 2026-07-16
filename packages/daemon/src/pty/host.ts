@@ -1206,6 +1206,12 @@ interface Live {
   // still pending to apply it.
   startedAt: number;
   logStream: fs.WriteStream;
+  // Flips true the first time logStream emits 'error' (see attachLogErrorGuard) — degrades THIS
+  // session's log-writing to a no-op for the rest of its life. A WriteStream auto-destroys on error,
+  // so a bare listener alone isn't enough: without this flag, every subsequent .write() to the dead
+  // stream would re-emit 'error' (handled, but re-logged/re-thrown-from-emit on every pty data chunk).
+  // The pty/session itself is never affected — only its on-disk transcript log goes silent.
+  logBroken: boolean;
   busy: boolean;        // a turn is in flight (locally tracked; mirrored to DB via onBusy)
   ready: boolean;       // the TUI has booted (first SessionStart, after mode-cycles) — gate for injection.
                         // DISTINCT from busy: busy="turn in flight", ready="engine up + safe to submit".
@@ -2087,6 +2093,39 @@ export async function reapProcessesRootedInWorktree(
 }
 
 /**
+ * Attach the fail-safe 'error' listener every per-session log WriteStream MUST have (card 7a6cc239): a
+ * Node writable that emits 'error' with zero listeners throws it back out of `.emit()` — unhandled, that
+ * crashes the ENTIRE daemon process (every live manager/worker pty lost), not just this one session's
+ * logging. Latent today only because `ensureDirs()` guarantees the log dir exists at boot; a disk-full,
+ * a permission change, an AV/indexer lock, or a corrupt volume on an actual write would still hit it.
+ * On error this DEGRADES — flips `live.logBroken` so `writeLog` becomes a no-op for the rest of this
+ * session's life — rather than rethrow; the pty/session itself is unaffected, only its on-disk log stops.
+ * Call once, synchronously, right after constructing each `live` entry (same tick as `createWriteStream`,
+ * so there's no race with the stream's own always-async error emission).
+ */
+function attachLogErrorGuard(sessionId: string, live: Live): void {
+  live.logStream.on("error", (err) => {
+    if (live.logBroken) return; // already degraded — don't re-log/spam on a re-emitted error
+    live.logBroken = true;
+    try {
+      // eslint-disable-next-line no-console
+      console.error(`[pty] ${sessionId} log stream error — disabling this session's on-disk log (session continues): ${err.message}`);
+    } catch { /* logging the error must never itself throw */ }
+  });
+}
+
+/**
+ * Write to a session's log stream, guarded against a previously-errored/destroyed stream (see
+ * attachLogErrorGuard) — a no-op once `live.logBroken` is set, so a broken log never re-attempts or
+ * re-throws. The try/catch is defense in depth (matches this file's existing style around `.end()`);
+ * `logBroken` is what actually stops repeat work, not the catch.
+ */
+function writeLog(live: Live, buf: Buffer): void {
+  if (live.logBroken) return;
+  try { live.logStream.write(buf); } catch { live.logBroken = true; }
+}
+
+/**
  * Owns all interactive `claude` ptys. Independent of any browser — sessions live here.
  * Implements the spike-validated gate-free spawn recipe (acceptEdits + allowlist,
  * --strict-mcp-config WITH an explicit --mcp-config so the .mcp.json prompt never blocks,
@@ -2154,6 +2193,7 @@ export class PtyHost {
       alive: true,
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
+      logBroken: false,
       busy: false,
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
       mcpSeen: false, // flipped on the first observed loom-orchestration MCP hit — see Live.mcpSeen / markMcpSeen
@@ -2195,6 +2235,7 @@ export class PtyHost {
       role: opts.role ?? null,
     };
     this.live.set(opts.sessionId, live);
+    attachLogErrorGuard(opts.sessionId, live);
 
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
@@ -2237,7 +2278,7 @@ export class PtyHost {
         }
       }
       this.appendRing(live, buf);
-      live.logStream.write(buf);
+      writeLog(live, buf);
       for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
     });
     pty.onExit(({ exitCode }) => {
@@ -2312,6 +2353,7 @@ export class PtyHost {
       alive: true,
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
+      logBroken: false,
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
@@ -2334,12 +2376,13 @@ export class PtyHost {
       role: null, // a shell has no role; unreachable anyway (modeLogged:true skips the auto-heal read)
     };
     this.live.set(opts.id, live);
+    attachLogErrorGuard(opts.id, live);
     // Shell onData is minimal: NO boot-prompt / resume-gate scanning (those are Claude-TUI artifacts).
     pty.onData((d) => {
       const buf = Buffer.from(d, "utf-8");
       live.lastOutputAt = Date.now();
       this.appendRing(live, buf);
-      live.logStream.write(buf);
+      writeLog(live, buf);
       for (const s of live.subscribers) { try { s.onData(buf); } catch { /* ignore */ } }
     });
     pty.onExit(({ exitCode }) => {
@@ -2384,6 +2427,7 @@ export class PtyHost {
       alive: true,
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
+      logBroken: false,
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0,
@@ -2404,6 +2448,7 @@ export class PtyHost {
     };
     if (opts.bytes.length) this.appendRing(live, opts.bytes);
     this.live.set(opts.id, live);
+    attachLogErrorGuard(opts.id, live);
   }
 
   /** TEST-ONLY: drop a `seedCanned` entry (no process to kill — just forget the map entry + close its log). */
