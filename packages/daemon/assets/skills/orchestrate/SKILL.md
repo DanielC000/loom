@@ -248,6 +248,16 @@ until you've seen the plan); `acceptEdits` / `auto` to open a trusted, low-risk 
 isn't stopping for routine confirmations. Match the mode to the risk — a tight spike plans, a well-scoped
 mechanical change can run fast.
 
+**An investigate-first / plan-approval instruction given as PROSE is NOT a gate — make it one with
+`plan` mode.** Telling a worker in the kickoff to "report your root cause + fix plan before you edit; I'll
+sanity-check first" is only advisory: a worker can (and does) treat it as optional narration — write the
+plan as chat prose and edit in the very next step, and the checkpoint you wanted never happens. To make it
+a REAL gate, set the worker to `plan` mode (`worker_set_mode('plan')`, or spawn it that way) so it
+structurally *cannot* edit until you've reviewed and approved the plan — don't rely on the prose request
+alone. And never pair the plan-request with a contradictory "stay in your normal working mode, not plan
+mode" caveat: that directly licenses the worker to skip the checkpoint, defeating the very gate you asked
+for.
+
 **Verify a steering message actually landed — but read the result precisely.** After
 `worker_message`/`worker_redirect`, check the result it returns and distinguish two "not delivered"
 cases, because they need OPPOSITE responses. **Held / queued** (the result names a queue position, or a
