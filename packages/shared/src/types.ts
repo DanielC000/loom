@@ -945,7 +945,13 @@ export type OrchestrationEventKind =
   // shape as the build/DoD gate's own diagnostic capture). The audit trail for this trust-boundary
   // surface; never fired for a refused (unconfigured / rate-limited) attempt, which returns an error
   // with no host exec and thus nothing to audit.
-  | "deploy";
+  | "deploy"
+  // Worker self-gate (orchestration `run_gate`, card 7f96aa09 — structural fix B for d5c5ccdf): a worker
+  // ran its OWN project's `gateCommand` pre-merge, daemon-mediated and bound by the SAME `GateSemaphore`
+  // cap as the merge/deploy gates (instead of an unbounded raw-Bash self-check). Filed under the CALLING
+  // WORKER itself (managerSessionId = its own id — there is no separate manager owner for a self-scoped
+  // op); `detail` carries { passed }.
+  | "worker_gate";
 
 export interface OrchestrationEvent {
   id: string;

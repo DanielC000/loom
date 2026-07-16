@@ -119,12 +119,13 @@ check("agent_list DTO carries name/profileId/position + role resolved from the b
 
 await M.close();
 
-// 5) ROLE-BASED surface: a WORKER connects but sees ONLY [my_context, worker_report] (no manager
-//    coordination tools — the depth-1 tree holds at the surface, not just a gate). my_context is the
-//    own-occupancy self-assessment tool, available to any role; worker_report is NOT a manager tool.
+// 5) ROLE-BASED surface: a WORKER connects but sees ONLY [my_context, run_gate, worker_report] (no
+//    manager coordination tools — the depth-1 tree holds at the surface, not just a gate). my_context is
+//    the own-occupancy self-assessment tool, available to any role; worker_report is NOT a manager tool;
+//    run_gate (card 7f96aa09) is the daemon-mediated DoD self-gate, added since this check was written.
 const W = await connect("W1");
 const wTools = (await W.listTools()).tools.map((t) => t.name).sort();
-check(`worker W1 sees ONLY [my_context, worker_report]  (got ${wTools.join(",")})`, wTools.join(",") === "my_context,worker_report");
+check(`worker W1 sees ONLY [my_context, run_gate, worker_report]  (got ${wTools.join(",")})`, wTools.join(",") === "my_context,run_gate,worker_report");
 // my_context on an UNMEASURED session (W1 has no ctx_input_tokens) → pct null + a note, never a fake 0.
 const wCtx = parse(await W.callTool({ name: "my_context", arguments: {} }));
 check(`my_context(W1) unmeasured → ctxInputTokens null, pct null, note present (got ${JSON.stringify(wCtx)})`,

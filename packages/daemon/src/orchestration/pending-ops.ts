@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 
-export type PendingOpKind = "spawn" | "merge";
+export type PendingOpKind = "spawn" | "merge" | "gate";
 export type PendingOpState = "running" | "done" | "failed";
 
 /**
@@ -65,7 +65,12 @@ function view(e: Entry<unknown>): PendingOpView {
  * throw-on-retry mutex) into a record whose outcome a client can come back for. Fixes the Auditor
  * b9515beb friction: a client-side MCP timeout on a minutes-long gate run used to leave the manager
  * unable to tell whether the op landed, and a retry bounced off a hard "already in flight" error instead
- * of finding out. One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`).
+ * of finding out. One op per `key` at a time (spawn: `spawn:${taskId}`; merge: `merge:${workerSessionId}`;
+ * gate: `gate:${workerSessionId}` — card 7f96aa09, a worker's own daemon-mediated DoD self-check). The
+ * "gate" kind has no separate owning manager: its `managerSessionId` field holds the CALLING WORKER's own
+ * session id (the caller and the beneficiary of the completion nudge are the same session), so it needs
+ * none of the dead-owner reconciliation the "merge" kind does — there is no cross-session ownership split
+ * to reconcile when a key's only possible caller is the session named by the key itself.
  *
  * EVICT-ON-SETTLE (not a TTL): the entry is deleted from the map the MOMENT it settles (inside the
  * `run().then/.catch` callback in `attach()`), not merely once someone happens to consume it. This closes

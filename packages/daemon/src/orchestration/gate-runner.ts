@@ -57,7 +57,7 @@ export interface GateStepResult {
  *  bounded ring so a rejection can surface the REAL failure instead of an opaque "gate failed". Injectable
  *  so a hermetic test can prove step-by-step + short-circuit behavior without spawning real processes. */
 export interface GateStepRunner {
-  (command: string, cwd: string, timeoutMs: number): Promise<GateStepResult>;
+  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv): Promise<GateStepResult>;
 }
 
 /**
@@ -70,7 +70,7 @@ export interface GateStepRunner {
  * other work (and let the sync-wait budget's timer actually fire) while the OS process runs in the
  * background.
  */
-export const runGateStep: GateStepRunner = (command, cwd, timeoutMs) => new Promise((resolve) => {
+export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride) => new Promise((resolve) => {
   // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front
   // as newer ones arrive. The final tail() slices to exactly the cap. Same shape as python/venv.ts's
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
@@ -87,8 +87,11 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs) => new Prom
   };
   // GIT_TERMINAL_PROMPT=0 — a gateCommand/deployCommand step may run `git push` (or any git op); without
   // this, an uncached-credential push blocks on an interactive prompt until the timeout SIGKILL instead
-  // of failing fast (mirrors git/writer.ts and pty/host.ts's same guard).
-  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
+  // of failing fast (mirrors git/writer.ts and pty/host.ts's same guard). `envOverride` (card 7f96aa09)
+  // lets a caller force additional vars onto just this step's own child — e.g. the worker self-gate pins
+  // `LOOM_TEST_CONCURRENCY=1` here so raising `maxConcurrentGates` can't silently double the total
+  // test-lane budget — applied AFTER the base env so an override always wins.
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", ...envOverride };
   const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], env });
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
@@ -128,12 +131,15 @@ export interface GateSequentialResult {
  * exactly: the first non-zero (or spawn-error) step stops the run and fails the gate; a gate with no
  * `&&` behaves exactly as the old single-`spawnSync` call did. Each step gets the SAME per-project
  * `gateTimeoutMs` budget (not a divided share) — a heavy step (e.g. a build) needs its own full window.
+ * `envOverride` (card 7f96aa09) is forwarded to every step's own `runStep` call, additive to whatever env
+ * that runner already sets (see `runGateStep`'s own doc) — trailing so existing 4-arg callers (incl. the
+ * `gate-runner-sequential.mjs` unit test, which injects its own `runStep`) are unaffected.
  */
 export async function runGateSequential(
-  gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep,
+  gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
 ): Promise<GateSequentialResult> {
   for (const step of splitGateSteps(gate)) {
-    const res = await runStep(step, cwd, timeoutMs);
+    const res = await runStep(step, cwd, timeoutMs, envOverride);
     const passed = res.status === 0 && !res.error;
     if (!passed) {
       return {

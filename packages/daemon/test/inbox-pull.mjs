@@ -163,8 +163,10 @@ process.env.LOOM_HOME = tmpHome;
   const workerTools = toolNames("worker");
   check("(T) inbox_pull IS registered on the MANAGER surface", managerTools.includes("inbox_pull"));
   check("(T) inbox_pull is NOT on the worker surface", !workerTools.includes("inbox_pull"));
-  check("(T) the worker surface is still exactly { my_context, worker_report } (depth-1 gate held)",
-    workerTools.slice().sort().join(",") === "my_context,worker_report");
+  // run_gate (card 7f96aa09, the daemon-mediated DoD self-gate) was added to the worker surface since
+  // this anchor was first written — the depth-1 gate now holds at three tools, not two.
+  check("(T) the worker surface is still exactly { my_context, run_gate, worker_report } (depth-1 gate held)",
+    workerTools.slice().sort().join(",") === "my_context,run_gate,worker_report");
 
   db.close();
   for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }

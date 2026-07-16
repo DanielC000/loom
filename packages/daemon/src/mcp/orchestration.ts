@@ -649,6 +649,45 @@ export class OrchestrationMcpRouter {
         async ({ status, summary, prUrl, needs, noChanges }) =>
           ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges })),
       );
+      // run_gate (card 7f96aa09 — structural fix B for d5c5ccdf): run THIS gate through the daemon's
+      // GateSemaphore instead of a raw Bash self-check, so N parallel workers can't structurally exceed
+      // the total-lane budget. No args — it always runs YOUR OWN project's configured gateCommand in
+      // YOUR OWN worktree; server-derived from your session id, never a param (mirrors worker_report).
+      server.registerTool(
+        "run_gate",
+        {
+          description:
+            "Run this project's build/DoD gate (the SAME `gateCommand` the merge gate itself runs, in YOUR " +
+            "OWN worktree) as your DoD self-check — daemon-mediated and admitted through the SAME " +
+            "GateSemaphore/`maxConcurrentGates` budget the merge/deploy gates already share, instead of an " +
+            "unbounded raw-Bash self-check. Prefer this over running the gate yourself via Bash: it structurally " +
+            "bounds total concurrent test-lanes across every worker + merge/deploy gate on the daemon (it also " +
+            "pins LOOM_TEST_CONCURRENCY=1 on the spawned child itself, so you don't need to set that env var). " +
+            "Because it shares one budget with merge/deploy gates, a busy fleet MAY mean this call queues behind " +
+            "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
+            "reason} if this project has no gateCommand configured at all — fall back to running your own " +
+            "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
+            "returns {ran:true, passed, gateDetail?} — on a failure, gateDetail carries {phase, failedStep, " +
+            "failingTest, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure vs. a " +
+            "flake without re-running blind. CLIENT-TIMEOUT RESILIENT, same shape as worker_merge_confirm: a " +
+            "fast run returns the full result inline (stamped with a correlation `opId`); a genuinely slow one " +
+            "(a real multi-minute test suite) instead returns {opId, status:\"pending\"} — wait for the async " +
+            "`[loom:gate-done]`/`[loom:gate-failed]` nudge (carrying this SAME opId) pushed into YOUR OWN " +
+            "session, or just RE-CALL run_gate with no args (idempotent-retryable: it attaches to the SAME " +
+            "in-flight run rather than starting a second one, and never throws 'already in flight').",
+          inputSchema: {},
+        },
+        async () => {
+          try {
+            const r = await sessions.runWorkerGate(sessionId);
+            if (!r.settled) return ok({ opId: r.op.opId, status: "pending", note: "gate still running — wait for the [loom:gate-done]/[loom:gate-failed] nudge, or re-call run_gate to fetch the result once ready." });
+            if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
+            return ok(r.value);
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
       return server;
     }
 

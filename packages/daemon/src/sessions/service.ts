@@ -40,7 +40,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
 import { GateSemaphore } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -87,6 +87,25 @@ type GateRejectionDetail = {
 };
 
 type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string };
+
+/** {@link SessionService.runWorkerGate}'s result (card 7f96aa09 — structural fix B for d5c5ccdf: route the
+ *  worker DoD self-gate through the daemon GateSemaphore). `ran:false` means no gate command is configured
+ *  for this project at all (the caller should fall back to a raw self-check, pinning `LOOM_TEST_CONCURRENCY=1`
+ *  itself); `ran:true` always means the SAME `orchestration.gateCommand` the merge gate itself runs was
+ *  actually executed, in the worker's own worktree. Reuses `GateRejectionDetail`'s shape on a failure — the
+ *  same diagnostic enrichment (phase/failedStep/failingTest/stderrTail/exitCode/signal/timedOut) the merge
+ *  gate's own rejection carries — but this is a single run: unlike `confirmWorkerMerge`, a transient-kill
+ *  classification is NOT auto-retried here (the worker can just re-call run_gate itself). */
+type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string };
+
+/** Forced onto the worker self-gate's OWN spawned child (card 7f96aa09), additive to whatever env the
+ *  worker's shell already has — pins the daemon test runner's own internal test-lane pool to ONE lane per
+ *  gate invocation, so raising `orchestration.maxConcurrentGates` to admit more parallel worker gates can't
+ *  silently double the total test-lane budget (cap × pool-size instead of cap × 1). Bakes in, structurally,
+ *  the SAME `LOOM_TEST_CONCURRENCY=1` convention CLAUDE.md previously asked a worker to remember on its own
+ *  raw-Bash self-check (fix A, card d5c5ccdf) — which stays documented as the fallback for an unconfigured
+ *  project or an ad-hoc local run outside `run_gate`. */
+const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_TEST_CONCURRENCY: "1" };
 
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
@@ -418,7 +437,9 @@ export class SessionService {
    * needing a real cross-platform OOM/SIGKILL (signal delivery on `close` is not reliably fakeable via a
    * real spawn on every OS this daemon runs on).
    */
-  private readonly runGate: ((gate: string, cwd: string, timeoutMs: number) => Promise<GateSequentialResult>) | undefined;
+  private readonly runGate:
+    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>)
+    | undefined;
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
    * must not mean "dangles forever"). A wedge is usually eventually-resolvable (a held OS-indexer/
@@ -554,7 +575,7 @@ export class SessionService {
       removeDir?: (target: string, timeoutMs: number) => Promise<{ removed: boolean; killed: boolean }>;
       reapWorktreeProcesses?: (worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>;
       findNestedGitRepos?: (worktreePath: string) => Promise<{ repos: string[]; truncated: boolean }>;
-      runGate?: (gate: string, cwd: string, timeoutMs: number) => Promise<GateSequentialResult>;
+      runGate?: (gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       codescape?: CodescapeSupervisor;
     },
@@ -5419,6 +5440,17 @@ export class SessionService {
     if (session.role !== "manager") throw new Error(`${surface} is a manager-only surface`);
   }
 
+  /** Role gate for {@link runWorkerGate} (card 7f96aa09): the caller must be a live WORKER session —
+   *  defense in depth mirroring `requireManager` above, on TOP of `run_gate` only ever being REGISTERED
+   *  on the `role==="worker"` MCP branch in the first place (mcp/orchestration.ts). Rejects a plain/run
+   *  session outright (wrong role); a TASKLESS (ad-hoc) worker is fine — run_gate needs a worktree, not a
+   *  task. */
+  private requireWorker(sessionId: string, surface: string): void {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("unknown session");
+    if (session.role !== "worker") throw new Error(`${surface} is a worker-only surface`);
+  }
+
   /**
    * The OWN-PROJECT containment boundary for every manager self-service write. A manager's self-service
    * tools (project_update/_archive, agent_update/_assign_profile, schedule_create/_update) take a target
@@ -6439,6 +6471,127 @@ export class SessionService {
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.reason ?? "merge did not complete"}`)
           : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+      },
+    );
+  }
+
+  /**
+   * Worker self-gate (orchestration `run_gate`, card 7f96aa09 — structural fix B for d5c5ccdf): run THIS
+   * project's OWN configured `gateCommand` in the CALLING worker's own worktree, daemon-mediated and bound
+   * by the SAME `gateSemaphore`/`maxConcurrentGates` cap the merge/deploy gates already share — so N
+   * parallel workers self-gating can no longer structurally exceed the total-lane budget, regardless of
+   * whether each worker remembers the `LOOM_TEST_CONCURRENCY=1` convention (fix A, d5c5ccdf — which stays
+   * documented as the fallback for a project with no `gateCommand` configured at all, or an ad-hoc local
+   * run outside `run_gate`).
+   *
+   * REUSES `gateCommand` rather than a second "worker DoD command" config field — `gateCommand` already
+   * runs in the worker's own worktree at merge-confirm time (after main is merged into it); calling
+   * `run_gate` pre-merge just previews the SAME command a little earlier, on the branch's own pre-merge
+   * state. This avoids a divergence footgun where a worker's self-check and the actual merge gate could
+   * silently differ.
+   *
+   * A SINGLE run — unlike `confirmWorkerMerge`, no transient-kill auto-retry (the caller can just re-call
+   * `run_gate` itself), no union-merge, no stranded-work check, no squash/finalize: this is a preview/
+   * rehearsal, not the merge gate itself.
+   *
+   * LONG-RUNNING (mirrors `confirmWorkerMergeTracked`): wrapped in `PendingOpRegistry.attach` under kind
+   * "gate", key `gate:${workerSessionId}` — a fast run (under `SYNC_ATTACH_BUDGET_MS`) returns inline; a
+   * genuinely slow one degrades to `{settled:false, op}` and, on its eventual settle, pushes a
+   * `[loom:gate-done]`/`[loom:gate-failed]` nudge straight to the WORKER's own session (not a manager — the
+   * caller and the beneficiary are the same session here) via `pty.enqueueStdin`. The key is single-flight
+   * per worker and needs no dead-owner eviction: unlike the "merge" kind (owned by a manager distinct from
+   * the worker being confirmed), a "gate" op's only possible caller IS the session named by its own key.
+   *
+   * CRASH-SAFETY: the gate's child process is spawned by the DAEMON (`runGateStep`), never the worker's own
+   * pty — `gateSemaphore.runExclusive`'s `finally{release()}` fires on the child's own close/error/timeout
+   * regardless of whether the calling worker session is still alive, so a worker dying mid-gate cannot leak
+   * a held semaphore slot. A worker that dies before ever consuming a `{status:"pending"}` result just
+   * wastes one gate run — harmless.
+   */
+  async runWorkerGate(workerSessionId: string): Promise<AttachResult<WorkerGateResult>> {
+    this.requireWorker(workerSessionId, "run_gate");
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker) throw new Error("unknown session");
+    const worktreePath = worker.worktreePath ?? worker.cwd;
+    const project = this.db.getProject(worker.projectId);
+    if (!project) throw new Error("project not found");
+    // RESOLVE-LIVE (mirrors confirmWorkerMerge): read fresh so a human PATCH to gateCommand/its timeout/
+    // maxConcurrentGates takes effect on the very next call with no daemon restart.
+    const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
+    const gate = orchestration.gateCommand;
+    if (!gate) {
+      return {
+        settled: true, ok: true,
+        value: {
+          ran: false,
+          reason: "no gateCommand configured for this project — ask the owner to set orchestration.gateCommand, or fall back to a raw self-check (pin LOOM_TEST_CONCURRENCY=1 yourself)",
+        },
+      };
+    }
+    const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
+    const gateCap = orchestration.maxConcurrentGates;
+    const runGateSeq = this.runGate ?? runGateSequential;
+    const key = `gate:${workerSessionId}`;
+    return this.pendingOps.attach<WorkerGateResult>(
+      key, "gate", workerSessionId, SYNC_ATTACH_BUDGET_MS,
+      async (opId) => {
+        const evt = (detail: Record<string, unknown>) => this.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: workerSessionId, workerSessionId,
+          taskId: worker.taskId ?? null, kind: "worker_gate", detail,
+        });
+        let gateResult: GateSequentialResult;
+        try {
+          gateResult = await this.gateSemaphore.runExclusive(
+            gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE),
+          );
+        } catch (err) {
+          // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
+          // not an ordinary gate FAILURE) used to leave NO audit trail at all — appendEvent was only ever
+          // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
+          // caller (PendingOpRegistry.attach) already turns a rejection into a normal {ok:false} outcome —
+          // this audit write adds a durable record, it does not change that error-handling behavior.
+          evt({ passed: false, error: err instanceof Error ? err.message : String(err) });
+          throw err;
+        }
+        if (gateResult.passed) {
+          evt({ passed: true });
+          return { ran: true, passed: true, opId };
+        }
+        const finalClass = classifyGateFailure(gateResult);
+        const phase = classifyGatePhase(gateResult.failedStep);
+        // Same INJECTION HYGIENE as confirmWorkerMerge's own rejection path: strip C0 control chars before
+        // this raw process output is embedded into the `[loom:gate-failed]` pty text.
+        const outputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
+        const rawFailingTest = outputTail ? extractFailingTest(outputTail) : undefined;
+        const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
+        const headline = finalClass === "kill"
+          ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""}`
+          : finalClass === "timeout"
+            ? "gate timed out (possibly resource-starved under load)"
+            : "build gate failed";
+        // AUDIT ENRICHMENT (CR follow-up): carry the same failure detail the sibling `deploy` event records
+        // (exitCode/signal/timedOut/outputTail) PLUS phase/failedStep/failingTest — we already compute all
+        // of this for the nudge/return value below, so the durable event shouldn't be a flatter `{passed}`.
+        evt({
+          passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
+          exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
+          ...(outputTail ? { outputTail } : {}),
+        });
+        return {
+          ran: true, passed: false, reason: headline, opId,
+          gateDetail: {
+            phase, failedStep: gateResult.failedStep, failingTest, stderrTail: outputTail,
+            exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
+          },
+        };
+      },
+      (outcome, opId) => {
+        const msg = outcome.ok
+          ? (outcome.value.passed
+            ? `[loom:gate-done] op ${opId} — gate passed.`
+            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${outcome.value.gateDetail?.stderrTail ? `\n--- gate output tail ---\n${outcome.value.gateDetail.stderrTail}` : ""}`)
+          : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
+        try { this.pty.enqueueStdin(workerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
       },
     );
   }

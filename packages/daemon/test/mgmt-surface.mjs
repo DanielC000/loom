@@ -132,10 +132,13 @@ check("schedule_update: a missing schedule is rejected", (await call(M, "schedul
 
 await M.close();
 
-// 7) ROLE GATE — a WORKER connects but sees ONLY worker_report; NONE of the management tools.
+// 7) ROLE GATE — a WORKER connects but sees ONLY {my_context, run_gate, worker_report}; NONE of the
+//    management tools. (This assertion was already stale before card 7f96aa09 — it never accounted for
+//    my_context, added to the worker branch by 5561afb8 — fixed as a drive-by while updating it for
+//    run_gate, the same worker-surface-enumeration assertion category.)
 const W = await connect("mcp-orch", "W");
-const wTools = (await W.listTools()).tools.map((t) => t.name);
-check(`role-gate: worker sees ONLY [worker_report] (got ${wTools.join(",")})`, wTools.join(",") === "worker_report");
+const wTools = (await W.listTools()).tools.map((t) => t.name).sort();
+check(`role-gate: worker sees ONLY [my_context, run_gate, worker_report] (got ${wTools.join(",")})`, wTools.join(",") === "my_context,run_gate,worker_report");
 check("role-gate: worker sees NONE of the six management tools", six.every((t) => !wTools.includes(t)));
 await W.close();
 // A plain session gets no orchestration surface at all (404 → throw).

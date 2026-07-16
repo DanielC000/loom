@@ -206,13 +206,19 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const workerTools = toolNames("worker");
 
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
-  const gateSetTool = (names) => names.find((n) => /gate/i.test(n));
+  // `run_gate` (card 7f96aa09) is a DELIBERATE, reviewed exception to the /gate/i sweep below: it only
+  // EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the GateSemaphore) — it never
+  // sets/configures gateCommand itself, so the trust boundary this check protects (no agent-writable
+  // gateCommand surface) is untouched.
+  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
-  check("(S) NO gate-setting tool on the worker surface", gateSetTool(workerTools) === undefined);
-  // The worker surface is unchanged: exactly { my_context, worker_report } (no new tool was added).
-  check("(S) worker surface is STILL exactly { my_context, worker_report }",
-    workerTools.slice().sort().join(",") === "my_context,worker_report");
+  check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",
+    gateSetTool(workerTools) === undefined);
+  // The worker surface is exactly { my_context, run_gate, worker_report } — run_gate (card 7f96aa09) is
+  // the one deliberate addition since this assertion was written; anything else would be a surface leak.
+  check("(S) worker surface is STILL exactly { my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "my_context,run_gate,worker_report");
   // my_context is present on BOTH role branches (it's the tool the gate is folded into).
   check("(S) my_context registered on both manager + worker surfaces",
     managerTools.includes("my_context") && workerTools.includes("my_context"));
