@@ -10,11 +10,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the session's own allowlist (`sessionConnections`) in every case here, proving the allowlist alone
 //       is NOT the gate — a cross-project session whose profile allowlists a scoped id still resolves
 //       NOTHING (fail-closed).
-//   (3) buildMcpServers' P4 capability-grant path (pty/host.ts): the SAME real composition index.ts's
-//       resolveConnectionSecret uses (getConnectionMetadata + isConnectionUsableByProject + getSecretForUse)
-//       is exercised end-to-end — a matching projectId gets the secret injected into the mounted server's
-//       env; a mismatched/absent projectId mounts the server WITHOUT the secret (fails closed, exactly like
-//       an unresolvable connection).
+//   (3) buildMcpServers' P4 capability-grant path (pty/host.ts): the REAL `resolveScopedConnectionSecret`
+//       helper (connections/store.ts) — the exact composition index.ts's resolveConnectionSecret closure
+//       calls — is exercised end-to-end — a matching projectId gets the secret injected into the mounted
+//       server's env; a mismatched/absent projectId mounts the server WITHOUT the secret (fails closed,
+//       exactly like an unresolvable connection).
 //   (4) provisionConnection's OPTIONAL scoped-rotation extension: a same-name collision refuses across
 //       scopes (global vs scoped, or two different projects) exactly as before f2abce7e, but ROTATES in
 //       place when the existing row is already scoped to the EXACT requesting project (api-key only).
@@ -38,6 +38,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const {
   createConnection, getConnectionMetadata, getSecretForUse, isConnectionUsableByProject, provisionConnection,
+  resolveScopedConnectionSecret,
 } = await import("../dist/connections/store.js");
 const { performAuthenticatedRequest, __resetConnectionsRateLimitState } = await import("../dist/connections/request.js");
 const { buildMcpServers } = await import("../dist/pty/host.js");
@@ -108,13 +109,9 @@ try {
       secretEnvVar: SECRET_ENV_VAR, createdAt: new Date().toISOString(),
     };
 
-    // The SAME composition index.ts's resolveConnectionSecret uses — a faithful proxy for the production
-    // resolver, not a fake stand-in that could drift from the real fail-closed logic.
-    const realResolver = (connectionId, projectId) => {
-      const meta = getConnectionMetadata(db, connectionId);
-      if (!meta || !isConnectionUsableByProject(meta.projectId, projectId ?? null)) return undefined;
-      return getSecretForUse(db, connectionId);
-    };
+    // The REAL resolveScopedConnectionSecret — the exact helper index.ts's resolveConnectionSecret closure
+    // calls — bound to this test's db, so this exercises production code, not a hand-copied proxy.
+    const realResolver = (connectionId, projectId) => resolveScopedConnectionSecret(db, connectionId, projectId);
 
     const withMatch = buildMcpServers({
       sessionId: "s-1", port: 4317, role: "worker",
@@ -192,7 +189,7 @@ try {
   }
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — isConnectionUsableByProject's truth table holds; performAuthenticatedRequest resolves a project-scoped connection ONLY for its own project (fail-closed even when the id is in a cross-project session's own allowlist) while a global connection resolves anywhere; buildMcpServers' P4 capability-grant path (the same real getConnectionMetadata+isConnectionUsableByProject+getSecretForUse composition index.ts uses) injects the secret only on a projectId match and mounts secret-less otherwise; and provisionConnection's optional scoped-rotation extension refuses every cross-scope/cross-project/non-api-key collision while rotating cleanly in place for a same-project same-name api-key row."
+    ? "\n✅ ALL PASS — isConnectionUsableByProject's truth table holds; performAuthenticatedRequest resolves a project-scoped connection ONLY for its own project (fail-closed even when the id is in a cross-project session's own allowlist) while a global connection resolves anywhere; buildMcpServers' P4 capability-grant path (the real resolveScopedConnectionSecret helper index.ts's resolveConnectionSecret calls) injects the secret only on a projectId match and mounts secret-less otherwise; and provisionConnection's optional scoped-rotation extension refuses every cross-scope/cross-project/non-api-key collision while rotating cleanly in place for a same-project same-name api-key row."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }

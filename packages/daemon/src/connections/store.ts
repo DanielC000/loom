@@ -231,6 +231,21 @@ export function getSecretForUse(db: ConnectionsDbStore, id: string, keyPath?: st
   return decryptSecret(row.secretBlob, keyPath);
 }
 
+/**
+ * Card f2abce7e's P4-capability fail-closed composition, extracted to a single tested owner (test-fidelity
+ * follow-up, card 34ea225d): `getConnectionMetadata` + `isConnectionUsableByProject` + `getSecretForUse`,
+ * checking project scope BEFORE decrypting. Returns undefined for an unresolvable/revoked connection, a
+ * project-scope mismatch (fail-closed), or a decrypt failure — `index.ts`'s `resolveConnectionSecret`
+ * calls this directly so the production closure and the test exercise the exact same code.
+ */
+export function resolveScopedConnectionSecret(db: ConnectionsDbStore, connectionId: string, projectId?: string | null): string | undefined {
+  try {
+    const meta = getConnectionMetadata(db, connectionId);
+    if (!meta || !isConnectionUsableByProject(meta.projectId, projectId ?? null)) return undefined;
+    return getSecretForUse(db, connectionId);
+  } catch { return undefined; }
+}
+
 // --- OAuth2 (agent-tooling epic P5a): authorization-code + PKCE registration + token-bundle seams -------
 // Everything below is HUMAN-only-triggered (REST, `gateway/server.ts`) or server-internal (the lazy
 // refresh-on-use seam in `connections/request.ts` / `connections/oauth.ts`) — no MCP tool ever reaches
