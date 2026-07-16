@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge } from "@loom/shared";
+import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Button, Input, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
@@ -19,12 +19,12 @@ import { PRIORITY_META, PriorityChip, prio } from "../components/priority";
 
 const PRIORITIES: TaskPriority[] = ["p0", "p1", "p2", "p3"];
 // Sort a column's cards high→low priority (p0 first), then by position — strings p0<p1<p2<p3 sort right.
-const byPriorityThenPosition = (a: Task, b: Task) =>
+const byPriorityThenPosition = (a: BoardTask, b: BoardTask) =>
   prio(a) === prio(b) ? a.position - b.position : (prio(a) < prio(b) ? -1 : 1);
 // Done columns sort most-recently-done first. `updatedAt` (ISO string → lexical compare is chronological)
 // is the stand-in for completion time; tie-break on position then id so equal-timestamp cards never
 // reshuffle on the 3s refetch (deterministic, no flicker).
-const byRecentlyDone = (a: Task, b: Task) =>
+const byRecentlyDone = (a: BoardTask, b: BoardTask) =>
   a.updatedAt === b.updatedAt ? (a.position - b.position || (a.id < b.id ? -1 : 1)) : (a.updatedAt > b.updatedAt ? -1 : 1);
 
 // Per-project kanban. Reads/writes the SAME task store the MCP tools use — moving a card
@@ -58,7 +58,12 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   // Edit a task's title/description/priority/held/deferred from the detail drawer (same store the MCP tools read/write).
   const edit = useMutation({
     mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean } }) => api.updateTask(id, patch),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
+    // Invalidate BOTH the board list and this card's own lazy-fetched detail (a done card's body query,
+    // below) — a save must never leave the detail cache holding the pre-edit body on next open.
+    onSuccess: (_r, { id }) => {
+      qc.invalidateQueries({ queryKey: ["board", projectId] });
+      qc.invalidateQueries({ queryKey: ["task", id] });
+    },
   });
   // PERMANENTLY delete a task card from the drawer (HUMAN-only REST; no MCP path). On success close the
   // drawer + refetch the board. On the server's live-session guard 400, delErr throws the reason — leave
@@ -87,6 +92,16 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const openTask = board.data?.tasks.find((t) => t.id === openTaskId) ?? null;
   // The open card's resolved lane, for the modal header's state/lane chip (dossier header).
   const openColumn = openTask ? board.data?.columns.find((c) => c.key === openTask.columnKey) ?? null : null;
+  // The board list omits a DONE card's body (card 4fa2c146) — `openTask.body` is only ever undefined for
+  // one of those, since a LIVE card's body rides along on the board response already. Lazy-fetch the full
+  // row ONLY in that case; a live card's drawer opens with zero extra round trip.
+  const needsBodyFetch = !!openTask && openTask.body === undefined;
+  const taskDetail = useQuery({
+    queryKey: ["task", openTask?.id],
+    queryFn: () => api.getTask(openTask!.id),
+    enabled: needsBodyFetch,
+  });
+  const drawerTask: Task | null = !openTask ? null : needsBodyFetch ? (taskDetail.data ?? null) : (openTask as Task);
 
   // ── Client-side view filter (no server round-trip) ───────────────────────────
   // Search matches id+title+body (case-insensitive substring — a full card id or any prefix finds the
@@ -143,8 +158,15 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
           </div>
         </>
       )}
-      {openTask && (
-        <TaskDrawer key={openTask.id} task={openTask} column={openColumn} onClose={() => setOpenTaskId(null)}
+      {/* A live card's full row already rode along on the board response, so its drawer opens instantly;
+          a done card's body is still loading (needsBodyFetch) for the brief window before the lazy
+          fetch above resolves — a minimal placeholder rather than rendering the editable form against a
+          not-yet-loaded body (which would let an edit race the fetch and clobber unsaved keystrokes). */}
+      {openTask && !drawerTask && (
+        <TaskDrawerLoading onClose={() => setOpenTaskId(null)} />
+      )}
+      {openTask && drawerTask && (
+        <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
           deleteError={del.error ? (del.error as Error).message : null} />
@@ -202,7 +224,7 @@ function labelColorFor(accent: string | null): string {
 }
 
 function Column({ col, tasks, filterActive, workers, onOpen, cardCount }:
-  { col: KanbanColumn; tasks: Task[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void;
+  { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void;
     cardCount: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
@@ -422,11 +444,11 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
   );
 }
 
-function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; worker?: SessionListItem; onOpen: () => void }) {
+function Card({ task, accent, worker, onOpen }: { task: BoardTask; accent: string; worker?: SessionListItem; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
-  const hasBody = !!task.body?.trim();
+  const hasBody = task.hasBody;
   return (
     <div ref={setNodeRef}
       className="loom-board-card"
@@ -495,6 +517,29 @@ function Card({ task, accent, worker, onOpen }: { task: Task; accent: string; wo
         </div>
       </div>
       {merge && <MergeTrack merge={merge} />}
+    </div>
+  );
+}
+
+// Minimal placeholder shown for the brief window between opening a DONE card (whose body the board list
+// omits) and its lazy GET /api/tasks/:id resolving — same backdrop/Esc/click-outside-closes as TaskDrawer
+// itself, so the dialog doesn't visibly jump when the real drawer takes its place.
+function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  return (
+    <div onClick={onClose} role="dialog" aria-modal
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 50, display: "flex",
+        alignItems: "flex-start", justifyContent: "center", padding: "6vh 16px", overflowY: "auto" }}>
+      <div onClick={(e) => e.stopPropagation()}
+        style={{ width: "min(820px, 92vw)", maxWidth: "100%", minHeight: "min(820px, 85vh)", maxHeight: "88vh",
+          background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
+          padding: 16, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
+        <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>Loading task…</span>
+      </div>
     </div>
   );
 }

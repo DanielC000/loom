@@ -21,6 +21,7 @@ import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
+import { toBoardTasks } from "../mcp/tasks.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
@@ -3072,11 +3073,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     deps.db.listAgents((req.params as { id: string }).id));
   app.get("/api/projects/:id/tasks", async (req) =>
     deps.db.listTasks((req.params as { id: string }).id));
-  // Board = resolved kanban columns (config default→override) + the project's tasks.
+  // Board = resolved kanban columns (config default→override) + the project's tasks, PROJECTED to
+  // BoardTask (card 4fa2c146 — this route was shipping every DONE card's full markdown body every 4s
+  // poll: 2.79MB / 1263 tasks, 1230 of them done). Mirrors the tasks_list MCP tool's summary-vs-full
+  // split: a LIVE (non-terminal) task keeps its full body (the common edit path is unaffected); a DONE
+  // task's body is dropped to a `hasBody` flag — its drawer lazy-fetches the body on open via the new
+  // GET /api/tasks/:id below. The terminal column is resolved the SAME way listProjectTasks does (by
+  // role, with no hardcoded key), so a renamed "done" lane still gets this treatment.
   app.get("/api/projects/:id/board", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return { columns: resolveConfig(p.config).kanbanColumns, tasks: deps.db.listTasks(p.id) };
+    const cols = resolveConfig(p.config).kanbanColumns;
+    const terminalKey = columnKeyForRole(cols, "terminal");
+    return { columns: cols, tasks: toBoardTasks(deps.db.listTasks(p.id), terminalKey) };
+  });
+  // A single task's full row (incl. body) — the lazy per-card fetch the board drawer uses to load a
+  // DONE card's body on open (the board LIST route above omits it). Same store as tasks_get/tasks_update.
+  app.get("/api/tasks/:id", async (req, reply) => {
+    const t = deps.db.getTask((req.params as { id: string }).id);
+    if (!t) return reply.code(404).send({ error: "task not found" });
+    return t;
   });
   // Lore — the read-only, per-project window into project_memory (the durable knowledge the fleet
   // writes + recalls via the `memory` MCP: memory_write/read/list/forget). PROJECT-SCOPED: the db

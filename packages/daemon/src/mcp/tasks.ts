@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { Task, TaskPriority, Question, QuestionType, QuestionState } from "@loom/shared";
+import type { Task, TaskPriority, Question, QuestionType, QuestionState, BoardTask } from "@loom/shared";
 import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/shared";
 import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
@@ -51,6 +51,27 @@ export interface ListTasksOptions {
 export const toTaskSummary = (t: Task): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt,
 });
+
+/**
+ * Project a project's tasks to the board LIST shape the REST board route returns (card 4fa2c146 — the
+ * 2026-07-16 perf profile found that route shipping every DONE card's full markdown body every 4s poll:
+ * 2.79MB / 1263 tasks, 1230 of them done). Mirrors the tasks_list summary-vs-full split, but at column
+ * granularity instead of an all-or-nothing switch: a LIVE (non-terminal-column) task keeps its full
+ * `body` — the common card-open/edit path pays no extra round trip — while a DONE task's body is dropped
+ * to a `hasBody` flag; its drawer lazy-fetches the body on open via GET /api/tasks/:id. `terminalKey` is
+ * the resolved terminal column key (`columnKeyForRole(cols, "terminal")`), or undefined on a board with
+ * no terminal role assigned — nothing is ever dropped in that case, matching listProjectTasks's fallback.
+ */
+export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): BoardTask[] {
+  return tasks.map((t) => {
+    const hasBody = !!t.body?.trim();
+    if (terminalKey && t.columnKey === terminalKey) {
+      const { body: _body, ...rest } = t;
+      return { ...rest, hasBody };
+    }
+    return { ...t, hasBody };
+  });
+}
 
 /**
  * List a project's board tasks, filtered + projected. DEFAULTS to a lightweight SUMMARY (no body)

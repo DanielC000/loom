@@ -3,7 +3,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // onRequest hook in gateway/server.ts. Ships INERT: the hook only exists when a non-loopback bind is
 // configured (remoteAccess.enabled && bindHost non-loopback), which is never true by default.
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject, like csrf-rebind.mjs). Proves:
-//   1. routeTier default-deny is TOTAL against the REAL registered route surface: every one of the 219
+//   1. routeTier default-deny is TOTAL against the REAL registered route surface: every one of the 220
 //      method+pattern combos the gateway actually registers (captured via app.printRoutes) classifies
 //      Tier-0 EXCEPT the exact, explicit Tier-1 allowlist — so a route added later is Tier-0 unless someone
 //      deliberately allowlists it.
@@ -133,7 +133,7 @@ const ALL_ROUTES = [
   ["GET", "/api/skills"], ["POST", "/api/skills"], ["DELETE", "/api/skills/:name"], ["GET", "/api/skills/:name"],
   ["PUT", "/api/skills/:name"], ["POST", "/api/skills/:name/adopt"], ["GET", "/api/skills/:name/merge-preview"],
   ["POST", "/api/skills/:name/publish"], ["POST", "/api/skills/:name/reset"], ["GET", "/api/skills/:name/update-diff"],
-  ["DELETE", "/api/tasks/:id"], ["POST", "/api/tasks/:id"],
+  ["DELETE", "/api/tasks/:id"], ["GET", "/api/tasks/:id"], ["POST", "/api/tasks/:id"],
   ["GET", "/api/terminals"], ["POST", "/api/terminals"], ["DELETE", "/api/terminals/:id"], ["GET", "/api/terminals/default-shell"],
   ["GET", "/api/update-status"], ["POST", "/api/usage/clear-hold"],
   ["GET", "/api/usage/history"], ["GET", "/api/usage/limits"], ["GET", "/api/usage/sessions/history"],

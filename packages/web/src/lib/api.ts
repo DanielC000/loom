@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentId, SessionRole, Session, Task, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
+import type { Project, Agent, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -434,7 +434,10 @@ export const api = {
   gitPush: (projectId: string) =>
     post<{ ok: boolean; branch?: string; error?: string }>(`/api/projects/${projectId}/git/push`),
   board: (projectId: string) =>
-    get<{ columns: KanbanColumn[]; tasks: Task[] }>(`/api/projects/${projectId}/board`),
+    get<{ columns: KanbanColumn[]; tasks: BoardTask[] }>(`/api/projects/${projectId}/board`),
+  // One task's full row (incl. body) — the board drawer's lazy fetch for a DONE card, whose body the
+  // board() list route above omits (card 4fa2c146).
+  getTask: (id: string) => get<Task>(`/api/tasks/${id}`),
   // Atomic safe board-column layout change (card B's endpoint) — the column-manager editor's ONLY
   // mutation path, NOT the blind config PATCH (which still owns every other setting). Sends the FULL
   // desired layout; the server diffs vs current, re-keys cards (renames + removals → defaultLanding) in

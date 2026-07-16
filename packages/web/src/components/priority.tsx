@@ -13,8 +13,10 @@ export const PRIORITY_META: Record<TaskPriority, { tone: Tone; label: string; sh
 };
 
 // Defensive read: a task served by a not-yet-restarted daemon (staggered deploy — web ships via HMR
-// before the daemon goes live) carries no `priority` field; treat it as the p2 default.
-export const prio = (t: Task): TaskPriority => t.priority ?? "p2";
+// before the daemon goes live) carries no `priority` field; treat it as the p2 default. Takes only the
+// `priority` field (not the full Task) so a BoardTask — the board LIST route's body-optional projection,
+// card 4fa2c146 — satisfies it too, same as Task.
+export const prio = (t: Pick<Task, "priority">): TaskPriority => t.priority ?? "p2";
 
 // Small colored priority chip shown on a card face. p0/p1 are filled (pop); p2/p3 are outlined
 // and understated so a board full of Normal cards stays calm.

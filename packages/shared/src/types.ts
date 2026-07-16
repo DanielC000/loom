@@ -1017,6 +1017,16 @@ export interface Task {
 }
 
 /**
+ * The board LIST projection `GET /api/projects/:id/board` returns (card 4fa2c146 — the 2026-07-16 perf
+ * profile found this route shipping every DONE card's full body: 2.79MB / 1263 tasks, polled every 4s).
+ * A LIVE (non-terminal-column) task keeps its full `body` — the common edit path pays no extra round
+ * trip. A DONE task's `body` is dropped to `hasBody` only; its drawer lazy-fetches the full body on open
+ * via `GET /api/tasks/:id`. `hasBody` is always accurate (derived server-side), so a card's "has a
+ * description" indicator never depends on whether `body` happens to be present on this row.
+ */
+export type BoardTask = Omit<Task, "body"> & { body?: string; hasBody: boolean };
+
+/**
  * A project-scoped SHARED memory note (card 2fd9abf9) — durable, fleet-shared project knowledge any
  * worker/manager can write (`memory_write`) and every kickoff can retrieve (pinned always + FTS5-matched
  * "related" notes). `key` is a stable slug: `memory_write` UPSERTS by `(projectId, key)`, so writing the

@@ -1,6 +1,6 @@
 import { useMemo, useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { SessionListItem, SessionRole, Schedule, Task } from "@loom/shared";
+import type { SessionListItem, SessionRole, Schedule, BoardTask } from "@loom/shared";
 import { api } from "../lib/api";
 import { TranscriptPane } from "./TranscriptPane";
 import { Panel, Button, StatusPill, Chip } from "./ui";
@@ -85,7 +85,7 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
 // orchestrationEvents (the session id IS the managerSessionId those events are keyed by). Refetch only
 // while live.
 function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
-  { run: SessionListItem; schedules: Schedule[]; tasks: Task[]; showFindings: boolean; open: boolean; onToggle: () => void }) {
+  { run: SessionListItem; schedules: Schedule[]; tasks: BoardTask[]; showFindings: boolean; open: boolean; onToggle: () => void }) {
   const qc = useQueryClient();
   const live = !run.archivedAt && run.processState === "live";
   // On-demand human resume of a non-live run (distinct from a manual Spawn, which always mints a FRESH
