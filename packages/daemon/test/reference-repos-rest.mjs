@@ -76,6 +76,18 @@ try {
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
     try {
+      // (A0) create with a NON-REPO primary repoPath is REJECTED (400), no project row created — closes
+      // the two-path validation asymmetry (this REST create path used to only presence-check repoPath,
+      // unlike project_create/checkRepoRebind and unlike the referenceRepos entries validated below).
+      const beforeCount0 = db.listAllProjects().length;
+      const badRepoPath = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadRepo", repoPath: nonRepo, vaultPath: primary },
+      });
+      check("(A0) POST with a non-repo repoPath → 400", badRepoPath.statusCode === 400);
+      check("(A0) error names the offending repoPath", /not an existing git repository/.test(badRepoPath.json().error ?? ""));
+      check("(A0) no project row was created on rejection", db.listAllProjects().length === beforeCount0);
+
       // (A1) create with a valid referenceRepos round-trips it.
       const created = await app.inject({
         method: "POST", url: "/api/projects",

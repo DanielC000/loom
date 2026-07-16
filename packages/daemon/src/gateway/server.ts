@@ -45,7 +45,7 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
-import { GitReader, checkCommitIdentity } from "../git/reader.js";
+import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { workerDiff } from "../git/worktrees.js";
@@ -3247,6 +3247,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown };
     if (!b.name || !b.repoPath || !b.vaultPath)
       return reply.code(400).send({ error: "name, repoPath, vaultPath required" });
+    // repoPath must be an existing git repo — matches the elevated platform MCP project_create and the
+    // PATCH /api/projects/:id rebind path (checkRepoRebind), both of which already isGitRepo-validate it.
+    // This create path previously only presence-checked repoPath, leaving it a laxer bar than the
+    // referenceRepos entries validated just below.
+    if (!(await isGitRepo(b.repoPath)))
+      return reply.code(400).send({ error: `repoPath is not an existing git repository: ${b.repoPath}` });
     // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST create path —
     // each entry MUST be an absolute path to an existing git repo (validateReferenceRepos), never a
     // relative one (meaningless to a worker whose cwd is a worktree elsewhere on disk).
