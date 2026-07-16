@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { randomUUID } from "node:crypto";
+import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
   resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY,
@@ -466,6 +466,18 @@ export class SessionService {
    */
   private readonly deployShaWindow = new Map<string, { shas: Set<string>; atMs: number }>();
   private static readonly SHA_DEDUP_TTL_MS = 30 * 60_000;
+  /**
+   * Deliver-once window for the Platform→manager `[loom:from-platform]` route (card c17291c3, the live
+   * repro: a directive arrived at a manager as two duplicated turns / a doubled prefix line). Keyed on a
+   * content hash of (recipient, normalized directive text) so a RETRIED or DUPLICATED `session_message`
+   * call for the SAME directive collapses to a single injected turn — no caller-supplied id required, and
+   * a genuinely-DIFFERENT directive (different text) always gets its own fresh key. In-memory by design,
+   * exactly like {@link deployShaWindow}: the send and the retry both happen within the same daemon
+   * process's short retry window, and a missed dedup (e.g. across a daemon restart) is harmless — one
+   * extra turn, not a lost one. Pruned by {@link PLATFORM_MESSAGE_DEDUP_TTL_MS}.
+   */
+  private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string }; atMs: number }>();
+  private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
   /**
    * TOCTOU spawn-claim (worker_spawn double-create race): the per-taskId set of worker spawns currently
    * IN FLIGHT — past the liveHolder check but not yet past insertSession + setProcessState('live'). The
@@ -3634,11 +3646,51 @@ export class SessionService {
    * Platform-Lead cross-project message delivery (loom-platform `session_message`, P4). Framed
    * `[loom:from-platform]` so the receiver knows the source is the platform operator, not its own
    * manager. See {@link deliverSessionMessage} for the shared delivery/routing/boarding mechanics.
+   *
+   * DELIVER-ONCE (card c17291c3): two distinct manifestations of the same root gap — no delivered-once
+   * guard on this route — showed up in the wild: (a) a retried/duplicated call for the SAME directive
+   * landing as two full duplicate turns, and (b) the directive text itself already carrying a
+   * `[loom:from-platform]` line (e.g. copied from a prior framed message) so this method's own wrap
+   * doubled it. Both are closed here, BEFORE the shared `deliverSessionMessage` ever sees the text:
+   *  1. `stripLeadingPlatformTag` normalizes away any leading `[loom:from-platform]` line(s) already in
+   *     `text`, so the frame this method applies is always the ONLY one, however the caller wrote it.
+   *  2. The normalized (recipient, text) pair is hashed into a short-TTL dedupe key
+   *     ({@link platformMessageDedupe}); a resend of the SAME directive within the window returns the
+   *     ORIGINAL delivery result (marked `duplicate:true`) with NO new enqueue — deliver-once. A
+   *     genuinely different directive (different text, or a different recipient) always gets a fresh key
+   *     and delivers normally.
    */
   messageSessionAsPlatform(
     sessionId: string, text: string, senderSessionId?: string,
-  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string } {
-    return this.deliverSessionMessage(sessionId, text, senderSessionId, SessionService.PLATFORM_MESSAGE_FRAMING);
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; duplicate?: boolean } {
+    const normalizedText = SessionService.stripLeadingPlatformTag(text);
+    const dedupeKey = createHash("sha256").update(sessionId).update(" ").update(normalizedText).digest("hex");
+    const now = Date.now();
+    this.prunePlatformMessageDedupe(now);
+    const prior = this.platformMessageDedupe.get(dedupeKey);
+    if (prior) return { ...prior.result, duplicate: true };
+    const result = this.deliverSessionMessage(sessionId, normalizedText, senderSessionId, SessionService.PLATFORM_MESSAGE_FRAMING);
+    this.platformMessageDedupe.set(dedupeKey, { result, atMs: now });
+    return result;
+  }
+
+  /** Strip any leading `[loom:from-platform]` line(s) from directive text — see {@link messageSessionAsPlatform}. */
+  private static stripLeadingPlatformTag(text: string): string {
+    const prefix = `[${SessionService.PLATFORM_MESSAGE_FRAMING.tag}]`;
+    let t = text;
+    while (t.startsWith(prefix)) {
+      t = t.slice(prefix.length);
+      if (t.startsWith("\n")) t = t.slice(1);
+    }
+    return t;
+  }
+
+  /** Sweep expired entries out of {@link platformMessageDedupe} — called on every write so the map never
+   *  grows past the live TTL window's worth of distinct directives. */
+  private prunePlatformMessageDedupe(nowMs: number): void {
+    for (const [key, entry] of this.platformMessageDedupe) {
+      if (nowMs - entry.atMs >= SessionService.PLATFORM_MESSAGE_DEDUP_TTL_MS) this.platformMessageDedupe.delete(key);
+    }
   }
 
   /**

@@ -1527,8 +1527,11 @@ export class PlatformMcpRouter {
           "routed there instead (deliveryStatus reflects the successor's delivery, and routedTo names it); a " +
           "NOT-LIVE target with no live successor anywhere in its lineage is BOARDED as a durable card on that " +
           "target's project board (boarded) — never silently dropped — and the returned taskId names it. " +
-          "Framed [loom:from-platform] so a live receiver knows the source. DELIVERY ONLY — this never spawns " +
-          "anything. 404 only if the session id is unknown.",
+          "Framed [loom:from-platform] so a live receiver knows the source (the tag is applied for you — do NOT " +
+          "prepend it yourself in `text`). DELIVER-ONCE: a retried/duplicated call for the SAME (sessionId, text) " +
+          "within a short window returns the ORIGINAL delivery result with duplicate:true and injects NOTHING new " +
+          "— safe to retry on an uncertain outcome. DELIVERY ONLY — this never spawns anything. 404 only if the " +
+          "session id is unknown.",
         inputSchema: { sessionId: z.string(), text: z.string() },
       },
       async ({ sessionId, text }) => {

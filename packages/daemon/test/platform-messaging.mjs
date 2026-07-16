@@ -128,6 +128,34 @@ try {
   check("(a) session_message routed to the TARGET session, framed [loom:from-platform]",
     host.enqueued.length === beforeEnq + 1 && lastEnq.id === "TARGET" &&
     lastEnq.text.startsWith("[loom:from-platform]\n") && lastEnq.text.includes("stand by for a platform-wide restart"));
+  // ===== DELIVER-ONCE (card c17291c3): a retried/duplicated send of the SAME directive is a no-op ======
+  // Manifestation (a) from the card: two consecutive identical turns from a resent/retried session_message
+  // call. A resend with the SAME (sessionId, text) within the dedupe window must inject NOTHING new.
+  const beforeDup = host.enqueued.length;
+  const dup = await pCall("session_message", { sessionId: "TARGET", text: "stand by for a platform-wide restart" });
+  check("(a) a duplicated/retried send of the SAME directive returns duplicate:true + the ORIGINAL deliveryStatus, no error",
+    dup.duplicate === true && dup.deliveryStatus === "delivered-live" && !dup.error);
+  check("(a) the duplicate injects NOTHING new (no second enqueue — delivers exactly once)",
+    host.enqueued.length === beforeDup);
+
+  // A genuinely-DIFFERENT directive to the same recipient is NOT suppressed — dedup keys on content, not
+  // just the recipient, so real distinct direction still lands.
+  const beforeDistinct = host.enqueued.length;
+  const distinct = await pCall("session_message", { sessionId: "TARGET", text: "a completely different directive" });
+  check("(a) a genuinely-distinct directive to the same session still delivers fresh (no duplicate flag, new enqueue)",
+    !distinct.duplicate && distinct.deliveryStatus === "delivered-live" && host.enqueued.length === beforeDistinct + 1);
+
+  // Manifestation (b) from the card: the directive text itself already carries a leading
+  // [loom:from-platform] line (e.g. relayed/copied from a prior framed message) — the tag must be applied
+  // EXACTLY ONCE, never doubled into "[loom:from-platform]\n[loom:from-platform]\n<body>".
+  const beforePrefixed = host.enqueued.length;
+  const prefixed = await pCall("session_message", { sessionId: "TARGET", text: "[loom:from-platform]\nsecond hop of a relayed directive" });
+  const prefixedEnq = host.enqueued[host.enqueued.length - 1];
+  check("(b) a caller-supplied leading [loom:from-platform] tag is collapsed to exactly ONE occurrence, one turn",
+    !prefixed.error && host.enqueued.length === beforePrefixed + 1 &&
+    prefixedEnq.text === "[loom:from-platform]\nsecond hop of a relayed directive" &&
+    (prefixedEnq.text.match(/\[loom:from-platform\]/g) || []).length === 1);
+
   // 404 ONLY for a truly unknown id.
   check("(a) session_message 404s an unknown session", (await pCall("session_message", { sessionId: "ghost", text: "x" })).error === "session not found");
   // A NOT-LIVE target no longer throws — it BOARDS a durable card on the target's project board (pOrd) and
