@@ -186,6 +186,24 @@ export interface Profile {
    * keeps working with zero data migration.
    */
   capabilities?: CapabilityGrant[];
+  /**
+   * Opt-in confined vault-write capability (card be8be211): when true, a session under this rig may call
+   * the `vault_write` tool (loom-tasks MCP) to write (create/overwrite) a UTF-8 text note under ITS OWN
+   * project's vault root — the friction this solves is a research/Analyst rig whose deliverable IS a
+   * vault note, but which runs in an isolated worktree with no vault access otherwise. Default OFF
+   * (absent/false) and fully additive — a rig without it spawns byte-identically to today (the tool is
+   * OMITTED from tools/list entirely, not merely denied — mirrors the `authenticated_request` gate on
+   * `connections`, not the browserTesting/documentConversion stdio-MCP pattern: no host process is
+   * launched, so this is never threaded into the spawn recipe). Confinement reuses `vault/writer.ts`'s
+   * existing path-traversal guard verbatim; the project is always SERVER-DERIVED from the session, never
+   * agent-passed. HUMAN-set only, via the Profiles UI / REST `POST`/`PUT /api/profiles` — the SAME
+   * stricter posture as `connections`/`capabilities`/`openDesign` (see `profiles/validate.ts`'s
+   * `AGENT_FORBIDDEN_PROFILE_KEYS`): a write capability into a human-reviewed corpus is exfil/tamper-
+   * adjacent, not a sandboxed read/convert tool, so it is rejected even on the Setup Assistant's / Platform
+   * Lead's own profile-writing MCP tools. Write-only by design (no delete) — a note-writer's job is to
+   * produce or update a note, not remove vault content.
+   */
+  vaultWrite?: boolean;
 }
 
 /**
@@ -596,6 +614,15 @@ export interface Session {
    * getSecretForUse return undefined for a deleted connection).
    */
   connections?: string[];
+  /**
+   * Opt-in confined vault-write grant, resolved from the session's Profile at spawn and PINNED here
+   * (mirrors `connections`, NOT `browserTesting`): the `vault_write` tool (loom-tasks MCP) is OMITTED
+   * from tools/list entirely unless this is true, and is only ever read by the MCP layer at CALL time —
+   * like `connections`, never threaded into the spawn recipe (no host process, no `--allowedTools`
+   * change). Absent/false on every existing session ⇒ no `vault_write`, byte-identical spawn. Persisted
+   * so every respawn path (resume/fork/recycle) carries the same grant forward unchanged.
+   */
+  vaultWrite?: boolean;
   /**
    * Agent-tooling P4: registry-capability grants resolved from the session's Profile at spawn and PINNED
    * here (mirrors `browserTesting`, spawn-time not tool-call-time — UNLIKE `connections`, which is only

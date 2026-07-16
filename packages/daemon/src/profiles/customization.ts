@@ -27,6 +27,7 @@ export const MERGEABLE_PROFILE_FIELDS = [
   "restrictedTools",
   "noCommit",
   "connections",
+  "vaultWrite",
   "capabilities",
 ] as const;
 type MergeableField = (typeof MERGEABLE_PROFILE_FIELDS)[number];
@@ -84,6 +85,9 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     // carries connection ids (those are the user's own credential grants), so shipped always normalizes
     // to [] here, which is what lets the merge rule protect a user's grant across an "adopt".
     connections: p.connections ?? [],
+    // Same off-by-default direction as connections; no bundled profile seeds vaultWrite, so shipped
+    // always normalizes to false — the merge rule protects a user's own grant across an "adopt".
+    vaultWrite: p.vaultWrite ?? false,
     // Same off-by-default direction as connections; no bundled profile seeds capabilities, so shipped
     // always normalizes to [] — the merge rule protects a user's own grants across an "adopt".
     capabilities: p.capabilities ?? [],

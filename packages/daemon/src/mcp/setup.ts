@@ -439,7 +439,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). `connections`/`capabilities`/`openDesign` are ALSO rejected here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, and `capabilities`/`openDesign` can launch a host process / inject an MCP server. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). `connections`/`capabilities`/`openDesign`/`vaultWrite` are ALSO rejected here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities`/`openDesign` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
@@ -458,7 +458,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). The patch may not touch `connections`/`capabilities`/`openDesign` (authenticated-egress grants / registry-capability grants / the Open Design MCP-injection flag — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). The patch may not touch `connections`/`capabilities`/`openDesign`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the Open Design MCP-injection flag / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {

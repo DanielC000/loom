@@ -48,6 +48,11 @@ const profileSchema = z
     // Platform Lead's own profile-writing MCP tools. OD is a public OSS capability (not gated by
     // isLoomDev() at spawn time) — but the GRANT itself stays human-only regardless.
     openDesign: z.boolean().optional(),
+    // Opt-in confined vault-write capability (default off), gates the `vault_write` tool. STRICTER than
+    // browserTesting/documentConversion (see AGENT_FORBIDDEN_PROFILE_KEYS below), the SAME posture as
+    // openDesign/connections/capabilities — a write grant into a human-reviewed corpus is exfil/tamper-
+    // adjacent, rejected even on the elevated Setup Assistant's/Platform Lead's own profile-writing tools.
+    vaultWrite: z.boolean().optional(),
     // Opt-in RESTRICTED-tools (default off). Blast-radius control for a chat-reachable Companion: when on,
     // the curated dangerous native tools (Bash/Edit/Write/NotebookEdit/MultiEdit) are appended to
     // --disallowedTools at spawn. Human-gated identically to browserTesting — it is never a NEW agent MCP
@@ -90,9 +95,12 @@ const profileSchema = z
  * `documentConversion` one: a capability grant launches a host process and can bind egress via a P1
  * connection, so it is owner-only end-to-end, never delegable to an elevated profile-writing agent.
  * `openDesign` gets the SAME stricter posture too: an MCP-server injection is an exfil-class grant, not
- * the milder `browserTesting`/`documentConversion` posture.
+ * the milder `browserTesting`/`documentConversion` posture. `vaultWrite` (card be8be211) gets the SAME
+ * stricter posture as well: a write grant into a human-reviewed vault corpus is exfil/tamper-adjacent,
+ * not a sandboxed capability — an elevated profile-writing agent must never be able to grant itself (or
+ * any other rig) the ability to write vault content a human will later trust as their own.
  */
-const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "openDesign"] as const;
+const AGENT_FORBIDDEN_PROFILE_KEYS = ["connections", "capabilities", "openDesign", "vaultWrite"] as const;
 
 /**
  * Reject a RAW create/patch payload (BEFORE any merge with an existing profile) that tries to set a
@@ -173,6 +181,7 @@ export function validateProfile(
       browserTesting: d.browserTesting ?? false, // normalize to the stored default (off)
       documentConversion: d.documentConversion ?? false, // normalize to the stored default (off)
       openDesign: d.openDesign ?? false, // normalize to the stored default (off)
+      vaultWrite: d.vaultWrite ?? false, // normalize to the stored default (off)
       restrictedTools: d.restrictedTools ?? false, // normalize to the stored default (off)
       noCommit: d.noCommit ?? false, // normalize to the stored default (off)
       connections: d.connections ?? [], // normalize to the stored default (no access)

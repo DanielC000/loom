@@ -607,7 +607,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; openDesign: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[] } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; openDesign: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -669,6 +669,9 @@ export class SessionService {
       // Profile-pinned authenticated-egress connection-id allowlist (backstop [] under forcePlain / no
       // profile / an unset field) — UNLIKE skills, [] here always means "no access", never "all".
       connections: resolved.connections,
+      // Profile-pinned confined vault-write grant (backstop false under forcePlain / no profile / an
+      // unset field) — mirrors connections: read LIVE by TaskMcpRouter, never threaded to pty.spawn.
+      vaultWrite: resolved.vaultWrite,
     };
   }
 
@@ -726,7 +729,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -751,6 +754,7 @@ export class SessionService {
       noCommit, // profile-conferred no-commit role, pinned (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-conferred skill subset, pinned (null ⇒ deliver all — today's behavior)
       connections, // profile-conferred authenticated-egress allowlist, pinned ([] ⇒ no access — today's behavior)
+      vaultWrite, // profile-conferred confined vault-write grant, pinned (false ⇒ no access — today's behavior)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty, so onExit ('exited') from a fast-failing spawn always
@@ -834,7 +838,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -859,6 +863,7 @@ export class SessionService {
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+      vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -930,7 +935,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -955,6 +960,7 @@ export class SessionService {
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+      vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -1009,7 +1015,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "auditor");
     const codescapeEnabled = config.codescape.enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -1035,6 +1041,7 @@ export class SessionService {
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+      vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -1090,7 +1097,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
     const codescapeEnabled = config.codescape.enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -1116,6 +1123,7 @@ export class SessionService {
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+      vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -1173,7 +1181,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "setup");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "setup");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -1198,6 +1206,7 @@ export class SessionService {
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+      vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -1258,7 +1267,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'operator' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-operator surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections } = this.resolveAgentSpawn(agent, config, "operator");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "operator");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -1283,6 +1292,7 @@ export class SessionService {
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
+      vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -1524,11 +1534,12 @@ export class SessionService {
     // Force role "assistant" (the row's own, immutable role) rather than trusting session.role blindly —
     // mirrors composeCompanionReinjectPrompt's explicitRole pattern. Model/prompt are discarded here (only
     // the capability surface matters); resume() below never threads --model or injects a startup prompt.
-    // `connections` is DELIBERATELY excluded from the pin below — unlike the others, resume() never threads
-    // it to pty.spawn (mcp/server.ts's TaskMcpRouter reads a session's connections LIVE, per-request, off
-    // the row — a plain row write already takes effect on the companion's very next tool call, no respawn
-    // needed), so pinning it here would be a misleading no-op. This is a pre-existing gap in resume()
-    // itself, out of scope to fix here.
+    // `connections` (and, for the same reason, `vaultWrite` — card be8be211) is DELIBERATELY excluded from
+    // the pin below — unlike the others, resume() never threads either to pty.spawn (mcp/server.ts's
+    // TaskMcpRouter reads a session's connections/vaultWrite LIVE, per-request, off the row — a plain row
+    // write already takes effect on the companion's very next tool call, no respawn needed), so pinning
+    // them here would be a misleading no-op. This is a pre-existing gap in resume() itself, out of scope to
+    // fix here.
     const { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills } =
       this.resolveAgentSpawn(agent, config, "assistant");
     this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills });
@@ -2401,6 +2412,7 @@ export class SessionService {
       noCommit: src.noCommit ?? false, // a fork inherits the source's declared no-commit role
       skills: src.skills ?? null, // a fork inherits the source's pinned skill subset (null ⇒ all)
       connections: src.connections ?? [], // a fork inherits the source's authenticated-egress allowlist
+      vaultWrite: src.vaultWrite ?? false, // a fork inherits the source's confined vault-write grant
     };
     this.db.insertSession(session);
     // Re-resolve the agent's spawn so the fork keeps its profile's LAYERED allowlist (baseline
@@ -2521,6 +2533,7 @@ export class SessionService {
       role: "run", browserTesting: false, documentConversion: false, openDesign: false, capabilities: [], restrictedTools: false, noCommit: false,
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections: [], // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
+      vaultWrite: false, // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -2972,6 +2985,7 @@ export class SessionService {
     const noCommit = workerSpawn.noCommit; // declared no-commit role (e.g. a Code Reviewer rig) — lifecycle-only
     const skills = workerSpawn.skills;
     const connections = workerSpawn.connections; // authenticated-egress allowlist (profile-pinned; [] ⇒ no access)
+    const vaultWrite = workerSpawn.vaultWrite; // confined vault-write grant (profile-pinned; false ⇒ no access)
 
     // Safety rails (§17a) — refuse NEW work before any side effect (worktree/pty). In-flight
     // workers are untouched. Pause is global-or-this-manager. (The concurrency cap is admitted
@@ -3101,6 +3115,7 @@ export class SessionService {
         noCommit, // declared no-commit role (e.g. Code Reviewer) ⇒ 0-commit done auto-retires + skips the warning
         skills, // profile-pinned skill subset for the worker (null ⇒ all); pinned so resume/recycle honor it
         connections, // profile-pinned authenticated-egress allowlist for the worker ([] ⇒ no access)
+        vaultWrite, // profile-pinned confined vault-write grant for the worker (false ⇒ no access)
         parentSessionId: managerSessionId,
         taskId,
         worktreePath,
@@ -4989,6 +5004,7 @@ export class SessionService {
       noCommit: old.noCommit ?? false, // a recycled reviewer keeps its declared no-commit role
       skills: old.skills ?? null, // a recycled worker keeps its pinned skill subset (null ⇒ all)
       connections: old.connections ?? [], // a recycled worker keeps its authenticated-egress allowlist
+      vaultWrite: old.vaultWrite ?? false, // a recycled worker keeps its confined vault-write grant
       parentSessionId: managerSessionId,
       taskId,
       worktreePath,
@@ -5121,6 +5137,7 @@ export class SessionService {
       noCommit: old.noCommit ?? false, // carry the declared no-commit role forward
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
+      vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
       gen: newGen,
       recycledFrom: old.id,
     };
@@ -5268,6 +5285,7 @@ export class SessionService {
       noCommit: old.noCommit ?? false, // carry the declared no-commit role forward
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
+      vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
       gen: newGen,
       recycledFrom: old.id,
     };

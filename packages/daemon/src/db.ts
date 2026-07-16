@@ -1119,6 +1119,10 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
   // opt-in Open Design (pinned at spawn from the Profile; carried across respawns); legacy rows ⇒ 0 (off).
   open_design: "INTEGER NOT NULL DEFAULT 0",
+  // opt-in confined vault-write grant (card be8be211), pinned at spawn from the Profile — mirrors
+  // `connections` (read LIVE per-request by TaskMcpRouter, never threaded into pty.spawn), NOT
+  // open_design; legacy rows ⇒ 0 (off).
+  vault_write: "INTEGER NOT NULL DEFAULT 0",
   // restricted-tools (pinned at spawn from the Profile; appends dangerous native tools to --disallowedTools); legacy rows ⇒ 0 (off).
   restricted_tools: "INTEGER NOT NULL DEFAULT 0",
   // declared no-commit role (pinned at spawn from the Profile; lifecycle-only); legacy rows ⇒ 0 (off).
@@ -1185,6 +1189,8 @@ const PROFILE_ADDED_COLUMNS: Record<string, string> = {
   document_conversion: "INTEGER NOT NULL DEFAULT 0",
   // opt-in Open Design flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   open_design: "INTEGER NOT NULL DEFAULT 0",
+  // opt-in confined vault-write flag (card be8be211); NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
+  vault_write: "INTEGER NOT NULL DEFAULT 0",
   // restricted-tools flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
   restricted_tools: "INTEGER NOT NULL DEFAULT 0",
   // declared no-commit role flag; NOT NULL + constant DEFAULT backfills legacy rows to 0 (off).
@@ -3393,8 +3399,8 @@ export class Db {
   }
   insertProfile(p: Profile): void {
     this.db.prepare(
-      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,open_design,restricted_tools,no_commit,connections,capabilities)
-       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@openDesign,@restrictedTools,@noCommit,@connections,@capabilities)`,
+      `INSERT INTO profiles (id,name,role,description,allow_delta,skills,model,icon,browser_testing,document_conversion,open_design,vault_write,restricted_tools,no_commit,connections,capabilities)
+       VALUES (@id,@name,@role,@description,@allowDelta,@skills,@model,@icon,@browserTesting,@documentConversion,@openDesign,@vaultWrite,@restrictedTools,@noCommit,@connections,@capabilities)`,
     ).run({
       id: p.id, name: p.name, role: p.role ?? null, description: p.description,
       // string[] columns persist as JSON text; skills NULL means "deliver all".
@@ -3404,6 +3410,7 @@ export class Db {
       browserTesting: p.browserTesting ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       documentConversion: p.documentConversion ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       openDesign: p.openDesign ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
+      vaultWrite: p.vaultWrite ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       restrictedTools: p.restrictedTools ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       noCommit: p.noCommit ? 1 : 0, // boolean ↔ INTEGER; absent ⇒ 0 (off)
       connections: JSON.stringify(p.connections ?? []), // [] = no access (absent ⇒ [], NOT skills' "all")
@@ -3423,6 +3430,7 @@ export class Db {
       browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
       document_conversion: patch.documentConversion === undefined ? undefined : patch.documentConversion ? 1 : 0,
       open_design: patch.openDesign === undefined ? undefined : patch.openDesign ? 1 : 0,
+      vault_write: patch.vaultWrite === undefined ? undefined : patch.vaultWrite ? 1 : 0,
       restricted_tools: patch.restrictedTools === undefined ? undefined : patch.restrictedTools ? 1 : 0,
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
       connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
@@ -3629,12 +3637,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,open_design,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,open_design,vault_write,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@openDesign,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@openDesign,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
     ).run({
       ...s,
@@ -3645,6 +3653,7 @@ export class Db {
       browserTesting: s.browserTesting ? 1 : 0, // off (0) on every plain session literal
       documentConversion: s.documentConversion ? 1 : 0, // off (0) on every plain session literal
       openDesign: s.openDesign ? 1 : 0, // off (0) on every plain session literal
+      vaultWrite: s.vaultWrite ? 1 : 0, // off (0) on every plain session literal
       restrictedTools: s.restrictedTools ? 1 : 0, // off (0) on every plain session literal
       noCommit: s.noCommit ? 1 : 0, // off (0) on every plain session literal
       // skill subset → JSON text; null/absent ⇒ NULL = deliver all (today's behavior). An empty array is
@@ -3715,9 +3724,10 @@ export class Db {
    * effect on an already-running pty — its MCP tool surface/allowlist was fixed at ITS OWN OS-process-start
    * — the caller (SessionService.upgradeCompanionCapabilities) is responsible for actually respawning the
    * process for it to take effect. Partial-patch shape mirrors {@link updateProfile}: an omitted (`undefined`)
-   * field is left untouched; `skills: null` explicitly clears to "deliver all". `connections` is DELIBERATELY
-   * NOT part of this patch — resume() never threads it to pty.spawn (it's read LIVE per-request instead, see
-   * the sole caller's comment), so pinning it here would be a misleading no-op.
+   * field is left untouched; `skills: null` explicitly clears to "deliver all". `connections` (and, for the
+   * same reason, `vaultWrite` — card be8be211) is DELIBERATELY NOT part of this patch — resume() never
+   * threads either to pty.spawn (both are read LIVE per-request instead, see the sole caller's comment), so
+   * pinning them here would be a misleading no-op.
    */
   setSessionCapabilitySurface(id: string, patch: {
     browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean;
@@ -5357,6 +5367,7 @@ function toProfile(r0: unknown): Profile {
     browserTesting: (r.browser_testing as number) === 1,
     documentConversion: (r.document_conversion as number) === 1,
     openDesign: (r.open_design as number) === 1,
+    vaultWrite: (r.vault_write as number) === 1,
     restrictedTools: (r.restricted_tools as number) === 1,
     noCommit: (r.no_commit as number) === 1,
     // authenticated-egress connection-id allowlist; malformed/absent degrades to [] = no access.
@@ -5387,6 +5398,8 @@ function toSession(r0: unknown): Session {
     skills: r.skills == null ? null : (() => { try { return JSON.parse(r.skills as string) as string[]; } catch { return null; } })(),
     // pinned connection-id allowlist; malformed/absent degrades to [] = no access (never "all").
     connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
+    // pinned confined vault-write grant; read LIVE by TaskMcpRouter at vault_write call time (mirrors connections).
+    vaultWrite: (r.vault_write as number) === 1,
     // pinned registry-capability grants (agent-tooling P4); malformed/absent degrades to [] = none.
     capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
     parentSessionId: (r.parent_session_id as string) ?? null,

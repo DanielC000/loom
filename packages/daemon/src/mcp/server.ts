@@ -11,6 +11,7 @@ import {
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
+import { writeVaultFile } from "../vault/writer.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -253,6 +254,33 @@ export class TaskMcpRouter {
         },
         async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args, projectId)),
       );
+    }
+
+    // Card be8be211: the profile-gated confined vault-write tool — same shape as authenticated_request
+    // immediately above (conditional registration IS the gate; OMITTED from tools/list entirely, not
+    // merely denied, when this session's Profile didn't opt in). `projectId` is the SERVER-DERIVED
+    // binding this whole router is keyed on (never agent-supplied — see the class doc), so the write can
+    // only ever land in THIS session's own project vault; `path` is REQUIRED to be vault-relative and is
+    // confined by vault/writer.ts's `resolveInVault` traversal guard (reused verbatim, not reimplemented).
+    // Write-only (create/overwrite) — no delete tool is exposed here, matching the profile field's doc.
+    if (session?.vaultWrite) {
+      const project = db.getProject(projectId);
+      if (project) {
+        server.registerTool(
+          "vault_write",
+          {
+            description:
+              "Write (create or overwrite) a UTF-8 text note under THIS project's vault, then commit it " +
+              "through the vault auto-committer. `path` is a vault-RELATIVE path (e.g. \"Design/My Note.md\") " +
+              "— confined to the project's vault root; a `..`/absolute-path escape or a backslash is REJECTED. " +
+              "Prefer the project's documented vault taxonomy folder for a well-behaved note rather than the " +
+              "vault root. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path " +
+              "escape, 'is-dir', 'error'). There is no delete — this tool only ever creates or overwrites.",
+            inputSchema: { path: z.string(), content: z.string() },
+          },
+          async ({ path: relPath, content }) => ok(await writeVaultFile(project.vaultPath, relPath, content)),
+        );
+      }
     }
 
     return server;

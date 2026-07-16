@@ -896,6 +896,9 @@ export interface ResolvedProfile {
   /** Authenticated-egress connection-id allowlist for the `authenticated_request` tool. Backstops to
    *  `[]` (NOT "all" — the secure default direction, unlike `skills`). */
   connections: string[];
+  /** Opt-in confined vault-write grant for the `vault_write` tool (loom-tasks MCP) — write-only, scoped
+   *  to this session's OWN project vault root. Backstops to false. */
+  vaultWrite: boolean;
   /**
    * Agent-tooling P4: the profile's OWN `capabilities` grants, a RAW passthrough — mirrors
    * `connections`/`skills` (no derived merging here). Backstops to `[]`. Deliberately does NOT fold in
@@ -946,7 +949,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, openDesign: false, restrictedTools: false, noCommit: false, connections: [], capabilities: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, openDesign: false, restrictedTools: false, noCommit: false, connections: [], vaultWrite: false, capabilities: [] };
   }
   return {
     role: profile.role ?? null,
@@ -965,6 +968,8 @@ export function resolveProfile(
     noCommit: profile.noCommit ?? false,
     // Authenticated-egress connection-id allowlist. Backstop [] (NOT "all" — the secure default).
     connections: profile.connections ?? [],
+    // Confined vault-write grant for the vault_write tool. Backstop false.
+    vaultWrite: profile.vaultWrite ?? false,
     // Registry-capability grants — RAW passthrough (see the field doc on ResolvedProfile). Backstop [].
     capabilities: profile.capabilities ?? [],
   };
