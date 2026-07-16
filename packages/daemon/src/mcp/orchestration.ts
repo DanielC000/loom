@@ -1743,15 +1743,21 @@ export class OrchestrationMcpRouter {
       "platform_escalate",
       {
         description:
-          "Escalate a discovered Loom bug or friction UP to the Platform Lead. Files a DURABLE, structured " +
-          "task on the reserved Loom Platform board (the Lead's inbox — it survives whether or not a Lead " +
-          "session is live), capturing your origin project + this manager session, the title, the detail/" +
-          "evidence, and a severity. The target is the Platform board, fixed server-side (you cannot pick a " +
-          "project) — for a LINKED peer project's manager instead, use peer_message. Returns the created " +
-          "Platform task id plus a `deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` " +
-          "means no Lead session was live but the board task is durably filed (the normal, safe case) — only " +
-          "`dropped` warrants concern. Use it for platform-level problems (a Loom bug, a confusing tool/skill, " +
-          "friction that slowed your workers) — NOT for your own project's task board (use tasks_create there).",
+          "Escalate a discovered Loom bug or friction UP to the Platform Lead — or notify it of a status/" +
+          "completion it asked to hear about (e.g. it told you 'let me know when this lands'). This is the " +
+          "ONE durable channel for anything the Lead needs to know; don't invent an ad hoc 'I'll ping you' — " +
+          "that reaches no one reliably. Files a DURABLE, structured task on the reserved Loom Platform " +
+          "board (the Lead's inbox — it survives whether or not a Lead session is live), capturing your " +
+          "origin project + this manager session, the title, the detail/evidence, and a severity — it is " +
+          "NOT an ephemeral fire-and-forget, the board task is the permanent record either way. The target " +
+          "is the Platform board, fixed server-side (you cannot pick a project) — for a LINKED peer " +
+          "project's manager instead, use peer_message. Returns the created Platform task id plus a " +
+          "`deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` means no Lead session " +
+          "was live but the board task is durably filed (the normal, safe case) — a live Lead is nudged " +
+          "immediately (even one that's currently parked waiting on exactly this); only `dropped` warrants " +
+          "concern. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
+          "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
+          "project's task board (use tasks_create there).",
         inputSchema: {
           title: z.string(),
           detail: z.string(),

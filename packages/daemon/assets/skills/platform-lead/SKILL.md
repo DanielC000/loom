@@ -210,7 +210,12 @@ tool — don't wait to be nudged:
 
 - **`working`** — back at it: re-arms normal watching and clears any `done`/`waiting` alert you raised.
 - **`waiting`** — parked on a long op or an external thing (a dispatched fleet, an owner answer you're
-  holding for). Pass `minutes` to snooze the watchdog that long.
+  holding for). Pass `minutes` to snooze the watchdog that long. **If what you're waiting on is a manager
+  finishing something and reporting back, don't tell it "ping me" — that's vague prose with no durable
+  channel behind it.** Tell the manager explicitly to **escalate it via `platform_escalate` when it
+  happens**: that's the manager's own tool (not yours), it durably boards the report either way, and it
+  best-effort wakes you immediately if you're still live — even parked exactly like this — so you're never
+  stuck depending on this idle watchdog's own tick to notice.
 - **`done`** — the platform work has genuinely converged (not merely drained-for-now — see Autonomy). Pass
   `detail`; this alerts the human. It does **not** close the session — that's **`end_me`**, a separate
   deliberate call (retire this lineage with no successor).
