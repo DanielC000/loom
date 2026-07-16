@@ -184,7 +184,9 @@ worktree's `node_modules` (or any directory) into another location and then run 
 cleanup — the remove follows the link and deletes *through* it, destroying the REAL target. Reuse deps
 via a real install or a plain file copy, never a junction/symlink into a tree that will be removed. And
 clone or check out large/deep trees into a **short** filesystem path to avoid Windows MAX_PATH (260-char)
-failures — enable `core.longpaths` if the path is unavoidably deep.
+failures — enable `core.longpaths` if the path is unavoidably deep. A bare POSIX `/tmp` path is also NOT
+portable on Windows — Git Bash and Node.js resolve it to different real directories — so for any scratch
+file a later Node/Read step will touch, use an absolute path (the session scratch dir), never `/tmp`.
 
 **Your worktree is force-removed on merge — nothing durable belongs inside it that isn't committed.**
 Once your work merges, the whole worktree directory is force-deleted, including any gitignored/untracked
