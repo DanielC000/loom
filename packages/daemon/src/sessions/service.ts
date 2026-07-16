@@ -1783,6 +1783,52 @@ export class SessionService {
   }
 
   /**
+   * Card df5e37e7: shared by BOTH post-restart continuation-nudge paths (resumeFleetOnBoot's
+   * daemon_restart resume AND recoverCrashOrphanedWorkers' crash-recovery resume) — each injects a
+   * "continue where you left off" turn right after a resume, whose FIRST action is typically an
+   * immediate loom-orchestration tool call (worker_spawn/worker_report/…). `ready` (SessionStart,
+   * host.ts) only proves the TUI booted — it says nothing about whether the CLI's own async MCP-client
+   * handshake to loom-orchestration has finished, so submitting the nudge the moment the session becomes
+   * ready can race ahead of it and hard-fail with "MCP server 'loom-orchestration' is not connected"
+   * (observed after a fleet-wide daemon_restart, where many sessions' MCP handshakes contend at once).
+   * Delays only the STDIN DELIVERY of the nudge via PtyHost.waitForMcpSeen — bounded + NEVER-rejecting,
+   * so `.then()` firing unconditionally is always safe; the `.catch` here is belt-and-suspenders against
+   * enqueueStdin itself throwing (the M1/M2 invariant guards) rather than against the wait ever rejecting.
+   * A session that died mid-wait resolves the wait `false` (host.ts pty.onExit) and enqueueStdin then
+   * no-ops safely on the dead session (`!live?.alive` check) — no throw either way. Callers that already
+   * ran `resumeOne()`/`replayPending()` synchronously before calling this keep their ordering: those ran
+   * BEFORE this fires, so the pending-replay-before-nudge guarantee holds regardless of how long the wait
+   * takes. Never blocks its caller's own synchronous return.
+   */
+  private deferredNudge(id: string, text: string): void {
+    void this.pty.waitForMcpSeen(id).then(() => this.pty.enqueueStdin(id, text)).catch((e: unknown) => {
+      console.warn(`[resume] deferred nudge to ${id.slice(0, 8)} failed unexpectedly: ${(e as Error)?.message ?? e}`);
+    });
+  }
+
+  /**
+   * Only manager/worker/assistant(Companion) sessions mount the loom-orchestration MCP server
+   * (pty/host.ts buildMcpServers' `wantsOrch`) — platform/auditor/workspace-auditor/setup use their OWN
+   * separate per-role MCP routers, not wired to markMcpSeen in this v1 (scoped to loom-orchestration, the
+   * router implicated by the observed failure + the one carrying the state-mutating tools). Mirrors
+   * buildMcpServers' role gate exactly so a future role change to either side is easy to keep in sync.
+   */
+  private usesOrchestrationMcp(role: SessionRole | null): boolean {
+    return role === "manager" || role === "worker" || role === "assistant";
+  }
+
+  /**
+   * Route a post-resume continuation nudge: deferred (see {@link deferredNudge}) for a role that mounts
+   * loom-orchestration, delivered immediately (today's behavior, unchanged) for every other role — a
+   * platform/auditor/workspace-auditor/setup/plain/run session would otherwise wait out the full
+   * MCP_READY_TIMEOUT_MS for a `markMcpSeen` signal its own MCP route never produces.
+   */
+  private enqueueNudge(id: string, role: SessionRole | null, text: string): void {
+    if (this.usesOrchestrationMcp(role)) this.deferredNudge(id, text);
+    else this.pty.enqueueStdin(id, text);
+  }
+
+  /**
    * Boot-time fleet resume (the resume half of P1 17df54c5) — re-spawn the WHOLE captured fleet after a
    * `daemon_restart`, injecting NOTHING into the resume itself (the resume-injects-nothing invariant;
    * `resume()` passes no startupPrompt and honors the resume hardening — readiness wait, summary-gate
@@ -1897,8 +1943,8 @@ export class SessionService {
       // classification, so it is never suppressed by the no-op/idle/no-nudge branches below).
       const draftNote = e.hadUnsentDraft ? DRAFT_LOSS_NOTE : "";
       if (e.role === "worker") {
-        this.pty.enqueueStdin(
-          e.sessionId,
+        this.enqueueNudge(
+          e.sessionId, e.role,
           `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — your worktree ` +
           `WIP is intact. Continue your assigned task from where you left off. If you had already finished, ` +
           `call worker_report (done/blocked) so your manager isn't left waiting.` + RESUME_NUDGE_TAIL + draftNote,
@@ -1921,7 +1967,7 @@ export class SessionService {
           // PENDING (unanswered) owner question still never forces a turn either — only an ANSWERED,
           // not-yet-pulled one does (hasUnconsumedAnswer), since that's genuinely new for this session.
           // EXCEPT a lost draft: that's actionable regardless of impact, so it still gets a minimal turn.
-          if (draftNote) this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+          if (draftNote) this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
         } else {
           // Affected (workers resumed, queued I/O replayed, an unconsumed answer, or stranded board work)
           // → the full re-orient, with a one-line classification of WHAT this restart touched so the
@@ -1940,15 +1986,15 @@ export class SessionService {
             // so this branch is reached only when the Lead genuinely has a stake in this restart, exactly
             // like a manager. Re-orient it from the board + its own living resume doc instead of the
             // manager-shaped worktree/worker phrasing.
-            this.pty.enqueueStdin(
-              e.sessionId,
+            this.enqueueNudge(
+              e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed (${affected}). Re-orient from your home board and your living resume doc, then ` +
               `continue your platform work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
             );
           } else {
-            this.pty.enqueueStdin(
-              e.sessionId,
+            this.enqueueNudge(
+              e.sessionId, e.role,
               `[loom:daemon-restarted] Another manager restarted the daemon (reason: ${intent.reason}) and you ` +
               `were resumed — your worktrees are intact (${affected}). Resume orchestrating from where you left ` +
               `off (re-check your workers' state; some may have just been resumed too).` + RESUME_NUDGE_TAIL + draftNote,
@@ -1968,20 +2014,22 @@ export class SessionService {
         // only burned a wasted turn every restart. Silencing blindly would strand a genuinely mid-run one,
         // so nudge ONLY the busy-at-capture case; the idle case falls through to a silent resume.
         if (e.busy) {
-          this.pty.enqueueStdin(
-            e.sessionId,
+          this.enqueueNudge(
+            e.sessionId, e.role,
             `[loom:daemon-restarted] The daemon was rebuilt + restarted and you were resumed — continue your ` +
             `work from where you left off.` + RESUME_NUDGE_TAIL + draftNote,
           );
         } else if (draftNote) {
           // Idle-at-capture normally resumes silently (its schedule re-engages it) — but a lost draft is
           // new, actionable information a silent resume would otherwise never surface at all.
-          this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+          this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
         }
       } else if (draftNote) {
         // role null (plain session) or "run": normally no nudge at all (no orchestration loop to re-engage)
         // — but a lost draft still needs surfacing, since nothing else will ever tell this session about it.
-        this.pty.enqueueStdin(e.sessionId, `[loom:daemon-restarted] You were resumed.${draftNote}`);
+        // enqueueNudge's role gate never defers here (null/"run" don't mount loom-orchestration) — same as
+        // today's immediate enqueueStdin.
+        this.enqueueNudge(e.sessionId, e.role, `[loom:daemon-restarted] You were resumed.${draftNote}`);
       }
     }
 
@@ -2000,7 +2048,9 @@ export class SessionService {
         // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
         // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
         // with a stale done/waiting idle-policy, the case the old converged-FYI branch wrongly stalled).
-        this.pty.enqueueStdin(
+        // The requester (RestartIntent.managerSessionId) is always a manager — mounts loom-orchestration,
+        // so this nudge is deferred exactly like any other manager's (see this.deferredNudge below).
+        this.deferredNudge(
           reqId,
           `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
           `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
@@ -2106,9 +2156,15 @@ export class SessionService {
         if (w.reportedDone) {
           awaitingReviewCount++;
         } else {
+          // Card df5e37e7: deferred (this.enqueueNudge — worker role always mounts loom-orchestration),
+          // same race guard as resumeFleetOnBoot's worker nudge. Wrapped in try/catch defensively:
+          // enqueueNudge's own synchronous branch (the non-deferred immediate-enqueue path for a
+          // non-orchestration role) never applies here, but the deferred branch's promise chain already
+          // has its own internal .catch — this try/catch is belt-and-suspenders against a synchronous
+          // throw from the call itself.
           try {
-            this.pty.enqueueStdin(
-              w.workerSessionId,
+            this.enqueueNudge(
+              w.workerSessionId, "worker",
               cleanStop
                 ? `[loom:daemon-restarted] The daemon was stopped and restarted (not a crash) — your worktree ` +
                   `WIP is intact. Continue your assigned task from where you left off. If you had already ` +
@@ -2163,8 +2219,10 @@ export class SessionService {
               `continue your platform work.` + RESUME_NUDGE_TAIL
             : `${tag} ${lead} it — ${parts}. Re-check their state and continue orchestrating.` + RESUME_NUDGE_TAIL;
         })();
+      // Card df5e37e7: deferred for a manager (mounts loom-orchestration); a platform manager's role
+      // (managerRole === "platform") routes through enqueueNudge's non-deferred branch, unchanged.
       try {
-        this.pty.enqueueStdin(managerId, note);
+        this.enqueueNudge(managerId, managerRole, note);
       } catch { /* not ready yet — the resume stands */ }
     }
     return { resumed, skippedParked, failed, managersFailed };

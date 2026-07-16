@@ -483,6 +483,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Manager-scoped orchestration MCP (role-gated; manager derived server-side) ---
   app.all("/mcp-orch/:sessionId", async (req, reply) => {
     const { sessionId } = req.params as { sessionId: string };
+    // Card df5e37e7: record BEFORE dispatching, so even a request whose handling later throws still
+    // counts as "the client's MCP connection reached us" — the resume-continuation-nudge race guard
+    // (sessions/service.ts resumeFleetOnBoot/recoverCrashOrphanedWorkers) only needs to know contact was
+    // made, not that this particular call succeeded.
+    deps.pty.markMcpSeen(sessionId);
     reply.hijack();
     await deps.orchMcp.handle(req.raw, reply.raw, sessionId, req.body);
   });

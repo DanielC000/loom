@@ -37,11 +37,16 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 // Claude-free pty stub: a resumed pty is not-ready, so every enqueueStdin QUEUES and getPending returns
 // the FIFO — exactly what resumeFleetOnBoot's nudges land in.
+// waitForMcpSeen resolves TRUE immediately — card df5e37e7's manager/worker nudge defer is exercised for
+// its OWN timing in mcp-ready-gate.mjs; this file only needs the eventual coherence/wording semantics.
 class PtyStub {
   constructor() { this.q = new Map(); }
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
+  waitForMcpSeen() { return Promise.resolve(true); }
 }
+// Card df5e37e7: flush the deferred-nudge microtask chain after resumeFleetOnBoot before reading getPending.
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const db = new Db();
 const pty = new PtyStub();
@@ -88,6 +93,7 @@ try {
     ],
   };
   const result = sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  await flush(); // let every deferred manager/worker nudge settle
   check("(0) all 5 sessions resumed, none failed", result.resumed.length === 5 && result.failed.length === 0);
 
   // The three NUDGED roles (requester, worker, busy-at-capture reviewer). The converged no-op manager and

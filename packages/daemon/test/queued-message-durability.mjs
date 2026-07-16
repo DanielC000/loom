@@ -117,7 +117,9 @@ try {
     supersedeHead(id, reason) { const a = this.q.get(id) ?? []; const m = a.shift(); if (m?.onDeliver) m.onDeliver(reason); return m?.text; }
     getPending(id) { return (this.q.get(id) ?? []).map((m) => m.text); }
     getPersistablePending(id) { return (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text); }
+    waitForMcpSeen() { return Promise.resolve(true); } // card df5e37e7 — see mcp-ready-gate.mjs for the primitive's own timing
   }
+  const flushB = () => new Promise((r) => setTimeout(r, 0));
 
   const db = new Db();
   const proj = `qmd-proj-${sfx}`, agent = `qmd-ag-${sfx}`;
@@ -181,6 +183,7 @@ try {
       resume: [{ sessionId: mgr, role: "manager", parentSessionId: null }, { sessionId: wkr, role: "worker", parentSessionId: mgr }],
       pending: { [wkr]: snap } }; // ONLY the plain nudge — the durable msg is intentionally absent
     sessionsPost.resumeFleetOnBoot(intent, { resumeOne: () => true });
+    await flushB(); // let every deferred manager/worker nudge settle
     const m = sessionsPost.recoverUndeliveredMessagesOnBoot();
     check("(B-b) boot scan re-enqueued the undelivered durable message", m.reEnqueued === 1);
 

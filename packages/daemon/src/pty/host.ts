@@ -357,6 +357,17 @@ const MODE_OVERRIDE_MAX_ATTEMPTS = Number(process.env.LOOM_MODE_OVERRIDE_MAX_ATT
 const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
 /**
+ * Card df5e37e7: bound on waitForMcpSeen — how long a deferred resume-continuation nudge (see
+ * sessions/service.ts resumeFleetOnBoot / recoverCrashOrphanedWorkers) waits for the CLI's own
+ * loom-orchestration MCP handshake to reach us (markMcpSeen) before giving up and delivering the nudge
+ * anyway (today's behavior — the possible "not connected" race, not a wedge). Comfortably under
+ * READY_FALLBACK_MS (20s): a normal MCP HTTP handshake is sub-second, so this only needs to absorb
+ * fleet-wide restart contention, not stand in as a second readiness fallback. Env-overridable so tests
+ * don't wait out the default.
+ */
+const MCP_READY_TIMEOUT_MS = Number(process.env.LOOM_MCP_READY_TIMEOUT_MS) || 9_000;
+
+/**
  * KICKOFF GUARANTEE (the "start/ready-gating race" — board card guaranteeing worker_spawn drives turn
  * 1). A positional-arg startup/kickoff prompt (buildSpawnArgs) — a fresh worker_spawn, a recycle
  * handoff (recycleWorker/recycleManager/the platform-lead recycle), or a run's startup prompt — rides
@@ -1311,6 +1322,22 @@ interface Live {
   // The session's role — used ONLY by logLandedMode's auto-heal to know whether ExitPlanMode is
   // disallowed for this session (see disallowedToolsForRole). null for a shell / a role-less spawn.
   role: SessionRole | null;
+  // Card df5e37e7: whether the daemon has observed at least one HTTP hit on THIS session's
+  // loom-orchestration MCP route (/mcp-orch/:sessionId → markMcpSeen) since the CURRENT pty instance
+  // was (re)spawned. `ready` (SessionStart) only proves the TUI booted — it says nothing about whether
+  // the CLI's own async MCP-client handshake to loom-orchestration has finished, so a resume-continuation
+  // nudge submitted right after `ready` can race ahead of it and the model's first tool call hard-fails
+  // with "MCP server 'loom-orchestration' is not connected" (observed after a fleet-wide daemon_restart).
+  // The daemon's MCP transport is stateless-per-request (see mcp/orchestration.ts), so it has NO other
+  // way to observe client-side connection state — "we received a request" is the closest proxy, since the
+  // CLI performs its `initialize` handshake unprompted at boot. Reset to false on every (re)spawn (this is
+  // a fresh Live object each time). See markMcpSeen/waitForMcpSeen. General-purpose: not loom-orchestration
+  // specific by construction — a future caller could mark/wait on this for any per-session MCP route.
+  mcpSeen: boolean;
+  // Resolvers waiting on `mcpSeen` flipping true (or on this pty dying) — see waitForMcpSeen. Drained
+  // (called + emptied) by markMcpSeen on success and by pty.onExit on death, so a waiter never outlives
+  // its pty instance.
+  mcpSeenWaiters: Array<(seen: boolean) => void>;
 }
 
 export interface SpawnOpts {
@@ -2129,6 +2156,8 @@ export class PtyHost {
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.sessionId}.log`)),
       busy: false,
       ready: false, // flipped on the first SessionStart (after mode-cycles) — see Live.ready / markReady
+      mcpSeen: false, // flipped on the first observed loom-orchestration MCP hit — see Live.mcpSeen / markMcpSeen
+      mcpSeenWaiters: [],
       busySince: null,
       lastOutputAt: Date.now(),
       composerLen: 0,
@@ -2217,6 +2246,15 @@ export class PtyHost {
       // live entry survives in the map with alive=false, and getPending reads live.pending). Covers
       // EVERY exit path — a Stop-initiated stop, a crash, a clean session end — not just stopWorker.
       live.pending.length = 0;
+      // A session that died while something was awaiting waitForMcpSeen must resolve that wait NOW
+      // (false — it will never connect) rather than leaving the waiter to time out on its own: the
+      // waiter's own .then() (enqueueStdin) already no-ops safely on a dead session either way, but
+      // resolving immediately here avoids holding the closure for the full MCP_READY_TIMEOUT_MS.
+      if (live.mcpSeenWaiters.length > 0) {
+        const waiters = live.mcpSeenWaiters;
+        live.mcpSeenWaiters = [];
+        for (const w of waiters) w(false);
+      }
       // Reap any descendant (e.g. a backgrounded `pnpm dev`) that escaped node-pty's own orphan-free
       // containment — the durable backstop for board card 621ef252. Fires on EVERY exit path, including
       // an unexpected crash that never went through stop().
@@ -2277,6 +2315,7 @@ export class PtyHost {
       // The Claude-only state below is inert for a shell (nothing reads it once kind:"shell" gates the
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
+      mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -2346,6 +2385,7 @@ export class PtyHost {
       startedAt: Date.now(),
       logStream: fs.createWriteStream(path.join(LOGS_DIR, `${opts.id}.log`)),
       busy: false, ready: true, busySince: null,
+      mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0,
       pending: [], stopping: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -2793,6 +2833,46 @@ export class PtyHost {
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
     live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId });
     return { delivered: false, position: live.pending.length, reason: "held" };
+  }
+
+  /**
+   * Card df5e37e7: record that the daemon has received an HTTP request on this session's
+   * loom-orchestration MCP route (called from gateway/server.ts's /mcp-orch/:sessionId handler, before
+   * dispatching to OrchestrationMcpRouter — so even a request whose handling later errors still counts
+   * as "the client reached us"). Idempotent; a no-op for an unknown/dead session or one already marked.
+   * Wakes every pending waitForMcpSeen caller. See Live.mcpSeen for why this proxy signal exists.
+   */
+  markMcpSeen(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.mcpSeen) return;
+    live.mcpSeen = true;
+    const waiters = live.mcpSeenWaiters;
+    live.mcpSeenWaiters = [];
+    for (const w of waiters) w(true);
+  }
+
+  /**
+   * Card df5e37e7: resolve once this session's loom-orchestration MCP route has been hit (markMcpSeen)
+   * or `timeoutMs` elapses, whichever first — NEVER rejects, so a caller's `.then()` is always safe to
+   * fire unconditionally. Resolves `true` immediately if already seen; `false` immediately for an
+   * unknown/dead session (nothing to wait for); `false` if the session dies while waiting (see
+   * pty.onExit) or the timeout fires first. Callers must treat `false` as "proceed anyway" (today's
+   * behavior), never as an error — this is a best-effort proxy signal, not a guarantee.
+   */
+  waitForMcpSeen(sessionId: string, timeoutMs: number = MCP_READY_TIMEOUT_MS): Promise<boolean> {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return Promise.resolve(false);
+    if (live.mcpSeen) return Promise.resolve(true);
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const done = (seen: boolean): void => {
+        if (settled) return;
+        settled = true;
+        resolve(seen);
+      };
+      live.mcpSeenWaiters.push(done);
+      setTimeout(() => done(false), timeoutMs);
+    });
   }
 
   /**

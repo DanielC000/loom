@@ -60,11 +60,16 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
 // Claude-free pty stub: a resumed pty is not-ready, so every enqueueStdin QUEUES and getPending returns
 // the FIFO — exactly what resumeFleetOnBoot's nudges + the escalation nudge land in.
+// waitForMcpSeen resolves TRUE immediately — card df5e37e7's manager/worker nudge defer is exercised for
+// its OWN timing in mcp-ready-gate.mjs; this file only needs the eventual classification/wording semantics.
 class PtyStub {
   constructor() { this.q = new Map(); }
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
+  waitForMcpSeen() { return Promise.resolve(true); }
 }
+// Card df5e37e7: flush the deferred-nudge microtask chain after resumeFleetOnBoot before reading getPending.
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const mkProject = (id, name, reserved = false) => db.insertProject({ id, name, repoPath: `/tmp/${id}`, vaultPath: `/tmp/${id}`, config: {}, createdAt: now, archivedAt: null, reserved });
 const mkAgent = (id, projId) => db.insertAgent({ id, projectId: projId, name: "t", startupPrompt: "", position: 0 });
@@ -219,6 +224,7 @@ try {
     ],
   };
   sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  await flush(); // let every deferred manager/worker nudge settle
   const q = (i) => pty.getPending(i);
 
   // The Lead: non-causal, 0 workers, no queued I/O, empty home board → SILENT resume, ZERO enqueued turns

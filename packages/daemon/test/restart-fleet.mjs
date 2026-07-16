@@ -39,15 +39,26 @@ const GIT_ID = "-c user.email=rf@loom -c user.name=rf";
 const now = new Date().toISOString();
 const future = new Date(Date.now() + 60 * 60 * 1000).toISOString(); // +1h: a live park
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+// Card df5e37e7: resumeFleetOnBoot's manager/worker(/assistant) continuation nudge is now deferred behind
+// PtyHost.waitForMcpSeen — a real async hop (even off an already-resolved promise, `.then()` still
+// schedules a microtask). A single macrotask flush after each resumeFleetOnBoot call guarantees every
+// deferred nudge's microtask chain has settled before the next getPending() assertion reads it — the
+// dedicated mcp-ready-gate.mjs test covers the primitive's OWN timing (queued/delivered/timeout/dead-
+// session) in detail; this file only needs the eventual ROUTING/ORDERING semantics, unaffected by the defer.
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 // A minimal PTY stub: a resumed pty is not-ready, so every enqueueStdin QUEUES (host.ts's ready-gated
 // path) and getPending returns a copy — exactly what the boot resume + replay rely on. Claude-free.
+// waitForMcpSeen resolves TRUE immediately (Promise.resolve) — this file tests nudge ROUTING/ORDERING
+// semantics, not the mcpSeen gate's own timing (see mcp-ready-gate.mjs for that), so the defer should
+// settle as fast as possible here.
 class PtyStub {
   constructor() { this.q = new Map(); }
   isAlive() { return false; } // resumed rows are not-live; let resume()'s already-live short-circuit fall through to spawn/guards
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
   isComposerDirty() { return false; } // claude-free stub: no live composer to be dirty — liveFleetResumeSet() calls this per session
+  waitForMcpSeen() { return Promise.resolve(true); }
 }
 
 const db = new Db();
@@ -128,6 +139,7 @@ try {
   const resumeCalls = [];
   const resumeOne = (sid) => { resumeCalls.push(sid); return sid !== deadW; }; // dead worker is unresumable
   const result = sessions.resumeFleetOnBoot(intent, { resumeOne });
+  await flush(); // let every deferred (manager/worker) continuation nudge's waitForMcpSeen().then(...) settle
 
   check("(2) every non-dead session resumed (6)", result.resumed.length === 6 && !result.resumed.includes(deadW));
   check("(2) the dead worker is in `failed`", result.failed.includes(deadW) && result.failed.length === 1);
@@ -201,6 +213,7 @@ try {
   const pty2 = new PtyStub();
   const sessions2 = new SessionService(db, pty2, new OrchestrationControl());
   const oldResult = sessions2.resumeFleetOnBoot(oldIntent, { resumeOne: () => true });
+  await flush(); // let the deferred requester/worker nudges settle
   check("(4) old-format boot resume brings back the requester + its workers without crashing", oldResult.resumed.length === 2 && oldResult.failed.length === 0);
   check("(4) old-format requester gets the 'code is live' re-prompt", pty2.getPending(id.mgrB).some((m) => m.includes("now LIVE")));
   check("(4) old-format worker gets the task nudge", pty2.getPending(id.wkrB1).some((m) => m.includes("Continue your assigned task")));
@@ -335,6 +348,7 @@ try {
     ],
   };
   sessions6.resumeFleetOnBoot(intent6, { resumeOne: () => true });
+  await flush(); // let every deferred manager/worker nudge settle
   const n6 = (i) => pty6.getPending(i);
 
   check("(6a) a BUSY-at-capture auditor gets a [loom:daemon-restarted] continue nudge",

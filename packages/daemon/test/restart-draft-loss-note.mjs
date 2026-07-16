@@ -24,7 +24,13 @@ import os from "node:os";
 import path from "node:path";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rdln-home-${Date.now()}`);
-fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+// PART A spawns real PtyHost sessions (host.spawn()), which open a per-session log under
+// $LOOM_HOME/logs (see pty/host.ts) — production always has this dir (index.ts's boot-time
+// ensureDirs()), but a hermetic test never runs that, so it must create it itself (mirrors
+// mcp-ready-gate.mjs / pty-resume-readiness.mjs). Pre-existing gap here: without it, every spawned
+// session's fs.createWriteStream targets a missing directory and — since host.ts attaches no 'error'
+// listener to that stream — its async ENOENT can crash the process on an unrelated later tick.
+fs.mkdirSync(path.join(process.env.LOOM_HOME, "logs"), { recursive: true });
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
@@ -123,7 +129,9 @@ class PtyStubC {
   constructor() { this.q = new Map(); }
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
+  waitForMcpSeen() { return Promise.resolve(true); } // card df5e37e7 — see mcp-ready-gate.mjs for the primitive's own timing
 }
+const flushC = () => new Promise((r) => setTimeout(r, 0));
 const dbC = new Db();
 const projC = `rdln-C-proj-${sfx}`, agentC = `rdln-C-ag-${sfx}`;
 try {
@@ -165,6 +173,7 @@ try {
     ],
   };
   sessions.resumeFleetOnBoot(intent, { resumeOne: () => true });
+  await flushC(); // let every deferred manager/worker nudge settle
   const q = (i) => pty.getPending(i);
   const hasNote = (i) => q(i).some((m) => /UNSENT draft/i.test(m) && /\[Pasted text #N\]/.test(m));
 

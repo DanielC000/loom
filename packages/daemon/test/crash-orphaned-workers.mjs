@@ -102,7 +102,13 @@ class PtyStub {
   spawn(opts) { this.spawns.push(opts); this.aliveIds.add(opts.sessionId); }
   enqueueStdin(id, text) { const a = this.q.get(id) ?? []; a.push(text); this.q.set(id, a); return { delivered: false, position: a.length }; }
   getPending(id) { return [...(this.q.get(id) ?? [])]; }
+  waitForMcpSeen() { return Promise.resolve(true); } // card df5e37e7 — see mcp-ready-gate.mjs for the primitive's own timing
 }
+// Card df5e37e7: recoverCrashOrphanedWorkers now defers its manager/worker continuation nudge behind
+// PtyHost.waitForMcpSeen (see sessions/service.ts's deferredNudge/enqueueNudge) — a real async hop even
+// off an already-resolved promise. Every `recoverCrashOrphanedWorkers(...)` call below is followed by
+// `await flush()` so the deferred nudge's microtask chain settles before the next getPending() assertion.
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 const db = new Db();
 const pty = new PtyStub();
@@ -225,6 +231,7 @@ try {
   check("(3) the worktree SURVIVES Pass B GC under protection", fs.existsSync(wt.worktreePath));
 
   const result3 = sessions.recoverCrashOrphanedWorkers(derived3);
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(3) recoverCrashOrphanedWorkers resumed both the manager and the worker (REAL resume(), no stub)",
     result3.resumed.includes(realWorkerId) && result3.failed.length === 0);
   check("(3) the worker REAPPEARS in its manager's worker_list (archived_at cleared)",
@@ -266,6 +273,7 @@ try {
 
   const resumeOne4 = (sid) => sid !== id.deadMgr; // the manager's own resume() would throw (resumability:dead)
   const result4 = sessions.recoverCrashOrphanedWorkers(derived4, { resumeOne: resumeOne4 });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(4) a worker whose manager can't be resumed is NOT in `resumed`", !result4.resumed.includes(id.orphanMgr));
   check("(4) it IS counted in `failed`", result4.failed.includes(id.orphanMgr));
   check("(4) it received NO nudge (left untouched, not half-resumed)", pty.getPending(id.orphanMgr).length === 0);
@@ -283,6 +291,7 @@ try {
   mkSession({ id: id5.wkrOk, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id5.mgr, taskId: t5c, processState: "exited" });
   const derived5 = deriveCrashOrphanedWorkers(db, [db.getSession(id5.mgr), db.getSession(id5.wkrParked), db.getSession(id5.wkrOk)]);
   const result5 = sessions.recoverCrashOrphanedWorkers(derived5, { resumeOne: () => true });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(5) the parked worker IS resumed (in `resumed`)", result5.resumed.includes(id5.wkrParked));
   check("(5) the parked worker is reported in `skippedParked`", result5.skippedParked.includes(id5.wkrParked));
   check("(5) the parked worker received NO continue-nudge (park honored)", pty.getPending(id5.wkrParked).length === 0);
@@ -298,6 +307,7 @@ try {
   mkSession({ id: id5b.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id5b.mgr, taskId: t5d, processState: "exited" });
   const derived5b = deriveCrashOrphanedWorkers(db, [db.getSession(id5b.mgr), db.getSession(id5b.wkr)]);
   sessions.recoverCrashOrphanedWorkers(derived5b, { resumeOne: () => true });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(5) a PARKED manager gets NO summary nudge", pty.getPending(id5b.mgr).length === 0);
   check("(5) its non-parked worker still gets resumed + nudged", pty.getPending(id5b.wkr).some((m) => m.includes("[loom:crash-recovered]")));
 
@@ -311,6 +321,7 @@ try {
   const derived6 = deriveCrashOrphanedWorkers(db, [db.getSession(id6.mgr), db.getSession(id6.wkrA), db.getSession(id6.wkrB)]);
   const resumeOne6 = (sid) => sid === id6.mgr; // the manager resumes; EVERY worker individually fails
   const result6 = sessions.recoverCrashOrphanedWorkers(derived6, { resumeOne: resumeOne6 });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(6) both workers land in `failed` (all individually unresumable)", result6.failed.includes(id6.wkrA) && result6.failed.includes(id6.wkrB));
   check("(6) the manager STILL gets a summary nudge even though recoveredCount is 0",
     pty.getPending(id6.mgr).some((m) => m.includes("[loom:crash-recovered]") && /none of your 2/i.test(m)));
@@ -326,6 +337,7 @@ try {
   const c7 = derived7.find((c) => c.workerSessionId === id7.wkr);
   check("(7) a worker_report(done) SUPERSEDED by a later merge_rejected is NOT treated as reportedDone", c7?.reportedDone === false);
   sessions.recoverCrashOrphanedWorkers(derived7, { resumeOne: () => true });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(7) it therefore STILL gets the continue-your-task nudge (it's actually mid-fix, not awaiting review)",
     pty.getPending(id7.wkr).some((m) => m.includes("[loom:crash-recovered]") && /continue your assigned task/i.test(m)));
 
@@ -364,6 +376,7 @@ try {
   // With the stale flag no longer trusted, the manager DOES still have a surviving candidate (staleDead)
   // and is attempted, proving the fix closes exactly that gap.
   const result8 = sessions.recoverCrashOrphanedWorkers(derived8, { resumeOne: () => true });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(8) the manager (whose only surviving worker was previously wrongly excluded) IS resumed",
     result8.resumed.includes(id8.staleDead) && !result8.managersFailed.includes(id8.mgr));
 
@@ -378,6 +391,7 @@ try {
   const soloManagers9 = deriveCrashOrphanedManagers(db, recovered9, derived9);
   check("(9-pre) the manager (zero surviving worker candidates) IS derived as a solo manager", soloManagers9.includes(id9.mgr));
   const result9 = sessions.recoverCrashOrphanedWorkers(derived9, { resumeOne: () => true, soloManagerIds: soloManagers9 });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(9) the solo manager still gets an independent resume attempt (no worker candidates required)",
     !result9.managersFailed.includes(id9.mgr));
   // card c9e51581 (Path B stake-aware classification): a solo manager (0 crash-orphaned worker
@@ -402,6 +416,7 @@ try {
   const soloManagers9b = deriveCrashOrphanedManagers(db, [db.getSession(id9b.mgr)], []);
   check("(9b-pre) a resumable-but-broken manager (engine id set, no transcript) IS derived as a candidate", soloManagers9b.includes(id9b.mgr));
   const result9b = sessions.recoverCrashOrphanedWorkers([], { soloManagerIds: soloManagers9b });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(9b) a solo manager whose OWN resume genuinely fails lands in `managersFailed`",
     result9b.managersFailed.includes(id9b.mgr));
   check("(9b) the real failure reason is LOGGED (not silently swallowed into a bare boolean)",
@@ -450,6 +465,7 @@ try {
   const soloManagers9f = deriveCrashOrphanedManagers(db, [db.getSession(id9f.plat)], []);
   check("(9f-pre) a PLATFORM-role solo session IS derived as a candidate", soloManagers9f.includes(id9f.plat));
   const result9f = sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9f });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(9f) it gets the SAME independent resume attempt as a manager-role session, no failure",
     !result9f.managersFailed.includes(id9f.plat));
   check("(9f) it resumes SILENTLY (no stake: 0 workers, board covered by the active idle-watcher, no answer) — SAME classification as a manager",
@@ -465,6 +481,7 @@ try {
   db.setIdleNudgePolicy(id9f2.plat, "suppressed");
   const soloManagers9f2 = deriveCrashOrphanedManagers(db, [db.getSession(id9f2.plat)], []);
   sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9f2 });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   const nudge9f2 = pty.getPending(id9f2.plat).find((m) => m.includes("[loom:crash-recovered]"));
   check("(9f2) a platform (Lead) with STRANDED board work gets the FULL nudge (genuine stake)", !!nudge9f2);
   check("(9f2) the Lead nudge has NO manager-shaped 'workers'/'worktrees' text",
@@ -480,6 +497,7 @@ try {
   db.setRateLimitedUntil(id9g.mgr, future, "usage limit — parked");
   const soloManagers9g = deriveCrashOrphanedManagers(db, [db.getSession(id9g.mgr)], []);
   const result9g = sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers9g });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(9g) a PARKED solo manager is still resumed (in the successful path, not `managersFailed`)",
     !result9g.managersFailed.includes(id9g.mgr));
   check("(9g) it receives NO summary nudge (usage hold honored)", pty.getPending(id9g.mgr).length === 0);
@@ -498,6 +516,7 @@ try {
   mkSession({ id: id10a.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10a.mgr, taskId: t10a, processState: "live" });
   const derived10a = deriveCrashOrphanedWorkers(db, [db.getSession(id10a.mgr), db.getSession(id10a.wkr)]);
   sessions.recoverCrashOrphanedWorkers(derived10a, { resumeOne: () => true, shutdownMarker: cleanMarker });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10a) the worker nudge uses [loom:daemon-restarted], NOT [loom:crash-recovered]",
     pty.getPending(id10a.wkr).some((m) => m.includes("[loom:daemon-restarted]")) &&
     !pty.getPending(id10a.wkr).some((m) => m.includes("[loom:crash-recovered]")));
@@ -516,6 +535,7 @@ try {
   });
   const soloManagers10b = deriveCrashOrphanedManagers(db, [db.getSession(id10b.mgr)], []);
   sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers10b, shutdownMarker: cleanMarker });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10b) the solo-manager nudge uses [loom:daemon-restarted] and 'not a crash', not 'crashed'",
     pty.getPending(id10b.mgr).some((m) => m.includes("[loom:daemon-restarted]") && /not a crash/i.test(m) && !/crashed/i.test(m)));
 
@@ -526,6 +546,7 @@ try {
   mkSession({ id: id10c.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10c.mgr, taskId: t10c, processState: "live" });
   const derived10c = deriveCrashOrphanedWorkers(db, [db.getSession(id10c.mgr), db.getSession(id10c.wkr)]);
   sessions.recoverCrashOrphanedWorkers(derived10c, { resumeOne: () => true, shutdownMarker: cleanMarker });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10c) the manager summary nudge uses [loom:daemon-restarted], names the recovered count, and never says 'crashed'",
     pty.getPending(id10c.mgr).some((m) => m.includes("[loom:daemon-restarted]") && /1 of your 1/i.test(m) && !/crashed/i.test(m)));
 
@@ -537,6 +558,7 @@ try {
   mkSession({ id: id10d.wkr, projId: P.proj, agentId: P.agent, role: "worker", parentSessionId: id10d.mgr, taskId: t10d, processState: "live" });
   const derived10d = deriveCrashOrphanedWorkers(db, [db.getSession(id10d.mgr), db.getSession(id10d.wkr)]);
   sessions.recoverCrashOrphanedWorkers(derived10d, { resumeOne: () => true, shutdownMarker: null });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(10d) with NO shutdown marker, the worker still gets the original [loom:crash-recovered] nudge",
     pty.getPending(id10d.wkr).some((m) => m.includes("[loom:crash-recovered]") && /The daemon crashed/i.test(m)));
 
@@ -551,6 +573,7 @@ try {
   mkSession({ id: id11a.mgr, projId: proj11, agentId: ag11, role: "manager", processState: "live" });
   const soloManagers11a = deriveCrashOrphanedManagers(db, [db.getSession(id11a.mgr)], []);
   sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers11a });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(11a) a stakeless solo manager (0 candidates, empty board, no answer) resumes SILENTLY",
     pty.getPending(id11a.mgr).length === 0);
 
@@ -561,6 +584,7 @@ try {
   mkSession({ id: id11b.wkr, projId: proj11, agentId: ag11, role: "worker", parentSessionId: id11b.mgr, taskId: t11b, processState: "live" });
   const derived11b = deriveCrashOrphanedWorkers(db, [db.getSession(id11b.mgr), db.getSession(id11b.wkr)]);
   sessions.recoverCrashOrphanedWorkers(derived11b, { resumeOne: () => true });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(11b) a manager with a recovered worker candidate gets the FULL summary nudge",
     pty.getPending(id11b.mgr).some((m) => m.includes("[loom:crash-recovered]") && /1 of your 1/i.test(m)));
 
@@ -574,6 +598,7 @@ try {
   const derived11c = deriveCrashOrphanedWorkers(db, [db.getSession(id11c.mgr), db.getSession(id11c.wkr)]);
   const resumeOne11c = (sid) => sid === id11c.mgr; // the manager resumes; its one worker fails
   sessions.recoverCrashOrphanedWorkers(derived11c, { resumeOne: resumeOne11c });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(11c) a manager whose only candidate worker FAILS to resume still gets the FULL summary nudge",
     pty.getPending(id11c.mgr).some((m) => m.includes("[loom:crash-recovered]") && /none of your 1/i.test(m)));
 
@@ -586,6 +611,7 @@ try {
   db.setIdleNudgePolicy(id11d.mgr, "suppressed");
   const soloManagers11d = deriveCrashOrphanedManagers(db, [db.getSession(id11d.mgr)], []);
   sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers11d });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(11d) a solo manager with STRANDED board work (escalated-suppressed policy) gets the FULL nudge",
     pty.getPending(id11d.mgr).some((m) => m.includes("[loom:crash-recovered]") && /re-check your state and continue orchestrating/i.test(m)));
 
@@ -599,6 +625,7 @@ try {
   });
   const soloManagers11e = deriveCrashOrphanedManagers(db, [db.getSession(id11e.mgr)], []);
   sessions.recoverCrashOrphanedWorkers([], { resumeOne: () => true, soloManagerIds: soloManagers11e });
+  await flush(); // card df5e37e7 — let the deferred manager/worker nudge settle
   check("(11e) a solo manager with an unconsumed ANSWERED question gets the FULL nudge despite an empty board",
     pty.getPending(id11e.mgr).some((m) => m.includes("[loom:crash-recovered]")));
 } finally {
