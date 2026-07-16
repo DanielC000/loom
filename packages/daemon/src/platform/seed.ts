@@ -160,6 +160,7 @@ export function seedPlatformHome(db: Db): string[] {
     createdAt: now,
     archivedAt: null,
     reserved: true, // the ONLY place a reserved project is minted — boot-seed, never an agent/REST path
+    referenceRepos: [],
   };
   db.insertProject(project);
 

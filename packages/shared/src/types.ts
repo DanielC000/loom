@@ -16,6 +16,12 @@ export interface Project {
   name: string;
   repoPath: string;   // cwd for spawned sessions; source of project-local .claude/skills
   vaultPath: string;  // Obsidian docs folder (auto-committed)
+  /**
+   * Additional repos a manager + its workers may READ but never own — never a cwd, worktree base,
+   * or gate target (repoPath stays the one primary repo for all of that). Absolute host paths.
+   * Additive; legacy rows backfill to []. Nothing reads this yet — data model only.
+   */
+  referenceRepos: string[];
   /** Per-project config overrides; merged over platform defaults. */
   config: ProjectConfigOverride;
   createdAt: string;

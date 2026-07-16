@@ -138,6 +138,7 @@ export function seedSetupHome(db: Db): string[] {
     createdAt: now,
     archivedAt: null,
     reserved: true, // a reserved home — hidden from the picker, minted only here at boot-seed
+    referenceRepos: [],
   };
   db.insertProject(project);
 

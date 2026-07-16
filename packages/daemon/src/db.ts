@@ -159,7 +159,11 @@ CREATE TABLE IF NOT EXISTS projects (
   -- Reserved/system project flag (the seeded "Loom Platform" home). 1 = hidden from the project
   -- picker (listProjects) but still admin/Mission-Control visible. Added to existing DBs via the
   -- idempotent migration below; NOT NULL + constant DEFAULT 0 backfills legacy rows to 0 (ordinary).
-  reserved INTEGER NOT NULL DEFAULT 0
+  reserved INTEGER NOT NULL DEFAULT 0,
+  -- Reference-only repos a manager + its workers may READ but never own (JSON array of absolute host
+  -- paths); repoPath stays the one primary repo. Added to existing DBs via the idempotent migration
+  -- below; NOT NULL + constant DEFAULT '[]' backfills legacy rows to [] (mirrors connections/capabilities).
+  reference_repos TEXT NOT NULL DEFAULT '[]'
 );
 -- Profiles (platform-level rig: role + model + permission-delta + skill-subset + icon). NO project
 -- FK — a profile is cross-project, reused by agents across projects. allow_delta/skills are JSON text.
@@ -1160,6 +1164,8 @@ const PROJECT_ADDED_COLUMNS: Record<string, string> = {
   // Reserved/system project flag (Platform Manager P1). NOT NULL + constant DEFAULT 0 is legal on
   // ALTER TABLE ADD COLUMN, so every legacy project row backfills to 0 (ordinary, picker-visible).
   reserved: "INTEGER NOT NULL DEFAULT 0",
+  // Reference-only repos (JSON array of absolute host paths); legacy rows backfill to '[]' (no refs).
+  reference_repos: "TEXT NOT NULL DEFAULT '[]'",
 };
 
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
@@ -1860,9 +1866,15 @@ export class Db {
   }
   insertProject(p: Project): void {
     this.db.prepare(
-      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved)
-       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved)`,
-    ).run({ ...p, config: JSON.stringify(p.config), archivedAt: p.archivedAt, reserved: p.reserved ? 1 : 0 });
+      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos)
+       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos)`,
+    ).run({
+      ...p,
+      config: JSON.stringify(p.config),
+      archivedAt: p.archivedAt,
+      reserved: p.reserved ? 1 : 0,
+      referenceRepos: JSON.stringify(p.referenceRepos ?? []),
+    });
   }
   /**
    * Partial STRUCTURAL edit of a project (name / vaultPath / repoPath). Provided fields are written;
@@ -5237,6 +5249,7 @@ function toProject(r0: unknown): Project {
     config: JSON.parse((r.config_json as string) || "{}") as ProjectConfigOverride,
     createdAt: r.created_at as string, archivedAt: (r.archived_at as string) ?? null,
     reserved: (r.reserved as number) === 1,
+    referenceRepos: JSON.parse((r.reference_repos as string) || "[]") as string[],
   };
 }
 function toAgent(r0: unknown): Agent {

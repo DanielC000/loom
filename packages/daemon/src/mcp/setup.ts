@@ -153,6 +153,7 @@ export class SetupMcpRouter {
           id: randomUUID(), name, repoPath: repo, vaultPath: vault,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
+          referenceRepos: [],
         };
         db.insertProject(project);
         // Bind-time commit-identity assert (CODE repos only — a vault-only notes folder takes no commits):
@@ -195,6 +196,7 @@ export class SetupMcpRouter {
           id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
+          referenceRepos: [],
         };
         db.insertProject(project);
         // Same bind-time identity assert as project_create, for the git kind (a vault folder takes no

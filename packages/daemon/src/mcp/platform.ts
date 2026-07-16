@@ -564,6 +564,7 @@ export class PlatformMcpRouter {
           id: randomUUID(), name, repoPath, vaultPath: vault,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
+          referenceRepos: [],
         };
         db.insertProject(project);
         return ok(project);
@@ -596,6 +597,7 @@ export class PlatformMcpRouter {
           id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
+          referenceRepos: [],
         };
         db.insertProject(project);
         return ok(project);

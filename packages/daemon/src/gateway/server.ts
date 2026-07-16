@@ -2831,6 +2831,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath: boot.dir,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
+      referenceRepos: [],
     };
     deps.db.insertProject(project);
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
@@ -3233,6 +3234,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       id: randomUUID(), name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
+      referenceRepos: [],
     };
     deps.db.insertProject(project);
     return reply.code(201).send(project);
