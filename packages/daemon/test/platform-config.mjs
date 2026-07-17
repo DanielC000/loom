@@ -857,6 +857,47 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ==== (17) PATCH per-field bounds are DERIVED from the persisted schemas, not hand-duplicated (card 389bb302) ====
+// rateLimitPatchOverride/watchersPatchOverride/timeoutsPatchOverride are now built from
+// rateLimitOverride/watchersOverride/timeoutsOverride's own `.shape` (`nullableShape`), so a nested
+// field's bounds can never diverge from the persisted schema. Prove the derived schemas enforce the
+// EXACT SAME edges as the hand-written ones did (validatePlatformConfigOverride's own (8)-style checks
+// above), not just "it compiles" — one edge pair per group, plus the .strict() unknown-key guard still
+// holding on a nested group.
+{
+  // rateLimit.defaultBackoffMs: 60000(1m)–86400000(24h), same edges as check (8) above.
+  check("(17) PATCH rateLimit.defaultBackoffMs:59999 (<1m floor) rejected",
+    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: 59999 } }).ok === false);
+  check("(17) PATCH rateLimit.defaultBackoffMs:60000 (1m floor) accepted",
+    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: 60000 } }).ok === true);
+  check("(17) PATCH rateLimit.defaultBackoffMs:86400001 (>24h) rejected",
+    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: 86400001 } }).ok === false);
+
+  // watchers share the 5000(5s)–3600000(1h) floor/ceiling.
+  check("(17) PATCH watchers.contextWatchMs:4999 (<5s floor) rejected",
+    validatePlatformConfigPatch({ watchers: { contextWatchMs: 4999 } }).ok === false);
+  check("(17) PATCH watchers.contextWatchMs:5000 (5s floor) accepted",
+    validatePlatformConfigPatch({ watchers: { contextWatchMs: 5000 } }).ok === true);
+  check("(17) PATCH watchers.contextWatchMs:3600001 (>1h ceiling) rejected",
+    validatePlatformConfigPatch({ watchers: { contextWatchMs: 3600001 } }).ok === false);
+
+  // timeouts.runMs: 30000(30s)–3600000(1h).
+  check("(17) PATCH timeouts.runMs:29999 (<30s floor) rejected",
+    validatePlatformConfigPatch({ timeouts: { runMs: 29999 } }).ok === false);
+  check("(17) PATCH timeouts.runMs:30000 (30s floor) accepted",
+    validatePlatformConfigPatch({ timeouts: { runMs: 30000 } }).ok === true);
+  check("(17) PATCH timeouts.runMs:3600001 (>1h ceiling) rejected",
+    validatePlatformConfigPatch({ timeouts: { runMs: 3600001 } }).ok === false);
+
+  // .strict() on the derived object still rejects an unknown key nested inside a submitted group.
+  check("(17) PATCH rejects an unknown key nested inside rateLimit (.strict() preserved)",
+    validatePlatformConfigPatch({ rateLimit: { bogusField: 1 } }).ok === false);
+
+  // null still wins alongside a real bound (per-field clear sentinel unaffected by the derivation).
+  check("(17) PATCH still accepts null on a bounded field",
+    validatePlatformConfigPatch({ timeouts: { runMs: null } }).ok === true);
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 

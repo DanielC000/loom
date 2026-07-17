@@ -488,39 +488,23 @@ export function validatePlatformConfigOverride(
 // Per-field-nullable variants of the 3 ms-keyed groups, for the PATCH body ONLY (card ba9ccd75): each
 // field individually accepts `null` as its own clear sentinel (delete just this field from the
 // persisted group), alongside the existing whole-group `.nullable()` below (delete the whole group).
-// Bounds are duplicated from rateLimitOverride/watchersOverride/timeoutsOverride above rather than
-// derived from them — zod has no "make every field of this object schema nullable" combinator that
-// preserves each field's own numeric bounds, and the persisted-result schemas above must stay
-// non-nullable per field (a `null` leaf is stripped by the server.ts merge before re-validating against
-// them, so it must never be a shape they themselves accept).
-const rateLimitPatchOverride = z.object({
-  defaultBackoffMs: z.number().int().min(60000).max(86400000).nullable().optional(),
-  resetBufferMs: z.number().int().min(0).max(600000).nullable().optional(),
-  deadlineAfterResetMs: z.number().int().min(60000).max(86400000).nullable().optional(),
-  deadlineNoResetMs: z.number().int().min(600000).max(172800000).nullable().optional(),
-  recencyWindowMs: z.number().int().min(0).max(86400000).nullable().optional(),
-  exhaustedThresholdPct: z.number().int().min(50).max(100).nullable().optional(),
-}).strict();
-const watcherMsPatch = z.number().int().min(5000).max(3600000).nullable().optional();
-const watchersPatchOverride = z.object({
-  contextWatchMs: watcherMsPatch,
-  idleWatchMs: watcherMsPatch,
-  rateLimitWatchMs: watcherMsPatch,
-  usagePollMs: watcherMsPatch,
-  wakeMs: watcherMsPatch,
-  schedulerMs: watcherMsPatch,
-  reconcileMs: watcherMsPatch,
-  snapshotMs: watcherMsPatch,
-  crashRecoveryWatchMs: watcherMsPatch,
-}).strict();
-const timeoutsPatchOverride = z.object({
-  gitOpMs: z.number().int().min(1000).max(120000).nullable().optional(),
-  gitLocalMs: z.number().int().min(1000).max(120000).nullable().optional(),
-  gitPushMs: z.number().int().min(1000).max(600000).nullable().optional(),
-  provisionMs: z.number().int().min(10000).max(1800000).nullable().optional(),
-  busyStaleMs: z.number().int().min(30000).max(1800000).nullable().optional(),
-  runMs: z.number().int().min(30000).max(3600000).nullable().optional(),
-}).strict();
+// DERIVED from rateLimitOverride/watchersOverride/timeoutsOverride's own `.shape` (card 389bb302) —
+// each field's bounds come from exactly ONE place, so a bound changed on the persisted schema can never
+// silently drift out of sync with the PATCH variant. `nullableShape` maps `.nullable()` over every
+// value in a ZodRawShape, preserving each field's own type/bounds; the persisted-result schemas above
+// must stay non-nullable per field (a `null` leaf is stripped by the server.ts merge before
+// re-validating against them, so it must never be a shape they themselves accept) — only the derived
+// PATCH copy adds the `.nullable()` layer on top.
+function nullableShape<Shape extends z.ZodRawShape>(
+  shape: Shape,
+): { [K in keyof Shape]: z.ZodNullable<Shape[K]> } {
+  return Object.fromEntries(
+    Object.entries(shape).map(([key, schema]) => [key, (schema as z.ZodTypeAny).nullable()]),
+  ) as unknown as { [K in keyof Shape]: z.ZodNullable<Shape[K]> };
+}
+const rateLimitPatchOverride = z.object(nullableShape(rateLimitOverride.shape)).strict();
+const watchersPatchOverride = z.object(nullableShape(watchersOverride.shape)).strict();
+const timeoutsPatchOverride = z.object(nullableShape(timeoutsOverride.shape)).strict();
 
 /**
  * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75):
