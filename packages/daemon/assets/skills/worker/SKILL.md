@@ -69,27 +69,45 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    blocked` *immediately*, before doing the full implementation, so the human fix can happen in
    parallel instead of after a wasted build.
 4. **Verify before reporting.** Meet the DoD — run the project's gate (build / typecheck / repro / the
-   check your task names) and confirm the behavior. **Run the gate in the FOREGROUND, then commit, then
-   report — in ONE flow.** A blocking command completes within your turn, so you never need to launch it
-   in the background and park on a poll waiting for it. **The rule: never end your turn while a gate is
-   running, and never report before committing.** A gate that runs for **minutes**, not just one whose
+   check your task names) and confirm the behavior. **Use the `run_gate` tool
+   (`mcp__loom-orchestration__run_gate`, no args) rather than running your project's gate yourself in a
+   shell** — the DAEMON spawns it, so every worker gate + merge gate on the daemon shares ONE concurrency
+   budget and parallel workers can't collectively swamp the host. It also pins single-lane test
+   concurrency for you, so **don't set a test-concurrency env var yourself**. **Its tool description is
+   the contract for the exact return, pending, and retry shape — read it there.** Two things that
+   description can't tell you, because they're doctrine:
+   - **None of the foreground/backgrounding rules below apply to `run_gate`** — the daemon, not your
+     shell, runs it, so it never blocks your turn. A `pending` result, or the call queueing behind another
+     in-flight gate on a busy fleet, is EXPECTED — not a hang. Parking on its completion nudge IS safe:
+     that nudge is a real Loom-pushed message that drives a new turn, unlike a backgrounded shell
+     command's own notification (see below), which is not.
+   - **If it reports your project has no gate command configured**, only then fall back to running your
+     own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
+     if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report
+     the missing gate command up, too.
+
+   **If you do run a build/test command yourself** (that no-gate-command fallback, or another check your
+   task names): **run it in the FOREGROUND, then commit, then report — in ONE flow.** A blocking command
+   completes within your turn, so you never need to launch it in the background and park on a poll waiting
+   for it. **The rule: never end your turn while a command you launched yourself is still running, and
+   never report before committing.** Such a command that runs for **minutes**, not just one whose
    output is long/noisy, needs the same care: your shell tool's default timeout (commonly ~120s) will
-   auto-background a bare long-running command out from under you. So for any gate that's slow OR noisy,
-   either launch it with an explicit long `timeout` set to cover its real duration, or redirect it to a
-   file and read the tail in the same turn (e.g. `<gate-cmd> > gate.log 2>&1; echo EXIT=$?`, then read
-   `gate.log`) — either way the command still runs in the foreground and returns to you when done. **If a
-   gate command DOES get auto-backgrounded anyway** (you see a background task id instead of a normal
+   auto-background a bare long-running command out from under you. So for any such command that's slow OR
+   noisy, either launch it with an explicit long `timeout` set to cover its real duration, or redirect it
+   to a file and read the tail in the same turn (e.g. `<cmd> > check.log 2>&1; echo EXIT=$?`, then read
+   `check.log`) — either way the command still runs in the foreground and returns to you when done. **If
+   such a command DOES get auto-backgrounded anyway** (you see a background task id instead of a normal
    result), await its actual completion — the tool made for that (commonly `TaskOutput` with a
    blocking/wait option), not a fresh `Monitor`/watch call, which is for observing a new command or
-   stream, not for pulling the result of a task that already started running in the background. **Never park a gate on a scheduled wake** (`wake_me` to sleep the turn, wake
+   stream, not for pulling the result of a task that already started running in the background. **Never park such a command on a scheduled wake** (`wake_me` to sleep the turn, wake
    later, check if it finished) — that risks a "No response requested" stall and only adds latency; a
    foreground run just returns when it's done. **Never end your turn parked on a background task's own
    completion notification as your only plan, either — that notification is delivered on your *next* turn,
    not by spontaneously waking an otherwise-silent session, and as a worker you have no standing channel
    that pokes you on a timer the way a manager does; nothing else may ever arrive to trigger that next turn,
-   and you can dead-stall indefinitely with the gate long since finished.** Run gate/test commands in the
-   FOREGROUND (or poll their output inline) precisely so you're never depending on that notification to
-   bring you back. If you must background a genuinely long-running task for some OTHER reason, don't trust
+   and you can dead-stall indefinitely with the command long since finished.** Run any build/test command
+   you launch yourself in the FOREGROUND (or poll its output inline) precisely so you're never depending on
+   that notification to bring you back. If you must background a genuinely long-running task for some OTHER reason, don't trust
    the completion notification alone to resume you: `worker_report progress` immediately, naming what you
    kicked off and that you're waiting — the report (and whatever direction it draws back down) is a real
    route back into a turn; the bare notification is not. And even then you
@@ -150,7 +168,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    workaround or letting a verification-only run trigger a production-shaped side effect.
 5. **Hold the line on honesty.** "Done" means done and verified — report what passed, what you skipped,
    and any known limitation rather than papering over it. Keep any docs you touch accurate: rewrite
-   stale claims in place, no "UPDATE:" appends. **A "X does not exist in the codebase" / "there's no such
+   stale claims in place, no "UPDATE:" appends. **Changing a tool's contract or a documented behavior?
+   Update the docs that teach the OLD way in the SAME change** — grep the project's `CLAUDE.md` and any
+   doctrine/skill that documents it. A fix whose docs still teach the workaround gets no adoption: it
+   effectively did not ship. **A "X does not exist in the codebase" / "there's no such
    machinery" claim is an ASSERTION you must PROVE before you ship it** — an absence claim is not
    reportable from memory or a couple of hopeful reads: run the repo-wide grep that FAILS to find it and
    cite that negative search (the pattern you searched + zero hits) in your report. A confident absence
@@ -217,13 +238,14 @@ can then fail against the wrong base. Prefer **absolute paths** in Grep/Glob (or
 
 ## Report protocol
 
-Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report` and
-`my_context` (you RECEIVE `worker_message`, and your manager may `worker_recycle` you — neither is a
+Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
+`run_gate` (your DoD gate — see step 4), and `my_context` (you RECEIVE `worker_message`, and your manager
+may `worker_recycle` you — neither is a
 tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`; and the `mcp__loom-tasks__`
 namespace also gives you `wake_me` (schedule a wake — `delaySeconds` OR `minutes`, plus a `note`/`reason`;
 `wake_cancel` / `wake_list` manage pending wakes) and `task_requests_list` / `task_request_get` (read your
 card's connected Requests). Load them in ONE ToolSearch:
-`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
+`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
 (`authenticated_request` — a proxied outbound HTTP call over a human-granted connection — exists **only
 when your session was provisioned such a connection**; assume it's absent unless your brief says otherwise.)
 

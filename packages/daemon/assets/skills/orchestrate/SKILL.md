@@ -325,6 +325,9 @@ mid-report — before sending anything.
 2. **Decompose into delegable tasks**, each with an explicit **definition of done**. A task without a
    DoD/acceptance check can't be delegated — state what *proves* it works (your agent prompt names the
    project's gate command). One task = one focused, independently-mergeable change.
+   - **A card that changes a tool's contract or a documented behavior carries "update the docs/doctrine
+     that teach the OLD way" IN its DoD** — and you check it at the merge gate. Code that ships while its
+     docs still teach the workaround gets no adoption: it effectively did not ship.
    - **Title cards in Conventional Commits form** — `type(scope): summary` (lowercase type, imperative
      mood, no trailing period, ≤~72-char subject). **DROP the old `[Type, Priority]` bracket** — priority
      lives in the card's priority field, not the title. WHY: the squash merge uses the card title verbatim
