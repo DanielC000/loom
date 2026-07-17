@@ -3071,6 +3071,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   app.get("/api/projects/:id/agents", async (req) =>
     deps.db.listAgents((req.params as { id: string }).id));
+  // Bulk cross-project agent list (perf profile 2026-07-16): replaces the client N+1 of
+  // api.projects() + Promise.all(projects.map(p => api.agents(p.id))) that Schedules/Settings/
+  // EventTriggers each ran independently to build a "Project / Agent" label map (~26 round-trips
+  // on mount) with ONE JOINed query.
+  app.get("/api/agents", async () => deps.db.listAllAgents());
   app.get("/api/projects/:id/tasks", async (req) =>
     deps.db.listTasks((req.params as { id: string }).id));
   // Board = resolved kanban columns (config default→override) + the project's tasks, PROJECTED to

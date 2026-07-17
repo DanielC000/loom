@@ -4,6 +4,7 @@ import type { Schedule, CronBuilderState, CronFrequency } from "@loom/shared";
 import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius } from "../theme";
 
@@ -27,22 +28,6 @@ const codeStyle: CSSProperties = {
   border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 5px", whiteSpace: "nowrap",
 };
 
-// Flat list of every agent across all projects, with a "Project / Agent" label — for TABLE label
-// resolution only (the table stays god-eye: it shows schedules targeting any project). The builder's
-// agent picker does NOT use this — it is scoped to the active project (see ScheduleBuilder).
-function useAllAgents() {
-  return useQuery({
-    queryKey: ["allAgents"],
-    queryFn: async () => {
-      const projects = await api.projects();
-      const lists = await Promise.all(
-        projects.map((p) => api.agents(p.id).then((ags) => ags.map((a) => ({ id: a.id, label: `${p.name} / ${a.name}` })))),
-      );
-      return lists.flat();
-    },
-  });
-}
-
 type ModalState = { mode: "create" } | { mode: "edit"; schedule: Schedule } | null;
 
 // Loom's cron Schedules — the trigger layer (phase-2 Pillar B). On each due boundary the daemon
@@ -61,6 +46,8 @@ export default function Schedules() {
   // warning on an explicit `=== false` so it doesn't flash while the status is still loading.
   const orch = useQuery({ queryKey: ["orchestrationStatus"], queryFn: api.orchestrationStatus });
   const schedulerOff = orch.data?.schedulerEnabled === false;
+  // Flat cross-project "Project / Agent" labels for TABLE resolution only — the table stays god-eye
+  // (shows schedules targeting any project). The builder's picker below is scoped to the active project.
   const agents = useAllAgents();
   const agentLabel = (id: string) => agents.data?.find((a) => a.id === id)?.label ?? id;
   // The builder's agent dropdown is scoped to the ACTIVE project's agents (re-scopes on project switch).

@@ -30,7 +30,7 @@ function assertNotProdDbInTest(file: string): void {
   }
 }
 import type {
-  Project, Agent, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
+  Project, Agent, AgentListItem, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
   OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
@@ -2730,6 +2730,20 @@ export class Db {
   listAgents(projectId: string): Agent[] {
     return this.db.prepare("SELECT * FROM agents WHERE project_id = ? ORDER BY position")
       .all(projectId).map(toAgent);
+  }
+  /**
+   * Every agent across every project, enriched with its project name — the bulk "Project / Agent"
+   * label-map read (perf profile 2026-07-16: three web call sites each did api.projects() then
+   * Promise.all(projects.map(p => api.agents(p.id))), ~26 sequential round-trips on mount). Modeled
+   * on listAllSessions's JOIN pattern.
+   */
+  listAllAgents(): AgentListItem[] {
+    const rows = this.db.prepare(
+      `SELECT a.*, p.name AS project_name
+       FROM agents a JOIN projects p ON a.project_id = p.id
+       ORDER BY p.name, a.position`,
+    ).all() as Row[];
+    return rows.map((r) => ({ ...toAgent(r), projectName: r.project_name as string }));
   }
   getAgent(id: string): Agent | undefined {
     const r = this.db.prepare("SELECT * FROM agents WHERE id = ?").get(id) as Row | undefined;

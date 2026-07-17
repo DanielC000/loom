@@ -3,6 +3,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { EventTrigger, EventTriggerEventKind } from "@loom/shared";
 import { EVENT_TRIGGER_EVENT_KINDS } from "@loom/shared";
 import { api } from "../lib/api";
+import { useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius } from "../theme";
 
@@ -16,22 +17,6 @@ function fmt(iso: string | null): string {
 function humanizeKind(kind: string): string {
   const spaced = kind.replace(/_/g, " ");
   return spaced.charAt(0).toUpperCase() + spaced.slice(1);
-}
-
-// Flat list of every agent across all projects, "Project / Agent" labelled — for BOTH the spawn-mode
-// picker and the table's target resolution. A trigger's scope (which project's events it reacts to) is
-// independent of where its target lives, so the target may be any project's agent — this stays god-eye.
-function useAllAgents() {
-  return useQuery({
-    queryKey: ["allAgents"],
-    queryFn: async () => {
-      const projects = await api.projects();
-      const lists = await Promise.all(
-        projects.map((p) => api.agents(p.id).then((ags) => ags.map((a) => ({ id: a.id, label: `${p.name} / ${a.name}` })))),
-      );
-      return lists.flat();
-    },
-  });
 }
 
 type ModalState = { mode: "create" } | { mode: "edit"; trigger: EventTrigger } | null;
@@ -48,6 +33,9 @@ export default function EventTriggers() {
   const triggers = useQuery({ queryKey: ["eventTriggers"], queryFn: api.eventTriggers });
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  // Flat "Project / Agent" labels for BOTH the spawn-mode picker and the table's target resolution. A
+  // trigger's scope (which project's events it reacts to) is independent of where its target lives, so
+  // the target may be any project's agent — this stays god-eye.
   const agents = useAllAgents();
 
   const projectName = (id: string | null) =>

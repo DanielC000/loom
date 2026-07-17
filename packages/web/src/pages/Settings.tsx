@@ -18,6 +18,7 @@ import {
 } from "@loom/shared";
 import { api, type ProjectPatchError, type IntegrationStatus } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
+import { useAllAgents } from "../lib/useAllAgents";
 import { Panel, Button, Input, Select, SectionLabel, Badge, Chip } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import { color, font, tone, type Tone } from "../theme";
@@ -1234,21 +1235,6 @@ function fmtWhen(iso: string | null): string {
   return iso ? new Date(iso).toLocaleString() : "never";
 }
 
-// Flat cross-project agent list ("Project / Agent" labels) for a spawn-mode target picker — mirrors
-// Schedules' useAllAgents. Poll jobs are daemon-global, so the target can be any project's agent.
-function usePollAgents() {
-  return useQuery({
-    queryKey: ["allAgentsFlat"],
-    queryFn: async () => {
-      const projects = await api.projects();
-      const lists = await Promise.all(
-        projects.map((p) => api.agents(p.id).then((ags) => ags.map((a) => ({ id: a.id, label: `${p.name} / ${a.name}` })))),
-      );
-      return lists.flat();
-    },
-  });
-}
-
 // Owner-declared symmetric project links (board card 2349d90c) — the sole gate for the manager↔manager
 // `peer_message` cross-project channel. Daemon-global (like Connections/Capabilities), HUMAN-only REST —
 // there is intentionally no agent MCP path that can create or remove a link. A minimal list + two-project
@@ -1347,7 +1333,9 @@ function PollJobsPanel() {
   const jobs = useQuery({ queryKey: ["pollJobs"], queryFn: () => api.pollJobs() });
   const connections = useQuery({ queryKey: ["connections"], queryFn: () => api.connections() });
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: () => api.allSessions() });
-  const agents = usePollAgents();
+  // Flat cross-project "Project / Agent" labels for the spawn-mode target picker. Poll jobs are
+  // daemon-global, so the target can be any project's agent.
+  const agents = useAllAgents();
 
   const invalidate = () => qc.invalidateQueries({ queryKey: ["pollJobs"] });
   const create = useMutation({

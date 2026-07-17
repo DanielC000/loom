@@ -76,6 +76,11 @@ export interface Agent {
   ioSchema: unknown | null;
 }
 
+/** An agent enriched with its project name — for a global "Project / Agent" label map (god-eye pickers). */
+export interface AgentListItem extends Agent {
+  projectName: string;
+}
+
 /**
  * A **Profile** — a reusable, platform-level (cross-project) "rig": the role, model, permission
  * delta, skill-subset, and icon a session adopts. Agents reference one via `profileId`, and
