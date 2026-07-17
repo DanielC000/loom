@@ -299,6 +299,15 @@ body {
   flex: none;
   display: flex;
 }
+/* Collapsed: center the mark on the same 60px axis as the nav-icon column below (mirrors
+   .loom-rail-ico) so the logo lines up with the icons instead of sitting 4px to the left.
+   Reverts to the left-biased flow layout on expand, keeping the expanded lockup unchanged. */
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-mark {
+  width: var(--loom-rail-w);
+  margin-left: -16px;
+  display: grid;
+  place-items: center;
+}
 .loom-rail-wordmark {
   font-family: var(--loom-font-head);
   font-weight: 600;
