@@ -49,7 +49,7 @@ import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
-import { workerDiff } from "../git/worktrees.js";
+import { getWorkerDiffCached } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
@@ -3150,7 +3150,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const p = deps.db.getProject(s.projectId);
     if (!p) return reply.code(404).send({ error: "project not found" });
     // Lifecycle-robust: live worktree (uncommitted) → committed branch → reconstructed merge diff.
-    const d = await workerDiff(p.repoPath, { branch: s.branch, worktreePath: s.worktreePath ?? null });
+    // Cached (see getWorkerDiffCached in worktrees.ts): Overview polls this every ~4s per rendered
+    // worker card regardless of whether the worktree changed, and the underlying git subprocess costs
+    // 350-415ms/poll — an unchanged poll skips it entirely via a git-free freshness proof.
+    const d = await getWorkerDiffCached(p.repoPath, { branch: s.branch, worktreePath: s.worktreePath ?? null });
     if (!d) return reply.code(404).send({ error: "no diff available (no worktree, and branch gone/unmergeable)" });
     return d;
   });

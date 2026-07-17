@@ -1349,6 +1349,192 @@ export async function workerDiff(
   return null;
 }
 
+// ── Diff cache for the polled orchestration-view endpoint (`GET /api/sessions/:id/diff`) ──────────
+//
+// Overview polls this once per rendered worker card every ~4s regardless of whether anything changed,
+// and workerDiff() always shells out to git (350-415ms/poll in the 2026-07-16 perf profile). This wraps
+// workerDiff with a cache keyed on a CHEAP, git-subprocess-free freshness proof, so a repeat poll on an
+// unchanged worker skips git entirely.
+//
+// KEY DESIGN (correctness over hit-rate — a false HIT serves a stale diff, worse than the perf cost it
+// saves):
+//  - The canonical repo's HEAD sha, read via fs (not `git rev-parse`) — covers stage 2/3 (committed-only
+//    and merged-and-reconstructed diffs), whose result only changes if HEAD moves or the branch/worktree
+//    lifecycle transitions.
+//  - When a live worktree exists (stage 1 — the case that ALSO reflects UNCOMMITTED work), HEAD sha alone
+//    is NOT enough: a worker can edit a tracked file without staging or committing, which never touches
+//    any git ref or the index, only the file's own mtime. So stage 1 additionally fingerprints the
+//    worktree's actual file contents (path + mtime + size + mode) via a bounded, git-free recursive walk.
+//    `.git` (never diff-relevant) and `node_modules` (Loom-provisioned per worktree, never git-tracked —
+//    see CLAUDE.md "Worktree dep-provisioning") are skipped as a pure perf optimization; every other path
+//    is walked, so any tracked-file edit, add, delete, rename, or mode change is caught.
+//  - The walk is capped (DIFF_FINGERPRINT_MAX_ENTRIES) — past the cap we can't CHEAPLY prove the worktree
+//    is unchanged, so the key resolves to null and the caller always recomputes: a false MISS, which only
+//    costs perf, never correctness.
+//
+// Bounded via simple LRU eviction (DIFF_CACHE_MAX_ENTRIES) keyed by branch — branches come and go with
+// workers over the daemon's whole lifetime, so an unbounded map would leak.
+//
+// MEASURED, NOT ASSUMED (2026-07-17, throwaway script against this repo's own worktree — a real
+// pnpm-monorepo tree, real node_modules — not a synthetic fixture): the HIT path is NOT free, it still
+// walks the tree. 1566 files walked (excl `.git`/`node_modules`). HIT (fingerprintWorktree alone) ~94ms
+// avg across 8 warm runs (83-145ms range over two independent passes). MISS (the git subprocess trio
+// this replaces: merge-base + diff --stat + diff) ~235-253ms avg locally, vs 350-415ms/poll on the live
+// 2026-07-16 profile (a different/larger host — git's fixed spawn overhead plausibly dominates more
+// there, so the live win is likely larger in absolute ms, not smaller). Net: a real, repeatable ~2x
+// reduction, not an order-of-magnitude one. Threadpool contention (libuv's default pool is only 4
+// threads) was checked too: production deliberately runs `UV_THREADPOOL_SIZE=16` (see `bin/loom.mjs` /
+// `daemon-supervisor.mjs`, task dea6728e) for exactly this class of fs-heavy work; under that config,
+// N=4/8/16 concurrent fingerprintWorktree() calls (simulating several worker cards polling the same
+// ~4s tick) ran FASTER per-call than sequential, no contention degradation observed. Caveat: that test
+// repeated ONE worktree (favorable OS file-cache sharing) rather than N distinct ones, so fleet-scale
+// contention isn't fully ruled out — if it ever shows up in a future profile, the fix degrades gracefully
+// (still async, bounded, correct — just less speedup), it doesn't turn wrong.
+//
+// DECLINED ALTERNATIVE (don't build unless a future profile actually shows the walk itself is hot): a
+// cheaper key that fingerprints only git-TRACKED paths (a cached `git ls-files` result, invalidated when
+// the worktree's own index file's mtime moves) instead of walking the whole non-`.git`/non-`node_modules`
+// tree — on this same measurement, that's ~1566 files down to roughly the ~800 actually tracked, so
+// another ~2x on the HIT path alone. Declined 2026-07-17: not worth the added complexity and a NEW
+// invalidation-correctness risk against an already-real 2x — notably, index mtime does NOT move on an
+// UNSTAGED edit to an already-tracked file, so the ls-files cache would need its own separate
+// invalidation proof, layering exactly the kind of hazard this card exists to eliminate.
+
+const DIFF_CACHE_MAX_ENTRIES = 500;
+const DIFF_FINGERPRINT_MAX_ENTRIES = 20_000;
+
+interface DiffCacheEntry {
+  key: string;
+  result: WorkerDiff | null;
+}
+
+const diffCache = new Map<string, DiffCacheEntry>();
+
+/** Loose-or-packed ref resolution via fs only (no `git rev-parse`). `refName` like `refs/heads/<branch>`. */
+async function readRefSha(gitDir: string, refName: string): Promise<string | null> {
+  try {
+    const content = (await fs.promises.readFile(path.join(gitDir, refName), "utf8")).trim();
+    if (content) return content;
+  } catch { /* not a loose ref; fall through to packed-refs */ }
+  try {
+    const packed = await fs.promises.readFile(path.join(gitDir, "packed-refs"), "utf8");
+    for (const line of packed.split("\n")) {
+      if (!line || line[0] === "#" || line[0] === "^") continue;
+      const sp = line.indexOf(" ");
+      if (sp === -1) continue;
+      if (line.slice(sp + 1).trim() === refName) return line.slice(0, sp).trim();
+    }
+  } catch { /* no packed-refs either */ }
+  return null;
+}
+
+/** The canonical repo's current HEAD sha, resolved via fs only (handles both symbolic and detached HEAD). */
+async function readHeadSha(repoPath: string): Promise<string | null> {
+  try {
+    const gitDir = path.join(repoPath, ".git");
+    const head = (await fs.promises.readFile(path.join(gitDir, "HEAD"), "utf8")).trim();
+    if (head.startsWith("ref:")) return readRefSha(gitDir, head.slice(4).trim());
+    return head || null; // detached HEAD: a raw sha
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Bounded, git-free recursive fingerprint of a worktree's files (path + mtime + size + mode), so a
+ * repeat poll can PROVE no uncommitted edit happened without shelling out to git. Returns null if the
+ * walk exceeds {@link DIFF_FINGERPRINT_MAX_ENTRIES} (can't cheaply prove unchanged -> caller always
+ * recomputes) — never wrong, just no speedup for a pathologically large tree.
+ */
+async function fingerprintWorktree(worktreePath: string): Promise<string | null> {
+  const parts: string[] = [];
+  let overflowed = false;
+  async function walk(dir: string): Promise<void> {
+    if (overflowed) return;
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // dir vanished mid-walk (worktree being torn down concurrently) -> best-effort
+    }
+    for (const entry of entries) {
+      if (overflowed) return;
+      if (entry.name === ".git" || entry.name === "node_modules") continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) { await walk(full); continue; }
+      if (!entry.isFile()) continue; // skip symlinks etc.
+      if (parts.length >= DIFF_FINGERPRINT_MAX_ENTRIES) { overflowed = true; return; }
+      try {
+        const st = await fs.promises.stat(full);
+        parts.push(`${full}:${st.mtimeMs}:${st.size}:${st.mode}`);
+      } catch { /* file vanished mid-walk -> ignore this entry, best-effort */ }
+    }
+  }
+  await walk(worktreePath);
+  if (overflowed) return null;
+  parts.sort();
+  return createHash("sha1").update(parts.join("\n")).digest("hex");
+}
+
+/** Compute the cache freshness key for one workerDiff() call, or null if it can't be cheaply proven. */
+async function computeDiffCacheKey(
+  repoPath: string, branch: string, worktreePath: string | null,
+): Promise<string | null> {
+  const headSha = (await readHeadSha(repoPath)) ?? "-";
+  if (worktreePath && fs.existsSync(worktreePath)) {
+    const contentFp = await fingerprintWorktree(worktreePath);
+    if (contentFp === null) return null;
+    return `wt:${headSha}:${contentFp}`;
+  }
+  const branchSha = await readRefSha(path.join(repoPath, ".git"), `refs/heads/${branch}`);
+  if (branchSha) return `branch:${branchSha}`;
+  // Branch merged+deleted (or unknown): stage 3 searches history from HEAD, so HEAD alone is the key.
+  return `merged:${headSha}`;
+}
+
+/**
+ * Cached wrapper around {@link workerDiff} for the polled orchestration-view diff endpoint. `deps.compute`
+ * is an injectable seam (defaults to the real {@link workerDiff}) so a test can count git-subprocess-
+ * triggering calls without mocking `simple-git`/`child_process`.
+ */
+export async function getWorkerDiffCached(
+  repoPath: string,
+  opts: { branch: string; worktreePath: string | null },
+  deps: { compute?: typeof workerDiff } = {},
+): Promise<WorkerDiff | null> {
+  const compute = deps.compute ?? workerDiff;
+  const key = await computeDiffCacheKey(repoPath, opts.branch, opts.worktreePath);
+  if (key !== null) {
+    const cached = diffCache.get(opts.branch);
+    if (cached && cached.key === key) {
+      diffCache.delete(opts.branch); // move to the Map's end (most-recently-used)
+      diffCache.set(opts.branch, cached);
+      return cached.result;
+    }
+  }
+  const result = await compute(repoPath, { branch: opts.branch, worktreePath: opts.worktreePath });
+  if (key !== null) {
+    diffCache.delete(opts.branch);
+    diffCache.set(opts.branch, { key, result });
+    while (diffCache.size > DIFF_CACHE_MAX_ENTRIES) {
+      const oldest = diffCache.keys().next().value;
+      if (oldest === undefined) break;
+      diffCache.delete(oldest);
+    }
+  }
+  return result;
+}
+
+/** TEST-ONLY: clear the diff cache between hermetic test cases that reuse the same temp dirs/branches. */
+export function __resetWorkerDiffCacheForTest(): void {
+  diffCache.clear();
+}
+
+/** TEST-ONLY: current diff-cache size, to prove the LRU bound actually evicts. */
+export function __workerDiffCacheSizeForTest(): number {
+  return diffCache.size;
+}
+
 /** The Conventional Commits types Loom recognizes (the allowed type list, documented once in CLAUDE.md). */
 const CONVENTIONAL_TYPES = [
   "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
