@@ -3624,6 +3624,22 @@ export class PtyHost {
    * §19c-b resume: re-submit the turn the usage cap killed (lastPrompt) once the reset passes. Goes
    * out via submit() (re-arms busy); the held pending queue then drains normally on the next Stop.
    * Returns false if the session isn't live (already stopped/killed → caller does not resume).
+   *
+   * Card 7edd420b: a PARKED (rateLimited) session is alive-but-idle, not dying — so an UNRELATED stop can
+   * overlap it: a plain pty.stop() (live.stopping) or a companion upgrade's holdDrain window
+   * (live.drainHeld, see that method's doc) can both be mid-flight the instant this fires (the 60s
+   * rate-limit-watcher tick, or a human clearing the park via REST). Pre-fix this method guarded on
+   * `alive` only, so it would write the replayed turn straight into that dying/held pty — a write that
+   * races the kill, is never recorded in `pending` (so `flushPending` can't recover it), and is simply
+   * lost. `blocked` closes that: when either flag is set, route the replay through `enqueueStdin` instead
+   * of a direct `submit()` — the SAME queuing primitive `drainPending`'s own turn-starting site already
+   * falls back to when it can't submit safely. That HOLDS the prompt in `live.pending` rather than writing
+   * it into the pty, and a caller that's actively draining `pending` before the pty actually exits
+   * (upgradeCompanionCapabilities's holdDrain loop is exactly this) recovers and redelivers it onto the
+   * fresh pty after the respawn — preserving the turn instead of merely declining to lose it noisily. A
+   * plain stop() with no such capture (drainHeld never set) still clears `pending` itself before anything
+   * can recover it (see stop()), so the prompt CAN still be lost on that narrower path — but only ever as
+   * a quietly-dropped queue entry, never by corrupting a dying pty's write.
    */
   resumeAfterRateLimit(sessionId: string): boolean {
     const live = this.live.get(sessionId);
@@ -3636,7 +3652,14 @@ export class PtyHost {
     // replay its lastPromptOwnerText so Primitive A's attestation survives the kill-and-resume too, and its
     // lastPromptProactive so a rate-limited heartbeat/reminder/alert turn's replayed chat_reply is still
     // tagged as proactive.
-    if (live.lastPrompt != null) this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
+    if (live.lastPrompt != null) {
+      const blocked = live.stopping || live.drainHeld;
+      if (blocked) {
+        this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
+      } else {
+        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
+      }
+    }
     return true;
   }
 
