@@ -88,6 +88,12 @@ type GateRejectionDetail = {
 
 type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string };
 
+/** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
+ *  PendingOpRegistry's doc) after {@link SessionService.confirmWorkerMergeTracked} settles it — long
+ *  enough for the Board's polling `/api/sessions` fetch to catch the terminal fill at least once before
+ *  it reverts, short enough that a stale merged/rejected/failed card doesn't linger. */
+const MERGE_OP_RETAIN_MS = 5_000;
+
 /** {@link SessionService.runWorkerGate}'s result (card 7f96aa09 — structural fix B for d5c5ccdf: route the
  *  worker DoD self-gate through the daemon GateSemaphore). `ran:false` means no gate command is configured
  *  for this project at all (the caller should fall back to a raw self-check, pinning `LOOM_TEST_CONCURRENCY=1`
@@ -6471,6 +6477,16 @@ export class SessionService {
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.reason ?? "merge did not complete"}`)
           : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+      },
+      {
+        // RETAIN + CLASSIFY (card d1aee5f1 follow-up): keep the settled op briefly `peek()`-able (see
+        // PendingOpRegistry's "RETAINED TERMINAL VIEW" doc) with a distinct terminal outcome, so the Board
+        // card's merge-gate hairline can render merged/rejected/failed instead of reverting the instant the
+        // gate settles. `merged:true` → "merged"; a RESOLVED `merged:false` (the gate/stranded-work/empty-
+        // stage rejection paths — none of these throw) → "rejected"; only a genuinely THROWN error (a real
+        // exception, not a rejection result) → "failed". Mirrors `mergeDisplay`'s Board-side classification.
+        retainMs: MERGE_OP_RETAIN_MS,
+        classifyOutcome: (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "merged" : "rejected"),
       },
     );
   }

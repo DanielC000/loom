@@ -520,24 +520,31 @@ export interface RunEvent {
 }
 
 /**
- * A worker's in-flight merge-gate op, surfaced read-only onto its session (card 7b7fa6d — the Board
- * merge-gate hairline). This is the shared-type mirror of the daemon's `PendingOpView` subset that
- * `worker_list` already exposes, projected onto `/api/sessions` from the in-memory PendingOpRegistry
- * (NOT a DB column). Non-null ONLY while a `worker_merge_confirm` gate is genuinely RUNNING: the source
- * op is EVICTED from the registry the instant it settles, so a settled/terminal op is never surfaced
- * here and the field returns to null. Consequently `state` is effectively always `"running"` while the
- * field is present — the `"done"`/`"failed"` terminals are part of the faithful op-state union but are
- * evicted before they can surface live (the Board renders them for completeness / synthetic states).
- * Note the source op-state collapses a merge SUCCESS and a merge REJECTION into `"done"` (a rejection
- * resolves; only an exception → `"failed"`), so this field alone cannot distinguish merged-vs-rejected.
+ * A worker's in-flight (or just-settled) merge-gate op, surfaced read-only onto its session (card
+ * 7b7fa6d — the Board merge-gate hairline; `outcome` added by the d1aee5f1 follow-up). This is the
+ * shared-type mirror of the daemon's `PendingOpView` subset that `worker_list` already exposes, projected
+ * onto `/api/sessions` from the in-memory PendingOpRegistry (NOT a DB column). Non-null while a
+ * `worker_merge_confirm` gate is RUNNING, and for a brief RETENTION window after it settles (see
+ * PendingOpRegistry's "RETAINED TERMINAL VIEW" doc) — long enough for the Board to render the terminal
+ * fill before the field reverts to null and the card falls back to its normal worker-status row.
+ * `state` is the raw op state; it alone CANNOT distinguish a merge SUCCESS from a gate REJECTION (both
+ * resolve normally to `"done"` — only a genuine exception settles `"failed"`), which is exactly what
+ * `outcome` is for.
  */
 export interface PendingMerge {
   /** The PendingOpRegistry op id — lets a viewer correlate this to its `worker_merge_confirm`. */
   opId: string;
-  /** Raw op state. Live: effectively always "running" (settled ops evict before surfacing). */
+  /** Raw op state: "running" while the gate is in flight; "done"/"failed" only during the brief
+   *  post-settle retention window (see the interface doc), then the field goes null. */
   state: "running" | "done" | "failed";
   /** ISO instant the gate started — drives the live elapsed (M:SS) timer on the Board card. */
   startedAt: string;
+  /** Terminal classification, set only once the op has settled (undefined while `state === "running"`):
+   *  "merged" (a successful squash-merge), "rejected" (the gate/stranded-work/empty-stage check resolved
+   *  `merged:false` — no exception, the merge was refused), or "failed" (the confirm itself threw). This
+   *  is what lets the Board distinguish a rejected merge (amber) from a merged one (phosphor) instead of
+   *  both reading as green "merged" via `state === "done"`. */
+  outcome?: "merged" | "rejected" | "failed";
 }
 
 export interface Session {
@@ -670,10 +677,12 @@ export interface Session {
    */
   archivedAt?: string | null;
   /**
-   * A worker's in-flight merge-gate op (see {@link PendingMerge}). Projected onto `/api/sessions` from
-   * the in-memory PendingOpRegistry — non-null only while a `worker_merge_confirm` gate is RUNNING;
-   * absent/null on every other session (byte-identical to before for a non-merging session). Read-only,
-   * never consumed. Drives the Board card's bottom-edge sweep meter + live timer.
+   * A worker's in-flight (or just-settled) merge-gate op (see {@link PendingMerge}). Projected onto
+   * `/api/sessions` from the in-memory PendingOpRegistry — non-null while a `worker_merge_confirm` gate
+   * is RUNNING, and briefly afterward while the settled op is RETAINED for the Board's benefit; absent/
+   * null on every other session, and null again once the retention window lapses (byte-identical to
+   * before this existed for a non-merging session). Read-only, never consumed. Drives the Board card's
+   * bottom-edge sweep/fill meter + live timer.
    */
   pendingMerge?: PendingMerge | null;
 }

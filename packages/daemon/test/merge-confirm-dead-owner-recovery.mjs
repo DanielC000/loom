@@ -97,7 +97,12 @@ try {
   check("(recovery) the branch's file actually landed on main", fs.existsSync(path.join(repo, "feat.txt")));
   check("(recovery) exactly ONE new commit landed (a real squash-merge ran, not a phantom result)", git(repo, `rev-list --count ${headBefore}..HEAD`) === "1");
   check("(recovery) task moved to done", db.getTask(taskId).columnKey === "done");
-  check("(recovery) pendingMerge is clear afterward (evict-on-settle of the FRESH op)", sessions.peekPendingMerge(workerId) === undefined);
+  // confirmWorkerMergeTracked RETAINS a settled merge op briefly (card d1aee5f1 follow-up — the Board's
+  // merge-gate fill needs a real window to render before pendingMerge reverts to null), so this no longer
+  // evicts to `undefined` INSTANTLY — it settles to a terminal RETAINED view instead. The invariant that
+  // matters (not stuck "running" forever on the zombie) still holds; assert the terminal shape directly.
+  const afterRecovery = sessions.peekPendingMerge(workerId);
+  check("(recovery) pendingMerge is a RETAINED terminal 'merged' view post-settle — not stuck 'running'", afterRecovery?.state === "done" && afterRecovery?.outcome === "merged");
 
   // ── (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op directly ─────
   const key2 = `merge:${workerId}-b`;

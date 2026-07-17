@@ -152,7 +152,11 @@ try {
     check("(merge fast) settles within the sync-wait budget", r.settled === true && r.ok === true);
     check("(merge fast) value shape matches confirmWorkerMerge's result", r.value.merged === true && r.value.emptyKind === undefined);
     check("(merge fast) file actually landed on main", fs.existsSync(path.join(repo, "feat4.txt")));
-    check("(merge fast) pendingMerge is null once settled (evict-on-settle) — not stuck 'still running'", svc.peekPendingMerge(workerId) === undefined);
+    // confirmWorkerMergeTracked RETAINS a settled merge op briefly (card d1aee5f1 follow-up — the Board's
+    // merge-gate fill needs a real window to render), so this is no longer `undefined` INSTANTLY — it's a
+    // terminal RETAINED view. What still matters (not stuck "running") holds; assert the terminal shape.
+    const afterFast = svc.peekPendingMerge(workerId);
+    check("(merge fast) pendingMerge is a RETAINED terminal 'merged' view once settled — not stuck 'still running'", afterFast?.state === "done" && afterFast?.outcome === "merged");
   }
 
   // ============================ MERGE (5): TWO concurrent Tracked calls → gate runs EXACTLY ONCE ============================

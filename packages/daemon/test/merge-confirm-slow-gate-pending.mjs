@@ -110,9 +110,13 @@ try {
   check("(5) exactly ONE new commit on main (one squash, not two)", execSync(`git rev-list --count ${headBefore}..HEAD`, { cwd: repo }).toString().trim() === "1");
   check("(5) worktree removed after the merge", !fs.existsSync(worktreePath));
 
+  // confirmWorkerMergeTracked RETAINS a settled merge op briefly (card d1aee5f1 follow-up), so
+  // worker_list's pendingMerge no longer reverts to null the INSTANT the gate settles — it shows a
+  // terminal RETAINED view instead. The invariant that matters (not stuck "still running") still holds.
   const listAfter = await call(client, "worker_list");
   const rowAfter = listAfter.find((w) => w.workerSessionId === workerId);
-  check("(5) worker_list's pendingMerge is null AFTER settle — not stuck 'still running' (evict-on-settle)", rowAfter && rowAfter.pendingMerge === null);
+  check("(5) worker_list's pendingMerge is a RETAINED terminal 'merged' view AFTER settle — not stuck 'running' (evict-on-settle)",
+    rowAfter && rowAfter.pendingMerge && rowAfter.pendingMerge.state === "done" && rowAfter.pendingMerge.outcome === "merged");
 
   await client.close();
 } finally {

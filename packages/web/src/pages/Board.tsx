@@ -377,22 +377,30 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
   return w.busy ? { tone: "amber", label: "working", glow: true } : { tone: "phosphor", label: "idle" };
 }
 
-// Direction C — the merge-gate hairline sweep meter + live timer (card 7b7fa6d). A worker with a
-// `pendingMerge` op gets a 2px hairline flush at the card's BOTTOM edge — an amber oscilloscope sweep
-// while the gate RUNS, a solid full-width fill once settled — plus a live M:SS timer riding the right
-// edge of the worker row. Compact by construction: the hairline is absolutely positioned over the card's
-// existing bottom edge, so it adds NO card height.
+// Direction C — the merge-gate hairline sweep meter + live timer (card 7b7fa6d; the merged/rejected/
+// failed 3-way split is the d1aee5f1 follow-up). A worker with a `pendingMerge` op gets a 2px hairline
+// flush at the card's BOTTOM edge — an amber oscilloscope sweep while the gate RUNS, a solid full-width
+// fill once settled — plus a live M:SS timer riding the right edge of the worker row. Compact by
+// construction: the hairline is absolutely positioned over the card's existing bottom edge, so it adds
+// NO card height.
 //
-// The source op-state is evicted from the registry the instant the gate settles, so live this is
-// effectively always the RUNNING sweep; the settled fills render for the terminal states the type
-// carries (exercised via synthetic states). The op-state collapses a merge SUCCESS and a REJECTION into
-// "done" (a rejection resolves; only an exception → "failed"), so "done" reads here as "merged".
-type MergeDisplay = { state: "running" | "merged" | "failed"; tone: Tone; label: string; startedAt: string };
+// The settled op is RETAINED in the registry for a brief window after it settles (see PendingOpRegistry's
+// "RETAINED TERMINAL VIEW" doc), so the terminal fill below has a real chance to render before
+// `pendingMerge` reverts to null and the card falls back to its normal worker-status row. `pm.outcome`
+// (not the raw `pm.state`, which can't tell a merge SUCCESS from a gate REJECTION — both resolve to
+// "done") drives which of the three fills renders: "merged" (phosphor), "rejected" (amber — a distinct
+// solid fill from the RUNNING sweep, which is also amber but animated), or "failed" (red, an unexpected
+// exception during confirm). `outcome` is only absent for a legacy/synthetic "done" with no outcome field
+// (e.g. an older cached row) — that degrades to "merged" for backward compatibility, matching the old
+// done⇒merged reading.
+type MergeState = "running" | "merged" | "rejected" | "failed";
+type MergeDisplay = { state: MergeState; tone: Tone; label: string; startedAt: string };
 function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null {
   if (!pm) return null;
   if (pm.state === "running") return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
-  if (pm.state === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
-  return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "done" ⇒ merged
+  if (pm.state === "failed" || pm.outcome === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
+  if (pm.outcome === "rejected") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
+  return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
 }
 
 // Live M:SS elapsed since `startedAt`, ticking once a second. Shown only while the gate is RUNNING — it's
@@ -429,17 +437,18 @@ function MergePill({ merge }: { merge: MergeDisplay }) {
 }
 
 // The bottom-edge hairline itself. RUNNING → an amber segment sweeping left↔right (the CSS keyframes
-// degrade to a static amber bar under prefers-reduced-motion); settled → a solid full-width fill,
-// phosphor (merged, with a faint CRT glow) or red (failed). aria-hidden — the worker-row pill already
-// names the state in text.
+// degrade to a static amber bar under prefers-reduced-motion); settled → a solid full-width fill —
+// phosphor (merged, with a faint CRT glow), amber (rejected — a solid bar, distinct from the RUNNING
+// sweep's animated one), or red (failed). aria-hidden — the worker-row pill already names the state in
+// text.
 function MergeTrack({ merge }: { merge: MergeDisplay }) {
+  const fillStyle: React.CSSProperties =
+    merge.state === "merged" ? { background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }
+    : merge.state === "rejected" ? { background: color.amber }
+    : { background: color.red };
   return (
     <div className="loom-merge-track" aria-hidden>
-      {merge.state === "running"
-        ? <span className="loom-merge-sweep" />
-        : <span className="loom-merge-fill" style={merge.state === "merged"
-            ? { background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }
-            : { background: color.red }} />}
+      {merge.state === "running" ? <span className="loom-merge-sweep" /> : <span className="loom-merge-fill" style={fillStyle} />}
     </div>
   );
 }

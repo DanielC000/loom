@@ -1,15 +1,17 @@
-// Board merge-gate hairline meter spec (card 7b7fa6d — Direction C). A worker bound to a board card can
-// carry a `pendingMerge` op (surfaced on /api/sessions from the in-memory PendingOpRegistry); the card
-// renders a 2px hairline at its BOTTOM edge — an amber oscilloscope SWEEP while the gate runs, a solid
-// full-width FILL once settled (phosphor merged / red failed) — plus a live M:SS timer on the worker row.
+// Board merge-gate hairline meter spec (card 7b7fa6d — Direction C; the merged/rejected/failed 3-way
+// split is the d1aee5f1 follow-up). A worker bound to a board card can carry a `pendingMerge` op
+// (surfaced on /api/sessions from the in-memory PendingOpRegistry, briefly RETAINED after it settles);
+// the card renders a 2px hairline at its BOTTOM edge — an amber oscilloscope SWEEP while the gate runs, a
+// solid full-width FILL once settled (phosphor merged / amber rejected / red failed) — plus a live M:SS
+// timer on the worker row.
 //
 // `pendingMerge` lives in the registry (no DB / test-seam to seed a real running merge op without a real
 // worker+manager+gate), so — exactly as the DoD sanctions — this exercises the RENDER by injecting a
 // SYNTHETIC pendingMerge into the /api/sessions response via a Playwright route intercept (the frontend's
-// own data layer). Each lifecycle state is driven by flipping the injected state and re-fetching, and every
-// assertion is an OBSERVABLE before/after diff (a distinct element, a state-specific fill color, a ticking
-// timer) — not just "the page renders". Builds on the shared `loomDaemon` fixture; board.spec.ts is the
-// board-interaction template this follows.
+// own data layer). Each lifecycle state is driven by flipping the injected state+outcome and re-fetching,
+// and every assertion is an OBSERVABLE before/after diff (a distinct element, a state-specific fill
+// color, a ticking timer) — not just "the page renders". Builds on the shared `loomDaemon` fixture;
+// board.spec.ts is the board-interaction template this follows.
 import { expect, test } from "./fixtures/daemon";
 import type { Locator, Page } from "@playwright/test";
 import path from "node:path";
@@ -30,11 +32,14 @@ function cardByTitle(page: Page, title: string) {
 
 // Token rgb values (styles/global.css :root) — asserting the fill's computed color is the strongest
 // observable that the card actually switched terminal state, not merely that some bar is present.
-const AMBER_RGB = "255, 178, 62"; // --loom-amber #ffb23e (the running sweep gradient)
+const AMBER_RGB = "255, 178, 62"; // --loom-amber #ffb23e (the running sweep gradient AND the rejected fill)
 const PHOSPHOR_RGB = "46, 230, 110"; // --loom-phosphor #2ee66e (merged fill)
 const RED_RGB = "255, 92, 92"; // --loom-red #ff5c5c (failed fill)
 
-type MergeState = "running" | "done" | "failed" | null;
+// `state` is the raw op state; `outcome` (only meaningful once `state !== "running"`) is what actually
+// distinguishes a merge SUCCESS from a gate REJECTION — both settle to `state:"done"` (see PendingMerge's
+// doc), so the card's rendered fill/label is driven by `outcome`, not `state`, for every terminal case.
+type MergeInjection = { state: "running" | "done" | "failed"; outcome?: "merged" | "rejected" | "failed" } | null;
 
 test("a board card's merge hairline sweeps while running, fills solid on settle, and ticks a live timer", async ({ page, loomDaemon }) => {
   // A worker bound to a card in Review (the lane a merge fires from), with a branch so the branch chip
@@ -55,17 +60,17 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   });
   await pinActiveProject(page, seeded.projectId);
 
-  // Inject a synthetic pendingMerge onto the merging worker's /api/sessions row. `mergeState` is the
+  // Inject a synthetic pendingMerge onto the merging worker's /api/sessions row. `mergeInjection` is the
   // mutable lifecycle knob; `startedAt` sits ~15s in the past so the running timer reads a non-zero M:SS
   // and visibly climbs. Only the ONE seeded worker gets a pendingMerge; every other row passes through.
-  let mergeState: MergeState = "running";
+  let mergeInjection: MergeInjection = { state: "running" };
   const startedAt = new Date(Date.now() - 15_000).toISOString();
   await page.route("**/api/sessions", async (route) => {
     const resp = await route.fetch();
     const sessions = (await resp.json()) as Array<{ taskId?: string | null }>;
     const patched = sessions.map((s) =>
-      s.taskId === seeded.taskId && mergeState
-        ? { ...s, pendingMerge: { opId: "e2e-merge-op", state: mergeState, startedAt } }
+      s.taskId === seeded.taskId && mergeInjection
+        ? { ...s, pendingMerge: { opId: "e2e-merge-op", startedAt, ...mergeInjection } }
         : s);
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(patched) });
   });
@@ -100,9 +105,9 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   expect(plainBox).not.toBeNull();
   expect(Math.abs(mergeBox!.height - plainBox!.height)).toBeLessThanOrEqual(4);
 
-  // ── MERGED (op-state "done"): flip the injection, re-fetch, and the hairline SETTLES to a solid
-  //    phosphor fill; the sweep is gone and the pill now reads "merged". ──
-  mergeState = "done";
+  // ── MERGED (op-state "done", outcome "merged"): flip the injection, re-fetch, and the hairline SETTLES
+  //    to a solid phosphor fill; the sweep is gone and the pill now reads "merged". ──
+  mergeInjection = { state: "done", outcome: "merged" };
   await page.reload();
   const fill = card.locator(".loom-merge-fill");
   await expect(fill).toBeVisible();
@@ -111,8 +116,24 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   expect(await fill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(PHOSPHOR_RGB);
   await shoot(card, "merge-merged.png");
 
-  // ── FAILED: a solid RED fill + "failed" pill — a distinct terminal state from merged. ──
-  mergeState = "failed";
+  // ── REJECTED (op-state "done", outcome "rejected" — a gate/stranded-work/empty-stage refusal that
+  //    RESOLVED rather than threw): a solid AMBER fill + "rejected" pill — distinct from both "merged"
+  //    (phosphor) and the RUNNING sweep (also amber, but the animated `.loom-merge-sweep`, not a static
+  //    `.loom-merge-fill`). This is the case that used to misread as green "merged" via `state:"done"`
+  //    alone before `outcome` existed. ──
+  mergeInjection = { state: "done", outcome: "rejected" };
+  await page.reload();
+  const rejectedFill = card.locator(".loom-merge-fill");
+  await expect(rejectedFill).toBeVisible();
+  await expect(card.locator(".loom-merge-sweep")).toHaveCount(0);
+  await expect(card.getByText("rejected", { exact: true })).toBeVisible();
+  await expect(card.getByText("merged", { exact: true })).toHaveCount(0);
+  expect(await rejectedFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(AMBER_RGB);
+  await shoot(card, "merge-rejected.png");
+
+  // ── FAILED (op-state "failed" — a genuine exception during confirm): a solid RED fill + "failed"
+  //    pill — a distinct terminal state from both merged and rejected. ──
+  mergeInjection = { state: "failed", outcome: "failed" };
   await page.reload();
   const failFill = card.locator(".loom-merge-fill");
   await expect(failFill).toBeVisible();
@@ -120,9 +141,10 @@ test("a board card's merge hairline sweeps while running, fills solid on settle,
   expect(await failFill.evaluate((el) => getComputedStyle(el).backgroundColor)).toContain(RED_RGB);
   await shoot(card, "merge-failed.png");
 
-  // ── SETTLE-EVICTION: when the op leaves the registry (pendingMerge → null), the card reverts to the
-  //    normal worker-status row — no hairline at all. ──
-  mergeState = null;
+  // ── SETTLE-EVICTION: once the RETAINED terminal view expires (or the op is gone from the registry
+  //    entirely), pendingMerge → null and the card reverts to the normal worker-status row — no
+  //    hairline at all. ──
+  mergeInjection = null;
   await page.reload();
   await expect(card).toBeVisible();
   await expect(card.locator(".loom-merge-fill")).toHaveCount(0);

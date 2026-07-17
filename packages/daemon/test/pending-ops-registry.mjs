@@ -198,7 +198,83 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("(clobber guard) run_C's OWN settle correctly evicts once IT finishes", reg.peek("k6") === undefined);
 }
 
+// --- RETAINED TERMINAL VIEW (card d1aee5f1 follow-up — the Board merge-gate card's merged/rejected/
+// failed fill): opts.retainMs keeps a settled op's terminal view peek()-able for a brief window instead
+// of evicting it instantly; opts.classifyOutcome stamps a caller-chosen outcome string onto that view. ---
+const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "merged" : "rejected");
+
+// A resolved SUCCESS (merged:true) classifies as "merged" and is peek()-able during the window, then
+// expires exactly like the un-retained case once retainMs elapses.
+{
+  const reg = new PendingOpRegistry();
+  const r = await reg.attach("m1", "merge", "mgr1", 200, async () => ({ merged: true }), undefined, { retainMs: 50, classifyOutcome: classify });
+  check("(retain) the direct AttachResult is unchanged by retention/classification", r.settled === true && r.ok === true && r.value.merged === true);
+  const retained = reg.peek("m1");
+  check("(retain) peek() surfaces a RETAINED terminal view immediately after settle", retained !== undefined && retained.state === "done" && retained.outcome === "merged");
+  // CR finding: peek() must PROJECT the retained view down to a bare PendingOpView — its internal
+  // `expiresAt` bookkeeping field must never leak onto a caller-facing surface (worker_list/worker_status/
+  // /api/sessions all spread this verbatim), and its shape must match a RUNNING row's exactly.
+  check("(retain) the retained view's shape has NO internal 'expiresAt' field — it never leaks to callers", !("expiresAt" in retained));
+  check("(retain) the retained view's keys match a plain PendingOpView (opId/kind/key/managerSessionId/startedAt/state/outcome only)",
+    JSON.stringify(Object.keys(retained).sort()) === JSON.stringify(["key", "kind", "managerSessionId", "opId", "outcome", "startedAt", "state"]));
+  await sleep(70); // past retainMs
+  check("(retain) the retained view expires after retainMs — peek() reverts to undefined", reg.peek("m1") === undefined);
+}
+
+// A RESOLVED merge:false (a gate/stranded-work rejection — confirmWorkerMerge never throws for this)
+// classifies as "rejected", not "failed" — this is the exact case that used to read as green "merged"
+// via state:"done" alone before outcome existed.
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("m2", "merge", "mgr1", 200, async () => ({ merged: false, reason: "gate failed" }), undefined, { retainMs: 50, classifyOutcome: classify });
+  const retained = reg.peek("m2");
+  check("(retain rejected) a resolved merged:false classifies as 'rejected' (op-state stays 'done')", retained?.outcome === "rejected" && retained.state === "done");
+}
+
+// A genuinely THROWN error classifies as "failed", with op-state "failed" too — distinct from a
+// rejection (op-state "done" + outcome "rejected").
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("m3", "merge", "mgr1", 200, async () => { throw new Error("boom"); }, undefined, { retainMs: 50, classifyOutcome: classify });
+  const retained = reg.peek("m3");
+  check("(retain failed) a thrown error classifies as 'failed' with op-state 'failed'", retained?.outcome === "failed" && retained.state === "failed");
+}
+
+// Without retainMs, behavior is BYTE-IDENTICAL to before this existed — evicts instantly, even if
+// classifyOutcome was (harmlessly) also given.
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("m4", "merge", "mgr1", 200, async () => ({ merged: true }), undefined, { classifyOutcome: classify });
+  check("(no retainMs) a settled op still evicts immediately — no retained view without opting in", reg.peek("m4") === undefined);
+}
+
+// A fresh attach() on the SAME key WHILE a retained view is still live must start a genuinely NEW op —
+// retention is a read-only side channel for surfacing, never a dedup source for attach()'s own logic.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  await reg.attach("m5", "merge", "mgr1", 200, async () => { calls++; return { merged: true }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(retain) first op ran once", calls === 1 && reg.peek("m5")?.outcome === "merged");
+  const r2 = await reg.attach("m5", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "x" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(retain) a re-confirm during the retention window starts a FRESH op, not a dedup-attach to the stale result", calls === 2 && r2.settled === true && r2.ok === true && r2.value.merged === false);
+  check("(retain) peek() now reflects the NEW op's retained outcome, replacing the old one", reg.peek("m5")?.outcome === "rejected");
+}
+
+// CLOBBER GUARD (retained-cache variant): op A's own delayed cleanup timer must NOT delete a NEWER
+// retained view op B wrote under the same key before A's timer fires — mirrors the `entries`-map clobber
+// guard above, but for the separate `retained` side channel.
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: true }), undefined, { retainMs: 30, classifyOutcome: classify });
+  check("(retain clobber) op A's retained view present", reg.peek("m6")?.outcome === "merged");
+  await sleep(10); // op A's 30ms cleanup timer has NOT fired yet
+  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: false, reason: "y" }), undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(retain clobber) op B's retained view replaces op A's", reg.peek("m6")?.outcome === "rejected");
+  await sleep(40); // op A's cleanup timer (fires ~30ms after A settled) has now long since fired
+  check("(retain clobber) op A's stale cleanup timer did NOT delete op B's still-live retained view", reg.peek("m6")?.outcome === "rejected");
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), and an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, and opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure) without ever letting retention interfere with attach()'s own dedup/clobber-guard logic."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
