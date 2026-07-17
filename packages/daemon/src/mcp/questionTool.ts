@@ -263,3 +263,33 @@ export function auditRequestItem(q: Question & { agentId: string | null }): Reco
     provisioning: provisioningAudit(q),
   };
 }
+
+/** The `{items,total,returned,offset,hasMore}` envelope shape both `requests_list` sites return. */
+export interface PagedResult<T> {
+  items: T[];
+  total: number;
+  returned: number;
+  offset: number;
+  hasMore: boolean;
+}
+
+/**
+ * ONE shared pager for the two sibling `requests_list` tools (mcp/orchestration.ts's manager surface,
+ * mcp/audit.ts's Auditor surface) — closes a two-path divergence where the manager side carried the
+ * `{items,total,returned,offset,hasMore}` truncation-signal envelope (card a193398f) while the Auditor
+ * side stayed a bare, silently-capped array (card requests-list-two-path-cap-asymmetry). Both call sites
+ * now slice + shape through this ONE function so the envelope can't drift apart again; the caller still
+ * does its own `db.listQuestionsForAudit` (scoping differs: project-scoped for the manager, cross-project
+ * for the Auditor) and its own `.map(auditRequestItem)`, since `pageRequests` only knows about slicing —
+ * generic over any row type, not the Requests shape specifically.
+ */
+export function pageRequests<T>(
+  all: T[],
+  opts: { limit?: number; offset?: number },
+  defaultLimit: number,
+): PagedResult<T> {
+  const offset = opts.offset ?? 0;
+  const limit = opts.limit ?? defaultLimit;
+  const items = all.slice(offset, offset + limit);
+  return { items, total: all.length, returned: items.length, offset, hasMore: offset + items.length < all.length };
+}

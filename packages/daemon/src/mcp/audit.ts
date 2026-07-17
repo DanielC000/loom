@@ -7,7 +7,7 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerRepoReadTools } from "./repo-read.js";
-import { auditRequestItem } from "./questionTool.js";
+import { auditRequestItem, pageRequests } from "./questionTool.js";
 
 // Same envelope as the task / orchestration / platform MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -89,14 +89,17 @@ export class AuditMcpRouter {
           "whole Requests inbox, so you can intake requests-friction directly instead of hoping one happens " +
           "to surface in a transcript. NON-CONSUMING — reading NEVER drains or flips state, unlike " +
           "question_pull's agent-scoped drain-and-consume (a distinct primitive; mirrors task_requests_list/ " +
-          "task_request_get's non-consuming guarantee). Returns, per row: {id, projectId, sessionId, agentId, " +
-          "taskId, type, title, state, createdAt, answeredAt, consumedAt} plus an answer summary by type — " +
-          "chosenOption/note for decision|input, approved/note for permission, ack ONLY for credential " +
-          "(NEVER the secret — mirrors question_pull's never-echo shape; a pending row's answer fields read " +
-          "null rather than a misleading false-ish value). Filters (all optional, AND'd): projectId (one " +
-          "project), state (pending|answered|consumed), type, sinceMinutes (only requests created within the " +
-          "last N minutes). Newest-first (createdAt DESC); no filters returns the whole platform. Bounded to " +
-          `${DEFAULT_REQUESTS_LIST_CAP} rows by default — pass an explicit limit/offset to page past it.`,
+          "task_request_get's non-consuming guarantee). Returns {items, total, returned, offset, hasMore}: " +
+          "`items` per row is {id, projectId, sessionId, agentId, taskId, type, title, state, createdAt, " +
+          "answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for decision|input, " +
+          "approved/note for permission, ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
+          "never-echo shape; a pending row's answer fields read null rather than a misleading false-ish " +
+          "value). `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
+          "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
+          "projectId (one project), state (pending|answered|consumed), type, sinceMinutes (only requests " +
+          "created within the last N minutes). Newest-first (createdAt DESC); no filters returns the whole " +
+          `platform. Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see \`hasMore\`) — pass an ` +
+          "explicit limit/offset to page past it.",
         inputSchema: {
           projectId: z.string().optional(),
           state: z.enum(QUESTION_STATES).optional(),
@@ -111,9 +114,8 @@ export class AuditMcpRouter {
           ? new Date(Date.now() - sinceMinutes * 60_000).toISOString()
           : undefined;
         const all = db.listQuestionsForAudit({ projectId, state, type, since });
-        const off = offset ?? 0;
-        const page = all.slice(off, off + (limit ?? DEFAULT_REQUESTS_LIST_CAP));
-        return ok(page.map(auditRequestItem));
+        const paged = pageRequests(all, { limit, offset }, DEFAULT_REQUESTS_LIST_CAP);
+        return ok({ ...paged, items: paged.items.map(auditRequestItem) });
       },
     );
 

@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
@@ -1257,16 +1257,8 @@ export class OrchestrationMcpRouter {
           projectId: asker.projectId, state, type, excludeConsumed: !includeConsumed,
           agentId: mine ? asker.agentId : undefined,
         });
-        const off = offset ?? 0;
-        const eff = limit ?? DEFAULT_REQUESTS_LIST_CAP;
-        const page = all.slice(off, off + eff);
-        return ok({
-          items: page.map(auditRequestItem),
-          total: all.length,
-          returned: page.length,
-          offset: off,
-          hasMore: off + page.length < all.length,
-        });
+        const paged = pageRequests(all, { limit, offset }, DEFAULT_REQUESTS_LIST_CAP);
+        return ok({ ...paged, items: paged.items.map(auditRequestItem) });
       },
     );
 

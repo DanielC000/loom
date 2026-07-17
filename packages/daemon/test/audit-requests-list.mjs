@@ -6,6 +6,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // shaping (`questionAnswerByType`) the task-scoped `task_request_get`/`task_requests_list` pair (card
 // 988bb585) already uses — this test proves the CROSS-PROJECT read, not that shared shaping logic again.
 //
+// Follow-up (requests-list-two-path-cap-asymmetry): this surface used to return a bare capped array with
+// no truncation signal, unlike the manager's sibling `requests_list` (mcp/orchestration.ts, card a193398f)
+// which returns a `{items,total,returned,offset,hasMore}` envelope. Both now route through the ONE shared
+// `pageRequests` helper (mcp/questionTool.ts), so this test's (F) section mirrors manager-requests-list.mjs's
+// (G) — proving the envelope + truthful hasMore/total, not just "a limit eventually gets you more rows".
+//
 // Covers:
 //   (A) cross-project rows are returned — a request from project pA AND one from project pB both surface
 //       from a single requests_list call with no projectId filter.
@@ -17,7 +23,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (E) the row shape: {id, projectId, sessionId, agentId, taskId, type, title, state, createdAt,
 //       answeredAt, consumedAt} plus the per-type answer summary (chosenOption/note for decision,
 //       approved/note for permission).
-//   (F) pagination: bounded to the default cap; an explicit limit/offset pages past it.
+//   (F) envelope + pagination: {items,total,returned,offset,hasMore} is present and truthful; bounded to
+//       the default cap by default; an explicit limit/offset pages past it; hasMore flips false once every
+//       row has been paged through.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/audit-requests-list.mjs
 import fs from "node:fs";
@@ -37,7 +45,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
+const { AuditMcpRouter, DEFAULT_REQUESTS_LIST_CAP } = await import("../dist/mcp/audit.js");
 const { encryptSecret } = await import("../dist/keys/envelope.js");
 const { PERMISSION_ANSWERS } = await import("@loom/shared");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -97,7 +105,11 @@ try {
   await server.connect(serverT);
   const client = new Client({ name: "audit-requests-list-test", version: "0" });
   await client.connect(clientT);
-  const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+  // requests_list now returns {items, total, returned, offset, hasMore} instead of a bare array — `call`
+  // unwraps `.items` so every EXISTING array-shaped assertion below stays unchanged; `callRaw` (used by the
+  // new (F) envelope/paging checks) returns the full envelope. Mirrors manager-requests-list.mjs.
+  const callRaw = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
+  const call = async (name, args) => (await callRaw(name, args)).items;
 
   // ============ role gate sanity: requests_list is on the surface ============
   const tools = (await client.listTools()).tools.map((t) => t.name);
@@ -167,21 +179,51 @@ try {
   const filteredByWideWindow = await call("requests_list", { sinceMinutes: 60 * 48 });
   check("(D) a wider sinceMinutes window includes the day-old request too", filteredByWideWindow.some((r) => r.id === qOld));
 
-  // ============ (F) pagination — bounded default cap, explicit limit/offset pages past it ============
+  // ============ (F) envelope + pagination — bounded default cap, explicit limit/offset pages past it ============
+  const envelopeBaseline = await callRaw("requests_list", { projectId: "pA" });
+  check(
+    "(F) response envelope includes total/returned/offset/hasMore alongside items",
+    typeof envelopeBaseline.total === "number" && typeof envelopeBaseline.returned === "number" &&
+      envelopeBaseline.offset === 0 && typeof envelopeBaseline.hasMore === "boolean",
+  );
+  check(
+    "(F) total/returned/items.length agree when under the cap",
+    envelopeBaseline.total === envelopeBaseline.items.length &&
+      envelopeBaseline.returned === envelopeBaseline.items.length && envelopeBaseline.hasMore === false,
+  );
+
   const bulkCount = 60; // exceeds a modest default cap regardless of its exact value
   for (let i = 0; i < bulkCount; i++) {
     insertQ({ id: `bulk-${i}`, sessionId: "mgrA", projectId: "pA", title: `bulk ${i}`, createdAt: now });
   }
   // Ground truth via the db layer directly (unpaginated) — the true total for project pA.
   const pATotal = db.listQuestionsForAudit({ projectId: "pA" }).length;
-  const defaultRead = await call("requests_list", { projectId: "pA" });
-  check(`(F) a default (no limit) requests_list read is BOUNDED (got ${defaultRead.length} of ${pATotal} total)`,
-    defaultRead.length < pATotal);
-  const paged = await call("requests_list", { projectId: "pA", limit: pATotal + 10 });
-  check("(F) an explicit limit pages PAST the default cap and returns the FULL total", paged.length > defaultRead.length && paged.length === pATotal);
-  const page1 = await call("requests_list", { projectId: "pA", limit: 10, offset: 0 });
-  const page2 = await call("requests_list", { projectId: "pA", limit: 10, offset: 10 });
-  check("(F) offset pages to a disjoint next window (no overlap)", !page1.some((r) => page2.some((r2) => r2.id === r.id)));
+  const defaultRead = await callRaw("requests_list", { projectId: "pA" });
+  check(`(F) a default (no limit) requests_list read is BOUNDED (got ${defaultRead.items.length} of ${pATotal} total)`,
+    defaultRead.items.length < pATotal);
+  check("(F) total still reports the FULL matching count even though items is truncated", defaultRead.total === pATotal);
+  check("(F) hasMore is true once the project exceeds the default cap", defaultRead.hasMore === true);
+  check(
+    `(F) the default read is truncated to exactly ${DEFAULT_REQUESTS_LIST_CAP} rows`,
+    defaultRead.items.length === DEFAULT_REQUESTS_LIST_CAP && defaultRead.returned === DEFAULT_REQUESTS_LIST_CAP,
+  );
+
+  const paged = await callRaw("requests_list", { projectId: "pA", limit: pATotal + 10 });
+  check(
+    "(F) an explicit limit pages PAST the default cap and returns the FULL total — the cap is pageable-past, not a hard ceiling",
+    paged.items.length > defaultRead.items.length && paged.items.length === pATotal && paged.hasMore === false,
+  );
+  const page1 = await callRaw("requests_list", { projectId: "pA", limit: 10, offset: 0 });
+  const page2 = await callRaw("requests_list", { projectId: "pA", limit: 10, offset: 10 });
+  check("(F) offset pages to a disjoint next window (no overlap)", !page1.items.some((r) => page2.items.some((r2) => r2.id === r.id)));
+  check("(F) hasMore reflects whether rows remain past this page", page2.hasMore === (10 + 10 < pATotal));
+
+  // offset = pATotal-1 guarantees EXACTLY one row left, regardless of pATotal's exact value.
+  const lastPage = await callRaw("requests_list", { projectId: "pA", limit: 10, offset: pATotal - 1 });
+  check(
+    "(F) the final page is short and hasMore flips false once every row has been paged through",
+    lastPage.items.length === 1 && lastPage.hasMore === false,
+  );
 
   await client.close();
 } finally {
@@ -190,6 +232,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — requests_list surfaces Requests ACROSS PROJECTS (pA + pB) in one call; a credential request NEVER returns secret_blob/secretBlob/secret (only a non-secret ack, null while pending); the read is NON-CONSUMING (a pending or answered request's state is unchanged, even after repeated reads); projectId/state/type/sinceMinutes filters narrow correctly; and the read is bounded by default with limit/offset paging past the cap."
+  ? "\n✅ ALL PASS — requests_list surfaces Requests ACROSS PROJECTS (pA + pB) in one call; a credential request NEVER returns secret_blob/secretBlob/secret (only a non-secret ack, null while pending); the read is NON-CONSUMING (a pending or answered request's state is unchanged, even after repeated reads); projectId/state/type/sinceMinutes filters narrow correctly; and it returns the {items,total,returned,offset,hasMore} envelope — truthfully truncated to the default cap, with limit/offset paging past it and hasMore flipping false once exhausted — the same envelope the manager's sibling requests_list returns."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
