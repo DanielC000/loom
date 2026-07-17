@@ -25,6 +25,13 @@ Once the owner's one-time setup is done (see *Automated release (CI)* below), cu
 
 1. **Land everything** for the release on `main` and confirm green: `pnpm build` + the hermetic
    daemon suite (`pnpm --filter @loom/daemon test:daemon`).
+   - **The local merge/self-host gate is NOT sufficient proof `main` is releasable.** It runs on the
+     Windows self-host, *with* an ambient git identity and whatever else the host happens to have, so it
+     can't catch Linux/POSIX-specific failures (path case-sensitivity, separators, permissions) or a test
+     that implicitly depends on ambient host state a clean machine won't have. **Before cutting, confirm the
+     latest `main` run of the Linux gate (`.github/workflows/ci.yml`) is GREEN** — e.g.
+     `gh run list --workflow=ci.yml --branch main --limit 1`. The manager can't run the Linux gate locally,
+     so treat that CI run as the authoritative "is `main` releasable" signal.
    - **Bundled-skill currency check.** If anything in this release added, renamed, or removed an MCP tool,
      skill, or capability, update the bundled doctrine skill(s) that teach it (`packages/daemon/assets/skills/**`)
      — and confirm no shipped skill now names a tool that doesn't exist. A wrong or stale tool **name** is

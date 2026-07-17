@@ -155,6 +155,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    And if the project has an
    end-to-end / browser test suite, a **new or changed user-facing feature** ships with (or updates)
    a test in it, run green as part of the DoD — see the project's own testing docs (its `CLAUDE.md`).
+   **A test you write must be hermetic — never dependent on ambient host state:** a global identity or
+   user/global config, an already-installed tool, or platform path semantics (`\` vs `/`,
+   case-sensitivity). A test that leans on such state can PASS on the dev or CI host that happens to have
+   it and FAIL on a clean CI runner or a real end-user machine. Make it self-contained — provide or
+   redirect the state it needs to test-owned files — so it proves the same thing everywhere it runs.
    **Verifying by booting a fresh/isolated instance of the service under test** (its own throwaway data
    dir or config)? Check first whether it has a first-run/onboarding auto-action — auto-provisioning,
    spawning a process, sending a notification — that could fire before you're ready for it; the project's
