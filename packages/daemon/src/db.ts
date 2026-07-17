@@ -4863,6 +4863,21 @@ export class Db {
     ).all(projectId, taskId, taskId) as Row[]).map(toQuestion);
   }
   /**
+   * Batched sibling of listQuestionsForTask, for a caller that needs "does THIS card have a pending
+   * Request" for EVERY non-terminal card on a board (idle-watcher.ts's openCards scan, card a193398f) —
+   * ONE query for the whole project instead of one listQuestionsForTask call per card (the N+1 that scan
+   * used to run). Returns the raw `task_id` values as stored (may be a full task id OR a legacy 8-char
+   * PREFIX from before commit a3f1319f) — the caller matches a candidate task id against this set the SAME
+   * way listQuestionsForTask does internally (`taskId === id || (prefix.length === 8 && taskId.startsWith(prefix + "-"))`),
+   * just once per project instead of once per card.
+   */
+  listPendingQuestionTaskIds(projectId: string): Set<string> {
+    const rows = this.db.prepare(
+      "SELECT DISTINCT task_id FROM questions WHERE project_id = ? AND state = 'pending' AND task_id IS NOT NULL",
+    ).all(projectId) as { task_id: string }[];
+    return new Set(rows.map((r) => r.task_id));
+  }
+  /**
    * Every request (any state), newest-first — the backing read for the Platform Auditor's cross-project
    * `requests_list` (card 59489267) AND the manager's own project-scoped `requests_list` (card 988bb585
    * follow-up): the audit-scope sibling of `listQuestionsForTask` (one-task-scoped). Deliberately

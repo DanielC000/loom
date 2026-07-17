@@ -7,6 +7,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem } from "./questionTool.js";
+import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -1223,11 +1224,13 @@ export class OrchestrationMcpRouter {
           "the non-consuming complement to question_pull (which only returns ANSWERED requests and " +
           "CONSUMES them). Use this to survey pending/answered/consumed requests, including ones asked " +
           "with no taskId or asked by a predecessor manager on this project. NON-CONSUMING — reading NEVER " +
-          "drains or flips state; calling it twice returns the same records. Returns, per row: {id, " +
-          "projectId, sessionId, agentId, taskId, type, title, state, createdAt, answeredAt, consumedAt} " +
-          "plus an answer summary by type — chosenOption/note for decision|input, approved/note for " +
-          "permission, ack ONLY for credential (NEVER the secret — a pending row's answer fields read null " +
-          "rather than a misleading false-ish value). Filters (all optional, AND'd): state " +
+          "drains or flips state; calling it twice returns the same records. Returns {items, total, " +
+          "returned, offset, hasMore}: `items` per row is {id, projectId, sessionId, agentId, taskId, type, " +
+          "title, state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/" +
+          "note for decision|input, approved/note for permission, ack ONLY for credential (NEVER the secret " +
+          "— a pending row's answer fields read null rather than a misleading false-ish value). `total` is " +
+          "the FULL matching count and `hasMore` tells you whether `items` was truncated — never assume " +
+          "`items` is everything without checking it. Filters (all optional, AND'd): state " +
           "(pending|answered|consumed), type (decision|input|permission|credential), includeConsumed " +
           "(false by default — folds already-consumed requests in alongside the rest; an explicit " +
           "state:\"consumed\" always shows consumed regardless of this flag), mine (false by default — " +
@@ -1236,22 +1239,34 @@ export class OrchestrationMcpRouter {
           "`mine:true` is the dedup read for a scheduled/autonomous agent: before filing a new " +
           "question_ask, call this to check whether you (or a predecessor session on your agent) already " +
           "filed an equivalent request that's still pending or answered-but-unpulled, instead of re-filing " +
-          "a duplicate every cycle. Newest-first (createdAt DESC).",
+          `a duplicate every cycle. Newest-first (createdAt DESC). Bounded to ${DEFAULT_REQUESTS_LIST_CAP} ` +
+          "rows by default (see `hasMore`) — pass an explicit limit/offset to page past it.",
         inputSchema: {
           state: z.enum(QUESTION_STATES).optional(),
           type: z.enum(QUESTION_TYPES).optional(),
           includeConsumed: z.boolean().optional(),
           mine: z.boolean().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
         },
       },
-      async ({ state, type, includeConsumed, mine }) => {
+      async ({ state, type, includeConsumed, mine, limit, offset }) => {
         const asker = db.getSession(managerSessionId);
         if (!asker?.projectId) return ok({ error: "no project for this session" });
-        const rows = db.listQuestionsForAudit({
+        const all = db.listQuestionsForAudit({
           projectId: asker.projectId, state, type, excludeConsumed: !includeConsumed,
           agentId: mine ? asker.agentId : undefined,
         });
-        return ok(rows.map(auditRequestItem));
+        const off = offset ?? 0;
+        const eff = limit ?? DEFAULT_REQUESTS_LIST_CAP;
+        const page = all.slice(off, off + eff);
+        return ok({
+          items: page.map(auditRequestItem),
+          total: all.length,
+          returned: page.length,
+          offset: off,
+          hasMore: off + page.length < all.length,
+        });
       },
     );
 

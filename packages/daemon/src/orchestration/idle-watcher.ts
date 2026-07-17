@@ -79,6 +79,30 @@ const ORCH_ACTIVITY_KINDS: ReadonlySet<OrchestrationEventKind> = new Set<Orchest
 const ANSWERED_QUESTION_STUCK_MINUTES = 15;
 
 /**
+ * Idle-nudge board-scan throttle (card a193398f — perf: bound the idle-nudge re-drain). The board scan
+ * below (nonTerminal/openCards) is only NEEDED once per nudge decision, but a "nothing actionable" outcome
+ * doesn't call recordIdleNudge (last_idle_nudge_at never advances), so without this throttle the FULL scan
+ * — db.listTasks(projectId) (every column incl. body, every row incl. done) plus a pending-question lookup
+ * per non-terminal card — reran on EVERY 60s tick, indefinitely, for as long as a manager sat idle-eligible
+ * with nothing to nudge: cost scaling with board_size × idle-TICK-count, not board_size × nudge_count as
+ * intended. Deliberately SHORTER than any real idleNudgeMinutes (default 45) so a due nudge is never
+ * delayed by more than this window — a manager whose board gains actionable work is caught within a few
+ * minutes instead of instantly, in exchange for not re-deriving the whole board every single tick. Purely
+ * a re-SCAN cadence; the nudge-firing predicate/cap/escalation/parked-lane discount are untouched.
+ */
+const IDLE_SCAN_THROTTLE_MINUTES = 5;
+
+/**
+ * Appended to every idle-manager nudge (card a193398f): the message already embeds current, cheaply-
+ * computed counts (openTodos/stranded/live-worker) — this line tells the manager those counts are fresh
+ * so it doesn't reflexively re-pull the whole board/worker list/Requests just to confirm what the nudge
+ * already told it. Short + additive; doesn't touch the branch copy above it.
+ */
+const IDLE_NUDGE_BOUNDED_HINT =
+  " These counts are already current — no need to re-pull the whole board, worker list, or Requests just " +
+  "to confirm them; only fetch details if you're about to act on a specific card.";
+
+/**
  * Asleep-at-the-Wheel watcher (idle-manager watchdog) — also covers platform (Lead) sessions (card
  * 98b3725c). Structural twin of ContextWatcher: each tick, for every LIVE manager OR platform session
  * that is idle (`busy=false` + `lastActivity` older than the project's `idleNudgeMinutes`) with NO live
@@ -122,6 +146,13 @@ export class IdleWatcher {
    * re-nudging once more; benign, since that's rare and one extra manager nudge is harmless.
    */
   private nudgedAnsweredQuestions = new Set<string>();
+  /**
+   * IDLE_SCAN_THROTTLE_MINUTES cache (card a193398f): per-manager last-scanned-at, in-memory only —
+   * mirrors the nudgedAnsweredQuestions precedent above (no schema migration; a daemon restart just costs
+   * one extra scan per manager, harmless). Pruned each tick to the currently-live manager/platform set so
+   * it can never grow unboundedly across recycles/restarts.
+   */
+  private lastIdleScanAt = new Map<string, number>();
   constructor(private deps: IdleWatcherDeps) {}
 
   tick(now: Date = new Date()): void {
@@ -136,7 +167,13 @@ export class IdleWatcher {
     // free-standing manager/plain sessions, no parentSessionId), so db.listWorkers(leadId) below is
     // always [] for it — the manager-shaped worker-checks silently no-op instead of forcing a manager
     // assumption onto the Lead.
-    for (const m of [...db.listLiveManagers(), ...db.listLivePlatformSessions()]) {
+    const managers = [...db.listLiveManagers(), ...db.listLivePlatformSessions()];
+    // Prune the scan-throttle cache to currently-live managers/platforms only (card a193398f) — bounds
+    // its memory to the live fleet instead of accumulating an entry per manager id ever seen.
+    const liveManagerIds = new Set(managers.map((mm) => mm.id));
+    for (const id of this.lastIdleScanAt.keys()) if (!liveManagerIds.has(id)) this.lastIdleScanAt.delete(id);
+
+    for (const m of managers) {
       const project = db.getProject(m.projectId);
       if (!project) continue;
       const cfg = resolveConfig(project.config).orchestration;
@@ -247,6 +284,22 @@ export class IdleWatcher {
       // (db.listQuestionsForTask, the same taskId→questions linkage tasks_get's connected-requests summary
       // and task_requests_list use) is blocked on the owner, not the manager — discounted the same way; a
       // card whose request is already answered/consumed is NOT discounted (it's actionable again).
+      // Scan throttle (card a193398f): the board scan below is the expensive part of this predicate
+      // (a full db.listTasks(projectId) plus, historically, one listQuestionsForTask query PER non-terminal
+      // card). A "nothing actionable" outcome doesn't advance last_idle_nudge_at, so without this throttle
+      // it reran every 60s tick indefinitely. Skip re-scanning within the throttle window of the last scan
+      // for THIS manager — short enough that a due nudge is never meaningfully delayed. Only ever SKIPS a
+      // re-derivation; never affects whether a nudge fires once scanned.
+      //
+      // CR follow-up: idleMinutes is project/env-overridable with NO floor, so a project configuring it
+      // below IDLE_SCAN_THROTTLE_MINUTES would have its actionable re-nudge cadence silently stretched to
+      // the throttle window instead. Floor the EFFECTIVE throttle at this manager's own idleMinutes so it
+      // can never exceed that manager's configured nudge cadence, for any config.
+      const effectiveScanThrottleMinutes = Math.min(IDLE_SCAN_THROTTLE_MINUTES, idleMinutes);
+      const lastScanMs = this.lastIdleScanAt.get(m.id) ?? 0;
+      if (nowMs - lastScanMs < effectiveScanThrottleMinutes * 60_000) continue;
+      this.lastIdleScanAt.set(m.id, nowMs);
+
       const cols = resolveConfig(project.config).kanbanColumns;
       const terminalKey = columnKeyForRole(cols, "terminal");
       const reviewKey = columnKeyForRole(cols, "review");
@@ -264,13 +317,23 @@ export class IdleWatcher {
       // (orchestration/wake-impact.ts) so the two "actionable board work" definitions stay consistent.
       const excludedColumnKeys = new Set(cols.filter((c) => c.excludeFromIdleWatchdog === true).map((c) => c.key));
       const nonTerminal = db.listTasks(m.projectId).filter((t) => t.columnKey !== terminalKey);
+      // Batched pending-request check (card a193398f): ONE query for the whole project instead of one
+      // listQuestionsForTask call PER non-terminal card (the N+1 this scan used to run every throttle
+      // window). listPendingQuestionTaskIds returns raw task_id values as stored — a legacy row (pre-
+      // a3f1319f) may carry an 8-char PREFIX rather than the full task id, so prefix rows are matched the
+      // same way listQuestionsForTask itself does (`taskId.startsWith(prefix + "-")`), just against an
+      // in-memory set instead of a per-card SQL round trip.
+      const pendingQuestionTaskIds = db.listPendingQuestionTaskIds(m.projectId);
+      const pendingLegacyPrefixes = [...pendingQuestionTaskIds].filter((id) => id.length === 8);
+      const hasPendingQuestion = (taskId: string): boolean =>
+        pendingQuestionTaskIds.has(taskId) || pendingLegacyPrefixes.some((p) => taskId.startsWith(`${p}-`));
       const openCards = nonTerminal.filter((t) =>
         t.held !== true
         && t.deferred !== true
         && t.columnKey !== reviewKey
         && !excludedColumnKeys.has(t.columnKey)
         && !(isPlatform && t.columnKey === parkedKey)
-        && !db.listQuestionsForTask(m.projectId, t.id).some((q) => q.state === "pending"),
+        && !hasPendingQuestion(t.id),
       );
       // Narrow liveWorkers (all idle at this point — a live BUSY one would have skipped above) to
       // GENUINELY STRANDED ones (CR blocker #2): a live worker that's rate-limited, already reported
@@ -327,7 +390,11 @@ export class IdleWatcher {
           `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
           `external thing — optionally pass minutes), or 'done' (the queue is genuinely drained). Need a human ` +
           `decision/credential/access? File a Request via question_ask instead. Resume the loop if appropriate.`;
-      try { pty.enqueueStdin(m.id, msg); } catch { /* manager not live */ }
+      // Card a193398f: append the bounded-recheck hint to the MANAGER branches only (they cite the
+      // openTodos/stranded/live-worker counts this hint refers to) — the platform (Lead) branch above
+      // doesn't surface those counts, so the hint wouldn't make sense appended there.
+      const finalMsg = isPlatform ? msg : msg + IDLE_NUDGE_BOUNDED_HINT;
+      try { pty.enqueueStdin(m.id, finalMsg); } catch { /* manager not live */ }
       db.recordIdleNudge(m.id, nowIso); // stamp last_idle_nudge_at + increment idle_nudge_unanswered
       // eslint-disable-next-line no-console
       console.log(`[idle-watcher] nudged idle manager ${m.id} (~${n}m idle, ${openTodos} actionable, unanswered→${state.unanswered + 1})`);

@@ -999,6 +999,145 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
+// ===== (19) idle-nudge board-SCAN THROTTLE (card a193398f — perf: bound the idle-nudge re-drain) =====
+// The expensive part of the manager loop (db.listTasks over the whole project + the pending-request
+// discount) used to rerun on EVERY 60s tick once a manager crossed idleNudgeMinutes with NOTHING
+// actionable (that outcome never calls recordIdleNudge, so idleForMin never drops back below the
+// threshold). Now it's throttled to at most once per IDLE_SCAN_THROTTLE_MINUTES per manager.
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-throttle");
+  // A held-only board (mirrors (1c)): nonTerminal.length > 0 but openCards.length === 0, so the "nothing
+  // actionable" skip fires WITHOUT calling recordIdleNudge — last_idle_nudge_at never advances, so
+  // idleForMin stays >= idleMinutes across every subsequent tick (a truly empty board would instead take
+  // the "no cards at all" branch and nudge every time, resetting the baseline and defeating this test).
+  seedTitled(e, "todo", "big owner decision parked here", true);
+  let listTasksCalls = 0;
+  const realListTasks = e.db.listTasks.bind(e.db);
+  e.db.listTasks = (...args) => { listTasksCalls++; return realListTasks(...args); };
+
+  e.watcher.tick(NOW);
+  check("(19a) the first eligible tick scans the board", listTasksCalls === 1);
+  check("(19a) nothing actionable → no nudge fires (0 actionable cards)", e.enqueued.length === 0);
+
+  e.watcher.tick(new Date(NOW.getTime() + 2 * 60_000)); // +2min — inside the throttle window
+  check("(19b) a re-tick WITHIN the throttle window does NOT re-scan the board", listTasksCalls === 1);
+
+  e.watcher.tick(new Date(NOW.getTime() + 6 * 60_000)); // +6min — past the throttle window
+  check("(19c) a re-tick PAST the throttle window DOES re-scan the board", listTasksCalls === 2);
+  cleanup(e);
+}
+{
+  // The throttle only ever SKIPS a re-scan — it never delays a nudge that's genuinely due. With
+  // idleNudgeMinutes=45 (default) and IDLE_SCAN_THROTTLE_MINUTES=5, a manager that becomes idle-eligible
+  // still gets scanned (and nudged, since there's actionable work) on its very first eligible tick.
+  const e = makeEnv();
+  seedManager(e, "mgr-throttle-still-nudges");
+  seedTodo(e, 2);
+  e.watcher.tick(NOW);
+  check("(19d) the throttle never blocks a genuinely-due FIRST nudge", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-throttle-still-nudges");
+  cleanup(e);
+}
+{
+  // (19e) CR follow-up: a board that GAINS actionable work MID-throttle-window still fires within the
+  // throttle bound (≤ IDLE_SCAN_THROTTLE_MINUTES) — the throttle only delays DETECTION by that bounded
+  // amount, it never defers a fresh nudge all the way out to the next full idleNudgeMinutes cadence.
+  const e = makeEnv();
+  seedManager(e, "mgr-throttle-catchup");
+  seedTitled(e, "todo", "held only, nothing actionable yet", true); // held=true → 0 actionable initially
+
+  e.watcher.tick(NOW); // first eligible tick — scans, sees nothing actionable, no nudge
+  check("(19e) precondition: no nudge on the first scan (nothing actionable yet)", e.enqueued.length === 0);
+
+  // Board gains real work mid-window (+1min — inside the 5min throttle).
+  e.watcher.tick(new Date(NOW.getTime() + 1 * 60_000));
+  seedTitled(e, "todo", "fix(web): now actionable", false);
+  check("(19e) still throttled at +1min — no re-scan yet, so no nudge yet either", e.enqueued.length === 0);
+
+  // By +5min (the throttle bound), the next tick re-scans and catches the new work — a BOUNDED delay,
+  // never deferred to the next full idleNudgeMinutes cadence.
+  e.watcher.tick(new Date(NOW.getTime() + 5 * 60_000));
+  check(
+    "(19e) the nudge fires within the throttle bound once the board actually changed",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-throttle-catchup" && e.enqueued[0].text.includes("1 actionable"),
+  );
+  cleanup(e);
+}
+{
+  // (19f) CR follow-up: the effective throttle is floored at THIS manager's own idleNudgeMinutes, so a
+  // project configuring it BELOW IDLE_SCAN_THROTTLE_MINUTES never has its re-nudge cadence silently
+  // stretched to the (longer) default throttle window — Math.min(IDLE_SCAN_THROTTLE_MINUTES, idleMinutes).
+  const e = makeEnv({ projectConfig: { orchestration: { idleNudgeMinutes: 2 } } }); // below the 5min throttle default
+  seedManager(e, "mgr-short-cadence", { idleMin: 3 }); // idle 3m — already past this project's 2m cadence
+  seedTitled(e, "todo", "held only, nothing actionable yet", true);
+
+  e.watcher.tick(NOW); // first eligible tick — scans, nothing actionable, no nudge
+  check("(19f) precondition: no nudge on the first scan (nothing actionable yet)", e.enqueued.length === 0);
+
+  seedTitled(e, "todo", "fix(web): now actionable", false); // board gains work immediately after
+  e.watcher.tick(new Date(NOW.getTime() + 2 * 60_000)); // +2min — AT this project's own 2min cadence
+  check(
+    "(19f) the effective throttle is floored at idleNudgeMinutes(2), not the longer 5min default — re-scans by +2min",
+    e.enqueued.length === 1 && e.enqueued[0].id === "mgr-short-cadence",
+  );
+  cleanup(e);
+}
+
+// ===== (20) the per-card pending-request discount is now ONE query, not one-per-card (N+1 fix, card a193398f) =====
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-n-plus-one");
+  seedCard(e, "todo"); seedCard(e, "todo"); seedCard(e, "todo"); seedCard(e, "todo"); // 4 non-terminal cards
+  let listQuestionsForTaskCalls = 0;
+  const realListQFT = e.db.listQuestionsForTask.bind(e.db);
+  e.db.listQuestionsForTask = (...args) => { listQuestionsForTaskCalls++; return realListQFT(...args); };
+  let listPendingCalls = 0;
+  const realListPending = e.db.listPendingQuestionTaskIds.bind(e.db);
+  e.db.listPendingQuestionTaskIds = (...args) => { listPendingCalls++; return realListPending(...args); };
+
+  e.watcher.tick(NOW);
+  check("(20a) the board scan calls listPendingQuestionTaskIds exactly ONCE regardless of card count", listPendingCalls === 1);
+  check("(20b) the per-card N+1 listQuestionsForTask is NEVER called by this scan", listQuestionsForTaskCalls === 0);
+  check("(20c) with no pending requests, all 4 cards are still counted actionable", e.enqueued.length === 1 && e.enqueued[0].text.includes("4 actionable"));
+  cleanup(e);
+}
+{
+  // Legacy 8-char task_id-PREFIX rows (pre-a3f1319f) — listQuestionsForTask tolerated these; the batched
+  // listPendingQuestionTaskIds replacement must discount a card the same way, not just for full-id rows.
+  const e = makeEnv();
+  seedManager(e, "mgr-legacy-prefix");
+  seedCard(e, "todo");
+  const task = e.db.listTasks(e.projId)[0];
+  seedQuestion(e, "mgr-legacy-prefix", task.id.slice(0, 8), "pending"); // legacy prefix-linked row
+  e.watcher.tick(NOW);
+  check("(21) a PENDING request linked by a legacy 8-char task_id PREFIX still discounts the card", e.enqueued.length === 0);
+  cleanup(e);
+}
+
+// ===== (22) the nudge copy carries the bounded-recheck hint (card a193398f) =====
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-hint");
+  seedTodo(e, 2);
+  e.watcher.tick(NOW);
+  check(
+    "(22a) a manager idle nudge appends the 'these counts are already current' hint",
+    e.enqueued[0]?.text.includes("already current") && e.enqueued[0]?.text.includes("no need to re-pull"),
+  );
+  cleanup(e);
+}
+{
+  const e = makeEnv();
+  seedPlatform(e, "plat-hint");
+  seedTodo(e, 2);
+  e.watcher.tick(NOW);
+  check(
+    "(22b) the PLATFORM (Lead) nudge does NOT carry the hint (its copy never cites the counts the hint refers to)",
+    !e.enqueued[0]?.text.includes("already current"),
+  );
+  cleanup(e);
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — IdleWatcher nudges an idle, watching, unpaused, under-cap, context-roomy MANAGER (with no live BUSY worker) exactly once per leash window (recordIdleNudge increments); is SILENT when busy / fresh / snoozed / suppressed / has-a-live-BUSY-worker / human-paused / recently-nudged / disabled(0) / recycle-pending; a live IDLE worker no longer shields the manager (board card b9d479b0) and the nudge copy reflects that honestly; ESCALATES ONCE at the unanswered cap (one idle_escalated event + policy→suppressed, no re-emit on a later tick); honors per-project idleNudgeMinutes; resets to 'watching' on genuine new orchestration activity (ignoring idle_report); the zod orchestrationOverride now accepts the four idle config keys (strictness intact); the NEW idle-WORKER periodic coverage re-nudges a live/idle/unreported/stale worker on its own cadence while staying silent when disabled, under the window, already-reported, human-paused, or recently re-nudged; a PLATFORM (Lead) session (card 98b3725c) gets the SAME full-trigger/silent/escalate coverage a manager does, alongside a manager in the same project/tick without interference; a platform-role session now gets its OWN idle-nudge copy (no orchestration-loop/pick-up-next/N-actionable framing) and discounts parked-lane (decision-gated/owner-flow) cards from its actionable count, while the manager's copy and parked-lane counting stay byte-identical (card f98f3e43); and a session's OWN open (pending) owner question_ask — regardless of taskId — suppresses ITS idle nudge lineage-scoped across a fresh non-recycle successor, resuming normally once answered or when there's no pending own-Request, without being fooled by an unrelated agent's pending Request (card cb56cf80)."
   : `\n❌ ${failures} FAILURE(S).`);

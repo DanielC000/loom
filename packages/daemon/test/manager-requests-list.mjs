@@ -54,6 +54,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { DEFAULT_REQUESTS_LIST_CAP } = await import("../dist/mcp/audit.js");
 const { encryptSecret } = await import("../dist/keys/envelope.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -106,7 +107,11 @@ try {
   const sessions = new SessionService(db, { isAlive: () => true, enqueueStdin: () => ({ delivered: true }), getActiveTurnOrigin: () => null, purgeQueuedByQuestionIds: () => [] }, new OrchestrationControl());
   const router = new OrchestrationMcpRouter(db, sessions);
   const mgrServer = router.buildServer("mgrA", "manager");
-  const call = async (args) => JSON.parse((await mgrServer._registeredTools["requests_list"].handler(args ?? {})).content[0].text);
+  // (card a193398f) requests_list now returns {items, total, returned, offset, hasMore} instead of a bare
+  // array — `call` unwraps `.items` so every EXISTING array-shaped assertion below stays unchanged;
+  // `callRaw` (used by the new (G) cap/paging checks) returns the full envelope.
+  const callRaw = async (args) => JSON.parse((await mgrServer._registeredTools["requests_list"].handler(args ?? {})).content[0].text);
+  const call = async (args) => (await callRaw(args)).items;
 
   check("requests_list is registered on the loom-orchestration surface", "requests_list" in mgrServer._registeredTools);
 
@@ -130,7 +135,7 @@ try {
     const tool = (await mcpClient.listTools()).tools.find((t) => t.name === "requests_list");
     const props = tool?.inputSchema?.properties ?? {};
     check("(D) requests_list has NO projectId param to widen the read", !("projectId" in props));
-    check("(D) requests_list exposes exactly state/type/includeConsumed/mine", ["state", "type", "includeConsumed", "mine"].every((k) => k in props) && Object.keys(props).length === 4);
+    check("(D) requests_list exposes exactly state/type/includeConsumed/mine/limit/offset", ["state", "type", "includeConsumed", "mine", "limit", "offset"].every((k) => k in props) && Object.keys(props).length === 6);
     await mcpClient.close();
   }
 
@@ -221,6 +226,62 @@ try {
   check("(F) mine:true (excludeConsumed default) no longer shows the now-consumed request", !mineRead3.some((r) => r.id === answeredMineId));
   const mineRead3WithConsumed = await call({ mine: true, includeConsumed: true });
   check("(F) mine:true with includeConsumed:true still shows it, correctly state:consumed", mineRead3WithConsumed.some((r) => r.id === answeredMineId && r.state === "consumed"));
+
+  // ============ (G) cap + paging (card a193398f) ============
+  // Seed a known-size batch of FRESH pending rows so the paging math below is deterministic regardless of
+  // exactly what earlier sections left behind — e.g. (F)'s REAL question_pull call drains every ANSWERED
+  // request for that agent lineage, not just the one it was targeting, so the pre-existing pending/
+  // answered count at this point is intentionally not hardcoded here.
+  for (let i = 0; i < 6; i++) insertQ({ id: `req-page-${i}`, sessionId: "mgrA", projectId: "pA", title: `page filler ${i}` });
+
+  const capBaseline = await callRaw({});
+  const total = capBaseline.total; // >= 6 (the filler above) + whatever else is still pending/answered
+  check(
+    "(G) response envelope includes total/returned/offset/hasMore alongside items",
+    typeof capBaseline.total === "number" && typeof capBaseline.returned === "number" &&
+      capBaseline.offset === 0 && typeof capBaseline.hasMore === "boolean",
+  );
+  check(
+    "(G) total/returned/items.length agree when under the cap",
+    capBaseline.total === capBaseline.items.length && capBaseline.returned === capBaseline.items.length && capBaseline.hasMore === false,
+  );
+
+  const limited = await callRaw({ limit: 2 });
+  check(
+    "(G) an explicit limit caps items/returned without changing total",
+    limited.items.length === 2 && limited.returned === 2 && limited.total === total && limited.hasMore === true,
+  );
+
+  const page2 = await callRaw({ limit: 2, offset: 2 });
+  check("(G) offset pages forward — no overlap with the first page", page2.items.length === 2 && !page2.items.some((r) => limited.items.some((r2) => r2.id === r.id)));
+  check("(G) hasMore reflects whether rows remain past this page", page2.hasMore === (2 + 2 < total));
+
+  // offset = total-1 guarantees EXACTLY one row left, regardless of total's exact value (which depends on
+  // however many pending/answered rows earlier sections left behind).
+  const lastPage = await callRaw({ limit: 2, offset: total - 1 });
+  check(
+    "(G) the final page is short and hasMore flips false once every row has been paged through",
+    lastPage.items.length === 1 && lastPage.hasMore === false,
+  );
+
+  // Exceed DEFAULT_REQUESTS_LIST_CAP so the DEFAULT (no explicit limit) call is PROVABLY truncated, not
+  // just theoretically bounded — the whole point of the guardrail (never leave a manager silently blind
+  // to requests beyond the cap).
+  for (let i = 0; i < DEFAULT_REQUESTS_LIST_CAP + 5; i++) {
+    insertQ({ id: `req-cap-${i}`, sessionId: "mgrA", projectId: "pA", title: `cap filler ${i}` });
+  }
+  const overCap = await callRaw({});
+  check(
+    `(G) the DEFAULT read is truncated to ${DEFAULT_REQUESTS_LIST_CAP} rows once the project has more matching requests than that`,
+    overCap.items.length === DEFAULT_REQUESTS_LIST_CAP && overCap.returned === DEFAULT_REQUESTS_LIST_CAP,
+  );
+  check("(G) total still reports the FULL matching count even though items is truncated", overCap.total === capBaseline.total + DEFAULT_REQUESTS_LIST_CAP + 5);
+  check("(G) hasMore is true once the project exceeds the default cap", overCap.hasMore === true);
+  const overCapAllPaged = await callRaw({ limit: overCap.total });
+  check(
+    "(G) an explicit limit at/above total reaches every row — the cap is pageable-past, not a hard ceiling",
+    overCapAllPaged.items.length === overCap.total && overCapAllPaged.hasMore === false,
+  );
 } finally {
   try { db.close(); } catch { /* ignore */ }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }

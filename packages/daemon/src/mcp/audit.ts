@@ -17,7 +17,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * overflow the tool-result cap with no explicit limit — same rationale + sizing precedent as
  * `DEFAULT_SESSION_SUMMARY_CAP` (mcp/sessionView.ts). An explicit limit/offset pages past it.
  */
-const DEFAULT_REQUESTS_LIST_CAP = 50;
+export const DEFAULT_REQUESTS_LIST_CAP = 50;
 
 /**
  * Audit MCP server (Platform Manager P5) — the Platform Auditor's RESTRICTED, READ-AND-FILE-ONLY surface.
