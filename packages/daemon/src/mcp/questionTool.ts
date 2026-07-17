@@ -38,6 +38,11 @@ export const QUESTION_ASK_INPUT_SHAPE = {
   scope: z.enum(PERMISSION_SCOPES).optional(),
   expiresAt: z.string().optional(),
   envVar: z.string().optional(),
+  // Card feat(orchestration): add an explicit supersedes:<id> param to question_ask — the questionId of a
+  // still-PENDING ask (asked by the SAME caller) that this new ask replaces. Resolved in the tool handlers
+  // (mcp/orchestration.ts, mcp/platform.ts) via `applySupersede` below, NOT here — this shape only carries
+  // the raw param through validation.
+  supersedes: z.string().optional(),
   // Credential auto-provisioning v1 (card 193de09e) — STATING INTENT only; see ProvisionTarget's own doc.
   // Restricted to manager/platform roles (buildQuestionAsk's role gate below).
   provisionTo: z
@@ -61,6 +66,7 @@ export interface QuestionAskInput {
   expiresAt?: string;
   envVar?: string;
   provisionTo?: ProvisionTarget;
+  supersedes?: string;
 }
 
 /**
@@ -327,6 +333,49 @@ export function cancelQuestionForAgent(
     }
     return { error: message };
   }
+}
+
+/**
+ * `question_ask`'s optional `supersedes:<questionId>` handling (card feat(orchestration): add an explicit
+ * supersedes:<id> param to question_ask that auto-cancels the named prior pending ask). The originating
+ * card floated an AUTO-supersede heuristic ("this new ask obviously replaces that old one") — deliberately
+ * REJECTED, because "obviously replaces" eventually guesses wrong and silently cancels a live owner ask.
+ * This is the safe, non-heuristic version: the asker names the exact prior ask it's replacing, explicitly,
+ * at the moment it knows.
+ *
+ * Reuses `cancelQuestionForAgent` VERBATIM — the identical agent-lineage ownership check, pending-only
+ * constraint, and atomic answer-race refusal as the standalone `question_cancel` tool; this never forks a
+ * parallel cancel implementation. The `reason` stamped on the cancelled row links back to the new ask
+ * (id + title) so a human reading the retained history sees WHY it was withdrawn.
+ *
+ * Load-bearing: the new ask is filed **regardless** of whether the supersede succeeds. A failed supersede
+ * (the named ask was already answered/cancelled in the meantime, is unknown, or belongs to another agent)
+ * is reported back to the caller in the returned `supersede` field — never silently swallowed — but it
+ * NEVER blocks or discards the caller's actual new ask, and it can never clobber an answer the human
+ * already gave (the same guarantee `question_cancel` itself makes).
+ *
+ * **CALL-ORDER CONTRACT — not a transaction, an ordering guarantee:** both callers MUST `db.insertQuestion`
+ * the new ask BEFORE calling this function, never after. There is no DB transaction spanning the two writes
+ * (insert + cancel), so the ORDER is what makes every failure mode safe: if the insert itself throws
+ * (constraint/IO error), nothing has been cancelled yet — the prior ask stays exactly as it was. If THIS
+ * call fails/throws instead, the new ask is already filed and the prior ask simply stays `pending`
+ * (visible, redundant, but never lost). Reversing the order would open a window where a failed insert
+ * leaves the prior ask cancelled with NO replacement filed — the owner's pending decision would vanish with
+ * nothing in its place, exactly the failure this whole feature exists to prevent. Always fail toward the
+ * harmless outcome (a stale-but-present duplicate ask), never the unrecoverable one (a vanished ask).
+ *
+ * Called with the SAME `askerSessionId` as the new ask's own asker, from both `question_ask` registrations
+ * (mcp/orchestration.ts's manager surface, mcp/platform.ts's Lead surface) so ownership is scoped to that
+ * one caller's own agent lineage in both places, identically.
+ */
+export function applySupersede(
+  db: Db,
+  askerSessionId: string,
+  supersedesId: string,
+  newQuestion: Question,
+): { cancelled: true; questionId: string } | { error: string } {
+  const reason = `superseded by a newer ask: "${newQuestion.title}" (question ${newQuestion.id})`;
+  return cancelQuestionForAgent(db, askerSessionId, supersedesId, reason);
 }
 
 /** The `{items,total,returned,offset,hasMore}` envelope shape both `requests_list` sites return. */

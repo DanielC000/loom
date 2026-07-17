@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
@@ -1172,9 +1172,18 @@ export class OrchestrationMcpRouter {
           "once it's provided; `envVar` (optional) names the env var/config key you'd like it stored " +
           "under. It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
           "(outside this tool) that must happen before an agent session can use it. " +
-          "`taskId` (optional) softly links this to a board task. You'll get a one-time push nudge into " +
+          "`taskId` (optional) softly links this to a board task. `supersedes` (optional): the questionId " +
+          "of a still-PENDING ask (asked by you) that this new ask replaces — atomically cancels it via " +
+          "the SAME machinery as `question_cancel` (your own agent lineage only; pending-only) and lands " +
+          "it `cancelled` with a reason linking this new ask, so a moot/superseded Request never has to " +
+          "sit in the human's inbox waiting on a separate cancel call. This NEW ask is filed regardless " +
+          "of whether the supersede succeeds — if the named ask was already answered/cancelled, unknown, " +
+          "or isn't yours, the cancel is refused (an answer the human already gave is NEVER discarded) " +
+          "and that failure is reported back in the response's `supersede` field, never silently " +
+          "swallowed. You'll get a one-time push nudge into " +
           "your own session when the human answers; call question_pull (e.g. when you reach the point " +
-          "this was blocking) to fetch the answer. Returns {questionId}.",
+          "this was blocking) to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
+          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}.",
         inputSchema: QUESTION_ASK_INPUT_SHAPE,
       },
       async (input) => {
@@ -1183,14 +1192,19 @@ export class OrchestrationMcpRouter {
         const built = buildQuestionAsk(input, { sessionId: managerSessionId, projectId, db, role });
         if ("error" in built) return ok({ error: built.error });
         const { question } = built;
+        // Insert the NEW ask BEFORE superseding the old one (see applySupersede's doc — the ordering, not a
+        // transaction, is what guarantees a failure never loses the owner's prior pending ask).
         db.insertQuestion(question);
+        const supersede = input.supersedes
+          ? applySupersede(db, managerSessionId, input.supersedes, question)
+          : undefined;
         // Event-emit twin (attention-push signal source, Lead fork 2b) — additive, no existing consumer
         // (alert-webhook's events[] allowlist, web attention) lists this new kind, so this is inert for them.
         db.appendEvent({
           id: randomUUID(), ts: question.createdAt, managerSessionId,
           kind: "question_asked", detail: { questionId: question.id, title: question.title },
         });
-        return ok({ questionId: question.id });
+        return ok(supersede !== undefined ? { questionId: question.id, supersede } : { questionId: question.id });
       },
     );
 

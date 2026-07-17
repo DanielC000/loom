@@ -158,7 +158,13 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   withdraws your OWN still-pending ask (never another agent's — it's scoped to your own asks only) into a
   retained, never-hard-deleted history entry carrying your reason. It ONLY ever touches a still-`pending`
   ask — an already-answered one is refused outright (cancelling can never discard an answer the human
-  already gave); `question_pull` that instead.
+  already gave); `question_pull` that instead. **If you already know, at the moment you re-ask, exactly
+  which prior pending ask this new one replaces**, skip the separate cancel call: pass
+  `question_ask({..., supersedes: "<questionId>"})` and it atomically cancels that named ask for you (same
+  ownership + pending-only rules as `question_cancel`) while filing the new one — never a guess ("this
+  looks like it replaces that"), only an explicit id you name yourself. The new ask is always filed even
+  if the supersede is refused (already answered/cancelled/not yours) — check the response's `supersede`
+  field for the outcome.
 - **Pick the right escalation channel by WHO must answer.** An **owner-facing** ask — a decision,
   approval, secret, or input only the human can give — goes to `question_ask` (above). A **platform /
   cross-project** ask — a suspected Loom bug, a missing platform affordance, or something that needs the

@@ -8,7 +8,7 @@ import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, S
 import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, applySupersede } from "./questionTool.js";
 import { resolveAlias } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -1600,9 +1600,18 @@ export class PlatformMcpRouter {
           "it's provided; `envVar` (optional) names the env var/config key you'd like it stored under. " +
           "It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
           "(outside this tool) that must happen before an agent session can use it. " +
-          "`taskId` (optional) softly links this to a board task. You'll get a one-time push nudge into " +
+          "`taskId` (optional) softly links this to a board task. `supersedes` (optional): the questionId " +
+          "of a still-PENDING ask (asked by you) that this new ask replaces — atomically cancels it via " +
+          "the SAME machinery as `question_cancel` (your own agent lineage only; pending-only) and lands " +
+          "it `cancelled` with a reason linking this new ask, so a moot/superseded Request never has to " +
+          "sit in the human's inbox waiting on a separate cancel call. This NEW ask is filed regardless " +
+          "of whether the supersede succeeds — if the named ask was already answered/cancelled, unknown, " +
+          "or isn't yours, the cancel is refused (an answer the human already gave is NEVER discarded) " +
+          "and that failure is reported back in the response's `supersede` field, never silently " +
+          "swallowed. You'll get a one-time push nudge into " +
           "your own session when the human answers; call question_pull (e.g. when you reach the point " +
-          "this was blocking) to fetch the answer. Returns {questionId}.",
+          "this was blocking) to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
+          "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}.",
         inputSchema: QUESTION_ASK_INPUT_SHAPE,
       },
       async (input) => {
@@ -1613,8 +1622,14 @@ export class PlatformMcpRouter {
         // than threading a role param through buildServer for a single caller that never varies.
         const built = buildQuestionAsk(input, { sessionId: callerSessionId, projectId, db, role: "platform" });
         if ("error" in built) return ok({ error: built.error });
-        db.insertQuestion(built.question);
-        return ok({ questionId: built.question.id });
+        const { question } = built;
+        // Insert the NEW ask BEFORE superseding the old one (see applySupersede's doc — the ordering, not a
+        // transaction, is what guarantees a failure never loses the owner's prior pending ask).
+        db.insertQuestion(question);
+        const supersede = input.supersedes
+          ? applySupersede(db, callerSessionId, input.supersedes, question)
+          : undefined;
+        return ok(supersede !== undefined ? { questionId: question.id, supersede } : { questionId: question.id });
       },
     );
 

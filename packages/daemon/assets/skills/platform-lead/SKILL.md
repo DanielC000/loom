@@ -74,7 +74,10 @@ is your ONLY human-confirm channel — there is no `AskUserQuestion` on this sur
 that goes moot or gets superseded doesn't have to sit in the human's inbox forever — `question_cancel`
 withdraws your OWN pending ask (never another agent's) into a retained history entry, but REFUSES an
 already-answered one outright (`question_pull` that instead — cancelling can never discard a human answer);
-and the elevated
+when you already know at ask time exactly which prior pending ask a new one replaces, `question_ask({...,
+supersedes: "<questionId>"})` does the cancel-and-file in one call (same ownership + pending-only rules as
+`question_cancel`; the new ask is filed either way, and a refused supersede is reported back in the
+response's `supersede` field, never silently swallowed); and the elevated
 human-equivalent ops routed through the FULL validators. **Use these tools for every read and write —
 never reach around them to the raw database.** If a tool you genuinely expect is missing, don't
 improvise a workaround that bypasses a trust boundary — report the gap instead.
