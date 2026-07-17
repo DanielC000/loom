@@ -12,6 +12,7 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
+import { resolveAlias } from "./arg-alias.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -129,9 +130,10 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_update",
       {
-        description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
+        description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool — tasks_get/task_requests_list/task_request_get — uses) — pass either one (if both, id wins). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
         inputSchema: {
-          id: z.string(),
+          id: z.string().optional(),
+          taskId: z.string().optional(),
           title: z.string().optional(),
           body: z.string().optional(),
           columnKey: z.string().optional(),
@@ -141,7 +143,11 @@ export class TaskMcpRouter {
           deferred: z.boolean().optional(),
         },
       },
-      async ({ id, ...patch }) => ok(updateProjectTask(db, projectId, id, patch)),
+      async ({ id, taskId, ...patch }) => {
+        const resolvedId = resolveAlias(id, taskId);
+        if (resolvedId === undefined) return ok({ error: "id (or taskId) is required" });
+        return ok(updateProjectTask(db, projectId, resolvedId, patch));
+      },
     );
 
     // Project-scoped SHARED memory (card 2fd9abf9) — universal, every project session, ANY worker may

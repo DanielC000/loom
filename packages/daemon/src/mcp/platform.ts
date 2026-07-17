@@ -9,6 +9,7 @@ import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem } from "./questionTool.js";
+import { resolveAlias } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { checkRepoRebind } from "../projects/rebind.js";
@@ -1208,17 +1209,21 @@ export class PlatformMcpRouter {
           "= nothing to do until something lands — optionally snooze for `minutes` (defaults to the " +
           "per-project idle snooze); 'done' = this agent's work is complete. If you need the human, file " +
           "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
-          "short `detail` to say why (recorded for the human).",
+          "short `detail` to say why (recorded for the human). `state` is the canonical param; `status` " +
+          "is accepted as an ALIAS for it — pass either one (if both, state wins).",
         inputSchema: {
-          state: z.enum(["working", "waiting", "done"]),
+          state: z.enum(["working", "waiting", "done"]).optional(),
+          status: z.enum(["working", "waiting", "done"]).optional(),
           detail: z.string().optional(),
           minutes: z.number().optional(),
         },
       },
-      async ({ state, detail, minutes }) => {
+      async ({ state, status, detail, minutes }) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
+        const resolvedState = resolveAlias(state, status);
+        if (resolvedState === undefined) return ok({ error: "state (or status) is required" });
         try {
-          return ok(sessions.recordIdleReport(callerSessionId, state, { detail, minutes }));
+          return ok(sessions.recordIdleReport(callerSessionId, resolvedState, { detail, minutes }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -1580,7 +1585,9 @@ export class PlatformMcpRouter {
         description:
           "Ask the HUMAN something you need them for — NON-BLOCKING: creates a durable, answerable " +
           "request and returns IMMEDIATELY, so you keep working instead of blocking this turn on a " +
-          "reply. `title`+`body` frame the ask. `type` picks the shape (defaults to \"decision\"): " +
+          "reply. `title`+`body` frame the ask (`body` is the canonical param; `detail` — " +
+          "platform_escalate's name for the same concept — is accepted as an ALIAS for it, pass either " +
+          "one, if both body wins). `type` picks the shape (defaults to \"decision\"): " +
           "\"decision\" — `options` is an OPTIONAL array of choices for the human to pick between (omit " +
           "for a pure blocker — free-text note only) and `recommendation` is an OPTIONAL suggested " +
           "answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no options. " +

@@ -8,6 +8,7 @@ import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
+import { resolveAlias } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -967,14 +968,15 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_spawn",
       {
-        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker (e.g. a read-only Code Reviewer pointed at another worker's branch via its kickoffPrompt) that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (so a read-only reviewer can run alongside a live author on the SAME logical work without a throwaway vehicle card, and two taskless spawns never collide with each other). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath} exactly as before; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape (byte-identical to before). REUSED-DIRTY-WORKTREE FLAG: when this spawn REUSED a worktree retained from a PRIOR hard-stopped or rejected-merge attempt on this task AND it still carries real leftover uncommitted work, the result ALSO carries `reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}` (a bounded `git status`-derived summary) — the worktree is NEVER auto-cleaned (Loom never silently discards a hard-stopped worker's edits), and the new worker's own kickoff already carries a reconcile note pointing at the same leftover paths, so you don't need to hand-instruct one yourself. Absent for a fresh worktree or a reused-but-clean one (byte-identical to before). CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` exactly as before, PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost; re-call worker_spawn with the same args once a slot frees (nothing auto-dispatches it for you).",
+        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. kickoffPrompt is the canonical param for the worker's kickoff instructions; `kickoff` is accepted as an ALIAS for it — pass either one (if both, kickoffPrompt wins). agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker (e.g. a read-only Code Reviewer pointed at another worker's branch via its kickoffPrompt) that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (so a read-only reviewer can run alongside a live author on the SAME logical work without a throwaway vehicle card, and two taskless spawns never collide with each other). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath} exactly as before; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape (byte-identical to before). REUSED-DIRTY-WORKTREE FLAG: when this spawn REUSED a worktree retained from a PRIOR hard-stopped or rejected-merge attempt on this task AND it still carries real leftover uncommitted work, the result ALSO carries `reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}` (a bounded `git status`-derived summary) — the worktree is NEVER auto-cleaned (Loom never silently discards a hard-stopped worker's edits), and the new worker's own kickoff already carries a reconcile note pointing at the same leftover paths, so you don't need to hand-instruct one yourself. Absent for a fresh worktree or a reused-but-clean one (byte-identical to before). CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` exactly as before, PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost; re-call worker_spawn with the same args once a slot frees (nothing auto-dispatches it for you).",
         inputSchema: {
           taskId: z.string().optional(),
           agentId: z.string(),
-          kickoffPrompt: z.string(),
+          kickoffPrompt: z.string().optional(),
+          kickoff: z.string().optional(),
         },
       },
-      async ({ taskId, agentId, kickoffPrompt }) => {
+      async ({ taskId, agentId, kickoffPrompt, kickoff }) => {
         // A usage-limit refusal carries a STRUCTURED retry-after deadline (PL Auditor finding #7) so the
         // manager can schedule a wake to it instead of guessing (and the daemon also auto-wakes it on
         // hold-clear). Surface `retryAfter` alongside the message — NOT a bare string. A concurrency-cap
@@ -986,8 +988,12 @@ export class OrchestrationMcpRouter {
           e instanceof UsageLimitError ? { error: e.message, retryAfter: e.retryAfter }
           : e instanceof CapQueueRejectedError ? { error: e.message, capQueued: e.capQueued }
           : { error: e instanceof Error ? e.message : String(e) };
+        // `kickoff` is accepted as an ALIAS for `kickoffPrompt` (card fix(mcp): accept arg-name aliases) —
+        // a wrong-but-obvious first call shouldn't eat a failed round-trip.
+        const resolvedKickoffPrompt = resolveAlias(kickoffPrompt, kickoff);
+        if (resolvedKickoffPrompt === undefined) return ok({ error: "kickoffPrompt (or kickoff) is required" });
         try {
-          const r = await sessions.spawnWorkerTracked(managerSessionId, { taskId, agentId, kickoffPrompt });
+          const r = await sessions.spawnWorkerTracked(managerSessionId, { taskId, agentId, kickoffPrompt: resolvedKickoffPrompt });
           if (!r.settled) return ok({ opId: r.op.opId, status: "pending", taskId, note: "still spawning — poll worker_list (a pendingSpawn placeholder row) or re-call worker_spawn with the SAME taskId/agentId/kickoffPrompt to fetch the result once ready." });
           if (!r.ok) return ok(asUsageLimitOrMessage(r.error));
           const worker = r.value;
@@ -1067,13 +1073,15 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_message",
       {
-        description: "Send a message to one of your workers. Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. If several messages stack up while it's busy, they're COALESCED and delivered together as ONE turn (FIFO order, newest last) — so a later message supersedes/augments earlier ones in the same turn rather than replaying one-per-turn. On `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting).",
-        inputSchema: { workerSessionId: z.string(), text: z.string() },
+        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). On `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting).",
+        inputSchema: { workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() },
       },
-      async ({ workerSessionId, text }) => {
+      async ({ workerSessionId, text, message }) => {
         try {
+          const resolvedText = resolveAlias(text, message);
+          if (resolvedText === undefined) return ok({ error: "text (or message) is required" });
           ensureWorkerLinked(workerSessionId, "worker_message");
-          return ok(sessions.messageWorker(managerSessionId, workerSessionId, text));
+          return ok(sessions.messageWorker(managerSessionId, workerSessionId, resolvedText));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -1088,19 +1096,25 @@ export class OrchestrationMcpRouter {
           "CURRENT turn immediately and REPLACES its entire pending direction with this ONE instruction, " +
           "delivered as its next turn. Use it ONLY when you must change course NOW and cannot wait for the " +
           "worker to finish — e.g. you've spotted it building the wrong thing. CONTRAST with worker_message, " +
-          "which is ADDITIVE and NON-interrupting (it queues behind the current turn and coalesces with other " +
-          "pending messages); prefer worker_message unless you truly need to interrupt. " +
+          "which is ADDITIVE and NON-interrupting (it queues behind the current turn, delivered ALONE as its " +
+          "own turn by default — coalesced with other pending messages into one turn only if the human has " +
+          "turned on the legacy daemon-global `coalesceAgentMessages` setting); prefer worker_message unless " +
+          "you truly need to interrupt. " +
           "CAUTION: the interrupt may land MID-EDIT, leaving the worker's working tree partly changed — so " +
           "phrase `text` so the worker FIRST reconciles/inspects its working tree (e.g. `git status`, finish " +
           "or revert the half-done edit) BEFORE acting on the new direction. Any messages that were queued for " +
           "the worker are discarded (superseded by this one). Returns {delivered} — true if it went out as a " +
-          "turn immediately (worker was idle), false if queued to land right after the interrupt clears.",
-        inputSchema: { workerSessionId: z.string(), text: z.string() },
+          "turn immediately (worker was idle), false if queued to land right after the interrupt clears. " +
+          "`text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if " +
+          "both, text wins).",
+        inputSchema: { workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() },
       },
-      async ({ workerSessionId, text }) => {
+      async ({ workerSessionId, text, message }) => {
         try {
+          const resolvedText = resolveAlias(text, message);
+          if (resolvedText === undefined) return ok({ error: "text (or message) is required" });
           ensureWorkerLinked(workerSessionId, "worker_redirect");
-          return ok(sessions.redirectWorker(managerSessionId, workerSessionId, text));
+          return ok(sessions.redirectWorker(managerSessionId, workerSessionId, resolvedText));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -1143,7 +1157,9 @@ export class OrchestrationMcpRouter {
         description:
           "Ask the HUMAN something you need them for — NON-BLOCKING: creates a durable, answerable " +
           "request and returns IMMEDIATELY, so you keep orchestrating the rest of your fleet instead of " +
-          "blocking this turn on a reply. `title`+`body` frame the ask. `type` picks the shape (defaults " +
+          "blocking this turn on a reply. `title`+`body` frame the ask (`body` is the canonical param; " +
+          "`detail` — platform_escalate's name for the same concept — is accepted as an ALIAS for it, " +
+          "pass either one, if both body wins). `type` picks the shape (defaults " +
           "to \"decision\"): \"decision\" — `options` is an OPTIONAL array of choices for the human to " +
           "pick between (omit for a pure blocker — free-text note only) and `recommendation` is an " +
           "OPTIONAL suggested answer shown as a nudge, not enforced. \"input\" — a freeform-text ask, no " +
@@ -1270,7 +1286,13 @@ export class OrchestrationMcpRouter {
         inputSchema: { workerSessionId: z.string(), handoffSummary: z.string().optional(), continuationPrompt: z.string().optional() },
       },
       async ({ workerSessionId, handoffSummary, continuationPrompt }) => {
-        const summary = handoffSummary ?? continuationPrompt;
+        const summary = resolveAlias(handoffSummary, continuationPrompt);
+        // Falsy check (NOT `=== undefined`) — restores the PRE-alias behavior where an empty string was
+        // rejected at the tool boundary with this clear message, rather than passing through to the
+        // service's own blank-guard (a confusingly different "must not be blank"/"not your worker" error
+        // depending on link state). Unlike the 6 NEW aliases below (whose canonical was already a required
+        // z.string() that always accepted ""), this tool's canonical/alias pair predates that convention —
+        // restoring it here is a bugfix, not a behavior change worth re-litigating (CR minor 1).
         if (!summary) return ok({ error: "handoffSummary (or continuationPrompt) is required" });
         try {
           ensureWorkerLinked(workerSessionId, "worker_recycle");
@@ -1431,7 +1453,9 @@ export class OrchestrationMcpRouter {
         inputSchema: { continuationPrompt: z.string().optional(), handoffSummary: z.string().optional() },
       },
       async ({ continuationPrompt, handoffSummary }) => {
-        const prompt = continuationPrompt ?? handoffSummary;
+        const prompt = resolveAlias(continuationPrompt, handoffSummary);
+        // Falsy check (NOT `=== undefined`) — see the matching comment on worker_recycle above (CR minor 1):
+        // restores the pre-alias behavior of rejecting an empty string at the tool boundary.
         if (!prompt) return ok({ error: "continuationPrompt (or handoffSummary) is required" });
         try {
           const fresh = await sessions.recycleManager(managerSessionId, prompt);
@@ -1479,16 +1503,20 @@ export class OrchestrationMcpRouter {
           "= nothing to do until something lands — optionally snooze for `minutes` (defaults to the " +
           "per-project idle snooze); 'done' = this agent's work is complete. If you need the human, file " +
           "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
-          "short `detail` to say why (recorded for the human).",
+          "short `detail` to say why (recorded for the human). `state` is the canonical param; `status` " +
+          "is accepted as an ALIAS for it — pass either one (if both, state wins).",
         inputSchema: {
-          state: z.enum(["working", "waiting", "done"]),
+          state: z.enum(["working", "waiting", "done"]).optional(),
+          status: z.enum(["working", "waiting", "done"]).optional(),
           detail: z.string().optional(),
           minutes: z.number().optional(),
         },
       },
-      async ({ state, detail, minutes }) => {
+      async ({ state, status, detail, minutes }) => {
+        const resolvedState = resolveAlias(state, status);
+        if (resolvedState === undefined) return ok({ error: "state (or status) is required" });
         try {
-          return ok(sessions.recordIdleReport(managerSessionId, state, { detail, minutes }));
+          return ok(sessions.recordIdleReport(managerSessionId, resolvedState, { detail, minutes }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }
@@ -1812,16 +1840,20 @@ export class OrchestrationMcpRouter {
           "`deduped: true` and no fresh Lead nudge is sent; check escalation_status instead of re-escalating " +
           "on a timer. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
           "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
-          "project's task board (use tasks_create there).",
+          "project's task board (use tasks_create there). `detail` is the canonical param; `body` is " +
+          "accepted as an ALIAS for it — pass either one (if both, detail wins).",
         inputSchema: {
           title: z.string(),
-          detail: z.string(),
+          detail: z.string().optional(),
+          body: z.string().optional(),
           severity: z.enum(["low", "medium", "high", "critical"]).optional(),
         },
       },
-      async ({ title, detail, severity }) => {
+      async ({ title, detail, body, severity }) => {
+        const resolvedDetail = resolveAlias(detail, body);
+        if (resolvedDetail === undefined) return ok({ error: "detail (or body) is required" });
         try {
-          return ok(sessions.platformEscalate(managerSessionId, { title, detail, severity }));
+          return ok(sessions.platformEscalate(managerSessionId, { title, detail: resolvedDetail, severity }));
         } catch (e) {
           return ok({ error: (e as Error).message });
         }

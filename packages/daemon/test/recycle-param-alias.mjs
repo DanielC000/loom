@@ -86,6 +86,14 @@ try {
   check("(4) worker_recycle({}) — neither param → explicit error naming both", typeof r4.error === "string" && r4.error.includes("handoffSummary") && r4.error.includes("continuationPrompt"));
   check("(4) worker_recycle({}) — sessions.recycleWorker was NOT called for the missing-param case", calls.recycleWorker.length === 3);
 
+  // (4b) CR minor 1: an EMPTY STRING is a falsy "nothing given", not a valid handoff — must be
+  // rejected at the TOOL boundary with the same clear "required" message, not passed through to
+  // sessions.recycleWorker (where it used to surface a confusingly different error, or none at all).
+  const r4b = await call("worker_recycle", { workerSessionId: "wkr4b", handoffSummary: "" });
+  check("(4b) worker_recycle({handoffSummary:\"\"}) — empty string treated as missing, rejected at the tool boundary",
+    typeof r4b.error === "string" && r4b.error.includes("handoffSummary") && r4b.error.includes("continuationPrompt"));
+  check("(4b) worker_recycle({handoffSummary:\"\"}) — sessions.recycleWorker was NOT called", calls.recycleWorker.length === 3);
+
   // ===================== recycle_me =====================
   // (5) The ORIGINAL canonical `continuationPrompt` param still works unchanged (no regression).
   const m1 = await call("recycle_me", { continuationPrompt: "CP-canonical" });
@@ -108,6 +116,12 @@ try {
   const m4 = await call("recycle_me", {});
   check("(8) recycle_me({}) — neither param → explicit error naming both", typeof m4.error === "string" && m4.error.includes("continuationPrompt") && m4.error.includes("handoffSummary"));
   check("(8) recycle_me({}) — sessions.recycleManager was NOT called for the missing-param case", calls.recycleManager.length === 3);
+
+  // (8b) CR minor 1: mirrors (4b) for recycle_me's own canonical/alias pair.
+  const m4b = await call("recycle_me", { continuationPrompt: "" });
+  check("(8b) recycle_me({continuationPrompt:\"\"}) — empty string treated as missing, rejected at the tool boundary",
+    typeof m4b.error === "string" && m4b.error.includes("continuationPrompt") && m4b.error.includes("handoffSummary"));
+  check("(8b) recycle_me({continuationPrompt:\"\"}) — sessions.recycleManager was NOT called", calls.recycleManager.length === 3);
 
   await client.close();
 } finally {

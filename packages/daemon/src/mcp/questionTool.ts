@@ -3,6 +3,7 @@ import { z } from "zod";
 import { QUESTION_TYPES, PERMISSION_SCOPES, PERMISSION_ANSWERS, type Question, type QuestionType, type PermissionScope, type ProvisionTarget, type SessionRole } from "@loom/shared";
 import { resolveIdPrefix } from "../id-prefix.js";
 import type { Db } from "../db.js";
+import { resolveAlias } from "./arg-alias.js";
 
 /** Roles allowed to set `provisionTo` on a `type:"credential"` ask (card 193de09e Q1) — manager and
  *  platform (the Lead) only. Enforced in `buildQuestionAsk` below so both `question_ask` registrations
@@ -24,7 +25,12 @@ const PROVISIONING_ROLES: readonly SessionRole[] = ["manager", "platform"];
 export const QUESTION_ASK_INPUT_SHAPE = {
   type: z.enum(QUESTION_TYPES).optional(),
   title: z.string(),
-  body: z.string(),
+  // `body` is the canonical param; `detail` (platform_escalate's name for the same concept) is
+  // accepted as an ALIAS for it — resolved in buildQuestionAsk below (card fix(mcp): accept
+  // arg-name aliases). Both optional here so a caller passing only `detail` still validates; buildQuestionAsk
+  // rejects the case where NEITHER is given.
+  body: z.string().optional(),
+  detail: z.string().optional(),
   options: z.array(z.string()).optional(),
   recommendation: z.string().optional(),
   taskId: z.string().optional(),
@@ -45,7 +51,8 @@ export const QUESTION_ASK_INPUT_SHAPE = {
 export interface QuestionAskInput {
   type?: QuestionType;
   title: string;
-  body: string;
+  body?: string;
+  detail?: string;
   options?: string[];
   recommendation?: string;
   taskId?: string;
@@ -75,6 +82,8 @@ export function buildQuestionAsk(
   ctx: { sessionId: string; projectId: string; db: Db; role: SessionRole },
 ): { question: Question } | { error: string } {
   const type: QuestionType = input.type ?? "decision";
+  const body = resolveAlias(input.body, input.detail);
+  if (body === undefined) return { error: "body (or detail) is required" };
   if (type === "permission" && !input.action?.trim()) {
     return { error: 'type:"permission" requires a non-empty `action` describing what you want authorized' };
   }
@@ -108,7 +117,7 @@ export function buildQuestionAsk(
       projectId: ctx.projectId,
       type,
       title: input.title,
-      body: input.body,
+      body,
       options: type === "decision" && input.options && input.options.length > 0 ? input.options : null,
       recommendation: type === "decision" ? (input.recommendation ?? null) : null,
       taskId,
