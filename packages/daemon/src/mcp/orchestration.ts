@@ -11,7 +11,7 @@ import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { readTranscript, pageTranscript } from "../sessions/transcript.js";
+import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -903,8 +903,11 @@ export class OrchestrationMcpRouter {
           "offset, returned, nextOffset}. Page deterministically by calling again with offset:nextOffset " +
           "until nextOffset is null (covers the whole transcript, no gaps/overlaps). `lastN` is a SEPARATE " +
           "backward-compat shortcut for 'just the last N turns': it takes PRECEDENCE over offset/limit/ " +
-          "turnRange (pass one style or the other, not both) and always returns the bare last-N array, " +
-          "never a page envelope.",
+          "turnRange (pass one style or the other, not both) and always returns the bare last-N array — " +
+          "but is ALSO bounded to the same page char budget, so a large `lastN` may return fewer than N " +
+          "turns (always the MOST RECENT ones). A long offset->nextOffset walk is capped in aggregate " +
+          "too: past ~10 pages, a page comes back with nextOffset:null and truncated:true even though " +
+          "more remains — switch to a targeted turnRange read instead of continuing to loop.",
         inputSchema: {
           workerSessionId: z.string(),
           lastN: z.number().optional(),
@@ -917,10 +920,12 @@ export class OrchestrationMcpRouter {
         const w = ensureWorkerLinked(workerSessionId, "worker_transcript");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
-        if (typeof lastN === "number" && lastN > 0) return ok(turns.slice(-lastN));
+        if (typeof lastN === "number" && lastN > 0) return ok(lastNTurns(turns, lastN));
         const page = pageTranscript(turns, { offset, limit, turnRange });
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
-        return ok(!explicit && page.offset === 0 && page.nextOffset === null ? page.turns : page);
+        if (!explicit && page.offset === 0 && page.nextOffset === null) return ok(page.turns);
+        const bounded = w.engineSessionId ? applyAggregateWalkCap(w.engineSessionId, page.offset, page) : page;
+        return ok(bounded);
       },
     );
 

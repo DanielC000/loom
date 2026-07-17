@@ -12,12 +12,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // totalTurns, offset, returned, nextOffset} the auditor's transcript_read already uses, offset/limit
 // pages it deterministically with no gaps/overlaps, a default call on a small transcript stays
 // byte-shape backward-compatible (bare array), and lastN keeps working (and takes precedence).
+//
+// Also guards the two READ LEAKS closed by task 14aee044: (a) `lastN` used to bypass the page char
+// budget entirely (a bare `turns.slice(-lastN)`) — a large lastN on a large-turn transcript could pull
+// an unbounded amount; (b) sequential offset->nextOffset paging had no bound on the AGGREGATE across
+// many chained calls — each page was capped, but nothing stopped walking the whole transcript page by
+// page. Both are now bounded (lastNTurns / applyAggregateWalkCap in sessions/transcript.ts).
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { Db } from "../dist/db.js";
 import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
-import { engineTranscriptPath } from "../dist/sessions/transcript.js";
+import { engineTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } from "../dist/sessions/transcript.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 
@@ -54,6 +60,11 @@ db.insertSession({
   resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker",
   parentSessionId: "M", taskId: "tk-small", branch: "loom/w-small",
 });
+db.insertSession({
+  id: "W-HUGE", projectId: projId, agentId, engineSessionId: "eng-w-huge", title: null, cwd, processState: "live",
+  resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker",
+  parentSessionId: "M", taskId: "tk-huge", branch: "loom/w-huge",
+});
 
 // --- a LARGE transcript on disk: 10 turns of ~10KB text each — big enough that the default page budget
 // (~48KB) can't fit them all in one shot, so worker_transcript() with NO args must return a page
@@ -71,6 +82,18 @@ const smallFile = engineTranscriptPath(cwd, "eng-w-small");
 fs.mkdirSync(path.dirname(smallFile), { recursive: true });
 fs.writeFileSync(smallFile, Array.from({ length: 3 }, (_, i) =>
   JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: `small-turn-${i}` }] } })
+).join("\n") + "\n");
+
+// --- a HUGE transcript: enough ~10KB turns to blow past TRANSCRIPT_AGGREGATE_CHAR_BUDGET (the 10-page
+// aggregate walk cap) with turns left over — proves a sequential offset->nextOffset walk stops EARLY
+// (truncated:true) instead of re-ingesting the whole thing, even though each individual page is fine. ---
+const HUGE_TURN_TEXT_LEN = 10_000;
+const APPROX_TURN_CHARS = HUGE_TURN_TEXT_LEN + 20 /* index/prefix slack */ + 40 /* role + JSON overhead */;
+const HUGE_TURN_COUNT = Math.ceil(TRANSCRIPT_AGGREGATE_CHAR_BUDGET / APPROX_TURN_CHARS) + 20;
+const hugeFile = engineTranscriptPath(cwd, "eng-w-huge");
+fs.mkdirSync(path.dirname(hugeFile), { recursive: true });
+fs.writeFileSync(hugeFile, Array.from({ length: HUGE_TURN_COUNT }, (_, i) =>
+  JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: `huge-${i}-` + "x".repeat(HUGE_TURN_TEXT_LEN) }] } })
 ).join("\n") + "\n");
 
 // --- drive the REAL manager MCP tools in-process (worker_transcript only reads `db`; `sessions` is
@@ -124,6 +147,41 @@ const lastWithOffset = await call("worker_transcript", { workerSessionId: "W-BIG
 check("worker_transcript(W-BIG, lastN:1, offset:5) — lastN wins, still a bare 1-element array",
   Array.isArray(lastWithOffset) && lastWithOffset.length === 1 && lastWithOffset[0].text.startsWith("turn-9-"));
 
+// ============================ (3b) LEAK FIX: lastN is bounded by the page char budget too — a large
+// lastN whose total size exceeds the budget must return FEWER than N turns (the MOST RECENT ones),
+// never the raw unbounded slice ============================
+const lastAllBig = await call("worker_transcript", { workerSessionId: "W-BIG", lastN: BIG_TURN_COUNT });
+check(`worker_transcript(W-BIG, lastN:${BIG_TURN_COUNT}) is bounded by the page char budget (got ${Array.isArray(lastAllBig) ? lastAllBig.length : "non-array"}, not the full ${BIG_TURN_COUNT})`,
+  Array.isArray(lastAllBig) && lastAllBig.length > 0 && lastAllBig.length < BIG_TURN_COUNT);
+check("worker_transcript budget-bounded lastN result still ends on the MOST RECENT turn",
+  Array.isArray(lastAllBig) && lastAllBig[lastAllBig.length - 1].text.startsWith(`turn-${BIG_TURN_COUNT - 1}-`));
+
+// ============================ (3c) LEAK FIX: sequential offset->nextOffset chaining across MANY pages
+// is bounded in AGGREGATE — it must stop (truncated:true, nextOffset:null) before re-ingesting an
+// entire huge transcript, even though every individual page stays within its own page budget ============
+let hoff = 0, hseen = 0, hpages = 0, hTruncated = false;
+while (hoff !== null) {
+  const pg = await call("worker_transcript", { workerSessionId: "W-HUGE", offset: hoff });
+  hseen += pg.returned;
+  hpages++;
+  if (pg.truncated) {
+    hTruncated = true;
+    check("aggregate-capped page forces nextOffset:null", pg.nextOffset === null);
+    hoff = null;
+  } else {
+    hoff = pg.nextOffset;
+  }
+  if (hpages > 30) { check("huge-transcript walk terminates (runaway guard)", false); break; }
+}
+check(`sequential offset-walk of a HUGE transcript (${HUGE_TURN_COUNT} turns, ~${HUGE_TURN_COUNT * APPROX_TURN_CHARS} chars) is capped in aggregate — stopped after ${hseen} turns / ${hpages} pages (truncated=${hTruncated}), NOT the whole transcript`,
+  hTruncated && hseen > 0 && hseen < HUGE_TURN_COUNT);
+
+// A FRESH walk (offset:0 again — NOT continuing the capped walk's nextOffset) must not be penalized by
+// the prior walk's consumption; it gets its own budget from scratch.
+const freshAfterCap = await call("worker_transcript", { workerSessionId: "W-HUGE", offset: 0 });
+check("a fresh offset:0 read after a capped walk is NOT pre-truncated by the prior walk's consumption",
+  freshAfterCap.truncated !== true && freshAfterCap.returned > 0);
+
 // ============================ (4) a SMALL transcript with no paging arg stays byte-shape backward-compat:
 // the bare turns array, not an envelope — but an EXPLICIT paging arg still returns the envelope even
 // though it fits in one page ============================
@@ -141,6 +199,6 @@ for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force:
 try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_transcript pages a large transcript in bounded envelopes (no overflow), offset paging covers the whole transcript with no gaps/overlaps, a small transcript stays backward-compatible, and lastN still works and takes precedence."
+  ? "\n✅ ALL PASS — worker_transcript pages a large transcript in bounded envelopes (no overflow), offset paging covers the whole transcript with no gaps/overlaps, a small transcript stays backward-compatible, lastN still works and takes precedence (and is itself budget-bounded), and a sequential offset-walk of a huge transcript is capped in aggregate instead of re-ingesting it whole."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

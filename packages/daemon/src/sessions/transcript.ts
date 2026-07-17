@@ -227,6 +227,13 @@ export interface TranscriptPage {
   returned: number;
   /** Offset to pass for the NEXT page, or null when this page reached the end of the (ranged) transcript. */
   nextOffset: number | null;
+  /**
+   * True when `nextOffset` was forced to null by {@link applyAggregateWalkCap} even though more turns
+   * remained — the caller has walked far enough via offset->nextOffset chaining that continuing would
+   * re-ingest an unbounded amount of the transcript. Switch to a targeted `turnRange` read instead.
+   * Absent (not just false) on a page the cap never touched.
+   */
+  truncated?: boolean;
 }
 
 /**
@@ -261,6 +268,86 @@ export function pageTranscript(
   }
   const endIdx = start + turns.length;
   return { turns, totalTurns: total, offset: start, returned: turns.length, nextOffset: endIdx < windowEnd ? endIdx : null };
+}
+
+/** Approximate a turn's serialized footprint the same way {@link pageTranscript} does. */
+function turnCharSize(t: TranscriptTurn): number {
+  return t.text.length + t.role.length + 40;
+}
+
+/**
+ * Bounded "last N turns" read: like `all.slice(-n)`, but capped to {@link TRANSCRIPT_PAGE_CHAR_BUDGET}
+ * so a large `n` (or large turns) can't bypass the page budget the way a bare slice used to — this was
+ * the one read path in the module that skipped the budget entirely. Always keeps at least the single
+ * most recent turn, and always keeps the MOST RECENT turns (trims from the OLDER end of the requested
+ * window when the budget is exceeded), mirroring pageTranscript's own "always take >=1" rule.
+ */
+export function lastNTurns(all: TranscriptTurn[], n: number): TranscriptTurn[] {
+  const want = Math.max(1, n);
+  const start = Math.max(0, all.length - want);
+  let chars = 0;
+  let firstIncluded = all.length;
+  for (let i = all.length - 1; i >= start; i--) {
+    const t = all[i];
+    if (!t) break;
+    const size = turnCharSize(t);
+    if (firstIncluded < all.length && chars + size > TRANSCRIPT_PAGE_CHAR_BUDGET) break; // always take >=1
+    chars += size;
+    firstIncluded = i;
+  }
+  return all.slice(firstIncluded);
+}
+
+/**
+ * Aggregate ceiling (chars) on ONE caller's sequential offset -> nextOffset walk through a transcript.
+ * A single page is already bounded by {@link TRANSCRIPT_PAGE_CHAR_BUDGET}, but nothing stopped a caller
+ * from looping start -> nextOffset arbitrarily many times and re-ingesting an entire (possibly
+ * multi-megabyte) transcript page by page. 10 pages (~480KB, ~120K tokens) is generous headroom for a
+ * real investigation; walking further should be a deliberate turnRange-targeted read, not a blind loop.
+ */
+export const TRANSCRIPT_AGGREGATE_CHAR_BUDGET = TRANSCRIPT_PAGE_CHAR_BUDGET * 10;
+
+/**
+ * Per-process tracker of chars consumed by a caller's IN-PROGRESS sequential offset-walk of one
+ * transcript, keyed by an identity for "this transcript" (e.g. its engineSessionId). A single
+ * pageTranscript() call can't tell a chained offset:nextOffset continuation apart from a fresh direct
+ * jump to some offset — both arrive as the same bare {offset} — so the walk is tracked explicitly here
+ * instead, mirroring the daemon's other per-session in-memory trackers (e.g. the companion's trust
+ * windows). Bounded to a small number of concurrently in-progress walks (evicted oldest-first) so this
+ * can never grow unbounded over a long daemon lifetime.
+ */
+const MAX_TRACKED_WALKS = 200;
+const walkState = new Map<string, { consumed: number; expectedOffset: number }>();
+
+/**
+ * Apply the aggregate walk cap to a page {@link pageTranscript} just produced, keyed by `walkKey`. A
+ * call that CONTINUES the walk this key is already tracking (its `requestedOffset` matches the
+ * previous page's `nextOffset`) accumulates onto that walk's running total; anything else — a fresh
+ * read, a direct jump, a different turnRange — starts a new walk at 0 and is never penalized by an
+ * unrelated prior walk. Once the walk's cumulative served chars reach
+ * {@link TRANSCRIPT_AGGREGATE_CHAR_BUDGET}, the page is returned with `nextOffset` forced to null and
+ * `truncated:true` — even though pageTranscript itself had more to give — so a caller can't keep
+ * looping past the cap; it must switch to a targeted turnRange read instead. A page whose `nextOffset`
+ * was ALREADY null (the walk finished naturally, within budget) passes through untouched.
+ */
+export function applyAggregateWalkCap(walkKey: string, requestedOffset: number, page: TranscriptPage): TranscriptPage {
+  if (page.nextOffset === null) {
+    walkState.delete(walkKey);
+    return page;
+  }
+  const prior = walkState.get(walkKey);
+  const continuing = prior !== undefined && prior.expectedOffset === requestedOffset;
+  const consumed = (continuing ? prior.consumed : 0) + page.turns.reduce((sum, t) => sum + turnCharSize(t), 0);
+  if (consumed >= TRANSCRIPT_AGGREGATE_CHAR_BUDGET) {
+    walkState.delete(walkKey);
+    return { ...page, nextOffset: null, truncated: true };
+  }
+  if (!walkState.has(walkKey) && walkState.size >= MAX_TRACKED_WALKS) {
+    const oldest = walkState.keys().next().value;
+    if (oldest !== undefined) walkState.delete(oldest);
+  }
+  walkState.set(walkKey, { consumed, expectedOffset: page.nextOffset });
+  return page;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────────
