@@ -408,12 +408,33 @@ try {
     await removeWorktree(repo, wtN);
     await deleteBranch(repo, brN);
   }
+
+  // (o) card 9c46cd7a — a title naming a param/type (`supersedes:<id>`) must land in the squash commit
+  //     subject with its literal `<`/`>`/`&` intact, never HTML-entity-escaped. toConventionalSubject is
+  //     pure string manipulation (regex + concatenation) with no encode step, so this is a passthrough
+  //     case identical to (n)'s plain-conventional check — asserted end-to-end through a real mergeBranch
+  //     squash (not just the pure function) so a future regression anywhere in the merge-subject path
+  //     (not only toConventionalSubject itself) would trip this.
+  {
+    const rawTitle = "feat(orchestration): add an explicit supersedes:<id> param to question_ask";
+    check("(o) toConventionalSubject leaves `<id>` unescaped (passthrough, already conventional)",
+      toConventionalSubject(rawTitle) === rawTitle);
+    const tO = "convsubj-angle-9c46";
+    const { worktreePath: wtO, branch: brO } = await createWorktree(repo, "projWT", tO);
+    commitInto(wtO, "o.txt", "o\n", "o commit");
+    const mO = await mergeBranch(repo, brO, rawTitle);
+    check("(o) e2e squash ok", mO.ok === true && typeof mO.sha === "string");
+    check("(o) e2e commit subject contains a LITERAL <id>, not &lt;id&gt;",
+      git(repo, "log -1 --format=%s") === rawTitle);
+    await removeWorktree(repo, wtO);
+    await deleteBranch(repo, brO);
+  }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, and every boot-reconcile op (removeWorktree's git ops AND its filesystem backstop, isBranchMerged, deleteBranch) is BOUNDED — neither a hung git nor a stuck directory handle can wedge daemon boot anywhere in the reconcile path."
+  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, every boot-reconcile op (removeWorktree's git ops AND its filesystem backstop, isBranchMerged, deleteBranch) is BOUNDED — neither a hung git nor a stuck directory handle can wedge daemon boot anywhere in the reconcile path — and a title naming a param/type (`<id>`) lands in the squash commit subject unescaped."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
