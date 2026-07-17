@@ -525,43 +525,35 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const odMcpParsed = parseOpenDesignMcpConfig(openDesignMcpConfigJson);
 
   // Build the PATCH body from the form — every non-blank field converted to canonical ms (× the unit).
-  // A field/group that's ENTIRELY blank sends the explicit `null` clear-to-inherit sentinel (card
-  // fd55ac8a) — NOT omitted — so a set→blank→save round-trip actually reverts the stored override
-  // instead of leaving the last-saved value stranded (the PATCH handler only leaves an OMITTED key
-  // alone; only `null` deletes it). A group with at least one non-blank field still sends that group as
-  // a plain object (each field within it stays a non-nullable number, so a stray NaN-from-garbage-input
-  // inside it still 400s, same as pre-fix).
+  // A blank field sends the explicit PER-FIELD `null` clear-to-inherit sentinel (card ba9ccd75) — NOT
+  // omitted — so a set→blank→save round-trip actually reverts that field instead of leaving the
+  // last-saved value stranded. The PATCH handler now DEEP-merges each group field by field, so sending
+  // only the fields this grid renders is safe: a field this form doesn't present (e.g.
+  // rateLimit.exhaustedThresholdPct — one of the 3 daemon-global fields with no GLOBAL_FIELDS control,
+  // human-settable only via direct REST) is simply never mentioned in the submitted group, and "omitted
+  // = leave alone" now holds at the field level too — no need to read back and re-carry the persisted
+  // override's non-grid keys the way the old shallow-merge server contract required.
+  //
+  // Code-review catch (card ba9ccd75): widening the per-field schema to accept `null` removed a guard
+  // this grid was leaning on WITHOUT its own backstop — a garbage entry (`Number("abc")` → NaN,
+  // `Number("1e999")` → Infinity) JSON-serializes to `null`, which is now the SAME wire shape as the
+  // legitimate clear sentinel above, so it would silently "succeed" as a clear instead of 400ing. Same
+  // hazard, same fix as `maxConcurrentGates` below: route a non-finite result through as the ORIGINAL
+  // STRING rather than the NaN/Infinity number, so it fails the `number|null` shape check server-side
+  // and still 400s readably.
   function buildGlobalOverride(): PlatformConfigPatch {
     const o: PlatformConfigPatch = {};
     const msGroups = ["rateLimit", "watchers", "timeouts"] as const;
     for (const grp of msGroups) {
-      const entries: Record<string, number> = {};
+      const entries: Record<string, number | string | null> = {};
       for (const f of GLOBAL_FIELDS) {
         if (f.grp !== grp) continue;
         const s = vals[f.key] ?? "";
-        if (s.trim() === "") continue;
-        entries[f.key] = Number(s) * UNIT_MS[f.unit];
+        if (s.trim() === "") { entries[f.key] = null; continue; }
+        const n = Number(s) * UNIT_MS[f.unit];
+        entries[f.key] = Number.isFinite(n) ? n : s;
       }
-      // Code-review fix: some fields the platform-config zod schemas accept (mcp/platform.ts —
-      // rateLimit.exhaustedThresholdPct, watchers.crashRecoveryWatchMs, timeouts.runMs) have NO control
-      // in GLOBAL_FIELDS — the grid simply never renders them, but a human can still persist them
-      // directly over the loopback REST PATCH (there is no agent-facing writer for this daemon-global
-      // surface — see CLAUDE.md/mcp/platform.ts's human-only note). A submitted group REPLACES the
-      // persisted one wholesale (the PATCH handler's shallow TOP-LEVEL merge), so building the group from
-      // ONLY grid fields — as the first pass of this card did — would silently DELETE a non-grid sibling
-      // the instant this form saves, even though the user never touched (or even saw) it. Carry every
-      // non-grid key through from the loaded override UNCHANGED, so this form can only ever affect the
-      // fields it actually presents; the group is nulled only when it's genuinely empty (nothing
-      // persisted outside the grid, nothing entered in it) — never merely because the grid itself is
-      // blank.
-      const persistedGroup = (override as Record<string, Record<string, unknown> | undefined>)[grp] ?? {};
-      const gridKeys = new Set(GLOBAL_FIELDS.filter((f) => f.grp === grp).map((f) => f.key));
-      const preserved: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(persistedGroup)) {
-        if (!gridKeys.has(k)) preserved[k] = v;
-      }
-      const merged = { ...preserved, ...entries };
-      (o as Record<string, unknown>)[grp] = Object.keys(merged).length > 0 ? merged : null;
+      (o as Record<string, unknown>)[grp] = entries;
     }
     o.coalesceAgentMessages = coalesceAgentMsgs === "inherit" ? null : coalesceAgentMsgs === "true";
     o.operatorEnabled = operatorEnabled === "inherit" ? null : operatorEnabled === "true";

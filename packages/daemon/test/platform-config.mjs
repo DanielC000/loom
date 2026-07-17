@@ -664,13 +664,16 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
-// ============================ (15) clear-to-inherit sentinel (card fd55ac8a) ============================
+// ============================ (15) clear-to-inherit sentinel (card fd55ac8a, deep-merge (16) below) ============================
 // Set→blank→save must actually clear a top-level scalar/group back to inherit-the-default — the PATCH
 // handler used to shallow-merge ONLY submitted keys, so an omitted (blanked) field left the stale
 // persisted value in place forever. An explicit `null` on one of the 7 clearable keys
 // (schedulerEnabled/operatorEnabled/coalesceAgentMessages/maxConcurrentGates + the ms-keyed
 // rateLimit/watchers/timeouts groups) now DELETES that key from the persisted override; an OMITTED key
-// is unaffected (today's/unchanged behavior — test (12) above already covers that half).
+// is unaffected (today's/unchanged behavior — test (12) above already covers that half). Card ba9ccd75
+// widened this further: a field NESTED INSIDE a submitted rateLimit/watchers/timeouts group is now ALSO
+// individually nullable (its own per-field clear sentinel) — see test (16) below for the deep-merge
+// contract this enables.
 {
   // --- validatePlatformConfigPatch: null accepted on every clearable key, rejected everywhere else ---
   check("(15) accepts schedulerEnabled:null", validatePlatformConfigPatch({ schedulerEnabled: null }).ok === true);
@@ -686,10 +689,13 @@ const dbFile = path.join(TMP, "loom.db");
   check("(15) REJECTS connections:null", validatePlatformConfigPatch({ connections: null }).ok === false);
   check("(15) REJECTS integrations:null", validatePlatformConfigPatch({ integrations: null }).ok === false);
   check("(15) REJECTS remoteAccess:null", validatePlatformConfigPatch({ remoteAccess: null }).ok === false);
-  // Only the WHOLE-GROUP key is nullable, not its members — a stray null (e.g. NaN-from-garbage-input
-  // over JSON) inside an otherwise-populated group still 400s, same as pre-fix.
-  check("(15) rejects a null WITHIN rateLimit (per-field, not whole-group)",
-    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: null } }).ok === false);
+  // (card ba9ccd75 — INVERTS the pre-ba9ccd75 assertion here) A field nested INSIDE a submitted group is
+  // now its OWN per-field clear sentinel, not rejected — this is the whole point of the widened schema.
+  // A genuinely malformed field (wrong TYPE, not null) still 400s exactly like before.
+  check("(15) accepts a null WITHIN rateLimit (per-field clear sentinel, card ba9ccd75)",
+    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: null } }).ok === true);
+  check("(15) still REJECTS a wrong-typed (non-null, non-number) value within rateLimit",
+    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: "not-a-number" } }).ok === false);
 
   // --- REST round-trip: set → clear → the stored override no longer carries the key, resolves to the default ---
   const clearDbFile = path.join(TMP, "clear-sentinel.db");
@@ -697,14 +703,15 @@ const dbFile = path.join(TMP, "loom.db");
   const stub = {};
   const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
   try {
-    // Seed all 4 scalar toggles + all 3 ms groups (rateLimit with TWO fields, to prove a partial-group
-    // replace still keeps a resent sibling while dropping the one that's blanked client-side).
+    // Seed all 4 scalar toggles + all 3 ms groups (rateLimit with THREE fields — one gets resent/changed,
+    // one gets per-field-nulled, one stays OMITTED from the clear PATCH below to prove the deep merge
+    // leaves an untouched sibling alone even inside a group that's otherwise being edited).
     db.setPlatformConfig({
       schedulerEnabled: true,
       operatorEnabled: true,
       coalesceAgentMessages: true,
       maxConcurrentGates: 5,
-      rateLimit: { defaultBackoffMs: 3600000, resetBufferMs: 20000 },
+      rateLimit: { defaultBackoffMs: 3600000, resetBufferMs: 20000, deadlineAfterResetMs: 7200000 },
       watchers: { wakeMs: 90000 },
       timeouts: { gitPushMs: 90000 },
     });
@@ -712,20 +719,20 @@ const dbFile = path.join(TMP, "loom.db");
     check("(15) seed: every field persisted before the clear",
       before.schedulerEnabled === true && before.operatorEnabled === true && before.coalesceAgentMessages === true &&
       before.maxConcurrentGates === 5 && before.rateLimit?.defaultBackoffMs === 3600000 && before.rateLimit?.resetBufferMs === 20000 &&
-      before.watchers?.wakeMs === 90000 && before.timeouts?.gitPushMs === 90000);
+      before.rateLimit?.deadlineAfterResetMs === 7200000 && before.watchers?.wakeMs === 90000 && before.timeouts?.gitPushMs === 90000);
 
     // Clear 3 of the 4 scalars + both single-field ms groups via the `null` sentinel; leave
-    // `operatorEnabled` UNTOUCHED (omitted) to prove an omitted field survives a save that clears its
-    // siblings; resend `rateLimit` as a partial object (one field blanked client-side ⇒ omitted from
-    // it, mirroring GlobalConfigForm.buildGlobalOverride) rather than null, since it still has a
-    // non-blank field.
+    // `operatorEnabled` UNTOUCHED (omitted) to prove an omitted top-level field survives a save that
+    // clears its siblings. For `rateLimit`: resend `defaultBackoffMs` CHANGED, per-field-null
+    // `resetBufferMs` to clear just that field, and OMIT `deadlineAfterResetMs` entirely — the deep-merge
+    // contract (card ba9ccd75) this test now exercises.
     const clear = await app.inject({
       method: "PATCH", url: "/api/platform/config",
       payload: {
         schedulerEnabled: null,
         coalesceAgentMessages: null,
         maxConcurrentGates: null,
-        rateLimit: { defaultBackoffMs: 3600000 },
+        rateLimit: { defaultBackoffMs: 1800000, resetBufferMs: null },
         watchers: null,
         timeouts: null,
       },
@@ -739,8 +746,9 @@ const dbFile = path.join(TMP, "loom.db");
     check("(15) UNTOUCHED scalar (operatorEnabled, omitted from the PATCH) is byte-identical", after.operatorEnabled === true);
     check("(15) cleared group #1 (watchers) is GONE entirely, not stale", after.watchers === undefined);
     check("(15) cleared group #2 (timeouts) is GONE entirely, not stale", after.timeouts === undefined);
-    check("(15) partially-replaced group (rateLimit) keeps the resent field", after.rateLimit?.defaultBackoffMs === 3600000);
-    check("(15) partially-replaced group (rateLimit) drops the sibling blanked client-side (not resent)", after.rateLimit?.resetBufferMs === undefined);
+    check("(15) deep-merged group (rateLimit) applies the resent/changed field", after.rateLimit?.defaultBackoffMs === 1800000);
+    check("(15) deep-merged group (rateLimit) clears the per-field null sentinel", after.rateLimit?.resetBufferMs === undefined);
+    check("(15) deep-merged group (rateLimit) leaves the OMITTED sibling untouched (card ba9ccd75)", after.rateLimit?.deadlineAfterResetMs === 7200000);
 
     // resolveConfig now reflects the platform DEFAULT for every cleared key, not the stale override.
     const resolved = resolveConfig(undefined, after);
@@ -784,10 +792,75 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (16) deep-merge the ms-keyed groups (card ba9ccd75) ============================
+// The exact regression from the card: PATCHing ONE non-grid field of `rateLimit` (a field no Settings UI
+// control renders — `exhaustedThresholdPct`/`crashRecoveryWatchMs`/`runMs` are human-settable only via
+// direct loopback REST) used to silently WIPE every other persisted sibling in that group, because the
+// pre-fix handler treated a submitted group as a wholesale replace (`merged[key] = val`) rather than
+// merging field by field — the same "omitted ≠ leave alone" bug `fd55ac8a` fixed one level up, still
+// present one level down. This test FAILS on pre-ba9ccd75 main (the siblings come back `undefined`).
+{
+  const deepMergeDbFile = path.join(TMP, "deep-merge-groups.db");
+  const db = new Db(deepMergeDbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    // Seed a full rateLimit group with 3 fields, exactly as a human's earlier curl PATCHes might have
+    // built it up over time.
+    db.setPlatformConfig({ rateLimit: { defaultBackoffMs: 1800000, resetBufferMs: 10000, exhaustedThresholdPct: 80 } });
+
+    // The card's exact repro: PATCH only exhaustedThresholdPct.
+    const patch = await app.inject({
+      method: "PATCH", url: "/api/platform/config",
+      payload: { config: { rateLimit: { exhaustedThresholdPct: 90 } } },
+    });
+    check("(16) PATCH a single non-grid rateLimit field → 200", patch.statusCode === 200);
+
+    const after = db.getPlatformConfig();
+    check("(16) the submitted field applies", after.rateLimit?.exhaustedThresholdPct === 90);
+    check("(16) sibling #1 (defaultBackoffMs) survives — NOT silently wiped", after.rateLimit?.defaultBackoffMs === 1800000);
+    check("(16) sibling #2 (resetBufferMs) survives — NOT silently wiped", after.rateLimit?.resetBufferMs === 10000);
+
+    // watchers/timeouts get the identical treatment (same DEEP_MERGE_GROUPS set in server.ts).
+    db.setPlatformConfig({ ...db.getPlatformConfig(), watchers: { wakeMs: 60000, idleWatchMs: 30000 }, timeouts: { gitPushMs: 45000, gitOpMs: 20000 } });
+    await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { config: { watchers: { idleWatchMs: 45000 } } } });
+    await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { config: { timeouts: { gitOpMs: 25000 } } } });
+    const after2 = db.getPlatformConfig();
+    check("(16) watchers: submitted field applies, OMITTED sibling survives",
+      after2.watchers?.idleWatchMs === 45000 && after2.watchers?.wakeMs === 60000);
+    check("(16) timeouts: submitted field applies, OMITTED sibling survives",
+      after2.timeouts?.gitOpMs === 25000 && after2.timeouts?.gitPushMs === 45000);
+
+    // Whole-group `null` still clears the ENTIRE group, including a field the deep merge would otherwise
+    // have preserved — the deep merge only changes OMITTED-field handling, not the whole-group sentinel.
+    const wholeGroupClear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { config: { rateLimit: null } } });
+    check("(16) whole-group null still clears every field, unchanged", wholeGroupClear.statusCode === 200 && db.getPlatformConfig().rateLimit === undefined);
+
+    // --- Code-review catch: the REACHABLE wire shape a garbage grid entry now produces client-side ---
+    // Widening the per-field schema to accept `null` quietly removed a guard the grid was leaning on:
+    // `Number("abc")` is NaN and `Number("1e999")` is Infinity, and BOTH JSON.stringify() to `null` — the
+    // same wire shape as the legitimate clear sentinel. Pre-this-fix, Settings.tsx sent that raw NaN/
+    // Infinity through untouched, so a garbage grid entry would have silently "succeeded" as a clear
+    // instead of 400ing (the exact regression a Code Reviewer caught, since the non-nullable per-field
+    // schema had been the ONLY thing 400ing garbage before ba9ccd75 widened it). The fixed Settings.tsx
+    // (buildGlobalOverride) now routes a non-finite result through as the ORIGINAL STRING instead — this
+    // is that reachable shape, proven still 400s and never clobbers the persisted value.
+    db.setPlatformConfig({ timeouts: { busyStaleMs: 60000 } });
+    for (const garbage of ["abc", "1e999"]) {
+      const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { config: { timeouts: { busyStaleMs: garbage } } } });
+      check(`(16) the reachable garbage shape {busyStaleMs:${JSON.stringify(garbage)}} still 400s`, bad.statusCode === 400);
+      check(`(16) that rejected PATCH did NOT clobber (let alone clear) the persisted field`, db.getPlatformConfig().timeouts?.busyStaleMs === 60000);
+    }
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the new `integrations` key with deep-partial sibling isolation, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/unreachable/detected across not-configured, misconfigured, real-binary-but-nothing-listening (OD residual risk 2), and real-binary (Codescape) cases; (card e8eee68c) the full mcpConfig escape hatch: the zod schema accepts a valid command+args+env spec (args/env optional, command required + non-empty), rejects a bad shape (.strict() unknown key, non-string args/env values), rides the SAME PATCH surface with a 400 that never clobbers a valid persisted spec, resolvePlatform threads it through, and detectIntegrations skips the TCP daemon-port probe entirely for a full spec (reporting detected/not-found on binary presence alone — the desktop app's named-pipe sidecar makes that probe inapplicable) even against the same closed port that downgrades the plain-path form to unreachable; and (card fd55ac8a) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) and rejects it everywhere else (incl. a per-field null nested inside a group), a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, a partial-object group-replace still drops just the blanked field, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the new `integrations` key with deep-partial sibling isolation, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/unreachable/detected across not-configured, misconfigured, real-binary-but-nothing-listening (OD residual risk 2), and real-binary (Codescape) cases; (card e8eee68c) the full mcpConfig escape hatch: the zod schema accepts a valid command+args+env spec (args/env optional, command required + non-empty), rejects a bad shape (.strict() unknown key, non-string args/env values), rides the SAME PATCH surface with a 400 that never clobbers a valid persisted spec, resolvePlatform threads it through, and detectIntegrations skips the TCP daemon-port probe entirely for a full spec (reporting detected/not-found on binary presence alone — the desktop app's named-pipe sidecar makes that probe inapplicable) even against the same closed port that downgrades the plain-path form to unreachable; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

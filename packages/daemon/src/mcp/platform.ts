@@ -485,24 +485,65 @@ export function validatePlatformConfigOverride(
   return { ok: true, value: r.data as PlatformConfigOverride };
 }
 
+// Per-field-nullable variants of the 3 ms-keyed groups, for the PATCH body ONLY (card ba9ccd75): each
+// field individually accepts `null` as its own clear sentinel (delete just this field from the
+// persisted group), alongside the existing whole-group `.nullable()` below (delete the whole group).
+// Bounds are duplicated from rateLimitOverride/watchersOverride/timeoutsOverride above rather than
+// derived from them — zod has no "make every field of this object schema nullable" combinator that
+// preserves each field's own numeric bounds, and the persisted-result schemas above must stay
+// non-nullable per field (a `null` leaf is stripped by the server.ts merge before re-validating against
+// them, so it must never be a shape they themselves accept).
+const rateLimitPatchOverride = z.object({
+  defaultBackoffMs: z.number().int().min(60000).max(86400000).nullable().optional(),
+  resetBufferMs: z.number().int().min(0).max(600000).nullable().optional(),
+  deadlineAfterResetMs: z.number().int().min(60000).max(86400000).nullable().optional(),
+  deadlineNoResetMs: z.number().int().min(600000).max(172800000).nullable().optional(),
+  recencyWindowMs: z.number().int().min(0).max(86400000).nullable().optional(),
+  exhaustedThresholdPct: z.number().int().min(50).max(100).nullable().optional(),
+}).strict();
+const watcherMsPatch = z.number().int().min(5000).max(3600000).nullable().optional();
+const watchersPatchOverride = z.object({
+  contextWatchMs: watcherMsPatch,
+  idleWatchMs: watcherMsPatch,
+  rateLimitWatchMs: watcherMsPatch,
+  usagePollMs: watcherMsPatch,
+  wakeMs: watcherMsPatch,
+  schedulerMs: watcherMsPatch,
+  reconcileMs: watcherMsPatch,
+  snapshotMs: watcherMsPatch,
+  crashRecoveryWatchMs: watcherMsPatch,
+}).strict();
+const timeoutsPatchOverride = z.object({
+  gitOpMs: z.number().int().min(1000).max(120000).nullable().optional(),
+  gitLocalMs: z.number().int().min(1000).max(120000).nullable().optional(),
+  gitPushMs: z.number().int().min(1000).max(600000).nullable().optional(),
+  provisionMs: z.number().int().min(10000).max(1800000).nullable().optional(),
+  busyStaleMs: z.number().int().min(30000).max(1800000).nullable().optional(),
+  runMs: z.number().int().min(30000).max(3600000).nullable().optional(),
+}).strict();
+
 /**
- * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a): field-for-field identical to
- * `platformConfigOverrideSchema` above, except the 7 top-level keys the Settings global-config form can
- * blank back to "inherit" — `rateLimit`/`watchers`/`timeouts` (the ms-keyed field grid) and
- * `schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/`maxConcurrentGates` (the tri-state
- * toggles + the gate-cap input) — additionally accept an explicit `null`. `null` here means "delete this
- * key from the persisted override" (revert to the resolved default); OMITTING the key still means
- * "not being edited, leave whatever is already persisted alone" (today's/unchanged behavior) — the PATCH
- * handler in server.ts is what turns a `null` into an actual delete, then re-validates the merged result
- * against the non-nullable `platformConfigOverrideSchema` above, so a `null` can never itself reach
- * `db.setPlatformConfig`. Every other key (`connections`/`integrations`/`remoteAccess`/
- * `companionVoiceEnabled`) has no client-facing blank-to-inherit control today, so it keeps its plain
- * optional shape here too — add the nullable treatment here first if that ever changes.
+ * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75):
+ * field-for-field identical to `platformConfigOverrideSchema` above, except the 7 top-level keys the
+ * Settings global-config form can blank back to "inherit" — `rateLimit`/`watchers`/`timeouts` (the
+ * ms-keyed field grid) and `schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
+ * `maxConcurrentGates` (the tri-state toggles + the gate-cap input) — additionally accept an explicit
+ * `null`. Whole-group `null` means "delete this whole group from the persisted override" (revert every
+ * field in it to the resolved default). Within a submitted group object, EACH FIELD is also individually
+ * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride` above) — a per-field
+ * `null` means "delete just this field"; an OMITTED field — whether at the top level or nested inside a
+ * submitted group — means "not being edited, leave whatever is already persisted alone". The PATCH
+ * handler in server.ts is what turns a `null` (whole-group or per-field) into an actual delete via a
+ * DEEP merge onto the persisted config, then re-validates the merged result against the non-nullable
+ * `platformConfigOverrideSchema` above, so a `null` can never itself reach `db.setPlatformConfig`. Every
+ * other key (`connections`/`integrations`/`remoteAccess`/`companionVoiceEnabled`) has no client-facing
+ * blank-to-inherit control today, so it keeps its plain optional shape here too — add the nullable
+ * treatment here first if that ever changes.
  */
 const platformConfigPatchSchema = z.object({
-  rateLimit: rateLimitOverride.nullable().optional(),
-  watchers: watchersOverride.nullable().optional(),
-  timeouts: timeoutsOverride.nullable().optional(),
+  rateLimit: rateLimitPatchOverride.nullable().optional(),
+  watchers: watchersPatchOverride.nullable().optional(),
+  timeouts: timeoutsPatchOverride.nullable().optional(),
   connections: connectionsOverride.optional(),
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().nullable().optional(),

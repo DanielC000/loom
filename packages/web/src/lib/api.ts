@@ -350,6 +350,10 @@ export const api = {
   // `config` is a `PlatformConfigPatch` (not a plain `PlatformConfigOverride`): the clearable top-level
   // keys (the tri-state toggles + maxConcurrentGates + the ms-keyed rateLimit/watchers/timeouts groups)
   // accept an explicit `null` as the clear-to-inherit sentinel — see GlobalConfigForm's buildGlobalOverride.
+  // Card ba9ccd75 widened this ONE LEVEL DOWN too: a field NESTED inside a submitted rateLimit/watchers/
+  // timeouts object is ALSO individually nullable (its own per-field clear), and the PATCH handler now
+  // deep-merges those 3 groups field by field instead of replacing the group wholesale — an omitted
+  // nested field means "leave alone", not "delete", matching the top-level omitted-key contract.
   updatePlatformConfig: (config: PlatformConfigPatch) =>
     patch<{ ok: boolean; override: PlatformConfigOverride }>("/api/platform/config", { config }),
   agents: (projectId: string) => get<Agent[]>(`/api/projects/${projectId}/agents`),

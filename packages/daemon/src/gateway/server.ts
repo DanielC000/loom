@@ -3516,14 +3516,45 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // sibling field the caller didn't touch byte-identical. An OMITTED key (not present in v.value)
     // is left alone (today's/unchanged behavior); an explicit `null` (card fd55ac8a — the clear
     // sentinel a blanked Settings toggle sends) DELETES the key instead, reverting it to inherit the
-    // resolved default. Re-validate the merged result too, so a partial body can't bypass the
-    // bounds/shape checks the old full-blob path enforced — and so a `null` can never itself reach
-    // `setPlatformConfig` (the merge below always strips it back out first).
+    // resolved default.
+    //
+    // The 3 ms-keyed groups (card ba9ccd75) get a DEEP merge instead of the shallow whole-key replace
+    // every other key uses: a submitted `rateLimit`/`watchers`/`timeouts` object merges FIELD BY FIELD
+    // onto the persisted group rather than replacing it wholesale, so "omitted = leave alone" holds
+    // uniformly at both levels (top-level key AND a field nested inside a submitted group) — before this,
+    // `{"rateLimit":{"exhaustedThresholdPct":90}}` silently wiped every other persisted rateLimit field,
+    // since the shallow path below `merged[key] = val` replaces the entire group with just what was sent.
+    // A per-field `null` inside the group (accepted by platformConfigPatchSchema's nullable field
+    // variants) deletes just that field; whole-group `null` still deletes the whole group unchanged.
+    const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts"]);
     const merged: Record<string, unknown> = { ...deps.db.getPlatformConfig() };
     for (const [key, val] of Object.entries(v.value)) {
-      if (val === null) delete merged[key];
-      else if (val !== undefined) merged[key] = val;
+      if (val === null) {
+        delete merged[key];
+      } else if (val !== undefined && DEEP_MERGE_GROUPS.has(key)) {
+        const existingGroup: Record<string, unknown> = { ...(merged[key] as Record<string, unknown> | undefined) };
+        for (const [fieldKey, fieldVal] of Object.entries(val as Record<string, unknown>)) {
+          if (fieldVal === null) delete existingGroup[fieldKey];
+          else if (fieldVal !== undefined) existingGroup[fieldKey] = fieldVal;
+        }
+        merged[key] = existingGroup;
+        // Code-review note (card ba9ccd75): an all-blank grid save now submits every field individually
+        // `null`'d rather than the whole-group `null` sentinel (Settings.tsx no longer has a reason to
+        // compute "would this end up empty" — that was exactly the client-side invariant-tracking this
+        // card removed). So `existingGroup` can end up `{}` here — persisted as e.g. `rateLimit: {}`
+        // rather than the key being deleted entirely. This is INERT, not a bug: resolvePlatform reads
+        // every field with `??`, so an empty group resolves identically to an absent one. Leave it —
+        // making the client special-case "all fields blank ⇒ send whole-group null instead" would
+        // reintroduce client-side bookkeeping about the group's contents, the exact thing deep-merging
+        // server-side was meant to make unnecessary. Whole-group `null` stays fully supported (see the
+        // `val === null` branch above); it's just not this form's path to it anymore.
+      } else if (val !== undefined) {
+        merged[key] = val;
+      }
     }
+    // Re-validate the merged result too, so a partial body can't bypass the bounds/shape checks the old
+    // full-blob path enforced — and so a `null` (whole-group or per-field) can never itself reach
+    // `setPlatformConfig` (the merge above always strips it back out first).
     const mv = validatePlatformConfigOverride(merged);
     if (!mv.ok) return reply.code(400).send({ error: `invalid platform config: ${mv.error}` });
     const wasOperatorEnabled = isOperatorEnabled(deps.db);

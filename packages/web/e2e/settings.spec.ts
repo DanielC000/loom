@@ -237,7 +237,7 @@ test("editing a message-delivery toggle (coalesceAgentMessages): set persists, c
   await expect(field(page, labelText)).toHaveValue("inherit");
 });
 
-test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a)", () => {
+test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a; deep-merge, card ba9ccd75)", () => {
   // This spec seeds rateLimit.exhaustedThresholdPct directly and sets watchers.wakeMs through the UI, on
   // the SHARED worker-scoped daemon. Both are inert to every other spec today (nothing else reads
   // exhaustedThresholdPct; wakeMs is boot-bound, per event-triggers.spec.ts's determinism note this is
@@ -247,20 +247,21 @@ test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a)", 
     await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ config: { rateLimit: null, watchers: null } }),
+      body: JSON.stringify({ config: { rateLimit: null, watchers: null, timeouts: null } }),
     });
   });
 
   test("saving the Rate Limits grid with every rendered field blank PRESERVES a non-grid sibling it doesn't show", async ({ page, loomDaemon }) => {
     // rateLimit.exhaustedThresholdPct has NO control anywhere in GLOBAL_FIELDS — the Rate Limits panel
     // never renders it — but a human can still persist it directly over the loopback REST PATCH (there
-    // is no agent-facing writer for this daemon-global surface). A submitted group REPLACES the
-    // persisted one wholesale (the PATCH handler's shallow TOP-LEVEL merge), so a form that builds its
-    // group from ONLY the fields it renders would silently DELETE this sibling the instant the user
-    // saves ANY daemon-global edit — even one in a completely different group — since
-    // buildGlobalOverride recomputes and resends every group on every save. Seed it directly over REST
-    // (bypassing the grid, exactly as a human curl'ing the PATCH endpoint would), then save with the
-    // Rate Limits grid entirely blank (untouched) and confirm the sibling survives.
+    // is no agent-facing writer for this daemon-global surface). Before card ba9ccd75 a submitted group
+    // REPLACED the persisted one wholesale (the PATCH handler's shallow TOP-LEVEL merge); now the handler
+    // DEEP-merges field by field, so a form that builds its group from ONLY the fields it renders is safe
+    // by construction (an unmentioned field is just left alone) — but this test still proves the
+    // end-to-end OUTCOME, not the mechanism: a save that touched a different group entirely must never
+    // disturb a sibling field this form never rendered. Seed it directly over REST (bypassing the grid,
+    // exactly as a human curl'ing the PATCH endpoint would), then save with the Rate Limits grid entirely
+    // blank (untouched) and confirm the sibling survives.
     const seed = await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -304,6 +305,96 @@ test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a)", 
         return body?.override?.watchers?.wakeMs ?? null;
       })
       .toBe(50_000);
+  });
+
+  test("blanking a PREVIOUSLY-SET rendered grid field actually clears it, while a resent sibling in the same group survives (card ba9ccd75)", async ({ page, loomDaemon }) => {
+    // The load-bearing risk on card ba9ccd75: "blank a grid field → Save → it clears" worked pre-fix only
+    // BECAUSE the group replaced wholesale (any field the form didn't resend was gone by construction).
+    // Under the deep merge that same outcome now depends on buildGlobalOverride sending an explicit
+    // per-field `null` for a blanked field, instead of just omitting it (omitted now means "leave alone"
+    // at the field level too) — if that per-field null stopped firing, this is exactly the regression
+    // that would silently ship: a blanked field would stop clearing and just sit there stale. Seed TWO
+    // fields in the same group (timeouts) directly over REST, exactly as two prior grid saves would have
+    // left them, then blank only one through the UI and confirm it — and only it — clears.
+    const seed = await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: { timeouts: { busyStaleMs: 120000, provisionMs: 300000 } } }),
+    });
+    expect(seed.ok).toBe(true);
+
+    const project = await loomDaemon.createProject(`settings-grid-field-clear-${Date.now()}`);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+
+    const busyStale = field(page, "PTY busy-stale (s)");
+    const provision = field(page, "Worktree provision (s)");
+    // BEFORE: both fields render the seeded values (proves the load happened, not just that both are
+    // blank by coincidence).
+    await expect(busyStale).toHaveValue("120");
+    await expect(provision).toHaveValue("300");
+
+    // Blank ONLY busyStaleMs; leave provisionMs exactly as loaded (a non-blank, unchanged resend).
+    await busyStale.fill("");
+    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    await expect(globalSave).toBeEnabled();
+    await globalSave.click();
+
+    const readTimeouts = async (): Promise<{ busyStaleMs?: number; provisionMs?: number }> => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+      const body = (await res.json()) as { override?: { timeouts?: { busyStaleMs?: number; provisionMs?: number } } };
+      return body?.override?.timeouts ?? {};
+    };
+    // Observable #1: the blanked field is actually GONE from the persisted override — the per-field null
+    // sentinel fired, not left stale under the new deep-merge contract.
+    await expect.poll(async () => (await readTimeouts()).busyStaleMs).toBeUndefined();
+    // Observable #2: the sibling the grid resent unchanged (non-blank) survives — the deep merge applied
+    // it, rather than the whole group having been nulled.
+    await expect.poll(async () => (await readTimeouts()).provisionMs).toBe(300_000);
+
+    // A reload re-seeds the cleared field back to blank — not the stale "120" — and the surviving sibling
+    // still shows its value.
+    await page.reload();
+    await expect(field(page, "PTY busy-stale (s)")).toHaveValue("");
+    await expect(field(page, "Worktree provision (s)")).toHaveValue("300");
+  });
+
+  test("typing garbage into a grid field 400s and does NOT silently clear it (code-review catch, card ba9ccd75)", async ({ page, loomDaemon }) => {
+    // The Code Reviewer catch on ba9ccd75: widening the per-field schema to accept `null` removed a guard
+    // this grid was leaning on without its own backstop. `Number("abc")` is NaN, which JSON.stringify()s
+    // to `null` — the SAME wire shape as the legitimate clear sentinel — so pre-fix this would have
+    // silently "succeeded" as a clear (200, value reverted to inherit) instead of 400ing. Seed a field,
+    // type garbage into it, and prove BOTH halves: a readable 400 surfaces, AND the persisted value is
+    // untouched (not cleared).
+    const seed = await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: { timeouts: { busyStaleMs: 120000 } } }),
+    });
+    expect(seed.ok).toBe(true);
+
+    const project = await loomDaemon.createProject(`settings-grid-garbage-${Date.now()}`);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+
+    const busyStale = field(page, "PTY busy-stale (s)");
+    await expect(busyStale).toHaveValue("120");
+
+    await busyStale.fill("abc");
+    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    await expect(globalSave).toBeEnabled();
+    await globalSave.click();
+
+    // A readable 400 surfaces inline (field-named, like the maxConcurrentGates bad-value case above).
+    await expect(page.getByText(/busyStaleMs/).first()).toBeVisible();
+
+    // NOT cleared: the persisted value is exactly what it was before Save, not gone.
+    const readBusyStale = async (): Promise<number | null> => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+      const body = (await res.json()) as { override?: { timeouts?: { busyStaleMs?: number } } };
+      return body?.override?.timeouts?.busyStaleMs ?? null;
+    };
+    await expect.poll(readBusyStale).toBe(120_000);
   });
 });
 

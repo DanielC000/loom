@@ -751,14 +751,22 @@ export interface PlatformConfigOverride {
   maxConcurrentGates?: number;
 }
 
+/** Every field of `T` individually nullable — the per-field clear sentinel a `PlatformConfigPatch`
+ *  ms-keyed group accepts (card ba9ccd75): `null` on one field clears just that field, omitting a
+ *  field leaves it alone, distinct from the WHOLE-GROUP `null` (below) that clears the entire group. */
+type NullableFields<T> = { [K in keyof T]?: T[K] | null };
+
 /**
- * The wire body for `PATCH /api/platform/config` (card fd55ac8a): identical to `PlatformConfigOverride`
- * except the top-level keys the Settings global-config form can blank back to "inherit" — the 4 scalar
- * toggles (`schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/`maxConcurrentGates`) and the 3
- * ms-keyed sub-groups its field grid writes to (`rateLimit`/`watchers`/`timeouts`) — also accept an
- * explicit `null`. `null` is the CLEAR sentinel: "delete this key from the stored override, revert to
- * the resolved default" — distinct from OMITTING the key entirely, which means "not being edited, leave
- * whatever is already persisted alone" (today's/unchanged shallow-merge behavior). Every other key
+ * The wire body for `PATCH /api/platform/config` (card fd55ac8a, widened by card ba9ccd75): identical to
+ * `PlatformConfigOverride` except the top-level keys the Settings global-config form can blank back to
+ * "inherit" — the 4 scalar toggles (`schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
+ * `maxConcurrentGates`) and the 3 ms-keyed sub-groups its field grid writes to (`rateLimit`/`watchers`/
+ * `timeouts`) — also accept an explicit `null`. Whole-group `null` is the CLEAR sentinel: "delete this
+ * key from the stored override, revert to the resolved default". Within a submitted group object, each
+ * field is ALSO individually nullable (card ba9ccd75): a per-field `null` clears just that field, while
+ * an OMITTED field (whether at the top level or nested inside a submitted group) means "not being
+ * edited, leave whatever is already persisted alone" — the PATCH handler DEEP-merges these 3 groups onto
+ * the persisted override, so "omitted = leave alone" now holds uniformly at both levels. Every other key
  * (`connections`/`integrations`/`remoteAccess`/`companionVoiceEnabled`) has no client-facing
  * blank-to-inherit control today, so it keeps its plain optional (present-or-absent) shape here too.
  */
@@ -766,9 +774,9 @@ export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
   "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates"
 > & {
-  rateLimit?: Partial<RateLimitConfig> | null;
-  watchers?: Partial<WatcherConfig> | null;
-  timeouts?: Partial<TimeoutConfig> | null;
+  rateLimit?: NullableFields<RateLimitConfig> | null;
+  watchers?: NullableFields<WatcherConfig> | null;
+  timeouts?: NullableFields<TimeoutConfig> | null;
   coalesceAgentMessages?: boolean | null;
   operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
