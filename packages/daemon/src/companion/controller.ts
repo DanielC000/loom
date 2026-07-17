@@ -155,8 +155,9 @@ export interface CompanionControl {
    * normal, expected outcome for a REST caller to relay, not an exceptional one.
    *
    * KNOWN TRADE-OFF (CR-confirmed acceptable, by design): `this.chain` is GLOBAL, not per-session — a slow
-   * upgrade (worst case ~10s if the pty won't die) briefly blocks every OTHER live companion's reconcile
-   * behind it too, not just this session's.
+   * upgrade (worst case ~13s: up to `UPGRADE_BUSY_WAIT_MS` [card d88163b7's busy-turn wait, ~3s] plus ~10s
+   * if the pty then won't die) briefly blocks every OTHER live companion's reconcile behind it too, not
+   * just this session's.
    */
   upgrade(sessionId: string): Promise<{ ok: true; session: Session } | { ok: false; error: string }>;
 }

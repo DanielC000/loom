@@ -384,6 +384,20 @@ const RUN_WEBHOOK_ATTEMPTS = 2;
  */
 const MERGE_PATCH_INLINE_CAP = 40_000;
 
+/** Bounded wait `upgradeCompanionCapabilities` gives a BUSY companion turn to finish naturally before
+ *  force-interrupting it (card d88163b7). NOT a free knob (CR round 2 correction of an earlier "the wait
+ *  is loss-free, so raise it freely" claim): `holdDrain` (see that method's comment) only protects
+ *  messages QUEUED during the wait — it does NOTHING for the busy turn itself. A turn still busy when this
+ *  bound expires is STILL force-interrupted and its in-flight reply STILL lost, exactly as pre-fix. So
+ *  this is a genuine trade — longer catches more real turns before they're cut off, at the cost of a
+ *  longer human-facing REST "Save" hang — kept at ~3s for REST responsiveness (a human-facing Settings
+ *  save hanging 10s is bad UX; this only bites when someone saves mid-turn; it's env-overridable if that
+ *  trade needs revisiting). Measured on a MONOTONIC clock (`performance.now()`), not an iteration count,
+ *  so it's a genuine wall-clock bound even if an individual 100ms poll tick runs long under event-loop
+ *  load. Env-overridable (mirrors pty/host.ts's LOOM_GRACEFUL_*_MS seams) so a test can shrink it instead
+ *  of waiting out the real bound. */
+const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_000;
+
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
 const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
   const ctrl = new AbortController();
@@ -1520,6 +1534,26 @@ export class SessionService {
    * (companion/revive.ts, wired to this SAME `resume()`), that resume ALSO reads the already-updated row —
    * whichever resume wins (this one or the self-heal's), the outcome is identical.
    *
+   * IN-FLIGHT-TURN PRESERVATION (card d88163b7): if the companion is BUSY (mid-turn) when this runs, its
+   * drain surface is HELD (`pty.holdDrain`/`releaseDrain`) and it gets a short bounded wait
+   * (`UPGRADE_BUSY_WAIT_MS`, on a monotonic clock) to go idle on its own before `pty.stop` is called — see
+   * the wait loop's own comment below. Before this fix, a busy companion's turn was ALWAYS force-
+   * interrupted immediately, silently discarding whatever it hadn't yet delivered (including an in-flight
+   * `chat_reply` MCP call) with no recovery path — the AVAILABILITY-GAP fix above only ever covered a NEW
+   * message racing the stop, never one the pty was already mid-reply to. A first pass at this fix (waiting
+   * without holding the drain) reopened exactly that gap: the busy turn ending DURING the wait would let
+   * `drainPending`'s Stop-hook auto-drain (or `enqueueStdin`'s idle-submit path) promote a queued message
+   * into a fresh turn our own `pty.stop()` would then kill, uncapturable by `flushPending` since it was no
+   * longer sitting in `pending` by the time we called it (CR-caught). `holdDrain` closes that: while held,
+   * anything that would start a turn queues instead, so `drain()` below can always recover it.
+   *
+   * SCOPE (CR round 2 correction — read precisely): `holdDrain` protects MESSAGES, not the turn itself. It
+   * guarantees anything QUEUED or arriving during the wait is recoverable regardless of outcome. It does
+   * NOT guarantee the busy turn survives — a turn STILL busy when `UPGRADE_BUSY_WAIT_MS` expires is STILL
+   * force-interrupted below, and its own in-flight reply is STILL lost, same as pre-fix. The wait only
+   * helps when the turn finishes naturally within the bound; see the wait loop's own comment for that
+   * trade.
+   *
    * AVAILABILITY-GAP MESSAGE PRESERVATION (CR fix): `pty.stop("graceful")` marks the pty `stopping` but
    * leaves it alive for up to several seconds while it winds down — an inbound chat message that lands in
    * that window is NOT treated as "session dead" (so `withCompanionSelfHeal` never fires), it's HELD in the
@@ -1573,32 +1607,76 @@ export class SessionService {
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
     if (this.pty.isAlive(sessionId)) {
-      drain(); // anything already queued before we even ask the pty to stop
-      this.pty.stop(sessionId, "graceful");
-      let died = false;
-      for (let i = 0; i < 80 && !died; i++) {
-        if (!this.pty.isAlive(sessionId)) { died = true; break; } // LATCH — never re-derive from a later read
-        drain(); // anything enqueued while the pty is "stopping" (held, not treated as dead — see above)
-        await new Promise((r) => setTimeout(r, 100));
-      }
-      drain();
-      if (!died) {
-        // eslint-disable-next-line no-console
-        console.warn(`[companion] upgrade ${sessionId}: still alive ~8s after a graceful stop — forcing a hard stop before resume`);
-        this.pty.stop(sessionId, "hard");
-        for (let i = 0; i < 20 && !died; i++) {
-          if (!this.pty.isAlive(sessionId)) { died = true; break; } // same latch, same reasoning
-          drain();
+      // Card d88163b7 (CR fix): HOLD the drain surface for this session's ENTIRE stop sequence below —
+      // BEFORE the busy-wait even starts. Without this, the wait could observe the ACTIVE turn end
+      // mid-wait: the Stop hook's `drainPending` runs SYNCHRONOUSLY (the M2 invariant) and would splice a
+      // QUEUED message OUT of `live.pending` and submit it as a fresh turn before our next poll even runs —
+      // invisible to `flushPending`/`drain()` below (it's no longer in `pending`), and then killed by
+      // `pty.stop()` anyway. Worse, a brand-new inbound message arriving during the wait's momentarily-idle
+      // gap would hit `enqueueStdin`'s idle-submit path and become a turn WITHOUT ever entering `pending`
+      // at all. `holdDrain` forces BOTH paths to queue instead — exactly where `drain()` below can recover
+      // them. Released in `finally` — including on the "didn't stop in time" abort/throw path below, or
+      // this session's drain stays wedged shut forever (a worse bug than the one this fixes).
+      this.pty.holdDrain(sessionId);
+      try {
+        // Give an ACTIVE turn a short bounded window to finish naturally before we force-interrupt it. A
+        // companion mid-turn — possibly with a `chat_reply` MCP call already dispatched — that gets
+        // Ctrl-C'd below loses that turn outright: nothing recaptures it, since `flushPending` only
+        // recovers messages still QUEUED, never one already handed to the pty as a turn in progress (see
+        // the AVAILABILITY-GAP comment above — it's scoped to a NEW inbound message racing the stop, not
+        // an ALREADY-IN-FLIGHT one). Most real turns settle within a couple seconds of a tool call; if
+        // this one does too, `pty.stop` below lands on an already-IDLE session — the clean, no-interrupt
+        // exit `stop()`'s own comment describes ("double Ctrl-C exits an IDLE claude"). If it's still busy
+        // past the bound — a genuinely long turn, OR a STALE busy that only the multi-minute self-heal
+        // watchdog (`healIfStuck`) would otherwise clear — fall through to the SAME forced interrupt this
+        // method has always done. HONEST SCOPE OF WHAT `holdDrain` FIXES (CR round 2 correction — do not
+        // read this as "the wait is loss-free, so raise the bound freely"): `holdDrain` only protects
+        // MESSAGES QUEUED (or arriving) DURING the wait — those are captured by `drain()` below and never
+        // silently dropped, regardless of whether the bound is hit. It does NOT protect the busy turn
+        // ITSELF — a turn STILL busy when the bound expires is STILL force-interrupted here exactly as
+        // before this fix, and its in-flight reply (e.g. a dispatched-but-unfinished `chat_reply`) is
+        // STILL lost. So `UPGRADE_BUSY_WAIT_MS` is a genuine trade: a longer bound catches more real
+        // in-flight turns before they're cut off, at the cost of a longer REST "Save" hang; it is NOT a
+        // free knob now that queuing is safe. Kept at ~3s for REST responsiveness — see the constant's own
+        // doc for the full rationale. Either way (interrupted or not), the REST caller is never blocked
+        // longer than this bound and an upgrade can never be permanently refused. Bounded on a MONOTONIC
+        // clock, not an iteration count — under event-loop load (e.g. the Stop hook's own synchronous
+        // multi-MB JSONL tail-read) a 100ms `setTimeout` can run long, and counting iterations as if each
+        // were exactly 100ms would silently overshoot the intended wall-clock bound.
+        const waitDeadline = performance.now() + UPGRADE_BUSY_WAIT_MS;
+        while (this.pty.isBusy(sessionId) && performance.now() < waitDeadline) {
+          await new Promise((r) => setTimeout(r, 100));
+          if (!this.pty.isAlive(sessionId)) break; // died on its own mid-wait — nothing left to interrupt
+        }
+        drain(); // anything queued (incl. anything the hold kept OUT of a fresh turn) before we stop
+        this.pty.stop(sessionId, "graceful");
+        let died = false;
+        for (let i = 0; i < 80 && !died; i++) {
+          if (!this.pty.isAlive(sessionId)) { died = true; break; } // LATCH — never re-derive from a later read
+          drain(); // anything enqueued while the pty is "stopping" (held, not treated as dead — see above)
           await new Promise((r) => setTimeout(r, 100));
         }
         drain();
-      }
-      if (!died) {
-        // The pty is STILL alive — push everything we drained OUT of its FIFO back onto it before aborting
-        // (nothing else will redeliver them; resume() below never runs on this path). The capability re-pin
-        // above already landed durably — a later manual restart/resume picks it up.
-        for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText);
-        throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
+        if (!died) {
+          // eslint-disable-next-line no-console
+          console.warn(`[companion] upgrade ${sessionId}: still alive ~8s after a graceful stop — forcing a hard stop before resume`);
+          this.pty.stop(sessionId, "hard");
+          for (let i = 0; i < 20 && !died; i++) {
+            if (!this.pty.isAlive(sessionId)) { died = true; break; } // same latch, same reasoning
+            drain();
+            await new Promise((r) => setTimeout(r, 100));
+          }
+          drain();
+        }
+        if (!died) {
+          // The pty is STILL alive — push everything we drained OUT of its FIFO back onto it before aborting
+          // (nothing else will redeliver them; resume() below never runs on this path). The capability re-pin
+          // above already landed durably — a later manual restart/resume picks it up.
+          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText);
+          throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
+        }
+      } finally {
+        this.pty.releaseDrain(sessionId);
       }
     }
     const resumed = this.resume(sessionId);

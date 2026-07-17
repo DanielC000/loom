@@ -22,6 +22,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      never two ptys alive for the same session id at once.
 //   4. Guardrails: unknown session, non-assistant role, and no-engine-id (never spawned) are all refused
 //      with a clear error and no pin/spawn side effects.
+//   5. IN-FLIGHT-TURN PRESERVATION (card d88163b7): a BUSY companion turn gets a short bounded wait to go
+//      idle before the interrupt lands — idle proceeds with zero added delay, a turn that clears within
+//      the bound is never interrupted, and a turn that stays busy past the bound (a genuinely long turn,
+//      or a stale busy stuck true) still proceeds — bounded, never a permanent refusal.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/companion-live-upgrade.mjs
 import fs from "node:fs";
@@ -50,6 +54,9 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 process.env.LOOM_GRACEFUL_GAP_MS = "50";
 process.env.LOOM_GRACEFUL_RETRY_MS = "150";
 process.env.LOOM_GRACEFUL_KILL_MS = "300";
+// Shrink the busy-turn preservation wait (card d88163b7 — read once at sessions/service.js import time) so
+// the busy-clears/stale-busy checks below resolve in well under a second instead of the real 3s bound.
+process.env.LOOM_UPGRADE_BUSY_WAIT_MS = "300";
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, capabilityToolAllowlist } = await import("../dist/pty/host.js");
@@ -181,6 +188,10 @@ try {
   // synchronously through its guards/DB-writes/pty.stop() call before its first `await` (inside the poll
   // loop) — so by the time this synchronous call below returns, pty.stop("graceful") has DEFINITELY
   // already run and `live.stopping` is already true, making this deterministic rather than a timing race.
+  // (This still holds after card d88163b7's busy-wait: the fresh pty resumed above is idle — `live.busy`
+  // is false, per PtyHost.spawn's own initial Live shape — so that wait's isBusy-gated loop condition is
+  // false on its FIRST check and its own `await` never runs; the busy-wait/stale-busy behavior itself is
+  // covered separately below with a scripted pty that controls `isBusy` directly.)
   {
     const upgradePromise = svc.upgradeCompanionCapabilities(sessionId);
     const midGap = host.enqueueStdin(sessionId, "URGENT: hi during the gap", "system", undefined, undefined, "agent");
@@ -243,6 +254,10 @@ try {
         // Call 3+: resume()'s own short-circuit (and anything after) — a self-heal already respawned it.
         return aliveCalls !== 2;
       },
+      // Not-busy ⇒ the card-d88163b7 pre-stop wait (isBusy-gated) below never runs, so it adds no extra
+      // isAlive() calls here — the Call-1/2/3+ counting above is unaffected by that fix.
+      isBusy() { return false; },
+      holdDrain() {}, releaseDrain() {}, // the CR-fix drain-hold seam — no-ops on this scripted double
       stop(_sid, mode) { stopModes.push(mode); },
       spawn(opts) { spawns.push(opts); },
       enqueueStdin() { return { delivered: false, position: 0 }; },
@@ -257,6 +272,222 @@ try {
     check("race: resume()'s own isAlive short-circuit no-ops — no THIRD respawn (pty.spawn never called)", spawns.length === 0);
     check("race: the upgrade still reports success (whichever resume won, identical outcome)", raceResult.id === scriptSessionId && raceResult.engineSessionId === scriptEngineId);
     scriptDb.close();
+  }
+
+  // ===================== IN-FLIGHT-TURN PRESERVATION (card d88163b7) =====================
+  // Before this fix, a BUSY companion (mid-turn — possibly with an in-flight `chat_reply` MCP call) was
+  // ALWAYS force-interrupted the instant an upgrade ran, discarding that turn with no recovery. The fix
+  // gives a busy session a short bounded wait (LOOM_UPGRADE_BUSY_WAIT_MS, shrunk to 300ms above) to go
+  // idle on its own BEFORE `pty.stop` is ever called. Both branches use a SCRIPTED pty (not the real
+  // PtyHost) so `isBusy` is driven deterministically rather than depending on real turn timing.
+  const makeBusySession = (label, rowBusy) => {
+    const bDb = new Db();
+    const bProjId = randomUUID();
+    bDb.insertProject({ id: bProjId, name: `Busy ${label}`, repoPath: cwd, vaultPath: cwd, config: {}, createdAt: now, archivedAt: null });
+    const bAgentId = randomUUID();
+    bDb.insertAgent({ id: bAgentId, projectId: bProjId, name: "Companion", startupPrompt: "", position: 0, profileId, endpoint: false, ioSchema: null });
+    const bSessionId = randomUUID();
+    const bEngineId = `eng-busy-${label}`;
+    bDb.insertSession({
+      id: bSessionId, projectId: bProjId, agentId: bAgentId, engineSessionId: bEngineId, title: null, cwd,
+      processState: "live", resumability: "resumable", busy: rowBusy, createdAt: now, lastActivity: now, lastError: null,
+      role: "assistant", browserTesting: false, documentConversion: false, restrictedTools: false,
+      noCommit: false, skills: null, connections: [], capabilities: [],
+    });
+    const bTpath = engineTranscriptPath(cwd, bEngineId);
+    fs.mkdirSync(path.dirname(bTpath), { recursive: true });
+    fs.writeFileSync(bTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+    return { bDb, bSessionId };
+  };
+
+  // ---- (0) IDLE: the upgrade proceeds immediately, with NO added wait ----
+  {
+    const { bDb, bSessionId } = makeBusySession("idle", false);
+    const callLog = [];
+    let busyPolls = 0;
+    let stopped = false;
+    const idlePty = {
+      isAlive() { return !stopped; },
+      isBusy() { busyPolls++; callLog.push("isBusy"); return false; }, // idle from the very first check
+      holdDrain() { callLog.push("holdDrain"); }, releaseDrain() { callLog.push("releaseDrain"); },
+      stop(_sid, mode) { callLog.push(`stop:${mode}`); stopped = true; },
+      spawn() { callLog.push("spawn"); stopped = false; },
+      enqueueStdin() { return { delivered: false, position: 0 }; },
+      flushPending() { return []; },
+      getPending() { return []; },
+    };
+    const bSvc = new SessionService(bDb, idlePty, new OrchestrationControl());
+    const result = await bSvc.upgradeCompanionCapabilities(bSessionId);
+
+    check("idle: isBusy was checked exactly once — the wait loop's condition short-circuits, no polling delay added", busyPolls === 1);
+    check("idle: pty.stop was called immediately (idle ⇒ the clean, no-interrupt stop path)", callLog.indexOf("stop:graceful") === 2);
+    check("idle: holdDrain was called BEFORE isBusy was ever checked (the hold covers the wait from its very first check)", callLog.indexOf("holdDrain") === 0);
+    check("idle: releaseDrain was called (the hold is always lifted)", callLog.includes("releaseDrain"));
+    check("idle: the upgrade completes successfully", result.id === bSessionId && result.engineSessionId === "eng-busy-idle");
+    bDb.close();
+  }
+
+  // ---- (A) busy CLEARS within the bound: the interrupt never lands on a live turn ----
+  {
+    const { bDb, bSessionId } = makeBusySession("clears", true);
+    const callLog = [];
+    let busyPolls = 0;
+    let stopped = false;
+    const busyClearsPty = {
+      isAlive() { return !stopped; },
+      isBusy() { busyPolls++; callLog.push("isBusy"); return busyPolls < 2; }, // busy on poll 1, idle from poll 2
+      holdDrain() { callLog.push("holdDrain"); }, releaseDrain() { callLog.push("releaseDrain"); },
+      stop(_sid, mode) { callLog.push(`stop:${mode}`); stopped = true; },
+      spawn() { callLog.push("spawn"); stopped = false; },
+      enqueueStdin() { return { delivered: false, position: 0 }; },
+      flushPending() { return []; },
+      getPending() { return []; },
+    };
+    const bSvc = new SessionService(bDb, busyClearsPty, new OrchestrationControl());
+    await bSvc.upgradeCompanionCapabilities(bSessionId);
+
+    check("busy-clears: holdDrain was called BEFORE the wait started (the hold covers the whole wait, not just part of it)", callLog.indexOf("holdDrain") === 0 && callLog.indexOf("holdDrain") < callLog.indexOf("isBusy"));
+    check("busy-clears: isBusy was polled MORE than once (the wait loop actually waited, not skipped)", busyPolls >= 2);
+    check("busy-clears: isBusy was polled EXACTLY twice — it stopped polling the instant busy cleared, not the full bound", busyPolls === 2);
+    check("busy-clears: pty.stop was still called (the upgrade always proceeds once idle)", callLog.includes("stop:graceful"));
+    check("busy-clears: EVERY isBusy poll ran BEFORE stop — the interrupt never landed while isBusy was still returning true", callLog.indexOf("stop:graceful") === busyPolls + 1);
+    check("busy-clears: only a graceful stop, never a hard one (no interrupted turn to escalate against)", !callLog.includes("stop:hard"));
+    check("busy-clears: releaseDrain was called AFTER stop (the hold spans the full stop sequence)", callLog.indexOf("releaseDrain") > callLog.indexOf("stop:graceful"));
+    bDb.close();
+  }
+
+  // ---- (B) busy NEVER clears (a genuinely long turn, or a STALE busy only the multi-minute self-heal
+  //      watchdog would otherwise clear): the wait is BOUNDED — it still proceeds, never a permanent
+  //      refusal, and never blocks the REST caller longer than LOOM_UPGRADE_BUSY_WAIT_MS ----
+  {
+    const { bDb, bSessionId } = makeBusySession("stale", true);
+    const callLog = [];
+    let busyPolls = 0;
+    let stopped = false;
+    const staleBusyPty = {
+      isAlive() { return !stopped; },
+      isBusy() { busyPolls++; callLog.push("isBusy"); return true; }, // never clears
+      holdDrain() { callLog.push("holdDrain"); }, releaseDrain() { callLog.push("releaseDrain"); },
+      stop(_sid, mode) { callLog.push(`stop:${mode}`); stopped = true; },
+      spawn() { callLog.push("spawn"); stopped = false; },
+      enqueueStdin() { return { delivered: false, position: 0 }; },
+      flushPending() { return []; },
+      getPending() { return []; },
+    };
+    const bSvc = new SessionService(bDb, staleBusyPty, new OrchestrationControl());
+    const t0 = performance.now();
+    const result = await bSvc.upgradeCompanionCapabilities(bSessionId);
+    const elapsedMs = performance.now() - t0;
+
+    // The production wait is bounded on a MONOTONIC clock (performance.now()), not an iteration count —
+    // so the poll count is real-timing-dependent (setTimeout jitter under load) and asserting an EXACT
+    // count here would be its own flake risk. Assert boundedness the same way: real elapsed wall time, with
+    // a generous margin above LOOM_UPGRADE_BUSY_WAIT_MS (300ms) that would only trip if the wait were
+    // genuinely open-ended (it stops "3 polls" from being provable — the loop still visibly iterates,
+    // which busyPolls >= 2 below proves).
+    check("stale-busy: isBusy was polled MORE than once (the wait loop actually iterated, not skipped)", busyPolls >= 2);
+    check("stale-busy: the wait is BOUNDED — total elapsed stays within a generous margin above LOOM_UPGRADE_BUSY_WAIT_MS, never open-ended", elapsedMs < 300 + 2000);
+    check("stale-busy: pty.stop was STILL called despite busy never clearing — never a permanent refusal", callLog.includes("stop:graceful"));
+    check("stale-busy: the upgrade still completes successfully (degrades to today's forced-interrupt behavior, never worse)", result.id === bSessionId && result.engineSessionId === `eng-busy-stale`);
+    check("stale-busy: releaseDrain was called even though the wait ran the full bound (the hold is never left dangling)", callLog.includes("releaseDrain"));
+    bDb.close();
+  }
+
+  // ===================== CR-CAUGHT REGRESSION: a QUEUED message must survive its busy turn ending
+  // MID-WAIT (card d88163b7 follow-up) =====================
+  // The scripted-pty tests above prove the wait LOOP behaves correctly; they can't prove a message
+  // actually SURVIVES, because their `flushPending`/`getPending` are hardcoded stubs decoupled from
+  // `isBusy`/`stop` — the exact drainPending/enqueueStdin interaction where the bug lived is never
+  // exercised. This block drives the REAL PtyHost (via SeamHost, not a scripted double) so that real
+  // interaction runs for real.
+  //
+  // Scenario: the companion is BUSY (a turn in flight) AND a second chat message is sitting QUEUED in
+  // `live.pending` behind it. The busy turn's Stop hook fires WHILE the upgrade's busy-wait is still
+  // polling — simulating "the turn finishes naturally right as the upgrade started waiting". Pre-fix (or
+  // with the hold sitting in the wrong place), that Stop hook's OWN synchronous `drainPending` would
+  // splice the queued message OUT of `pending` and submit it as a fresh turn — invisible to `flushPending`
+  // (it's no longer queued) and then killed outright by the upgrade's own subsequent `pty.stop()`. With
+  // `holdDrain` held across the whole wait, that Stop hook's drain bails instead, so the message stays in
+  // `pending` and is recovered normally.
+  {
+    const rDb = new Db();
+    const rProjId = randomUUID();
+    rDb.insertProject({ id: rProjId, name: "Regression", repoPath: cwd, vaultPath: cwd, config: {}, createdAt: now, archivedAt: null });
+    const rAgentId = randomUUID();
+    rDb.insertAgent({ id: rAgentId, projectId: rProjId, name: "Companion", startupPrompt: "", position: 0, profileId, endpoint: false, ioSchema: null });
+    const rSessionId = randomUUID();
+    const rEngineId = "eng-regression-drain-hold";
+    rDb.insertSession({
+      id: rSessionId, projectId: rProjId, agentId: rAgentId, engineSessionId: rEngineId, title: null, cwd,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null,
+      role: "assistant", browserTesting: false, documentConversion: false, restrictedTools: false,
+      noCommit: false, skills: null, connections: [], capabilities: [],
+    });
+    const rTpath = engineTranscriptPath(cwd, rEngineId);
+    fs.mkdirSync(path.dirname(rTpath), { recursive: true });
+    fs.writeFileSync(rTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    const rEvents = {
+      onEngineSessionId(id, eng) { rDb.setEngineSessionId(id, eng); },
+      onBusy(id, b) { rDb.setBusy(id, b); },
+      onContextStats() {}, onRateLimited() {},
+      onExit(id) { rDb.setProcessState(id, "exited"); rDb.setBusy(id, false); },
+    };
+    const rHost = new SeamHost(rEvents);
+    rHost.spawn({
+      sessionId: rSessionId, cwd, permission: { allow: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 },
+      resumeId: rEngineId, role: "assistant", browserTesting: false, documentConversion: false,
+      capabilities: [], restrictedTools: false, skills: null,
+    });
+    rHost.deliverHook(rSessionId, { hook_event_name: "SessionStart" });
+
+    const primer = rHost.enqueueStdin(rSessionId, "PRIMER_TURN", "system");
+    check("regression setup: the primer turn submits immediately on an idle session (arms busy)", primer.delivered === true);
+    check("regression setup: the companion is BUSY before the upgrade starts", rHost.isBusy(rSessionId) === true);
+
+    const queued = rHost.enqueueStdin(rSessionId, "URGENT: reply to this while busy", "system", undefined, undefined, "agent");
+    check("regression setup: a second message QUEUES behind the busy turn (not yet a turn of its own)", queued.delivered === false && queued.reason === "held");
+
+    const rSvc = new SessionService(rDb, rHost, new OrchestrationControl());
+    const upgradePromise = rSvc.upgradeCompanionCapabilities(rSessionId);
+    // upgradeCompanionCapabilities runs synchronously through its guards + holdDrain call before its first
+    // `await` (inside the busy-wait loop) — so by this point holdDrain has DEFINITELY already run (same
+    // reasoning as the AVAILABILITY-GAP test's own comment above). Firing the Stop hook now — itself fully
+    // synchronous, per the M2 invariant — simulates the busy turn ending WHILE the upgrade is still
+    // waiting, and its effect (or non-effect) on `pending` is observable immediately, no race.
+    rHost.deliverHook(rSessionId, { hook_event_name: "Stop" });
+    check(
+      "(CR regression) the queued message was NOT promoted into a fresh turn by the mid-wait Stop hook — it survives in `pending`",
+      rHost.getPending(rSessionId).includes("URGENT: reply to this while busy"),
+    );
+    check("(CR regression) the companion is idle again after the mid-wait Stop (drainPending bailed, so nothing re-armed busy)", rHost.isBusy(rSessionId) === false);
+
+    // The session is now IDLE (busy=false) but the drain is STILL HELD — the upgrade's wait loop hasn't
+    // exited yet (we haven't `await`ed it), so `pty.stop` hasn't run either. Without the SEPARATE
+    // enqueueStdin-side `!live.drainHeld` gate (host.ts:2864), THIS is exactly the instant a brand-new
+    // inbound chat message would hit the idle-submit path (ready && !busy && !stopping && !rateLimited)
+    // and become a turn with NO `pending` entry at all — the OTHER half of the Critical (case (b) via the
+    // enqueueStdin door, distinct from the drainPending door the checks above already cover). The two
+    // gates are independently falsifiable: stripping drainPending's gate fails the checks above (the
+    // QUEUED message gets drained/promoted, busy re-arms); stripping THIS gate leaves those passing but
+    // fails the one below (verified by hand against both single-gate strips).
+    const midHoldNew = rHost.enqueueStdin(rSessionId, "NEW: arrived mid-hold", "system", undefined, undefined, "agent");
+    check(
+      "(CR regression, gate 2/2) a FRESH message arriving idle-but-held is HELD, not submitted as its own turn",
+      midHoldNew.delivered === false && midHoldNew.reason === "held",
+    );
+
+    await upgradePromise;
+
+    check(
+      "(CR regression, gate 1/2) the ORIGINAL queued message SURVIVED the whole upgrade — redelivered onto the fresh pty, never lost",
+      rHost.getPending(rSessionId).includes("URGENT: reply to this while busy"),
+    );
+    check(
+      "(CR regression, gate 2/2) the FRESH mid-hold message ALSO survived — redelivered onto the fresh pty, never lost",
+      rHost.getPending(rSessionId).includes("NEW: arrived mid-hold"),
+    );
+    rDb.close();
   }
 
   // ===================== guardrails =====================
@@ -296,6 +527,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — upgradeCompanionCapabilities re-resolves + re-pins the capability surface, stops the old pty, and resumes with the SAME engine session id — the new tool allow-list is present post-upgrade and absent pre-upgrade; guardrails refuse an unknown/non-assistant/never-spawned session — claude-free, network-free."
+  ? "\n✅ ALL PASS — upgradeCompanionCapabilities re-resolves + re-pins the capability surface, stops the old pty, and resumes with the SAME engine session id — the new tool allow-list is present post-upgrade and absent pre-upgrade; guardrails refuse an unknown/non-assistant/never-spawned session; a BUSY turn gets a short bounded wait before the interrupt (idle: no delay, clears-in-time: never interrupted, stays-busy: still bounded, never a permanent refusal) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -1225,6 +1225,14 @@ interface Live {
                         // The PRECISE collision signal (supersedes the old keystroke time-grace). Tracked in writeStdin.
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
+  // Card d88163b7 (CR fix): a CALLER-held drain suppression — SUPPRESS drain/submit (mirrors `stopping`,
+  // but is a DISTINCT flag: see `holdDrain`/`releaseDrain`) for a window BEFORE the caller has decided to
+  // actually stop the session, so nothing can start a NEW turn (via drainPending's Stop-hook auto-drain
+  // or enqueueStdin's idle-submit path) that a later `pty.stop()` would then kill with no recovery.
+  // DELIBERATELY NOT `stopping` itself: `onExit` classifies a death as `intended: live.stopping`, so
+  // setting `stopping` early (before we've actually decided to interrupt) would misreport a genuine
+  // mid-hold crash as an intended stop.
+  drainHeld: boolean;
   rateLimited: boolean; // §19c park: the turn died on a usage cap; the pty is alive but PARKED. SUPPRESS
                         // drain/submit (mirror of `stopping`) so the ~10s reconcile drain can't submit pending
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
@@ -2203,6 +2211,7 @@ export class PtyHost {
       composerLen: 0,
       pending: [],
       stopping: false,
+      drainHeld: false,
       rateLimited: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
@@ -2359,7 +2368,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0,
-      pending: [], stopping: false, rateLimited: false, lastPrompt: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -2431,7 +2440,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0,
-      pending: [], stopping: false, rateLimited: false, lastPrompt: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -2852,7 +2861,7 @@ export class PtyHost {
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
     // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
-    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !this.deferForHumanDraft(live)) {
+    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live)) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -3350,6 +3359,11 @@ export class PtyHost {
     // account and OVERWRITE lastPrompt, so the agent would resume with the wrong content and never finish
     // the interrupted turn. The held queue is kept intact and drains normally on the post-resume Stop.
     if (live.rateLimited) return;
+    // A caller is HOLDING the drain (card d88163b7's `holdDrain`) → do NOT promote a queued message into a
+    // turn. The caller is deciding whether to interrupt this session and needs anything that would start a
+    // NEW turn to stay in `pending`, recoverable via `flushPending`, instead of vanishing into an active
+    // turn the caller's own `pty.stop()` would then kill with no way to recapture it.
+    if (live.drainHeld) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
     const head = live.pending[0]!;
     let drained: QueuedMessage[];
@@ -4176,6 +4190,52 @@ export class PtyHost {
 
   isAlive(sessionId: string): boolean {
     return this.live.get(sessionId)?.alive ?? false;
+  }
+
+  /** Whether a session's turn is CURRENTLY in flight — the same in-memory `live.busy` flag `setBusy`
+   *  writes on every rising/falling edge (mirrored to the DB via `onBusy`, but read here directly with no
+   *  DB round-trip). Card d88163b7: lets a caller that's about to force-interrupt a session (e.g. a
+   *  companion capability upgrade) give an active turn a bounded chance to finish naturally first, instead
+   *  of always cutting it off mid-generation. Returns false for a dead/unknown session — nothing is "in
+   *  flight" there. */
+  isBusy(sessionId: string): boolean {
+    return this.live.get(sessionId)?.busy ?? false;
+  }
+
+  /**
+   * Card d88163b7 (CR fix): suppress this session's drain surface — BOTH `drainPending`'s Stop-hook
+   * auto-drain and `enqueueStdin`'s idle-submit path — until `releaseDrain` lifts it. For a caller that's
+   * deciding WHETHER to interrupt a live session (e.g. a companion capability upgrade waiting out a busy
+   * turn): without this, the turn ending (or a new message arriving) DURING that decision window can start
+   * a fresh turn the caller's own subsequent `pty.stop()` then kills — invisible to `flushPending`, since
+   * neither path ever leaves the message sitting in `pending` for it to recover. Holding the drain forces
+   * anything that would start a turn to stay queued instead, exactly where `flushPending` CAN see it.
+   *
+   * DELIBERATELY a distinct flag from `stopping` (see `Live.drainHeld`) — `stopping` also means "this
+   * session is being torn down" (`onExit` reads it to classify the death as intended), which is not yet
+   * true here; the caller may still decide NOT to stop. A no-op for a dead/unknown session.
+   *
+   * The caller MUST pair this with `releaseDrain` — including on an abort/throw path — or this session's
+   * drain stays suppressed forever (a worse wedge than the bug this exists to fix). Use try/finally.
+   *
+   * NOT RE-ENTRANT — `drainHeld` is a bool, not a counter, so an inner `releaseDrain` lifts an OUTER hold
+   * wholesale. Safe today only because the sole caller (`CompanionController.upgrade`) serializes on a
+   * single global reconcile chain, so two holds on the same session can never overlap. A future caller
+   * that could nest holds would need a counter instead — don't add one speculatively; there is no such
+   * caller today.
+   */
+  holdDrain(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (live) live.drainHeld = true;
+  }
+
+  /** Lift a `holdDrain` suppression. A no-op for a dead/unknown session (nothing to release) — safe to
+   *  call unconditionally, including from a `finally` after the session died mid-hold. Does NOT itself
+   *  re-trigger a drain: the caller that held it is expected to `flushPending`/decide next, exactly as
+   *  `upgradeCompanionCapabilities` does immediately after releasing. */
+  releaseDrain(sessionId: string): void {
+    const live = this.live.get(sessionId);
+    if (live) live.drainHeld = false;
   }
 
   /** Epoch ms when this session's CURRENTLY LIVE pty process started, or null if it has no live process

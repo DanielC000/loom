@@ -1792,8 +1792,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // heartbeat/reminders/chat_reply torn down once the fresh pty comes back — see onSessionExit's stale-exit
   // guard). An inbound chat message that lands mid-gap is captured and redelivered onto the fresh process
   // (SessionService.upgradeCompanionCapabilities' flushPending drain), not lost to the old process's FIFO
-  // wipe on exit — bounded to well under a second of genuinely unrecoverable window, not "never," since a
-  // message could in principle land in the same instant the old process actually dies.
+  // wipe on exit. Card d88163b7 (CR fix): that gap now starts EARLIER than the old process actually
+  // stopping — a BUSY turn first gets a short bounded wait (up to `UPGRADE_BUSY_WAIT_MS`, ~3s) to finish on
+  // its own, with the pty's drain surface HELD (`holdDrain`/`releaseDrain`) for the wait's full duration so
+  // neither the turn ending mid-wait nor a fresh inbound message can slip into an active turn the
+  // subsequent `pty.stop()` would then kill uncapturably. So the recoverable window is now the WHOLE
+  // upgrade sequence (wait + stop), not just the post-stop teardown — the one genuinely unrecoverable
+  // sliver left is the same as before: a message landing in the exact instant the old process actually
+  // dies, well under a second, never "never."
   app.post("/api/companion/:sessionId/upgrade", async (req, reply) => {
     const sessionId = (req.params as { sessionId: string }).sessionId;
     const r = resolveCompanionAgent(sessionId);
