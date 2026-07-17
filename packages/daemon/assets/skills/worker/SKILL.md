@@ -72,10 +72,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    check your task names) and confirm the behavior. **Run the gate in the FOREGROUND, then commit, then
    report — in ONE flow.** A blocking command completes within your turn, so you never need to launch it
    in the background and park on a poll waiting for it. **The rule: never end your turn while a gate is
-   running, and never report before committing.** If the
-   output would be too long/noisy to read inline, redirect it to a file and read the tail in the same turn
-   (e.g. `<gate-cmd> > gate.log 2>&1; echo EXIT=$?`, then read `gate.log`) — the command still runs in the
-   foreground and returns to you when done. **Never park a gate on a scheduled wake** (`wake_me` to sleep the turn, wake
+   running, and never report before committing.** A gate that runs for **minutes**, not just one whose
+   output is long/noisy, needs the same care: your shell tool's default timeout (commonly ~120s) will
+   auto-background a bare long-running command out from under you. So for any gate that's slow OR noisy,
+   either launch it with an explicit long `timeout` set to cover its real duration, or redirect it to a
+   file and read the tail in the same turn (e.g. `<gate-cmd> > gate.log 2>&1; echo EXIT=$?`, then read
+   `gate.log`) — either way the command still runs in the foreground and returns to you when done. **If a
+   gate command DOES get auto-backgrounded anyway** (you see a background task id instead of a normal
+   result), await its actual completion — the tool made for that (commonly `TaskOutput` with a
+   blocking/wait option), not a fresh `Monitor`/watch call, which is for observing a new command or
+   stream, not for pulling the result of a task that already started running in the background. **Never park a gate on a scheduled wake** (`wake_me` to sleep the turn, wake
    later, check if it finished) — that risks a "No response requested" stall and only adds latency; a
    foreground run just returns when it's done. **Never end your turn parked on a background task's own
    completion notification as your only plan, either — that notification is delivered on your *next* turn,
