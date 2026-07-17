@@ -187,6 +187,41 @@ export function resolveCompanionGrant(db: Db, sessionId: string, capability: str
   };
 }
 
+/**
+ * Distinguishes a project that's TOTALLY ungranted from one that's granted for a DIFFERENT capability but
+ * not `deniedCapability` — every belt-and-suspenders per-project scope denial below (Framework §2) routes
+ * through this so it names WHICH capability is missing, instead of the old collapsed "not in your granted
+ * scope" that reads identically whether the project has no access at all or just lacks THIS ONE lever
+ * (Platform Auditor finding, session 5db71873: `sessions_status` on a project succeeded while `board_list`
+ * on the SAME project returned the plain message, with nothing surfacing that the two are independently
+ * scoped — a partial grant is easy to mistake for full access). `label` names the project reference in the
+ * message (defaults to `project "<id>"`; a caller that resolved the project from a task/question/session
+ * id instead of a bare `project` param passes its own label, e.g. "this task's project"). Reads the
+ * session's WHOLE grant set (every capability, every project) — purely descriptive, never widens or itself
+ * decides scope. Falls back to the plain message (byte-identical to before this fix) when the store can't
+ * list grants, or when the project genuinely has no OTHER capability grant either — a fully-ungranted
+ * project's error is unchanged.
+ */
+function scopeDenialMessage(
+  db: Db,
+  sessionId: string,
+  deniedCapability: string,
+  projectId: string,
+  label: string = `project "${projectId}"`,
+): string {
+  const plain = `${label} is not in your granted scope`;
+  if (typeof db.listCompanionCapabilityGrantsForSession !== "function") return plain;
+  const ownProjectId = db.getSession(sessionId)?.projectId ?? null;
+  const other = db.listCompanionCapabilityGrantsForSession(sessionId).find((g) => {
+    if (g.capability === deniedCapability) return false;
+    return (g.projectId ?? ownProjectId) === projectId;
+  });
+  if (!other) return plain;
+  return `${label} is granted for "${other.capability}" (${other.mode}) but NOT for "${deniedCapability}" — ` +
+    `this is a PARTIAL grant, not full access. The owner would need to also grant "${deniedCapability}" on ` +
+    `this project for you to use it here.`;
+}
+
 /** The slice of `PtyHost` a sensitive ACT lever needs to (a) scope Primitive C's propose/confirm round-trip
  *  to the CURRENT turn's reply-to route and (b) push a best-effort nudge once a privileged action commits —
  *  mirrors the minimal `HeartbeatPty` seam (companion/heartbeat.ts) rather than importing the full
@@ -395,7 +430,7 @@ const SESSION_STATUS: CompanionCapability = {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "session-status", project) });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
         // `state` mirrors the Lead's own list_all_sessions state filter (mcp/platform.ts) in SHAPE
@@ -545,7 +580,7 @@ const DECISIONS_RELAY: CompanionCapability = {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "decisions-relay", project) });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
         const rows = db.listOpenQuestions().filter((q) => targetProjects.has(q.projectId));
@@ -608,7 +643,7 @@ const DECISIONS_RELAY: CompanionCapability = {
         if (!question) return ok({ error: `no question "${questionId}"` });
         // Belt-and-suspenders (Framework §2, mandatory per-project — never a collapsed scope check).
         if (!ctx.scope.projectIds.has(question.projectId)) {
-          return ok({ error: "this question's project is not in your granted scope" });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "decisions-relay", question.projectId, "this question's project") });
         }
         if (!ctx.scope.mayAct(question.projectId)) {
           return ok({ error: "you only have a read-mode grant on this question's project — decision_resolve needs act-mode" });
@@ -903,7 +938,7 @@ const BOARD_REACH: CompanionCapability = {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
         const cards = [...targetProjects].flatMap((pid) => {
@@ -931,7 +966,7 @@ const BOARD_REACH: CompanionCapability = {
         // Belt-and-suspenders re-check (Framework §2): `project` must be one of THIS grant's scoped
         // projects — it can only ever NAME a project already granted, never widen scope.
         if (!ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
         const found = getProjectTask(db, project, taskId);
         if ("error" in found) return ok({ error: found.error });
@@ -992,7 +1027,7 @@ const BOARD_REACH: CompanionCapability = {
         }
         // Belt-and-suspenders (Framework §2, mandatory per-project — never a collapsed scope check).
         if (!ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
         if (!ctx.scope.mayAct(project)) {
           return ok({ error: "you only have a read-mode grant on this project — board_create needs act-mode" });
@@ -1160,7 +1195,7 @@ const BOARD_REACH: CompanionCapability = {
         const task = db.getTask(id);
         if (!task) return ok({ error: `no task "${id}"` });
         if (!ctx.scope.projectIds.has(task.projectId)) {
-          return ok({ error: "this task's project is not in your granted scope" });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", task.projectId, "this task's project") });
         }
         if (!ctx.scope.mayAct(task.projectId)) {
           return ok({ error: "you only have a read-mode grant on this task's project — board_update needs act-mode" });
@@ -1322,7 +1357,7 @@ const BOARD_REACH: CompanionCapability = {
       },
       async ({ project, scope }) => {
         if (!ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
         if (!ctx.scope.mayAct(project)) {
           return ok({ error: "you only have a read-mode grant on this project — authored_content_grant needs act-mode" });
@@ -1619,7 +1654,7 @@ const VAULT_READ: CompanionCapability = {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "vault-read", project) });
         }
         const q = query.trim().toLowerCase();
         if (!q) return ok({ error: "query must not be empty" });
@@ -1819,7 +1854,7 @@ const SESSION_STEER: CompanionCapability = {
       if (!target) return { error: `no session "${sessionId}"` };
       const projectId = target.projectId;
       if (!projectId || !ctx.scope.projectIds.has(projectId)) {
-        return { error: "this session's project is not in your granted scope" };
+        return { error: projectId ? scopeDenialMessage(db, ctx.sessionId, "session-steer", projectId, "this session's project") : "this session's project is not in your granted scope" };
       }
       if (!ctx.scope.mayAct(projectId)) {
         return { error: "you only have a read-mode grant on this session's project — session control needs act-mode" };
@@ -2109,7 +2144,7 @@ function pendingSpawnKey(sessionId: string, route: CompanionRoute | null): strin
 const SESSION_SPAWN: CompanionCapability = {
   slug: "session-spawn",
   supportsMode: ["act"],
-  register(server, ctx) {
+  register(server, ctx, db) {
     // ACT-only lever — mirrors media-out/session-steer's own hasActGrant gate.
     const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
     if (!hasActGrant) return;
@@ -2141,7 +2176,7 @@ const SESSION_SPAWN: CompanionCapability = {
 
         // Guard (b) — belt-and-suspenders per-project scope (Framework §2, mandatory).
         if (!ctx.scope.projectIds.has(project)) {
-          return ok({ error: `project "${project}" is not in your granted scope` });
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "session-spawn", project) });
         }
         if (!ctx.scope.mayAct(project)) {
           return ok({ error: "you only have a read-mode grant on this project — session_spawn needs act-mode" });
