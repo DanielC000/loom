@@ -146,7 +146,104 @@ try {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
+// ===== SECOND scenario (card a5f98bb4): a pre-`version`-column project_memory DB — the exact shape
+// every real Loom install has TODAY, after card 2fd9abf9 shipped project_memory but BEFORE this card
+// added the optimistic-concurrency `version` column. Proves migrateProjectMemory() (an ADD COLUMN, not a
+// CREATE TABLE) actually reaches an existing table with real rows in it, backfills version=1 in place,
+// and that the version-based CAS guard works correctly against a note that predates the migration.
+// A SEPARATE tmp dir — the first scenario's `finally` above already deleted `tmpHome`.
+const tmpHome2 = path.join(os.tmpdir(), `loom-pm-version-migration-${Date.now()}-${process.pid}`);
+fs.mkdirSync(tmpHome2, { recursive: true });
+const dbFile2 = path.join(tmpHome2, "legacy-pre-version-column.db");
+const projId2 = randomUUID();
+const noteId2 = randomUUID();
+const t1 = "2026-01-01T00:00:00.000Z";
+
+{
+  const raw = new Database(dbFile2);
+  raw.pragma("journal_mode = WAL");
+  raw.exec(`
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL, vault_path TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT, reserved INTEGER NOT NULL DEFAULT 0
+    );
+    -- project_memory WITHOUT the version column — the real pre-a5f98bb4 shape (mirrors db.ts SCHEMA minus
+    -- the version line this card adds).
+    CREATE TABLE project_memory (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      key TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      text TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      tags TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_retrieved_at TEXT,
+      retrieval_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(project_id, key)
+    );
+    CREATE INDEX idx_project_memory_project ON project_memory(project_id, pinned, last_retrieved_at);
+    CREATE VIRTUAL TABLE project_memory_fts USING fts5(title, text, content='project_memory', content_rowid='rowid');
+    CREATE TRIGGER project_memory_ai AFTER INSERT ON project_memory BEGIN
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+    CREATE TRIGGER project_memory_ad AFTER DELETE ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+    END;
+    CREATE TRIGGER project_memory_au AFTER UPDATE OF title, text ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+  `);
+  raw.prepare("INSERT INTO projects (id, name, repo_path, vault_path, config_json, created_at, archived_at, reserved) VALUES (?, ?, ?, ?, '{}', ?, NULL, 0)")
+    .run(projId2, "Pre-Version Project", projId2, projId2, t1);
+  // A real pre-existing note, written before version existed — this is the row the migration must reach.
+  raw.prepare(
+    "INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, created_at, updated_at, last_retrieved_at, retrieval_count) VALUES (?, ?, 'pre-existing-note', 'A note from before the CAS guard', 'this note predates the version column', 0, '[]', ?, ?, NULL, 0)",
+  ).run(noteId2, projId2, t1, t1);
+  raw.close();
+}
+
+let db2;
+try {
+  let ctorError2 = null;
+  try {
+    const { Db } = await import("../dist/db.js");
+    db2 = new Db(dbFile2);
+  } catch (err) {
+    ctorError2 = err;
+  }
+  check("(v-migrate) constructing Db against a pre-version-column project_memory DB does not throw", ctorError2 === null);
+  if (ctorError2) console.log(`    threw: ${ctorError2?.stack || ctorError2}`);
+
+  if (!ctorError2) {
+    const raw2 = new Database(dbFile2, { readonly: true });
+    try {
+      const cols = (raw2.prepare("PRAGMA table_info(project_memory)").all()).map((c) => c.name);
+      check("(v-migrate) the `version` column was added to the existing table", cols.includes("version"));
+    } finally {
+      raw2.close();
+    }
+
+    // ===== the pre-existing row is backfilled to version=1, untouched otherwise =====
+    const preExisting = db2.getProjectMemoryByKey(projId2, "pre-existing-note");
+    check("(v-migrate) the pre-existing note is still readable post-migration", preExisting?.text === "this note predates the version column");
+    check("(v-migrate) the pre-existing note backfills to version 1 (the same starting point a brand-new note gets)", preExisting?.version === 1);
+
+    // ===== the version-based CAS guard works correctly against this migrated-in row =====
+    const staleAttempt = db2.upsertProjectMemoryChecked(projId2, { key: "pre-existing-note", text: "a race, using the wrong version" }, 500, 999);
+    check("(v-migrate) a stale baseVersion against a MIGRATED row is correctly rejected", staleAttempt.ok === false && staleAttempt.current.text === "this note predates the version column");
+    const correctAttempt = db2.upsertProjectMemoryChecked(projId2, { key: "pre-existing-note", text: "the real next edit" }, 500, preExisting.version);
+    check("(v-migrate) the CORRECT baseVersion (1, from the backfill) against a MIGRATED row succeeds", correctAttempt.ok === true && correctAttempt.entry.text === "the real next edit");
+    check("(v-migrate) the version bumped to 2 on that first post-migration update", correctAttempt.entry.version === 2);
+  }
+} finally {
+  try { db2?.close(); } catch { /* ignore */ }
+  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome2, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired)."
+  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

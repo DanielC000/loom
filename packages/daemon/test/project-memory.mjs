@@ -48,7 +48,7 @@ try {
   }
 
   // ===================== pure compose: composeProjectMemoryDigest =====================
-  const mk = (over) => ({ id: over.id, projectId: projId, key: over.key, title: over.title ?? "", text: over.text, pinned: !!over.pinned, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 0 });
+  const mk = (over) => ({ id: over.id, projectId: projId, key: over.key, title: over.title ?? "", text: over.text, pinned: !!over.pinned, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 0, version: 1 });
 
   check("(compose) empty pinned + empty related ⇒ digest null, includedIds []", (() => {
     const { digest, includedIds } = composeProjectMemoryDigest([], [], 4000);
@@ -245,19 +245,52 @@ try {
     const oversizedText = writeProjectMemory(db, mcpProj, { key: "too-big", text: "x".repeat(5000) });
     check("(mcp) memory_write rejects text over the byte cap with a clear error", "error" in oversizedText && /too long/i.test(oversizedText.error));
     check("(mcp) an oversized write never actually persisted a row", db.getProjectMemoryByKey(mcpProj, "too-big") === undefined);
+    // F3b: the byte-cap rejection is ERGONOMIC — bytesOver lets the caller trim without re-fetching, and
+    // `current` is omitted (not just undefined-in-spirit) for a brand-new key with nothing to trim against.
+    check("(mcp) the oversized-text rejection reports bytesOver", oversizedText.bytesOver === Buffer.byteLength("x".repeat(5000), "utf8") - 4000);
+    check("(mcp) a brand-new oversized key has no `current` to trim against", oversizedText.current === undefined);
     const oversizedTitle = writeProjectMemory(db, mcpProj, { key: "big-title", text: "fine", title: "t".repeat(300) });
     check("(mcp) memory_write rejects a title over the char cap", "error" in oversizedTitle && /too long/i.test(oversizedTitle.error));
 
     const ok = writeProjectMemory(db, mcpProj, { key: "note-1", text: "the actual note body", title: "Note One", tags: ["a", "b"] });
-    check("(mcp) a valid memory_write succeeds", !("error" in ok) && ok.key === "note-1");
-    const okUpdate = writeProjectMemory(db, mcpProj, { key: "note-1", text: "UPDATED body" });
-    check("(mcp) re-writing the same key upserts (same id, updated text)", okUpdate.id === ok.id && okUpdate.text === "UPDATED body");
+    check("(mcp) a valid memory_write (brand-new key) succeeds with no baseVersion", !("error" in ok) && ok.key === "note-1");
+    check("(mcp) a brand-new note starts at version 1", ok.version === 1);
+
+    // F3: concurrency guard — updating an EXISTING key with NO baseVersion is a blind clobber attempt
+    // and must be REJECTED (this is the actual incident: neither writer had read the other's version, so
+    // "optional base" alone would not have caught it).
+    const updateNoBase = writeProjectMemory(db, mcpProj, { key: "note-1", text: "sneaky blind overwrite" });
+    check("(mcp) updating an existing key WITHOUT baseVersion is rejected as a conflict", "conflict" in updateNoBase && updateNoBase.conflict === true);
+    check("(mcp) the conflict response carries the CURRENT note to reconcile against", updateNoBase.current?.text === "the actual note body");
+    check("(mcp) the blind-overwrite attempt never actually persisted", db.getProjectMemoryByKey(mcpProj, "note-1").text === "the actual note body");
+
+    // A STALE baseVersion (captured before someone else's write landed) is rejected the same way — using
+    // an integer, not a timestamp, so this is immune to any clock-collision concern.
+    const updateStaleBase = writeProjectMemory(db, mcpProj, { key: "note-1", text: "overwrite from a stale read", baseVersion: 999 });
+    check("(mcp) updating with a STALE baseVersion is rejected as a conflict", "conflict" in updateStaleBase && updateStaleBase.conflict === true);
+    check("(mcp) the stale-base attempt never actually persisted", db.getProjectMemoryByKey(mcpProj, "note-1").text === "the actual note body");
+
+    // The CORRECT baseVersion (from the last real read) lets the update through, and the version bumps.
+    const okUpdate = writeProjectMemory(db, mcpProj, { key: "note-1", text: "UPDATED body", baseVersion: ok.version });
+    check("(mcp) re-writing the same key with the CORRECT baseVersion upserts (same id, updated text)", okUpdate.id === ok.id && okUpdate.text === "UPDATED body");
+    check("(mcp) the version incremented by exactly 1 on that update", okUpdate.version === ok.version + 1);
+
+    // Simulate the actual incident: two writers race for the same key. Writer A reads-then-writes
+    // successfully; writer B, holding the SAME stale base A started from, is rejected — not silently
+    // clobbered — once A's write has landed.
+    const writerA = writeProjectMemory(db, mcpProj, { key: "note-1", text: "writer A's update", baseVersion: okUpdate.version });
+    check("(mcp) (race) writer A's write (fresh base) succeeds", !("error" in writerA) && writerA.text === "writer A's update");
+    const writerB = writeProjectMemory(db, mcpProj, { key: "note-1", text: "writer B's conflicting update", baseVersion: okUpdate.version });
+    check("(mcp) (race) writer B's write (SAME base A started from, now stale) is REJECTED, not silently applied",
+      "conflict" in writerB && writerB.conflict === true);
+    check("(mcp) (race) writer A's write SURVIVES — the incident's silent-clobber is closed", db.getProjectMemoryByKey(mcpProj, "note-1").text === "writer A's update");
+    check("(mcp) (race) writer B's rejection carries writer A's text so B can reconcile", writerB.current?.text === "writer A's update");
 
     const listed = listProjectMemoryEntries(db, mcpProj);
     check("(mcp) memory_list returns the note", listed.length === 1 && listed[0].key === "note-1");
 
     const readBack = readProjectMemory(db, mcpProj, "note-1");
-    check("(mcp) memory_read returns the full note", !("error" in readBack) && readBack.text === "UPDATED body");
+    check("(mcp) memory_read returns the full note", !("error" in readBack) && readBack.text === "writer A's update");
     const readMissing = readProjectMemory(db, mcpProj, "no-such-key");
     check("(mcp) memory_read on a missing key returns an error, not a throw", "error" in readMissing);
 
@@ -267,6 +300,15 @@ try {
 
     const forgetAgain = forgetProjectMemory(db, mcpProj, "note-1");
     check("(mcp) memory_forget on an already-missing key is idempotent", forgetAgain.deleted === false);
+
+    // The blind upsert (upsertProjectMemory) — used ONLY by the e2e test-seed route (gateway/server.ts),
+    // which has no reader to race against — is UNCHANGED and unaffected by the guard above.
+    const seedProj = "proj-mcp-seed";
+    db.insertProject({ id: seedProj, name: "Seed Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    const seed1 = db.upsertProjectMemory(seedProj, { key: "seeded", text: "first seed" }, 500);
+    const seed2 = db.upsertProjectMemory(seedProj, { key: "seeded", text: "second seed, no base needed" }, 500);
+    check("(mcp) the blind upsertProjectMemory (e2e seed path) still overwrites with no base check at all", seed2.id === seed1.id && seed2.text === "second seed, no base needed");
+    check("(mcp) the blind path still bumps version normally (it just never CHECKS it)", seed1.version === 1 && seed2.version === 2);
   }
 
   // ===================== zero metered tokens (structural check) =====================
@@ -279,6 +321,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project_memory DB layer (upsert-by-key, memory_forget, bounded LRU-by-retrieval eviction with pinned exempt, FTS5 search scoped + graceful on special chars/empty), the memory_write/forget/list/read MCP tool business logic, the pure composeProjectMemoryDigest budget-cap + pinned/related tiering, and the additive-empty-project guard — all claude-free, network-free."
+  ? "\n✅ ALL PASS — project_memory DB layer (upsert-by-key, memory_forget, bounded LRU-by-retrieval eviction with pinned exempt, FTS5 search scoped + graceful on special chars/empty), the memory_write/forget/list/read MCP tool business logic incl. the card a5f98bb4 monotonic-version optimistic-concurrency guard (blind/missing/stale baseVersion rejected with the current note attached, a race reproduced end-to-end, the e2e-seed blind upsert path left untouched but still version-bumping) and the ergonomic byte-cap rejection (bytesOver + current), the pure composeProjectMemoryDigest budget-cap + pinned/related tiering, and the additive-empty-project guard — all claude-free, network-free. The same-millisecond clock-collision proof (why version, not updatedAt) lives in project-memory-version-guard.mjs."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

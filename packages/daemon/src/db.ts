@@ -995,9 +995,9 @@ CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_s
 -- write to (memory_write), retrieved by FTS5 and injected into every kickoff (pinned always + top-K
 -- related-on-match), so fleet-shared decisions/facts survive across sessions instead of living only in
 -- hand-curated docs. UNIQUE(project_id, key) makes memory_write an upsert-by-key — a second write to the
--- same key overwrites in place (see upsertProjectMemory), never a duplicate row. Brand-new table ⇒
--- CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER needed, no migrate*() method) —
--- an existing DB simply gains an empty table on next boot, mirroring api_keys/runs above.
+-- same key overwrites in place (see upsertProjectMemory), never a duplicate row. version (below) was
+-- added post-launch by card a5f98bb4 (the optimistic-concurrency guard) — applied to existing DBs by
+-- migrateProjectMemory() below (fresh installs already have it via this CREATE TABLE).
 CREATE TABLE IF NOT EXISTS project_memory (
   id TEXT PRIMARY KEY,
   project_id TEXT NOT NULL REFERENCES projects(id),
@@ -1006,6 +1006,7 @@ CREATE TABLE IF NOT EXISTS project_memory (
   text TEXT NOT NULL,
   pinned INTEGER NOT NULL DEFAULT 0,      -- pinned notes ride IN FULL on every kickoff, NEVER evicted
   tags TEXT NOT NULL DEFAULT '[]',        -- JSON string[]
+  version INTEGER NOT NULL DEFAULT 1,     -- monotonic CAS token (card a5f98bb4) — +1 on every write, in SQL
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_retrieved_at TEXT,                 -- NULL until first retrieved; feeds LRU-by-retrieval eviction
@@ -1285,6 +1286,15 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   deferred: "INTEGER NOT NULL DEFAULT 0",
 };
 
+/** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
+ *  migrateProjectMemory() (fresh installs already have them via CREATE TABLE). */
+const PROJECT_MEMORY_ADDED_COLUMNS: Record<string, string> = {
+  // Optimistic-concurrency CAS token (card a5f98bb4). NOT NULL + constant DEFAULT 1 backfills every
+  // legacy row to version 1 in place — the same starting point a brand-new row gets, so a pre-existing
+  // note's first post-migration write is a normal version-1→2 update, nothing special-cased.
+  version: "INTEGER NOT NULL DEFAULT 1",
+};
+
 /** Columns added to `companion_config` after its initial ship; applied to existing DBs by
  *  migrateCompanionConfig() (fresh installs already have them via CREATE TABLE). */
 const COMPANION_CONFIG_ADDED_COLUMNS: Record<string, string> = {
@@ -1456,6 +1466,7 @@ export class Db {
     this.migrateOrchestrationEvents();
     this.migrateQuestions();
     this.migrateConnections();
+    this.migrateProjectMemory();
   }
 
   /**
@@ -1568,6 +1579,20 @@ export class Db {
     );
     for (const [name, type] of Object.entries(TASK_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `project_memory` (card a5f98bb4) — ADD COLUMN any post-launch
+   * column missing from an existing DB (fresh installs already have them via CREATE TABLE). Mirrors
+   * migrateTasks; the NOT NULL + constant DEFAULT 1 backfills every legacy note to version 1 in place.
+   */
+  private migrateProjectMemory(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(project_memory)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(PROJECT_MEMORY_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE project_memory ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -4392,10 +4417,14 @@ export class Db {
 
   // --- project memory (card 2fd9abf9: project-scoped SHARED agent memory, FTS5-retrieved at kickoff) ---
   /** UPSERT by `(projectId, key)` — a second write to the same key overwrites in place (title/text/pinned/
-   *  tags + updated_at), never a duplicate row; `id`/`created_at`/`lastRetrievedAt`/`retrievalCount` are
-   *  preserved across an update (the INSERT's values for those only apply on a true first write — the
-   *  ON CONFLICT branch never references them). Runs the bounded-store eviction sweep afterward (owner
-   *  decision #2) so the store never grows past `maxNotes` unpinned rows. */
+   *  tags/updated_at + a `version` bump), never a duplicate row; `id`/`created_at`/`lastRetrievedAt`/
+   *  `retrievalCount` are preserved across an update (the INSERT's values for those only apply on a true
+   *  first write — the ON CONFLICT branch never references them). `version = version + 1` is an ATOMIC
+   *  SQL increment (not a JS read-then-write), so it can never skip or double-count even under whatever
+   *  concurrency a future caller might add. Runs the bounded-store eviction sweep afterward (owner
+   *  decision #2) so the store never grows past `maxNotes` unpinned rows. BLIND — no concurrency guard;
+   *  used as-is only by the e2e test-seed route (gateway/server.ts), which has no reader to race against.
+   *  The agent-facing memory_write path goes through {@link upsertProjectMemoryChecked} instead. */
   upsertProjectMemory(
     projectId: string,
     input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[] },
@@ -4403,10 +4432,10 @@ export class Db {
   ): ProjectMemoryEntry {
     const now = new Date().toISOString();
     this.db.prepare(
-      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, created_at, updated_at, last_retrieved_at, retrieval_count)
-       VALUES (@id, @projectId, @key, @title, @text, @pinned, @tags, @now, @now, NULL, 0)
+      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, created_at, updated_at, last_retrieved_at, retrieval_count, version)
+       VALUES (@id, @projectId, @key, @title, @text, @pinned, @tags, @now, @now, NULL, 0, 1)
        ON CONFLICT(project_id, key) DO UPDATE SET
-         title = @title, text = @text, pinned = @pinned, tags = @tags, updated_at = @now`,
+         title = @title, text = @text, pinned = @pinned, tags = @tags, updated_at = @now, version = version + 1`,
     ).run({
       id: randomUUID(),
       projectId,
@@ -4419,6 +4448,45 @@ export class Db {
     });
     this.evictProjectMemoryOverCap(projectId, maxNotes);
     return this.getProjectMemoryByKey(projectId, input.key)!;
+  }
+  /**
+   * Optimistic-concurrency-guarded upsert (card a5f98bb4, Lore audit F3) — the memory_write MCP tool's
+   * write path. Compare-and-sets against the existing row's monotonic `version` (NOT `updatedAt` — a
+   * timestamp is NOT a safe CAS token here: two distinct writes CAN legitimately compute the identical
+   * millisecond, either from OS clock-resolution coarseness or from two calls simply landing in the same
+   * tick, which would let a stale write masquerade as fresh and silently clobber; an integer counter,
+   * incremented atomically in SQL, cannot collide this way — see the dedicated
+   * project-memory-version-guard.mjs test, which forces exactly this updatedAt collision and proves the
+   * version-based guard is unaffected). This closes the failure OBSERVED live 2026-07-17: two writers 3
+   * min apart, neither aware of the other, last-write-wins silently ate the first write.
+   * `baseVersion` is the `version` the caller last read for this key (via memory_read/memory_list/a prior
+   * memory_write response):
+   *   - key doesn't exist yet → plain insert (starts at version 1); `baseVersion` is irrelevant (nothing
+   *     to race against on a brand-new key).
+   *   - key exists and `baseVersion` is `undefined` OR doesn't equal the row's current `version` →
+   *     REJECTED: returns `{ok:false, current}` (the row as it stands right now) instead of writing, so
+   *     the caller can reconcile/merge and retry with the fresh version — omission is deliberately
+   *     treated the same as staleness, since an update to an EXISTING key with no base at all is
+   *     indistinguishable from a blind clobber (this is what actually closes the incident: neither writer
+   *     had read the other's version, so an *optional* check would not have caught it).
+   *   - key exists and `baseVersion` equals the current version → proceeds exactly like the old upsert.
+   * Wrapped in one `db.transaction()` so the read-current + conditional-write stays atomic even though
+   * Node + better-sqlite3 are already single-threaded/synchronous within this call.
+   */
+  upsertProjectMemoryChecked(
+    projectId: string,
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[] },
+    maxNotes: number,
+    baseVersion: number | undefined,
+  ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } {
+    const run = this.db.transaction((): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } => {
+      const existing = this.getProjectMemoryByKey(projectId, input.key);
+      if (existing && existing.version !== baseVersion) {
+        return { ok: false, current: existing };
+      }
+      return { ok: true, entry: this.upsertProjectMemory(projectId, input, maxNotes) };
+    });
+    return run();
   }
   getProjectMemoryByKey(projectId: string, key: string): ProjectMemoryEntry | undefined {
     const r = this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND key = ?").get(projectId, key) as Row | undefined;
@@ -5667,6 +5735,7 @@ function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
     lastRetrievedAt: (r.last_retrieved_at as string | null) ?? null,
     retrievalCount: (r.retrieval_count as number) ?? 0,
+    version: (r.version as number) ?? 1,
   };
 }
 /** Turn free-form kickoff/task text into a safe FTS5 MATCH query: split into word tokens, drop short

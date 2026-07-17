@@ -1080,6 +1080,14 @@ export interface ProjectMemoryEntry {
   updatedAt: string;
   lastRetrievedAt: string | null;
   retrievalCount: number;
+  /**
+   * Monotonic optimistic-concurrency token (card a5f98bb4) — starts at 1, incremented by exactly 1 on
+   * every write, atomically in SQL. NOT derived from `updatedAt`: a coarse or colliding clock (same-ms
+   * timestamps from two distinct writes — a real risk on some hosts/OSes) would let two writes share an
+   * `updatedAt` and defeat a timestamp-based compare-and-set; an integer counter cannot collide this way.
+   * This is the field `memory_write`'s `baseVersion` compares against.
+   */
+  version: number;
 }
 
 /**

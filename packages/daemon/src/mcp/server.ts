@@ -190,13 +190,21 @@ export class TaskMcpRouter {
           "that should surface only when it's RELEVANT (matched by full-text search against the kickoff/" +
           "task text). Optional `title` (short label, max 200 chars) and `tags` (string[]). Write " +
           "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
-          "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground).",
+          "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground); a too-long write " +
+          "is rejected with `bytesOver` + the current note (if any) so you can trim without re-fetching. " +
+          "UPDATING A NOTE THAT ALREADY EXISTS REQUIRES `baseVersion` — the `version` you last read for " +
+          "this key (from memory_read, memory_list, or a prior memory_write's response; NOT its `updatedAt` " +
+          "timestamp). Omitting it, or passing a stale one, is REJECTED with `conflict:true` and `current` " +
+          "(the note as it stands right now) instead of silently overwriting someone else's write — re-read, " +
+          "merge your change into `current.text`, and retry with `baseVersion: current.version`. A brand-new " +
+          "key needs no base.",
         inputSchema: {
           key: z.string(),
           text: z.string(),
           title: z.string().optional(),
           pinned: z.boolean().optional(),
           tags: z.array(z.string()).optional(),
+          baseVersion: z.number().int().optional(),
         },
       },
       async (args) => ok(writeProjectMemory(db, projectId, args)),
