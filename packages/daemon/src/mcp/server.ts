@@ -53,6 +53,11 @@ export class TaskMcpRouter {
     const wakes = this.wakes;
     const fetchOverride = this.fetchOverride;
     const server = new McpServer({ name: "loom-tasks", version: "0.1.0" });
+    // `session` is resolved HERE (not further down, where it used to be computed only for the
+    // authenticated_request/vault_write gates) so tasks_create/tasks_update below can also condition on
+    // it — SAME conditional-registration pattern as those two tools (an omitted tool never reaches
+    // tools/list, not a runtime denial).
+    const session = db.getSession(sessionId);
 
     server.registerTool(
       "tasks_list",
@@ -119,36 +124,55 @@ export class TaskMcpRouter {
       },
       async ({ id, taskId }) => ok(getProjectTaskRequest(db, projectId, id, taskId)),
     );
-    server.registerTool(
-      "tasks_create",
-      {
-        description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2.",
-        inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional() },
-      },
-      async (args) => ok(createProjectTask(db, projectId, args)),
-    );
-    server.registerTool(
-      "tasks_update",
-      {
-        description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool — tasks_get/task_requests_list/task_request_get — uses) — pass either one (if both, id wins). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
-        inputSchema: {
-          id: z.string().optional(),
-          taskId: z.string().optional(),
-          title: z.string().optional(),
-          body: z.string().optional(),
-          columnKey: z.string().optional(),
-          position: z.number().optional(),
-          priority: prioritySchema.optional(),
-          held: z.boolean().optional(),
-          deferred: z.boolean().optional(),
+    // An "assistant" (Companion) session gets NEITHER tool — its only card-write path is the separately
+    // grant-checked `board_create`/`board_update` (companion/capabilities.ts, mounted on loom-orchestration),
+    // which take an EXPLICIT `project` param and are checked against a real `board-reach` act-mode grant.
+    // Unlike those, tasks_create/tasks_update ALWAYS write to THIS session's own project with no grant
+    // check at all — for the Companion that silently meant "your own bound board", which is exactly the
+    // silent-wrong-board footgun this omission closes (a Companion asked to file to a NAMED project would
+    // reach for this tool and misfile to its home board instead). Every other role is unaffected — this is
+    // conditional TOOL REGISTRATION (an omitted tool never reaches tools/list), the same pattern already
+    // used by authenticated_request/vault_write below.
+    //
+    // `session?.role !== "assistant"` reads fail-open on a null session (an unknown/expired sessionId
+    // would take the TRUE branch and register the tools) — that's fine because it's UNREACHABLE, not
+    // merely unlikely: `buildServer` is private with exactly ONE caller, `handle()` below, which resolves
+    // `resolveProject(sessionId)` FIRST and returns a synchronous 404 ("unknown or expired session")
+    // before ever calling `buildServer` — no `await` in between, so there's no TOCTOU window either. A
+    // null `session` here can only mean the id resolved to a project moments ago but the session row is
+    // now gone, which cannot happen within one synchronous request.
+    if (session?.role !== "assistant") {
+      server.registerTool(
+        "tasks_create",
+        {
+          description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2.",
+          inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional() },
         },
-      },
-      async ({ id, taskId, ...patch }) => {
-        const resolvedId = resolveAlias(id, taskId);
-        if (resolvedId === undefined) return ok({ error: "id (or taskId) is required" });
-        return ok(updateProjectTask(db, projectId, resolvedId, patch));
-      },
-    );
+        async (args) => ok(createProjectTask(db, projectId, args)),
+      );
+      server.registerTool(
+        "tasks_update",
+        {
+          description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool — tasks_get/task_requests_list/task_request_get — uses) — pass either one (if both, id wins). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
+          inputSchema: {
+            id: z.string().optional(),
+            taskId: z.string().optional(),
+            title: z.string().optional(),
+            body: z.string().optional(),
+            columnKey: z.string().optional(),
+            position: z.number().optional(),
+            priority: prioritySchema.optional(),
+            held: z.boolean().optional(),
+            deferred: z.boolean().optional(),
+          },
+        },
+        async ({ id, taskId, ...patch }) => {
+          const resolvedId = resolveAlias(id, taskId);
+          if (resolvedId === undefined) return ok({ error: "id (or taskId) is required" });
+          return ok(updateProjectTask(db, projectId, resolvedId, patch));
+        },
+      );
+    }
 
     // Project-scoped SHARED memory (card 2fd9abf9) — universal, every project session, ANY worker may
     // write (owner decision #1: it's notes, not code/secrets). Pinned + FTS5-related notes are injected
@@ -234,7 +258,7 @@ export class TaskMcpRouter {
     // separate stdio MCP servers — no `--allowedTools` entry is needed here: conditional registration IS
     // the gate. The handler double-checks the requested connection id against this same pinned list
     // (defense in depth), so a future bug in this gate still can't reach a connection outside the grant.
-    const session = db.getSession(sessionId);
+    // (`session` is resolved above, ahead of tasks_create/tasks_update's own conditional registration.)
     const sessionConnections = session?.connections ?? [];
     if (sessionConnections.length > 0) {
       const guard = resolveConfig(undefined, db.getPlatformConfig()).platform.connections;

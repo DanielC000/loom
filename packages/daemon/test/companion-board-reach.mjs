@@ -22,6 +22,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (excludeDone:true, all columns); includeDone:true surfaces done/terminal cards; columns narrows
 //       to the given column keys (composes with includeDone); the per-project scope check still applies
 //       when filters are passed alongside an out-of-scope `project`.
+//   (h) project-id DISCOVERY (companion silent-wrong-board fix, follow-up): `projects` — the caller's own
+//       granted project set (id/name/mode) — is returned ALONGSIDE `cards`, including for a project whose
+//       board is currently EMPTY (zero card rows must not mean zero discoverable projects); a multi-grant
+//       companion sees BOTH an act-mode and a read-mode entry, correctly mode-tagged; passing an explicit
+//       `project` narrows `projects` to that one project too (mirrors `cards`' own narrowing).
 // Run: 1) build (turbo builds shared first), 2) node test/companion-board-reach.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -187,6 +192,38 @@ try {
     db.close();
   }
 
+  // ============ (h) `projects` discovery — present even for an EMPTY board, mode-tagged ============
+  {
+    const db = tmpDb();
+    const projEmpty = "proj-discover-empty", projRead = "proj-discover-read";
+    seedProject(db, projEmpty, "Discover Empty");
+    seedProject(db, projRead, "Discover Read");
+    // projEmpty deliberately gets NO seedTask call — an empty board must still surface in `projects`.
+    seedTask(db, "d-read", projRead, { title: "Card on read project" });
+    const companionSess = "companion-discover";
+    seedSession(db, companionSess, projEmpty, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: projEmpty, mode: "act" });
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: projRead, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const all = await call(client, "board_list", {});
+    check("(h) an EMPTY-board project still appears in `cards`... with zero rows", all.cards.filter((c) => c.projectId === projEmpty).length === 0);
+    const emptyEntry = all.projects?.find((p) => p.id === projEmpty);
+    const readEntry = all.projects?.find((p) => p.id === projRead);
+    check("(h) `projects` lists the EMPTY-board project despite zero card rows", !!emptyEntry);
+    check("(h) the empty project's entry carries its name + mode:'act'", emptyEntry?.name === "Discover Empty" && emptyEntry?.mode === "act");
+    check("(h) the other granted project also appears, mode:'read'", !!readEntry && readEntry.name === "Discover Read" && readEntry.mode === "read");
+    check("(h) `projects` has exactly the 2 granted projects, no more", all.projects.length === 2);
+
+    const scoped = await call(client, "board_list", { project: projEmpty });
+    check("(h) an explicit `project` filter narrows `projects` too (mirrors `cards`)", scoped.projects.length === 1 && scoped.projects[0].id === projEmpty);
+
+    await client.close();
+    db.close();
+  }
+
   // ============ (d) no grant ⇒ board_list is NOT registered (inert + invisible) ============
   {
     const db = tmpDb();
@@ -260,6 +297,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — board_list registers ONLY behind a board-reach grant and reports ONLY that grant's non-done cards scoped to the granted project(s), each tagged with its project; a project selector can never widen scope; an ungranted/non-assistant session gets nothing; board_create/board_update are registered ONLY under a mode:'act' grant and stay absent under 'read' (byte-identical); no delete tool is ever registered under either mode."
+  ? "\n✅ ALL PASS — board_list registers ONLY behind a board-reach grant and reports ONLY that grant's non-done cards scoped to the granted project(s), each tagged with its project; a project selector can never widen scope; an ungranted/non-assistant session gets nothing; board_create/board_update are registered ONLY under a mode:'act' grant and stay absent under 'read' (byte-identical); no delete tool is ever registered under either mode; and board_list also returns `projects` — the caller's own granted project set, mode-tagged, present even for a project whose board is currently empty."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -931,7 +931,12 @@ const BOARD_REACH: CompanionCapability = {
           "of your granted projects — passing a project you were NOT granted is rejected with an {error}; " +
           "omitting it returns every granted project's cards. Pass `includeDone:true` to also include " +
           "done/terminal cards, and/or `columns` to narrow to specific column keys (mirrors tasks_list's " +
-          "excludeDone/columns filters). Omitting both filters is byte-identical to today's behavior.",
+          "excludeDone/columns filters). Omitting both filters is byte-identical to today's behavior. Also " +
+          "returns `projects` — YOUR granted project set for this call (id, name, and `mode`: \"read\" or " +
+          "\"act\") — this is the ONE place to discover a project's id (e.g. to resolve an owner-named " +
+          "board to its id, or to find an act-mode project to file to) even when its board is currently " +
+          "EMPTY and so contributes no card rows to `cards`; a `mode:\"act\"` entry is one you can pass to " +
+          "board_create/board_update, a `mode:\"read\"` one you can only ever read.",
         inputSchema: { project: z.string().optional(), includeDone: z.boolean().optional(), columns: z.array(z.string()).optional() },
       },
       async ({ project, includeDone, columns }) => {
@@ -948,7 +953,14 @@ const BOARD_REACH: CompanionCapability = {
             position: t.position, updatedAt: t.updatedAt, projectId: pid, projectName,
           }));
         });
-        return ok({ cards });
+        // Project-id DISCOVERY (the READ half — no grant semantics move; this only echoes the caller's OWN
+        // grants back to it, the same reasoning that makes scopeDenialMessage safe). Without this, an
+        // act-granted Companion whose board is still EMPTY has no way to construct a valid board_create
+        // `project` arg at all (`cards` alone carries project ids only on card ROWS).
+        const projects = [...targetProjects].map((pid) => ({
+          id: pid, name: db.getProject(pid)?.name ?? null, mode: ctx.scope.modeFor(pid) ?? null,
+        }));
+        return ok({ cards, projects });
       },
     );
 
@@ -990,10 +1002,9 @@ const BOARD_REACH: CompanionCapability = {
       "board_create",
       {
         description:
-          "Create a NEW board card on behalf of the owner, in one of your act-granted project(s) — use " +
-          "THIS tool (never tasks_create) whenever the owner names a project OTHER than your own home " +
-          "board; tasks_create only ever files to your home board and cannot target any other project. " +
-          "By default, `title` and (if given) `body` MUST each be a verbatim quote of words the owner " +
+          "Create a NEW board card on behalf of the owner, in one of your act-granted project(s). `project` " +
+          "is REQUIRED and EXPLICIT — this is your ONLY card-write tool, with no implicit default board, so " +
+          "always name the project you mean, including your own. By default, `title` and (if given) `body` MUST each be a verbatim quote of words the owner " +
           "ACTUALLY said — this turn or one of your last few recent owner turns (a same-exchange " +
           "correction still counts) — you may never author card content yourself. If this project has been " +
           "opted into authored content, you may instead write real, well-formed card text yourself rather " +
@@ -1153,9 +1164,8 @@ const BOARD_REACH: CompanionCapability = {
       "board_update",
       {
         description:
-          "Update an EXISTING board card (by the exact `id` from board_list) on behalf of the owner — use " +
-          "THIS tool (never tasks_update) for a card that lives on a project OTHER than your own home " +
-          "board; tasks_update only ever reaches cards on your home board. " +
+          "Update an EXISTING board card (by the exact `id` from board_list) on behalf of the owner — this " +
+          "is your ONLY card-update tool, on any of your act-granted projects, including your own. " +
           "Move its column (`columnKey`), change its `priority`, set `held` (the owner-gated 'don't nag' " +
           "flag), and/or rewrite its `title`/`body`. At least one field must be given. By default, `title`/ " +
           "`body` (if given) MUST each be a verbatim quote of words the owner ACTUALLY said — this turn or " +

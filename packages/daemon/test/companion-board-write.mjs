@@ -10,6 +10,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // adapter. NO network, NO real claude, NO daemon.
 //
 // Covers the card's DoD:
+//   - board_create using a project id DISCOVERED via board_list's `projects` field on a genuinely EMPTY
+//     board (the companion silent-wrong-board fix's follow-up blocker — an act-granted companion with no
+//     cards yet had no way to construct a valid `project` arg at all)
 //   - board_create title-not-verbatim reject
 //   - board_create body-not-verbatim reject
 //   - write on a read-only-granted project reject (mayAct false), for both board_create and board_update
@@ -126,6 +129,42 @@ function seedTask(db, id, projectId, opts = {}) {
 const tmpDb = () => new Db(path.join(tmpHome, `${randomUUID()}.db`));
 
 try {
+  // ============ board_create: an act-granted companion on an EMPTY board discovers its project id via
+  // board_list, then successfully files with it (the follow-up blocker: an id-free tasks_create used to
+  // silently carry this discovery for the home board; removing it exposed that board_list never surfaced
+  // the granted project set at all — fixed by board_list's own `projects` field) ============
+  {
+    const db = tmpDb();
+    const proj = "proj-discover-and-create";
+    seedProject(db, proj, "Discover And Create");
+    // Deliberately NO seedTask call — the board starts genuinely empty, so `cards` alone carries no
+    // project ids at all; `project` must be resolvable from `projects` instead.
+    const companionSess = "companion-discover-and-create";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "board-reach", projectId: proj, mode: "act" });
+    const pty = makeFakePty("the owner said: file my first card here");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    const discovery = await call(client, "board_list", {});
+    check("discovery: the empty board still contributes zero card rows", discovery.cards.length === 0);
+    const discovered = discovery.projects?.find((p) => p.id === proj);
+    check("discovery: the project itself IS discoverable via `projects` despite the empty board", !!discovered);
+    check("discovery: the discovered entry is mode:'act' (matches the grant)", discovered?.mode === "act");
+
+    const proposed = await call(client, "board_create", { project: discovered.id, title: "file my first card here" });
+    check("propose: succeeds using the DISCOVERED project id (no id was ever hardcoded/guessed)", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const created = await call(client, "board_create", { project: discovered.id, title: "file my first card here" });
+    check("confirm: the card is actually created on the discovered project", created.status === "created");
+    check("confirm: it landed on the RIGHT project (the one discovered, not guessed)", db.listTasks(proj).some((t) => t.title === "file my first card here"));
+
+    await client.close();
+    db.close();
+  }
+
   // ============ board_create: title-not-verbatim reject ============
   {
     const db = tmpDb();
@@ -621,6 +660,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — board_create/board_update reject a non-verbatim title/body, act on a read-only-granted or ungranted project, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; NO delete tool is ever registered; neither tool ever applies on the first (propose) call, both deliver the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and both apply EXACTLY ONCE via the existing createProjectTask/updateProjectTask writes once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and a real confirm token minted for one tool's proposal can never commit the OTHER tool's write, in either direction, even though they share one capability-slug/pending-map namespace by design."
+  ? "\n✅ ALL PASS — an act-granted companion on a genuinely EMPTY board can discover its own project id via board_list's `projects` field and successfully board_create with it; board_create/board_update reject a non-verbatim title/body, act on a read-only-granted or ungranted project, any proactive (no-owner-text) turn, a missing reply-to route, and a failed outbound delivery; NO delete tool is ever registered; neither tool ever applies on the first (propose) call, both deliver the confirm prompt to the OWNER directly (never the companion, which receives no promptText/token), and both apply EXACTLY ONCE via the existing createProjectTask/updateProjectTask writes once the owner's own next turn carries the confirm token — a companion that never saw the token cannot forge a confirm for a swapped action; and a real confirm token minted for one tool's proposal can never commit the OTHER tool's write, in either direction, even though they share one capability-slug/pending-map namespace by design."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
