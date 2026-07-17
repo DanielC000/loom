@@ -497,6 +497,18 @@ export const api = {
   // Queued inbound messages held for a session (worker reports / turns waiting for it to free up).
   // Entries carry a stable id so the UI can address a specific one for delete/edit/reorder.
   sessionQueue: (sessionId: string) => get<{ pending: QueuedMessage[] }>(`/api/sessions/${sessionId}/queue`),
+  // Bulk counterparts of the two above — ONE round-trip for a whole grid of session cards (Overview's
+  // ProjectTerminals + the Terminals page) instead of 2×N per poll window. Keyed by sessionId; a
+  // session absent from the response has nothing pending. Empty `ids` short-circuits to `{}` client-side
+  // (no round-trip for an empty grid).
+  sessionQueuesBulk: (ids: string[]) =>
+    ids.length === 0
+      ? Promise.resolve<Record<string, QueuedMessage[]>>({})
+      : get<Record<string, QueuedMessage[]>>(`/api/sessions/queues?ids=${ids.join(",")}`),
+  sessionWakesBulk: (ids: string[]) =>
+    ids.length === 0
+      ? Promise.resolve<Record<string, Wake[]>>({})
+      : get<Record<string, Wake[]>>(`/api/sessions/wakes?ids=${ids.join(",")}`),
   // Mutate the held queue (human-only; id-addressed). A stale id (already drained) is a graceful no-op.
   deleteQueued: (sessionId: string, entryId: string) =>
     del<{ deleted: boolean }>(`/api/sessions/${sessionId}/queue/${entryId}`),

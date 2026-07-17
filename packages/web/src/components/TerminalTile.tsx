@@ -1,5 +1,6 @@
-import type { SessionListItem } from "@loom/shared";
+import type { SessionListItem, Wake } from "@loom/shared";
 import { TerminalCard } from "./TerminalCard";
+import type { QueuedMessage } from "../lib/api";
 
 // One live Claude-session terminal tile — the SHARED unit used by BOTH the dedicated Terminals page and
 // the project Overview's ProjectTerminals grid AND the single-session `/session/:id` view, so the three
@@ -19,7 +20,7 @@ import { TerminalCard } from "./TerminalCard";
 export { ForkButton, StopButton, TileTitle } from "./TerminalCard";
 
 export function TerminalTile({
-  s, height, showProject, onFork, forkPending, onStop, stopPending,
+  s, height, showProject, onFork, forkPending, onStop, stopPending, queueData, wakesData, onQueueMutated, onWakeCancelled,
 }: {
   s: SessionListItem;
   height: number | string;
@@ -28,6 +29,12 @@ export function TerminalTile({
   forkPending: boolean;
   onStop: () => void;
   stopPending: boolean;
+  /** Pre-fetched queue/wakes data from a caller's shared parent-level bulk query (Overview/Terminals
+   * batching). Omit for a standalone tile (SessionView) — it then falls back to its own per-card poll. */
+  queueData?: QueuedMessage[];
+  wakesData?: Wake[];
+  onQueueMutated?: () => void;
+  onWakeCancelled?: () => void;
 }) {
   return (
     <TerminalCard
@@ -42,7 +49,7 @@ export function TerminalTile({
       stopPending={stopPending}
       maximizable
       statusMode="busy"
-      subPanels={{ queue: true, wakes: true, taskCard: true }}
+      subPanels={{ queue: true, wakes: true, taskCard: true, queueData, wakesData, onQueueMutated, onWakeCancelled }}
     />
   );
 }

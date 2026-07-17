@@ -43,14 +43,31 @@ const isEditable = (m: QueuedMessage) => m.source === "human";
 // footprint stays bounded no matter how deep the backlog is.
 const DRAWER_MAX_H = 118;
 
-export function SessionQueue({ sessionId }: { sessionId: string }) {
+export function SessionQueue({
+  sessionId, pending: bulkPending, onMutated,
+}: {
+  sessionId: string;
+  /** Pre-fetched pending list from a shared parent-level bulk query (Overview/Terminals batching — see
+   * useSessionQueuesBulk). When supplied, this card skips its own per-session 3s poll entirely. */
+  pending?: QueuedMessage[];
+  /** Called after a mutation (delete/edit/reorder) settles, in place of invalidating this card's own
+   * per-session query — only meaningful (and required) alongside `pending`, whose owning bulk query
+   * this card doesn't otherwise know how to invalidate. */
+  onMutated?: () => void;
+}) {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["queue", sessionId], queryFn: () => api.sessionQueue(sessionId), refetchInterval: 3000 });
+  const bulkMode = bulkPending !== undefined;
+  const q = useQuery({
+    queryKey: ["queue", sessionId],
+    queryFn: () => api.sessionQueue(sessionId),
+    refetchInterval: 3000,
+    enabled: !bulkMode,
+  });
   const [expanded, setExpanded] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
-  const pending = q.data?.pending ?? [];
+  const pending = bulkMode ? bulkPending! : (q.data?.pending ?? []);
 
-  const invalidate = () => qc.invalidateQueries({ queryKey: ["queue", sessionId] });
+  const invalidate = () => (bulkMode ? onMutated?.() : qc.invalidateQueries({ queryKey: ["queue", sessionId] }));
   const del = useMutation({ mutationFn: (id: string) => api.deleteQueued(sessionId, id), onSettled: invalidate });
   const reorder = useMutation({ mutationFn: (ids: string[]) => api.reorderQueued(sessionId, ids), onSettled: invalidate });
   const edit = useMutation({

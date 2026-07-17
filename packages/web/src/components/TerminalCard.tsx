@@ -1,7 +1,7 @@
 import { type CSSProperties, type ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import type { SessionListItem } from "@loom/shared";
-import { api } from "../lib/api";
+import type { SessionListItem, Wake } from "@loom/shared";
+import { api, type QueuedMessage } from "../lib/api";
 import { TerminalPane } from "./Terminal";
 import { TranscriptPane } from "./TranscriptPane";
 import { Composer } from "./Composer";
@@ -61,6 +61,15 @@ export interface TerminalSubPanels {
   queue?: boolean; // SessionQueue strip below the terminal
   wakes?: boolean; // SessionWakes strip below the terminal
   taskCard?: boolean; // slim bound-board-task bar above the terminal
+  // Optional pre-fetched data from a caller's shared parent-level bulk query (Overview's
+  // ProjectTerminals grid + the Terminals page — see useSessionQueuesBulk/useSessionWakesBulk). When
+  // provided, SessionQueue/SessionWakes skip their own per-card poll and read this instead; a caller
+  // that doesn't batch (SessionView, Companion, PlatformSessionTile) omits these and each card falls
+  // back to its own per-session useQuery, byte-identical to before.
+  queueData?: QueuedMessage[];
+  wakesData?: Wake[];
+  onQueueMutated?: () => void;
+  onWakeCancelled?: () => void;
 }
 
 // The HUG budget reserve — a FALLBACK estimate (header + composer + panel padding) used ONLY for the
@@ -333,13 +342,15 @@ export function TerminalCard({
           large editor re-measures even when the card is already at its height cap. flexShrink:0 keeps the
           composer + strips at natural height — the terminal is the element that gives up space. */}
       <div ref={belowRef} style={{ flexShrink: 0 }}>
-        {subPanels?.wakes && <SessionWakes sessionId={session.id} />}
+        {subPanels?.wakes && (
+          <SessionWakes sessionId={session.id} wakes={subPanels.wakesData} onCancelled={subPanels.onWakeCancelled} />
+        )}
         {/* The queue ledger is measured on its OWN (queueRef) so it can grow the card without shrinking the
             terminal. flex-column so the SessionQueue root's marginTop counts in offsetHeight (a plain block
             wrapper would collapse that margin through its top edge and under-measure the ledger). */}
         {subPanels?.queue && (
           <div ref={queueRef} style={{ display: "flex", flexDirection: "column" }}>
-            <SessionQueue sessionId={session.id} />
+            <SessionQueue sessionId={session.id} pending={subPanels.queueData} onMutated={subPanels.onQueueMutated} />
           </div>
         )}
         {!readOnly && <Composer sessionId={session.id} />}

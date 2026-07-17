@@ -213,6 +213,13 @@ export const GATEWAY_LOG_SERIALIZERS = {
   },
 };
 
+/** Parse a `?ids=a,b,c` query param into a deduped, non-empty id list — shared by the bulk session-scoped
+ * reads (queue/wakes) below. Missing/blank param or an all-blank list yields []. */
+export function parseIdsParam(raw: string | undefined): string[] {
+  if (!raw) return [];
+  return [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+}
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // trustProxy is DELIBERATELY left at its default (false) — LOAD-BEARING for every `req.ip` loopback
   // gate in this file (the /internal/* checks below, and the trust-tier onRequest hook's own peer check).
@@ -3989,6 +3996,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // targets a specific message (not a drifting array index). Shown in the UI.
   app.get("/api/sessions/:id/queue", async (req) =>
     ({ pending: deps.pty.getPendingEntries((req.params as { id: string }).id) }));
+  // Bulk counterparts of the two endpoints above (perf profile 2026-07-16 finding #4): Overview +
+  // Terminals render one card per live session, and each card independently polled its own /queue
+  // (3s) + /wakes (15s) — 2×N round-trips per poll window. `ids` is a comma-separated session-id list;
+  // an unknown/dead/stale id (e.g. one that exited between the caller's id-list snapshot and this
+  // request) just comes back absent from the result — no 404 for a bulk read. Both are keyed BEFORE the
+  // param routes above in file order, but Fastify disambiguates on segment count (`/api/sessions/queues`
+  // is 3 segments vs `/api/sessions/:id/queue`'s 4), so there's no route collision either way.
+  app.get("/api/sessions/queues", async (req) => {
+    const ids = parseIdsParam((req.query as { ids?: string }).ids);
+    const result: Record<string, ReturnType<PtyHost["getPendingEntries"]>> = {};
+    for (const id of ids) result[id] = deps.pty.getPendingEntries(id);
+    return result;
+  });
+  app.get("/api/sessions/wakes", async (req) =>
+    deps.db.listWakesForSessions(parseIdsParam((req.query as { ids?: string }).ids)));
   // Human-facing queue mutators (delete/edit/reorder a HELD entry). HUMAN/REST ONLY — like
   // /input, /stop and /merge these are a trust boundary and are NOT exposed as agent MCP tools; an
   // agent can never reorder or rewrite another session's pending turns. All three are id-addressed and

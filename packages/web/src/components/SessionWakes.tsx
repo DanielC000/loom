@@ -6,23 +6,40 @@ import { color, font } from "../theme";
 
 // Shows a session's pending scheduled wake-ups / nudges (the wake_me primitive) under its terminal,
 // each cancellable. Renders nothing when there are none, so it stays out of the way.
-export function SessionWakes({ sessionId }: { sessionId: string }) {
-  const wakes = useQuery({ queryKey: ["wakes", sessionId], queryFn: () => api.sessionWakes(sessionId), refetchInterval: 15000 });
-  const list = [...(wakes.data ?? [])].sort((a, b) => a.wakeAt.localeCompare(b.wakeAt));
+export function SessionWakes({
+  sessionId, wakes: bulkWakes, onCancelled,
+}: {
+  sessionId: string;
+  /** Pre-fetched wake list from a shared parent-level bulk query (Overview/Terminals batching — see
+   * useSessionWakesBulk). When supplied, this card skips its own per-session 15s poll entirely. */
+  wakes?: Wake[];
+  /** Called after a cancel settles, in place of invalidating this card's own per-session query — only
+   * meaningful (and required) alongside `wakes`, whose owning bulk query this card doesn't otherwise
+   * know how to invalidate. */
+  onCancelled?: () => void;
+}) {
+  const bulkMode = bulkWakes !== undefined;
+  const q = useQuery({
+    queryKey: ["wakes", sessionId],
+    queryFn: () => api.sessionWakes(sessionId),
+    refetchInterval: 15000,
+    enabled: !bulkMode,
+  });
+  const list = [...(bulkMode ? bulkWakes! : (q.data ?? []))].sort((a, b) => a.wakeAt.localeCompare(b.wakeAt));
   if (list.length === 0) return null;
   return (
     <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", marginTop: 4 }}>
       <span style={{ fontFamily: font.head, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textMuted }}>Wakes</span>
-      {list.map((w) => <WakeChip key={w.id} w={w} sessionId={sessionId} />)}
+      {list.map((w) => <WakeChip key={w.id} w={w} sessionId={sessionId} onCancelled={bulkMode ? onCancelled : undefined} />)}
     </div>
   );
 }
 
-function WakeChip({ w, sessionId }: { w: Wake; sessionId: string }) {
+function WakeChip({ w, sessionId, onCancelled }: { w: Wake; sessionId: string; onCancelled?: () => void }) {
   const qc = useQueryClient();
   const cancel = useMutation({
     mutationFn: () => api.cancelWake(sessionId, w.id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["wakes", sessionId] }),
+    onSuccess: () => (onCancelled ? onCancelled() : qc.invalidateQueries({ queryKey: ["wakes", sessionId] })),
   });
   const inMs = new Date(w.wakeAt).getTime() - Date.now();
   return (

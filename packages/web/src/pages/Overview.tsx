@@ -1,4 +1,4 @@
-import { useState, type CSSProperties } from "react";
+import { useState, useMemo, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
@@ -12,6 +12,7 @@ import { useStopSession, useForkSession, useEndSession } from "../lib/useSession
 import Board from "./Board";
 import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard, type TerminalTabs } from "../components/TerminalCard";
+import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWakesBulk } from "../lib/useSessionQueueWakesBulk";
 import { SessionActions } from "../components/SessionActions";
 import { SpawnControls } from "../components/SpawnControls";
 import { DiffView } from "../components/Diff";
@@ -519,6 +520,14 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
   // the Terminals page — the orchestrator pins to the front and its workers follow to the right, and a
   // session keeps its slot whether busy or idle so the grid never reshuffles on the 3s poll.
   const live = sessions.filter((s) => s.processState === "live").slice().sort(byManagerThenCreated);
+  // ONE bulk queue/wakes poll for the whole grid instead of 2×N per-card round-trips (perf profile
+  // 2026-07-16 finding #4) — every tile below reads its own slice via queueData/wakesData props instead
+  // of running its own useQuery. Called unconditionally (before the early return) per Rules of Hooks; an
+  // empty id list short-circuits client-side to a resolved `{}`, no round-trip.
+  const liveIds = useMemo(() => live.map((s) => s.id), [live]);
+  const queues = useSessionQueuesBulk(liveIds);
+  const wakes = useSessionWakesBulk(liveIds);
+  const { invalidateQueues, invalidateWakes } = useInvalidateSessionQueueWakesBulk();
   if (live.length === 0) return <p style={{ color: color.textMuted, marginTop: 0 }}>No live sessions in this project. Spawn the manager above.</p>;
 
   // alignItems:"start" so each tile sizes to ITS OWN content — a bare card stays short instead of being
@@ -530,7 +539,9 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
       {live.map((s) => (
         <TerminalTile key={s.id} s={s} height={520}
           onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
-          onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
+          onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
+          queueData={queues.data?.[s.id] ?? []} wakesData={wakes.data?.[s.id] ?? []}
+          onQueueMutated={invalidateQueues} onWakeCancelled={invalidateWakes} />
       ))}
     </div>
   );

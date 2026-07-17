@@ -4482,6 +4482,25 @@ export class Db {
   listWakesForSession(sessionId: string): Wake[] {
     return (this.db.prepare("SELECT * FROM wakes WHERE session_id = ? ORDER BY wake_at").all(sessionId) as Row[]).map(toWake);
   }
+  /**
+   * The bulk counterpart to listWakesForSession — every pending wake for a SET of sessions, grouped by
+   * session id, in ONE query (perf profile 2026-07-16 finding #4: Overview/Terminals render one card per
+   * live session and each independently polled its own /wakes, 15s × N round-trips). A session with no
+   * pending wakes is simply absent from the result, not present as an empty array.
+   */
+  listWakesForSessions(sessionIds: string[]): Record<string, Wake[]> {
+    const result: Record<string, Wake[]> = {};
+    if (sessionIds.length === 0) return result;
+    const placeholders = sessionIds.map(() => "?").join(",");
+    const rows = this.db.prepare(
+      `SELECT * FROM wakes WHERE session_id IN (${placeholders}) ORDER BY wake_at`,
+    ).all(...sessionIds) as Row[];
+    for (const r of rows) {
+      const w = toWake(r);
+      (result[w.sessionId] ??= []).push(w);
+    }
+    return result;
+  }
   countPendingWakes(sessionId: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM wakes WHERE session_id = ?").get(sessionId) as { c: number }).c;
   }

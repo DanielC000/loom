@@ -7,6 +7,7 @@ import { useStopSession, useForkSession } from "../lib/useSessionActions";
 import { TerminalPane } from "../components/Terminal";
 import { TerminalTile } from "../components/TerminalTile";
 import { TerminalCard } from "../components/TerminalCard";
+import { useSessionQueuesBulk, useSessionWakesBulk, useInvalidateSessionQueueWakesBulk } from "../lib/useSessionQueueWakesBulk";
 import { Button, Select, Input, StatusPill, SectionLabel } from "../components/ui";
 import { color, font } from "../theme";
 
@@ -50,12 +51,23 @@ export default function Terminals() {
   // drops companion/assistant sessions at the source so they can never render a pty tile in any row.
   const rows = useMemo<SessionRow[]>(() => groupSessionRows(shown), [shown]);
 
+  // ONE bulk queue/wakes poll for the whole grid instead of 2×N per-card round-trips (perf profile
+  // 2026-07-16 finding #4) — every tile below reads its own slice via queueData/wakesData props instead
+  // of running its own useQuery. Keyed off `shown` (the flat live set), not per-row, so the same two
+  // queries cover every row on the page.
+  const shownIds = useMemo(() => shown.map((s) => s.id), [shown]);
+  const queues = useSessionQueuesBulk(shownIds);
+  const wakes = useSessionWakesBulk(shownIds);
+  const { invalidateQueues, invalidateWakes } = useInvalidateSessionQueueWakesBulk();
+
   // The slim bound-task bar is fetched + rendered by TerminalTile itself (per-session), so no task
   // lookup or prop pass is needed here — every tile shows it automatically, identically to Overview.
   const renderTile = (s: SessionListItem) => (
     <TerminalTile key={s.id} s={s} height={540} showProject
       onFork={() => fork.mutate(s.id)} forkPending={fork.isPending}
-      onStop={() => stop.mutate(s.id)} stopPending={stop.isPending} />
+      onStop={() => stop.mutate(s.id)} stopPending={stop.isPending}
+      queueData={queues.data?.[s.id] ?? []} wakesData={wakes.data?.[s.id] ?? []}
+      onQueueMutated={invalidateQueues} onWakeCancelled={invalidateWakes} />
   );
 
   return (
