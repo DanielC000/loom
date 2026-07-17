@@ -474,7 +474,9 @@ mid-report — before sending anything.
    always-relevant fact; leave the rest unpinned to surface by relevance, and `memory_forget` a note gone stale.
    The recall/injection side is automatic — writing the nuggets is the half that makes it pay off. **Query it,
    don't only write it** — `memory_read`/`memory_list` pull a relevant note on demand, so consult the store when
-   a decision might already be settled in it. **Stamp a durable note with light provenance**
+   a decision might already be settled in it. Read-first also gates an UPDATE: to overwrite an existing key,
+   read it and pass its current `version` as `baseVersion` — a stale or omitted base is rejected with the
+   current note returned so you reconcile. **Stamp a durable note with light provenance**
    (`verified: <date> against <mainline>`) and cite identifiers that survive — commit SUBJECTS, symbol names —
    never a pre-squash branch SHA (rots on merge) or a line number (drifts). **If a note carries an expiry, write
    it as a runnable predicate** (a grep / commit-presence / card-state check), not prose like "until X lands" —

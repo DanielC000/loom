@@ -195,6 +195,8 @@ what you learned. Leave `pinned` off for the normal case (it surfaces by relevan
 always-load-bearing fact. It's NOT task state (the board) or a design doc (a vault note) — just the durable,
 reusable nugget. **The store is queryable, not write-only** — `memory_read`/`memory_list` pull a relevant
 note on demand, so consult it when a decision or gotcha might already be captured; don't only append.
+Read-first also gates an UPDATE: to overwrite an existing key, read it and pass its current `version` as
+`baseVersion` — a stale or omitted base is rejected with the current note returned so you reconcile.
 **Stamp a durable note with light provenance** (`verified: <date> against <mainline>`) and cite identifiers
 that survive — commit SUBJECTS, symbol names — never ephemeral ones (a pre-squash branch SHA rots on merge;
 line numbers drift). **If a note's validity has an expiry, write it as a runnable predicate** (a grep /

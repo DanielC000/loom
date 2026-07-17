@@ -123,7 +123,8 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 Loom's commit scope vocabulary, derived from the real tree. Pick the one subsystem a change lands in; prefer the finest-grained scope that fits.
 - **Packages:** `daemon`, `web`, `shared`, `cli` (the `bin/loom.mjs` management CLI).
 - **Daemon subsystems** (`packages/daemon/src/*`): `companion`, `connections`, `gateway`, `git`, `mcp`,
-  `memory` (project-scoped shared agent memory — `project_memory` FTS5 store + kickoff injection),
+  `memory` (project-scoped shared agent memory — `project_memory` FTS5 store + kickoff injection;
+  `memory_write` UPDATES an existing key only with a read-first `baseVersion` — the tool description owns the mechanics),
   `orchestration`, `platform`, `profiles`, `pty`, `runs`, `sessions`, `setup`, `skills`,
   `tasks` (the task board / cards domain), `update`, `vault`.
 - **Cross-cutting / process:** `deps` (dependency bumps), `ci`, `release`, `docs`, `assets` (bundled
