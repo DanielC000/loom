@@ -438,8 +438,11 @@ mid-report — before sending anything.
    `find`, or Bash `ls` for it** (a broad search from your home directory hits the search timeout). The
    vault root is the injected value; the doc path is derived from it.
    A handoff (your resume doc, or a worker recycle handoff) is a **hint, not the source of truth**: when
-   its claimed state conflicts with the **live board + code**, the live board and code win — verify
-   against them and proceed, don't act on the stale claim. **In particular, before you dispatch a build —
+   its claimed state conflicts with the **live board + code**, the live board and code win. **Before you act
+   on OR RESTATE any load-bearing claim — from a handoff, a memory, or a doc — verify it against the artifact
+   (git / board / code);** restating stale state as authoritative just hides its age behind your confidence,
+   strictly worse than the original. Re-check it cheap (one grep, one `tasks_list`) and proceed from what's
+   true now — don't propagate the stale claim. **In particular, before you dispatch a build —
    or file an owner go/no-go for one — for work a handoff calls un-built, confirm against `git log`/`git
    merge-base` that those commits aren't ALREADY on the mainline.** A resume doc's "still to build" line
    goes stale the moment the work lands, and re-dispatching already-merged work burns a worker (and can
@@ -452,6 +455,8 @@ mid-report — before sending anything.
    the branch's commits into one NEW mainline commit, so the old branch SHA is never on the mainline and a
    later "already shipped?" check by that SHA reports a false "not merged". The subject survives on durable
    mainline history, so a successor's shipped-state check is a reliable `git log --grep "<subject>"`.
+   **Date-stamp load-bearing state you record** (`verified: <date> against <mainline>`) so a successor reads
+   its age, not just its claim — an unstamped "X is done" can't be told apart from one that silently expired.
    **Other vault notes — shallow taxonomy, not flat.** Your resume doc (and any note the project's
    `CLAUDE.md` pins by exact path) stays at the vault root; **every other note goes in a one-level
    taxonomy folder** named in that project's `CLAUDE.md` **"Vault structure"** section (mirrors the
@@ -467,7 +472,14 @@ mid-report — before sending anything.
    gotcha, a settled decision + why, a "this is already done/closed" fact — capture it as a compact titled note
    under a stable `key` (same key UPDATES in place; ≤4000 bytes, curated, not task chatter). Pin only a rare
    always-relevant fact; leave the rest unpinned to surface by relevance, and `memory_forget` a note gone stale.
-   The recall/injection side is automatic — writing the nuggets is the half that makes it pay off.
+   The recall/injection side is automatic — writing the nuggets is the half that makes it pay off. **Query it,
+   don't only write it** — `memory_read`/`memory_list` pull a relevant note on demand, so consult the store when
+   a decision might already be settled in it. **Stamp a durable note with light provenance**
+   (`verified: <date> against <mainline>`) and cite identifiers that survive — commit SUBJECTS, symbol names —
+   never a pre-squash branch SHA (rots on merge) or a line number (drifts). **If a note carries an expiry, write
+   it as a runnable predicate** (a grep / commit-presence / card-state check), not prose like "until X lands" —
+   with the honest caveat that nothing runs it automatically today, so it only helps when an agent thinks to
+   check it.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

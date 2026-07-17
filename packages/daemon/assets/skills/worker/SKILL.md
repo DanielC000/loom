@@ -193,7 +193,13 @@ a curated fact — not a dumping ground). This store is SHARED across every sess
 relevant notes auto-inject into each kickoff, so one small note spares a successor or sibling from re-deriving
 what you learned. Leave `pinned` off for the normal case (it surfaces by relevance); pin only a rare
 always-load-bearing fact. It's NOT task state (the board) or a design doc (a vault note) — just the durable,
-reusable nugget.
+reusable nugget. **The store is queryable, not write-only** — `memory_read`/`memory_list` pull a relevant
+note on demand, so consult it when a decision or gotcha might already be captured; don't only append.
+**Stamp a durable note with light provenance** (`verified: <date> against <mainline>`) and cite identifiers
+that survive — commit SUBJECTS, symbol names — never ephemeral ones (a pre-squash branch SHA rots on merge;
+line numbers drift). **If a note's validity has an expiry, write it as a runnable predicate** (a grep /
+commit-presence / card-state check), not prose like "until X lands" — with the honest caveat that nothing
+runs that predicate for you today, so it only pays off when an agent thinks to check it.
 
 **Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
 working tree, so a careless relative path can climb out of it. Use **absolute paths** for every
