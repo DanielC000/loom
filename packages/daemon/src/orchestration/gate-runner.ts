@@ -89,8 +89,9 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // this, an uncached-credential push blocks on an interactive prompt until the timeout SIGKILL instead
   // of failing fast (mirrors git/writer.ts and pty/host.ts's same guard). `envOverride` (card 7f96aa09)
   // lets a caller force additional vars onto just this step's own child — e.g. the worker self-gate pins
-  // `LOOM_TEST_CONCURRENCY=1` here so raising `maxConcurrentGates` can't silently double the total
-  // test-lane budget — applied AFTER the base env so an override always wins.
+  // `LOOM_TEST_CONCURRENCY=2` here (card 68920f5b), matching the merge gate's own unpinned default lane
+  // count, so the host-load budget is `maxConcurrentGates × 2` — the SAME bound the merge gate already
+  // implies, not a new one — applied AFTER the base env so an override always wins.
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", ...envOverride };
   const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], env });
   child.stdout?.on("data", capture);

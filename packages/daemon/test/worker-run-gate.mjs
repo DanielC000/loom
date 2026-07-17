@@ -170,6 +170,26 @@ try {
     check("(D) reports ran:true, passed:true", r.value.ran === true && r.value.passed === true);
   }
 
+  // ── (D2) run_gate's spawned child is pinned to LOOM_TEST_CONCURRENCY=2 (card 68920f5b: matches the
+  //         merge gate's own default lane count — was "=1" pre-68920f5b, half the merge gate's
+  //         parallelism against the same gateCommandTimeoutMs, which made run_gate structurally more
+  //         timeout-prone than the merge gate it feeds) ─────────────────────────────────────────────
+  {
+    const sfx = `d2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-d2-${sfx}`);
+    const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    let capturedEnvOverride;
+    const capturingGate = async (_gate, _worktreePath, _timeoutMs, _onOutput, envOverride) => {
+      capturedEnvOverride = envOverride;
+      return { passed: true };
+    };
+    const { stub } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: capturingGate });
+
+    await sessions.runWorkerGate(gateWorkerId);
+    check("(D2) run_gate pins LOOM_TEST_CONCURRENCY=2 on its spawned child", capturedEnvOverride?.LOOM_TEST_CONCURRENCY === "2");
+  }
+
   // ── (E) slow path degrades to {opId,status:pending} and later delivers a [loom:gate-*] nudge ──────
   {
     const { enqueued } = ptyStub();

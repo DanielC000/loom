@@ -104,14 +104,28 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  classification is NOT auto-retried here (the worker can just re-call run_gate itself). */
 type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string };
 
-/** Forced onto the worker self-gate's OWN spawned child (card 7f96aa09), additive to whatever env the
- *  worker's shell already has — pins the daemon test runner's own internal test-lane pool to ONE lane per
- *  gate invocation, so raising `orchestration.maxConcurrentGates` to admit more parallel worker gates can't
- *  silently double the total test-lane budget (cap × pool-size instead of cap × 1). Bakes in, structurally,
- *  the SAME `LOOM_TEST_CONCURRENCY=1` convention CLAUDE.md previously asked a worker to remember on its own
- *  raw-Bash self-check (fix A, card d5c5ccdf) — which stays documented as the fallback for an unconfigured
- *  project or an ad-hoc local run outside `run_gate`. */
-const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_TEST_CONCURRENCY: "1" };
+/** Forced onto the worker self-gate's OWN spawned child (card 7f96aa09, revised by 68920f5b), additive to
+ *  whatever env the worker's shell already has — pins the daemon test runner's own internal test-lane pool
+ *  to TWO lanes per gate invocation, matching the merge gate's own unpinned default (`DEFAULT_CONCURRENCY`
+ *  in `scripts/test-daemon.mjs`). Owner decision 68920f5b (request 3d73c2a8): `run_gate` was running the
+ *  SAME suite at HALF the merge gate's parallelism against the SAME `gateCommandTimeoutMs`, making it
+ *  structurally more timeout-prone than the merge gate it feeds — a `run_gate` timeout did not predict a
+ *  merge rejection. Raising this to 2 removes that asymmetry.
+ *
+ *  Still safe: `orchestration.maxConcurrentGates` (default 1) admits gate RUNS — merge, deploy, AND
+ *  run_gate — through the SAME `gateSemaphore`, so at the default config at most one gate runs at a time
+ *  and a 2-lane `run_gate` peaks at the SAME 2 lanes a merge gate already reaches today. The 2026-07-15
+ *  8-lane incident was ONE gate's pool defaulting to full core count (no `LOOM_TEST_CONCURRENCY` pin at
+ *  all), not concurrent gates — this override still pins a bound, just 2 instead of 1. The real
+ *  host-load budget is `maxConcurrentGates × 2` (same formula the merge gate already implies); that only
+ *  changes if someone raises `maxConcurrentGates` above 1, which carries the identical exposure for the
+ *  merge gate too — no new risk class.
+ *
+ *  This is DELIBERATELY DIFFERENT from the raw-Bash fallback pin (still `LOOM_TEST_CONCURRENCY=1`,
+ *  documented below and in CLAUDE.md): a raw self-check run via Bash is OUTSIDE the semaphore entirely —
+ *  N concurrent raw gates is N × lanes with no structural bound, so its pin stays conservative at 1. This
+ *  override is admitted through the semaphore, so it can safely match the merge gate's 2. */
+const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_TEST_CONCURRENCY: "2" };
 
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
