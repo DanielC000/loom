@@ -60,7 +60,9 @@ export type NavPage = {
 // active-project-scoped — a builder-internal scope, not a page-level rescope.
 export const NAV_PAGES: NavPage[] = [
   // ── Primary tabs (header), in display order ──────────────────────────────────
-  { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl />, group: "system", primary: true },
+  // The god-eye home. Grouped under Operate so it heads the sidebar's Operate section (the first
+  // destination in the rail); `primary` keeps it a top-level tab under any header-style consumer.
+  { label: "Mission Control", nav: "Mission", to: "/", end: true, element: <MissionControl />, group: "operate", primary: true },
   // The project-scoped Overview — the analog of the Platform page for the header's active project
   // (identity + fleet + go-live + board + schedules + attention/activity + archive count, all rescoped
   // when you switch the active project). Composes the shared fleet widgets off existing endpoints.

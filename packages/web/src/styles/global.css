@@ -35,6 +35,10 @@
   --loom-radius: 4px;
   --loom-radius-sm: 2px;
 
+  /* Instrument Rail (sidebar) — collapsed gutter width + expanded (hover/pin) width. */
+  --loom-rail-w: 60px;
+  --loom-rail-open: 236px;
+
   /* Faint grid texture */
   --loom-grid-line: rgba(255, 255, 255, 0.02);
 }
@@ -215,6 +219,375 @@ body {
 .loom-navtab.is-active {
   color: var(--loom-text);
   border-bottom-color: var(--loom-phosphor);
+}
+
+/* ── Instrument Rail (sidebar nav — Direction A) ──────────────────────────────────
+   A 60px icon-only rail that expands to full labels on hover / keyboard focus / pin, floating OVER
+   the cockpit (the gutter reserves only the collapsed width, so expanding never reflows content).
+   Component: components/Sidebar.tsx; icons: components/navIcons.tsx. */
+.loom-railgutter {
+  width: var(--loom-rail-w);
+  flex: none;
+}
+.loom-rail {
+  position: fixed;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: var(--loom-rail-w);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  background: var(--loom-panel);
+  border-right: 1px solid var(--loom-border);
+  transition:
+    width 160ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    box-shadow 160ms ease;
+  overflow: hidden;
+}
+/* Expand on hover, keyboard focus (a11y — Tab reveals the labels), the pin toggle, or while the
+   rail's own project dropdown is open. */
+.loom-rail:hover,
+.loom-rail:focus-within,
+.loom-rail.is-pinned,
+.loom-rail.is-open {
+  width: var(--loom-rail-open);
+  box-shadow: 12px 0 40px rgba(0, 0, 0, 0.5);
+}
+/* Label text — hidden (and non-interactive) until the rail opens. */
+.loom-rail-lbl {
+  opacity: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+  min-width: 0;
+  transition: opacity 120ms ease 20ms;
+}
+.loom-rail:hover .loom-rail-lbl,
+.loom-rail:focus-within .loom-rail-lbl,
+.loom-rail.is-pinned .loom-rail-lbl,
+.loom-rail.is-open .loom-rail-lbl {
+  opacity: 1;
+}
+.loom-rail-revealonly {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.loom-rail:hover .loom-rail-revealonly,
+.loom-rail:focus-within .loom-rail-revealonly,
+.loom-rail.is-pinned .loom-rail-revealonly,
+.loom-rail.is-open .loom-rail-revealonly {
+  opacity: 1;
+}
+
+/* Brand + pin */
+.loom-rail-brand {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  height: 52px;
+  padding: 0 16px;
+  flex: none;
+  border-bottom: 1px solid var(--loom-border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+.loom-rail-mark {
+  color: var(--loom-phosphor);
+  flex: none;
+  display: flex;
+}
+.loom-rail-wordmark {
+  font-family: var(--loom-font-head);
+  font-weight: 600;
+  font-size: 16px;
+  letter-spacing: 0.12em;
+  color: var(--loom-text);
+}
+.loom-rail-pinbtn {
+  margin-left: auto;
+  color: var(--loom-text-muted);
+  flex: none;
+  display: flex;
+}
+.loom-rail-pinbtn svg {
+  width: 15px;
+  height: 15px;
+}
+.loom-rail-brand:hover .loom-rail-pinbtn {
+  color: var(--loom-text);
+}
+.loom-rail.is-pinned .loom-rail-pinbtn {
+  color: var(--loom-phosphor);
+}
+
+/* Active-project chip */
+.loom-rail-proj {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  height: 48px;
+  padding: 0 14px;
+  flex: none;
+  border-bottom: 1px solid var(--loom-border);
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+.loom-rail-proj:disabled {
+  cursor: default;
+}
+.loom-rail-sig {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  flex: none;
+  border-radius: var(--loom-radius);
+  background: var(--loom-panel-2);
+  border: 1px solid var(--loom-border-strong);
+  display: grid;
+  place-items: center;
+  font-family: var(--loom-font-head);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--loom-phosphor);
+}
+.loom-rail-sig-live {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 8px;
+  height: 8px;
+  border-radius: 8px;
+  background: var(--loom-phosphor);
+  box-shadow: 0 0 6px var(--loom-phosphor);
+  border: 2px solid var(--loom-panel);
+}
+.loom-rail-proj-meta {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.25;
+}
+.loom-rail-eyebrow {
+  font-family: var(--loom-font-head);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--loom-text-muted);
+}
+.loom-rail-proj-name {
+  font-size: 13px;
+  color: var(--loom-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.loom-rail-caret {
+  margin-left: auto;
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  flex: none;
+}
+
+/* Nav */
+.loom-rail-nav {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 8px 0;
+}
+.loom-rail-grp {
+  padding: 10px 16px 4px;
+  font-family: var(--loom-font-head);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--loom-text-muted);
+  height: 24px;
+}
+/* Collapsed: group labels hide (no room), but the first keeps a thin gap so the rail doesn't jump. */
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-grp {
+  visibility: hidden;
+}
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-grp.is-first {
+  visibility: visible;
+  font-size: 0;
+}
+.loom-rail-sep {
+  height: 1px;
+  background: var(--loom-border);
+  margin: 8px 16px;
+}
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-sep {
+  margin: 8px 12px;
+}
+.loom-rail-item {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: 38px;
+  padding: 0 16px;
+  color: var(--loom-text-dim);
+  text-decoration: none;
+  cursor: pointer;
+  position: relative;
+  border-left: 2px solid transparent;
+  transition:
+    color 80ms linear,
+    background 80ms linear;
+}
+.loom-rail-item .loom-rail-ico {
+  width: var(--loom-rail-w);
+  flex: none;
+  margin-left: -16px;
+  display: grid;
+  place-items: center;
+  color: inherit;
+}
+.loom-rail-item .loom-rail-ico svg {
+  width: 19px;
+  height: 19px;
+}
+.loom-rail-item .loom-rail-lbl {
+  font-size: 12.5px;
+  letter-spacing: 0.03em;
+}
+.loom-rail-item:hover {
+  color: var(--loom-text);
+  background: var(--loom-panel-2);
+}
+.loom-rail-item.is-active {
+  color: var(--loom-text);
+  border-left-color: var(--loom-phosphor);
+  background: linear-gradient(90deg, var(--loom-phosphor-dim), transparent 70%);
+}
+.loom-rail-item.is-active .loom-rail-ico {
+  color: var(--loom-phosphor);
+}
+.loom-rail-scopedot {
+  width: 4px;
+  height: 4px;
+  border-radius: 4px;
+  background: var(--loom-cyan);
+  opacity: 0.85;
+  margin-left: 6px;
+  flex: none;
+}
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-scopedot {
+  display: none;
+}
+.loom-rail-badge {
+  margin-left: auto;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--loom-amber);
+  color: #231a08;
+  font-size: 10px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+/* Collapsed: float the count badge onto the icon's top-right corner so it still signals. */
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-item .loom-rail-badge {
+  position: absolute;
+  top: 5px;
+  right: 8px;
+  margin: 0;
+}
+
+/* Footer status (Alerts · Settings + running pill · version) */
+.loom-rail-foot {
+  flex: none;
+  border-top: 1px solid var(--loom-border);
+  padding: 8px 0 6px;
+}
+.loom-rail-statrow {
+  display: flex;
+  align-items: center;
+  gap: 0;
+  height: 34px;
+  padding: 0 16px;
+  color: var(--loom-text-dim);
+  cursor: pointer;
+  text-decoration: none;
+  background: transparent;
+  border: none;
+  border-left: 2px solid transparent;
+  width: 100%;
+  text-align: left;
+  position: relative;
+  transition:
+    color 80ms linear,
+    background 80ms linear;
+}
+.loom-rail-statrow .loom-rail-ico {
+  width: var(--loom-rail-w);
+  flex: none;
+  margin-left: -16px;
+  display: grid;
+  place-items: center;
+  color: inherit;
+}
+.loom-rail-statrow .loom-rail-ico svg {
+  width: 18px;
+  height: 18px;
+}
+.loom-rail-statrow:hover {
+  color: var(--loom-text);
+  background: var(--loom-panel-2);
+}
+.loom-rail-statrow.is-alert {
+  color: var(--loom-amber);
+}
+.loom-rail-statrow.is-active {
+  color: var(--loom-text);
+  border-left-color: var(--loom-phosphor);
+}
+.loom-rail-statrow.is-active .loom-rail-ico {
+  color: var(--loom-phosphor);
+}
+.loom-rail-statrow .loom-rail-lbl {
+  font-size: 12px;
+}
+.loom-rail-runpill {
+  margin-left: auto;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  font-family: var(--loom-font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--loom-phosphor);
+  border: 1px solid var(--loom-phosphor);
+  border-radius: var(--loom-radius-sm);
+  padding: 1px 7px;
+}
+.loom-rail-ver {
+  padding: 6px 16px 2px;
+  font-size: 10px;
+  color: var(--loom-text-muted);
+  letter-spacing: 0.04em;
+}
+.loom-rail:not(:hover):not(:focus-within):not(.is-pinned):not(.is-open) .loom-rail-ver {
+  text-align: center;
+  padding: 6px 0 2px;
+}
+/* Keyboard focus ring on the rail's interactive rows. */
+.loom-rail-brand:focus-visible,
+.loom-rail-proj:focus-visible,
+.loom-rail-item:focus-visible,
+.loom-rail-statrow:focus-visible {
+  outline: 2px solid var(--loom-phosphor);
+  outline-offset: -2px;
 }
 
 /* Role picker cards (Profiles editor, components/RolePicker): a selectable capability "class" card.
@@ -491,7 +864,12 @@ body {
   .loom-rolecard,
   .loom-fade,
   .loom-tree-row,
-  .loom-crumb {
+  .loom-crumb,
+  .loom-rail,
+  .loom-rail-lbl,
+  .loom-rail-revealonly,
+  .loom-rail-item,
+  .loom-rail-statrow {
     transition: none;
   }
   .loom-mic-pulse {
