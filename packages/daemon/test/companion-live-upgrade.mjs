@@ -12,9 +12,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // Proves:
 //   1. The NEW tool surface is present post-upgrade: the re-resolved capabilities/browserTesting/
-//      documentConversion/restrictedTools/skills/connections land on BOTH the session row and the
-//      freshly-captured pty.spawn() opts — and capabilityToolAllowlist (the real, pure allow-list builder)
-//      shows a brand-new capability's tool name present after upgrade, absent before.
+//      documentConversion/restrictedTools/skills land on BOTH the session row and the freshly-captured
+//      pty.spawn() opts — and capabilityToolAllowlist (the real, pure allow-list builder) shows a
+//      brand-new capability's tool name present after upgrade, absent before.
+//   1b. connections/vaultWrite (card 1a048349) are the ROW-ONLY exception — mcp/server.ts's TaskMcpRouter
+//      reads them LIVE off the session row on every request, never threading either through pty.spawn, so
+//      a row write alone (no respawn needed) is what a live upgrade must produce. Verified in BOTH
+//      directions AT THE ENFORCEMENT SITE, not just the DB column: a real tools/list round-trip through
+//      the (stateless, rebuilt-per-request) TaskMcpRouter — GRANT (Profile adds a connection/vaultWrite →
+//      authenticated_request/vault_write go from OMITTED to PRESENT in tools/list) and REVOKE (Profile
+//      removes them → both go from PRESENT back to OMITTED) — the security-relevant direction, proving a
+//      revoked exfil-class grant is UNREACHABLE on the companion's very next tool call, no residual window.
 //   2. The engine session id (conversation) is PRESERVED: the post-upgrade spawn is a `--resume
 //      <engineSessionId>` (opts.resumeId === the ORIGINAL engineSessionId, unchanged in the DB), never a
 //      fresh/fork spawn.
@@ -63,6 +71,28 @@ const { PtyHost, capabilityToolAllowlist } = await import("../dist/pty/host.js")
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { TaskMcpRouter } = await import("../dist/mcp/server.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+
+// TaskMcpRouter is STATELESS — a fresh McpServer is built per request, re-reading the session row fresh
+// each time (mcp/server.ts's own class doc). This helper drives a REAL tools/list round-trip through it
+// (mirrors authenticated-request.mjs Part 2), so the connections/vaultWrite checks below prove the fix at
+// the ACTUAL enforcement site (does the tool disappear from tools/list on the very next call after a
+// revoke?), not merely that a DB column changed underneath it.
+const throwFetch = async () => { throw new Error("unexpected real fetch in a tools/list-only test"); };
+const listToolsFor = async (sessionId) => {
+  const router = new TaskMcpRouter(db, {}, throwFetch);
+  const projectId = router.resolveProject(sessionId);
+  const server = router.buildServer(projectId, sessionId);
+  const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverT);
+  const client = new Client({ name: "companion-upgrade-test", version: "0" });
+  await client.connect(clientT);
+  const tools = (await client.listTools()).tools;
+  await client.close();
+  return tools.map((t) => t.name);
+};
 
 // Fake pty seam (mirrors respawn-profile-attrs.mjs's SeamHost): captures every SpawnOpts and wires kill()
 // to fire the REAL onExit callback the base PtyHost.spawn() registers — so the base class's OWN `live` map
@@ -488,6 +518,105 @@ try {
       rHost.getPending(rSessionId).includes("NEW: arrived mid-hold"),
     );
     rDb.close();
+  }
+
+  // ===================== connections/vaultWrite (card 1a048349): BOTH directions =====================
+  // mcp/server.ts's TaskMcpRouter reads a session's connections/vaultWrite LIVE off the ROW on every
+  // request (stateless — never threaded through pty.spawn/resume() at all), so a live upgrade must WRITE
+  // those columns for a Profile change to take effect, not merely re-resolve them for the fresh spawn.
+  // GRANT and REVOKE are each set up with the ROW starting in the OPPOSITE state from where the Profile
+  // is about to move it — never with the row already sitting at the post-upgrade value it's about to be
+  // asserted at — so neither check can pass merely because nothing happened to write the row (a mistake
+  // caught while authoring this test: an earlier draft seeded REVOKE's row from GRANT's own, possibly-
+  // unwritten, post-state and passed vacuously on unfixed code).
+  const makeConnWriteSession = (label, { profileConnections, profileVaultWrite, rowConnections, rowVaultWrite }) => {
+    const cwProfileId = randomUUID();
+    db.insertProfile({
+      id: cwProfileId, name: `ConnWrite ${label}`, role: "assistant", description: "", allowDelta: [], skills: null, model: null, icon: null,
+      browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false,
+      connections: profileConnections, vaultWrite: profileVaultWrite, capabilities: [],
+    });
+    const cwAgentId = randomUUID();
+    db.insertAgent({ id: cwAgentId, projectId: projId, name: `ConnWrite ${label} Companion`, startupPrompt: "", position: 3, profileId: cwProfileId, endpoint: false, ioSchema: null });
+    const cwSessionId = randomUUID();
+    const cwEngineId = `eng-connwrite-${label}`;
+    db.insertSession({
+      id: cwSessionId, projectId: projId, agentId: cwAgentId, engineSessionId: cwEngineId, title: null, cwd,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null,
+      role: "assistant", browserTesting: false, documentConversion: false, restrictedTools: false,
+      noCommit: false, skills: null, connections: rowConnections, vaultWrite: rowVaultWrite, capabilities: [],
+    });
+    const cwTpath = engineTranscriptPath(cwd, cwEngineId);
+    fs.mkdirSync(path.dirname(cwTpath), { recursive: true });
+    fs.writeFileSync(cwTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    const cwEvents = {
+      onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
+      onBusy(id, b) { db.setBusy(id, b); },
+      onContextStats() {}, onRateLimited() {},
+      onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
+    };
+    const cwHost = new SeamHost(cwEvents);
+    cwHost.spawn({
+      sessionId: cwSessionId, cwd, permission: { allow: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 },
+      resumeId: cwEngineId, role: "assistant", browserTesting: false, documentConversion: false,
+      capabilities: [], restrictedTools: false, skills: null,
+    });
+    return { cwSessionId, cwSvc: new SessionService(db, cwHost, new OrchestrationControl()) };
+  };
+
+  // ---- GRANT: the row starts with NO grant; the Profile ALREADY carries one (the owner granted it
+  // before this upgrade); the upgrade must WRITE it onto the row ----
+  {
+    const { cwSessionId, cwSvc } = makeConnWriteSession("grant", {
+      profileConnections: ["conn-acme"], profileVaultWrite: true,
+      rowConnections: [], rowVaultWrite: false,
+    });
+    check("(GRANT) setup: row starts with no grant", db.getSession(cwSessionId).connections.length === 0 && db.getSession(cwSessionId).vaultWrite === false);
+    const preGrantTools = await listToolsFor(cwSessionId);
+    check("(GRANT) enforcement site, BEFORE: authenticated_request OMITTED from tools/list (no grant yet)", !preGrantTools.includes("authenticated_request"));
+    check("(GRANT) enforcement site, BEFORE: vault_write OMITTED from tools/list (no grant yet)", !preGrantTools.includes("vault_write"));
+
+    await cwSvc.upgradeCompanionCapabilities(cwSessionId);
+
+    const grantedRow = db.getSession(cwSessionId);
+    check("(GRANT) row: connections re-pinned to the newly-granted id", JSON.stringify(grantedRow.connections) === JSON.stringify(["conn-acme"]));
+    check("(GRANT) row: vaultWrite re-pinned true", grantedRow.vaultWrite === true);
+    // The ENFORCEMENT SITE, not just the column: a fresh tools/list (the router is stateless — this is
+    // exactly what the companion's VERY NEXT tool call would rebuild) now offers both gated tools, proving
+    // the grant is actually live, not merely reflected in the DB.
+    const postGrantTools = await listToolsFor(cwSessionId);
+    check("(GRANT) enforcement site, AFTER: authenticated_request now PRESENT in tools/list — the grant is LIVE on the very next call", postGrantTools.includes("authenticated_request"));
+    check("(GRANT) enforcement site, AFTER: vault_write now PRESENT in tools/list — the grant is LIVE on the very next call", postGrantTools.includes("vault_write"));
+  }
+
+  // ---- REVOKE: the row starts with a PRE-EXISTING grant (e.g. from an earlier spawn); the Profile has
+  // ALREADY been revoked to empty/false; the upgrade must CLEAR the row — the security-relevant
+  // direction, since a stale row would otherwise keep feeding an exfil-class grant to the live
+  // per-request TaskMcpRouter read indefinitely after the owner revoked it ----
+  {
+    const { cwSessionId, cwSvc } = makeConnWriteSession("revoke", {
+      profileConnections: [], profileVaultWrite: false,
+      rowConnections: ["conn-legacy"], rowVaultWrite: true,
+    });
+    check("(REVOKE) setup: row starts with a pre-existing grant", JSON.stringify(db.getSession(cwSessionId).connections) === JSON.stringify(["conn-legacy"]) && db.getSession(cwSessionId).vaultWrite === true);
+    const preRevokeTools = await listToolsFor(cwSessionId);
+    check("(REVOKE) enforcement site, BEFORE: authenticated_request is PRESENT (the pre-existing grant is live)", preRevokeTools.includes("authenticated_request"));
+    check("(REVOKE) enforcement site, BEFORE: vault_write is PRESENT (the pre-existing grant is live)", preRevokeTools.includes("vault_write"));
+
+    await cwSvc.upgradeCompanionCapabilities(cwSessionId);
+
+    const revokedRow = db.getSession(cwSessionId);
+    check("(REVOKE) row: connections cleared — a revoked exfil-class grant does NOT survive a live upgrade", revokedRow.connections.length === 0);
+    check("(REVOKE) row: vaultWrite cleared false — a revoked grant does NOT survive a live upgrade", revokedRow.vaultWrite === false);
+    // THE SECURITY-RELEVANT PROOF: the ENFORCEMENT SITE, not just the column. mcp/server.ts's TaskMcpRouter
+    // is stateless and rebuilds fresh on every request, so this tools/list call is EXACTLY what the
+    // companion's very next tool call would see — proving the revoked grant is unreachable IMMEDIATELY
+    // (no respawn, no delay, no residual window), not merely that a DB column changed underneath a still-
+    // trusting live router.
+    const postRevokeTools = await listToolsFor(cwSessionId);
+    check("(REVOKE) enforcement site, AFTER: authenticated_request OMITTED — the revoked grant is UNREACHABLE on the very next call", !postRevokeTools.includes("authenticated_request"));
+    check("(REVOKE) enforcement site, AFTER: vault_write OMITTED — the revoked grant is UNREACHABLE on the very next call", !postRevokeTools.includes("vault_write"));
   }
 
   // ===================== guardrails =====================

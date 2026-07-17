@@ -1608,15 +1608,18 @@ export class SessionService {
     // Force role "assistant" (the row's own, immutable role) rather than trusting session.role blindly —
     // mirrors composeCompanionReinjectPrompt's explicitRole pattern. Model/prompt are discarded here (only
     // the capability surface matters); resume() below never threads --model or injects a startup prompt.
-    // `connections` (and, for the same reason, `vaultWrite` — card be8be211) is DELIBERATELY excluded from
-    // the pin below — unlike the others, resume() never threads either to pty.spawn (mcp/server.ts's
-    // TaskMcpRouter reads a session's connections/vaultWrite LIVE, per-request, off the row — a plain row
-    // write already takes effect on the companion's very next tool call, no respawn needed), so pinning
-    // them here would be a misleading no-op. This is a pre-existing gap in resume() itself, out of scope to
-    // fix here.
-    const { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills } =
+    // `connections`/`vaultWrite` ARE re-pinned in the row write below (card 1a048349), same as every other
+    // field here — but for a DIFFERENT reason than the rest of the surface. Every other field is a
+    // spawn-time property (argv/`--allowedTools`) that needs the RESPAWN below to take live effect.
+    // `connections`/`vaultWrite` are the opposite: `mcp/server.ts`'s TaskMcpRouter is stateless and
+    // re-resolves them off THIS ROW fresh on every request, never threading either through `pty.spawn` or
+    // `resume()` at all — so the row write alone already takes effect on the companion's very next tool
+    // call, respawn or not. They're written here anyway (not via a separate live-effect-only path) purely
+    // because this is the one place that re-pins the whole surface from a single `resolveAgentSpawn` call —
+    // sourced from the human-set Profile, never from agent input, same as every other field here.
+    const { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
       this.resolveAgentSpawn(agent, config, "assistant");
-    this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills });
+    this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
     if (this.pty.isAlive(sessionId)) {

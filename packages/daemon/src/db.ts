@@ -3822,15 +3822,17 @@ export class Db {
    * effect on an already-running pty — its MCP tool surface/allowlist was fixed at ITS OWN OS-process-start
    * — the caller (SessionService.upgradeCompanionCapabilities) is responsible for actually respawning the
    * process for it to take effect. Partial-patch shape mirrors {@link updateProfile}: an omitted (`undefined`)
-   * field is left untouched; `skills: null` explicitly clears to "deliver all". `connections` (and, for the
-   * same reason, `vaultWrite` — card be8be211) is DELIBERATELY NOT part of this patch — resume() never
-   * threads either to pty.spawn (both are read LIVE per-request instead, see the sole caller's comment), so
-   * pinning them here would be a misleading no-op.
+   * field is left untouched; `skills: null` explicitly clears to "deliver all". `connections`/`vaultWrite`
+   * ARE part of this patch (card 1a048349) despite being spawn-independent — unlike every other field here,
+   * `mcp/server.ts`'s TaskMcpRouter re-resolves them off THIS ROW fresh on every request (it never threads
+   * them through `pty.spawn`/`resume()` at all), so a plain write here takes effect on the companion's very
+   * next tool call — no respawn needed. They're still written through this same partial-patch helper because
+   * the caller re-pins the whole surface from one `resolveAgentSpawn` result in one row write.
    */
   setSessionCapabilitySurface(id: string, patch: {
     browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean;
     capabilities?: CapabilityGrant[]; restrictedTools?: boolean; noCommit?: boolean;
-    skills?: string[] | null;
+    skills?: string[] | null; connections?: string[]; vaultWrite?: boolean;
   }): void {
     const cols: Record<string, unknown> = {
       browser_testing: patch.browserTesting === undefined ? undefined : patch.browserTesting ? 1 : 0,
@@ -3840,6 +3842,8 @@ export class Db {
       no_commit: patch.noCommit === undefined ? undefined : patch.noCommit ? 1 : 0,
       skills: patch.skills === undefined ? undefined : patch.skills === null ? null : JSON.stringify(patch.skills),
       capabilities: patch.capabilities === undefined ? undefined : JSON.stringify(patch.capabilities),
+      connections: patch.connections === undefined ? undefined : JSON.stringify(patch.connections),
+      vault_write: patch.vaultWrite === undefined ? undefined : patch.vaultWrite ? 1 : 0,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
