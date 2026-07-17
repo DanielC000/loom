@@ -3640,6 +3640,18 @@ export class PtyHost {
    * plain stop() with no such capture (drainHeld never set) still clears `pending` itself before anything
    * can recover it (see stop()), so the prompt CAN still be lost on that narrower path — but only ever as
    * a quietly-dropped queue entry, never by corrupting a dying pty's write.
+   *
+   * Card 81f9c887 (defense-in-depth, mirrors `enqueueStdin`'s own idle-submit gate re-checking rather than
+   * trusting its caller): also guard on `live.busy`. The invariant `rateLimited ⇒ !busy` (rateLimited is
+   * only ever set inside the Stop/StopFailure handler AFTER setBusy(false)) means a genuinely parked
+   * session is never busy — so hitting this on a BUSY session only happens when a caller invokes it against
+   * a session that was never actually parked (e.g. the per-session `POST /rate-limit/clear` REST route has
+   * no server-side busy/parked guard of its own, and `live.lastPrompt` is set by ANY submit(), not just a
+   * rate-limit kill). That's a caller error, not a real resume — replaying `lastPrompt` there would
+   * re-submit it as a SECOND turn on top of the one already in flight (the exact double-turn hazard the
+   * M1/M2 busy-gate ordering exists to prevent). Skip the replay entirely rather than queuing it: unlike
+   * the stopping/drainHeld case, there is no genuinely-held turn here to preserve — queuing would just
+   * deliver the same stale duplicate a moment later instead of on top of the live one.
    */
   resumeAfterRateLimit(sessionId: string): boolean {
     const live = this.live.get(sessionId);
@@ -3652,7 +3664,7 @@ export class PtyHost {
     // replay its lastPromptOwnerText so Primitive A's attestation survives the kill-and-resume too, and its
     // lastPromptProactive so a rate-limited heartbeat/reminder/alert turn's replayed chat_reply is still
     // tagged as proactive.
-    if (live.lastPrompt != null) {
+    if (live.lastPrompt != null && !live.busy) {
       const blocked = live.stopping || live.drainHeld;
       if (blocked) {
         this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
