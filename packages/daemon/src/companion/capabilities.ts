@@ -629,7 +629,10 @@ const DECISIONS_RELAY: CompanionCapability = {
           "while that trust window stays warm. Otherwise (a cold window, a deploy/irreversible decision, or " +
           "this grant configured to always confirm) it does NOT resolve on the first call: Loom sends a " +
           "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
-          "token — just tell the owner you've requested their confirmation) and returns {status:'proposed'}. " +
+          "token — just tell the owner you've requested their confirmation) and returns " +
+          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner this " +
+          "request will clear itself automatically around then (about 5 minutes out) if they don't " +
+          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
           "Only once the owner replies to THAT message do you call decision_resolve AGAIN with the SAME " +
           "arguments to actually commit it ({status:'resolved'}) — Loom detects the owner's confirming reply " +
           "itself. A mismatched confirm reply returns {status:'confirm-mismatch'} — tell the owner to reply " +
@@ -777,7 +780,7 @@ const DECISIONS_RELAY: CompanionCapability = {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
         pendingDecisionResolves.set(key, { questionId, chosenOption, note: normalizedNote });
-        return ok({ status: "proposed" });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
   },
@@ -823,6 +826,41 @@ const pendingAuthoredGrants = new Map<string, PendingAuthoredGrant>();
 
 function pendingAuthoredGrantKey(sessionId: string, route: CompanionRoute | null): string {
   return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${AUTHORED_CONTENT_GRANT_SLUG}`;
+}
+
+/** Clears every outstanding proposal PAYLOAD held for `sessionId`, across all FOUR ACT levers' own
+ *  module-scoped pending-payload maps (decisions-relay/board-reach/authored-content-grant/session-spawn —
+ *  `pendingSpawns`, declared further down this file with `SESSION_SPAWN_SLUG`'s registration, is in scope
+ *  here the same way `pendingBoardWrites`/`pendingAuthoredGrants` are: a module-level `const`, safe to
+ *  reference from an exported function that only ever runs after the whole module has finished
+ *  evaluating) — the lever side of the session-close hygiene fix; a caller must ALSO call
+ *  `OwnerConfirmStore.clearSession` (attestation.ts) for the SAME sessionId, since this only clears the
+ *  levers' own remembered payloads, never the confirm tokens themselves (card 327bcaaa). Before this,
+ *  `closeCompanionTrustWindow` cleared neither store, so a recycled/unbound/re-paired session's pending
+ *  proposal became permanently-orphaned dead memory — never a security issue (nothing can ever confirm it
+ *  once the session is gone), but genuine leaked state. CR follow-up (this card): the first pass missed
+ *  `pendingSpawns` — session_spawn uses the identical proposeConfirmation→pending→confirm shape via the
+ *  same `OwnerConfirmStore`, so it needed the same clear as the other three. Prefix-matches on
+ *  `${sessionId}::`, mirroring every pending*Key helper's own key shape. */
+export function clearPendingProposalsForSession(sessionId: string): void {
+  const prefix = `${sessionId}::`;
+  for (const k of pendingDecisionResolves.keys()) if (k.startsWith(prefix)) pendingDecisionResolves.delete(k);
+  for (const k of pendingBoardWrites.keys()) if (k.startsWith(prefix)) pendingBoardWrites.delete(k);
+  for (const k of pendingAuthoredGrants.keys()) if (k.startsWith(prefix)) pendingAuthoredGrants.delete(k);
+  for (const k of pendingSpawns.keys()) if (k.startsWith(prefix)) pendingSpawns.delete(k);
+}
+
+/** TEST-ONLY introspection (not called from any production path): the count of outstanding proposal
+ *  PAYLOADS currently held for `sessionId`, summed across all four maps `clearPendingProposalsForSession`
+ *  clears. Exists because the commit path on every lever checks the confirm TOKEN (`OwnerConfirmStore`)
+ *  BEFORE it ever reads its own payload map — so a test that only proves "the captured token no longer
+ *  commits" can pass even if a payload-map clear silently regressed (CR follow-up, card 327bcaaa: this is
+ *  exactly how the `pendingSpawns` gap above slipped past the first test). Asserting on this directly
+ *  gives a test that FAILS if the payload-map half of the clear breaks, independent of the token half. */
+export function pendingProposalCountForSession(sessionId: string): number {
+  const prefix = `${sessionId}::`;
+  const matching = (m: ReadonlyMap<string, unknown>) => [...m.keys()].filter((k) => k.startsWith(prefix)).length;
+  return matching(pendingDecisionResolves) + matching(pendingBoardWrites) + matching(pendingAuthoredGrants) + matching(pendingSpawns);
 }
 
 /**
@@ -1014,7 +1052,10 @@ const BOARD_REACH: CompanionCapability = {
           "configured to always confirm) it does NOT create the card on the first call: Loom sends a " +
           "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
           "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed'}. Only once the owner replies to THAT message do you call " +
+          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner this " +
+          "request will clear itself automatically around then (about 5 minutes out) if they don't " +
+          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "Only once the owner replies to THAT message do you call " +
           "board_create AGAIN with the SAME arguments to actually create it ({status:'created'}) — Loom " +
           "detects the owner's confirming reply itself. A mismatched confirm reply returns " +
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
@@ -1156,7 +1197,7 @@ const BOARD_REACH: CompanionCapability = {
         // `grantBacked` freezes THIS call's `grantAllows` verdict for the later confirm to replay — see
         // the confirm branch's own doc for why it must not be recomputed there.
         pendingBoardWrites.set(key, { action: "create", projectId: project, title, body: normalizedBody, columnKey, priority, grantBacked: grantAllows });
-        return ok({ status: "proposed" });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
 
@@ -1177,7 +1218,10 @@ const BOARD_REACH: CompanionCapability = {
           "window, or this grant configured to always confirm) it does NOT apply the update on the first " +
           "call: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see or " +
           "relay any prompt/token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed'}. Only once the owner replies to THAT message do " +
+          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner this " +
+          "request will clear itself automatically around then (about 5 minutes out) if they don't " +
+          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "Only once the owner replies to THAT message do " +
           "you call board_update AGAIN with the SAME arguments to actually apply it ({status:'updated'}) " +
           "— Loom detects the owner's confirming reply itself. A mismatched confirm reply returns " +
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
@@ -1326,7 +1370,7 @@ const BOARD_REACH: CompanionCapability = {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
         pendingBoardWrites.set(key, { action: "update", taskId: id, title: normalizedTitle, body: normalizedBody, columnKey, priority, held, grantBacked: grantAllows });
-        return ok({ status: "proposed" });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
 
@@ -1437,7 +1481,10 @@ const BOARD_REACH: CompanionCapability = {
           "applies on the first call, even inside an otherwise-warm trust window: Loom sends a " +
           "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
           "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed'}. Only once the owner replies to THAT message do you call board_relocate " +
+          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner this " +
+          "request will clear itself automatically around then (about 5 minutes out) if they don't " +
+          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "Only once the owner replies to THAT message do you call board_relocate " +
           "AGAIN with the SAME arguments to actually relocate it ({status:'relocated'}) — Loom detects " +
           "the owner's confirming reply itself. A mismatched confirm reply returns " +
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
@@ -1547,7 +1594,7 @@ const BOARD_REACH: CompanionCapability = {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
         pendingBoardWrites.set(key, { action: "relocate", taskId, toProject, fromProject: sourceProject });
-        return ok({ status: "proposed" });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
   },

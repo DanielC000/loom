@@ -339,7 +339,8 @@ try {
 
     // First call — Tier X ALWAYS proposes, never a low-friction direct commit (unlike board_create/update).
     const proposed = await call(client, "board_relocate", { taskId: "t-tierx", toProject: projDest });
-    check("propose: returns a BARE status:'proposed', nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("propose: returns ONLY status:'proposed' + expiresAt, nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 2);
+    check("propose: expiresAt is a future epoch-ms timestamp (card 327bcaaa)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
     check("propose: NO promptText is returned to the companion", proposed.promptText === undefined);
     check("propose: NO token is returned to the companion", proposed.token === undefined);
     check("unconfirmed: card has not moved yet", db.getTask("t-tierx").projectId === projSrc);

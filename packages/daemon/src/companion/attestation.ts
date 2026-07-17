@@ -183,6 +183,17 @@ export class OwnerConfirmStore {
     this.pending.delete(key); // single-use: committed exactly once
     return { committed: true, summary: proposal.summary };
   }
+
+  /** Revoke every pending proposal held for `sessionId`, across every route/capability — called from the
+   *  same session-close paths that clear the Companion Trust Window and `AuthoredContentGrantStore`
+   *  (recycle/unbind/re-pair, `/new`/`/reset`), so an unconfirmed proposal never outlives the session it
+   *  was proposed to (card 327bcaaa: closing this gap so recycle/unbind/re-pair doesn't strand a
+   *  permanently-orphaned, unconfirmable proposal). A daemon restart clears it automatically (in-memory,
+   *  mirrors `AuthoredContentGrantStore.clearSession`). */
+  clearSession(sessionId: string): void {
+    const prefix = `${sessionId}::`;
+    for (const k of this.pending.keys()) if (k.startsWith(prefix)) this.pending.delete(k);
+  }
 }
 
 // --- Direction (a) — inline authored-content grant (card 2b26035c) ----------------------------------------

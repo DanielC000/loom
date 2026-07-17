@@ -284,7 +284,8 @@ try {
 
     // First call — PROPOSES, never creates.
     const proposed = await call(client, "board_create", { project: proj, title: "Fix login", body: "happens on Safari only" });
-    check("propose: returns a BARE status:'proposed', nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("propose: returns ONLY status:'proposed' + expiresAt, nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 2);
+    check("propose: expiresAt is a future epoch-ms timestamp (card 327bcaaa)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
     check("propose: NO promptText is returned to the companion", proposed.promptText === undefined);
     check("propose: NO token is returned to the companion", proposed.token === undefined);
     check("unconfirmed: no card exists yet", db.listTasks(proj).length === 0);
@@ -333,7 +334,8 @@ try {
     const client = await connect(orch.buildServer(companionSess, "assistant"));
 
     const proposed = await call(client, "board_update", { id: "t-upd", columnKey: "in_progress", priority: "p0" });
-    check("propose: returns a BARE status:'proposed', nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("propose: returns ONLY status:'proposed' + expiresAt, nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 2);
+    check("propose: expiresAt is a future epoch-ms timestamp (card 327bcaaa)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
     check("unconfirmed: card is unchanged", db.getTask("t-upd").columnKey === "backlog" && db.getTask("t-upd").priority === "p2");
     check("exactly one message was delivered to the owner", companion.delivered.length === 1);
     check("the delivered text names the exact proposed change", companion.delivered[0].text.includes("in_progress") && companion.delivered[0].text.includes("p0"));

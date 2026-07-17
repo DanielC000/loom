@@ -35,7 +35,7 @@ import {
   readCompanionMemory,
   removeCompanionMemory,
 } from "../skills/companion-memory-store.js";
-import { registerCompanionCapabilities } from "../companion/capabilities.js";
+import { registerCompanionCapabilities, clearPendingProposalsForSession } from "../companion/capabilities.js";
 import { createOwnerAttestation, OwnerConfirmStore, AuthoredContentGrantStore } from "../companion/attestation.js";
 import { CompanionTrustWindow } from "../companion/trust-window.js";
 
@@ -141,10 +141,17 @@ export class OrchestrationMcpRouter {
    *  layer's own close paths (session recycle/unbind, a binding/allowlist change, a re-pair); a daemon
    *  restart closes every window automatically (in-memory). Also clears any inline authored-content
    *  grant (card 2b26035c) held for the same session — a grant must never outlive the session it was
-   *  explicitly granted to, mirroring the trust window's own close-path lifetime. */
+   *  explicitly granted to, mirroring the trust window's own close-path lifetime. Also clears any
+   *  OUTSTANDING (unconfirmed) Primitive-C proposal held for the same session — both the shared
+   *  `OwnerConfirmStore` token/summary/expiry AND each ACT lever's own payload map (card 327bcaaa: before
+   *  this, neither was cleared here, so a recycled/unbound/re-paired session's pending proposal became
+   *  permanently-orphaned dead memory — never confirmable again since the session is gone, but genuine
+   *  leaked state that only a daemon restart would clear). */
   closeCompanionTrustWindow(sessionId: string): void {
     this.trustWindow.closeAllForSession(sessionId);
     this.authoredContentGrants.clearSession(sessionId);
+    this.ownerConfirmStore.clearSession(sessionId);
+    clearPendingProposalsForSession(sessionId);
   }
 
   /** Role gate: returns the session's id + orchestration role, or null (→ 404) for plain/unknown.

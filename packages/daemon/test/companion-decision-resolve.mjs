@@ -251,7 +251,8 @@ try {
 
     // First call — PROPOSES, never resolves.
     const proposed = await call(client, "decision_resolve", { questionId: "q-confirm", chosenOption: "approve", note: "looks good" });
-    check("propose: returns a BARE status:'proposed', nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("propose: returns ONLY status:'proposed' + expiresAt, nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 2);
+    check("propose: expiresAt is a future epoch-ms timestamp (card 327bcaaa)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
     check("propose: NO promptText is returned to the companion", proposed.promptText === undefined);
     check("propose: NO token is returned to the companion", proposed.token === undefined);
     check("unconfirmed: question is STILL pending after the propose call", db.getQuestion("q-confirm").state === "pending");
@@ -490,7 +491,7 @@ try {
     const client = await connect(orch.buildServer(companionSess, "assistant"));
 
     const proposed = await call(client, "decision_resolve", { questionId: "q-tierx-warm", chosenOption: "approve" });
-    check("Tier X (irreversible) even-in-warm-window: proposes, does NOT resolve", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("Tier X (irreversible) even-in-warm-window: proposes, does NOT resolve", proposed.status === "proposed" && Object.keys(proposed).length === 2);
     check("Tier X even-in-warm-window: NO promptText/token returned to the companion", proposed.promptText === undefined && proposed.token === undefined);
     check("Tier X even-in-warm-window: question still pending", db.getQuestion("q-tierx-warm").state === "pending");
     check("Tier X even-in-warm-window: exactly one message delivered to the owner", companion.delivered.length === 1);

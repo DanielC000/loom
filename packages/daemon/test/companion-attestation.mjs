@@ -75,6 +75,27 @@ const { isVerbatimOwnerSubstring, isVerbatimOwnerSubstringRecent, OwnerConfirmSt
   const retry = store.confirm({ sessionId, route, capability, ownerText: `CONFIRM ${retryable.token}` });
   check("C: the SAME proposal can still be confirmed correctly after a mismatched attempt", retry.committed === true);
 
+  // --- clearSession (card 327bcaaa hygiene fix): revokes every pending proposal for a session, across
+  // every route/capability, without touching a DIFFERENT session's own pending proposal ---
+  {
+    const orphaned = store.propose({ sessionId, route, capability, summary: "About to be orphaned by a session close" });
+    const otherRoute = store.propose({ sessionId, route: { channel: "telegram", chatId: "tg-2" }, capability, summary: "Same session, different route" });
+    const otherCapability = store.propose({ sessionId, route, capability: "board-reach", summary: "Same session+route, different capability" });
+    const untouchedSession = store.propose({ sessionId: "sess-untouched", route, capability, summary: "A different session entirely" });
+
+    store.clearSession(sessionId);
+
+    check("clearSession: the session's proposal (original route+capability) no longer confirms", store.confirm({ sessionId, route, capability, ownerText: `CONFIRM ${orphaned.token}` }).committed === false);
+    check("clearSession: the SAME session's proposal on a DIFFERENT route is also cleared", store.confirm({ sessionId, route: { channel: "telegram", chatId: "tg-2" }, capability, ownerText: `CONFIRM ${otherRoute.token}` }).committed === false);
+    check("clearSession: the SAME session's proposal under a DIFFERENT capability is also cleared", store.confirm({ sessionId, route, capability: "board-reach", ownerText: `CONFIRM ${otherCapability.token}` }).committed === false);
+    check("clearSession: a DIFFERENT session's pending proposal is UNTOUCHED and still commits", store.confirm({ sessionId: "sess-untouched", route, capability, ownerText: `CONFIRM ${untouchedSession.token}` }).committed === true);
+
+    // The store itself is not broken — a fresh propose for the cleared session still works.
+    const freshAfterClear = store.propose({ sessionId, route, capability, summary: "Fresh after clearSession" });
+    const freshConfirm = store.confirm({ sessionId, route, capability, ownerText: `CONFIRM ${freshAfterClear.token}` });
+    check("clearSession: a FRESH propose for the cleared session still commits normally afterward", freshConfirm.committed === true);
+  }
+
   // --- CR hardening (card a8ddd6d2): capability namespacing — two DIFFERENT levers proposing on the SAME
   // (session, route) at once must never clobber each other's pending token. A VARYING random source is
   // used here (unlike the fixed `random: () => 0` store above) so the two levers' minted tokens are
