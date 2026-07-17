@@ -533,6 +533,41 @@ export class SessionService {
   private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string }; atMs: number }>();
   private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
   /**
+   * Resume-half project-memory dedup gate (card ea648f89): sessionId → the sha256 hex digest of the LAST
+   * framed project-memory block this session was actually handed by resume() (or `null` when the last
+   * resume had nothing to inject). resume() re-retrieves on EVERY resume (idle-nudge resumes, wakes, and
+   * crash/restart recovery all call it) with no change-detection otherwise — re-injecting the IDENTICAL
+   * framed block verbatim every time (observed live as 3 consecutive identical injections, flagged
+   * unprompted as noise by the resumed manager). In-memory by design, exactly like {@link deployShaWindow}/
+   * {@link platformMessageDedupe} above: the FREQUENT resumes this fixes (idle-nudge/wake/crash-recovery)
+   * all happen within the SAME daemon process as the injection they're deduping against, so a plain Map
+   * catches every one of them with zero schema cost. The only case it can't dedupe is the very FIRST resume
+   * after a daemon RESTART (the map itself doesn't survive process exit) — but that's harmless, not merely
+   * tolerable: the resumed engine's own transcript already carries the prior injection from before the
+   * restart, so this is one redundant-but-correct re-inject on a rare event, not a persistent regression.
+   * Not persisted to the `sessions` table on purpose — this is a noise-reduction cache, not durable state;
+   * a core-table column + migration would be the wrong tool for a problem an in-memory map fully solves.
+   * Cleaned up on session deletion (see the deleteSession call site) so a long-lived daemon doesn't grow
+   * this map forever as sessions churn.
+   */
+  private readonly lastProjectMemoryDigest = new Map<string, string | null>();
+  /**
+   * Stamp {@link lastProjectMemoryDigest} for a session's FRESH-spawn project-memory injection (the
+   * `retrieveProjectMemoryForKickoff` result already appended to its startup prompt by the caller) — so the
+   * session's very FIRST resume dedups against the block the spawn kickoff already showed it, rather than
+   * treating the map as empty and redundantly re-injecting the same content resume() would otherwise
+   * recompute identically. Called by every fresh-spawn path that injects project memory (startNew,
+   * startManager, spawnWorker, recycleWorker — the same v1 coverage project-memory-recall.ts documents);
+   * resume() sets the SAME map directly (its own comment above explains the hashing). A fresh spawn whose
+   * kickoff/task search text differs from what its first resume will search (e.g. spawnWorker matches the
+   * manager's kickoff prompt, but resume matches the bound task's title+body once one exists) may still
+   * compute a DIFFERENT digest at that first resume — correctly triggering a real (not redundant) inject,
+   * since the matched notes genuinely differ; this stamp only dedupes the common case where they agree.
+   */
+  private stampProjectMemoryDigest(sessionId: string, framed: string | null): void {
+    this.lastProjectMemoryDigest.set(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
+  }
+  /**
    * TOCTOU spawn-claim (worker_spawn double-create race): the per-taskId set of worker spawns currently
    * IN FLIGHT — past the liveHolder check but not yet past insertSession + setProcessState('live'). The
    * existing liveHolder guard ({@link Db.liveSessionIdForTask}) is a single NON-atomic SELECT taken
@@ -845,6 +880,9 @@ export class SessionService {
     const withProjectMemory = projectMemoryFramed
       ? appendMemoryRecallToStartupPrompt(composedStartupPrompt ?? "", projectMemoryFramed)
       : composedStartupPrompt;
+    // Card ea648f89: stamp the dedup map so this session's FIRST resume compares against what this fresh
+    // spawn just showed it, instead of treating "no prior digest" as license to redundantly re-inject.
+    this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
     // Card f9b47cd1: a profile can confer role "worker" here too (PROFILE_SPAWNABLE_ROLES) — this path
     // never runs in a worktree/has a task, so it names as a TASKLESS worker ("adhoc" segment); every
     // other role (incl. undefined ⇒ "Plain/run") uses the fixed per-role tag.
@@ -946,6 +984,9 @@ export class SessionService {
           prompt,
         );
         const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
+        // Card ea648f89: stamp the dedup map so this manager's FIRST resume compares against what this
+        // fresh spawn just showed it (see stampProjectMemoryDigest's own doc).
+        this.stampProjectMemoryDigest(session.id, projectMemoryFramed);
         return projectMemoryFramed ? appendMemoryRecallToStartupPrompt(scheduled ?? "", projectMemoryFramed) : scheduled;
       })(),
       role,
@@ -1508,11 +1549,25 @@ export class SessionService {
     // Search text is the resumed session's own task (title+body) when it has one bound (the richest
     // match source), else the agent's own startup prompt; both empty ⇒ pinned-only. null (no project
     // memory notes match) ⇒ no enqueue, byte-identical to today.
+    //
+    // Dedup gate (card ea648f89): resume() re-retrieves on EVERY resume (idle-nudge resumes, wakes, and
+    // crash/restart recovery all call it), and with no change-detection that re-injected the FULL framed
+    // block verbatim even when byte-identical to what this same session was already handed — observed
+    // live as 3 consecutive identical injections, flagged unprompted by the resumed manager as noise.
+    // Fix: hash the framed block and compare against the digest held in {@link lastProjectMemoryDigest}
+    // (the in-memory dedup map, not a DB column — see its own doc comment for why); skip the enqueue when
+    // unchanged. This still preserves the "sees notes written since last spawn" intent — a genuinely
+    // new/edited note changes the digest and is injected — it just stops re-blasting identical content
+    // every resume within the SAME daemon process.
     {
       const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
       const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
       const projectRecall = retrieveProjectMemoryForKickoff(this.db, session.projectId, kickoffText);
-      if (projectRecall) this.pty.enqueueStdin(session.id, projectRecall, "system");
+      const digest = projectRecall ? createHash("sha256").update(projectRecall).digest("hex") : null;
+      if (digest !== this.lastProjectMemoryDigest.get(session.id)) {
+        if (projectRecall) this.pty.enqueueStdin(session.id, projectRecall, "system");
+        this.lastProjectMemoryDigest.set(session.id, digest);
+      }
     }
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
     // queued messages addressed to it that the ONE-SHOT boot scan couldn't deliver because it wasn't live
@@ -2952,6 +3007,7 @@ export class SessionService {
     for (const id of ids) {
       deleteArchivedTranscript(s.projectId, id); // best-effort snapshot removal
       this.db.deleteSession(id);
+      this.lastProjectMemoryDigest.delete(id); // bound the resume-dedup map's growth (card ea648f89)
     }
     return { deleted: ids };
   }
@@ -3245,6 +3301,12 @@ export class SessionService {
       this.db.insertSession(worker);
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
       this.db.setProcessState(worker.id, "live");
+      // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, searched against the manager's
+      // own kickoff text (which typically carries the task description — the richest match source of any
+      // spawn path); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so this
+      // worker's FIRST resume compares against what this fresh spawn just showed it.
+      const workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
+      this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
       this.pty.spawn({
         sessionId: worker.id,
         cwd: worktreePath,
@@ -3258,12 +3320,9 @@ export class SessionService {
         // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
         // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
-        // Project memory (card 2fd9abf9, fresh-spawn half) appended LAST, searched against the manager's
-        // own kickoff text (which typically carries the task description — the richest match source of
-        // any spawn path); null (no notes) ⇒ byte-identical to today.
         startupPrompt: appendMemoryRecallToStartupPrompt(
           composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree),
-          retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt),
+          workerProjectMemoryFramed,
         ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
         browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
@@ -5212,6 +5271,13 @@ export class SessionService {
       `Your predecessor's handoff:\n\n${handoffSummary}\n\nContinue from here.`;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
+    // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
+    // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
+    // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
+    // available here); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so
+    // this recycled worker's FIRST resume compares against what this fresh spawn just showed it.
+    const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
+    this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
     this.pty.spawn({
       sessionId: fresh.id,
       cwd: worktreePath,
@@ -5224,13 +5290,9 @@ export class SessionService {
       // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
       // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
       // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
-      // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
-      // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
-      // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
-      // available here); null (no notes) ⇒ byte-identical to today.
       startupPrompt: appendMemoryRecallToStartupPrompt(
         composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos),
-        retrieveProjectMemoryForKickoff(this.db, project.id, framed),
+        recycleProjectMemoryFramed,
       ),
       role: "worker",
       browserTesting: old.browserTesting ?? false,

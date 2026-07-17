@@ -133,6 +133,41 @@ try {
   check("(recycle) the handoff text itself is still present (append, not replace)",
     recycledOpts.startupPrompt.includes(handoff));
 
+  // ===================== FRESH-SPAWN STAMP (card ea648f89 follow-up): recycleWorker's own fresh-spawn
+  // project-memory injection (just proven above) must ALSO stamp the resume-dedup map with what it just
+  // showed `recycled` — otherwise the map is empty at this session's first resume() call, which would
+  // treat "no prior digest" as license to redundantly re-inject the SAME block the fresh spawn already
+  // carried. Run IMMEDIATELY after recycleWorker, before any further memory_write, so nothing has changed
+  // since the stamp — this is the clean "nothing to see" case the fix targets. =====================
+  {
+    const engIdRecycled = "55555555-6666-7777-8888-999999999999";
+    db.setEngineSessionId(recycled.id, engIdRecycled);
+    const tpathRecycled = engineTranscriptPath(repo, engIdRecycled);
+    fs.mkdirSync(path.dirname(tpathRecycled), { recursive: true });
+    fs.writeFileSync(tpathRecycled, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    host.enqueued.length = 0;
+    svc.resume(recycled.id);
+    check("(fresh-spawn stamp) the recycled worker's FIRST resume enqueues NOTHING project-memory-related — recycleWorker's own fresh-spawn kickoff already showed it the identical block",
+      !host.enqueued.some((e) => e.sessionId === recycled.id && e.text.includes(PROJECT_MEMORY_TAG)));
+
+    // a genuinely NEW pinned note (rides regardless of search text) changes the digest — the very next
+    // resume must still inject it: the dedup must never go silent on real new content.
+    db.upsertProjectMemory(projA, {
+      key: "new-note-after-recycle-stamp",
+      title: "New note added after the recycle fresh-spawn stamp",
+      text: "this note was written after recycleWorker's own stamp and must still reach the very next resume.",
+      pinned: true,
+    }, cfg.maxNotes);
+    host.enqueued.length = 0;
+    svc.resume(recycled.id);
+    const recycleDedupMsg = host.enqueued.find((e) => e.sessionId === recycled.id);
+    check("(fresh-spawn stamp) a resume AFTER a genuinely new note still enqueues (the digest changed since the fresh-spawn stamp)",
+      !!recycleDedupMsg && recycleDedupMsg.text.includes(PROJECT_MEMORY_TAG));
+    check("(fresh-spawn stamp) the new note's content is present in the re-injected block",
+      recycleDedupMsg?.text.includes("written after recycleWorker's own stamp"));
+  }
+
   // ===================== additive guard: a DIFFERENT project with ZERO memory notes spawns a
   // BYTE-IDENTICAL startupPrompt to composeWorkerStartupPrompt alone (no tag, no injection at all) =====================
   const kickoffB = "Do the unrelated task.";
@@ -159,17 +194,24 @@ try {
     workerFreshOpts?.startupPrompt?.includes(PROJECT_MEMORY_TAG) && workerFreshOpts.startupPrompt.includes("daemon default port is 4317"));
 
   // ===================== RESUME injection point (enqueueStdin, kind defaults to "warning") =====================
-  // Resumes `recycled` (the CURRENT live worker on task A) rather than the original `worker` — the
-  // original now has a successor (recycleWorker above), and resume() structurally refuses to resurrect a
-  // superseded session (hasSuccessor guard) alongside its live successor.
-  const engId = "33333333-4444-5555-6666-777777777777";
-  db.setEngineSessionId(recycled.id, engId);
-  const tpath = engineTranscriptPath(repo, engId);
+  // A RAW session inserted directly (never spawned through svc, mirroring mgrA/mgrB above) — unlike
+  // `recycled`, it carries NO prior entry in the resume-dedup map, so its first resume is guaranteed to
+  // inject regardless of the fresh-spawn stamping proven above, cleanly isolating "resume CAN inject" from
+  // "a fresh spawn's own stamp dedups its first resume". Task-bound to tA so its kickoffText still matches
+  // the FTS5-related note, same as the original scenario this section proved.
+  const rawWorkerId = "rawWorkerA";
+  const rawEngId = "33333333-4444-5555-6666-777777777777";
+  db.insertSession({
+    id: rawWorkerId, projectId: projA, agentId: "workerAgentA", engineSessionId: rawEngId, title: null,
+    cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker", taskId: tA,
+  });
+  const tpath = engineTranscriptPath(repo, rawEngId);
   fs.mkdirSync(path.dirname(tpath), { recursive: true });
   fs.writeFileSync(tpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
   host.enqueued.length = 0;
-  svc.resume(recycled.id);
-  const resumeMsg = host.enqueued.find((e) => e.sessionId === recycled.id);
+  svc.resume(rawWorkerId);
+  const resumeMsg = host.enqueued.find((e) => e.sessionId === rawWorkerId);
   check("(resume) resume() enqueues a project-memory recall turn (task-bound worker still matches its own task)",
     !!resumeMsg && resumeMsg.text.includes(PROJECT_MEMORY_TAG));
   check("(resume) the recall carries the pinned note", resumeMsg?.text.includes("daemon default port is 4317"));
@@ -186,6 +228,37 @@ try {
   svc.resume(workerB.id);
   check("(resume additive) zero-notes project: NO project-memory enqueue at all",
     !host.enqueued.some((e) => e.sessionId === workerB.id && e.text.includes(PROJECT_MEMORY_TAG)));
+
+  // ===================== RESUME DEDUP (card ea648f89): the resume half re-retrieves on EVERY resume
+  // (idle-nudge resumes, wakes, crash/restart recovery) with no change-detection — re-injecting the
+  // IDENTICAL framed block verbatim every time. Observed live as 3 consecutive identical injections on one
+  // manager, flagged unprompted as noise. Fix: hash the framed block and compare against the digest
+  // persisted from the session's LAST injection (in-memory, keyed by session id — see
+  // lastProjectMemoryDigest in service.ts); skip the enqueue when unchanged, but still inject when a
+  // genuinely NEW/edited note changes the digest. =====================
+  host.enqueued.length = 0;
+  svc.resume(rawWorkerId); // same session, SAME notes as its last resume above — nothing changed
+  check("(dedup) a resume with NO change since the last injection enqueues NOTHING project-memory-related",
+    !host.enqueued.some((e) => e.sessionId === rawWorkerId && e.text.includes(PROJECT_MEMORY_TAG)));
+
+  db.upsertProjectMemory(projA, {
+    key: "new-note-after-dedup",
+    title: "New note added after the dedup baseline",
+    text: "this note was written AFTER the session's last injected digest and must reach the next resume.",
+    pinned: true,
+  }, cfg.maxNotes);
+  host.enqueued.length = 0;
+  svc.resume(rawWorkerId);
+  const dedupResumeMsg = host.enqueued.find((e) => e.sessionId === rawWorkerId);
+  check("(dedup) a resume AFTER a genuinely new note enqueues the recall again (the digest changed)",
+    !!dedupResumeMsg && dedupResumeMsg.text.includes(PROJECT_MEMORY_TAG));
+  check("(dedup) the new note's content is present in the re-injected block ('sees notes written since last spawn' is preserved)",
+    dedupResumeMsg?.text.includes("written AFTER the session's last injected digest"));
+
+  host.enqueued.length = 0;
+  svc.resume(rawWorkerId); // immediately again, no further writes — must dedup against the JUST-updated digest too
+  check("(dedup) a resume right after the delta injection ALSO dedups (the newly-persisted digest is the new baseline)",
+    !host.enqueued.some((e) => e.sessionId === rawWorkerId && e.text.includes(PROJECT_MEMORY_TAG)));
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -197,6 +270,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — cross-session sharing PROVEN (a note written in one session is retrieved and injected into a DIFFERENT, freshly-spawned worker session's kickoff via spawnWorker on a real worktree branch); pinned-always + FTS5-related-on-match both land; fresh-spawn injection covers spawnWorker/startManager/startNew; resume() injects via enqueueStdin as kind:\"warning\"; a zero-notes project stays byte-identical to composeWorkerStartupPrompt alone with no tag anywhere and no resume enqueue — claude-free, network-free."
+  ? "\n✅ ALL PASS — cross-session sharing PROVEN (a note written in one session is retrieved and injected into a DIFFERENT, freshly-spawned worker session's kickoff via spawnWorker on a real worktree branch); pinned-always + FTS5-related-on-match both land; fresh-spawn injection covers spawnWorker/startManager/startNew/recycleWorker; resume() injects via enqueueStdin as kind:\"warning\"; a zero-notes project stays byte-identical to composeWorkerStartupPrompt alone with no tag anywhere and no resume enqueue; a resume with an unchanged project-memory digest does NOT re-inject (whether unchanged since a PRIOR resume or since the session's own FRESH-SPAWN kickoff), while a genuinely new note still reaches the very next resume every time (card ea648f89) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
