@@ -3823,7 +3823,7 @@ export class SessionService {
   platformEscalate(
     managerSessionId: string,
     input: { title: string; detail: string; severity?: string },
-  ): { taskId: string; projectId: string; deliveryStatus: DeliveryStatus } {
+  ): { taskId: string; projectId: string; deliveryStatus: DeliveryStatus; deduped?: boolean } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("platform_escalate is a manager-only surface");
     // HARDCODED target: the reserved Platform home — never an arbitrary projectId from the manager.
@@ -3832,6 +3832,28 @@ export class SessionService {
     // and would mis-file the escalation into the wrong home.
     const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot escalate");
+
+    // SERVER-SIDE DEDUPE: a manager re-escalating the SAME issue every cycle while nobody has picked it up
+    // yet floods the Companion's attention-push alert (companion/attention-push.ts) with zero new
+    // owner-facing value — each re-file is a fresh orchestration_event, so attention-push's watermark
+    // treats it as genuinely new and re-pushes "escalated to platform" every time, whether or not a Lead
+    // is live to act on it. If THIS origin project already has a still-PENDING escalation (never picked up
+    // — still sitting in the Platform board's landing lane) with the same normalized title, reuse it
+    // instead of filing a duplicate task/event: no new orchestration_event ⇒ no new attention-push alert,
+    // and no redundant live-nudge either. Once the Lead moves/resolves it (status advances past pending), a
+    // repeat with the same title is treated as a genuinely new occurrence and files fresh — mirrors
+    // auditFileFinding's title-normalized dedupe, but scoped to "still unclaimed" rather than "ever filed"
+    // (an escalation, unlike an audit finding, can legitimately recur after resolution).
+    const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
+    const key = norm(input.title);
+    for (const e of this.db.listEscalationsForProject(caller.projectId)) {
+      const filedTitle = (e.detail?.title as string | undefined) ?? "";
+      if (!e.taskId || norm(filedTitle) !== key) continue;
+      const existingTask = this.db.getTask(e.taskId);
+      if (existingTask && this.classifyEscalationStatus(home.id, existingTask.columnKey) === "pending") {
+        return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true };
+      }
+    }
 
     const origin = this.db.getProject(caller.projectId);
     const originName = origin?.name ?? caller.projectId;

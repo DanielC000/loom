@@ -399,13 +399,39 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("classify: worker_report(other status) → null (not subscribed)", classify("worker_report", { status: "done" }) === null);
   check("classify: idle_report(waiting) → null (not a manager-idle alert)", classify("idle_report", { state: "waiting" }) === null);
   check("classify: idle_report(done) → manager-idle", classify("idle_report", { state: "done" }) === "manager-idle");
+  check("classify: platform_escalate → escalation", classify("platform_escalate", { title: "x" }) === "escalation");
   check("classify: an unrelated kind → null", classify("spawn_worker", {}) === null);
   const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-12345678", kind: "context_escalated", detail: {} }, "context-overflow", "Proj Z");
   check("alertLine: terse, names the project + an m: id slice", line.includes("Proj Z") && line.includes("m:mgr-1234"));
   cleanupEnv({ db: { close() {} }, dbFile: "" }); // no-op cleanup (nothing to remove) — keeps the block shape uniform
 }
 
+// --- 18. FIX: platform_escalate carries a READABLE payload (title/summary), not an opaque line ---
+{
+  const detail = { originProjectId: "pOrd", severity: "high", platformProjectId: "pHome", title: "worker_merge gate hangs on a slow build" };
+  const line = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", kind: "platform_escalate", detail }, "escalation", "Proj A");
+  check("platform_escalate alert line: non-empty", line.length > 0);
+  check("platform_escalate alert line: carries the escalation's title (not just 'escalated to platform')", line.includes("worker_merge gate hangs on a slow build"));
+  check("platform_escalate alert line: still names the project + a manager id slice", line.includes("Proj A") && line.includes("m:mgr-abcd"));
+  // A missing/malformed title degrades to a labeled placeholder rather than throwing or going blank.
+  const lineNoTitle = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", kind: "platform_escalate", detail: {} }, "escalation", "Proj A");
+  check("platform_escalate alert line: a missing title degrades to 'untitled', never blank", lineNoTitle.includes("untitled") && lineNoTitle.length > 0);
+}
+
+// --- 19. END-TO-END: a real platform_escalate event ticks through the watcher and pushes a turn whose
+//     body carries the escalation's title (not just an opaque "escalated to platform" line). ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  fire(e, "platform_escalate", e.mgrA, { originProjectId: e.projA, severity: "high", platformProjectId: "pHome", title: "worker_merge gate hangs on a slow build" }, { taskId: "task-xyz" });
+  e.watcher.tick(new Date());
+  check("platform_escalate e2e: enqueues ONE turn", e.enqueued.length === 1);
+  check("platform_escalate e2e: framed [loom:alert]", e.enqueued[0].text.startsWith(ALERT_TAG));
+  check("platform_escalate e2e: the pushed turn carries the escalation's title", e.enqueued[0].text.includes("worker_merge gate hangs on a slow build"));
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, and bundles a digest under its MIN cadence."
+  ? "\n✅ ALL PASS — AttentionPushWatcher stays DEFAULT-OFF with no grant, never replays backlog, pushes exactly the granted-project/subscribed-class events once each, survives a restart without re-pushing, respects rate-limit park + no-stacking (watermark held, one deferred event per streak), union-merges alertClasses/digestMinutes across granted projects, bundles a digest under its MIN cadence, and renders a platform_escalate alert with a readable title instead of an opaque line."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

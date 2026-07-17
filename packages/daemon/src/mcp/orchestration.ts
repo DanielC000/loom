@@ -1807,7 +1807,10 @@ export class OrchestrationMcpRouter {
           "`deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` means no Lead session " +
           "was live but the board task is durably filed (the normal, safe case) — a live Lead is nudged " +
           "immediately (even one that's currently parked waiting on exactly this); only `dropped` warrants " +
-          "concern. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
+          "concern. DEDUPED: re-escalating the SAME title while your prior escalation is still pending " +
+          "(unclaimed on the board) reuses that task instead of filing a duplicate — the response carries " +
+          "`deduped: true` and no fresh Lead nudge is sent; check escalation_status instead of re-escalating " +
+          "on a timer. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
           "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
           "project's task board (use tasks_create there).",
         inputSchema: {

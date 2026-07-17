@@ -168,9 +168,11 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
     case "context_escalated":
       line = `${projectName}: manager context overflow risk — ${m8}`;
       break;
-    case "platform_escalate":
-      line = `${projectName}: escalated to platform — ${m8}`;
+    case "platform_escalate": {
+      const title = typeof detail.title === "string" ? truncateText(detail.title, ALERT_TITLE_MAX_CHARS) : "untitled";
+      line = `${projectName}: escalated to platform — "${title}" (${m8})`;
       break;
+    }
     case "session_rate_limited":
       line = `${projectName}: usage limit reached, parked — s:${e.managerSessionId.slice(0, 8)}`;
       break;
