@@ -145,6 +145,9 @@ try {
     check("propose-only: authored_content_grant PROPOSES, does not grant yet", proposed.status === "proposed");
     check("propose-only: confirmation delivered DIRECTLY to the owner (never returned to the companion)", companion.delivered.length === 1);
     check("propose-only: the delivered prompt never leaks the raw token via the tool's own return value", proposed.token === undefined);
+    check("propose-only: returns ONLY status:'proposed' + expiresAt, nothing else", Object.keys(proposed).length === 2);
+    check("propose-only: expiresAt is a future epoch-ms timestamp (card 49f4d116)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
+    check("propose-only: NO promptText is returned to the companion", proposed.promptText === undefined);
 
     // board_create still requires verbatim — the grant was only PROPOSED, never confirmed. (Content is
     // non-verbatim, so this rejects up front regardless of the board-write trust window's own warm/cold

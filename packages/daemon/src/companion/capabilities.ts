@@ -1401,7 +1401,10 @@ const BOARD_REACH: CompanionCapability = {
           "— it ALWAYS requires the owner's explicit confirmation, even inside an otherwise-warm trust " +
           "window: Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT see " +
           "or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
-          "returns {status:'proposed'}. Only once the owner replies to THAT message do you call " +
+          "returns {status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner " +
+          "this request will clear itself automatically around then (about 5 minutes out) if they don't " +
+          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "Only once the owner replies to THAT message do you call " +
           "authored_content_grant AGAIN with the SAME arguments to actually apply it " +
           "({status:'granted'}) — Loom detects the owner's confirming reply itself. A mismatched confirm " +
           "reply returns {status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. " +
@@ -1462,7 +1465,7 @@ const BOARD_REACH: CompanionCapability = {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
         pendingAuthoredGrants.set(key, { projectId: project, scope: scopeTyped });
-        return ok({ status: "proposed" });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
 
@@ -2217,7 +2220,10 @@ const SESSION_SPAWN: CompanionCapability = {
           "inside an otherwise-warm trust window — it does NOT spawn on the first call: Loom sends a " +
           "confirmation request DIRECTLY to the owner's chat itself (you do NOT see or relay any prompt/" +
           "token — just tell the owner you've requested their confirmation) and returns " +
-          "{status:'proposed'}. Only once the owner replies to THAT message do you call session_spawn " +
+          "{status:'proposed', expiresAt} — expiresAt is an epoch-ms timestamp; tell the owner this " +
+          "request will clear itself automatically around then (about 5 minutes out) if they don't " +
+          "confirm it, so a mis-worded or abandoned request never lingers or needs manual cleanup. " +
+          "Only once the owner replies to THAT message do you call session_spawn " +
           "AGAIN with the SAME arguments to actually spawn it ({status:'spawned'}) — Loom detects the " +
           "owner's confirming reply itself. A mismatched confirm reply returns " +
           "{status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose. Requires an " +
@@ -2306,7 +2312,7 @@ const SESSION_SPAWN: CompanionCapability = {
           return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
         }
         pendingSpawns.set(key, { project, agentId, role });
-        return ok({ status: "proposed" });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
       },
     );
   },

@@ -233,7 +233,8 @@ try {
     const client = await connect(orch.buildServer(companionSess, "assistant"));
 
     const proposed = await call(client, "session_spawn", { project: proj, agentId: "agent-1", role: "manager" });
-    check("Tier X even-in-warm-window: proposes, does NOT spawn", proposed.status === "proposed" && Object.keys(proposed).length === 1);
+    check("Tier X even-in-warm-window: proposes, does NOT spawn", proposed.status === "proposed" && Object.keys(proposed).length === 2);
+    check("Tier X even-in-warm-window: expiresAt is a future epoch-ms timestamp (card 49f4d116)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
     check("Tier X even-in-warm-window: NO promptText/token returned to the companion", proposed.promptText === undefined && proposed.token === undefined);
     check("Tier X even-in-warm-window: NO spawnSessionAsPlatform call yet", sessions.calls.length === 0);
     check("Tier X even-in-warm-window: exactly one message delivered to the owner", companion.delivered.length === 1);
@@ -257,7 +258,9 @@ try {
     const client = await connect(orch.buildServer(companionSess, "assistant"));
 
     const proposed = await call(client, "session_spawn", { project: proj, agentId: "agent-1", role: "plain" });
-    check("propose: returns a bare {status:'proposed'}", proposed.status === "proposed");
+    check("propose: returns ONLY status:'proposed' + expiresAt, nothing else", proposed.status === "proposed" && Object.keys(proposed).length === 2);
+    check("propose: expiresAt is a future epoch-ms timestamp (card 49f4d116)", typeof proposed.expiresAt === "number" && proposed.expiresAt > Date.now());
+    check("propose: NO promptText/token returned to the companion", proposed.promptText === undefined && proposed.token === undefined);
     check("propose: no spawn yet", sessions.calls.length === 0);
 
     const token = extractToken(companion.delivered[0].text);
