@@ -47,9 +47,9 @@ interface Entry<T> {
    *  + its `retryAfter`) through the settle/consume path, so a caller's `instanceof` check still works
    *  exactly as it would on a direct synchronous throw. */
   error?: unknown;
-  /** Set from `attach()`'s `classifyOutcome` opt at settle time, BEFORE eviction — so the `view()` this
-   *  registry hands to a RETAINED-view write already carries it. Undefined when no `classifyOutcome` was
-   *  given (every call site except confirmWorkerMergeTracked, today). */
+  /** Set from `attach()`'s `classifyOutcome` opt at settle time, BEFORE eviction — so the `projectView()`
+   *  this registry hands to a RETAINED-view write already carries it. Undefined when no `classifyOutcome`
+   *  was given (every call site except confirmWorkerMergeTracked, today). */
   outcome?: PendingOpOutcome;
   /** Resolves once `state` leaves "running" — the seam every `attach()` call (fresh or retry) races
    *  against its own `waitMs`, so multiple concurrent callers can all observe the SAME single
@@ -74,7 +74,16 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function view(e: Entry<unknown>): PendingOpView {
+/** The common allowlisted-fields shape both `Entry` and `RetainedView` satisfy — used ONLY to type
+ *  {@link projectView}'s input, so that function is the single place either internal shape is narrowed
+ *  down to the caller-facing {@link PendingOpView}. */
+type ViewSource = Pick<PendingOpView, "opId" | "kind" | "key" | "managerSessionId" | "startedAt" | "state" | "outcome">;
+
+/** ALLOWLIST projection (CR nitpick, card 33172f01): builds the caller-facing view by naming exactly the
+ *  fields that belong on it, rather than destructuring the internal source and denying specific ones. An
+ *  allowlist makes a future internal-only field (like `RetainedView.rawOutcome`) leak-proof by
+ *  construction — adding one never requires remembering to also add it to a denylist. */
+function projectView(e: ViewSource): PendingOpView {
   return {
     opId: e.opId, kind: e.kind, key: e.key, managerSessionId: e.managerSessionId, startedAt: e.startedAt, state: e.state,
     ...(e.outcome !== undefined ? { outcome: e.outcome } : {}),
@@ -84,6 +93,12 @@ function view(e: Entry<unknown>): PendingOpView {
 /** A retained terminal view plus its expiry — see the class doc's "RETAINED TERMINAL VIEW" section. */
 interface RetainedView extends PendingOpView {
   expiresAt: number; // epoch ms (Date.now())
+  /** The RAW settled outcome (value or error — never stringified), separate from the classified `outcome`
+   *  string above. Lets `attach()` short-circuit a re-call landing within the retention window by handing
+   *  this back directly instead of starting a genuinely fresh op (card 33172f01) — `peek()` never surfaces
+   *  this field (it's stripped in the same projection that already drops `expiresAt`), so it stays purely
+   *  an internal dedupe channel, not a caller-facing one. */
+  rawOutcome: { ok: true; value: unknown } | { ok: false; error: unknown };
 }
 
 /**
@@ -131,18 +146,31 @@ interface RetainedView extends PendingOpView {
  * `opts.retainMs`: at settle time, ONCE the identity-guarded delete from `entries` happens (same guard,
  * same place), the settled view is ALSO written into a SEPARATE `retained` map (keyed the same) with an
  * expiry — `peek()` falls back to it (lazily self-evicting once expired) so a viewer sees the terminal
- * state for a brief window instead of it vanishing the instant the gate settles. This is a genuinely
- * separate side channel from `entries`: writing/reading `retained` never affects `attach()`'s dedup logic,
- * so retention changes nothing about when a NEW `attach()` call on the same `key` starts a fresh op (it
- * still only ever looks at `entries`, exactly as before this existed) — a re-confirm during the retention
- * window correctly starts a real new merge, it just doesn't clobber the still-displaying retained view
- * until ITS OWN settle overwrites `retained` for that key. The identity guard on `entries` (see `attach()`)
- * also gates the `retained` write: an orphaned dead-owner op's late settle (its identity check on `entries`
- * already fails, per the DEAD-OWNER RECOVERY note above) never reaches the `retained` write either, so it
- * can't resurrect a stale view over a live successor's. A SECOND, separate identity guard on `retained`
- * itself (via a captured object reference, not just the key) protects the delayed cleanup timer from
- * deleting a NEWER retained view a successor op wrote under the same key before the OLDER view's own timer
- * fires.
+ * state for a brief window instead of it vanishing the instant the gate settles.
+ *
+ * `retained` ALSO stores the settled op's RAW outcome (`RetainedView.rawOutcome` — the actual value/error,
+ * not just the classified display string), and `attach()` consults it BEFORE minting a fresh `entries` row
+ * (card 33172f01): a `key` miss on `entries` that still has a live, unexpired `retained` hit means some
+ * `run()` for this exact key produced a definitive answer moments ago, so `attach()` hands that back
+ * directly instead of re-invoking `run()`. WHY: for `confirmWorkerMergeTracked`, a `key` miss used to mean
+ * "genuinely nothing outstanding," so an accidental duplicate re-confirm landing in the few seconds after a
+ * merge just settled would re-run `confirmWorkerMerge` for real — against a worktree/branch the FIRST call
+ * had already torn down, which could reproduce a false `[loom:merge-failed]` instead of returning the
+ * merge (or rejection, or thrown-error) that already happened. This dedupe is STRICTLY bounded by
+ * `retainMs`: `attach()`'s check is a plain `Date.now() < retainedHit.expiresAt` against the SAME timer
+ * that already governs the Board-facing view — once it expires (and self-evicts, unchanged), a fresh call
+ * finds nothing retained and runs for real exactly as before this existed, so a genuine retry after the
+ * window is never blocked. The short-circuit returns before any `fresh.settle` chain is created, so it can
+ * never invoke `onSettledAfterPending` either — re-confirming within the window can't re-emit a duplicate
+ * completion nudge, whether the cached outcome was a success, a resolved rejection, or a thrown error. The
+ * identity guard on `entries` (see `attach()`) still gates the `retained` write exactly as before: an
+ * orphaned dead-owner op's late settle (its identity check on `entries` already fails, per the DEAD-OWNER
+ * RECOVERY note above) never reaches the `retained` write, so it can't resurrect a stale view — or a stale
+ * dedupe target — over a live successor's. A SECOND, separate identity guard on `retained` itself (via a
+ * captured object reference, not just the key) protects the delayed cleanup timer from deleting a NEWER
+ * retained view a successor op wrote under the same key before the OLDER view's own timer fires — and by
+ * the same token, that successor's own `retained` write is what a THIRD call would dedupe against once
+ * installed, never the stale one the timer is about to (or already did) evict.
  */
 export class PendingOpRegistry {
   private readonly entries = new Map<string, Entry<unknown>>();
@@ -151,29 +179,35 @@ export class PendingOpRegistry {
   /** Read-only, NEVER consumes — for surfacing (worker_list's `pendingMerge` field). Returns a RUNNING
    *  op's view, or — if `key` has no running entry but a not-yet-expired RETAINED terminal view (see the
    *  class doc's "RETAINED TERMINAL VIEW" section; only `attach()` calls that opted into `retainMs` ever
-   *  populate this) — that view instead, PROJECTED down to a bare `PendingOpView` (its internal
-   *  `expiresAt` bookkeeping field stripped) so a retained row's shape is indistinguishable from a running
-   *  one on every caller-facing surface (worker_list/worker_status/`/api/sessions` all spread this
-   *  verbatim — `expiresAt` has no business leaking onto those). Otherwise undefined, lazily evicting an
-   *  expired retained view as a side effect so a stale one is never handed out. */
+   *  populate this) — that view instead, PROJECTED down to a bare `PendingOpView` via the SAME allowlist
+   *  {@link projectView} uses for a running entry, so its internal-only fields (`expiresAt`, `rawOutcome`)
+   *  can never leak onto a caller-facing surface (worker_list/worker_status/`/api/sessions` all spread this
+   *  verbatim) even if a future field is added to `RetainedView` — an allowlist can't forget to exclude
+   *  something new the way a denylist destructure could. Otherwise undefined, lazily evicting an expired
+   *  retained view as a side effect so a stale one is never handed out. */
   peek(key: string): PendingOpView | undefined {
     const e = this.entries.get(key);
-    if (e && e.state === "running") return view(e);
+    if (e && e.state === "running") return projectView(e);
     const r = this.retained.get(key);
     if (!r) return undefined;
     if (Date.now() >= r.expiresAt) { this.retained.delete(key); return undefined; }
-    const { expiresAt: _expiresAt, ...opView } = r;
-    return opView;
+    return projectView(r);
   }
 
-  /** Write `fresh`'s just-settled state into the retained-view cache for `retainMs`, then self-evict via a
-   *  timer — called ONLY from inside `attach()`'s identity-guarded settle callback (so an orphaned
-   *  dead-owner op's late settle, whose identity check already failed, never reaches here — see the class
-   *  doc). The timer's own delete is identity-guarded against the `RetainedView` OBJECT this call installs
-   *  (not just the key), so a NEWER retained view a successor op writes under the same key before this
-   *  timer fires survives it untouched. */
-  private retain(key: string, fresh: PendingOpView, retainMs: number): void {
-    const entry: RetainedView = { ...fresh, expiresAt: Date.now() + retainMs };
+  /** Write `fresh`'s just-settled state (plus its RAW outcome — see `RetainedView.rawOutcome`) into the
+   *  retained-view cache for `retainMs`, then self-evict via a timer — called ONLY from inside `attach()`'s
+   *  identity-guarded settle callback (so an orphaned dead-owner op's late settle, whose identity check
+   *  already failed, never reaches here — see the class doc). The timer's own delete is identity-guarded
+   *  against the `RetainedView` OBJECT this call installs (not just the key), so a NEWER retained view a
+   *  successor op writes under the same key before this timer fires survives it untouched. Under NORMAL
+   *  scheduling this guard's false branch is effectively unreachable post-card-33172f01 (`attach()`'s own
+   *  dedupe means a genuinely second real op for one key can only start once the first's retained view has
+   *  expired) — but `attach()`'s expiry check and this timer race the SAME clock independently, so under
+   *  real event-loop congestion (long synchronous handlers delaying this timer's callback) a fresh op COULD
+   *  still start while the old entry is technically present; keep this guard even though no current test
+   *  exercises that skew. */
+  private retain(key: string, fresh: PendingOpView, retainMs: number, rawOutcome: RetainedView["rawOutcome"]): void {
+    const entry: RetainedView = { ...fresh, expiresAt: Date.now() + retainMs, rawOutcome };
     this.retained.set(key, entry);
     setTimeout(() => {
       if (this.retained.get(key) === entry) this.retained.delete(key);
@@ -188,7 +222,7 @@ export class PendingOpRegistry {
   listByManager(managerSessionId: string, kind: PendingOpKind): PendingOpView[] {
     const out: PendingOpView[] = [];
     for (const e of this.entries.values()) {
-      if (e.kind === kind && e.managerSessionId === managerSessionId && e.state === "running") out.push(view(e));
+      if (e.kind === kind && e.managerSessionId === managerSessionId && e.state === "running") out.push(projectView(e));
     }
     return out;
   }
@@ -199,7 +233,7 @@ export class PendingOpRegistry {
    *  manager's own. Never consumes (mirrors peek()/listByManager()). */
   listAllOfKind(kind: PendingOpKind): PendingOpView[] {
     const out: PendingOpView[] = [];
-    for (const e of this.entries.values()) if (e.kind === kind && e.state === "running") out.push(view(e));
+    for (const e of this.entries.values()) if (e.kind === kind && e.state === "running") out.push(projectView(e));
     return out;
   }
 
@@ -233,12 +267,16 @@ export class PendingOpRegistry {
   }
 
   /**
-   * Attach to (or start) the op for `key`. NO entry exists yet → `run()` is invoked exactly once,
-   * SYNCHRONOUSLY registering the entry BEFORE `run()`'s first internal `await` (same no-await window as
-   * the old Set-based claim this generalizes — see the ATOMICITY PROOF comment at spawnWorker's call
-   * site). An entry ALREADY exists (a retry, or a fresh call that raced in first) → `run()` is NOT invoked
-   * again; this call just races the EXISTING op's settlement — so two callers can never trigger two real
-   * invocations for the same key.
+   * Attach to (or start) the op for `key`. NO entry exists yet AND no live retained result for `key` either
+   * → `run()` is invoked exactly once, SYNCHRONOUSLY registering the entry BEFORE `run()`'s first internal
+   * `await` (same no-await window as the old Set-based claim this generalizes — see the ATOMICITY PROOF
+   * comment at spawnWorker's call site). An entry ALREADY exists (a retry, or a fresh call that raced in
+   * first) → `run()` is NOT invoked again; this call just races the EXISTING op's settlement — so two
+   * callers can never trigger two real invocations for the same key. NO entry exists but a live, unexpired
+   * RETAINED result does (a re-call landing within `opts.retainMs` of the prior invocation's settle — see
+   * the class doc's "RETAINED TERMINAL VIEW" section) → also no new invocation: that cached outcome is
+   * returned directly as a settled `AttachResult`, just as if this call had raced the original op's own
+   * settlement.
    *
    * Either way, races the op's settlement against `waitMs`: settles in time → the settle callback has
    * ALREADY evicted the entry (see the class doc) — this call just reads the final state/result/error off
@@ -269,6 +307,19 @@ export class PendingOpRegistry {
    * (identity check already fails) never classifies or retains either. `classifyOutcome` alone (no
    * `retainMs`) just stamps `outcome` on the terminal `AttachResult` value this call itself returns/awaits
    * — harmless but pointless without retention, since nothing else would ever observe it once evicted.
+   *
+   * `opts.bypassRetained` (card 33172f01 CR finding): the retention-window dedupe below is arg-agnostic BY
+   * DESIGN — `key` alone decides it, deliberately NOT widened to include `run`'s actual arguments (that
+   * would ALSO fracture the RUNNING-op dedupe above, letting two differently-parameterized calls race two
+   * real concurrent invocations against the same underlying resource — exactly the bug this registry
+   * exists to prevent). But that means a caller whose args carry an explicit one-shot ESCALATION — e.g.
+   * `confirmWorkerMergeTracked`'s `forceRemoveWorktree` — would otherwise have that escalation SILENTLY
+   * swallowed by a cache hit built from an EARLIER call that didn't set it. `bypassRetained:true` is the
+   * opt-out: THIS call skips the retained-cache read (still fully participates in the RUNNING-op dedupe
+   * below — force never starts a second CONCURRENT real op on top of one still executing) and always mints
+   * a fresh invocation carrying its own (forceful) args. The cache is still WRITTEN on this call's own
+   * settle (ungated by this flag), so a later NON-forced re-confirm within ITS window correctly dedupes
+   * against the fresh (forced) outcome, not the stale pre-force one.
    */
   async attach<T>(
     key: string, kind: PendingOpKind, managerSessionId: string, waitMs: number, run: (opId: string) => Promise<T>,
@@ -276,10 +327,28 @@ export class PendingOpRegistry {
     opts?: {
       retainMs?: number;
       classifyOutcome?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => PendingOpOutcome;
+      bypassRetained?: boolean;
     },
   ): Promise<AttachResult<T>> {
     let e = this.entries.get(key) as Entry<T> | undefined;
     if (!e) {
+      // RETENTION-WINDOW DEDUPE (card 33172f01): no RUNNING entry for `key` — this could be a genuinely
+      // fresh call, OR an accidental duplicate re-confirm landing WHILE the prior op's settled result is
+      // still in its brief retained window (see `retain()`/the class doc's "RETAINED TERMINAL VIEW"
+      // section). Check the retained cache FIRST (unless `opts.bypassRetained` — see its doc above): a
+      // live, unexpired hit means some `run()` for this exact key already produced a definitive answer
+      // moments ago — hand it back directly instead of minting a fresh entry and re-invoking `run()`. This
+      // returns before any `fresh.settle` chain is created, so it can never re-trigger `onSettledAfterPending`
+      // either — a within-window re-confirm on a FAILED/rejected op can't re-emit a duplicate completion
+      // nudge. Bounded by the SAME `retainMs` timer that already governs the Board-facing retained view:
+      // once it expires (and self-evicts), this check finds nothing and falls through to the normal
+      // fresh-op path below exactly as before — a genuine retry after the window still runs for real.
+      const retainedHit = this.retained.get(key);
+      if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt) {
+        return retainedHit.rawOutcome.ok
+          ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T }
+          : { settled: true, ok: false, error: retainedHit.rawOutcome.error };
+      }
       const fresh: Entry<T> = {
         opId: randomUUID(), kind, key, managerSessionId, startedAt: new Date().toISOString(),
         state: "running", settle: Promise.resolve(), surfacedPending: false,
@@ -305,7 +374,7 @@ export class PendingOpRegistry {
           fresh.outcome = opts?.classifyOutcome?.({ ok: true, value });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
-            if (opts?.retainMs) this.retain(key, view(fresh), opts.retainMs);
+            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value });
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
           }
         },
@@ -314,7 +383,7 @@ export class PendingOpRegistry {
           fresh.outcome = opts?.classifyOutcome?.({ ok: false, error: err });
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
-            if (opts?.retainMs) this.retain(key, view(fresh), opts.retainMs);
+            if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err });
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
           }
         },
@@ -322,7 +391,7 @@ export class PendingOpRegistry {
       e = fresh;
     }
     if (e.state === "running") await Promise.race([e.settle, sleep(waitMs)]);
-    if (e.state === "running") { e.surfacedPending = true; return { settled: false, op: view(e) }; }
+    if (e.state === "running") { e.surfacedPending = true; return { settled: false, op: projectView(e) }; }
     return e.state === "done"
       ? { settled: true, ok: true, value: e.result as T }
       : { settled: true, ok: false, error: e.error };

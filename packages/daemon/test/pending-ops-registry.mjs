@@ -248,33 +248,115 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(no retainMs) a settled op still evicts immediately — no retained view without opting in", reg.peek("m4") === undefined);
 }
 
-// A fresh attach() on the SAME key WHILE a retained view is still live must start a genuinely NEW op —
-// retention is a read-only side channel for surfacing, never a dedup source for attach()'s own logic.
+// RETENTION-WINDOW DEDUPE (card 33172f01): a re-call landing WITHIN the retention window with NO running
+// entry for the key must NOT start a fresh op — it must return the SAME cached settled outcome the first
+// call produced, across all three settled shapes (merged / resolved-rejected / thrown-failed), and must
+// NOT re-fire the completion-nudge callback (a within-window re-confirm on a FAILED op can't re-emit a
+// duplicate [loom:merge-failed]-style push). Mirrors worker_spawn's own dedup-attach contract instead of
+// racing a torn-down worktree with a second real invocation — see the class doc's "RETAINED TERMINAL VIEW"
+// section.
+{
+  // (a) MERGED outcome: second call returns the cached value, run() invoked exactly once, no second nudge.
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const nudges = [];
+  const r1 = await reg.attach("m5a", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-1" }; }, (o) => nudges.push(o), { retainMs: 200, classifyOutcome: classify });
+  check("(retain dedupe/merged) first op ran once and settled", calls === 1 && r1.ok === true && r1.value.opId === "op-1");
+  const r2 = await reg.attach("m5a", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, (o) => nudges.push(o), { retainMs: 200, classifyOutcome: classify });
+  check("(retain dedupe/merged) re-call within the window does NOT invoke run() a second time", calls === 1);
+  check("(retain dedupe/merged) re-call returns the SAME cached settled outcome (the ORIGINAL op's opId), not a fresh one", r2.settled === true && r2.ok === true && r2.value.opId === "op-1");
+  check("(retain dedupe/merged) peek() still reflects the retained outcome (unaffected by the dedupe hit)", reg.peek("m5a")?.outcome === "merged");
+  check("(retain dedupe/merged) the completion-nudge callback never fires at all — both calls were fast-path/short-circuit, neither was ever surfaced pending", nudges.length === 0);
+}
+{
+  // (b) RESOLVED-REJECTED outcome (confirmWorkerMerge's gate-failed shape: resolves merged:false, doesn't throw).
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const r1 = await reg.attach("m5b", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(retain dedupe/rejected) first op ran once and resolved rejected", calls === 1 && r1.ok === true && r1.value.merged === false);
+  const r2 = await reg.attach("m5b", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(retain dedupe/rejected) re-call within the window does NOT invoke run() a second time", calls === 1);
+  check("(retain dedupe/rejected) re-call returns the SAME cached rejected outcome, not a fresh (different) one", r2.settled === true && r2.ok === true && r2.value.merged === false && r2.value.opId === "op-1");
+}
+{
+  // (c) THROWN outcome (a genuine exception, e.g. an unexpected error mid-confirm — not a resolved rejection).
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const nudges = [];
+  const r1 = await reg.attach("m5c", "merge", "mgr1", 200, async () => { calls++; throw new Error("boom-1"); }, (o) => nudges.push(o), { retainMs: 200, classifyOutcome: classify });
+  check("(retain dedupe/failed) first op ran once and threw", calls === 1 && r1.ok === false && r1.error.message === "boom-1");
+  const r2 = await reg.attach("m5c", "merge", "mgr1", 200, async () => { calls++; throw new Error("boom-2"); }, (o) => nudges.push(o), { retainMs: 200, classifyOutcome: classify });
+  check("(retain dedupe/failed) re-call within the window does NOT invoke run() a second time", calls === 1);
+  check("(retain dedupe/failed) re-call returns the SAME cached thrown error (identity preserved), not a fresh one", r2.settled === true && r2.ok === false && r2.error.message === "boom-1");
+  check("(retain dedupe/failed) the completion-nudge callback never fires — a within-window re-confirm on a FAILED op cannot re-emit a duplicate failure nudge", nudges.length === 0);
+}
+
+// AFTER the retention window has expired, a re-call is a GENUINE fresh retry — the dedupe must be strictly
+// bounded by retainMs, not permanently sticky (a real second merge attempt after the window must still work).
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
-  await reg.attach("m5", "merge", "mgr1", 200, async () => { calls++; return { merged: true }; }, undefined, { retainMs: 200, classifyOutcome: classify });
-  check("(retain) first op ran once", calls === 1 && reg.peek("m5")?.outcome === "merged");
-  const r2 = await reg.attach("m5", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "x" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
-  check("(retain) a re-confirm during the retention window starts a FRESH op, not a dedup-attach to the stale result", calls === 2 && r2.settled === true && r2.ok === true && r2.value.merged === false);
-  check("(retain) peek() now reflects the NEW op's retained outcome, replacing the old one", reg.peek("m5")?.outcome === "rejected");
+  await reg.attach("m5d", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-1" }; }, undefined, { retainMs: 30, classifyOutcome: classify });
+  check("(retain dedupe/expired) first op ran once", calls === 1);
+  await sleep(50); // past retainMs — the retained view has self-evicted
+  check("(retain dedupe/expired) precondition: the retained view is gone", reg.peek("m5d") === undefined);
+  const r2 = await reg.attach("m5d", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "y", opId: "op-2" }; }, undefined, { retainMs: 30, classifyOutcome: classify });
+  check("(retain dedupe/expired) a re-call AFTER the window runs a genuinely FRESH op", calls === 2 && r2.settled === true && r2.value.opId === "op-2");
 }
 
-// CLOBBER GUARD (retained-cache variant): op A's own delayed cleanup timer must NOT delete a NEWER
-// retained view op B wrote under the same key before A's timer fires — mirrors the `entries`-map clobber
-// guard above, but for the separate `retained` side channel.
+// opts.bypassRetained (CR BLOCKER 1, card 33172f01): an explicit one-shot escalation (mirrors
+// confirmWorkerMergeTracked's forceRemoveWorktree) must NEVER be served from the retained cache — the
+// caller's own forceful args would otherwise be silently swallowed by an EARLIER, non-forced call's cached
+// result. Also proves the cache write on the forced call's OWN settle is unaffected: a THIRD, non-forced
+// call right after still correctly dedupe-hits the fresh (forced) outcome, not the stale pre-force one.
 {
   const reg = new PendingOpRegistry();
-  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: true }), undefined, { retainMs: 30, classifyOutcome: classify });
-  check("(retain clobber) op A's retained view present", reg.peek("m6")?.outcome === "merged");
-  await sleep(10); // op A's 30ms cleanup timer has NOT fired yet
-  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: false, reason: "y" }), undefined, { retainMs: 200, classifyOutcome: classify });
-  check("(retain clobber) op B's retained view replaces op A's", reg.peek("m6")?.outcome === "rejected");
-  await sleep(40); // op A's cleanup timer (fires ~30ms after A settled) has now long since fired
-  check("(retain clobber) op A's stale cleanup timer did NOT delete op B's still-live retained view", reg.peek("m6")?.outcome === "rejected");
+  let calls = 0;
+  const r1 = await reg.attach("m5e", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-1", warning: "nested repo — re-run with forceRemoveWorktree" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(bypassRetained) first (unforced) op ran once, carries the warning", calls === 1 && r1.value.warning !== undefined);
+  // A plain re-call within the window would normally dedupe-hit — confirm that's still true WITHOUT the flag.
+  const rPlain = await reg.attach("m5e", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-plain" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(bypassRetained) precondition: an UNFLAGGED re-call still dedupe-hits (does not itself re-run)", calls === 1 && rPlain.value.opId === "op-1");
+  // NOW the caller re-confirms WITH the force flag, still well within the original window.
+  const rForced = await reg.attach("m5e", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2", warning: undefined }; }, undefined, { retainMs: 200, classifyOutcome: classify, bypassRetained: true });
+  check("(bypassRetained) a FORCED re-call within the window DOES invoke run() again — the cache is bypassed, not read", calls === 2 && rForced.value.opId === "op-2");
+  check("(bypassRetained) the forced call's own fresh result is what comes back, not the stale cached one", rForced.value.warning === undefined);
+  // A subsequent NON-forced call dedupes against the FRESH (forced) outcome — the forced call's own settle
+  // still writes the cache (bypassRetained only gates the READ), so this must NOT see the stale op-1 view.
+  const rAfter = await reg.attach("m5e", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-3" }; }, undefined, { retainMs: 200, classifyOutcome: classify });
+  check("(bypassRetained) a later unflagged call dedupes against the NEW cached (forced) result, not the stale pre-force one", calls === 2 && rAfter.value.opId === "op-2");
+}
+
+// TTL IS NOT REFRESHED BY A DEDUPE HIT (card 33172f01): repeatedly re-confirming within the window must
+// not extend the retained view's lifetime — it's anchored to the ORIGINAL settle, not to the most recent
+// re-confirm. (This replaces the old "two real settled ops race each other's cleanup timer" clobber test:
+// under NORMAL scheduling that scenario is no longer reachable through attach()'s public API via a
+// same-tick re-confirm — by construction of the dedupe check above, a SECOND real op for a given key can
+// only start once the first's retained view has expired via `Date.now() >= expiresAt`. It is NOT provably
+// unreachable in general, though: `attach()`'s own expiry check races the SAME clock the cleanup timer in
+// `retain()` uses, and under real event-loop congestion (documented ~500ms+ blocking on synchronous SQLite
+// handlers under load — see the platform escalation this project tracks) a call landing in that narrow
+// skew window could still see `Date.now() >= expiresAt` true while the timer hasn't fired yet, starting a
+// genuinely fresh op while the old retained entry is still technically present — so `retain()`'s identity
+// guard on its OWN cleanup timer stays load-bearing defense-in-depth, not dead code to delete just because
+// no test currently drives its false branch. The `entries`-map clobber guard above — evictDeadOwner()
+// freeing a key while an orphaned RUNNING op is still executing in the background — is a distinct scenario
+// and is unaffected by this change.)
+{
+  const reg = new PendingOpRegistry();
+  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: 40, classifyOutcome: classify });
+  check("(retain ttl) retained view present after the first settle", reg.peek("m6")?.outcome === "merged");
+  await sleep(20); // still within the original 40ms window
+  const r2 = await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: false, reason: "y", opId: "op-2" }), undefined, { retainMs: 40, classifyOutcome: classify });
+  check("(retain ttl) the re-confirm at t=20ms dedupe-hits the cached op-1 result", r2.value.opId === "op-1");
+  await sleep(25); // t=45ms total — past the ORIGINAL 40ms window (would still be live if the dedupe hit had refreshed the TTL)
+  check("(retain ttl) the retained view is gone — its lifetime was anchored to the ORIGINAL settle, not extended by the re-confirm", reg.peek("m6") === undefined);
+  let calls = 0;
+  const r3 = await reg.attach("m6", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-3" }; }, undefined, { retainMs: 40, classifyOutcome: classify });
+  check("(retain ttl) a call after expiry runs a genuinely FRESH op, unaffected by the earlier dedupe hits", calls === 1 && r3.value.opId === "op-3");
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, and opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure) without ever letting retention interfere with attach()'s own dedup/clobber-guard logic."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, and opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

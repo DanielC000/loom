@@ -6472,10 +6472,23 @@ export class SessionService {
     // SCOPED TO A CONFIRMED-DEAD OWNER ONLY: a live (or still-resuming) owner's op is left completely
     // alone, so the healthy path — two managers/retries racing a genuinely in-flight merge — is
     // byte-identical to before this card.
+    //
+    // NOTE (card 33172f01): `existing` here can ALSO be a settled RETAINED view (peek() surfaces both
+    // shapes — see pending-ops.ts). `evictDeadOwner` only ever removes a RUNNING entry, so it's correctly a
+    // no-op for a retained one regardless of whose manager owned the op that produced it — a retained
+    // result is a FINISHED answer, not a stuck zombie, so there is nothing to evict; `attach()` below will
+    // short-circuit to that cached outcome for ANY caller within the retention window, which is exactly
+    // right (the merge already happened; ownership of the op that ran it doesn't change the answer).
     const existing = this.pendingOps.peek(key);
     if (existing && this.isManagerSessionDead(existing.managerSessionId)) {
-      console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
-      this.pendingOps.evictDeadOwner(key);
+      // MINOR A (CR finding, card 33172f01): `evictDeadOwner` only ever removes a RUNNING entry (a no-op
+      // for a settled RETAINED view, per the NOTE above) — so only log the "evicting so this confirm can
+      // proceed fresh" claim when it's actually TRUE. Logging it unconditionally used to lie for a
+      // dead-owner'd retained view: nothing gets evicted and this confirm does NOT proceed fresh, it
+      // dedupe-hits the cache instead — a correct outcome, but a misleading operator-facing log line.
+      if (this.pendingOps.evictDeadOwner(key)) {
+        console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
+      }
     }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
     const who = (opId: string) => `worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${opId}]`;
@@ -6509,6 +6522,15 @@ export class SessionService {
         // exception, not a rejection result) → "failed". Mirrors `mergeDisplay`'s Board-side classification.
         retainMs: MERGE_OP_RETAIN_MS,
         classifyOutcome: (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "merged" : "rejected"),
+        // BYPASS THE RETAINED CACHE ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01): the retention-window
+        // dedupe (see PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on
+        // `workerSessionId`, not on `forceRemoveWorktree` — so without this, a manager that read a
+        // nested-repo-guard warning telling it to "re-run worker_merge_confirm with forceRemoveWorktree:true"
+        // and did EXACTLY that within the retention window would get back the IDENTICAL cached (unforced)
+        // warning, `confirmWorkerMerge` never re-entered, the worktree never actually removed, and no signal
+        // that the flag was silently ignored. `forceRemoveWorktree` is an explicit one-shot escalation from
+        // the caller — it must never be served from a cache built by an earlier, non-forced call.
+        bypassRetained: forceRemoveWorktree === true,
       },
     );
   }
