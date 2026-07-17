@@ -76,11 +76,46 @@ try {
   const okExited = await app.inject({ method: "DELETE", url: "/api/tasks/tExited" });
   check("C: DELETE with only an exited session bound → 200 (deletes)", okExited.statusCode === 200 && !db.getTask("tExited"));
 
-  // ════════ D. TRUST BOUNDARY — no delete tool / no delete export on the loom-tasks MCP surface ════════
-  const toolNames = tasksMod.TASK_TOOL_DESCRIPTORS.map((d) => d.name);
-  check("D: TASK_TOOL_DESCRIPTORS is exactly the 6 known tools (create/get/list/update + the task_request_* read pair, card 988bb585)",
-    JSON.stringify([...toolNames].sort()) === JSON.stringify(["task_request_get", "task_requests_list", "tasks_create", "tasks_get", "tasks_list", "tasks_update"]));
-  check("D: NO task tool name mentions delete/remove/destroy", !toolNames.some((n) => /delete|remove|destroy/i.test(n)));
+  // ════════ D. TRUST BOUNDARY — no delete tool on the REAL registered loom-tasks MCP surface ════════
+  // Enumerated from tools/list over a REAL TaskMcpRouter + in-process MCP transport (mirrors
+  // companion-tasks-create-omitted.mjs) — NOT a hand-maintained descriptor list. The old
+  // TASK_TOOL_DESCRIPTORS array (card bb570cfc) duplicated the real registration and silently drifted
+  // from it twice (an alias disclosure, then the role-conditional omission below); asserting against the
+  // ACTUAL tools/list can never drift that way. Checked across BOTH a full-surface role ("worker") and
+  // the reduced "assistant" role (tasks_create/tasks_update omitted, card 0784e5cb) — a role-conditional
+  // check the old static list could never express.
+  {
+    const { TaskMcpRouter } = await import("../dist/mcp/server.js");
+    const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
+    const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+
+    db.insertSession(mkSession("sWorkerD", "pDel", "aLive", { processState: "live", role: "worker" }));
+    db.insertSession(mkSession("sAssistD", "pDel", "aLive", { processState: "live", role: "assistant" }));
+
+    const wakesStub = {};
+    const router = new TaskMcpRouter(db, wakesStub);
+    const listToolNames = async (sessionId) => {
+      const projectId = router.resolveProject(sessionId);
+      const server = router.buildServer(projectId, sessionId);
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: "task-delete-trust-boundary-test", version: "0" });
+      await client.connect(clientT);
+      const names = (await client.listTools()).tools.map((t) => t.name);
+      await client.close();
+      return names;
+    };
+
+    const workerNames = await listToolNames("sWorkerD");
+    const taskToolNames = workerNames.filter((n) => n.startsWith("task"));
+    check("D: the REAL registered task/tasks_* surface (worker role) is exactly the 6 known tools (create/get/list/update + the task_request_* read pair, card 988bb585)",
+      JSON.stringify([...taskToolNames].sort()) === JSON.stringify(["task_request_get", "task_requests_list", "tasks_create", "tasks_get", "tasks_list", "tasks_update"]));
+    check("D: NO registered tool name (worker role) mentions delete/remove/destroy", !workerNames.some((n) => /delete|remove|destroy/i.test(n)));
+
+    const assistantNames = await listToolNames("sAssistD");
+    check("D: assistant role omits tasks_create/tasks_update (card 0784e5cb) and still exposes no delete tool",
+      !assistantNames.includes("tasks_create") && !assistantNames.includes("tasks_update") && !assistantNames.some((n) => /delete|remove|destroy/i.test(n)));
+  }
   check("D: tasks MCP module exports NO delete function",
     Object.keys(tasksMod).every((k) => !/delete/i.test(k)));
 } finally {
