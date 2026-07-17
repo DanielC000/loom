@@ -48,8 +48,12 @@ export default function MissionControl() {
   // Archived (now-exited) sessions across all projects, newest-archived first — the live feed above
   // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used to
   // restore history access to Run Replay (a god-eye view of LIVE orchestration otherwise loses every
-  // finished wave). Polled lazily (15s) — archived rows don't change second-to-second.
-  const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 15000 });
+  // finished wave). Polled lazily (15s) — archived rows don't change second-to-second. PAGINATED — this
+  // god-eye view only needs RECENT history (inactive-project detection + the replay picker both read
+  // newest-first), so it fetches one bounded page rather than the full cross-project archived set
+  // (previously 2137 rows / 2.4MB measured live).
+  const archived = useQuery({ queryKey: ["allArchivedSessions", 300], queryFn: () => api.allArchivedSessions({ limit: 300 }), refetchInterval: 15000 });
+  const archivedItems = archived.data?.items ?? [];
   // The reserved/system homes (the dev "Loom Platform" home + the shipping "Platform" home) — discovered
   // read-only, exactly as the Platform pages do (retry:false, since platformHome 404s in the shipping
   // edition and setupHome may 404 before the home seeds). Their project ids exclude the reserved homes from
@@ -100,7 +104,7 @@ export default function MissionControl() {
   // rank first and inactive history can never crowd the active fleet. The reserved-home ids are passed to
   // exclude the "Loom Platform" / "Platform" system homes (hidden everywhere else — never an "inactive" card).
   const reservedProjectIds = [platformHome.data?.project?.id, setupHome.data?.project?.id].filter(Boolean) as string[];
-  const archivedOnly = archivedOnlyProjects(projectNames, archived.data ?? [], reservedProjectIds);
+  const archivedOnly = archivedOnlyProjects(projectNames, archivedItems, reservedProjectIds);
 
   // Per-project Fleet card mode: small fixed-size summary by default; a card expands to the full
   // managers→workers view. State holds the EXPANDED project names (empty = all small). Persisted to
@@ -131,7 +135,7 @@ export default function MissionControl() {
   // from the live feed and lives only in `archived` — without this merge the panel would show only the
   // current wave and "replay any past run too" (above) would be a lie. Dedup by id, live row wins.
   const liveManagerIds = new Set(managers.map((m) => m.id));
-  const archivedManagers = (archived.data ?? []).filter((s) => s.role === "manager" && !liveManagerIds.has(s.id));
+  const archivedManagers = archivedItems.filter((s) => s.role === "manager" && !liveManagerIds.has(s.id));
   const replayRoots: SessionListItem[] = [
     ...[...managers].sort((a, b) => {
       const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
@@ -207,7 +211,7 @@ export default function MissionControl() {
               const projWorkers = workers.filter((w) => w.projectName === pn);
               // This project's archived (exited) sessions — folded into the compact card as muted history
               // so it doesn't go blank the moment the wave auto-archives.
-              const projArchived = (archived.data ?? []).filter((s) => s.projectName === pn);
+              const projArchived = archivedItems.filter((s) => s.projectName === pn);
               const looseWorkers = projWorkers
                 .filter((w) => !projManagers.some((m) => m.id === w.parentSessionId))
                 .sort(bySessionActivity);

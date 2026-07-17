@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { ArchivedSessionListItem } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -16,6 +16,15 @@ import { ARCHIVE_INVALIDATE_KEYS } from "../lib/archiveInvalidate";
 // fold COLLAPSED by default so a large archive stays scannable. View a session's captured transcript
 // snapshot, Resume it back to the live rail (clears archived_at), or Delete permanently. Scoped to the
 // active project (useActiveProject) — NOT god-eye; the cross-project view lives elsewhere.
+//
+// Pages accumulate via TRUE offset paging (React Query's useInfiniteQuery), not a client-grown `limit` —
+// a grown-limit request would eventually exceed the server's MAX_ARCHIVED_PAGE clamp and get silently
+// truncated, dead-ending "Load more" forever while `total` kept claiming more rows existed (code review
+// finding on the first pass of this card, on the live instance's real 2137-row archive). Each page stays
+// a small, bounded ARCHIVE_PAGE_SIZE request; `hasNextPage` (derived from `total` vs. rows loaded so far)
+// tells the truth about whether every row is reachable.
+const ARCHIVE_PAGE_SIZE = 100;
+
 export default function Archive() {
   const qc = useQueryClient();
   const { projectId } = useActiveProject();
@@ -24,11 +33,22 @@ export default function Archive() {
   const [query, setQuery] = useState(""); // debounced
   useEffect(() => { const t = setTimeout(() => setQuery(rawQuery), 200); return () => clearTimeout(t); }, [rawQuery]);
 
-  const archived = useQuery({
+  const archived = useInfiniteQuery({
     queryKey: ["archive", projectId],
-    queryFn: () => api.archivedSessions(projectId),
+    queryFn: ({ pageParam }) => api.archivedSessions(projectId, { limit: ARCHIVE_PAGE_SIZE, offset: pageParam }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((n, p) => n + p.items.length, 0);
+      return loaded < lastPage.total ? loaded : undefined;
+    },
     enabled: !!projectId,
-    refetchInterval: 4000,
+    // Refetching an infinite query re-runs EVERY already-loaded page's queryFn in sequence — fine for a
+    // single page, but polling that every 4s once the human has clicked "Load more" a few times would
+    // re-fetch the whole accumulated set on a timer (the cost this card exists to cut). So only auto-poll
+    // while just the first page is loaded (the common case: a session that just auto-archived should
+    // still surface promptly); once more pages are loaded, rely on the explicit Restore/Delete
+    // invalidation below rather than a background timer.
+    refetchInterval: (q) => ((q.state.data?.pages.length ?? 1) <= 1 ? 4000 : false),
   });
 
   const invalidate = () => {
@@ -45,12 +65,15 @@ export default function Archive() {
     onError: (e) => window.alert((e as Error).message),
   });
 
-  const rows = archived.data ?? [];
-  // Selection resolves from the FULL list, so the transcript stays put even when search hides its row.
+  const rows = useMemo(() => archived.data?.pages.flatMap((p) => p.items) ?? [], [archived.data]);
+  const total = archived.data?.pages[0]?.total ?? 0;
+  const hasMore = archived.hasNextPage ?? false;
+  // Selection resolves from the loaded pages, so the transcript stays put even when search hides its row.
   const selected = rows.find((r) => r.id === sessionId) ?? null;
 
   // Filter (case-insensitive across id/agent/role/task/branch) then build the manager → worker tree,
-  // newest-archived first at every level (archivedAt desc, falling back to lastActivity).
+  // newest-archived first at every level (archivedAt desc, falling back to lastActivity). Search only
+  // covers rows LOADED so far — "Load more" widens both the tree and what search can match.
   const { nodes, matchCount } = useMemo(() => buildTree(rows, query), [rows, query]);
 
   const searching = query.trim().length > 0;
@@ -61,7 +84,7 @@ export default function Archive() {
       <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
           <SectionLabel style={{ margin: 0 }}>
-            Archived sessions ({searching ? `${matchCount} of ${rows.length}` : rows.length})
+            Archived sessions ({searching ? `${matchCount} of ${rows.length} loaded` : `${rows.length}${hasMore ? ` of ${total}` : ""}`})
           </SectionLabel>
           <span style={{ flex: 1 }} />
         </div>
@@ -71,6 +94,11 @@ export default function Archive() {
           onChange={(e) => setRawQuery(e.currentTarget.value)}
           style={{ marginBottom: 10 }}
         />
+        {searching && hasMore && (
+          <p style={{ color: color.textMuted, fontSize: 12, marginTop: -6, marginBottom: 8 }}>
+            Search only covers the {rows.length} loaded so far — “Load more” below to search further back.
+          </p>
+        )}
         <div style={{ maxHeight: "70vh", overflowY: "auto", display: "flex", flexDirection: "column", gap: 8, paddingRight: 4 }}>
           {!projectId && (
             <p style={{ color: color.textMuted, fontSize: 13 }}>No project selected.</p>
@@ -90,6 +118,11 @@ export default function Archive() {
               onDelete={(id) => { if (window.confirm("Permanently delete this archived session and its transcript snapshot? This cannot be undone.")) del.mutate(id); }}
               deleting={del.isPending} />
           ))}
+          {hasMore && (
+            <Button onClick={() => archived.fetchNextPage()} disabled={archived.isFetchingNextPage}>
+              {archived.isFetchingNextPage ? "Loading…" : `Load more (${rows.length} of ${total})`}
+            </Button>
+          )}
         </div>
       </div>
 

@@ -10,9 +10,9 @@ import { canResumeSession } from "../lib/sessions";
 // A platform/home agent's RUN HISTORY — every RUN of a given `role` is a session of that role in a
 // reserved home project. SHARED between the dev Platform view (Lead role:"platform" + Auditor
 // role:"auditor", showFindings) and the END-USER Platform view (operator role:"setup" + Workspace
-// Auditor role:"workspace-auditor"). Runs = api.allSessions() (live+exited) ∪ api.allArchivedSessions()
-// (god-eye archive, already enriched with projectId), filtered to the reserved project's sessions of this
-// role, newest-first by createdAt. The trigger (a schedule's cron, or "manual") comes from a run's
+// Auditor role:"workspace-auditor"). Runs = api.allSessions() (live+exited) ∪ api.archivedSessions(reservedProjectId)
+// (this reserved project's own archived page — PAGINATED, bounded to RUN_HISTORY_ARCHIVE_LIMIT), filtered
+// to this role, newest-first by createdAt. The trigger (a schedule's cron, or "manual") comes from a run's
 // orchestrationEvents (schedule_fired); the findings-filed list (when showFindings) comes from
 // audit_finding events resolved against the reserved board() — fetched only when showFindings. Everything
 // reuses EXISTING api methods — no new daemon/REST. The live+exited reserved sessions are passed in
@@ -38,9 +38,19 @@ function fmtDur(startIso: string, endIso: string): string {
 // only the visible rows fetch until the human expands the list with "Show all".
 const DEFAULT_VISIBLE = 12;
 
+// Run History reads this reserved project's OWN archived page directly (scoped server-side, rather than
+// filtering the cross-project god-eye list down to one project) — bounded well past DEFAULT_VISIBLE/its
+// "Show all" so a single project's run history reads as complete in practice, without ever requesting the
+// full unpaginated archived set.
+const RUN_HISTORY_ARCHIVE_LIMIT = 300;
+
 export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, showFindings = false }:
   { reservedProjectId: string; sessions: SessionListItem[]; role: SessionRole; emptyLabel: string; showFindings?: boolean }) {
-  const archived = useQuery({ queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 8000 });
+  const archived = useQuery({
+    queryKey: ["archive", reservedProjectId, RUN_HISTORY_ARCHIVE_LIMIT],
+    queryFn: () => api.archivedSessions(reservedProjectId, { limit: RUN_HISTORY_ARCHIVE_LIMIT }),
+    refetchInterval: 8000,
+  });
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
   const board = useQuery({ queryKey: ["board", reservedProjectId], queryFn: () => api.board(reservedProjectId), refetchInterval: 8000, enabled: showFindings });
 
@@ -53,9 +63,9 @@ export function RunHistory({ reservedProjectId, sessions, role, emptyLabel, show
 
   const runs = useMemo(() => {
     const live = sessions.filter((s) => s.role === role); // already reserved-project + non-archived
-    const arch = (archived.data ?? []).filter((s) => s.projectId === reservedProjectId && s.role === role);
+    const arch = (archived.data?.items ?? []).filter((s) => s.role === role);
     return [...live, ...arch].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-  }, [sessions, archived.data, reservedProjectId, role]);
+  }, [sessions, archived.data, role]);
 
   if (runs.length === 0) {
     return <Panel style={{ padding: 12 }}><span style={{ color: color.textMuted, fontSize: 12 }}>{emptyLabel}</span></Panel>;
@@ -100,7 +110,7 @@ function RunRow({ run, schedules, tasks, showFindings, open, onToggle }:
     mutationFn: () => api.resumeSession(run.id),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["allSessions"] });
-      qc.invalidateQueries({ queryKey: ["allArchivedSessions"] });
+      qc.invalidateQueries({ queryKey: ["archive"] }); // prefix-matches ["archive", reservedProjectId, limit]
     },
   });
   const events = useQuery({

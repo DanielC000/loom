@@ -1091,6 +1091,14 @@ const MAX_RETAINED_CONVERSATIONS = 20;
 const CONVERSATION_PREVIEW_MAX_CHARS = 120;
 
 /**
+ * Clamp for a bounded archived-sessions page (listArchivedSessionsPage/listAllArchivedSessionsPage) — the
+ * cross-project Archive endpoint was measured returning the FULL archived set unpaginated (2137 rows /
+ * 2.4MB on the live instance; see project-memory `perf-profile-2026-07-16-findings`). A caller's requested
+ * `limit` is clamped into [1, MAX_ARCHIVED_PAGE] so a stray huge value can't reintroduce the same payload.
+ */
+const MAX_ARCHIVED_PAGE = 500;
+
+/**
  * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
  * reject) — see removeWorktree/killableRemoveDir in git/worktrees.ts. This is NOT a permanent quarantine:
  * the owner pushed back that "wedged" must not mean "dangles forever" — most wedges are eventually
@@ -3567,6 +3575,56 @@ export class Db {
        ORDER BY s.archived_at DESC`,
     ).all() as Row[];
     return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
+  }
+  /**
+   * BOUNDED page of a project's archived sessions, newest-archived first, plus the TOTAL row count (for
+   * a "N of total — Load more" list UI). `limit` is clamped into [1, MAX_ARCHIVED_PAGE]; `offset` defaults
+   * to 0. Backs the paginated `GET /api/projects/:id/archive` route; the unbounded `listArchivedSessions`
+   * above stays as-is for internal full-set callers (cascade restore/delete, tests) that aren't rendering
+   * a page. Returns the EFFECTIVE (post-clamp) `limit` too — a caller that requested more than
+   * MAX_ARCHIVED_PAGE must be able to tell it was silently capped (code review finding on the first pass
+   * of this card: an oversized requested limit with no way to observe the clamp made a client's own
+   * "load more until done" logic dead-end forever at the cap while `total` kept claiming more existed).
+   */
+  listArchivedSessionsPage(projectId: string, limit: number, offset = 0): { rows: SessionListItem[]; total: number; limit: number } {
+    const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
+    const total = (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE project_id = ? AND archived_at IS NOT NULL").get(projectId) as { c: number }).c;
+    const rows = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.project_id = ? AND s.archived_at IS NOT NULL
+       ORDER BY s.archived_at DESC LIMIT ? OFFSET ?`,
+    ).all(projectId, lim, offset) as Row[];
+    return { total, limit: lim, rows: rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string })) };
+  }
+  /** BOUNDED page across ALL projects, newest-archived first, plus total + the effective (clamped) limit
+   * — the cross-project mirror of listArchivedSessionsPage above, backing the paginated
+   * `GET /api/archived-sessions` route. */
+  listAllArchivedSessionsPage(limit: number, offset = 0): { rows: SessionListItem[]; total: number; limit: number } {
+    const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
+    const total = (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE archived_at IS NOT NULL").get() as { c: number }).c;
+    const rows = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.archived_at IS NOT NULL
+       ORDER BY s.archived_at DESC LIMIT ? OFFSET ?`,
+    ).all(lim, offset) as Row[];
+    return { total, limit: lim, rows: rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string })) };
+  }
+  /**
+   * A single archived session BY ID, cross-project (a by-id caller — e.g. a deep-linked SessionView or an
+   * attention-queue "Open" — doesn't know which project it belongs to ahead of time), enriched with
+   * names; undefined if no such row exists or it isn't archived. Backs `GET /api/archived-sessions/:id`,
+   * so a by-id lookup never depends on that session still sitting on the FIRST page of the bounded list
+   * routes above (card: paginate the archived-sessions endpoints).
+   */
+  getArchivedSessionById(id: string): SessionListItem | undefined {
+    const r = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.id = ? AND s.archived_at IS NOT NULL`,
+    ).get(id) as Row | undefined;
+    return r ? { ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string } : undefined;
   }
   /** An archived manager's archived workers — for cascade restore/delete (NOT a rail feed). */
   listArchivedWorkers(managerSessionId: string): Session[] {

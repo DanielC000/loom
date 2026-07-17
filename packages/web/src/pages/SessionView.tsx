@@ -20,15 +20,17 @@ export default function SessionView() {
   const { setProjectId } = useActiveProject();
 
   // Resolve from the LIVE feed first (the common case — the alert is about a running session), then fall
-  // back to the archived feed for an exited session (crash-looped sessions auto-archive on exit). A null
-  // from both ⇒ a graceful "not found" rather than a blank page.
+  // back to a BY-ID archived fetch for an exited session (crash-looped sessions auto-archive on exit) —
+  // a direct lookup, not a `.find()` over the (now paginated) full archived list, so this resolves an
+  // archived session regardless of how far back it sits in archive order. A null from both ⇒ a graceful
+  // "not found" rather than a blank page.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
   const live = (sessions.data ?? []).find((s) => s.id === id);
   const archived = useQuery({
-    queryKey: ["allArchivedSessions"], queryFn: api.allArchivedSessions, refetchInterval: 15000,
+    queryKey: ["archivedSessionById", id], queryFn: () => api.archivedSessionById(id), refetchInterval: 15000,
     enabled: !!id && !live,
   });
-  const session: SessionListItem | undefined = live ?? (archived.data ?? []).find((s) => s.id === id);
+  const session: SessionListItem | undefined = live ?? archived.data ?? undefined;
 
   // Fork/Stop wired exactly like the Terminals page: graceful stop (Ctrl-C ×2, clean + resumable) and
   // fork (branch an idle conversation into a new session), both invalidating the live feed on success.
@@ -50,6 +52,20 @@ export default function SessionView() {
   // Still resolving (neither feed has answered) — don't flash "not found" before the archived fetch lands.
   if (!session && (sessions.isLoading || archived.isLoading)) {
     return <div>{header("Session")}<Panel><span style={{ color: color.textMuted }}>Loading…</span></Panel></div>;
+  }
+
+  // A real fetch failure (403 remote-access denial, 500, network drop) is NOT the same claim as "this id
+  // was never archived / got deleted" — `archivedSessionById` only resolves 404 to `null`, so anything
+  // else surfaces here as a thrown query error. Rendering both the same way would assert a cause (genuine
+  // absence) the code never actually established (code review finding: this is exactly the false-not-found
+  // this card exists to prevent, just moved one layer down to a transport-level failure).
+  if (!session && archived.isError) {
+    return (
+      <div>
+        {header("Session")}
+        <Panel><span style={{ color: color.red }}>Couldn’t load this session’s archive record — {(archived.error as Error).message}. Try again.</span></Panel>
+      </div>
+    );
   }
 
   if (!session) {

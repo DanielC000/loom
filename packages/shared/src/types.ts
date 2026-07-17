@@ -992,6 +992,18 @@ export interface ArchivedSessionListItem extends SessionListItem {
   snapshotExists: boolean;
 }
 
+/** A bounded page of archived sessions (both the per-project and cross-project list routes) plus the
+ *  TOTAL row count — so a "N of total" / "Load more" list UI can size itself without ever fetching the
+ *  full archived set (previously unpaginated: 2137 rows / 2.4MB measured on the live instance). `limit`
+ *  is the EFFECTIVE (server-clamped) page size actually used — a caller that requested more than the
+ *  server's hard cap must read this back rather than assume its requested limit was honored verbatim,
+ *  or a "load more until done" loop can silently dead-end at the cap forever. */
+export interface ArchivedSessionsPage {
+  items: ArchivedSessionListItem[];
+  total: number;
+  limit: number;
+}
+
 /** A read-only vault file-tree entry. */
 export interface VaultEntry {
   path: string; // relative to the project's vault folder, forward slashes

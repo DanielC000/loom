@@ -89,6 +89,7 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/skills/:name" },
   // Archived lists
   { method: "GET", pattern: "/api/archived-sessions" },
+  { method: "GET", pattern: "/api/archived-sessions/:id" },
   { method: "GET", pattern: "/api/projects/:id/archive" },
   { method: "GET", pattern: "/api/projects/archived" },
   // Companion reads (writers on the SAME paths — POST/PUT/DELETE — stay Tier-0)

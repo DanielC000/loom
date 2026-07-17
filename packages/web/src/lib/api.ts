@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
+import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -119,6 +119,15 @@ export interface TemplateApplyResult { agents: Agent[]; tasks: Task[]; }
 
 async function get<T>(url: string): Promise<T> {
   const r = await fetch(url);
+  if (!r.ok) throw new Error(`${url} -> ${r.status}`);
+  return r.json() as Promise<T>;
+}
+// GET that resolves to `null` on an EXPECTED 404 (not found) instead of throwing — for a by-id lookup a
+// caller probes optimistically (e.g. "is this id archived?") and treats absence as a normal outcome, not
+// a query error.
+async function getOrNull<T>(url: string): Promise<T | null> {
+  const r = await fetch(url);
+  if (r.status === 404) return null;
   if (!r.ok) throw new Error(`${url} -> ${r.status}`);
   return r.json() as Promise<T>;
 }
@@ -385,11 +394,21 @@ export const api = {
   // --- Per-project session Archive (HUMAN-only; mirrors stop/fork — no agent MCP surface). Archiving
   // is now AUTOMATIC on session exit (the manual archive endpoint was removed), so there is no
   // archiveSession client. restore brings one back to the rail (view-only if dead); deleteArchived is
-  // permanent (row(s) + snapshot). archivedSessions feeds the Archive tab (each row tagged snapshotExists). ---
-  archivedSessions: (projectId: string) => get<ArchivedSessionListItem[]>(`/api/projects/${projectId}/archive`),
+  // permanent (row(s) + snapshot). archivedSessions feeds the Archive tab — PAGINATED (default/max page
+  // size live server-side; a list-rendering page grows `limit` for its own "Load more"), returning
+  // `{items, total}` rather than the full per-project archived set. ---
+  archivedSessions: (projectId: string, opts?: { limit?: number; offset?: number }) =>
+    get<ArchivedSessionsPage>(`/api/projects/${projectId}/archive?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}`),
   // Cross-project (god-eye) archive: archived sessions across ALL projects, each enriched with
-  // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page.
-  allArchivedSessions: () => get<ArchivedSessionListItem[]>("/api/archived-sessions"),
+  // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page + Mission
+  // Control/Overview/RunHistory's history views. PAGINATED, same `{items, total}` shape as above.
+  allArchivedSessions: (opts?: { limit?: number; offset?: number }) =>
+    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}`),
+  // A single archived session BY ID, cross-project — for a by-id consumer (SessionView resolving a
+  // deep-linked/attention-queue session) that must not depend on that session still being on the FIRST
+  // page of the bounded list above. Resolves to `null` (not a thrown error) on the expected 404 — "not
+  // archived (or never existed)" is a normal outcome for a caller that's still also checking the live feed.
+  archivedSessionById: (id: string) => getOrNull<ArchivedSessionListItem>(`/api/archived-sessions/${id}`),
   restoreSession: (id: string) => postErr<{ restored: string }>(`/api/sessions/${id}/restore`),
   deleteArchivedSession: (id: string) => delErr<{ deleted: string[] }>(`/api/sessions/${id}/archive`),
   vaultTree: (projectId: string) => get<VaultEntry[]>(`/api/projects/${projectId}/vault`),

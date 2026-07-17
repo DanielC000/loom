@@ -41,8 +41,11 @@ export default function Overview() {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
   // Polled (not just invalidation-driven): the accordion below now folds archived rows in as the
   // durable Resume path (finding #15), so a session that just auto-archived should surface here
-  // promptly, not only after some other mutation happens to invalidate this query.
-  const archived = useQuery({ queryKey: ["archive", projectId], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId, refetchInterval: 5000 });
+  // promptly, not only after some other mutation happens to invalidate this query. PAGINATED — this is
+  // a recency-ordered summary view (not the primary browse-everything Archive page), so the default
+  // page is fetched as-is with no "load more"; the header "archived" count reads the server-side `total`.
+  const archived = useQuery({ queryKey: ["archive", projectId, 100], queryFn: () => api.archivedSessions(projectId), enabled: !!projectId, refetchInterval: 5000 });
+  const archivedItems = archived.data?.items ?? [];
   const { items: attention } = useAttention();
 
   // Project-filtered session set — every section below scopes off this.
@@ -99,8 +102,8 @@ export default function Overview() {
   // isn't enough if the caller never feeds it one — finding #15). Kept SEPARATE from managers/workers/
   // all above, which stay live-only for the roll-up severity + worst-context math (fleetRollup/
   // worstContext are deliberately fed the running set only, per lib/fleet.ts).
-  const archivedManagers = archived.data?.filter((s) => s.role === "manager") ?? [];
-  const archivedWorkers = archived.data?.filter((s) => s.role === "worker") ?? [];
+  const archivedManagers = archivedItems.filter((s) => s.role === "manager");
+  const archivedWorkers = archivedItems.filter((s) => s.role === "worker");
   // Dedupe the live+archived merge by id (live-first ⇒ keep the LIVE row): a session mid-transition
   // live→archived can appear in BOTH source lists, and rendering both yields a duplicate React key
   // (card efd191ea). Presentational only — drops the duplicate, never changes which sessions show.
@@ -109,7 +112,7 @@ export default function Overview() {
   const accordionLooseWorkers = accordionWorkers
     .filter((w) => !accordionManagers.some((m) => m.id === w.parentSessionId))
     .sort(bySessionActivity);
-  const hasAnySessions = all.length > 0 || (archived.data?.length ?? 0) > 0;
+  const hasAnySessions = all.length > 0 || (archived.data?.total ?? 0) > 0;
 
   if (!projectId) return <p style={{ color: color.textMuted, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
 
@@ -140,7 +143,7 @@ export default function Overview() {
             <Stat label="active managers" value={managers.length} />
             <Stat label="active workers" value={workers.length} />
             <Stat label="attention" value={projAttention.length} tone={projAttention.length ? "amber" : "muted"} />
-            <Stat label="archived" value={archived.data?.length ?? 0} tone="muted" />
+            <Stat label="archived" value={archived.data?.total ?? 0} tone="muted" />
           </div>
           <div style={{ display: "inline-flex", flexDirection: "column", gap: 4, border: `1px solid ${color.border}`, borderRadius: 4, padding: "6px 12px", minWidth: 132 }}>
             <span style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
@@ -209,7 +212,7 @@ export default function Overview() {
         {hasAnySessions && !fleetOpen && (
           <div style={{ maxWidth: 280 }}>
             <FleetCard name={project?.name ?? projectId} managers={managers} workers={workers}
-              archived={archived.data ?? []}
+              archived={archivedItems}
               attention={projAttention.length} onExpand={() => setFleet(true)} />
           </div>
         )}

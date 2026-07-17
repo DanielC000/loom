@@ -81,6 +81,18 @@ const LOOPBACK = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1"]);
  *  a file over the cap is refused with 413 rather than streamed. */
 const VAULT_RAW_MAX_BYTES = 50 * 1024 * 1024; // 50 MB
 
+/** Default page size for the archived-sessions list routes (both per-project and cross-project) when the
+ *  caller passes no `?limit=` — small enough that the default request stays cheap; the hard clamp lives
+ *  next to `MAX_ARCHIVED_PAGE` in db.ts. */
+const DEFAULT_ARCHIVE_PAGE_LIMIT = 100;
+/** Parse a `?limit=`/`?offset=` query value: `Number.parseInt` silently truncates scientific notation
+ *  ("1e9" → 1), so this uses `Number(...)` (which parses "1e9" correctly) + a finite/non-negative check;
+ *  anything blank/NaN/negative falls back to `fallback`. */
+const parsePageParam = (v: string | undefined, fallback: number): number => {
+  const n = Number(v);
+  return v && Number.isFinite(n) && n >= 0 ? n : fallback;
+};
+
 /** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
 const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
 // P5/B6: the valid Schedule.kind values a fire can route on — "manager" (default), the dev "auditor",
@@ -4282,27 +4294,52 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     try { return reply.send(deps.sessions.deleteArchivedSession(id)); }
     catch (e) { return reply.code(400).send({ error: (e as Error).message }); }
   });
-  // Archived sessions for a project's Archive tab, each tagged with whether a transcript snapshot
-  // was captured on exit (false ⇒ "no transcript captured" — it was already dead when archived).
+  // A single archived session BY ID, cross-project — added so a by-id consumer (a deep-linked
+  // SessionView, an attention-queue "Open") never depends on that session still sitting on the FIRST
+  // page of the bounded list routes below. 404 with a reason so the UI can render "not found" rather
+  // than an opaque failure (mirrors the other archive/restore routes).
+  app.get("/api/archived-sessions/:id", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    const s = deps.db.getArchivedSessionById(id);
+    if (!s) return reply.code(404).send({ error: "archived session not found" });
+    return { ...s, snapshotExists: archivedTranscriptExists(s.projectId, s.id) };
+  });
+  // Archived sessions for a project's Archive tab, each tagged with whether a transcript snapshot was
+  // captured on exit (false ⇒ "no transcript captured" — it was already dead when archived). PAGINATED
+  // (?limit=&offset=, default/clamp DEFAULT_ARCHIVE_PAGE_LIMIT/MAX_ARCHIVED_PAGE) — this route used to
+  // return the WHOLE per-project archived set unpaginated; Archive.tsx now accumulates TRUE offset pages
+  // (React Query's useInfiniteQuery) so every row past the clamp stays reachable via "Load more", and
+  // reads `total`/`limit` (the EFFECTIVE, post-clamp page size) rather than assuming its requested limit
+  // was honored verbatim.
   app.get("/api/projects/:id/archive", async (req, reply) => {
     const id = (req.params as { id: string }).id;
     if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    const q = req.query as { limit?: string; offset?: string };
+    const limit = parsePageParam(q.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
+    const offset = parsePageParam(q.offset, 0);
+    const { rows, total, limit: effectiveLimit } = deps.db.listArchivedSessionsPage(id, limit, offset);
     const snapshotIds = archivedSnapshotIds(id); // ONE readdir instead of a per-row fs.existsSync stat
-    return deps.db.listArchivedSessions(id).map((s) => ({ ...s, snapshotExists: snapshotIds.has(s.id) }));
+    return { items: rows.map((s) => ({ ...s, snapshotExists: snapshotIds.has(s.id) })), total, limit: effectiveLimit };
   });
   // Cross-project Archive (god-eye): archived sessions across ALL projects, each enriched with
   // projectId/projectName (already on the SessionListItem) + snapshotExists, newest-archived first.
-  // Read-only; the cross-project Archive page groups these Project → Agent.
-  app.get("/api/archived-sessions", async () => {
-    const rows = deps.db.listAllArchivedSessions();
+  // Read-only; the cross-project Archive page groups these Project → Agent. PAGINATED, same shape/knobs
+  // as the per-project route above — this was the dominant unpaginated payload (2137 rows / 2.4MB
+  // measured live; see project-memory `perf-profile-2026-07-16-findings`).
+  app.get("/api/archived-sessions", async (req) => {
+    const q = req.query as { limit?: string; offset?: string };
+    const limit = parsePageParam(q.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
+    const offset = parsePageParam(q.offset, 0);
+    const { rows, total, limit: effectiveLimit } = deps.db.listAllArchivedSessionsPage(limit, offset);
     // One readdir PER DISTINCT project (not per row) — a bulk-existence cache keyed by projectId, since
     // rows span many projects here (unlike the single-project route above).
     const snapshotIdsByProject = new Map<string, Set<string>>();
-    return rows.map((s) => {
+    const items = rows.map((s) => {
       let ids = snapshotIdsByProject.get(s.projectId);
       if (!ids) { ids = archivedSnapshotIds(s.projectId); snapshotIdsByProject.set(s.projectId, ids); }
       return { ...s, snapshotExists: ids.has(s.id) };
     });
+    return { items, total, limit: effectiveLimit };
   });
 
   // --- Plain SHELL terminals (human-only): spawn pwsh/cmd/bash in a project's repo cwd ---
