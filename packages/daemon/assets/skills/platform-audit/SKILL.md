@@ -87,6 +87,8 @@ A finding a human can triage in one read is worth ten vague ones. Quality and de
 
 **A cited code location is a HYPOTHESIS to verify, not an authoritative pointer.** When a finding names where it thinks the defect lives, frame it as something to confirm ("likely in X — confirm by grepping symbol Y"), never as settled fact. A guessed `file:line` that reads as authoritative gets copied downstream into a hard scope-guard, sending a worker to block at the wrong site instead of tracing the real one — so state your confidence and how to verify the location, not just the location.
 
+**A suggested fix that names a concrete tool/API call is advisory-unverified, not confirmed working.** You file findings; you never execute the fix, so you cannot confirm a specific call you prescribe is actually accepted in the target context (a call valid for one role or mode can be flatly rejected for another — you have no way to check from a transcript read). When a suggested improvement names a specific tool/API call, either mark it explicitly **ADVISORY-UNVERIFIED — not run** in the finding, or, better, describe the **outcome** wanted ("gate the worker on an explicit checkpoint before it edits") rather than the exact call ("call X with argument Y"): the outcome survives you being wrong about the API, the exact call does not. Either way, the correctness burden for any named call stays with the implementing worker or manager — they must verify it against the current tool contract before use, never treat your suggestion as pre-verified.
+
 ### Freshness-check a CODE-LEVEL finding against current `main` BEFORE filing
 
 A transcript shows you what went wrong **when that session ran** — but a session can be days old, and
