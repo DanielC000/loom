@@ -33,6 +33,7 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 - **Companion:** removed the silent wrong-board card-create path; names the missing capability on a partial-grant deny; `connections`/`vaultWrite` apply via a row write on capability upgrade; defaults to relaying an unquotable ask to the manager.
 - **Orchestration:** de-duped cross-project platform→manager directive delivery; clean-or-flag a dirty worktree reused after `worker_stop(hard)`; normalized projectId/taskId prefix resolution; resume-doc records the mainline squash-subject, not the ephemeral branch SHA.
 - **Web:** archived managers older than the newest 300 stay reachable in the Run Replay picker; setup `project_configure` accepts an 8-char id-prefix.
+- **Vault auto-commit:** falls back to a generic Loom git identity when the host has no global git identity configured, so vault auto-commits (and the `vault_write` tool) no longer fail silently on a machine with no `user.name`/`user.email` set.
 
 ### Performance
 - Broad N+1 + payload-bounding pass across the gateway: paginated the archived-sessions endpoints and replaced the per-row `fs.existsSync` N+1 with one archive-dir scan; bounded the board REST payload (omit task body, cap done tasks); batched per-session-card queue/wakes polling into one bulk call; a bulk `GET /api/agents` kills the client-side N+1 in Schedules/Settings/EventTriggers; skip the `workerDiff` git subprocess when a branch is unchanged since the last poll.

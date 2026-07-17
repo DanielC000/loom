@@ -20,6 +20,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execSync } from "node:child_process";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -208,10 +209,66 @@ try {
     await client.close();
   }
 
+  // --- (f) commitVault git-identity fallback (release-blocking): the earlier (b) `committed === true`
+  // assertion only proves this on a host that happens to already have a git identity configured — it
+  // passes on a dev/daemon box and silently masks a commit that fails on a fresh CI runner or a real
+  // end-user machine with no global git identity. Hermetic: redirects GIT_CONFIG_GLOBAL/SYSTEM to files
+  // this test controls (never the host's real config), so neither case below depends on whatever
+  // identity (if any) is actually configured on the machine running the test.
+  {
+    const { commitVault } = await import("../dist/vault/versioner.js");
+    const savedEnv = { ...process.env };
+    const IDENTITY_ENV_KEYS = [
+      "GIT_AUTHOR_NAME", "GIT_AUTHOR_EMAIL", "GIT_COMMITTER_NAME", "GIT_COMMITTER_EMAIL",
+      "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM", "GIT_CONFIG_NOSYSTEM",
+    ];
+    const clearIdentityEnv = () => { for (const k of IDENTITY_ENV_KEYS) delete process.env[k]; };
+    const authorOf = (cwd) => execSync("git log -1 --format=%an%x09%ae", { cwd, env: process.env }).toString().trim();
+    // commitVault is documented to never throw for an expected git failure; guard the call anyway so a
+    // regression (e.g. a reintroduced unhandled "Author identity unknown") surfaces as a clean FAIL
+    // check instead of an uncaught exception that kills the whole test process mid-run.
+    const commitVaultSafe = async (vaultPath, message) => {
+      try { return await commitVault(vaultPath, message); }
+      catch (err) { return { threw: String(err?.message ?? err) }; }
+    };
+
+    try {
+      // (f1) NO ambient identity anywhere (global/system redirected to nonexistent files, no env
+      // overrides) — commit must still succeed via the generic Loom fallback identity.
+      clearIdentityEnv();
+      const noIdVault = path.join(tmpHome, "vault-no-identity");
+      fs.mkdirSync(noIdVault, { recursive: true });
+      process.env.GIT_CONFIG_GLOBAL = path.join(tmpHome, "nonexistent-global-gitconfig");
+      process.env.GIT_CONFIG_SYSTEM = path.join(tmpHome, "nonexistent-system-gitconfig");
+      process.env.GIT_CONFIG_NOSYSTEM = "1";
+      fs.writeFileSync(path.join(noIdVault, "note.md"), "no identity");
+      const committedNoId = await commitVaultSafe(noIdVault, "test: no ambient identity");
+      check("(f1) commitVault commits via the Loom fallback identity when the host has NO git identity configured", committedNoId === true);
+      check("(f1) the fallback commit's author is the generic Loom identity", committedNoId === true && authorOf(noIdVault) === "Loom\tloom@localhost");
+
+      // (f2) a repo WITH a configured identity (a global config this test controls, distinct from the
+      // fallback) still commits with ITS OWN identity — the fallback must never shadow a real one.
+      clearIdentityEnv();
+      const withIdVault = path.join(tmpHome, "vault-with-identity");
+      fs.mkdirSync(withIdVault, { recursive: true });
+      const customGlobalConfig = path.join(tmpHome, "custom-global-gitconfig");
+      fs.writeFileSync(customGlobalConfig, "[user]\n\tname = Test Vault User\n\temail = test-vault@example.com\n");
+      process.env.GIT_CONFIG_GLOBAL = customGlobalConfig;
+      process.env.GIT_CONFIG_SYSTEM = path.join(tmpHome, "nonexistent-system-gitconfig");
+      process.env.GIT_CONFIG_NOSYSTEM = "1";
+      fs.writeFileSync(path.join(withIdVault, "note.md"), "with identity");
+      const committedWithId = await commitVaultSafe(withIdVault, "test: configured identity");
+      check("(f2) commitVault commits when the host DOES have a git identity configured", committedWithId === true);
+      check("(f2) the commit uses the CONFIGURED identity, not the Loom fallback (no shadowing)", committedWithId === true && authorOf(withIdVault) === "Test Vault User\ttest-vault@example.com");
+    } finally {
+      process.env = savedEnv;
+    }
+  }
+
   db.close();
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — vault_write: OMITTED from tools/list when the profile didn't opt in, PRESENT + writes land under the project vault root when it did, traversal/absolute/backslash paths rejected (inherited confinement), no projectId param exists to address another project, agentProfileKeyError itself rejects vaultWrite:true, and BOTH the agent-facing setup and platform profile writers REJECT vaultWrite:true with nothing persisted."
+    ? "\n✅ ALL PASS — vault_write: OMITTED from tools/list when the profile didn't opt in, PRESENT + writes land under the project vault root when it did, traversal/absolute/backslash paths rejected (inherited confinement), no projectId param exists to address another project, agentProfileKeyError itself rejects vaultWrite:true, BOTH the agent-facing setup and platform profile writers REJECT vaultWrite:true with nothing persisted, and commitVault falls back to a generic Loom git identity with no ambient identity while still preferring a configured one."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }

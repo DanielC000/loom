@@ -6,6 +6,24 @@ import { simpleGit, type SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
 import { LOOM_HOME } from "../paths.js";
 
+/** Generic, non-personal identity used ONLY when the host has no git identity configured at all. */
+const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
+
+/**
+ * Whether the repo at `git`'s cwd has BOTH `user.name` and `user.email` resolvable (global/system/local
+ * config, in git's own precedence order). `git config user.<key>` exits non-zero when unset, which
+ * simple-git surfaces as a rejection — caught here and treated as "unresolved", never thrown.
+ */
+async function hasConfiguredGitIdentity(git: SimpleGit): Promise<boolean> {
+  try {
+    const name = (await git.raw(["config", "user.name"])).trim();
+    const email = (await git.raw(["config", "user.email"])).trim();
+    return !!name && !!email;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Stage-all + commit a vault folder, honoring the same externally-managed backoff as the
  * auto-committer: if the vault sits inside a git repo whose root is ABOVE the vault folder
@@ -15,6 +33,19 @@ import { LOOM_HOME } from "../paths.js";
  *
  * This is THE single vault commit path — shared by the auto-committer (below) and human UI
  * writes (vault/writer.ts) so the history stays consistent and there is no second git mechanism.
+ *
+ * **Identity fallback:** unlike `git/writer.ts` (which commits with NO identity override, by
+ * deliberate convention — the Loom repo itself always has one configured), this path runs
+ * unattended on an arbitrary end-user's machine, which may have no global/system git identity at
+ * all. When the repo has one configured (global, system, or local), we commit exactly as before —
+ * their identity, un-overridden. Only when EITHER `user.name` or `user.email` is unresolved do we
+ * fall back to a generic, non-personal `Loom <loom@localhost>` identity for that single commit, via
+ * `-c user.name=`/`-c user.email=` passed as ARGS on the commit invocation (never as an env-var
+ * override): simple-git's `blockUnsafeOperationsPlugin` rejects an explicit `.env()` call that
+ * carries `GIT_CONFIG_GLOBAL`/`GIT_CONFIG_SYSTEM` (a real config-injection vector it guards
+ * against) — a call we'd otherwise make by spreading `process.env` to preserve PATH/HOME for the
+ * child process. Scoped `-c` args sidestep that entirely (git itself only applies them to this one
+ * invocation) and `user.name`/`user.email` are not among simple-git's blocklisted config keys.
  */
 export async function commitVault(vaultPath: string, message: string): Promise<boolean> {
   const git = simpleGit(vaultPath);
@@ -29,7 +60,15 @@ export async function commitVault(vaultPath: string, message: string): Promise<b
   await git.add(".");
   const status = await git.status();
   if (status.files.length === 0) return false;
-  await git.commit(message);
+  if (await hasConfiguredGitIdentity(git)) {
+    await git.commit(message);
+  } else {
+    await git.raw([
+      "-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`,
+      "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`,
+      "commit", "-m", message,
+    ]);
+  }
   return true;
 }
 
