@@ -639,17 +639,18 @@ export class OrchestrationMcpRouter {
       server.registerTool(
         "worker_report",
         {
-          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody. `noChanges` is an OPTIONAL flag on a `done` report for a LEGITIMATE no-op — you reviewed only, investigated and found nothing to change, or your deliverable lives outside this repo (e.g. a mockup) — where the CORRECT outcome is 0 commits. Set it and a 0-commit done skips the 'you likely forgot to commit' warning and auto-retires your session cleanly (frees your manager's concurrency slot, no worker_stop needed) — the same clean exit a declared no-commit role gets. Omit it (or a done that DID commit) and behavior is unchanged; a 0-commit done without it still warns, so don't set it unless the no-op is genuinely intentional.",
+          description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody. `noChanges` is an OPTIONAL flag on a `done` report for a LEGITIMATE no-op — you reviewed only, investigated and found nothing to change, or your deliverable lives outside this repo (e.g. a mockup) — where the CORRECT outcome is 0 commits. Set it and a 0-commit done skips the 'you likely forgot to commit' warning and auto-retires your session cleanly (frees your manager's concurrency slot, no worker_stop needed) — the same clean exit a declared no-commit role gets. Omit it (or a done that DID commit) and behavior is unchanged; a 0-commit done without it still warns, so don't set it unless the no-op is genuinely intentional. `awaiting` is an OPTIONAL hint on a `progress` report that disambiguates WHY you then go idle: pass `\"background\"` when you're parking because you kicked off a backgrounded command/sub-agent and are relying on its own completion (or the harness's on-completion re-invoke) to bring you back — the daemon cannot see an in-flight background shell, so without this flag the `[loom:worker-idle]` watchdog defaults to assuming you're awaiting your manager's reply, which wrongly invites a `worker_message` that would double-dispatch onto your still-running work. Omit it (or pass `\"manager\"`, the default) for a real checkpoint where you genuinely are waiting on your manager's decision — that case is unaffected and still reads as awaiting-reply. Only meaningful on `progress`: a `blocked` report already means you're waiting on your manager's decision (self-contradictory with `\"background\"`), and a `done` report means you're awaiting merge review, not a reply — don't set it on either.",
           inputSchema: {
             status: z.enum(["done", "blocked", "progress"]),
             summary: z.string(),
             prUrl: z.string().optional(),
             needs: z.string().optional(),
             noChanges: z.boolean().optional(),
+            awaiting: z.enum(["manager", "background"]).optional(),
           },
         },
-        async ({ status, summary, prUrl, needs, noChanges }) =>
-          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges })),
+        async ({ status, summary, prUrl, needs, noChanges, awaiting }) =>
+          ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges, awaiting })),
       );
       // run_gate (card 7f96aa09 — structural fix B for d5c5ccdf): run THIS gate through the daemon's
       // GateSemaphore instead of a raw Bash self-check, so N parallel workers can't structurally exceed

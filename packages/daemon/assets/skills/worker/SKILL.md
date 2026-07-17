@@ -269,15 +269,26 @@ when your session was provisioned such a connection**; assume it's absent unless
   silently idle — a bare `wake_me` (or no wake at all), no report — is **indistinguishable from a wedge** to your
   manager, and may never resume at all if nothing else happens to trigger your next turn. So don't idle
   silently on a pending child: `worker_report progress` naming what you're waiting on and that you're
-  parked awaiting it, so your idle reads as *waiting*, not *stalled*, and your manager knows to check on
-  you and nudge you back if the completion notification never surfaces on its own. Then, once you're back
-  (whether from the completion notification or a manager nudge), read the result, and report `done` (or
-  `blocked`). **Scheduling a wake with `wake_me` to park for a legitimately-backgrounded task is a valid
-  move** — the point above is that a *silent* park (a wake with no report) is what reads as a wedge, not
-  that parking itself is wrong; pair any deliberate park with a `worker_report progress` so your
-  disposition is on record. And note the `[loom:worker-idle]` watchdog can **FALSE-nudge** a worker that
-  is legitimately parked and waiting — treat that nudge as a routine check-in, not an error: re-state your
-  disposition (`worker_report progress`, or `done`/`blocked` if you're actually ready) rather than
+  parked awaiting it — and pass **`awaiting: "background"`** on that report so the `[loom:worker-idle]`
+  watchdog doesn't default to falsely claiming you're awaiting your manager's reply (and pushing it to
+  `worker_message` you, which double-dispatches onto your still-running work) — the daemon has no visibility
+  into an in-flight backgrounded shell/sub-agent, so this flag is the ONLY way it can tell "parked on my own
+  background task" apart from "genuinely checkpointing for my manager's review". Omit `awaiting` (or pass
+  `"manager"`) for a real checkpoint where you ARE waiting on your manager's decision — that's the default
+  and stays correctly worded either way. Either way, your idle reads as *waiting*, not *stalled*, and your
+  manager knows to check on you and nudge you back if the completion notification never surfaces on its
+  own — the `awaiting:"background"` flag is NOT a permanent excuse: it has no expiry of its own, so it
+  decays after a bounded window with no fresh report into an actionable "this flag may be stale" nudge,
+  meaning a background task that silently died still surfaces instead of being forgiven forever. Then, once
+  you're back (whether from the completion notification or a manager nudge), read the result, and report
+  `done` (or `blocked`). **Scheduling a wake with `wake_me` to park for a legitimately-backgrounded task is
+  a valid move** — the point above is that a *silent* park (a wake with no report) is what reads as a
+  wedge, not that parking itself is wrong; pair any deliberate park with a `worker_report progress` so your
+  disposition is on record. (If you hold BOTH a pending `wake_me` and an `awaiting:"background"` flag, the
+  wake wins the wording — it's the verifiable, bounded one.) If you forgot to set `awaiting` on your last
+  progress report, a `[loom:worker-idle]` re-nudge may still (correctly, given what it knew) claim you're
+  awaiting reply — treat it as a routine check-in, not an error: re-state your disposition (`worker_report
+  progress` with `awaiting` set this time, or `done`/`blocked` if you're actually ready) rather than
   scrambling as if something broke.
 
 You **receive** direction via `worker_message`. Act on it, then report again. There is **no mid-turn way

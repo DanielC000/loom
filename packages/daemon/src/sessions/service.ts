@@ -398,6 +398,19 @@ const MERGE_PATCH_INLINE_CAP = 40_000;
  *  of waiting out the real bound. */
 const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_000;
 
+/**
+ * classifyIdleWorker's `parked-background` decay window (card c36bac53 round-2 CR Major): how long a
+ * worker's self-attributed `worker_report({awaiting:"background"})` is trusted at face value before
+ * classification falls through to the actionable `parked-background-stale` kind. A DOCUMENTED constant,
+ * not a per-project config knob (this is a daemon-internal staleness bound, not a tunable orchestration
+ * policy) — chosen to sit comfortably above a real gate's plausible run time (this repo's own daemon test
+ * gate legitimately runs ~8-10 minutes) so it never resurrects the false alarms this card fixes, while
+ * still being well short of `idleWorkerMinutes`'s 45-minute default periodic-recheck cadence so a
+ * genuinely dead background park surfaces within roughly one more tick instead of sitting silently
+ * "no reply owed" indefinitely.
+ */
+const BACKGROUND_PARK_STALE_MINUTES = 20;
+
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
 const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
   const ctrl = new AbortController();
@@ -4484,7 +4497,7 @@ export class SessionService {
    */
   async workerReport(
     workerSessionId: string,
-    report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string; noChanges?: boolean },
+    report: { status: "done" | "blocked" | "progress"; summary: string; prUrl?: string; needs?: string; noChanges?: boolean; awaiting?: "manager" | "background" },
   ): Promise<{ reported: boolean; deliveryStatus: DeliveryStatus; refused?: boolean; error?: string; uncommittedFiles?: string[]; warning?: string; autoRetired?: boolean }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown worker session");
@@ -4516,18 +4529,21 @@ export class SessionService {
         else if (e.kind === "worker_report" && e.taskId === taskId) { lastReport = e; break; }
       }
       if (lastReport && resumedSince && !directionSince) {
-        const d = lastReport.detail as { status?: string; summary?: string; prUrl?: string; needs?: string; noChanges?: boolean } | undefined;
+        const d = lastReport.detail as { status?: string; summary?: string; prUrl?: string; needs?: string; noChanges?: boolean; awaiting?: string } | undefined;
         // noChanges is included in the identity check (card ccf0bbfe follow-up): a worker that reports
         // done with an IDENTICAL summary but a DIFFERENT noChanges value (e.g. it crashed right after an
         // un-flagged done, auto-resumed, and re-reports with noChanges:true this time) must NOT be
         // collapsed as a pure re-confirmation echo — that would silently skip the auto-retire this report
         // is trying to trigger, leaving the worker stranded live needing a manual stop. Normalize
         // undefined/false together (both mean "no declared-intent signal") so an old pre-feature event
-        // (no noChanges key at all) still compares equal to a fresh `false`.
+        // (no noChanges key at all) still compares equal to a fresh `false`. `awaiting` gets the same
+        // normalize-then-compare treatment (default "manager") so a re-report that only changes its
+        // idle-watchdog disposition still counts as a genuine re-report, not a dropped echo.
         const identical =
           d?.status === report.status && d?.summary === report.summary &&
           (d?.prUrl ?? undefined) === report.prUrl && (d?.needs ?? undefined) === report.needs &&
-          (d?.noChanges ?? false) === (report.noChanges ?? false);
+          (d?.noChanges ?? false) === (report.noChanges ?? false) &&
+          (d?.awaiting ?? "manager") === (report.awaiting ?? "manager");
         if (identical) return { reported: true, deliveryStatus: "dropped" };
       }
     }
@@ -4677,8 +4693,11 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "worker_report",
       // noChanges recorded ONLY when true (additive, forensics completeness — CR follow-up): also what the
-      // auto-recovery re-confirmation dedupe above reads back via lastReport.detail.noChanges.
-      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}) },
+      // auto-recovery re-confirmation dedupe above reads back via lastReport.detail.noChanges. `awaiting`
+      // recorded ONLY when it's the non-default "background" (card c36bac53) — classifyIdleWorker below
+      // reads it back to tell a self-attributed background-task park apart from a genuine awaiting-manager
+      // checkpoint; an absent key means "manager" (the default), same normalize-on-read shape as noChanges.
+      detail: { status: report.status, summary: report.summary, prUrl: report.prUrl, needs: report.needs, ...(warning ? { warning } : {}), ...(report.noChanges ? { noChanges: true } : {}), ...(report.awaiting === "background" ? { awaiting: "background" } : {}) },
     });
 
     // No parent to route to (a parentless worker — practically impossible, but if it happens the report
@@ -4828,12 +4847,35 @@ export class SessionService {
    *   `done`/`blocked` and then parked itself on its OWN `wake_me`, not on the manager. The manager owes
    *   it NO reply — it resumes itself when the wake fires — so this is reported with distinct wording
    *   rather than folded into `parked-ack`'s "awaiting your reply" phrasing, which would be false here.
+   * - `parked-background` — card c36bac53: the worker's report itself SELF-ATTRIBUTED the park via
+   *   `worker_report({..., awaiting: "background"})` — it kicked off a backgrounded command/sub-agent and
+   *   is relying on ITS OWN completion (or the harness's on-completion re-invoke) to resume, not the
+   *   manager. This is genuinely UNDETECTABLE from any daemon-observable state otherwise: the daemon has
+   *   no API into the engine's background-task registry (confirmed in orchestration/resume-nudge.ts — a
+   *   `claude --resume` kills any in-flight `run_in_background` shell precisely because Loom has no
+   *   visibility into it, only the OS process tree), and the hook surface wired up for every session
+   *   (SessionStart/UserPromptSubmit/Stop/StopFailure, plus PostToolUse only for the vault-lint matcher)
+   *   captures no per-tool-call signal that could infer a live background job. UNLIKE `parked-wake`, this
+   *   flag is a bare, self-reported claim with NO backing row and NO expiry of its own — checked AFTER the
+   *   wake lookup now (round-2 CR fix): a pending wake is Loom's OWN verifiable, bounded resume signal (it
+   *   drives the actual resume and names a concrete `wakeAt`), so it wins over the worker's unbacked
+   *   self-attribution whenever both are present, not the other way around.
+   * - `parked-background-stale` — round-2 CR Major: `parked-background` alone would let the flag promise
+   *   "no reply owed; it will continue on its own" FOREVER if the background task dies silently and the
+   *   worker never re-engages (no fresh report, no `wake_me`, nothing to decay it) — a SILENT, PERMANENT
+   *   false negative, worse than the flat-assertion bug this card fixes (that one was at least noisy and
+   *   self-healing: `worker_message` → `ackedSince` → next idle reclassifies `stranded`). So the flag is
+   *   BOUNDED here: once `BACKGROUND_PARK_STALE_MINUTES` has elapsed since the flagged report with no
+   *   ack/re-report, classification falls through to this actionable kind instead of repeating the "no
+   *   reply owed" promise — nothing backs or bounds a bare self-attribution past that window.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
     | { kind: "not-evaluable" | "not-stranded" | "broken-spawn" | "stranded" }
     | { kind: "parked-ack"; status: string }
-    | { kind: "parked-wake"; status: string; wakeAt: string } {
+    | { kind: "parked-wake"; status: string; wakeAt: string }
+    | { kind: "parked-background"; status: string }
+    | { kind: "parked-background-stale"; status: string; minutesSinceReport: number } {
     // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
     // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
     // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
@@ -4871,9 +4913,25 @@ export class SessionService {
     const ackedSince = !!lastReport && events.slice(lastReportIdx + 1).some((e) => e.kind === "message_worker" || e.kind === "redirect_worker");
     if (lastReport && (status === "progress" || status === "done" || status === "blocked") && !ackedSince) {
       // Reported AND has a pending self-scheduled wake → it's parked on its OWN gate, not the manager's
-      // reply (card 95b2abb3). Reported with NO pending wake → the existing parked-ack await-reply case.
+      // reply (card 95b2abb3) — checked FIRST (round-2 CR fix): a pending wake is Loom's OWN verifiable,
+      // BOUNDED resume signal (a real `wakes` row, decays to `not-stranded`/`parked-ack` the moment it
+      // fires or is cancelled), so it's strictly more trustworthy than the worker's own unbacked
+      // `awaiting:"background"` self-attribution below when both happen to be present.
       const nextWake = pendingWakes[0];
       if (nextWake) return { kind: "parked-wake", status: status!, wakeAt: nextWake.wakeAt };
+      // SELF-ATTRIBUTED background park (card c36bac53): the worker told us directly it's not awaiting a
+      // reply — the ONLY way the daemon can know that at all (see the class doc). But unlike a wake, this
+      // flag has no backing row and no expiry, so it must DECAY: past BACKGROUND_PARK_STALE_MINUTES since
+      // the flagged report with no ack/re-report, it's no longer trustworthy on its own — fall through to
+      // the actionable `parked-background-stale` kind instead of repeating "no reply owed" forever.
+      const reportedAwaiting = (lastReport.detail as { awaiting?: string } | undefined)?.awaiting;
+      if (reportedAwaiting === "background") {
+        const minutesSinceReport = (Date.now() - Date.parse(lastReport.ts)) / 60_000;
+        if (minutesSinceReport >= BACKGROUND_PARK_STALE_MINUTES) {
+          return { kind: "parked-background-stale", status: status!, minutesSinceReport: Math.round(minutesSinceReport) };
+        }
+        return { kind: "parked-background", status: status! };
+      }
       return { kind: "parked-ack", status: status! };
     }
     // No usable report to explain the idle state — a pending wake still means it'll resume on its own
@@ -4958,6 +5016,10 @@ export class SessionService {
 
     const msg = cls.kind === "parked-wake"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and is parked on its OWN scheduled wake (self-resumes at ${cls.wakeAt}) — no reply owed; it will continue on its own. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
+      : cls.kind === "parked-background"
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and flagged it's parked on its OWN backgrounded task (not you) — no reply owed; it will continue on its own once that finishes. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
+      : cls.kind === "parked-background-stale"
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) flagged worker_report(${cls.status}) as parked on its OWN backgrounded task ~${cls.minutesSinceReport} min ago and still hasn't re-engaged — that flag has no expiry of its own and this is now stale, so it may be dead rather than genuinely still running. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the background task is gone.`
       : cls.kind === "parked-ack"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) is idle after calling worker_report(${cls.status}) — it IS parked awaiting your reply, not stalled. If you haven't replied yet, worker_message it with direction; if it looks stuck anyway, pull it first: worker_transcript ${workerSessionId}.`
       : `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) finished a turn and is idle but did NOT call worker_report (its task is still in_progress). It may be done-but-unreported or stalled — pull it: worker_transcript ${workerSessionId} to see what it did, then worker_merge ${workerSessionId} to review, or worker_message it.`;
