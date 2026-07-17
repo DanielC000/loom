@@ -27,7 +27,7 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
-import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
 import { AMBIGUOUS_ID_ERROR } from "./transcript-read.js";
 import { spawnableRoleError } from "./spawnable-role.js";
 
@@ -1112,10 +1112,16 @@ export class PlatformMcpRouter {
           const last = [...turns].reverse().find((t) => t.role === "assistant");
           return ok(last ? [last] : []);
         }
-        if (typeof lastN === "number" && lastN > 0) return ok(turns.slice(-lastN));
+        if (typeof lastN === "number" && lastN > 0) return ok(lastNTurns(turns, lastN));
         const page = pageTranscript(turns, { offset, limit, turnRange });
+        // Aggregate walk cap — same identity convention as worker_transcript (mcp/orchestration.ts): key
+        // off the live engine session id when there is one; an archived transcript (no engineSessionId)
+        // is keyed off its stable (projectId, sessionId) snapshot identity instead, so a chained
+        // offset->nextOffset walk of an archived transcript is bounded too.
+        const walkKey = s.engineSessionId ?? (s.archivedAt != null ? `archived:${s.projectId}:${s.id}` : null);
+        const bounded = walkKey ? applyAggregateWalkCap(walkKey, page.offset, page) : page;
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
-        return ok(!explicit && page.offset === 0 && page.nextOffset === null ? page.turns : page);
+        return ok(!explicit && bounded.offset === 0 && bounded.nextOffset === null ? bounded.turns : bounded);
       },
     );
 

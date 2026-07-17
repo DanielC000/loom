@@ -20,7 +20,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         turn, not just a genuine DM; Primitive A is what closes that gap.
 //       - an owner-authored DM turn (null senderId, owner text present) ⇒ succeeds.
 //   (e) the archived branch (s.archivedAt != null ⇒ readArchivedTranscript, no live engine file needed).
-//   (f) the pagination envelope (offset/limit/turnRange + nextOffset paging to completion).
+//   (f) the pagination envelope (offset/limit/turnRange + nextOffset paging to completion), PLUS the two
+//       rec#7 (14aee044) leak-fix parity cases ported to this mirror: lastN is bounded by the page char
+//       budget too (not a raw `slice(-lastN)`), and a sequential offset->nextOffset walk is capped in
+//       AGGREGATE (applyAggregateWalkCap) instead of re-ingesting a huge transcript whole.
 //   (g) an ambiguous / too-short id-prefix ⇒ AMBIGUOUS_ID_ERROR; a prefix ambiguous only ACROSS an
 //       out-of-scope session is NOT surfaced as ambiguous (filtered to in-scope matches only).
 //   (h) a defensive null-projectId session row is rejected (belt-and-suspenders — unreachable through
@@ -51,7 +54,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { COMPANION_CAPABILITIES } = await import("../dist/companion/capabilities.js");
-const { engineTranscriptPath, archivedTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { engineTranscriptPath, archivedTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -264,6 +267,61 @@ try {
     const last3 = await call(client, "transcript_read", { sessionId: "target-big", lastN: 3 });
     check("(f) lastN:3 returns a bare array of the last 3 turns", Array.isArray(last3) && last3.length === 3 && last3[2].text.startsWith("turn-9-"));
 
+    // (f2) LEAK FIX (rec#7 parity, 14aee044): lastN is bounded by the page char budget too — a large
+    // lastN whose total size exceeds the budget must return FEWER than N turns (the MOST RECENT ones),
+    // never the raw unbounded `turns.slice(-lastN)` this mirror used to do.
+    const lastAllBig = await call(client, "transcript_read", { sessionId: "target-big", lastN: BIG_TURN_COUNT });
+    check(`(f2) lastN:${BIG_TURN_COUNT} is bounded by the page char budget (got ${Array.isArray(lastAllBig) ? lastAllBig.length : "non-array"}, not the full ${BIG_TURN_COUNT})`,
+      Array.isArray(lastAllBig) && lastAllBig.length > 0 && lastAllBig.length < BIG_TURN_COUNT);
+    check("(f2) budget-bounded lastN result still ends on the MOST RECENT turn",
+      Array.isArray(lastAllBig) && lastAllBig[lastAllBig.length - 1].text.startsWith(`turn-${BIG_TURN_COUNT - 1}-`));
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ (f3) LEAK FIX (rec#7 parity): sequential offset->nextOffset chaining across MANY pages
+  // is bounded in AGGREGATE — it must stop (truncated:true, nextOffset:null) before re-ingesting an
+  // entire huge transcript, even though every individual page stays within its own page budget ============
+  {
+    const db = tmpDb();
+    const proj = "proj-huge";
+    seedProject(db, proj, "Huge");
+    const companionSess = "companion-huge";
+    seedSession(db, companionSess, proj, "assistant");
+    seedSession(db, "target-huge", proj, "manager", { engineSessionId: "eng-huge" });
+    const HUGE_TURN_TEXT_LEN = 10_000;
+    const APPROX_TURN_CHARS = HUGE_TURN_TEXT_LEN + 20 /* index/prefix slack */ + 40 /* role + JSON overhead */;
+    const HUGE_TURN_COUNT = Math.ceil(TRANSCRIPT_AGGREGATE_CHAR_BUDGET / APPROX_TURN_CHARS) + 20;
+    writeLiveTranscript(proj, "eng-huge", Array.from({ length: HUGE_TURN_COUNT }, (_, i) => `huge-${i}-` + "x".repeat(HUGE_TURN_TEXT_LEN)));
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "transcript-read", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {}, {}, makeFakePty(null, "the owner said: read the huge one"));
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    let hoff = 0, hseen = 0, hpages = 0, hTruncated = false;
+    while (hoff !== null) {
+      const pg = await call(client, "transcript_read", { sessionId: "target-huge", offset: hoff });
+      hseen += pg.returned;
+      hpages++;
+      if (pg.truncated) {
+        hTruncated = true;
+        check("(f3) aggregate-capped page forces nextOffset:null", pg.nextOffset === null);
+        hoff = null;
+      } else {
+        hoff = pg.nextOffset;
+      }
+      if (hpages > 30) { check("(f3) huge-transcript walk terminates (runaway guard)", false); break; }
+    }
+    check(`(f3) sequential offset-walk of a HUGE transcript (${HUGE_TURN_COUNT} turns) is capped in aggregate — stopped after ${hseen} turns / ${hpages} pages (truncated=${hTruncated}), NOT the whole transcript`,
+      hTruncated && hseen > 0 && hseen < HUGE_TURN_COUNT);
+
+    // A FRESH walk (offset:0 again — NOT continuing the capped walk's nextOffset) must not be penalized
+    // by the prior walk's consumption; it gets its own budget from scratch.
+    const freshAfterCap = await call(client, "transcript_read", { sessionId: "target-huge", offset: 0 });
+    check("(f3) a fresh offset:0 read after a capped walk is NOT pre-truncated by the prior walk's consumption",
+      freshAfterCap.truncated !== true && freshAfterCap.returned > 0);
+
     await client.close();
     db.close();
   }
@@ -339,6 +397,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — transcript_read registers ONLY behind a transcript-read grant, requires BOTH an owner-authored turn (Primitive A) and a DM route before any db lookup, resolves an in-scope session by id or an in-scope-filtered id-prefix (collapsing out-of-scope/not-found into one message), reads live or archived transcripts, and pages a large transcript deterministically."
+  ? "\n✅ ALL PASS — transcript_read registers ONLY behind a transcript-read grant, requires BOTH an owner-authored turn (Primitive A) and a DM route before any db lookup, resolves an in-scope session by id or an in-scope-filtered id-prefix (collapsing out-of-scope/not-found into one message), reads live or archived transcripts, pages a large transcript deterministically, bounds lastN to the page char budget (lastNTurns), and caps a sequential offset-walk in aggregate (applyAggregateWalkCap) instead of re-ingesting a huge transcript whole."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

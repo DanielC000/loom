@@ -22,7 +22,7 @@ import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
 import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
-import { readTranscript, readArchivedTranscript, pageTranscript } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
@@ -2035,10 +2035,17 @@ const TRANSCRIPT_READ: CompanionCapability = {
         const turns = s.archivedAt != null
           ? readArchivedTranscript(s.projectId, s.id)
           : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId) : [];
-        if (typeof lastN === "number" && lastN > 0) return ok(turns.slice(-lastN));
+        if (typeof lastN === "number" && lastN > 0) return ok(lastNTurns(turns, lastN));
         const page = pageTranscript(turns, { offset, limit, turnRange });
+        // Aggregate walk cap — same identity convention as worker_transcript (mcp/orchestration.ts) /
+        // session_transcript (mcp/platform.ts): key off the live engine session id when there is one; an
+        // archived transcript (no engineSessionId) is keyed off its stable (projectId, sessionId)
+        // snapshot identity instead, so a chained offset->nextOffset walk of an archived transcript is
+        // bounded too. BOUNDING ONLY — same bytes readable, just capped like every other mirror.
+        const walkKey = s.engineSessionId ?? (s.archivedAt != null ? `archived:${s.projectId}:${s.id}` : null);
+        const bounded = walkKey ? applyAggregateWalkCap(walkKey, page.offset, page) : page;
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
-        return ok(!explicit && page.offset === 0 && page.nextOffset === null ? page.turns : page);
+        return ok(!explicit && bounded.offset === 0 && bounded.nextOffset === null ? bounded.turns : bounded);
       },
     );
   },

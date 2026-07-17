@@ -48,7 +48,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 
 const { Db } = await import("../dist/db.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
-const { engineTranscriptPath, archivedTranscriptPath } = await import("../dist/sessions/transcript.js");
+const { engineTranscriptPath, archivedTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } = await import("../dist/sessions/transcript.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -117,6 +117,23 @@ fs.writeFileSync(mixedFile, [
   { type: "assistant", message: { content: [{ type: "text", text: "Final answer: done." }] } },
 ].map((o) => JSON.stringify(o)).join("\n") + "\n");
 
+// S-HUGE: LIVE, project p1 — enough ~10KB turns to blow past TRANSCRIPT_AGGREGATE_CHAR_BUDGET (the
+// 10-page aggregate walk cap) with turns left over, mirroring worker-transcript-paging.mjs's own huge
+// fixture — proves a sequential offset->nextOffset walk of session_transcript stops EARLY
+// (truncated:true) instead of re-ingesting the whole thing (rec#7's leak (b), now closed on this mirror).
+const HUGE_TURN_TEXT_LEN = 10_000;
+const APPROX_TURN_CHARS = HUGE_TURN_TEXT_LEN + 20 /* index/prefix slack */ + 40 /* role + JSON overhead */;
+const HUGE_TURN_COUNT = Math.ceil(TRANSCRIPT_AGGREGATE_CHAR_BUDGET / APPROX_TURN_CHARS) + 20;
+db.insertSession({
+  id: "55555555-huge-live", projectId: "p1", agentId: "a1", engineSessionId: "eng-huge", title: null, cwd: repo1,
+  processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: null,
+});
+const hugeFile = engineTranscriptPath(repo1, "eng-huge");
+fs.mkdirSync(path.dirname(hugeFile), { recursive: true });
+fs.writeFileSync(hugeFile, Array.from({ length: HUGE_TURN_COUNT }, (_, i) =>
+  JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: `huge-${i}-` + "x".repeat(HUGE_TURN_TEXT_LEN) }] } })
+).join("\n") + "\n");
+
 // Two sessions sharing an identical 8-char id-prefix — the AMBIGUOUS resolution fixture.
 db.insertSession({
   id: "aaaaaaaa-one", projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: repo1,
@@ -184,16 +201,54 @@ try {
   check("(c) session_transcript(S-BIG, lastN:1, offset:5) — lastN wins, still a bare 1-element array",
     Array.isArray(lastWithOffset) && lastWithOffset.length === 1 && lastWithOffset[0].text.startsWith("turn-9-"));
 
+  // (c2) LEAK FIX (rec#7 parity, 14aee044): lastN is bounded by the page char budget too — a large lastN
+  // whose total size exceeds the budget must return FEWER than N turns (the MOST RECENT ones), never the
+  // raw unbounded `turns.slice(-lastN)` this mirror used to do.
+  const lastAllBig = await call("session_transcript", { sessionId: "11111111-big-live", lastN: BIG_TURN_COUNT });
+  check(`(c2) session_transcript(S-BIG, lastN:${BIG_TURN_COUNT}) is bounded by the page char budget (got ${Array.isArray(lastAllBig) ? lastAllBig.length : "non-array"}, not the full ${BIG_TURN_COUNT})`,
+    Array.isArray(lastAllBig) && lastAllBig.length > 0 && lastAllBig.length < BIG_TURN_COUNT);
+  check("(c2) budget-bounded lastN result still ends on the MOST RECENT turn",
+    Array.isArray(lastAllBig) && lastAllBig[lastAllBig.length - 1].text.startsWith(`turn-${BIG_TURN_COUNT - 1}-`));
+
+  // (c3) LEAK FIX (rec#7 parity): sequential offset->nextOffset chaining across MANY pages is bounded in
+  // AGGREGATE — it must stop (truncated:true, nextOffset:null) before re-ingesting an entire huge
+  // transcript, even though every individual page stays within its own page budget.
+  let hoff = 0, hseen = 0, hpages = 0, hTruncated = false;
+  while (hoff !== null) {
+    const pg = await call("session_transcript", { sessionId: "55555555-huge-live", offset: hoff });
+    hseen += pg.returned;
+    hpages++;
+    if (pg.truncated) {
+      hTruncated = true;
+      check("(c3) aggregate-capped page forces nextOffset:null", pg.nextOffset === null);
+      hoff = null;
+    } else {
+      hoff = pg.nextOffset;
+    }
+    if (hpages > 30) { check("(c3) huge-transcript walk terminates (runaway guard)", false); break; }
+  }
+  check(`(c3) sequential offset-walk of a HUGE transcript (${HUGE_TURN_COUNT} turns) is capped in aggregate — stopped after ${hseen} turns / ${hpages} pages (truncated=${hTruncated}), NOT the whole transcript`,
+    hTruncated && hseen > 0 && hseen < HUGE_TURN_COUNT);
+
+  // A FRESH walk (offset:0 again — NOT continuing the capped walk's nextOffset) must not be penalized by
+  // the prior walk's consumption; it gets its own budget from scratch.
+  const freshAfterCap = await call("session_transcript", { sessionId: "55555555-huge-live", offset: 0 });
+  check("(c3) a fresh offset:0 read after a capped walk is NOT pre-truncated by the prior walk's consumption",
+    freshAfterCap.truncated !== true && freshAfterCap.returned > 0);
+
   // (d) ARCHIVED auto-detection: the row has NO engineSessionId / no live file at all — session_transcript
   // still returns the captured SNAPSHOT content, with no `archived` flag passed by the caller.
   const archRead = await call("session_transcript", { sessionId: "33333333-archived" });
   check("(d) session_transcript(S-ARCHIVED) auto-detects archived and reads the captured snapshot (no live file exists)",
     Array.isArray(archRead) && archRead.length === 4 && archRead[0].text === "arch-turn-0");
 
-  // (e) id-prefix resolution: an unambiguous 8-char prefix resolves to the same session.
+  // (e) id-prefix resolution: an unambiguous 8-char prefix resolves to the same session. lastN:100
+  // exceeds BIG_TURN_COUNT (10), so this also exercises the budget-bounded lastN path (c2) — it resolves
+  // to the MOST RECENT turns within the page char budget, not a raw slice of all 10.
   const prefixRead = await call("session_transcript", { sessionId: "11111111", lastN: 100 });
-  check("(e) session_transcript: an unambiguous 8-char id-prefix resolves (lastN clamps to all 10 turns)",
-    Array.isArray(prefixRead) && prefixRead.length === BIG_TURN_COUNT);
+  check("(e) session_transcript: an unambiguous 8-char id-prefix resolves (lastN budget-bounded, ends on the most recent turn)",
+    Array.isArray(prefixRead) && prefixRead.length > 0 && prefixRead.length <= BIG_TURN_COUNT &&
+    prefixRead[prefixRead.length - 1].text.startsWith(`turn-${BIG_TURN_COUNT - 1}-`));
 
   // (e) a genuinely ambiguous 8-char prefix (two sessions share it) -> the distinct error.
   const ambig = await call("session_transcript", { sessionId: "aaaaaaaa" });
@@ -239,6 +294,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session_transcript reads ANY session's transcript cross-project by sessionId alone (no projectId/parent scoping), shares the same bounded page envelope as transcript_read/worker_transcript with no gaps/overlaps, stays backward-compatible on a small transcript, lastN still works and takes precedence, live vs. archived is auto-detected off the session row, id-prefix resolution (unambiguous/ambiguous/too-short/unknown) mirrors transcript_read's own, and finalMessageOnly:true returns just the final assistant message (excluding tool_use/tool_result noise) while the default stays byte-identical — claude-free, network-free."
+  ? "\n✅ ALL PASS — session_transcript reads ANY session's transcript cross-project by sessionId alone (no projectId/parent scoping), shares the same bounded page envelope as transcript_read/worker_transcript with no gaps/overlaps, stays backward-compatible on a small transcript, lastN still works and takes precedence (and is itself budget-bounded via lastNTurns), a sequential offset-walk is capped in aggregate (applyAggregateWalkCap) instead of re-ingesting a huge transcript whole, live vs. archived is auto-detected off the session row, id-prefix resolution (unambiguous/ambiguous/too-short/unknown) mirrors transcript_read's own, and finalMessageOnly:true returns just the final assistant message (excluding tool_use/tool_result noise) while the default stays byte-identical — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
