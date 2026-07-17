@@ -706,6 +706,29 @@ export class OrchestrationMcpRouter {
     // role === "manager": the full coordination surface.
     const managerSessionId = sessionId;
 
+    // Conditional-registration gates (card 60d0fca2 — trim the always-on manager floor): read the SAME
+    // underlying data the gated tool's own execution relies on (`project_links` for peer_*, the resolved
+    // config for deploy), via `db` directly rather than through `sessions` — buildServer must stay
+    // callable with a bare service/db stub (several hermetic tests — my-context-gate.mjs's SURFACE test,
+    // companion-loop.mjs's Part C — build a router with `{}` for db and/or sessions just to introspect
+    // tool registration/schemas; buildServer must never throw just to decide what to register). So the
+    // tool list is never stale relative to what actually runs. buildServer is already rebuilt fresh per
+    // HTTP request (see handle() below, "no cached transport"), so a link/deployCommand added later is
+    // picked up on the manager's very next tool call — no respawn needed.
+    let hasPeerLinks = false;
+    let deployCommandConfigured = false;
+    try {
+      const managerProjectId = db.getSession(managerSessionId)?.projectId;
+      if (managerProjectId) {
+        hasPeerLinks = db.listProjectLinks().some((l) => l.projectAId === managerProjectId || l.projectBId === managerProjectId);
+        const project = db.getProject(managerProjectId);
+        if (project) deployCommandConfigured = !!resolveConfig(project.config, db.getPlatformConfig()).orchestration.deployCommand;
+      }
+    } catch {
+      // A stub db (see above) — degrade to "no peer links / no deployCommand configured" rather than
+      // throw. A real Db never throws here.
+    }
+
     this.registerMyContext(server, sessionId);
 
     // Additive "reported / awaiting-review" projection (read-only — never touches report DELIVERY).
@@ -880,7 +903,7 @@ export class OrchestrationMcpRouter {
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it. If you DO re-call it anyway while this retained view is still showing, that's SAFE (not a mistake to avoid): worker_merge_confirm dedupe-attaches to the SAME cached result instead of starting a competing gate op, so it's simply redundant rather than harmful. A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all, it's just a VISIBILITY marker so you don't forget to re-drive it; nothing auto-dispatches it, and it clears itself once you successfully worker_spawn the same taskId (or, for a taskless spawn, the same agentId) again. Never count either placeholder as live or awaiting review.", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all, it's just a VISIBILITY marker so you don't forget to re-drive it; nothing auto-dispatches it, and it clears itself once you successfully worker_spawn the same taskId (or, for a taskless spawn, the same agentId) again. Never count either placeholder as live or awaiting review.", inputSchema: {} },
       async () => ok(fleetView()),
     );
 
@@ -911,7 +934,7 @@ export class OrchestrationMcpRouter {
           "Read one of your workers' transcript as clean ordered turns. PAGINATION: a large transcript " +
           "would overflow the tool-result cap (and spill to an unreadable 1-line temp file), so reads are " +
           "bounded to ONE page — the SAME envelope the auditor's transcript_read uses. With NO paging arg " +
-          "a transcript that fits one page returns the bare turns array (as before); otherwise — or " +
+          "a transcript that fits one page returns the bare turns array; otherwise — or " +
           "whenever you pass offset/limit/turnRange — it returns a page envelope {turns, totalTurns, " +
           "offset, returned, nextOffset}. Page deterministically by calling again with offset:nextOffset " +
           "until nextOffset is null (covers the whole transcript, no gaps/overlaps). `lastN` is a SEPARATE " +
@@ -948,8 +971,7 @@ export class OrchestrationMcpRouter {
         description:
           "Explicit self-heal backstop for ONE worker: re-derive its ownership by lineage and repair a " +
           "stale `parent_session_id` in place, WITHOUT a daemon restart. Every other per-worker tool " +
-          "(worker_status/worker_transcript/worker_message/worker_redirect/worker_stop/worker_set_mode/" +
-          "worker_recycle/worker_merge/worker_merge_confirm) already runs this SAME repair automatically " +
+          "already runs this SAME repair automatically " +
           "before it acts, so you normally never need to call this directly — it exists as a standalone " +
           "diagnostic/backstop (e.g. to eagerly repair a worker, or confirm its link status, before " +
           "touching it any other way). Scoped to YOUR OWN lineage ONLY (walks the same recycledFrom-chain " +
@@ -978,7 +1000,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_spawn",
       {
-        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. kickoffPrompt is the canonical param for the worker's kickoff instructions; `kickoff` is accepted as an ALIAS for it — pass either one (if both, kickoffPrompt wins). agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker (e.g. a read-only Code Reviewer pointed at another worker's branch via its kickoffPrompt) that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (so a read-only reviewer can run alongside a live author on the SAME logical work without a throwaway vehicle card, and two taskless spawns never collide with each other). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath} exactly as before; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape (byte-identical to before). REUSED-DIRTY-WORKTREE FLAG: when this spawn REUSED a worktree retained from a PRIOR hard-stopped or rejected-merge attempt on this task AND it still carries real leftover uncommitted work, the result ALSO carries `reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}` (a bounded `git status`-derived summary) — the worktree is NEVER auto-cleaned (Loom never silently discards a hard-stopped worker's edits), and the new worker's own kickoff already carries a reconcile note pointing at the same leftover paths, so you don't need to hand-instruct one yourself. Absent for a fresh worktree or a reused-but-clean one (byte-identical to before). CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` exactly as before, PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost; re-call worker_spawn with the same args once a slot frees (nothing auto-dispatches it for you).",
+        description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. kickoffPrompt is the canonical param for the worker's kickoff instructions; `kickoff` is accepted as an ALIAS for it — pass either one (if both, kickoffPrompt wins). agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (two taskless spawns never collide with each other either). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath}; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape. REUSED-DIRTY-WORKTREE FLAG: when this spawn REUSED a worktree retained from a PRIOR hard-stopped or rejected-merge attempt on this task AND it still carries real leftover uncommitted work, the result ALSO carries `reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}` (a bounded `git status`-derived summary) — the worktree is NEVER auto-cleaned (Loom never silently discards a hard-stopped worker's edits), and the new worker's own kickoff already carries a reconcile note pointing at the same leftover paths, so you don't need to hand-instruct one yourself. Absent for a fresh worktree or a reused-but-clean one. CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost; re-call worker_spawn with the same args once a slot frees (nothing auto-dispatches it for you).",
         inputSchema: {
           taskId: z.string().optional(),
           agentId: z.string(),
@@ -1105,7 +1127,7 @@ export class OrchestrationMcpRouter {
           "FORCEFULLY redirect one of your workers — the \"land it NOW\" steer. This ENDS the worker's " +
           "CURRENT turn immediately and REPLACES its entire pending direction with this ONE instruction, " +
           "delivered as its next turn. Use it ONLY when you must change course NOW and cannot wait for the " +
-          "worker to finish — e.g. you've spotted it building the wrong thing. CONTRAST with worker_message, " +
+          "worker to finish. CONTRAST with worker_message, " +
           "which is ADDITIVE and NON-interrupting (it queues behind the current turn, delivered ALONE as its " +
           "own turn by default — coalesced with other pending messages into one turn only if the human has " +
           "turned on the legacy daemon-global `coalesceAgentMessages` setting); prefer worker_message unless " +
@@ -1191,8 +1213,7 @@ export class OrchestrationMcpRouter {
           "or isn't yours, the cancel is refused (an answer the human already gave is NEVER discarded) " +
           "and that failure is reported back in the response's `supersede` field, never silently " +
           "swallowed. You'll get a one-time push nudge into " +
-          "your own session when the human answers; call question_pull (e.g. when you reach the point " +
-          "this was blocking) to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
+          "your own session when the human answers; call question_pull to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
           "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}.",
         inputSchema: QUESTION_ASK_INPUT_SHAPE,
       },
@@ -1295,8 +1316,7 @@ export class OrchestrationMcpRouter {
           "title, state, createdAt, answeredAt, consumedAt} plus an answer summary by type — chosenOption/" +
           "note for decision|input, approved/note for permission, ack ONLY for credential (NEVER the secret " +
           "— a pending row's answer fields read null rather than a misleading false-ish value). `total` is " +
-          "the FULL matching count and `hasMore` tells you whether `items` was truncated — never assume " +
-          "`items` is everything without checking it. Filters (all optional, AND'd): state " +
+          "the FULL matching count and `hasMore` tells you whether `items` was truncated. Filters (all optional, AND'd): state " +
           "(pending|answered|consumed|cancelled — \"cancelled\" is a moot/superseded ask you or a human " +
           "withdrew via question_cancel/dismiss, never an answer), type (decision|input|permission|" +
           "credential), includeConsumed (false by default — folds already-consumed AND already-cancelled " +
@@ -1372,7 +1392,7 @@ export class OrchestrationMcpRouter {
           "patch to matching file(s) — pull one file's hunk at a time on a large multi-file change instead " +
           "of the whole patch. A pathGlob matching 0 of the actually-changed files returns a `hint` " +
           "explaining the miss (with the list of changed files) instead of a silent, empty-looking result. " +
-          "Omit both for the full unfiltered diff (unchanged). If the (possibly filtered) patch is still too " +
+          "Omit both for the full unfiltered diff. If the (possibly filtered) patch is still too " +
           "large to inline safely, it's written to a scratch file instead — UTF-8, real line breaks, " +
           "Read-pageable with offset/limit — and the response carries patchFile/patchChars + a note in " +
           "place of the inline patch. No merge happens; you must review before confirming (there is no " +
@@ -1392,7 +1412,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_merge_confirm",
       {
-        description: "STEP 2: after reviewing, confirm the merge. Runs the build/DoD gate, and ONLY if green merges the branch as ONE squash commit, removes the worktree, and moves the task to done. The staged set is re-derived at confirm time (never a stale snapshot), so a valid +N-commit branch merges on the FIRST call. Fail-closed: a failed gate or a conflict leaves the repo untouched and the worktree retained. A genuine no-op is distinguishable via emptyKind: ALREADY_MERGED (branch already in main → finished idempotently, merged:true) vs STAGE_EMPTY_RETRY (no diff to merge → merged:false, worktree retained). A gate rejection (reason:\"build gate failed\") carries `gateDetail: {phase, failedStep, failingTest, stderrTail, exitCode, signal, timedOut}` — the failing phase (typecheck|test|build) if derivable, the failed step's own command, the first recognizable failing-test/assertion line if extractable, and a bounded (~4KB) stdout+stderr tail — so you can diagnose a real test failure vs. a flake vs. a build break without re-running the gate blind; the same detail is also folded into the `[loom:merge-rejected]` notification text. If the project has NO gateCommand configured, a successful merge carries {warning:\"unverified: ...\"} — the merge landed but was NOT checked by any build/DoD gate. NESTED-REPO SAFETY: after a successful merge, the worktree is force-removed (it always carries expected ephemeral untracked content — node_modules, dist, build caches). If the worktree ALSO contains a nested git repository (a subdirectory with its own `.git` — e.g. something cloned into it, which can hold real unpushed work), the removal is REFUSED and the worktree is RETAINED intact — the merge itself already landed, only the cleanup is deferred; the result carries {warning} naming the nested path(s). Move/push that content out yourself and re-confirm, or pass forceRemoveWorktree:true if you've confirmed the nested content is disposable (default false — the safe choice) — a forceRemoveWorktree:true call ALWAYS runs for real (see below), so this is also how you retry the nested-repo case even moments after the first confirm. CLIENT-TIMEOUT RESILIENT: a fast confirm returns {merged,...,opId} exactly as before (now stamped with a correlation `opId`); a slow one (the gate genuinely takes a while) instead returns {opId,status:\"pending\",workerSessionId} — rather than polling, wait for the async `[loom:merge-done]`/`[loom:merge-rejected]`/`[loom:merge-failed]` nudge, which carries this SAME opId (plus the worker/task) so you can match it to this call even with several merges pending at once; or poll via worker_list (this worker's `pendingMerge` field) or RE-CALL worker_merge_confirm with the SAME workerSessionId — idempotent-retryable like worker_spawn: a re-call while the gate/merge is STILL running attaches to that SAME in-flight op (never a second one), and a re-call landing in the FEW SECONDS just after it settles gets the SAME cached result instead of starting a fresh one (worker_list's `pendingMerge.state` and this call's own `opId` in the result line up either way) — never throws 'already in flight'. The one exception is forceRemoveWorktree:true, which is a deliberate one-shot escalation and therefore ALWAYS runs for real, bypassing any cached result from an earlier call (so re-confirming with it set is the correct way to retry moments after a plain confirm, e.g. the nested-repo case above).",
+        description: "STEP 2: after reviewing, confirm the merge. Runs the build/DoD gate, and ONLY if green merges the branch as ONE squash commit, removes the worktree, and moves the task to done. The staged set is re-derived at confirm time (never a stale snapshot), so a valid +N-commit branch merges on the FIRST call. Fail-closed: a failed gate or a conflict leaves the repo untouched and the worktree retained. A genuine no-op is distinguishable via emptyKind: ALREADY_MERGED (branch already in main → finished idempotently, merged:true) vs STAGE_EMPTY_RETRY (no diff to merge → merged:false, worktree retained). A gate rejection (reason:\"build gate failed\") carries `gateDetail: {phase, failedStep, failingTest, stderrTail, exitCode, signal, timedOut}` — the failing phase (typecheck|test|build) if derivable, the failed step's own command, the first recognizable failing-test/assertion line if extractable, and a bounded (~4KB) stdout+stderr tail — so you can diagnose a real test failure vs. a flake vs. a build break without re-running the gate blind; the same detail is also folded into the `[loom:merge-rejected]` notification text. If the project has NO gateCommand configured, a successful merge carries {warning:\"unverified: ...\"} — the merge landed but was NOT checked by any build/DoD gate. NESTED-REPO SAFETY: after a successful merge, the worktree is force-removed (it always carries expected ephemeral untracked content — node_modules, dist, build caches). If the worktree ALSO contains a nested git repository (a subdirectory with its own `.git` — e.g. something cloned into it, which can hold real unpushed work), the removal is REFUSED and the worktree is RETAINED intact — the merge itself already landed, only the cleanup is deferred; the result carries {warning} naming the nested path(s). Move/push that content out yourself and re-confirm, or pass forceRemoveWorktree:true if you've confirmed the nested content is disposable (default false — the safe choice) — a forceRemoveWorktree:true call ALWAYS runs for real (see below), so this is also how you retry the nested-repo case even moments after the first confirm. CLIENT-TIMEOUT RESILIENT: a fast confirm returns {merged,...,opId} (stamped with a correlation `opId`); a slow one (the gate genuinely takes a while) instead returns {opId,status:\"pending\",workerSessionId} — rather than polling, wait for the async `[loom:merge-done]`/`[loom:merge-rejected]`/`[loom:merge-failed]` nudge, which carries this SAME opId (plus the worker/task) so you can match it to this call even with several merges pending at once; or poll via worker_list (this worker's `pendingMerge` field) or RE-CALL worker_merge_confirm with the SAME workerSessionId — idempotent-retryable like worker_spawn: a re-call while the gate/merge is STILL running attaches to that SAME in-flight op (never a second one), and a re-call landing in the FEW SECONDS just after it settles gets the SAME cached result instead of starting a fresh one (worker_list's `pendingMerge.state` and this call's own `opId` in the result line up either way) — never throws 'already in flight'. The one exception is forceRemoveWorktree:true, which is a deliberate one-shot escalation and therefore ALWAYS runs for real, bypassing any cached result from an earlier call (so re-confirming with it set is the correct way to retry moments after a plain confirm, e.g. the nested-repo case above).",
         inputSchema: { workerSessionId: z.string(), forceRemoveWorktree: z.boolean().optional() },
       },
       async ({ workerSessionId, forceRemoveWorktree }) => {
@@ -1434,30 +1454,37 @@ export class OrchestrationMcpRouter {
       },
     );
 
-    server.registerTool(
-      "deploy",
-      {
-        description:
-          "Deploy/push YOUR OWN project — least-privilege, no promotion to a cross-project Lead needed. " +
-          "Runs the project's HUMAN-configured `orchestration.deployCommand` (a build script, `git push`, " +
-          "or a deploy webhook curl — whatever the owner set up) in the project's own repo, bounded by a " +
-          "per-project timeout. There is NO projectId/host/branch/repo param — the project is always YOUR " +
-          "OWN, derived server-side from this session; you can never deploy anything else. Refuses with " +
-          "{deployed:false,reason} if the project has no deployCommand configured (ask the owner to set " +
-          "one — it's a human-only, opt-in-once setting) or if you've hit the per-manager deploy rate " +
-          "limit. `reason` is a short note for the audit trail only — it is never part of the command run. " +
-          "On success returns {deployed:true}; on a failed run returns {deployed:false,reason,exitCode," +
-          "outputTail} with a bounded stdout+stderr tail to diagnose from.",
-        inputSchema: { reason: z.string() },
-      },
-      async ({ reason }) => {
-        try {
-          return ok(await sessions.deployOwnProject(managerSessionId, reason));
-        } catch (e) {
-          return ok({ error: (e as Error).message });
-        }
-      },
-    );
+    // Registered ONLY when this project has a configured deployCommand (see deployCommandConfigured
+    // above, which resolves via the EXACT SAME `resolveConfig(project.config, db.getPlatformConfig())
+    // .orchestration.deployCommand` call — and the same falsy/"" check — that sessions.deployOwnProject
+    // itself uses to decide whether to refuse) — a project with none would just get {deployed:false,"no
+    // deployCommand configured"} every time, so most projects (deployCommand is human-only, opt-in) never
+    // need this in their floor.
+    if (deployCommandConfigured) {
+      server.registerTool(
+        "deploy",
+        {
+          description:
+            "Deploy/push YOUR OWN project — least-privilege, no promotion to a cross-project Lead needed. " +
+            "Runs the project's HUMAN-configured `orchestration.deployCommand` (a build script, `git push`, " +
+            "or a deploy webhook curl — whatever the owner set up) in the project's own repo, bounded by a " +
+            "per-project timeout. There is NO projectId/host/branch/repo param — the project is always YOUR " +
+            "OWN, derived server-side from this session; you can never deploy anything else. Refuses with " +
+            "{deployed:false,reason} if you've hit the per-manager deploy rate " +
+            "limit. `reason` is a short note for the audit trail only — it is never part of the command run. " +
+            "On success returns {deployed:true}; on a failed run returns {deployed:false,reason,exitCode," +
+            "outputTail} with a bounded stdout+stderr tail to diagnose from.",
+          inputSchema: { reason: z.string() },
+        },
+        async ({ reason }) => {
+          try {
+            return ok(await sessions.deployOwnProject(managerSessionId, reason));
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
+    }
 
     // GAP 2: a deploy/served-state read so post-daemon_restart verification doesn't need curl. Minimal by
     // design — just what's trivially available server-side: the umbrella package version, the served web
@@ -1638,7 +1665,7 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Read ONE agent in YOUR project — the FULL record INCLUDING its startupPrompt (agent_list's " +
-          "summary deliberately drops it — some prompts are large, e.g. ~6.6KB for a Code Reviewer rig), " +
+          "summary deliberately drops it — some prompts are large), " +
           "PLUS its resolved browserTesting/documentConversion/openDesign/restrictedTools capability flags (from its " +
           "assigned/default profile — same resolution profile_get/profile_list use; false when profile-less " +
           "or the profile leaves a flag unset). Use this before a safe read-modify-write via agent_update " +
@@ -1875,12 +1902,11 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Escalate a discovered Loom bug or friction UP to the Platform Lead — or notify it of a status/" +
-          "completion it asked to hear about (e.g. it told you 'let me know when this lands'). This is the " +
+          "completion it asked to hear about. This is the " +
           "ONE durable channel for anything the Lead needs to know; don't invent an ad hoc 'I'll ping you' — " +
           "that reaches no one reliably. Files a DURABLE, structured task on the reserved Loom Platform " +
           "board (the Lead's inbox — it survives whether or not a Lead session is live), capturing your " +
-          "origin project + this manager session, the title, the detail/evidence, and a severity — it is " +
-          "NOT an ephemeral fire-and-forget, the board task is the permanent record either way. The target " +
+          "origin project + this manager session, the title, the detail/evidence, and a severity. The target " +
           "is the Platform board, fixed server-side (you cannot pick a project) — for a LINKED peer " +
           "project's manager instead, use peer_message. Returns the created Platform task id plus a " +
           "`deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` means no Lead session " +
@@ -1920,61 +1946,76 @@ export class OrchestrationMcpRouter {
     // on the target project's own board instead of dropped. Reuses the same framed, kind:"agent",
     // one-per-turn delivery channel as worker_message/session_message — a data message only, no privilege
     // travels with it. Rate-limited per calling manager session.
-    server.registerTool(
-      "peer_message",
-      {
-        description:
-          "Message a LINKED peer project's manager — the sanctioned manager↔manager cross-project channel " +
-          "(replaces hand-relaying contract Q&A through the Platform Lead). `targetProjectId` MUST be a " +
-          "project the owner has explicitly LINKED to yours (ask the owner to link them first if not — " +
-          "there is no way to link projects yourself). Rejected if: the target is your own project, the " +
-          "target project doesn't exist, the two projects aren't linked, or you're sending too fast (a " +
-          "per-session rate limit). Delivers to the target project's LIVE manager session ONLY — never a " +
-          "worker or any other role there. If no manager session is live in the target project right now, " +
-          "the message is durably BOARDED as a task on that project's OWN board instead of being dropped — " +
-          "its manager will see it next time it attaches. Returns `deliveryStatus` (delivered-live | queued " +
-          "| boarded) plus `taskId` when boarded. This is DATA delivery only — the recipient acts on it " +
-          "within its OWN project and gains no reach into yours except replying through this same primitive. " +
-          "The delivered frame ([loom:from-manager · <name> · projectId:<id> · sessionId:<id>]) stamps YOUR " +
-          "project id and this manager session's id, so a recipient can reply with peer_message using that " +
-          "projectId as ITS targetProjectId — no need to ask the owner to relay it.",
-        inputSchema: { targetProjectId: z.string(), text: z.string() },
-      },
-      async ({ targetProjectId, text }) => {
-        try {
-          return ok(sessions.messagePeerManager(managerSessionId, targetProjectId, text));
-        } catch (e) {
-          return ok({ error: (e as Error).message });
-        }
-      },
-    );
+    //
+    // Both peer_message and peer_list are registered ONLY when this project has ≥1 project_links row
+    // (hasPeerLinks above, `db.listProjectLinks()` read directly — a deliberate SUPERSET of what
+    // sessions.listPeerProjects/peer_list actually returns, which ALSO drops an archived/missing peer via
+    // `.filter(p => !p.archivedAt)`). Safe either way: hasPeerLinks:false means NO link touches this
+    // project at all, so peer_list is guaranteed empty and peer_message would always reject "not linked" —
+    // a working peer tool is never hidden. It's only slightly over-inclusive when this project's SOLE link
+    // points to an archived/missing peer: both tools stay registered but peer_list still reports zero
+    // peers and peer_message still rejects "not linked" — the exact pre-trim always-registered behavior,
+    // just no longer the common case. So most projects (linking is an owner-only, opt-in action) never
+    // need either tool in their floor. A link added later appears on the manager's very next tool call
+    // (buildServer is
+    // rebuilt fresh per request — see handle() below).
+    if (hasPeerLinks) {
+      server.registerTool(
+        "peer_message",
+        {
+          description:
+            "Message a LINKED peer project's manager — the sanctioned manager↔manager cross-project channel " +
+            "(replaces hand-relaying contract Q&A through the Platform Lead). `targetProjectId` MUST be a " +
+            "project the owner has explicitly LINKED to yours (ask the owner to link them first if not — " +
+            "there is no way to link projects yourself). Rejected if: the target is your own project, the " +
+            "target project doesn't exist, the two projects aren't linked, or you're sending too fast (a " +
+            "per-session rate limit). Delivers to the target project's LIVE manager session ONLY — never a " +
+            "worker or any other role there. If no manager session is live in the target project right now, " +
+            "the message is durably BOARDED as a task on that project's OWN board instead of being dropped — " +
+            "its manager will see it next time it attaches. Returns `deliveryStatus` (delivered-live | queued " +
+            "| boarded) plus `taskId` when boarded. This is DATA delivery only — the recipient acts on it " +
+            "within its OWN project and gains no reach into yours except replying through this same primitive. " +
+            "The delivered frame ([loom:from-manager · <name> · projectId:<id> · sessionId:<id>]) stamps YOUR " +
+            "project id and this manager session's id, so a recipient can reply with peer_message using that " +
+            "projectId as ITS targetProjectId — no need to ask the owner to relay it.",
+          inputSchema: { targetProjectId: z.string(), text: z.string() },
+        },
+        async ({ targetProjectId, text }) => {
+          try {
+            return ok(sessions.messagePeerManager(managerSessionId, targetProjectId, text));
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
 
-    // peer_list: the read-only complement to peer_message — lets a manager DISCOVER its linked peers
-    // instead of only ever replying to one that already messaged it. Scoped server-side to the caller's
-    // own project (no projectId param — mirrors requests_list); reuses the exact same project_links gate
-    // peer_message checks, so it returns exactly the set peer_message would accept as a targetProjectId.
-    server.registerTool(
-      "peer_list",
-      {
-        description:
-          "List the projects the owner has LINKED to yours — the read-only complement to peer_message, " +
-          "letting you DISCOVER a linked peer's project id before it has ever messaged you (peer_message " +
-          "requires a targetProjectId, and nothing else exposes a linked project's id proactively). Scoped " +
-          "SERVER-SIDE to YOUR OWN project — no projectId param, so you can never enumerate another " +
-          "project's links. Returns exactly the target set peer_message would accept right now: " +
-          "[{projectId, name}], one entry per owner-linked peer, excluding any peer that's since been " +
-          "archived. Non-mutating — exposes only the projectId + display name, nothing else about the " +
-          "peer project.",
-        inputSchema: {},
-      },
-      async () => {
-        try {
-          return ok({ peers: sessions.listPeerProjects(managerSessionId) });
-        } catch (e) {
-          return ok({ error: (e as Error).message });
-        }
-      },
-    );
+      // peer_list: the read-only complement to peer_message — lets a manager DISCOVER its linked peers
+      // instead of only ever replying to one that already messaged it. Scoped server-side to the caller's
+      // own project (no projectId param — mirrors requests_list); reuses the exact same project_links gate
+      // peer_message checks, so it returns exactly the set peer_message would accept as a targetProjectId.
+      server.registerTool(
+        "peer_list",
+        {
+          description:
+            "List the projects the owner has LINKED to yours — the read-only complement to peer_message, " +
+            "letting you DISCOVER a linked peer's project id before it has ever messaged you (peer_message " +
+            "requires a targetProjectId, and nothing else exposes a linked project's id proactively). Scoped " +
+            "SERVER-SIDE to YOUR OWN project — no projectId param, so you can never enumerate another " +
+            "project's links. Returns exactly the target set peer_message would accept right now: " +
+            "[{projectId, name}], one entry per owner-linked peer, excluding any peer that's since been " +
+            "archived. Non-mutating — exposes only the projectId + display name, nothing else about the " +
+            "peer project.",
+          inputSchema: {},
+        },
+        async () => {
+          try {
+            return ok({ peers: sessions.listPeerProjects(managerSessionId) });
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
+    }
 
     server.registerTool(
       "escalation_status",
@@ -1989,7 +2030,7 @@ export class OrchestrationMcpRouter {
           "returns `{found:false}` uniformly, never an error, so this can't be used to probe another " +
           "project's escalations; an AMBIGUOUS prefix that matches more than one of YOUR OWN escalations " +
           "returns a \"did you mean\" error naming the candidates (pass more characters or the full id) — " +
-          "still never leaking anything outside your project. Each escalation reports its CURRENT title (the Lead may have refined it — " +
+          "Each escalation reports its CURRENT title (the Lead may have refined it — " +
           "itself a sign it was seen), a `status` of pending (still in the landing lane — not yet picked " +
           "up), in_progress (moved into a working lane — picked up), resolved (in a done/terminal column), " +
           "or closed (the task was deleted/archived), its columnKey, and updatedAt. No writes.",
