@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import {
   DECISION_WATCHDOG_MS, relativeAge, isDecisionWatchdog, questionStateChip, decisionAttentionText,
-  requestAttentionLabel,
+  requestAttentionLabel, requestOutcome,
 } from "../src/lib/questions.ts";
 
 let pass = 0;
@@ -54,6 +54,40 @@ check("answered PAST the threshold → amber WAITING ON MGR (watchdog re-escalat
 
 check("a pending question is never a watchdog, even if 'old'", () => {
   assert.equal(isDecisionWatchdog({ state: "pending", answeredAt: null }, NOW), false);
+});
+
+// question_cancel + dismiss (card feat(orchestration): question_cancel + dismiss) — the fourth terminal
+// state, reachable only from pending, never confusable with an actual answer.
+check("cancelled → red CANCELLED (never confusable with the muted answered/consumed states)", () => {
+  const c = questionStateChip({ state: "cancelled", answeredAt: null }, NOW);
+  assert.equal(c.tone, "red");
+  assert.equal(c.label, "CANCELLED");
+});
+
+check("a cancelled question is never a watchdog either", () => {
+  assert.equal(isDecisionWatchdog({ state: "cancelled", answeredAt: null }, NOW), false);
+});
+
+check("requestOutcome: a cancelled request reads 'cancelled' + its reason, checked BEFORE the per-type switch", () => {
+  assert.equal(
+    requestOutcome({ type: "decision", chosenOption: null, note: null, state: "cancelled", cancelledReason: "superseded by a fresher ask" }),
+    "cancelled · superseded by a fresher ask",
+  );
+  // no reason given → still reads "cancelled", never falls through to the type-specific "—"/answer text.
+  assert.equal(
+    requestOutcome({ type: "decision", chosenOption: null, note: null, state: "cancelled", cancelledReason: null }),
+    "cancelled",
+  );
+  // a cancelled PERMISSION must never read "denied" (chosenOption is null, never a real answer).
+  assert.equal(
+    requestOutcome({ type: "permission", chosenOption: null, note: null, state: "cancelled", cancelledReason: null }),
+    "cancelled",
+  );
+  // a cancelled CREDENTIAL must never claim "provided".
+  assert.equal(
+    requestOutcome({ type: "credential", chosenOption: null, note: null, state: "cancelled", cancelledReason: "no longer needed" }),
+    "cancelled · no longer needed",
+  );
 });
 
 check("decisionAttentionText: mgr <id8> · <project> — <title>", () => {

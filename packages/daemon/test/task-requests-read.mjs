@@ -241,6 +241,28 @@ try {
   const unknownAsk = await ask({ title: "Unknown taskId ask", body: "b", taskId: "ffffffff" });
   check("(H) an UNKNOWN taskId is cleanly rejected", typeof unknownAsk.error === "string");
 
+  // ============================ (I) card feat(orchestration): question_cancel + dismiss ==================
+  // summarizeTaskRequests used to derive `answered: questions.length - pending` — a pending-as-proxy bug
+  // that silently counted a CANCELLED request (never answered at all) as answered once that third state
+  // existed. Dedicated task so this section's counts are independent of T's prior mutations above.
+  const cancelledTaskId = "eeeeeeee-0000-4000-8000-000000000005";
+  db.insertTask({ id: cancelledTaskId, projectId: projId, title: "card with a cancelled request", body: "b", columnKey: "backlog", position: 5, priority: "p2", createdAt: now, updatedAt: now });
+  const pendingOnCard = await ask({ title: "Still pending", body: "b", taskId: cancelledTaskId });
+  const answeredOnCard = await ask({ title: "Really answered", body: "b", taskId: cancelledTaskId });
+  db.answerQuestion(answeredOnCard.questionId, { chosenOption: null, note: "yep", answeredAt: new Date().toISOString() });
+  const cancelledOnCard = await ask({ title: "Withdrawn as moot", body: "b", taskId: cancelledTaskId });
+  db.cancelQuestion(cancelledOnCard.questionId, { reason: "superseded", cancelledBy: "agent" });
+
+  const taskWithCancelled = await tCall("tasks_get", { id: cancelledTaskId });
+  check("(I) requests.total counts all three rows", taskWithCancelled.requests.total === 3);
+  check("(I) requests.pending counts ONLY the still-pending row", taskWithCancelled.requests.pending === 1);
+  check("(I) requests.answered counts ONLY the really-answered row — the cancelled row is NOT folded in", taskWithCancelled.requests.answered === 1);
+  check("(I) requests.cancelled counts the cancelled row separately", taskWithCancelled.requests.cancelled === 1);
+  check("(I) the three buckets sum to total (no row double-counted or dropped)", taskWithCancelled.requests.pending + taskWithCancelled.requests.answered + taskWithCancelled.requests.cancelled === taskWithCancelled.requests.total);
+  check("(I) requests.items reflects the cancelled row's real state", taskWithCancelled.requests.items.find((it) => it.id === cancelledOnCard.questionId)?.state === "cancelled");
+  const cancelledCardList = await tCallList("task_requests_list", { taskId: cancelledTaskId });
+  check("(I) task_requests_list also surfaces the cancelled row (pending+answered+consumed+cancelled alike)", cancelledCardList.some((r) => r.id === cancelledOnCard.questionId && r.state === "cancelled"));
+
   await tClient.close();
 } finally {
   try { db.close(); } catch { /* ignore */ }
@@ -248,6 +270,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a REAL question_ask call stamps task_id end-to-end; tasks_get's connected-requests summary ({total,answered,pending,items}) is correct before/after an answer (real-agent MCP tool calls, not just unit tests); task_requests_list/task_request_get are NON-CONSUMING (re-readable across repeated calls AND after the asking agent's own question_pull has drained+consumed the row, whose own semantics stay unchanged); task_request_get never returns secret_blob/secret for a credential request (only a non-secret ack, null while pending); a pending permission reads approved:null rather than a misleading false; project/task scoping rejects a mismatched taskId and a cross-project request id — INCLUDING a foreign-project question_ask carrying another project's task id, now REJECTED OUTRIGHT at write time (card 9be9784a: taskId resolution is scoped to the caller's own project); task_requests_list resolves an unambiguous 8-char taskId prefix; AND (card 9be9784a) question_ask itself now resolves an 8-char taskId PREFIX to the full id and stores THAT — so the soft-link actually connects — while an ambiguous or unknown prefix is cleanly rejected instead of silently stored as a dead link."
+  ? "\n✅ ALL PASS — a REAL question_ask call stamps task_id end-to-end; tasks_get's connected-requests summary ({total,answered,pending,cancelled,items}) is correct before/after an answer (real-agent MCP tool calls, not just unit tests); task_requests_list/task_request_get are NON-CONSUMING (re-readable across repeated calls AND after the asking agent's own question_pull has drained+consumed the row, whose own semantics stay unchanged); task_request_get never returns secret_blob/secret for a credential request (only a non-secret ack, null while pending); a pending permission reads approved:null rather than a misleading false; project/task scoping rejects a mismatched taskId and a cross-project request id — INCLUDING a foreign-project question_ask carrying another project's task id, now REJECTED OUTRIGHT at write time (card 9be9784a: taskId resolution is scoped to the caller's own project); task_requests_list resolves an unambiguous 8-char taskId prefix; question_ask itself resolves an 8-char taskId PREFIX to the full id and stores THAT — so the soft-link actually connects — while an ambiguous or unknown prefix is cleanly rejected instead of silently stored as a dead link; AND a CANCELLED connected request (question_cancel/dismiss) is counted in its OWN `cancelled` bucket, never folded into `answered` (the pending-as-proxy bug `total - pending` used to cause)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

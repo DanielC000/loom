@@ -954,14 +954,17 @@ CREATE TABLE IF NOT EXISTS questions (
                                             -- credential auto-provisioning v1 (card 193de09e), INTENT only
   provision_connection_id TEXT,            -- set ONLY by the answer boundary once provisioned
   provision_binding_state TEXT,            -- 'pending' | 'applied' once provisioned; NULL ('none') otherwise
-  state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed'
+  state TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'answered' | 'consumed' | 'cancelled'
   chosen_option TEXT,
   note TEXT,
   created_at TEXT NOT NULL,
   answered_at TEXT,
   consumed_at TEXT,
   last_surfaced_state TEXT,                -- decisions-relay dedup signature (card 0c1365d0), NULL = never surfaced
-  last_surfaced_at TEXT
+  last_surfaced_at TEXT,
+  cancelled_reason TEXT,                   -- question_cancel/dismiss (only ever set alongside state='cancelled')
+  cancelled_by TEXT,                       -- 'agent' | 'human'
+  cancelled_at TEXT
 );
 -- Serves both the manager's pull (session_id + state='answered') and a future project-scoped inbox read.
 CREATE INDEX IF NOT EXISTS idx_questions_session ON questions(session_id, state);
@@ -1344,6 +1347,12 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   // reads back as "not yet surfaced" (see getQuestionSurfacedSignatures) rather than a false match.
   last_surfaced_state: "TEXT",
   last_surfaced_at: "TEXT",
+  // question_cancel/dismiss (card feat(orchestration): question_cancel + dismiss) — all nullable, a
+  // legacy row (never cancelled) simply reads null for every one of these, same as any other terminal-
+  // state row that was answered/consumed instead.
+  cancelled_reason: "TEXT",
+  cancelled_by: "TEXT",
+  cancelled_at: "TEXT",
 };
 
 /** Columns added to `connections` by the OAuth2 phase (agent-tooling epic P5a) PLUS the project-scoping
@@ -4762,11 +4771,13 @@ export class Db {
       `INSERT INTO questions
         (id,session_id,project_id,type,title,body,options_json,recommendation,task_id,
          permission_action,permission_scope,permission_expires_at,credential_env_var,
-         provision_target,state,chosen_option,note,created_at,answered_at,consumed_at)
+         provision_target,state,chosen_option,note,created_at,answered_at,consumed_at,
+         cancelled_reason,cancelled_by,cancelled_at)
        VALUES
         (@id,@sessionId,@projectId,@type,@title,@body,@optionsJson,@recommendation,@taskId,
          @permissionAction,@permissionScope,@permissionExpiresAt,@credentialEnvVar,
-         @provisionTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt)`,
+         @provisionTarget,@state,@chosenOption,@note,@createdAt,@answeredAt,@consumedAt,
+         @cancelledReason,@cancelledBy,@cancelledAt)`,
     ).run({
       // `type` defaults to "decision" at the RUNTIME layer too (not just TS's Question interface) — a
       // plain-JS caller (a hermetic test predating card 695ebab0, or any future untyped caller) that never
@@ -4781,6 +4792,10 @@ export class Db {
       provisionTarget: q.provisionTarget ? JSON.stringify(q.provisionTarget) : null,
       state: q.state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
       createdAt: q.createdAt, answeredAt: q.answeredAt ?? null, consumedAt: q.consumedAt ?? null,
+      // Normally null at insert time (a question is only ever cancelled AFTER it's created — see
+      // cancelQuestion); accepted here too so a test/seed caller can insert an already-cancelled row
+      // directly (e.g. to drive the History view) without a separate cancel call.
+      cancelledReason: q.cancelledReason ?? null, cancelledBy: q.cancelledBy ?? null, cancelledAt: q.cancelledAt ?? null,
     });
   }
   getQuestion(id: string): Question | undefined {
@@ -4842,6 +4857,37 @@ export class Db {
       patch.provision ? patch.provision.bindingState : null,
       id,
     );
+    return this.getQuestion(id);
+  }
+  /**
+   * Cancel a still-'pending' request — the terminal, retained-in-history counterpart to answerQuestion/
+   * answerCredentialQuestion, reached by TWO entry points that both funnel through this ONE write (never a
+   * forked state model): the human-only REST dismiss route (POST /api/questions/:id/dismiss) and the
+   * agent-lineage-scoped `question_cancel` MCP tool (both surfaces — see mcp/questionTool.ts's
+   * cancelQuestionForAgent, which layers the ownership check in front of this). Mirrors
+   * dismissPresetPromptSuggestion's shape exactly: returns undefined when no question has this id (caller
+   * 404s); THROWS when it isn't currently 'pending' (caller 409s) — the thrown message names the row's
+   * ACTUAL current state, so a race where the question was answered between the caller's read and this
+   * write surfaces as "question is already answered" rather than a generic rejection, telling the caller an
+   * answer is now available instead of silently discarding it. The UPDATE's own `AND state = 'pending'`
+   * guard is what actually protects the DATA (never relies solely on the pre-check above being
+   * uncontended) — and its outcome is OBSERVED, not assumed: `run()`'s `changes` is checked, so a 0-row
+   * UPDATE (the guard tripped) throws the SAME "already <state>" error the pre-check does, rather than
+   * silently returning the row in whatever state it now actually has. Both branches read as this method
+   * either cancels the row or throws — never a truthy return for a row that's secretly something else.
+   * Never hard-deletes: a cancelled row keeps every prior field and gains cancelled_reason/cancelled_by/
+   * cancelled_at, retained exactly like an answered/consumed row (see listOpenQuestions' includeConsumed
+   * branch, which folds 'cancelled' in alongside 'consumed').
+   */
+  cancelQuestion(id: string, patch: { reason: string | null; cancelledBy: "agent" | "human" }): Question | undefined {
+    const existing = this.getQuestion(id);
+    if (!existing) return undefined;
+    if (existing.state !== "pending") throw new Error(`question is already ${existing.state}`);
+    const cancelledAt = new Date().toISOString();
+    const result = this.db.prepare(
+      "UPDATE questions SET state = 'cancelled', cancelled_reason = ?, cancelled_by = ?, cancelled_at = ? WHERE id = ? AND state = 'pending'",
+    ).run(patch.reason, patch.cancelledBy, cancelledAt, id);
+    if (result.changes === 0) throw new Error(`question is already ${this.getQuestion(id)?.state ?? existing.state}`);
     return this.getQuestion(id);
   }
   /**
@@ -4976,8 +5022,9 @@ export class Db {
    * optional/AND'd; omit all (no `projectId`) for the whole platform — the Auditor's use; the manager
    * surface always passes its own `projectId` so it can never read another project's requests.
    * `excludeConsumed` (default off, so the Auditor's "no filters returns the whole platform" behavior is
-   * unchanged) drops `state:'consumed'` rows UNLESS `state` itself is explicitly set — an explicit
-   * `state:'consumed'` always wins, mirroring `listOpenQuestions`'s `includeConsumed` toggle. `agentId` is
+   * unchanged) drops `state:'consumed'` AND `state:'cancelled'` rows UNLESS `state` itself is explicitly
+   * set — an explicit `state:'consumed'`/`'cancelled'` always wins, mirroring `listOpenQuestions`'s
+   * `includeConsumed` toggle (which folds both terminal states in together too). `agentId` is
    * NOT a column on `questions` itself (only the asking session carries it), so this LEFT JOINs `sessions`
    * to surface it — a hard-deleted asking session reads `agentId: null` rather than dropping the row.
    * `agentId` is ALSO an optional filter (task f724d65a), matched against that same joined
@@ -4994,7 +5041,9 @@ export class Db {
     const params: unknown[] = [];
     if (filters.projectId) { clauses.push("q.project_id = ?"); params.push(filters.projectId); }
     if (filters.state) { clauses.push("q.state = ?"); params.push(filters.state); }
-    else if (filters.excludeConsumed) { clauses.push("q.state != 'consumed'"); }
+    // 'cancelled' is EXCLUDED alongside 'consumed' by default (question_cancel/dismiss's terminal state is
+    // retained history exactly like 'consumed'), unless an explicit `state` filter asks for it.
+    else if (filters.excludeConsumed) { clauses.push("q.state NOT IN ('consumed','cancelled')"); }
     if (filters.type) { clauses.push("q.type = ?"); params.push(filters.type); }
     if (filters.since) { clauses.push("q.created_at >= ?"); params.push(filters.since); }
     if (filters.agentId) { clauses.push("s.agent_id = ?"); params.push(filters.agentId); }
@@ -5010,9 +5059,10 @@ export class Db {
    * The web decision-inbox's GLOBAL "waiting on me" read (card 8701bdbb, child B): every question across
    * ALL projects/sessions, enriched with the asking agent/project display names + whether the asking
    * session is still live (for the jump/nudge affordances). By default only the human-actionable states
-   * ('pending' + 'answered'); `includeConsumed` folds in the terminal history. Newest-first. LEFT JOINs so
-   * a question whose asking session/agent was hard-deleted still lists (name falls back to "?") rather than
-   * silently dropping — the human should still see and answer it.
+   * ('pending' + 'answered'); `includeConsumed` folds in the terminal history — 'consumed' AND 'cancelled'
+   * (question_cancel/dismiss's terminal state is retained history exactly like 'consumed', never a separate
+   * bucket). Newest-first. LEFT JOINs so a question whose asking session/agent was hard-deleted still lists
+   * (name falls back to "?") rather than silently dropping — the human should still see and answer it.
    */
   listOpenQuestions(includeConsumed = false): QuestionInboxItem[] {
     const rows = this.db.prepare(
@@ -5022,7 +5072,7 @@ export class Db {
        LEFT JOIN sessions s ON q.session_id = s.id
        LEFT JOIN agents a ON s.agent_id = a.id
        LEFT JOIN projects p ON q.project_id = p.id
-       WHERE q.state IN (${includeConsumed ? "'pending','answered','consumed'" : "'pending','answered'"})
+       WHERE q.state IN (${includeConsumed ? "'pending','answered','consumed','cancelled'" : "'pending','answered'"})
        ORDER BY q.created_at DESC`,
     ).all() as Row[];
     return rows.map(toQuestionInboxItem);
@@ -5840,6 +5890,9 @@ function toQuestion(r0: unknown): Question {
     createdAt: r.created_at as string,
     answeredAt: (r.answered_at as string | null) ?? null,
     consumedAt: (r.consumed_at as string | null) ?? null,
+    cancelledReason: (r.cancelled_reason as string | null) ?? null,
+    cancelledBy: (r.cancelled_by as "agent" | "human" | null) ?? null,
+    cancelledAt: (r.cancelled_at as string | null) ?? null,
   };
 }
 // A question row already carrying the joined display columns (agent_name / project_name /

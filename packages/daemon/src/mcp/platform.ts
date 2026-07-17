@@ -8,7 +8,7 @@ import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, S
 import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent } from "./questionTool.js";
 import { resolveAlias } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -1648,6 +1648,32 @@ export class PlatformMcpRouter {
           sessions.purgeAnsweredQuestionNudges(callerSessionId, answered.map((q) => q.id));
         }
         return ok({ questions: answered.map(questionPullItem) });
+      },
+    );
+
+    // question_cancel (card feat(orchestration): question_cancel + dismiss) — ports the manager surface's
+    // tool (mcp/orchestration.ts) so the Lead has the same exit from a moot/superseded ask; shares
+    // cancelQuestionForAgent (mcp/questionTool.ts) verbatim so the ownership check + error shaping can
+    // never drift between the two callers.
+    server.registerTool(
+      "question_cancel",
+      {
+        description:
+          "Cancel a request YOU asked via question_ask that's still PENDING — for a moot/superseded ask " +
+          "(e.g. you're re-asking with fresher information) so it doesn't sit in the human's inbox forever. " +
+          "Scoped to YOUR OWN agent lineage — you can never cancel a request asked by another agent. Only a " +
+          "still-'pending' request can be cancelled: an already-'answered'/'consumed' one is REFUSED — " +
+          "cancelling can never discard an answer the human already gave, so if it's answered you're told " +
+          "to call question_pull instead, and if the answer races in between your decision and this call " +
+          "landing, this fails the same way rather than clobbering it. Never hard-deletes — a cancelled " +
+          "request lands in a terminal 'cancelled' state, retained in the human's Requests history with " +
+          "your `reason`. `questionId` is required; `reason` is optional but recommended (shown in the " +
+          "human's history). Returns {cancelled:true, questionId} or {error}.",
+        inputSchema: { questionId: z.string(), reason: z.string().optional() },
+      },
+      async ({ questionId, reason }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        return ok(cancelQuestionForAgent(db, callerSessionId, questionId, reason));
       },
     );
 

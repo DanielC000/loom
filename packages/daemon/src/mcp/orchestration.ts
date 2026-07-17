@@ -6,7 +6,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests } from "./questionTool.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
@@ -1226,6 +1226,31 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // question_cancel (card feat(orchestration): question_cancel + dismiss) — the missing exit from a
+    // moot/superseded ask: before this, a pending Request could ONLY leave the human's inbox by being
+    // answered, so a re-asked-with-fresher-info question_ask left its predecessor sitting pending forever.
+    // Agent-lineage-scoped exactly like question_pull/requests_list({mine:true}) — see
+    // questionTool.ts's cancelQuestionForAgent, shared verbatim with the Lead surface (mcp/platform.ts) so
+    // the ownership check + error shaping can never drift between the two callers.
+    server.registerTool(
+      "question_cancel",
+      {
+        description:
+          "Cancel a request YOU asked via question_ask that's still PENDING — for a moot/superseded ask " +
+          "(e.g. you're re-asking with fresher information) so it doesn't sit in the human's inbox forever. " +
+          "Scoped to YOUR OWN agent lineage — you can never cancel a request asked by another agent. Only a " +
+          "still-'pending' request can be cancelled: an already-'answered'/'consumed' one is REFUSED — " +
+          "cancelling can never discard an answer the human already gave, so if it's answered you're told " +
+          "to call question_pull instead, and if the answer races in between your decision and this call " +
+          "landing, this fails the same way rather than clobbering it. Never hard-deletes — a cancelled " +
+          "request lands in a terminal 'cancelled' state, retained in the human's Requests history with " +
+          "your `reason`. `questionId` is required; `reason` is optional but recommended (shown in the " +
+          "human's history). Returns {cancelled:true, questionId} or {error}.",
+        inputSchema: { questionId: z.string(), reason: z.string().optional() },
+      },
+      async ({ questionId, reason }) => ok(cancelQuestionForAgent(db, managerSessionId, questionId, reason)),
+    );
+
     // requests_list (card 988bb585 follow-up): a NON-CONSUMING, board-wide read of YOUR OWN project's
     // Requests — the gap between question_pull (consumes, answered-only, no taskId filter) and
     // task_requests_list/task_request_get (task-scoped only). Mirrors the Platform Auditor's cross-project
@@ -1248,9 +1273,11 @@ export class OrchestrationMcpRouter {
           "— a pending row's answer fields read null rather than a misleading false-ish value). `total` is " +
           "the FULL matching count and `hasMore` tells you whether `items` was truncated — never assume " +
           "`items` is everything without checking it. Filters (all optional, AND'd): state " +
-          "(pending|answered|consumed), type (decision|input|permission|credential), includeConsumed " +
-          "(false by default — folds already-consumed requests in alongside the rest; an explicit " +
-          "state:\"consumed\" always shows consumed regardless of this flag), mine (false by default — " +
+          "(pending|answered|consumed|cancelled — \"cancelled\" is a moot/superseded ask you or a human " +
+          "withdrew via question_cancel/dismiss, never an answer), type (decision|input|permission|" +
+          "credential), includeConsumed (false by default — folds already-consumed AND already-cancelled " +
+          "requests in alongside the rest; an explicit state:\"consumed\"/\"cancelled\" always shows those " +
+          "regardless of this flag), mine (false by default — " +
           "when true, narrows to ONLY requests filed by YOUR OWN agent lineage, the same ownership scope " +
           "question_pull consumes from, so a fresh successor session on the same agent still sees them). " +
           "`mine:true` is the dedup read for a scheduled/autonomous agent: before filing a new " +

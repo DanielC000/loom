@@ -815,6 +815,7 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
   const pending = linked.filter((q) => q.state === "pending").length;
   const answered = linked.filter((q) => q.state === "answered").length;
   const consumed = linked.filter((q) => q.state === "consumed").length;
+  const cancelled = linked.filter((q) => q.state === "cancelled").length;
   return (
     <div data-testid="task-requests-rail"
       style={{ flex: "1 1 280px", minWidth: 240, maxWidth: "100%", display: "flex", flexDirection: "column",
@@ -847,6 +848,7 @@ function ConnectedRequestsRail({ linked, onCollapse }: { linked: QuestionInboxIt
             <span>{answered} answered</span>
             <span aria-hidden>·</span>
             <span>{consumed} consumed</span>
+            {cancelled > 0 && <><span aria-hidden>·</span><span style={{ color: color.red }}>{cancelled} cancelled</span></>}
           </div>
           {/* Signal rows — the lone scroll region so the header + summary stay pinned. */}
           <div style={{ flex: 1, minHeight: 0, overflowY: "auto", display: "flex", flexDirection: "column", gap: 6, padding: 10 }}>
@@ -878,7 +880,7 @@ function ConnectedRequestRow({ q, now }: { q: QuestionInboxItem; now: number }) 
         </div>
         <span style={{ fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          agent {q.sessionId.slice(0, 8)} · {relativeAge(q.state === "pending" ? q.createdAt : q.answeredAt, now)}
+          agent {q.sessionId.slice(0, 8)} · {relativeAge(q.state === "pending" ? q.createdAt : q.state === "cancelled" ? q.cancelledAt : q.answeredAt, now)}
         </span>
       </button>
       {open && (
@@ -900,6 +902,16 @@ function ConnectedRequestAnswer({ q }: { q: QuestionInboxItem }) {
       <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
         {q.body && <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{q.body}</span>}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: tone[REQUEST_TYPE_TONE[q.type]] }}>{requestHint(q)} · awaiting your answer</span>
+      </div>
+    );
+  }
+  if (q.state === "cancelled") {
+    return (
+      <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.red }}>cancelled · never answered</span>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, whiteSpace: "pre-wrap" }}>
+          {q.cancelledReason ?? "no reason given"} · by {q.cancelledBy === "agent" ? "the asking agent" : "a human"}
+        </span>
       </div>
     );
   }

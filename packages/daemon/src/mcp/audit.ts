@@ -96,7 +96,8 @@ export class AuditMcpRouter {
           "never-echo shape; a pending row's answer fields read null rather than a misleading false-ish " +
           "value). `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
           "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
-          "projectId (one project), state (pending|answered|consumed), type, sinceMinutes (only requests " +
+          "projectId (one project), state (pending|answered|consumed|cancelled — \"cancelled\" is a " +
+          "moot/superseded ask withdrawn via question_cancel/dismiss, never an answer), type, sinceMinutes (only requests " +
           "created within the last N minutes). Newest-first (createdAt DESC); no filters returns the whole " +
           `platform. Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see \`hasMore\`) — pass an ` +
           "explicit limit/offset to page past it.",

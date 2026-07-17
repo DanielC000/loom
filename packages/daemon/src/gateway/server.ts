@@ -2489,10 +2489,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // them — a spec that needs an already-provisioned row must seed pending, then answer it via the
           // real REST route below, not by pre-setting those two here.
           provisionTarget?: ProvisionTarget | null;
-          state?: "pending" | "answered" | "consumed"; chosenOption?: string | null; note?: string | null;
+          state?: "pending" | "answered" | "consumed" | "cancelled"; chosenOption?: string | null; note?: string | null;
           // Optional instant overrides — backdate `answeredAt` to drive the client-side watchdog (an
           // ignored `answered` re-escalating to amber) in a spec, or `createdAt` for a deterministic age.
           createdAt?: string; answeredAt?: string;
+          // question_cancel/dismiss (card feat(orchestration): question_cancel + dismiss) — a spec seeding
+          // state:"cancelled" directly (e.g. to drive the History view) may also set these; otherwise a
+          // cancelled seed defaults cancelledBy to "human" and cancelledAt to now, mirroring how "answered"
+          // defaults answeredAt.
+          cancelledReason?: string | null; cancelledBy?: "agent" | "human";
         }[];
         // Project memory (Lore) rows — the ONLY way an e2e spec can seed project_memory for the /lore page
         // (there is no REST/agent write path — writing stays the memory MCP's job). Upserted via the SAME
@@ -2737,6 +2742,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           createdAt: q.createdAt ?? now,
           answeredAt: q.answeredAt ?? (state === "answered" || state === "consumed" ? now : null),
           consumedAt: state === "consumed" ? now : null,
+          cancelledReason: state === "cancelled" ? (q.cancelledReason ?? null) : null,
+          cancelledBy: state === "cancelled" ? (q.cancelledBy ?? "human") : null,
+          cancelledAt: state === "cancelled" ? now : null,
         });
         questionIds.push(id);
       }
@@ -4277,6 +4285,35 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // (card bbc46336 follow-up — see SessionService.purgeAnsweredQuestionNudges).
       deps.pty.enqueueStdin(target, nudge, "human", undefined, undefined, "agent", updated.id);
     } catch { /* best-effort — the answer already persisted; question_pull is the durable fallback */ }
+    return reply.send(updated);
+  });
+  // Human dismiss (card feat(orchestration): question_cancel + dismiss) — the missing exit from a
+  // moot/superseded pending Request, mirroring the preset-suggestion store's existing human Adopt/Dismiss
+  // pair EXACTLY (POST /api/preset-prompt-suggestions/:id/dismiss → db.dismissPresetPromptSuggestion,
+  // above): a missing id 404s, an already-non-pending row THROWS (caught → 409 Conflict, the message
+  // naming the row's actual state) rather than silently discarding whatever it already became — most
+  // importantly an 'answered' row, which this must NEVER clobber. Same human-only loopback trust posture
+  // as the answer route just above (Tier-1 — see gateway/trust-tier.ts). Never hard-deletes: `updated` is
+  // the full cancelled Question row, retained in history exactly like an answered/consumed one.
+  app.post("/api/questions/:id/dismiss", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const body = (req.body ?? {}) as { reason?: unknown };
+    const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : null;
+    let updated;
+    try { updated = deps.db.cancelQuestion(id, { reason, cancelledBy: "human" }); }
+    catch (e) { return reply.code(409).send({ error: (e as Error).message }); }
+    if (!updated) return reply.code(404).send({ error: "question not found" });
+    // Best-effort push nudge — mirrors the answer route's nudge above EXACTLY (same agent-lineage
+    // resolution, same enqueueStdin rail), so a manager parked awaiting question_pull is told WHY its ask
+    // went quiet instead of only self-healing much later via the idle watchdog once
+    // hasPendingQuestionForAgent flips false (with no explanation of what happened). The dismissal is
+    // ALREADY durably persisted above — a torn-down asking-manager pty must never turn this into a 500.
+    try {
+      const asker = deps.db.getSession(updated.sessionId);
+      const target = (asker && deps.db.getLiveSessionForAgent(asker.agentId)?.id) ?? updated.sessionId;
+      const nudge = `Your request "${updated.title}" was dismissed — it will never be answered.${reason ? ` Reason: ${reason}` : ""}`;
+      deps.pty.enqueueStdin(target, nudge, "human", undefined, undefined, "agent", updated.id);
+    } catch { /* best-effort — the dismissal already persisted */ }
     return reply.send(updated);
   });
 

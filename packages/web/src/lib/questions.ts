@@ -39,9 +39,12 @@ export interface StateChipSpec { tone: Tone; label: string; }
 
 // The lifecycle chip (surface 4): pending (cyan, waiting on you) → answered (muted, waiting on the
 // manager's pickup) → consumed (muted ✓, terminal), with the watchdog re-escalating an ignored `answered`
-// to amber "WAITING ON MGR". One source of truth for every surface that renders a decision's state.
+// to amber "WAITING ON MGR". `cancelled` (question_cancel/dismiss) is a FOURTH terminal state reachable
+// only from pending — red, never confusable with the muted "resolved with an answer" states. One source of
+// truth for every surface that renders a decision's state.
 export function questionStateChip(q: Pick<Question, "state" | "answeredAt">, nowMs: number, thresholdMs = DECISION_WATCHDOG_MS): StateChipSpec {
   if (q.state === "pending") return { tone: "cyan", label: "PENDING" };
+  if (q.state === "cancelled") return { tone: "red", label: "CANCELLED" };
   if (q.state === "consumed") return { tone: "muted", label: "CONSUMED ✓" };
   // answered
   return isDecisionWatchdog(q, nowMs, thresholdMs)
@@ -138,9 +141,13 @@ export function requestHint(q: Pick<Question, "type" | "options" | "recommendati
   }
 }
 
-// The recorded-outcome text for an answered/consumed request (the history table + the answered readout).
-// Never surfaces a secret — a credential always reads "provided · encrypted, not shown".
-export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note">): string {
+// The recorded-outcome text for an answered/consumed/cancelled request (the history table + the answered
+// readout). Never surfaces a secret — a credential always reads "provided · encrypted, not shown". A
+// cancelled request was NEVER answered — this must be checked BEFORE the per-type switch below, or a
+// cancelled decision/input would misleadingly fall through to "—" (indistinguishable from "answered with
+// no note") instead of naming what actually happened.
+export function requestOutcome(q: Pick<Question, "type" | "chosenOption" | "note" | "state" | "cancelledReason">): string {
+  if (q.state === "cancelled") return q.cancelledReason ? `cancelled · ${q.cancelledReason}` : "cancelled";
   switch (q.type) {
     case "credential":
       return "provided · encrypted, not shown";

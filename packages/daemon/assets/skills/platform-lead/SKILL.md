@@ -70,7 +70,11 @@ spawn/stop and messaging (**`session_message` is cross-project and DURABLE** —
 routes to its live recycle successor, surfaced as `routedTo`, and otherwise boards as a card; it is never
 silently dropped); **your typed decision inbox — `question_ask` posts a human confirm/escalation
 (type `decision` | `input` | `permission` | `credential`) and `question_pull` consumes the answer** (this
-is your ONLY human-confirm channel — there is no `AskUserQuestion` on this surface); and the elevated
+is your ONLY human-confirm channel — there is no `AskUserQuestion` on this surface); a still-pending ask
+that goes moot or gets superseded doesn't have to sit in the human's inbox forever — `question_cancel`
+withdraws your OWN pending ask (never another agent's) into a retained history entry, but REFUSES an
+already-answered one outright (`question_pull` that instead — cancelling can never discard a human answer);
+and the elevated
 human-equivalent ops routed through the FULL validators. **Use these tools for every read and write —
 never reach around them to the raw database.** If a tool you genuinely expect is missing, don't
 improvise a workaround that bypasses a trust boundary — report the gap instead.

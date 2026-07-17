@@ -60,6 +60,33 @@ function NudgeMgrButton({ q }: { q: QuestionInboxItem }) {
   );
 }
 
+// ── Dismiss (question_cancel + dismiss — the human-side exit for a moot/superseded PENDING request) ────
+// A CONFIRMED action (window.confirm, mirroring Archive.tsx's Delete) — NOT a bare mirror of
+// PresetPrompts.tsx's unconfirmed preset-suggestion Dismiss: a preset suggestion is advisory, but a
+// Request is a LIVE agent blocked on this exact answer, and nothing reverts cancelled→pending (there is
+// no re-ask path — only an agent asks). One misclick on an unconfirmed button would permanently and
+// silently destroy that agent's ask, so match the STAKES (Archive's irreversible-delete precedent), not
+// just PresetPrompts' shape. A quiet inline alert on failure (a 409 means the row raced to answered/
+// cancelled elsewhere — invalidating still refetches it into its now-current state either way). Only ever
+// rendered for a pending row.
+function DismissButton({ q }: { q: QuestionInboxItem }) {
+  const qc = useQueryClient();
+  const dismiss = useMutation({
+    mutationFn: () => api.dismissQuestion(q.id),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["openQuestions"] }),
+    onError: (e) => window.alert((e as Error).message),
+  });
+  return (
+    <Button variant="ghost" disabled={dismiss.isPending}
+      title="Dismiss — moot or superseded; retained in history, never answered"
+      onClick={() => {
+        if (window.confirm(`Dismiss "${q.title}"? It will never be answered — this cannot be undone.`)) dismiss.mutate();
+      }}>
+      {dismiss.isPending ? "Dismissing…" : "Dismiss"}
+    </Button>
+  );
+}
+
 // A soft-linked task chip: "task #xxxx" (the request's `taskId`, a NON-FK soft link — a dangling id is
 // tolerated, never a crash). `onClick` (when set) navigates to the card; otherwise it's inert metadata.
 function LinkedTaskChip({ taskId, title, onClick }: { taskId: string; title?: string; onClick?: () => void }) {
@@ -101,7 +128,12 @@ function RequestRow({ q, now, onOpen }: { q: QuestionInboxItem; now: number; onO
             ? <RequestNeedsChip type={q.type} />
             : <DecisionStateChip q={q} now={now} />}
           {q.state === "pending"
-            ? <Button variant="primary" onClick={() => onOpen(q.id)}>{requestActionLabel(q.type)}</Button>
+            ? (
+              <div style={{ display: "flex", gap: 6 }}>
+                <DismissButton q={q} />
+                <Button variant="primary" onClick={() => onOpen(q.id)}>{requestActionLabel(q.type)}</Button>
+              </div>
+            )
             : watchdog
               ? <NudgeMgrButton q={q} />
               : <Button variant="ghost" onClick={() => onOpen(q.id)} style={{ padding: "0 6px" }}>View</Button>}
@@ -363,8 +395,23 @@ export function RequestDetail({ id, onClose }: { id: string; onClose?: () => voi
 
 // The recorded answer for a non-pending request. A credential NEVER shows a value — only that it was
 // provided, encrypted. Decision/input show the chosen option + note; permission shows the authorize/deny
-// outcome + note.
+// outcome + note. A CANCELLED request was never answered at all — a distinct readout (never "Answered …"),
+// naming the reason + who cancelled it (question_cancel/dismiss, card feat(orchestration): question_cancel
+// + dismiss).
 function AnsweredReadout({ q }: { q: QuestionInboxItem }) {
+  if (q.state === "cancelled") {
+    return (
+      <Panel style={{ display: "flex", flexDirection: "column", gap: 6, borderLeft: `3px solid ${color.red}` }}>
+        <SectionLabel style={{ margin: 0, color: color.red }}>Cancelled · never answered</SectionLabel>
+        <div style={{ fontFamily: font.mono, fontSize: 13, color: color.textDim }}>
+          {q.cancelledReason ?? "no reason given"}
+        </div>
+        <div style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+          by {q.cancelledBy === "agent" ? "the asking agent" : "a human"}
+        </div>
+      </Panel>
+    );
+  }
   return (
     <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
       <SectionLabel style={{ margin: 0 }}>{q.state === "consumed" ? "Answered · the manager pulled it" : "Answered · waiting on manager pickup"}</SectionLabel>
@@ -605,41 +652,49 @@ export function RequestHistory() {
   const [search, setSearch] = useState("");
   const [typeF, setTypeF] = useState<QuestionType | "all">("all");
   const [projF, setProjF] = useState<string>("all");
-  const [outcomeF, setOutcomeF] = useState<"all" | "authorized" | "denied" | "answered" | "provided">("all");
+  const [outcomeF, setOutcomeF] = useState<"all" | "authorized" | "denied" | "answered" | "provided" | "cancelled">("all");
   const [dateF, setDateF] = useState<"all" | "24h" | "7d" | "30d">("all");
   const openRequest = useOpenRequest();
   const now = Date.now();
 
   const all = questions.data ?? [];
-  const consumed = useMemo(() => all.filter((q) => q.state === "consumed"), [all]);
+  // Terminal history = 'consumed' (answered + pulled) AND 'cancelled' (question_cancel/dismiss — never
+  // answered at all, card feat(orchestration): question_cancel + dismiss) — both retained the same way,
+  // never a separate view.
+  const terminal = useMemo(() => all.filter((q) => q.state === "consumed" || q.state === "cancelled"), [all]);
+  const cancelledCount = useMemo(() => terminal.filter((q) => q.state === "cancelled").length, [terminal]);
   const projects = useMemo(() => {
     const m = new Map<string, string>();
-    for (const q of consumed) m.set(q.projectId, q.projectName);
+    for (const q of terminal) m.set(q.projectId, q.projectName);
     return [...m.entries()].map(([id, name]) => ({ id, name })).sort((a, b) => a.name.localeCompare(b.name));
-  }, [consumed]);
+  }, [terminal]);
 
-  // Outcome bucket for a consumed request — drives the outcome filter.
-  const outcomeOf = (q: QuestionInboxItem): "authorized" | "denied" | "answered" | "provided" =>
-    q.type === "credential" ? "provided"
-      : q.type === "permission" ? (q.chosenOption === "authorize" ? "authorized" : "denied")
-        : "answered";
+  // Outcome bucket for a terminal request — drives the outcome filter. Checked BEFORE the per-type
+  // branches: a cancelled request was never answered, so it must never fall into "answered"/"provided".
+  const outcomeOf = (q: QuestionInboxItem): "authorized" | "denied" | "answered" | "provided" | "cancelled" =>
+    q.state === "cancelled" ? "cancelled"
+      : q.type === "credential" ? "provided"
+        : q.type === "permission" ? (q.chosenOption === "authorize" ? "authorized" : "denied")
+          : "answered";
   const withinDate = (iso: string | null): boolean => {
     if (dateF === "all") return true;
     if (!iso) return false;
     const ms = { "24h": 864e5, "7d": 7 * 864e5, "30d": 30 * 864e5 }[dateF];
     return now - Date.parse(iso) <= ms;
   };
+  // A cancelled row's "when" is cancelledAt (it has no answeredAt — never answered).
+  const resolvedAt = (q: QuestionInboxItem): string | null => q.state === "cancelled" ? q.cancelledAt : q.answeredAt;
   const s = search.trim().toLowerCase();
-  const rows = consumed.filter((q) =>
+  const rows = terminal.filter((q) =>
     (typeF === "all" || q.type === typeF) &&
     (projF === "all" || q.projectId === projF) &&
     (outcomeF === "all" || outcomeOf(q) === outcomeF) &&
-    withinDate(q.answeredAt) &&
-    (s === "" || `${q.title} ${q.note ?? ""} ${q.chosenOption ?? ""} ${q.agentName} ${q.projectName}`.toLowerCase().includes(s)));
+    withinDate(resolvedAt(q)) &&
+    (s === "" || `${q.title} ${q.note ?? ""} ${q.chosenOption ?? ""} ${q.cancelledReason ?? ""} ${q.agentName} ${q.projectName}`.toLowerCase().includes(s)));
 
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-      <SectionLabel style={{ margin: 0 }}>History ({consumed.length} consumed)</SectionLabel>
+      <SectionLabel style={{ margin: 0 }}>History ({terminal.length - cancelledCount} consumed{cancelledCount > 0 ? ` · ${cancelledCount} cancelled` : ""})</SectionLabel>
       {/* filter bar */}
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
         <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="search titles / answers / agents…"
@@ -658,6 +713,7 @@ export function RequestHistory() {
           <option value="denied">denied</option>
           <option value="answered">answered</option>
           <option value="provided">provided</option>
+          <option value="cancelled">cancelled</option>
         </Select>
         <Select value={dateF} onChange={(e) => setDateF(e.target.value as typeof dateF)}>
           <option value="all">any time</option>
@@ -667,8 +723,8 @@ export function RequestHistory() {
         </Select>
       </div>
 
-      {consumed.length === 0 && <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No consumed requests yet — answered requests land here once the manager pulls them.</span></Panel>}
-      {consumed.length > 0 && rows.length === 0 && <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No history matches your search.</span></Panel>}
+      {terminal.length === 0 && <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No history yet — answered requests land here once the manager pulls them, and dismissed/cancelled ones land here too.</span></Panel>}
+      {terminal.length > 0 && rows.length === 0 && <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No history matches your search.</span></Panel>}
 
       {rows.length > 0 && (
         <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -680,9 +736,9 @@ export function RequestHistory() {
               <RequestTypeTag type={q.type} />
               <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: 12, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={q.title}>{q.title}</span>
               <span style={{ flex: "1 1 120px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{q.projectName} · {q.sessionId.slice(0, 8)}</span>
-              <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={requestOutcome(q)}>{requestOutcome(q)}</span>
+              <span style={{ flex: "2 1 200px", minWidth: 0, fontFamily: font.mono, fontSize: 11, color: q.state === "cancelled" ? color.red : color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={requestOutcome(q)}>{requestOutcome(q)}</span>
               {q.taskId && <LinkedTaskChip taskId={q.taskId} />}
-              <span style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{relativeAge(q.answeredAt, now)}</span>
+              <span style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>{relativeAge(resolvedAt(q), now)}</span>
             </button>
           ))}
         </div>

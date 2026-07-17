@@ -66,6 +66,7 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/questions/:id" },
   // --- Answer / steer (first-person human actions on an already-running session) ---
   { method: "POST", pattern: "/api/questions/:id/answer" },
+  { method: "POST", pattern: "/api/questions/:id/dismiss" },
   { method: "POST", pattern: "/api/sessions/:id/input" },
   { method: "POST", pattern: "/api/sessions/:id/end" },
   { method: "POST", pattern: "/api/sessions/:id/stop" },

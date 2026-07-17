@@ -174,6 +174,48 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(dialog.getByText(/Call it Atlas\./)).toBeVisible();
   });
 
+  test("Dismiss cancels a pending request — it leaves the inbox and lands in history as cancelled", async ({ page, loomDaemon }) => {
+    // card feat(orchestration): question_cancel + dismiss — the human-side exit for a moot/superseded
+    // pending Request. Drives the REAL POST /api/questions/:id/dismiss route (via the UI button, not a
+    // direct API call), then proves the OBSERVABLE before/after: the row leaves the pending inbox and
+    // reappears in History as CANCELLED, never confused with an answered/consumed row.
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "DismissMgr" });
+    const title = uniq("dismiss-me");
+    await loomDaemon.seedQuestion({ sessionId: mgr.sessionId, projectId: mgr.projectId, title, type: "decision", options: ["A", "B"] });
+
+    await page.goto(`${loomDaemon.baseURL}/inbox`);
+    const main = page.locator("main");
+    await expect(main.getByText(title, { exact: true })).toBeVisible();
+
+    // Dismiss is a CONFIRMED action (window.confirm, mirrors Archive.tsx's Delete) — first prove the gate
+    // is REAL by declining it: the row must survive a cancelled confirm, not just a click.
+    const row = main.locator("div").filter({ hasText: title }).first();
+    await expect(row.getByRole("button", { name: "Answer →" })).toBeVisible();
+    page.once("dialog", (dialog) => dialog.dismiss());
+    await row.getByRole("button", { name: "Dismiss" }).click();
+    await expect(main.getByText(title, { exact: true })).toBeVisible();
+
+    // Now accept the confirm — BEFORE: the row is there with its primary action button.
+    page.once("dialog", (dialog) => dialog.accept());
+    await row.getByRole("button", { name: "Dismiss" }).click();
+
+    // AFTER: the row leaves the default "waiting on me" inbox entirely (not just re-labeled in place).
+    await expect(main.getByText(title, { exact: true })).toHaveCount(0);
+
+    // History retains it, correctly labeled CANCELLED (not "answered"/"consumed").
+    await page.locator("main").getByRole("button", { name: "History" }).click();
+    await expect(main.getByText(title, { exact: true })).toBeVisible();
+    const historyRow = main.locator("button").filter({ hasText: title }).first();
+    await expect(historyRow).toContainText("cancelled");
+
+    // Opening it shows the dedicated cancelled readout — never the "Answered …" section label.
+    await historyRow.click();
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByText("CANCELLED", { exact: true })).toBeVisible();
+    await expect(dialog.getByText("Cancelled · never answered")).toBeVisible();
+  });
+
   test("the history tab lists consumed requests and the search box filters them", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "HistMgr" });
     const keep = uniq("rollback-plan");

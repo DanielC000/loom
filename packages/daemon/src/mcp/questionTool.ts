@@ -134,6 +134,9 @@ export function buildQuestionAsk(
       createdAt: now,
       answeredAt: null,
       consumedAt: null,
+      cancelledReason: null,
+      cancelledBy: null,
+      cancelledAt: null,
     },
   };
 }
@@ -195,18 +198,23 @@ export function questionPullItem(q: Question): Record<string, unknown> {
 /**
  * The per-type ANSWER shape shared by `taskRequestGetItem` and `auditRequestItem` (card 59489267) — same
  * branching/fields as `questionPullItem`, but safe to call on a row in ANY state (not just a freshly-
- * answered one `question_pull` just drained): a still-`pending` row's answer fields all read `null`
- * instead of a misleading false-ish derivation (e.g. a pending permission would otherwise wrongly read
- * `approved:false`, indistinguishable from "denied"). Same credential never-echo guarantee as
- * `questionPullItem` — see `credentialAck`. Exported so both non-consuming read surfaces (task-scoped and
- * cross-project audit) share this ONE branching implementation instead of drifting apart.
+ * answered one `question_pull` just drained): a row that was never actually answered — still `pending`, OR
+ * terminally `cancelled` (question_cancel/dismiss, card feat(orchestration): question_cancel + dismiss) —
+ * has its answer fields all read `null` instead of a misleading false-ish derivation (e.g. an unanswered
+ * permission would otherwise wrongly read `approved:false`, indistinguishable from "denied"; an unanswered
+ * credential would otherwise call `credentialAck`, which assumes an answer boundary actually ran, and
+ * fabricate a "provided and stored securely" ack for a secret that was never given). Same credential
+ * never-echo guarantee as `questionPullItem` — see `credentialAck`. Exported so both non-consuming read
+ * surfaces (task-scoped and cross-project audit) share this ONE branching implementation instead of
+ * drifting apart.
  */
 export function questionAnswerByType(q: Question): Record<string, unknown> {
+  const hasAnswer = q.state === "answered" || q.state === "consumed";
   if (q.type === "credential") {
-    return { ack: q.state === "pending" ? null : credentialAck(q) };
+    return { ack: hasAnswer ? credentialAck(q) : null };
   }
   if (q.type === "permission") {
-    return { approved: q.state === "pending" ? null : q.chosenOption === PERMISSION_ANSWERS[0], note: q.note };
+    return { approved: hasAnswer ? q.chosenOption === PERMISSION_ANSWERS[0] : null, note: q.note };
   }
   return { chosenOption: q.chosenOption, note: q.note };
 }
@@ -234,6 +242,9 @@ export function taskRequestGetItem(q: Question): Record<string, unknown> {
     createdAt: q.createdAt, answeredAt: q.answeredAt,
     ...questionAnswerByType(q),
     provisioning: provisioningAudit(q),
+    // question_cancel/dismiss — null unless state:"cancelled". Surfaced here (and in auditRequestItem
+    // below) so a task/audit reader can tell WHY a request left the pending inbox without an answer.
+    cancelledReason: q.cancelledReason, cancelledBy: q.cancelledBy,
   };
 }
 
@@ -270,7 +281,52 @@ export function auditRequestItem(q: Question & { agentId: string | null }): Reco
     createdAt: q.createdAt, answeredAt: q.answeredAt, consumedAt: q.consumedAt,
     ...questionAnswerByType(q),
     provisioning: provisioningAudit(q),
+    // question_cancel/dismiss — null unless state:"cancelled". See taskRequestGetItem's twin field.
+    cancelledReason: q.cancelledReason, cancelledBy: q.cancelledBy,
   };
+}
+
+/**
+ * Agent-lineage-scoped cancel — the shared implementation behind BOTH `question_cancel` MCP tool
+ * registrations (mcp/orchestration.ts's manager surface, mcp/platform.ts's Lead surface) so the two
+ * callers' ownership-check + error-shaping can never drift apart, mirroring how `buildQuestionAsk` is
+ * shared for the ask side. Scoped the SAME way `question_pull`/`requests_list({mine:true})` are — by
+ * `sessions.agent_id`, not the exact asking session id — so a fresh (non-recycle) successor session on the
+ * same agent lineage may still cancel a still-pending ask a predecessor session filed.
+ *
+ * Rejects: a question asked by a DIFFERENT agent lineage (an asker may only cancel its own asks — never
+ * another agent's, mirroring the `mine` ownership boundary); a genuinely unknown id; and — the load-bearing
+ * case — a question that has already LEFT the 'pending' state. `Db.cancelQuestion` throws when the row
+ * isn't pending, naming its actual current state; this catches that and, specifically for "already
+ * answered", returns a message that tells the caller an answer is now available (via question_pull) rather
+ * than a generic rejection — so an agent racing a human's answer can never read a failed cancel as having
+ * silently discarded that answer.
+ */
+export function cancelQuestionForAgent(
+  db: Db,
+  askerSessionId: string,
+  questionId: string,
+  reason: string | undefined,
+): { cancelled: true; questionId: string } | { error: string } {
+  const asker = db.getSession(askerSessionId);
+  if (!asker) return { error: "session not found" };
+  const question = db.getQuestion(questionId);
+  if (!question) return { error: "question not found" };
+  const askingSession = db.getSession(question.sessionId);
+  if (!askingSession || askingSession.agentId !== asker.agentId) {
+    return { error: "you may only cancel a request asked by your own agent lineage — not another agent's" };
+  }
+  try {
+    const cancelled = db.cancelQuestion(questionId, { reason: reason?.trim() || null, cancelledBy: "agent" });
+    if (!cancelled) return { error: "question not found" };
+    return { cancelled: true, questionId: cancelled.id };
+  } catch (e) {
+    const message = (e as Error).message;
+    if (message.includes("already answered")) {
+      return { error: "cannot cancel — this request was just answered; call question_pull to get the answer instead of discarding it" };
+    }
+    return { error: message };
+  }
 }
 
 /** The `{items,total,returned,offset,hasMore}` envelope shape both `requests_list` sites return. */

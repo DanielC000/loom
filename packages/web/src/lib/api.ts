@@ -569,6 +569,11 @@ export const api = {
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, { decision, note }),
   answerCredentialQuestion: (id: string, secret: string) =>
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, { secret }),
+  // Human dismiss (POST /api/questions/:id/dismiss) — the missing exit from a moot/superseded PENDING
+  // request; mirrors dismissPresetPromptSuggestion's shape (a stale/already-non-pending row 409s, surfaced
+  // via postErr like every other answer route above). Returns the cancelled Question (state:"cancelled").
+  dismissQuestion: (id: string, reason?: string) =>
+    postErr<Question>(`/api/questions/${encodeURIComponent(id)}/dismiss`, reason ? { reason } : {}),
 
   // --- Session/run AUDIT LOG (replayable timeline + run-vs-run diff). READ-ONLY, HUMAN-only loopback
   // readers over the existing `orchestration_events` record — NEVER an agent MCP tool (mirrors

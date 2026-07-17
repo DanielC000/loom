@@ -77,7 +77,7 @@ export class TaskMcpRouter {
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns a `requests` summary ({total, answered, pending, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list.",
+        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list.",
         inputSchema: { id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() },
       },
       async ({ id, taskId }) => {
@@ -90,8 +90,8 @@ export class TaskMcpRouter {
       "task_requests_list",
       {
         description:
-          "List every Request (from question_ask) connected to ONE task — pending + answered + consumed " +
-          "alike — as lightweight NEWLINE-DELIMITED JSON rows: {id,type,title,state,answeredAt}. " +
+          "List every Request (from question_ask) connected to ONE task — pending + answered + consumed + " +
+          "cancelled alike — as lightweight NEWLINE-DELIMITED JSON rows: {id,type,title,state,answeredAt}. " +
           "NON-CONSUMING: unlike question_pull (which drains + consumes), this is a stable, re-readable " +
           "reference you can call again later or from a different agent/turn and still see the same " +
           "requests. Use task_request_get(id) for the full body/options/recommendation + answer. taskId " +

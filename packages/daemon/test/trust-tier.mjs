@@ -3,7 +3,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // onRequest hook in gateway/server.ts. Ships INERT: the hook only exists when a non-loopback bind is
 // configured (remoteAccess.enabled && bindHost non-loopback), which is never true by default.
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via app.inject, like csrf-rebind.mjs). Proves:
-//   1. routeTier default-deny is TOTAL against the REAL registered route surface: every one of the 220
+//   1. routeTier default-deny is TOTAL against the REAL registered route surface: every one of the
 //      method+pattern combos the gateway actually registers (captured via app.printRoutes) classifies
 //      Tier-0 EXCEPT the exact, explicit Tier-1 allowlist — so a route added later is Tier-0 unless someone
 //      deliberately allowlists it.
@@ -119,6 +119,7 @@ const ALL_ROUTES = [
   ["GET", "/api/projects/:id/vault/raw"], ["GET", "/api/projects/archived"],
   ["GET", "/api/python/provisioning"], ["POST", "/api/python/provisioning/retry"],
   ["GET", "/api/questions"], ["GET", "/api/questions/:id"], ["POST", "/api/questions/:id/answer"],
+  ["POST", "/api/questions/:id/dismiss"],
   ["POST", "/api/runs"], ["GET", "/api/runs/:id"], ["POST", "/api/runs/:id/cancel"],
   ["GET", "/api/schedules"], ["POST", "/api/schedules"], ["DELETE", "/api/schedules/:id"],
   ["POST", "/api/schedules/:id"], ["POST", "/api/schedules/preview"],
@@ -169,7 +170,7 @@ const EXPECTED_TIER_1 = new Set([
   "GET /api/usage/limits", "GET /api/usage/history", "GET /api/usage/sessions/history",
   "GET /api/projects/:id/vault", "GET /api/projects/:id/vault/file", "GET /api/projects/:id/vault/raw",
   "GET /api/questions", "GET /api/questions/:id",
-  "POST /api/questions/:id/answer", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
+  "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
   "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
   "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId",
   // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.

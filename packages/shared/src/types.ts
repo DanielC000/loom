@@ -1697,7 +1697,14 @@ export interface WebhookEndpointMetadata {
   lastFiredAt: string | null;
 }
 
-export const QUESTION_STATES = ["pending", "answered", "consumed"] as const;
+// "cancelled" (card feat(orchestration): question_cancel + dismiss) is a FOURTH terminal state reachable
+// only from "pending" — never from "answered"/"consumed" (an agent/human can never discard an answer that
+// already landed; see Db.cancelQuestion). Two entry points land it: the asking agent's own `question_cancel`
+// MCP tool (agent-lineage-scoped — can only cancel its own asks) and the human-only `POST
+// /api/questions/:id/dismiss` REST route. Never a hard delete — a cancelled row is retained exactly like an
+// answered/consumed one (see Question.cancelledReason/cancelledBy/cancelledAt below), closing the gap where
+// a moot/superseded pending ask had no exit besides being answered and sat in the human's inbox forever.
+export const QUESTION_STATES = ["pending", "answered", "consumed", "cancelled"] as const;
 export type QuestionState = (typeof QUESTION_STATES)[number];
 
 /**
@@ -1810,6 +1817,15 @@ export interface Question {
   createdAt: string;
   answeredAt: string | null;
   consumedAt: string | null;
+  /** Set only when `state === "cancelled"`: the canceller's optional freeform reason (null if none given).
+   *  Retained forever alongside the row — never cleared, never overwritten (a question can only be
+   *  cancelled once, from "pending"). */
+  cancelledReason: string | null;
+  /** Set only when `state === "cancelled"`: which side cancelled it — the asking agent's own
+   *  `question_cancel` MCP tool, or a human via `POST /api/questions/:id/dismiss`. Null otherwise. */
+  cancelledBy: "agent" | "human" | null;
+  /** Set only when `state === "cancelled"`: when the cancellation landed. Null otherwise. */
+  cancelledAt: string | null;
 }
 
 /**

@@ -147,12 +147,17 @@ function resolveProjectTaskId(db: Db, projectId: string, taskId: string): Task |
  * answered) it should read via task_requests_list/task_request_get before proceeding, instead of missing
  * them entirely (the root problem: the read side used to ignore `task_id` altogether). `answered` counts
  * BOTH 'answered' and 'consumed' rows — both already carry the human's answer; 'consumed' only means the
- * ASKING agent already drained it via question_pull, not that the answer is unavailable here.
+ * ASKING agent already drained it via question_pull, not that the answer is unavailable here. `cancelled`
+ * (question_cancel/dismiss, card feat(orchestration): question_cancel + dismiss) is counted SEPARATELY —
+ * a cancelled request was NEVER answered, so it must never be folded into `answered` (nor derived as
+ * `total - pending`, which would silently do exactly that once a fourth state exists). `total` still
+ * counts every row regardless of state; `pending + answered + cancelled === total`.
  */
 export interface TaskRequestsSummary {
   total: number;
   answered: number;
   pending: number;
+  cancelled: number;
   items: Array<{ id: string; type: QuestionType; title: string; state: QuestionState }>;
 }
 
@@ -160,11 +165,17 @@ export interface TaskRequestsSummary {
 export type TaskWithRequests = Task & { requests: TaskRequestsSummary };
 
 function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
-  const pending = questions.filter((q) => q.state === "pending").length;
+  // Each bucket is derived EXPLICITLY by state — never `total - pending` (that silently mis-groups any
+  // state besides pending/answered/consumed, which is exactly the bug a cancelled row exposed here).
+  let pending = 0, answered = 0, cancelled = 0;
+  for (const q of questions) {
+    if (q.state === "pending") pending++;
+    else if (q.state === "answered" || q.state === "consumed") answered++;
+    else if (q.state === "cancelled") cancelled++;
+  }
   return {
     total: questions.length,
-    pending,
-    answered: questions.length - pending,
+    pending, answered, cancelled,
     items: questions.map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state })),
   };
 }
@@ -191,7 +202,7 @@ export interface TaskRequestSummaryRow {
 }
 
 /**
- * List every request connected to ONE task (pending + answered + consumed alike), NON-CONSUMING — a
+ * List every request connected to ONE task (pending + answered + consumed + cancelled alike), NON-CONSUMING — a
  * stable, re-readable reference distinct from `question_pull`'s agent-scoped drain-and-consume (card
  * 988bb585). `taskId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors getProjectTask).
  * Project-scoped symmetrically with {@link getProjectTaskRequest}'s single-request get — a foreign-
@@ -330,9 +341,9 @@ export function relocateProjectTask(db: Db, taskId: string, toProject: string): 
 /** Tool descriptors (name/description/input shape) for wiring to the MCP SDK. */
 export const TASK_TOOL_DESCRIPTORS = [
   { name: "tasks_list", description: "List the current project's board tasks. Defaults to a lightweight summary (no body) with done cards excluded; pass includeBody:true or use tasks_get(id) for bodies." },
-  { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Also returns a `requests` summary ({total, answered, pending, items:[{id,type,title,state}]}) of any Requests connected to this task (via taskId at question_ask time) — a task may carry prior owner decisions you'd otherwise miss; read them in full with task_requests_list/task_request_get." },
+  { name: "tasks_get", description: "Read ONE full task (title + body) by id, within the current project. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (via taskId at question_ask time) — a task may carry prior owner decisions you'd otherwise miss; read them in full with task_requests_list/task_request_get." },
   { name: "tasks_create", description: "Create a task on the current project's board (title, body?, columnKey?, priority?). priority is p0|p1|p2|p3 (low number = higher priority), default p2." },
   { name: "tasks_update", description: "Update a task (title?, body?, columnKey?, position?, priority?, held?, deferred?) by id, within the current project. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). priority is p0|p1|p2|p3; held=true is the owner-gated 'don't nag' flag the idle watchdog discounts; deferred=true is YOUR OWN (manager) sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but unlike held it never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack (no body) instead of echoing the full card; pass body when intentionally editing it to get the full task back." },
-  { name: "task_requests_list", description: "List every Request connected to a task (pending + answered + consumed alike), title-altitude only: {id,type,title,state,answeredAt}. NON-CONSUMING — re-readable across turns/agents, unlike question_pull's drain-and-consume. taskId accepts the full id OR an unambiguous 8-char id-prefix." },
+  { name: "task_requests_list", description: "List every Request connected to a task (pending + answered + consumed + cancelled alike), title-altitude only: {id,type,title,state,answeredAt}. NON-CONSUMING — re-readable across turns/agents, unlike question_pull's drain-and-consume. taskId accepts the full id OR an unambiguous 8-char id-prefix." },
   { name: "task_request_get", description: "Read ONE connected Request in full (body, options, recommendation, type, state) plus its answer by type — chosenOption/note for decision|input, approved/note for permission, ack ONLY (never the secret) for credential. NON-CONSUMING. id is the request id; an optional taskId further scopes the lookup." },
 ] as const;
