@@ -402,8 +402,10 @@ export const api = {
   // Cross-project (god-eye) archive: archived sessions across ALL projects, each enriched with
   // projectId/projectName + snapshotExists — feeds the grouped Project → Agent Archive page + Mission
   // Control/Overview/RunHistory's history views. PAGINATED, same `{items, total}` shape as above.
-  allArchivedSessions: (opts?: { limit?: number; offset?: number }) =>
-    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}`),
+  // Optional `role` scopes the page server-side to one SessionRole (e.g. "manager") BEFORE the
+  // limit/offset apply, so a role-scoped caller's page budget isn't diluted by unrelated rows.
+  allArchivedSessions: (opts?: { limit?: number; offset?: number; role?: string }) =>
+    get<ArchivedSessionsPage>(`/api/archived-sessions?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.role ? `&role=${opts.role}` : ""}`),
   // A single archived session BY ID, cross-project — for a by-id consumer (SessionView resolving a
   // deep-linked/attention-queue session) that must not depend on that session still being on the FIRST
   // page of the bounded list above. Resolves to `null` (not a thrown error) on the expected 404 — "not

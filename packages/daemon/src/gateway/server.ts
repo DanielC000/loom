@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget } from "@loom/shared";
-import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES } from "@loom/shared";
+import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -4365,12 +4365,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // projectId/projectName (already on the SessionListItem) + snapshotExists, newest-archived first.
   // Read-only; the cross-project Archive page groups these Project → Agent. PAGINATED, same shape/knobs
   // as the per-project route above — this was the dominant unpaginated payload (2137 rows / 2.4MB
-  // measured live; see project-memory `perf-profile-2026-07-16-findings`).
+  // measured live; see project-memory `perf-profile-2026-07-16-findings`). Optional `?role=` scopes the
+  // page to one SessionRole BEFORE the limit/offset apply (card 9f010283) — MissionControl's Run Replay
+  // picker only ever shows managers, so `role=manager` spends the whole page budget on manager rows
+  // instead of it being diluted by unrelated archived worker/setup/etc. rows; an unrecognized value is
+  // ignored (falls back to unfiltered) rather than erroring a god-eye read.
   app.get("/api/archived-sessions", async (req) => {
-    const q = req.query as { limit?: string; offset?: string };
+    const q = req.query as { limit?: string; offset?: string; role?: string };
     const limit = parsePageParam(q.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
     const offset = parsePageParam(q.offset, 0);
-    const { rows, total, limit: effectiveLimit } = deps.db.listAllArchivedSessionsPage(limit, offset);
+    const role = q.role && (SESSION_ROLES as readonly string[]).includes(q.role) ? (q.role as SessionRole) : undefined;
+    const { rows, total, limit: effectiveLimit } = deps.db.listAllArchivedSessionsPage(limit, offset, role);
     // One readdir PER DISTINCT project (not per row) — a bulk-existence cache keyed by projectId, since
     // rows span many projects here (unlike the single-project route above).
     const snapshotIdsByProject = new Map<string, Set<string>>();

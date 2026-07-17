@@ -27,6 +27,13 @@
 //   H. The actual "Load more" reachability loop (Archive.tsx's useInfiniteQuery accumulation) driven over
 //      REAL REST calls against the >500-row fixture — every row, including ones past the old dead-end,
 //      comes back exactly once across multiple fetches.
+//
+// Follow-up (keep archived managers older than the newest 300 reachable in Run Replay, card 9f010283):
+//   I. An optional `role=` filter on listAllArchivedSessionsPage/GET /api/archived-sessions scopes the
+//      page BEFORE limit/offset apply. Reproduces the bug (an unfiltered same-size page excludes an old
+//      archived manager once 300+ fresher non-manager rows exist) AND proves role=manager reaches it —
+//      both at the db layer and over REST, the exact path MissionControl's Run Replay picker calls. Also
+//      covers an unrecognized `role=` value being ignored (falls back to unfiltered) rather than erroring.
 // Run: 1) build the daemon, 2) node test/all-archived-sessions.mjs
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 import fs from "node:fs";
@@ -219,6 +226,56 @@ try {
       seen.size === grandTotal); // Set dedupes by id — a size shortfall here would mean a gap OR overlap
     check("H: reachability took multiple fetches (proves this isn't trivially satisfied by one big page)",
       fetches > 1);
+
+    // ===================== I. `role=` filter (card 9f010283) =====================
+    // Reproduce the exact bug: an archived MANAGER older than the newest N archived sessions GLOBALLY
+    // must still be reachable via a role-scoped page, even though the mixed (unfiltered) page of the
+    // same size excludes it. 300 fresh WORKER rows, all stamped strictly newer than every other row in
+    // this test (including the existing manager `a1`), plus one MANAGER (`oldMgr`) stamped older than
+    // everything else in the whole fixture (older even than the `bulk*` rows).
+    db.insertProject({ id: "pRole", name: "RoleFilter", repoPath: "C:/tmp/role", vaultPath: "C:/tmp/role", config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "aRole", projectId: "pRole", name: "agentRole", startupPrompt: "", position: 0 });
+    const NEW_WORKERS = 300;
+    for (let i = 0; i < NEW_WORKERS; i++) db.insertSession(mkSession(`roleW${i}`, "pRole", "aRole", { role: "worker" }));
+    db.insertSession(mkSession("oldMgr", "pRole", "aRole", { role: "manager" }));
+    const raw4 = new Database(dbFile);
+    const stamp4 = raw4.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?");
+    for (let i = 0; i < NEW_WORKERS; i++) stamp4.run(at(100_000 + i), `roleW${i}`); // newer than every prior row
+    stamp4.run(at(-50_000_000), "oldMgr"); // older than every prior row, incl. the bulk* rows
+    raw4.close();
+
+    // I1: the unfiltered page reproduces the bug — oldMgr falls off a same-size mixed page.
+    const mixedPage = db.listAllArchivedSessionsPage(NEW_WORKERS, 0);
+    check("I1: unfiltered page(300) is dominated by the 300 fresher workers, excluding oldMgr (the bug)",
+      mixedPage.rows.length === NEW_WORKERS && !mixedPage.rows.some((s) => s.id === "oldMgr"));
+
+    // I2: role="manager" spends the WHOLE page budget on managers only — oldMgr is reachable, ordered
+    // newest-manager-first (a1 archived at ms 1000, oldMgr archived at ms -50,000,000).
+    const mgrPage = db.listAllArchivedSessionsPage(300, 0, "manager");
+    check("I2: role=manager page contains ONLY managers (2 total: a1, oldMgr)", mgrPage.rows.length === 2);
+    check("I2: role=manager page's total is role-scoped too (2, not the full archived count)", mgrPage.total === 2);
+    check("I2: role=manager page reaches oldMgr — the fix", mgrPage.rows.some((s) => s.id === "oldMgr"));
+    check("I2: role=manager page stays newest-first among managers (a1, oldMgr)", mgrPage.rows.map((s) => s.id).join(",") === "a1,oldMgr");
+    check("I2: role=manager rows never include a non-manager row", mgrPage.rows.every((s) => s.role === "manager"));
+
+    // I3: same fix, over REST — the exact path MissionControl's Run Replay picker calls.
+    const restMixed = await app.inject({ method: "GET", url: "/api/archived-sessions?limit=300" });
+    const restMixedBody = restMixed.json();
+    check("I3: REST unfiltered ?limit=300 reproduces the bug (oldMgr absent)",
+      !restMixedBody.items.some((s) => s.id === "oldMgr"));
+
+    const restMgr = await app.inject({ method: "GET", url: "/api/archived-sessions?limit=300&role=manager" });
+    const restMgrBody = restMgr.json();
+    check("I3: REST ?role=manager reaches oldMgr (the picker fix, end to end)",
+      restMgrBody.items.some((s) => s.id === "oldMgr"));
+    check("I3: REST ?role=manager returns only managers", restMgrBody.items.every((s) => s.role === "manager"));
+    check("I3: REST ?role=manager total is role-scoped (2)", restMgrBody.total === 2);
+
+    // I4: an unrecognized role value is ignored (falls back to unfiltered), not an error — this is a
+    // best-effort god-eye read, not a validated write.
+    const restBogus = await app.inject({ method: "GET", url: "/api/archived-sessions?limit=300&role=not-a-real-role" });
+    check("I4: an unrecognized ?role= is ignored (200, behaves as unfiltered)",
+      restBogus.statusCode === 200 && restBogus.json().items.length === NEW_WORKERS);
   } finally {
     await app.close();
   }
@@ -229,6 +286,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — listAllArchivedSessions spans all projects newest-first enriched with names; the new bounded-page db methods + REST routes ({items,total,limit}, ?limit=/?offset=) return the same shape; GET /api/archived-sessions/:id resolves a session sitting off the first page, 404ing for an unknown/non-archived id; a REAL >500-row seed proves the MAX_ARCHIVED_PAGE clamp actually caps rows while reporting its effective limit back; and the actual Load-more accumulation loop reaches every row past the old 500-row dead-end, exactly once."
+  ? "\n✅ ALL PASS — listAllArchivedSessions spans all projects newest-first enriched with names; the new bounded-page db methods + REST routes ({items,total,limit}, ?limit=/?offset=) return the same shape; GET /api/archived-sessions/:id resolves a session sitting off the first page, 404ing for an unknown/non-archived id; a REAL >500-row seed proves the MAX_ARCHIVED_PAGE clamp actually caps rows while reporting its effective limit back; the actual Load-more accumulation loop reaches every row past the old 500-row dead-end, exactly once; and the new ?role= filter reproduces + fixes the archived-manager-falls-off-the-page bug (db layer + REST), ignoring an unrecognized role value rather than erroring."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

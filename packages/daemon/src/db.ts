@@ -3608,16 +3608,24 @@ export class Db {
   }
   /** BOUNDED page across ALL projects, newest-archived first, plus total + the effective (clamped) limit
    * — the cross-project mirror of listArchivedSessionsPage above, backing the paginated
-   * `GET /api/archived-sessions` route. */
-  listAllArchivedSessionsPage(limit: number, offset = 0): { rows: SessionListItem[]; total: number; limit: number } {
+   * `GET /api/archived-sessions` route. An optional `role` filter scopes the page to one SessionRole
+   * (e.g. `manager`) BEFORE the limit/offset apply, so a role-scoped caller (MissionControl's Run Replay
+   * picker, which only ever shows managers) spends its whole page budget on rows it actually wants,
+   * instead of the bound being diluted by unrelated worker/setup/etc. rows that share the same
+   * cross-project archived_at ordering (card 9f010283 — an archived manager older than the newest 300
+   * archived sessions GLOBALLY was unreachable in the picker even though far fewer than 300 managers
+   * existed). Omitted ⇒ unfiltered, byte-identical to the pre-filter behavior. */
+  listAllArchivedSessionsPage(limit: number, offset = 0, role?: SessionRole | null): { rows: SessionListItem[]; total: number; limit: number } {
     const lim = Math.max(1, Math.min(limit, MAX_ARCHIVED_PAGE));
-    const total = (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE archived_at IS NOT NULL").get() as { c: number }).c;
+    const roleClause = role ? " AND s.role = @role" : "";
+    const params = role ? { role } : {};
+    const total = (this.db.prepare(`SELECT COUNT(*) AS c FROM sessions s WHERE s.archived_at IS NOT NULL${roleClause}`).get(params) as { c: number }).c;
     const rows = this.db.prepare(
       `SELECT s.*, p.name AS project_name, a.name AS agent_name
        FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
-       WHERE s.archived_at IS NOT NULL
-       ORDER BY s.archived_at DESC LIMIT ? OFFSET ?`,
-    ).all(lim, offset) as Row[];
+       WHERE s.archived_at IS NOT NULL${roleClause}
+       ORDER BY s.archived_at DESC LIMIT @limit OFFSET @offset`,
+    ).all({ ...params, limit: lim, offset }) as Row[];
     return { total, limit: lim, rows: rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string })) };
   }
   /**

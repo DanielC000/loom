@@ -46,14 +46,24 @@ export default function MissionControl() {
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
   const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 2000 });
   // Archived (now-exited) sessions across all projects, newest-archived first — the live feed above
-  // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used to
-  // restore history access to Run Replay (a god-eye view of LIVE orchestration otherwise loses every
-  // finished wave). Polled lazily (15s) — archived rows don't change second-to-second. PAGINATED — this
-  // god-eye view only needs RECENT history (inactive-project detection + the replay picker both read
-  // newest-first), so it fetches one bounded page rather than the full cross-project archived set
-  // (previously 2137 rows / 2.4MB measured live).
+  // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used for
+  // inactive-project detection + each project's muted archived history (any role — see `archivedItems`
+  // usages below). Polled lazily (15s) — archived rows don't change second-to-second. PAGINATED — this
+  // god-eye view only needs RECENT history, so it fetches one bounded page rather than the full
+  // cross-project archived set (previously 2137 rows / 2.4MB measured live).
   const archived = useQuery({ queryKey: ["allArchivedSessions", 300], queryFn: () => api.allArchivedSessions({ limit: 300 }), refetchInterval: 15000 });
   const archivedItems = archived.data?.items ?? [];
+  // Archived MANAGERS ONLY, for Run Replay's picker — a SEPARATE role-scoped page (not derived by
+  // client-side filtering `archivedItems` above), so the 300-row budget is spent entirely on managers.
+  // The mixed all-roles page above interleaves managers with the far more numerous archived
+  // worker/setup/etc. rows in the same archived_at ordering, so an archived manager older than the
+  // newest 300 archived sessions GLOBALLY could fall off the page and become unreachable/unselectable
+  // in the picker even though far fewer than 300 managers actually existed (card 9f010283).
+  const archivedManagersQ = useQuery({
+    queryKey: ["allArchivedSessions", "manager", 300],
+    queryFn: () => api.allArchivedSessions({ limit: 300, role: "manager" }),
+    refetchInterval: 15000,
+  });
   // The reserved/system homes (the dev "Loom Platform" home + the shipping "Platform" home) — discovered
   // read-only, exactly as the Platform pages do (retry:false, since platformHome 404s in the shipping
   // edition and setupHome may 404 before the home seeds). Their project ids exclude the reserved homes from
@@ -131,11 +141,12 @@ export default function MissionControl() {
 
   // Replay roots: every manager you can replay — LIVE managers first (the wave you're driving, ordered
   // live-then-recency), then the ARCHIVED managers of past/exited runs (newest-archived first, as the
-  // feed already returns them). Since sessions auto-archive on exit, a finished run's manager is gone
-  // from the live feed and lives only in `archived` — without this merge the panel would show only the
-  // current wave and "replay any past run too" (above) would be a lie. Dedup by id, live row wins.
+  // role-scoped feed already returns them). Since sessions auto-archive on exit, a finished run's manager
+  // is gone from the live feed and lives only in `archivedManagersQ` — without this merge the panel would
+  // show only the current wave and "replay any past run too" (above) would be a lie. Dedup by id, live
+  // row wins.
   const liveManagerIds = new Set(managers.map((m) => m.id));
-  const archivedManagers = archivedItems.filter((s) => s.role === "manager" && !liveManagerIds.has(s.id));
+  const archivedManagers = (archivedManagersQ.data?.items ?? []).filter((s) => !liveManagerIds.has(s.id));
   const replayRoots: SessionListItem[] = [
     ...[...managers].sort((a, b) => {
       const liveA = a.processState === "live" ? 1 : 0, liveB = b.processState === "live" ? 1 : 0;
