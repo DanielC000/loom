@@ -4,6 +4,43 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.22.0] — 2026-07-18
+
+**A reliability, legibility, and workflow release.** The header nav becomes a collapsible **sidebar (Instrument Rail)**; every Loom session gets a **legible name** in the resume picker; the worker **DoD gate is routed through the daemon's concurrency semaphore** so parallel workers are structurally safe; the **question/Requests lifecycle** gains cancel + supersede; the **merge-gate card** shows live status and outcome; the **Companion** gets a broad refinement pass; a **token-reduction sweep** trims the always-on tool/doctrine surface; and a deep **performance pass** kills N+1s and unbounded payloads across the gateway.
+
+### Added
+- **Sidebar navigation ("Instrument Rail").** The top header nav is replaced by a collapsible sidebar; the Loom logo centers in the collapsed rail.
+- **Legible session names.** Every fresh `claude` session is named via `-n` (e.g. `loom-<project>-<agent>-<taskslug>`, `loom-<project>-mgr`, `loom-lead`) so Loom sessions are identifiable in the resume picker instead of an opaque `<hash>-XX`. Fresh spawns only; version-gated (Claude Code ≥ 2.1.196), fail-closed to byte-identical argv when unsupported.
+- **Question/Requests lifecycle.** `question_cancel` (withdraw your own pending ask) + a human "dismiss" route for pending Requests; a `supersedes:<id>` param on `question_ask` that atomically cancels a named prior pending ask while filing the new one.
+- **Richer merge-gate card.** Live gate status + an elapsed timer while a merge runs, and a briefly-retained merged / rejected / failed outcome distinction.
+- **Safe parallel workers.** The worker DoD self-check is the `run_gate` tool, which runs the project gate in the worker's own worktree through the daemon's **GateSemaphore** (`maxConcurrentGates`) — so total concurrent test-lanes are bounded across the whole fleet instead of forcing the manager to hand-serialize workers; `run_gate` now runs 2 lanes to match the merge gate. `maxConcurrentGates` is surfaced on the Settings global-config page.
+- **Analyst/Deep-Dive vault deliverables.** Analyst/Deep-Dive rigs can `vault_write` their note deliverable from an isolated worktree.
+- **Supervisor `.env`.** A file-based `.env` is loaded in the self-host supervisor so feature flags survive a `daemon_restart`.
+- **`finalMessageOnly` transcript mode** to avoid re-ingesting tool-result noise; a manager→Lead notify primitive; MCP arg-name aliases so an obvious wrong first call succeeds; a bulk `GET /api/agents` across all projects.
+
+### Changed
+- **Token-reduction sweep.** Trimmed the always-on manager tool descriptions and tightened conditional tool registration (e.g. `peer_*`/`deploy` register only when the project actually has links / a deploy command); trimmed `CLAUDE.md` + the orchestrate/worker doctrine skills to their load-bearing kernel.
+- **Shared agent memory hardening.** `memory_write` gains a concurrency guard (read-first `baseVersion` compare-and-set) and a byte-cap; the resume-half memory injection is deduped (no verbatim re-inject with no change); curation / freshness / provenance doctrine added.
+- **Companion refinements.** The heartbeat holds quietly instead of re-narrating an unchanged (`alreadySurfaced`) decision; propose responses carry `expiresAt` so the owner is told a proposal self-clears; escalation alerts are readable and no longer re-fire each cycle; a live capability upgrade no longer interrupts an in-flight turn.
+- **Idle-watchdog** no longer re-nudges a manager/Lead correctly parked on an open owner `question_ask`; its per-tick full-board rescan is throttled.
+- **Resume-doc size budget** enforced with a proactive auto-rotate nudge before the `Read` cap.
+
+### Fixed
+- **Daemon crash:** an `fs` error on a session-log write no longer takes down the whole daemon (an `error` listener on the log write stream).
+- **Zombie / duplicate merge ops:** `worker_merge_confirm` is deduped within the retention window and no longer re-submits onto a running turn.
+- **Gateway config:** platform-config groups deep-merge (an omitted nested key means "leave alone", not delete); clear-to-inherit works for top-level toggles.
+- **pty resilience:** `resumeAfterRateLimit` is gated so a reset can't submit into a dying pty; post-restart tool calls are gated until the MCP router reconnects (no "not connected" hard-fail).
+- **Companion:** removed the silent wrong-board card-create path; names the missing capability on a partial-grant deny; `connections`/`vaultWrite` apply via a row write on capability upgrade; defaults to relaying an unquotable ask to the manager.
+- **Orchestration:** de-duped cross-project platform→manager directive delivery; clean-or-flag a dirty worktree reused after `worker_stop(hard)`; normalized projectId/taskId prefix resolution; resume-doc records the mainline squash-subject, not the ephemeral branch SHA.
+- **Web:** archived managers older than the newest 300 stay reachable in the Run Replay picker; setup `project_configure` accepts an 8-char id-prefix.
+
+### Performance
+- Broad N+1 + payload-bounding pass across the gateway: paginated the archived-sessions endpoints and replaced the per-row `fs.existsSync` N+1 with one archive-dir scan; bounded the board REST payload (omit task body, cap done tasks); batched per-session-card queue/wakes polling into one bulk call; a bulk `GET /api/agents` kills the client-side N+1 in Schedules/Settings/EventTriggers; skip the `workerDiff` git subprocess when a branch is unchanged since the last poll.
+
+### Internal / Docs
+- Doctrine corrections: `worker_set_mode('plan')` is rejected for workers — the investigate-first gate is a kickoff instruction; `run_gate` is taught as THE worker DoD gate; irreversible owner decisions are filed by category, not repetition count; a Windows `/tmp` hazard note for workers.
+- Removed the dead `TASK_TOOL_DESCRIPTORS` parallel descriptor list; derived platform-config patch schemas from `.shape` so per-field bounds can't drift; added coverage for the bulk queue/wakes endpoints and `vault_write` gaps.
+
 ## [0.21.1] — 2026-07-16
 
 **Bind reference repos when creating a project from the setup wizard.** The "New project from Template" wizard's Project step now carries a reference-repos editor, so read-only sibling repos can be bound at creation time — previously `referenceRepos` (shipped in 0.21.0) could only be added afterwards from Project settings.
