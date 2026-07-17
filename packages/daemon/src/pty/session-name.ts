@@ -55,7 +55,7 @@ const MAX_TASK_SEG = 16;
 // Unicode combining diacritical marks (U+0300-U+036F) — stripped after NFKD decomposition so e.g. "é"
 // (which NFKD splits into "e" + a combining acute accent) folds to plain "e" instead of being dropped
 // entirely by the ASCII-only slug pass below.
-const DIACRITIC_MARKS_RE = /[̀-ͯ]/g;
+const DIACRITIC_MARKS_RE = /[\u0300-\u036F]/g;
 
 /**
  * Lowercase, ASCII-fold (NFKD decompose + drop combining diacritics, so e.g. "Café" → "cafe" rather than
