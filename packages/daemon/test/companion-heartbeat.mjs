@@ -187,6 +187,20 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   check("prompt: an env override wins", readCompanionConfig({ ...base, LOOM_COMPANION_HEARTBEAT_PROMPT: "hi" }).heartbeatPrompt === "hi");
 }
 
+// --- 6b. Repeat-heartbeat hold-when-unchanged framing (card e5a7f208): the DEFAULT prompt teaches the
+//     companion to keep calling decisions_list (the only out-of-band state-change detector) but hold
+//     quietly — no re-narration — when everything comes back alreadySurfaced:true. Text-assertion only:
+//     this proves the wording shipped, not that a real model obeys it (that's a live-only behavior, flagged
+//     up separately) — see the DEFAULT_HEARTBEAT_PROMPT doc comment in config.ts for the full rationale.
+{
+  const p = DEFAULT_HEARTBEAT_PROMPT;
+  check("hold-framing: still instructs checking decisions_list (the cheap out-of-band state-change detector)", p.includes("decisions_list"));
+  check("hold-framing: teaches the alreadySurfaced:true signal", p.includes("alreadySurfaced:true"));
+  check("hold-framing: instructs NOT re-narrating an unchanged decision", /do\s+not\s+re-narrate/i.test(p));
+  check("hold-framing: instructs holding quiet when everything is unchanged", /stay quiet and do nothing/i.test(p));
+  check("hold-framing: still preserves surfacing something newly changed", /genuinely new or changed/i.test(p));
+}
+
 // --- 7. The heartbeat carries the HOME route on its turn → per-turn-route deliverReply → HOME ---
 {
   const fakeAdapter = (name, sent) => ({ name, maxMessageLength: 4096, start() {}, async stop() {}, async send(chatId, text) { sent.push({ chatId, text }); } });

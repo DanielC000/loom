@@ -49,12 +49,24 @@ export interface CompanionConfig {
  * The default proactive-prompt text (TRUSTED daemon text — the heartbeat watcher frames it as
  * `[loom:heartbeat] …`, distinct from untrusted inbound chat). It instructs a brief proactive check and
  * a reply ONLY when there's something worth surfacing, so a conservative cadence stays quiet by default.
+ *
+ * Repeat-tick token friction (card e5a7f208): `decisions_list` (capabilities.ts) is a CHEAP read and the
+ * ONLY way the companion learns a decision changed OUT-OF-BAND — the owner can answer a pending decision
+ * on the board/manager side, which produces no message in the companion's own chat transcript, so the
+ * companion cannot skip calling it based on its own memory of "nothing new happened." What IS expensive
+ * and worth cutting is re-narrating / re-writing a brief for a decision that comes back unchanged
+ * (`alreadySurfaced:true`, dependency 0c1365d0) — so the prompt below keeps the cheap check every tick but
+ * explicitly teaches holding quietly on an all-unchanged result, rather than trying to skip the check.
  */
 export const DEFAULT_HEARTBEAT_PROMPT =
   "Proactive check-in. Briefly review anything you are tracking for the owner (running work, follow-ups, " +
-  "reminders, things you said you would get back to them on). If — and only if — there is something " +
-  "genuinely worth surfacing, send it with chat_reply. If there is nothing worth saying, stay quiet and " +
-  "do nothing. Don't message just because you were pinged.";
+  "reminders, things you said you would get back to them on) — including decisions_list if you have it. " +
+  "A decision's `alreadySurfaced:true` means you already told the owner about it in this exact state: do " +
+  "not re-narrate it or write a fresh brief about it again on your own; only mention it if the owner asks " +
+  "or something else prompts it. If every tracked decision is alreadySurfaced:true (or otherwise " +
+  "unchanged) and nothing else is newly worth mentioning, stay quiet and do nothing. If — and only if — " +
+  "something is genuinely new or changed (a decision newly surfaced, one whose state changed, or anything " +
+  "else worth flagging), send it with chat_reply. Don't message just because you were pinged.";
 
 /**
  * Read the companion config from env (spike scope). Returns null when the bot token is UNSET → the whole
