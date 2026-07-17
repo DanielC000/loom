@@ -113,13 +113,15 @@ test("editing a daemon-global setting persists to the platform override", async 
     .toBe(47_000);
 });
 
-test("editing maxConcurrentGates: blank inherits, a set value persists, a bad value surfaces a readable 400 (card 13eda2eb)", async ({ page, loomDaemon }) => {
+test("editing maxConcurrentGates: blank inherits, a set value persists, blank-AFTER-set CLEARS the override (card fd55ac8a), a bad value surfaces a readable 400 (card 13eda2eb)", async ({ page, loomDaemon }) => {
   // The daemon-global gate-concurrency cap surfaced as its own control. Per the card the field OMITS on
   // blank (a top-level scalar, like schedulerEnabled) — a blank field is not overridden, so it inherits the
-  // platform default. This proves the three DoD behaviors: blank = inherit, a set value PATCHes + persists,
-  // and a bad value 400s readably. (A daemon-global setting has no per-test isolation on this shared
-  // worker-scoped daemon, so the field is exercised on whatever state prior tests left; the assertions read
-  // the override + effective hint directly rather than assuming a pristine start.)
+  // platform default. This proves the DoD behaviors: blank = inherit, a set value PATCHes + persists, a
+  // PREVIOUSLY-SET value blanked-and-saved again actually CLEARS the persisted override (not just leaves
+  // the stale last-saved value in place — the pre-fix bug this card exists for), and a bad value 400s
+  // readably. (A daemon-global setting has no per-test isolation on this shared worker-scoped daemon, so
+  // the field is exercised on whatever state prior tests left; the assertions read the override + effective
+  // hint directly rather than assuming a pristine start.)
   const project = await loomDaemon.createProject(`settings-gates-${Date.now()}`);
   await pinActiveProject(page, project.id);
 
@@ -137,9 +139,8 @@ test("editing maxConcurrentGates: blank inherits, a set value persists, a bad va
     return body?.override?.maxConcurrentGates ?? null;
   };
 
-  // BLANK = INHERIT: clear the field (its own save row is independent) and confirm the resolved value the
-  // hint shows is the platform default (1) — a blank field resolves to the inherited default. The placeholder
-  // states the same revert target.
+  // BLANK = INHERIT (unset field): confirm the resolved value the hint shows is the platform default (1) —
+  // a never-set field resolves to the inherited default. The placeholder states the same revert target.
   await gates.fill("");
   await expect(gatesLabel.getByText("effective: 1")).toBeVisible();
   await expect(gates).toHaveAttribute("placeholder", "inherit (default 1)");
@@ -148,28 +149,162 @@ test("editing maxConcurrentGates: blank inherits, a set value persists, a bad va
   await gates.fill("4");
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
-  // Observable #1: the platform override now carries maxConcurrentGates = 4 (a top-level key, not nested).
+  // Observable #1 (BEFORE the clear): the platform override now carries maxConcurrentGates = 4 (a
+  // top-level key, not nested).
   await expect.poll(readGatesOverride).toBe(4);
   // Observable #2: a reload re-seeds the field from the persisted override — not just optimistic state.
   await page.reload();
   await expect(field(page, "Max concurrent merge/deploy gates")).toHaveValue("4");
 
+  // CLEAR (card fd55ac8a): blanking this NOW-SET field and saving again must actually revert it to
+  // inherit — the PATCH handler used to shallow-merge and OMIT an untouched/blank field, so a set→blank
+  // round-trip silently kept the stale 4 forever. Observable AFTER: the stored override no longer carries
+  // the key at all (not merely re-defaulted client-side) AND the effHint reverts to the platform default.
+  const gatesAfterSet = field(page, "Max concurrent merge/deploy gates");
+  await gatesAfterSet.fill("");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readGatesOverride).toBeNull();
+  await expect(gatesLabel.getByText("effective: 1")).toBeVisible();
+  // A reload re-seeds the field from the CLEARED persisted override (blank, not the stale "4").
+  await page.reload();
+  await expect(field(page, "Max concurrent merge/deploy gates")).toHaveValue("");
+
   // BAD VALUE: 99 is outside the control's advertised 1–50 bound. buildGlobalOverride sends it verbatim; the
   // strict-zod PATCH 400s with a field-named reason (formatZodIssues prefixes the path), surfaced inline —
-  // never silently accepted, and the persisted value is unchanged.
+  // never silently accepted, and the persisted (now-cleared) value stays unchanged.
   const gatesAfterReload = field(page, "Max concurrent merge/deploy gates");
   await gatesAfterReload.fill("99");
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
   await expect(page.getByText(/maxConcurrentGates/).first()).toBeVisible();
-  await expect.poll(readGatesOverride).toBe(4);
+  await expect.poll(readGatesOverride).toBeNull();
 
-  // NON-NUMERIC is likewise rejected (NaN → null over JSON → the strict validator 400s), not treated as 0.
+  // NON-NUMERIC is likewise rejected — routed through as the literal string (not NaN, which JSON-
+  // serializes to `null` and would collide with the clear sentinel) — so it 400s distinctly from a real
+  // clear, rather than being silently accepted as one.
   await gatesAfterReload.fill("abc");
   await expect(globalSave).toBeEnabled();
   await globalSave.click();
   await expect(page.getByText(/maxConcurrentGates/).first()).toBeVisible();
-  await expect.poll(readGatesOverride).toBe(4);
+  await expect.poll(readGatesOverride).toBeNull();
+});
+
+test("editing a message-delivery toggle (coalesceAgentMessages): set persists, clearing back to inherit CLEARS the override (card fd55ac8a)", async ({ page, loomDaemon }) => {
+  // The tri-state toggles (coalesceAgentMessages/operatorEnabled/schedulerEnabled) share the same
+  // clear-to-inherit fix as maxConcurrentGates above — selecting "— inherit" and saving must actually
+  // DELETE the persisted key, not just omit it from the PATCH while the last-saved boolean survives
+  // underneath. Exercised here on coalesceAgentMessages (default OFF); the other two toggles share the
+  // identical TriSelect + buildGlobalOverride code path.
+  const project = await loomDaemon.createProject(`settings-coalesce-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const labelText = "Group agent & worker messages into a single turn (legacy)";
+  const toggle = field(page, labelText);
+  await expect(toggle).toBeVisible();
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const toggleLabel = page.locator(`label:has(> span:text-is(${JSON.stringify(labelText)}))`);
+
+  const readOverride = async (): Promise<boolean | null> => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+    const body = (await res.json()) as { override?: { coalesceAgentMessages?: boolean } };
+    return body?.override?.coalesceAgentMessages ?? null;
+  };
+
+  // SET: flip it on — the platform default is off, so `true` is an unambiguous non-default value.
+  await toggle.selectOption("true");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  // Observable #1 (BEFORE the clear): the override now carries coalesceAgentMessages = true.
+  await expect.poll(readOverride).toBe(true);
+  await expect(toggleLabel.getByText("effective: true")).toBeVisible();
+  await page.reload();
+  await expect(field(page, labelText)).toHaveValue("true");
+
+  // CLEAR (card fd55ac8a): select "— inherit" and save. Observable AFTER: the stored override no longer
+  // carries the key at all AND the effective hint reverts to the platform default (false) — not merely a
+  // client-side re-default while `true` survives underneath in the DB.
+  const toggleAfterSet = field(page, labelText);
+  await toggleAfterSet.selectOption("inherit");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readOverride).toBeNull();
+  await expect(toggleLabel.getByText("effective: false")).toBeVisible();
+  // A reload re-seeds "— inherit" from the CLEARED override (not the stale "true").
+  await page.reload();
+  await expect(field(page, labelText)).toHaveValue("inherit");
+});
+
+test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a)", () => {
+  // This spec seeds rateLimit.exhaustedThresholdPct directly and sets watchers.wakeMs through the UI, on
+  // the SHARED worker-scoped daemon. Both are inert to every other spec today (nothing else reads
+  // exhaustedThresholdPct; wakeMs is boot-bound, per event-triggers.spec.ts's determinism note this is
+  // exactly the class of shared-daemon leakage that has broken this suite before) — clear both back out
+  // via the clear-to-inherit sentinel this same card built, so nothing survives to the next spec.
+  test.afterEach(async ({ loomDaemon }) => {
+    await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: { rateLimit: null, watchers: null } }),
+    });
+  });
+
+  test("saving the Rate Limits grid with every rendered field blank PRESERVES a non-grid sibling it doesn't show", async ({ page, loomDaemon }) => {
+    // rateLimit.exhaustedThresholdPct has NO control anywhere in GLOBAL_FIELDS — the Rate Limits panel
+    // never renders it — but a human can still persist it directly over the loopback REST PATCH (there
+    // is no agent-facing writer for this daemon-global surface). A submitted group REPLACES the
+    // persisted one wholesale (the PATCH handler's shallow TOP-LEVEL merge), so a form that builds its
+    // group from ONLY the fields it renders would silently DELETE this sibling the instant the user
+    // saves ANY daemon-global edit — even one in a completely different group — since
+    // buildGlobalOverride recomputes and resends every group on every save. Seed it directly over REST
+    // (bypassing the grid, exactly as a human curl'ing the PATCH endpoint would), then save with the
+    // Rate Limits grid entirely blank (untouched) and confirm the sibling survives.
+    const seed = await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ config: { rateLimit: { exhaustedThresholdPct: 77 } } }),
+    });
+    expect(seed.ok).toBe(true);
+
+    const project = await loomDaemon.createProject(`settings-nongrid-sibling-${Date.now()}`);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+
+    // Assert the load-bearing premise, not just claim it in prose: every Rate Limits grid field really
+    // is blank before Save — so the test can't quietly stop testing "the grid stays untouched" if a
+    // future spec (or reordering) left a stray value seeded into one of them.
+    for (const label of ["Default backoff (h)", "Deadline after reset (m)", "Deadline, no reset (h)", "Recency window (h)", "Reset buffer (s)"]) {
+      await expect(field(page, label)).toHaveValue("");
+    }
+
+    // Touch an UNRELATED daemon-global field (Watcher Cadences, not Rate Limits) so Save enables — the
+    // "user never touched this panel" scenario: the Rate Limits grid stays entirely blank throughout.
+    const wakeMs = field(page, "Wake tick (s)");
+    await expect(wakeMs).toBeVisible();
+    await wakeMs.fill("50");
+    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+    await expect(globalSave).toBeEnabled();
+    await globalSave.click();
+
+    const readExhaustedThreshold = async (): Promise<number | null> => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+      const body = (await res.json()) as { override?: { rateLimit?: { exhaustedThresholdPct?: number } } };
+      return body?.override?.rateLimit?.exhaustedThresholdPct ?? null;
+    };
+    // Observable: the sibling this form never rendered is still there after a save that touched a
+    // different group entirely — not silently wiped by the whole-group replace.
+    await expect.poll(readExhaustedThreshold).toBe(77);
+    // And the edited, unrelated field actually took (proving the save was real, not a no-op).
+    await expect
+      .poll(async () => {
+        const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+        const body = (await res.json()) as { override?: { watchers?: { wakeMs?: number } } };
+        return body?.override?.watchers?.wakeMs ?? null;
+      })
+      .toBe(50_000);
+  });
 });
 
 test("editing a host-tool integration path persists to the platform override (card 8dc5ebb9)", async ({ page, loomDaemon }) => {

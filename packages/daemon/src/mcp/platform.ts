@@ -4,7 +4,7 @@ import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, Profile, Schedule, Task } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, Task } from "@loom/shared";
 import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
@@ -483,6 +483,47 @@ export function validatePlatformConfigOverride(
   const r = platformConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
   return { ok: true, value: r.data as PlatformConfigOverride };
+}
+
+/**
+ * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a): field-for-field identical to
+ * `platformConfigOverrideSchema` above, except the 7 top-level keys the Settings global-config form can
+ * blank back to "inherit" — `rateLimit`/`watchers`/`timeouts` (the ms-keyed field grid) and
+ * `schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/`maxConcurrentGates` (the tri-state
+ * toggles + the gate-cap input) — additionally accept an explicit `null`. `null` here means "delete this
+ * key from the persisted override" (revert to the resolved default); OMITTING the key still means
+ * "not being edited, leave whatever is already persisted alone" (today's/unchanged behavior) — the PATCH
+ * handler in server.ts is what turns a `null` into an actual delete, then re-validates the merged result
+ * against the non-nullable `platformConfigOverrideSchema` above, so a `null` can never itself reach
+ * `db.setPlatformConfig`. Every other key (`connections`/`integrations`/`remoteAccess`/
+ * `companionVoiceEnabled`) has no client-facing blank-to-inherit control today, so it keeps its plain
+ * optional shape here too — add the nullable treatment here first if that ever changes.
+ */
+const platformConfigPatchSchema = z.object({
+  rateLimit: rateLimitOverride.nullable().optional(),
+  watchers: watchersOverride.nullable().optional(),
+  timeouts: timeoutsOverride.nullable().optional(),
+  connections: connectionsOverride.optional(),
+  integrations: integrationsOverride.optional(),
+  coalesceAgentMessages: z.boolean().nullable().optional(),
+  companionVoiceEnabled: z.boolean().optional(),
+  operatorEnabled: z.boolean().nullable().optional(),
+  remoteAccess: remoteAccessOverride.optional(),
+  schedulerEnabled: z.boolean().nullable().optional(),
+  maxConcurrentGates: z.number().int().min(1).max(50).nullable().optional(),
+}).strict();
+
+/**
+ * Validate the PATCH `/api/platform/config` request body against the clear-sentinel-aware shape above.
+ * Same `{ok:true,value}` | `{ok:false,error}` envelope as `validatePlatformConfigOverride`; the caller
+ * (server.ts) is responsible for turning a `null` value into an actual key deletion before persisting.
+ */
+export function validatePlatformConfigPatch(
+  raw: unknown,
+): { ok: true; value: PlatformConfigPatch } | { ok: false; error: string } {
+  const r = platformConfigPatchSchema.safeParse(raw ?? {});
+  if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
+  return { ok: true, value: r.data as PlatformConfigPatch };
 }
 
 /**

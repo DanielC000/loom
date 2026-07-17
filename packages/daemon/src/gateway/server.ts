@@ -41,7 +41,7 @@ import { listConnections, createConnection, deleteConnection, getConnectionMetad
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
 import { listCapabilitySummaries, createCapabilityDef, deleteCapabilityDef, getCapabilityProvisionStatus, resolveCapabilityServer } from "../capabilities/registry.js";
 import { encryptSecret, decryptSecret } from "../keys/envelope.js";
-import { validateProjectConfigOverride, validatePlatformConfigOverride, validateColumnLayout } from "../mcp/platform.js";
+import { validateProjectConfigOverride, validatePlatformConfigOverride, validatePlatformConfigPatch, validateColumnLayout } from "../mcp/platform.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
@@ -3503,13 +3503,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { override, resolved: { ...resolved.platform, remoteAccess: resolved.remoteAccess } };
   });
   app.patch("/api/platform/config", async (req, reply) => {
-    const v = validatePlatformConfigOverride((req.body as { config?: unknown })?.config ?? req.body);
+    const v = validatePlatformConfigPatch((req.body as { config?: unknown })?.config ?? req.body);
     if (!v.ok) return reply.code(400).send({ error: `invalid platform config: ${v.error}` });
     // Shallow-merge the submitted top-level keys onto the PERSISTED config rather than replacing the
     // whole blob — a PATCH carrying only one field (e.g. a single Settings toggle) must leave every
-    // sibling field the caller didn't touch byte-identical. Re-validate the merged result too, so a
-    // partial body can't bypass the bounds/shape checks the old full-blob path enforced.
-    const merged = { ...deps.db.getPlatformConfig(), ...v.value };
+    // sibling field the caller didn't touch byte-identical. An OMITTED key (not present in v.value)
+    // is left alone (today's/unchanged behavior); an explicit `null` (card fd55ac8a — the clear
+    // sentinel a blanked Settings toggle sends) DELETES the key instead, reverting it to inherit the
+    // resolved default. Re-validate the merged result too, so a partial body can't bypass the
+    // bounds/shape checks the old full-blob path enforced — and so a `null` can never itself reach
+    // `setPlatformConfig` (the merge below always strips it back out first).
+    const merged: Record<string, unknown> = { ...deps.db.getPlatformConfig() };
+    for (const [key, val] of Object.entries(v.value)) {
+      if (val === null) delete merged[key];
+      else if (val !== undefined) merged[key] = val;
+    }
     const mv = validatePlatformConfigOverride(merged);
     if (!mv.ok) return reply.code(400).send({ error: `invalid platform config: ${mv.error}` });
     const wasOperatorEnabled = isOperatorEnabled(deps.db);

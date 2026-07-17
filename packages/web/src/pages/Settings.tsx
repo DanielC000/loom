@@ -8,6 +8,7 @@ import {
   type OrchestrationConfig,
   type PlatformConfig,
   type PlatformConfigOverride,
+  type PlatformConfigPatch,
   type RemoteAccessConfig,
   type HostToolMcpSpec,
   type ConnectionAuthScheme,
@@ -523,23 +524,60 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   );
   const odMcpParsed = parseOpenDesignMcpConfig(openDesignMcpConfigJson);
 
-  // Build the override from the form — every non-blank field converted to canonical ms (× the unit).
-  // A blank field is omitted (inherits). A non-numeric entry sends NaN (→ null) so the strict-zod PATCH
-  // 400s with a readable reason — the demonstrable invalid path.
-  function buildGlobalOverride(): PlatformConfigOverride {
-    const o: PlatformConfigOverride = {};
-    for (const f of GLOBAL_FIELDS) {
-      const s = vals[f.key] ?? "";
-      if (s.trim() === "") continue;
-      const grp = ((o as Record<string, Record<string, number>>)[f.grp] ??= {});
-      grp[f.key] = Number(s) * UNIT_MS[f.unit];
+  // Build the PATCH body from the form — every non-blank field converted to canonical ms (× the unit).
+  // A field/group that's ENTIRELY blank sends the explicit `null` clear-to-inherit sentinel (card
+  // fd55ac8a) — NOT omitted — so a set→blank→save round-trip actually reverts the stored override
+  // instead of leaving the last-saved value stranded (the PATCH handler only leaves an OMITTED key
+  // alone; only `null` deletes it). A group with at least one non-blank field still sends that group as
+  // a plain object (each field within it stays a non-nullable number, so a stray NaN-from-garbage-input
+  // inside it still 400s, same as pre-fix).
+  function buildGlobalOverride(): PlatformConfigPatch {
+    const o: PlatformConfigPatch = {};
+    const msGroups = ["rateLimit", "watchers", "timeouts"] as const;
+    for (const grp of msGroups) {
+      const entries: Record<string, number> = {};
+      for (const f of GLOBAL_FIELDS) {
+        if (f.grp !== grp) continue;
+        const s = vals[f.key] ?? "";
+        if (s.trim() === "") continue;
+        entries[f.key] = Number(s) * UNIT_MS[f.unit];
+      }
+      // Code-review fix: some fields the platform-config zod schemas accept (mcp/platform.ts —
+      // rateLimit.exhaustedThresholdPct, watchers.crashRecoveryWatchMs, timeouts.runMs) have NO control
+      // in GLOBAL_FIELDS — the grid simply never renders them, but a human can still persist them
+      // directly over the loopback REST PATCH (there is no agent-facing writer for this daemon-global
+      // surface — see CLAUDE.md/mcp/platform.ts's human-only note). A submitted group REPLACES the
+      // persisted one wholesale (the PATCH handler's shallow TOP-LEVEL merge), so building the group from
+      // ONLY grid fields — as the first pass of this card did — would silently DELETE a non-grid sibling
+      // the instant this form saves, even though the user never touched (or even saw) it. Carry every
+      // non-grid key through from the loaded override UNCHANGED, so this form can only ever affect the
+      // fields it actually presents; the group is nulled only when it's genuinely empty (nothing
+      // persisted outside the grid, nothing entered in it) — never merely because the grid itself is
+      // blank.
+      const persistedGroup = (override as Record<string, Record<string, unknown> | undefined>)[grp] ?? {};
+      const gridKeys = new Set(GLOBAL_FIELDS.filter((f) => f.grp === grp).map((f) => f.key));
+      const preserved: Record<string, unknown> = {};
+      for (const [k, v] of Object.entries(persistedGroup)) {
+        if (!gridKeys.has(k)) preserved[k] = v;
+      }
+      const merged = { ...preserved, ...entries };
+      (o as Record<string, unknown>)[grp] = Object.keys(merged).length > 0 ? merged : null;
     }
-    if (coalesceAgentMsgs !== "inherit") o.coalesceAgentMessages = coalesceAgentMsgs === "true";
-    if (operatorEnabled !== "inherit") o.operatorEnabled = operatorEnabled === "true";
-    if (schedulerEnabled !== "inherit") o.schedulerEnabled = schedulerEnabled === "true";
-    // Emit only when non-blank; Number("") would be 0 (a deadlocking cap) so blank MUST inherit, not send
-    // 0. A non-numeric entry becomes NaN (→ null over JSON) and the strict-zod PATCH 400s readably.
-    if (maxConcurrentGates.trim() !== "") o.maxConcurrentGates = Number(maxConcurrentGates);
+    o.coalesceAgentMessages = coalesceAgentMsgs === "inherit" ? null : coalesceAgentMsgs === "true";
+    o.operatorEnabled = operatorEnabled === "inherit" ? null : operatorEnabled === "true";
+    o.schedulerEnabled = schedulerEnabled === "inherit" ? null : schedulerEnabled === "true";
+    // Number("") would be 0 (a deadlocking cap), so blank must send the clear sentinel, not 0. A
+    // non-numeric entry is routed through as the ORIGINAL STRING rather than Number()'s NaN — NaN
+    // JSON-serializes to `null`, which would collide with the clear sentinel and silently "succeed" as
+    // an inherit instead of 400ing; a string fails the number|null shape check and still 400s readably,
+    // same demonstrable-invalid path as before this card.
+    const gatesTrim = maxConcurrentGates.trim();
+    if (gatesTrim === "") {
+      o.maxConcurrentGates = null;
+    } else {
+      const n = Number(gatesTrim);
+      (o as Record<string, unknown>).maxConcurrentGates = Number.isFinite(n) ? n : gatesTrim;
+    }
     // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
     // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
     // persisted one wholesale. Omitting it when both paths are blank (the old behavior) meant clearing the

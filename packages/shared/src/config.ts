@@ -751,6 +751,30 @@ export interface PlatformConfigOverride {
   maxConcurrentGates?: number;
 }
 
+/**
+ * The wire body for `PATCH /api/platform/config` (card fd55ac8a): identical to `PlatformConfigOverride`
+ * except the top-level keys the Settings global-config form can blank back to "inherit" — the 4 scalar
+ * toggles (`schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/`maxConcurrentGates`) and the 3
+ * ms-keyed sub-groups its field grid writes to (`rateLimit`/`watchers`/`timeouts`) — also accept an
+ * explicit `null`. `null` is the CLEAR sentinel: "delete this key from the stored override, revert to
+ * the resolved default" — distinct from OMITTING the key entirely, which means "not being edited, leave
+ * whatever is already persisted alone" (today's/unchanged shallow-merge behavior). Every other key
+ * (`connections`/`integrations`/`remoteAccess`/`companionVoiceEnabled`) has no client-facing
+ * blank-to-inherit control today, so it keeps its plain optional (present-or-absent) shape here too.
+ */
+export type PlatformConfigPatch = Omit<
+  PlatformConfigOverride,
+  "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates"
+> & {
+  rateLimit?: Partial<RateLimitConfig> | null;
+  watchers?: Partial<WatcherConfig> | null;
+  timeouts?: Partial<TimeoutConfig> | null;
+  coalesceAgentMessages?: boolean | null;
+  operatorEnabled?: boolean | null;
+  schedulerEnabled?: boolean | null;
+  maxConcurrentGates?: number | null;
+};
+
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
   kanbanColumns: [
     { key: "inbox", label: "Inbox", role: "intake" },

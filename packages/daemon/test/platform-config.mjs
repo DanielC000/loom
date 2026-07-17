@@ -36,7 +36,7 @@ requireHermeticEnv();
 const { resolveConfig } = await import("@loom/shared");
 // dist imports happen AFTER LOOM_HOME is set (paths.ts reads it at module-eval time).
 const { Db } = await import("../dist/db.js");
-const { validatePlatformConfigOverride } = await import("../dist/mcp/platform.js");
+const { validatePlatformConfigOverride, validatePlatformConfigPatch } = await import("../dist/mcp/platform.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { detectIntegrations } = await import("../dist/integrations/detect.js");
 
@@ -664,10 +664,130 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (15) clear-to-inherit sentinel (card fd55ac8a) ============================
+// Set→blank→save must actually clear a top-level scalar/group back to inherit-the-default — the PATCH
+// handler used to shallow-merge ONLY submitted keys, so an omitted (blanked) field left the stale
+// persisted value in place forever. An explicit `null` on one of the 7 clearable keys
+// (schedulerEnabled/operatorEnabled/coalesceAgentMessages/maxConcurrentGates + the ms-keyed
+// rateLimit/watchers/timeouts groups) now DELETES that key from the persisted override; an OMITTED key
+// is unaffected (today's/unchanged behavior — test (12) above already covers that half).
+{
+  // --- validatePlatformConfigPatch: null accepted on every clearable key, rejected everywhere else ---
+  check("(15) accepts schedulerEnabled:null", validatePlatformConfigPatch({ schedulerEnabled: null }).ok === true);
+  check("(15) accepts operatorEnabled:null", validatePlatformConfigPatch({ operatorEnabled: null }).ok === true);
+  check("(15) accepts coalesceAgentMessages:null", validatePlatformConfigPatch({ coalesceAgentMessages: null }).ok === true);
+  check("(15) accepts maxConcurrentGates:null", validatePlatformConfigPatch({ maxConcurrentGates: null }).ok === true);
+  check("(15) accepts rateLimit:null", validatePlatformConfigPatch({ rateLimit: null }).ok === true);
+  check("(15) accepts watchers:null", validatePlatformConfigPatch({ watchers: null }).ok === true);
+  check("(15) accepts timeouts:null", validatePlatformConfigPatch({ timeouts: null }).ok === true);
+  // No client-facing blank-to-inherit control exists for these — they keep their plain (non-nullable)
+  // shape, so `null` still 400s exactly like any other type mismatch.
+  check("(15) REJECTS companionVoiceEnabled:null (no sentinel wired for it)", validatePlatformConfigPatch({ companionVoiceEnabled: null }).ok === false);
+  check("(15) REJECTS connections:null", validatePlatformConfigPatch({ connections: null }).ok === false);
+  check("(15) REJECTS integrations:null", validatePlatformConfigPatch({ integrations: null }).ok === false);
+  check("(15) REJECTS remoteAccess:null", validatePlatformConfigPatch({ remoteAccess: null }).ok === false);
+  // Only the WHOLE-GROUP key is nullable, not its members — a stray null (e.g. NaN-from-garbage-input
+  // over JSON) inside an otherwise-populated group still 400s, same as pre-fix.
+  check("(15) rejects a null WITHIN rateLimit (per-field, not whole-group)",
+    validatePlatformConfigPatch({ rateLimit: { defaultBackoffMs: null } }).ok === false);
+
+  // --- REST round-trip: set → clear → the stored override no longer carries the key, resolves to the default ---
+  const clearDbFile = path.join(TMP, "clear-sentinel.db");
+  const db = new Db(clearDbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    // Seed all 4 scalar toggles + all 3 ms groups (rateLimit with TWO fields, to prove a partial-group
+    // replace still keeps a resent sibling while dropping the one that's blanked client-side).
+    db.setPlatformConfig({
+      schedulerEnabled: true,
+      operatorEnabled: true,
+      coalesceAgentMessages: true,
+      maxConcurrentGates: 5,
+      rateLimit: { defaultBackoffMs: 3600000, resetBufferMs: 20000 },
+      watchers: { wakeMs: 90000 },
+      timeouts: { gitPushMs: 90000 },
+    });
+    const before = db.getPlatformConfig();
+    check("(15) seed: every field persisted before the clear",
+      before.schedulerEnabled === true && before.operatorEnabled === true && before.coalesceAgentMessages === true &&
+      before.maxConcurrentGates === 5 && before.rateLimit?.defaultBackoffMs === 3600000 && before.rateLimit?.resetBufferMs === 20000 &&
+      before.watchers?.wakeMs === 90000 && before.timeouts?.gitPushMs === 90000);
+
+    // Clear 3 of the 4 scalars + both single-field ms groups via the `null` sentinel; leave
+    // `operatorEnabled` UNTOUCHED (omitted) to prove an omitted field survives a save that clears its
+    // siblings; resend `rateLimit` as a partial object (one field blanked client-side ⇒ omitted from
+    // it, mirroring GlobalConfigForm.buildGlobalOverride) rather than null, since it still has a
+    // non-blank field.
+    const clear = await app.inject({
+      method: "PATCH", url: "/api/platform/config",
+      payload: {
+        schedulerEnabled: null,
+        coalesceAgentMessages: null,
+        maxConcurrentGates: null,
+        rateLimit: { defaultBackoffMs: 3600000 },
+        watchers: null,
+        timeouts: null,
+      },
+    });
+    check("(15) clear PATCH → 200", clear.statusCode === 200 && clear.json().ok === true);
+
+    const after = db.getPlatformConfig();
+    check("(15) cleared scalar #1 (schedulerEnabled) is GONE, not stale", after.schedulerEnabled === undefined);
+    check("(15) cleared scalar #2 (coalesceAgentMessages) is GONE, not stale", after.coalesceAgentMessages === undefined);
+    check("(15) cleared scalar #3 (maxConcurrentGates) is GONE, not stale", after.maxConcurrentGates === undefined);
+    check("(15) UNTOUCHED scalar (operatorEnabled, omitted from the PATCH) is byte-identical", after.operatorEnabled === true);
+    check("(15) cleared group #1 (watchers) is GONE entirely, not stale", after.watchers === undefined);
+    check("(15) cleared group #2 (timeouts) is GONE entirely, not stale", after.timeouts === undefined);
+    check("(15) partially-replaced group (rateLimit) keeps the resent field", after.rateLimit?.defaultBackoffMs === 3600000);
+    check("(15) partially-replaced group (rateLimit) drops the sibling blanked client-side (not resent)", after.rateLimit?.resetBufferMs === undefined);
+
+    // resolveConfig now reflects the platform DEFAULT for every cleared key, not the stale override.
+    const resolved = resolveConfig(undefined, after);
+    const def = resolveConfig(undefined);
+    check("(15) resolved schedulerEnabled reverted to the default", resolved.orchestration.schedulerEnabled === def.orchestration.schedulerEnabled);
+    check("(15) resolved maxConcurrentGates reverted to the default", resolved.orchestration.maxConcurrentGates === def.orchestration.maxConcurrentGates);
+    check("(15) resolved coalesceAgentMessages reverted to the default", resolved.platform.coalesceAgentMessages === def.platform.coalesceAgentMessages);
+    check("(15) resolved watchers.wakeMs reverted to the default", resolved.platform.watchers.wakeMs === def.platform.watchers.wakeMs);
+
+    // GET reflects the cleared store too (the effHint the Settings UI shows).
+    const g = (await app.inject({ method: "GET", url: "/api/platform/config" })).json();
+    check("(15) GET override no longer carries the cleared keys", g.override.schedulerEnabled === undefined && g.override.watchers === undefined);
+    check("(15) GET resolved shows the default for a cleared key", g.resolved.watchers.wakeMs === def.platform.watchers.wakeMs);
+
+    // A null on a key that was NEVER set is a harmless no-op (deleting an absent key).
+    const noop = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { companionVoiceEnabled: false, schedulerEnabled: null } });
+    check("(15) clearing an already-absent key is a harmless 200 no-op", noop.statusCode === 200 && db.getPlatformConfig().schedulerEnabled === undefined);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+
+  // --- maxConcurrentGates: a non-numeric client entry must still 400 (not silently "succeed" as a clear
+  // via NaN → null JSON collision) — the Settings form routes an invalid entry through as the ORIGINAL
+  // STRING (see Settings.tsx buildGlobalOverride) so it fails the number|null shape check distinctly
+  // from the real null clear sentinel. ---
+  {
+    const invalidDbFile = path.join(TMP, "clear-sentinel-invalid.db");
+    const db2 = new Db(invalidDbFile);
+    const stub = {};
+    const app2 = await buildServer({ db: db2, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+    try {
+      db2.setPlatformConfig({ maxConcurrentGates: 4 });
+      const bad = await app2.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentGates: "not-a-number" } });
+      check("(15) a non-numeric maxConcurrentGates string still 400s (not treated as a clear)", bad.statusCode === 400);
+      check("(15) the rejected invalid PATCH did not clobber the persisted value", db2.getPlatformConfig().maxConcurrentGates === 4);
+    } finally {
+      try { await app2.close(); } catch { /* ignore */ }
+      db2.close();
+    }
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the new `integrations` key with deep-partial sibling isolation, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/unreachable/detected across not-configured, misconfigured, real-binary-but-nothing-listening (OD residual risk 2), and real-binary (Codescape) cases; and (card e8eee68c) the full mcpConfig escape hatch: the zod schema accepts a valid command+args+env spec (args/env optional, command required + non-empty), rejects a bad shape (.strict() unknown key, non-string args/env values), rides the SAME PATCH surface with a 400 that never clobbers a valid persisted spec, resolvePlatform threads it through, and detectIntegrations skips the TCP daemon-port probe entirely for a full spec (reporting detected/not-found on binary presence alone — the desktop app's named-pipe sidecar makes that probe inapplicable) even against the same closed port that downgrades the plain-path form to unreachable."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the new `integrations` key with deep-partial sibling isolation, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/unreachable/detected across not-configured, misconfigured, real-binary-but-nothing-listening (OD residual risk 2), and real-binary (Codescape) cases; (card e8eee68c) the full mcpConfig escape hatch: the zod schema accepts a valid command+args+env spec (args/env optional, command required + non-empty), rejects a bad shape (.strict() unknown key, non-string args/env values), rides the SAME PATCH surface with a 400 that never clobbers a valid persisted spec, resolvePlatform threads it through, and detectIntegrations skips the TCP daemon-port probe entirely for a full spec (reporting detected/not-found on binary presence alone — the desktop app's named-pipe sidecar makes that probe inapplicable) even against the same closed port that downgrades the plain-path form to unreachable; and (card fd55ac8a) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) and rejects it everywhere else (incl. a per-field null nested inside a group), a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, a partial-object group-replace still drops just the blanked field, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
