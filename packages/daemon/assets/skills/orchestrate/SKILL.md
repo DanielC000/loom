@@ -163,12 +163,19 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   feels natural to inline the ask as prose for them to answer right there in the chat; don't. You may
   narrate it or point at it in the chat, but the request OBJECT is FILED via `question_ask` — never typed
   as chat-prose — so it becomes a durable, pushable, answerable inbox record instead of a message that
-  scrolls away with no answer surface. **A recurring owner choice is the tell: if you've surfaced the same
-  standing decision as chat prose two or three times and it keeps scrolling away unanswered, that is the
-  signal to STOP re-saying it and file it once as a durable `question_ask`.** The litmus: **"Do I need
-  something only the human can give — a
-  call between options, an approval to cross the irreversible/outward line, a secret, or a freeform
-  answer? → file a typed `question_ask`, not chat."**
+  scrolls away with no answer surface.
+- **The bright line is the action's CATEGORY, not how many times you've said it.** An irreversible /
+  outward / spend action (force-push, deletion, deploy, spending money, or any comparable one-way step)
+  that arises mid-chat is filed as a `question_ask` on the FIRST surfacing — never offered as chat-prose
+  "I can do X, want me to?" even once. That class needs a durable, pushable, answerable record before you
+  act, not a chat line the owner might miss.
+- **For a reversible or ordinary choice, a repeated ask is still a useful tell:** if you've surfaced the
+  same standing decision as chat prose two or three times and it keeps scrolling away unanswered, that's
+  the signal to stop re-saying it and file it once as a durable `question_ask`. The category trigger above
+  supersedes this count for the irreversible/outward/spend class — don't wait for a repeat there. The
+  litmus either way: **"Do I need something only the human can give — a call between options, an approval
+  to cross the irreversible/outward line, a secret, or a freeform answer? → file a typed `question_ask`,
+  not chat."**
 - When the explicit backlog empties, distinguish **drained-for-now** from **converged**. *Drained*
   means no actionable card sits on the board *right now* but the project's planned work (per the vault)
   isn't finished — so don't idle: identify the highest-value next step toward the standing goal and do
