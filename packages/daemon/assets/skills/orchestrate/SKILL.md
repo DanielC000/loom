@@ -273,9 +273,8 @@ instruction (next).
 required checkpoint in the kickoff.** Telling a worker in the kickoff to "report your root cause + fix plan
 before you edit; I'll sanity-check first" is only advisory if phrased loosely: a worker can (and does)
 treat it as optional narration — write the plan as chat prose and edit in the very next step, and the
-checkpoint you wanted never happens. You **cannot** fall back to `plan` mode to force it — the daemon
-rejects `worker_set_mode('plan')` for a worker (it would trap the worker's own `worker_report`). Enforce
-the gate with an EXPLICIT kickoff instruction instead: require the worker to `worker_report` its root
+checkpoint you wanted never happens. You **cannot** fall back to `plan` mode to force it (rejected for a
+worker, as above). Enforce the gate with an EXPLICIT kickoff instruction instead: require the worker to `worker_report` its root
 cause + plan as a `progress` (or `blocked`) checkpoint and then STOP and wait for your approval before
 making any edit. That report-and-stop is a real checkpoint (the `/worker` doctrine backs it — a plan
 narrated as prose followed by edits does not satisfy it); a loosely-worded "let me know your plan" does
@@ -476,12 +475,11 @@ mid-report — before sending anything.
    don't only write it** — `memory_read`/`memory_list` pull a relevant note on demand, so consult the store when
    a decision might already be settled in it. Read-first also gates an UPDATE: to overwrite an existing key,
    read it and pass its current `version` as `baseVersion` — a stale or omitted base is rejected with the
-   current note returned so you reconcile. **Stamp a durable note with light provenance**
-   (`verified: <date> against <mainline>`) and cite identifiers that survive — commit SUBJECTS, symbol names —
-   never a pre-squash branch SHA (rots on merge) or a line number (drifts). **If a note carries an expiry, write
-   it as a runnable predicate** (a grep / commit-presence / card-state check), not prose like "until X lands" —
-   with the honest caveat that nothing runs it automatically today, so it only helps when an agent thinks to
-   check it.
+   current note returned so you reconcile. **Stamp a durable note with the same provenance discipline as your
+   resume doc (above)** — date it, cite commit SUBJECTS / symbol names, never a branch SHA or line number.
+   **If a note carries an expiry, write it as a runnable predicate** (a grep / commit-presence / card-state
+   check), not prose like "until X lands" — with the honest caveat that nothing runs it automatically today,
+   so it only helps when an agent thinks to check it.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

@@ -87,32 +87,26 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      the missing gate command up, too.
 
    **If you do run a build/test command yourself** (that no-gate-command fallback, or another check your
-   task names): **run it in the FOREGROUND, then commit, then report — in ONE flow.** A blocking command
-   completes within your turn, so you never need to launch it in the background and park on a poll waiting
-   for it. **The rule: never end your turn while a command you launched yourself is still running, and
-   never report before committing.** Such a command that runs for **minutes**, not just one whose
-   output is long/noisy, needs the same care: your shell tool's default timeout (commonly ~120s) will
-   auto-background a bare long-running command out from under you. So for any such command that's slow OR
-   noisy, either launch it with an explicit long `timeout` set to cover its real duration, or redirect it
-   to a file and read the tail in the same turn (e.g. `<cmd> > check.log 2>&1; echo EXIT=$?`, then read
-   `check.log`) — either way the command still runs in the foreground and returns to you when done. **If
-   such a command DOES get auto-backgrounded anyway** (you see a background task id instead of a normal
-   result), await its actual completion — the tool made for that (commonly `TaskOutput` with a
-   blocking/wait option), not a fresh `Monitor`/watch call, which is for observing a new command or
-   stream, not for pulling the result of a task that already started running in the background. **Never park such a command on a scheduled wake** (`wake_me` to sleep the turn, wake
-   later, check if it finished) — that risks a "No response requested" stall and only adds latency; a
-   foreground run just returns when it's done. **Never end your turn parked on a background task's own
-   completion notification as your only plan, either — that notification is delivered on your *next* turn,
-   not by spontaneously waking an otherwise-silent session, and as a worker you have no standing channel
-   that pokes you on a timer the way a manager does; nothing else may ever arrive to trigger that next turn,
-   and you can dead-stall indefinitely with the command long since finished.** Run any build/test command
-   you launch yourself in the FOREGROUND (or poll its output inline) precisely so you're never depending on
-   that notification to bring you back. If you must background a genuinely long-running task for some OTHER reason, don't trust
-   the completion notification alone to resume you: `worker_report progress` immediately, naming what you
-   kicked off and that you're waiting — the report (and whatever direction it draws back down) is a real
-   route back into a turn; the bare notification is not. And even then you
-   MUST still read its result, commit, and only THEN report. Re-read your diff
-   against the task's acceptance check. Say what you actually ran. **COMMIT your verified work to your
+   task names): **run it in the FOREGROUND, commit, then report — in ONE flow.** A blocking command
+   completes within your turn, so **never end your turn while a command you launched is still running, and
+   never report before committing.** A command that runs for **minutes** needs care: your shell tool's
+   default timeout (commonly ~120s) will auto-background a bare long-running command out from under you —
+   so give it an explicit long `timeout` covering its real duration, or redirect it to a file and read the
+   tail in the same turn (e.g. `<cmd> > check.log 2>&1; echo EXIT=$?`, then read `check.log`); either way it
+   stays in the foreground and returns to you when done. **If it DOES get auto-backgrounded anyway** (you
+   see a background task id instead of a normal result), await its actual completion with the tool made for
+   that (commonly `TaskOutput` with a blocking/wait option) — NOT a fresh `Monitor`/watch call, which
+   observes a new command or stream, not the result of a task already running. **Don't park it on a
+   `wake_me`, and don't rely on the background task's own completion notification to bring you back** — that
+   notification is delivered on your *next* turn, not by spontaneously waking an otherwise-silent session,
+   and as a worker you have no standing channel that pokes you on a timer the way a manager does; nothing
+   else may ever arrive to trigger that next turn, so you can dead-stall indefinitely with the command long
+   since finished. Running in the foreground is exactly what keeps you off that dependency. If you must
+   background a genuinely long-running task for some OTHER reason, `worker_report progress` immediately —
+   naming what you kicked off and that you're waiting — since the report (and whatever direction it draws
+   back down) is a real route back into a turn; the bare notification is not. Even then you MUST still read
+   its result, commit, and only THEN report. Re-read your diff against the task's acceptance check. Say what
+   you actually ran. **COMMIT your verified work to your
    branch BEFORE you report `done`** (see the report protocol below) — uncommitted work is invisible: the
    gate sees `filesChanged:0` and bounces the task back. For UI/visual work: if your session is browser-capable
    (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
