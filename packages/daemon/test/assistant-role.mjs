@@ -92,6 +92,15 @@ try {
   check("(c) the agent's OWN prompt follows the base brief", sp.includes("COMPANION_AGENT_PROMPT") && sp.indexOf(ASSISTANT_BASE_BRIEF) < sp.indexOf("COMPANION_AGENT_PROMPT"));
   check("(c) Claude-first — no multi-vendor language leaked into the brief", !/OpenAI|GPT|Gemini|Llama|multi-vendor/i.test(ASSISTANT_BASE_BRIEF));
 
+  // Relay-default doctrine (Platform Auditor finding — verbatim guard widening + relay-default, this card):
+  // when authoring is off and no verbatim quote is available, the brief must tell the companion to DEFAULT
+  // to relaying via session_message to the project's live manager, not drag the owner through the
+  // verbatim/authored_content_grant confirm dance.
+  check("(c) the brief carries the relay-default doctrine (defer to the live manager over the verbatim dance)",
+    /DEFAULT to relaying/i.test(ASSISTANT_BASE_BRIEF) && /session_message/.test(ASSISTANT_BASE_BRIEF));
+  check("(c) the relay-default doctrine names authored_content_grant as the opt-in, not the default",
+    /authored_content_grant as an opt-in/i.test(ASSISTANT_BASE_BRIEF));
+
   // composeAssistantStartupPrompt is PURE: empty/whitespace agent brief ⇒ the base brief ALONE.
   check("(c) compose(undefined) === the base brief alone", composeAssistantStartupPrompt(undefined) === ASSISTANT_BASE_BRIEF);
   check("(c) compose('   ') (whitespace) === the base brief alone", composeAssistantStartupPrompt("   ") === ASSISTANT_BASE_BRIEF);

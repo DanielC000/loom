@@ -587,8 +587,9 @@ const DECISIONS_RELAY: CompanionCapability = {
           "Resolve a PENDING decision-inbox question that OFFERS options, on behalf of the owner — the " +
           "single highest-risk tool you have. `chosenOption` MUST be one of the question's offered " +
           "options (a question with no options is human-only; ask the owner directly instead). An " +
-          "optional `note` MUST be a verbatim quote of words the owner ACTUALLY said this turn — you may " +
-          "never author it yourself. An ORDINARY (\"general\") decision resolves IMMEDIATELY once the owner " +
+          "optional `note` MUST be a verbatim quote of words the owner ACTUALLY said — this turn or one of " +
+          "your last few recent owner turns (a same-exchange correction still counts) — you may never " +
+          "author it yourself. An ORDINARY (\"general\") decision resolves IMMEDIATELY once the owner " +
           "has recently confirmed something in this chat ({status:'resolved'}) — no per-action code needed " +
           "while that trust window stays warm. Otherwise (a cold window, a deploy/irreversible decision, or " +
           "this grant configured to always confirm) it does NOT resolve on the first call: Loom sends a " +
@@ -676,7 +677,7 @@ const DECISIONS_RELAY: CompanionCapability = {
             return ok({ error: "internal: tier-X action reported a low-friction path" });
           }
           if (!noteIsVerbatim) {
-            return ok({ error: "note must be a verbatim quote of what the owner said this turn — you may not author it" });
+            return ok({ error: "note must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
           }
           const updated = db.answerQuestion(questionId, { chosenOption, note: normalizedNote, answeredAt: new Date().toISOString() });
           if (!updated) return ok({ error: "question was answered or changed concurrently — nothing to resolve" });
@@ -723,7 +724,7 @@ const DECISIONS_RELAY: CompanionCapability = {
         // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B only
         // applies here: the confirming turn's own text is just "CONFIRM <token>", never the original note.
         if (!noteIsVerbatim) {
-          return ok({ error: "note must be a verbatim quote of what the owner said this turn — you may not author it" });
+          return ok({ error: "note must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
         }
         const proposal = ctx.attest.proposeConfirmation({
           sessionId: ctx.sessionId,
@@ -958,7 +959,8 @@ const BOARD_REACH: CompanionCapability = {
           "THIS tool (never tasks_create) whenever the owner names a project OTHER than your own home " +
           "board; tasks_create only ever files to your home board and cannot target any other project. " +
           "By default, `title` and (if given) `body` MUST each be a verbatim quote of words the owner " +
-          "ACTUALLY said this turn — you may never author card content yourself. If this project has been " +
+          "ACTUALLY said — this turn or one of your last few recent owner turns (a same-exchange " +
+          "correction still counts) — you may never author card content yourself. If this project has been " +
           "opted into authored content, you may instead write real, well-formed card text yourself rather " +
           "than quoting the owner verbatim. This creates the card IMMEDIATELY " +
           "({status:'created'}) once the owner has recently confirmed something in this chat — no per-" +
@@ -1045,7 +1047,7 @@ const BOARD_REACH: CompanionCapability = {
         // propose/confirm round-trip at all.
         if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
           if (!contentIsVerbatim) {
-            return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+            return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
           }
           const created = createProjectTask(db, project, { title, body: normalizedBody, columnKey, priority });
           if ("error" in created) return ok({ error: created.error });
@@ -1091,7 +1093,7 @@ const BOARD_REACH: CompanionCapability = {
 
         // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Primitive B.
         if (!contentIsVerbatim) {
-          return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+          return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
         }
         const proposal = ctx.attest.proposeConfirmation({
           sessionId: ctx.sessionId,
@@ -1121,7 +1123,8 @@ const BOARD_REACH: CompanionCapability = {
           "board; tasks_update only ever reaches cards on your home board. " +
           "Move its column (`columnKey`), change its `priority`, set `held` (the owner-gated 'don't nag' " +
           "flag), and/or rewrite its `title`/`body`. At least one field must be given. By default, `title`/ " +
-          "`body` (if given) MUST each be a verbatim quote of words the owner ACTUALLY said this turn — " +
+          "`body` (if given) MUST each be a verbatim quote of words the owner ACTUALLY said — this turn or " +
+          "one of your last few recent owner turns (a same-exchange correction still counts) — " +
           "you may never author card content yourself; if this project has been opted into authored " +
           "content, you may instead write real, well-formed text yourself. This applies the " +
           "update IMMEDIATELY ({status:'updated'}) once the owner has recently confirmed something in " +
@@ -1213,7 +1216,7 @@ const BOARD_REACH: CompanionCapability = {
         // propose/confirm round-trip at all.
         if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
           if (!contentIsVerbatim) {
-            return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+            return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
           }
           const result = applyPatch();
           if ("error" in result) return ok({ error: result.error });
@@ -1259,7 +1262,7 @@ const BOARD_REACH: CompanionCapability = {
         // applies here (title/body only — see above); columnKey/priority/held are closed-vocabulary,
         // validated above, so Primitive B never applies to them.
         if (!contentIsVerbatim) {
-          return ok({ error: "title/body must be a verbatim quote of what the owner said this turn — you may not author it" });
+          return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
         }
         const changes: string[] = [];
         if (hasTitle) changes.push(`change title to "${normalizedTitle}"`);

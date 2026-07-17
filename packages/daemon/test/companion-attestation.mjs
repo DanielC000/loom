@@ -112,6 +112,14 @@ const { isVerbatimOwnerSubstring, isVerbatimOwnerSubstringRecent, OwnerConfirmSt
   // another must NOT match (a real owner never said that contiguously in one authenticated turn).
   const boundary = ["please approve the", "merge request now"];
   check("recent: a candidate spanning a TURN BOUNDARY (never said contiguously) is REJECTED — no cross-turn concatenation", isVerbatimOwnerSubstringRecent("approve the merge request", boundary) === false);
+
+  // Platform Auditor finding, this card: the exact reported scenario — a two-turn owner correction
+  // ("Not 'X' I meant Y") must now be fileable (a) by quoting the PRIOR turn's corrected words, while a
+  // string the owner never said in any recent turn is still rejected (b) — this is the concrete repro of
+  // the "ordinary two-turn correction produces an unfilable card" friction the card fixes.
+  const correction = ["Creative repos", "Not 'Creative repos' I meant creating repos"];
+  check("(a) two-turn correction: the CORRECTED wording (prior turn) is now a quotable, accepted verbatim source", isVerbatimOwnerSubstringRecent("creating repos", correction) === true);
+  check("(b) two-turn correction: a string the owner never said in EITHER recent turn is still REJECTED", isVerbatimOwnerSubstringRecent("deleting repos", correction) === false);
 }
 
 // ===== Direction (a), card 2b26035c — AuthoredContentGrantStore =====
