@@ -4,6 +4,9 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Removed
+- **Open Design integration removed.** The opt-in Open Design (`openDesign`) capability — its per-session MCP-server injection, profile/session fields, capability-registry entry, integration detection, and Settings UI — is gone from Loom's built-in surface. The owner found it too limited for real use.
+
 ## [0.22.0] — 2026-07-18
 
 **A reliability, legibility, and workflow release.** The header nav becomes a collapsible **sidebar (Instrument Rail)**; every Loom session gets a **legible name** in the resume picker; the worker **DoD gate is routed through the daemon's concurrency semaphore** so parallel workers are structurally safe; the **question/Requests lifecycle** gains cancel + supersede; the **merge-gate card** shows live status and outcome; the **Companion** gets a broad refinement pass; a **token-reduction sweep** trims the always-on tool/doctrine surface; and a deep **performance pass** kills N+1s and unbounded payloads across the gateway.
@@ -109,7 +112,7 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 - **Idle/wake nudge accuracy.** `[loom:worker-idle]` no longer says a worker is "awaiting your reply" when it's parked on its own background gate; a finished taskless consultation worker no longer shows stale `busy:true`; and wake Paths B/C get Lead-appropriate nudge copy.
 
 ### Removed
-- **Deja integration removed.** The opt-in Deja mockup-corpus capability (`dejaCorpus`) and the Deja capture PostToolUse hook (`dejaCapture`) are gone from Loom's built-in surface — dedicated modules, config/DB fields, MCP wiring, and web UI all removed. [open-design](https://github.com/nexu-io/open-design) is the forward design capability that replaces it (see `openDesign` in `CLAUDE.md`). The Deja product itself is unaffected; only Loom's built-in integration is removed.
+- **Deja integration removed.** The opt-in Deja mockup-corpus capability (`dejaCorpus`) and the Deja capture PostToolUse hook (`dejaCapture`) are gone from Loom's built-in surface — dedicated modules, config/DB fields, MCP wiring, and web UI all removed. [open-design](https://github.com/nexu-io/open-design) was the forward design capability that replaced it at the time (itself since removed — see Unreleased). The Deja product itself is unaffected; only Loom's built-in integration is removed.
 
 ### Internal
 - `pnpm build` (sync-claude-skills) no longer mutates tracked skill files with pure LF→CRLF churn.

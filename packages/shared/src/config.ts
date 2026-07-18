@@ -470,51 +470,17 @@ export interface ConnectionsGuardConfig {
 }
 
 /**
- * A full stdio MCP server invocation spec — command + optional args[] + optional env{} — exactly the
- * shape a host tool's OWN "add this MCP server" export takes (e.g. Open Design's `claude mcp add-json`
- * payload). Card e8eee68c: some host tools' real invocation can't be expressed as a single bin path plus
- * one hardcoded subcommand arg — Open Design's desktop-app distribution needs a two-arg command
- * (`[daemon-cli.mjs, "mcp"]`) PLUS three env vars (its data dir, its sidecar IPC pipe, an
- * Electron-run-as-node flag) to reach its running desktop app's sidecar. When a tool's
- * `HostToolIntegrationConfig.mcpConfig` is set, its resolver injects this VERBATIM instead of deriving
- * `{command, args}` from `path` via `resolveHostToolBin` — no "mcp" arg is appended, no shape-guessing.
- */
-export interface HostToolMcpSpec {
-  command: string;
-  args?: string[];
-  env?: Record<string, string>;
-}
-
-/**
- * A single optional host-tool integration's DB-persisted configuration. `path` is an absolute PATH to
- * the tool's own executable/entry script (a host EXEC fact, exactly like `obsidian.path`/
- * `python.interpreterPath`) — unset means "no DB override," and the resolver falls back to its own
- * `LOOM_*_BIN` env var, never to a hardcoded path. `mcpConfig` (card e8eee68c) is the escape hatch for a
- * tool whose real invocation needs more than a bin path — see {@link HostToolMcpSpec}; when set it wins
- * over `path`/the env fallback entirely. Consumed by openDesign's resolver ONLY — Codescape is
- * PATH-only (see {@link CodescapeIntegrationConfig}) since `codescapeMcpServer` only ever resolves a bin
- * path, never a full stdio spec. See card 8dc5ebb9 (host-tool integrations: DB-persisted paths + Settings
- * UI).
- */
-export interface HostToolIntegrationConfig {
-  path?: string;
-  mcpConfig?: HostToolMcpSpec;
-}
-
-/**
- * Codescape's integration config: PATH-only, deliberately narrower than {@link HostToolIntegrationConfig}.
- * `codescapeMcpServer` (pty/host.ts) resolves via a bin path (DB override → `LOOM_CODESCAPE_BIN` → a bare
- * PATH-resolvable default name) and never reads a full stdio spec, so `mcpConfig` is REJECTED at
- * validation (`mcp/platform.ts`'s `codescapeIntegrationOverride`) rather than silently accepted-and-
- * ignored — a hand-authored `mcpConfig` on codescape used to validate, persist, and thread through
- * `resolvePlatform` while never actually being read.
+ * Codescape's integration config: PATH-only. `codescapeMcpServer` (pty/host.ts) resolves via a bin path
+ * (DB override → `LOOM_CODESCAPE_BIN` → a bare PATH-resolvable default name) and never reads a full
+ * stdio spec, so an `mcpConfig`-shaped field is REJECTED at validation (`mcp/platform.ts`'s
+ * `codescapeIntegrationOverride`) rather than silently accepted-and-ignored.
  */
 export interface CodescapeIntegrationConfig {
   path?: string;
 }
 
 /**
- * Daemon-global optional host-tool integration paths (Open Design, Codescape, …) — HOST-MACHINE facts,
+ * Daemon-global optional host-tool integration paths (Codescape, …) — HOST-MACHINE facts,
  * not per-project. Each named key is its own resolver's concern; this is deliberately a fixed, named
  * shape (like `obsidian`/`python`/`codescape` above), NOT a generic `Record<string,...>`, so it keeps the
  * same `.strict()` typo-guard every other config domain gets — adding a future tool means adding a new
@@ -522,7 +488,6 @@ export interface CodescapeIntegrationConfig {
  * tool (no DB path set) — see PLATFORM_DEFAULTS.platform.integrations.
  */
 export interface IntegrationsConfig {
-  openDesign: HostToolIntegrationConfig;
   codescape: CodescapeIntegrationConfig;
 }
 
@@ -538,7 +503,7 @@ export interface PlatformConfig {
   timeouts: TimeoutConfig;
   /** P2 authenticated-request bounds + per-connection rate guard. See ConnectionsGuardConfig. */
   connections: ConnectionsGuardConfig;
-  /** Host-tool integration paths (Open Design, Codescape, …). See IntegrationsConfig. */
+  /** Host-tool integration paths (Codescape, …). See IntegrationsConfig. */
   integrations: IntegrationsConfig;
   /**
    * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
@@ -730,7 +695,7 @@ export interface PlatformConfigOverride {
   /** See PlatformConfig.connections. */
   connections?: Partial<ConnectionsGuardConfig>;
   /** See PlatformConfig.integrations. Deep-partial: setting one tool's path leaves the other untouched. */
-  integrations?: { openDesign?: HostToolIntegrationConfig; codescape?: CodescapeIntegrationConfig };
+  integrations?: { codescape?: CodescapeIntegrationConfig };
   /** See PlatformConfig.coalesceAgentMessages. */
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
@@ -832,7 +797,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     connections: { requestTimeoutMs: 20000, maxResponseBytes: 1000000, rateLimitMax: 30, rateLimitWindowMs: 300000 },
     // No DB path set for either tool by default — each resolver falls back to its own LOOM_*_BIN env var
     // (card 8dc5ebb9). Byte-identical-when-absent: an empty override here changes nothing vs. today.
-    integrations: { openDesign: {}, codescape: {} },
+    integrations: { codescape: {} },
     // Default false = deliver agent/human messages one-per-turn (the 2026-07-03 owner-directed fix).
     coalesceAgentMessages: false,
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
@@ -916,9 +881,6 @@ export interface ResolvedProfile {
   browserTesting: boolean;
   /** Opt-in document-conversion: inject a per-session markitdown MCP at spawn. Backstops to false. */
   documentConversion: boolean;
-  /** Opt-in Open Design: inject a per-session OD MCP server at spawn iff OD resolves on this host.
-   *  Backstops to false. Not gated by isLoomDev() (OD is public OSS). */
-  openDesign: boolean;
   /** Restricted-tools: append the curated dangerous native tools to `--disallowedTools` at spawn
    *  (blast-radius control for a chat-reachable Companion). Backstops to false. */
   restrictedTools: boolean;
@@ -943,7 +905,7 @@ export interface ResolvedProfile {
 }
 
 /** The permanently-reserved builtin capability slugs the legacy boolean flags bridge to (P4). */
-export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion", openDesign: "open-design" } as const;
+export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", documentConversion: "document-conversion" } as const;
 
 /**
  * Bridge a profile/session's legacy `browserTesting`/`documentConversion` booleans + its
@@ -954,11 +916,10 @@ export const LEGACY_CAPABILITY_SLUGS = { browserTesting: "browser-testing", docu
  * array verbatim. Called EXACTLY ONCE per resolution (buildMcpServers) — `capabilities` itself is never
  * pre-bridged (see the field doc above), so this is the only place legacy + new merge.
  */
-export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
+export function resolveProfileCapabilities(p: { browserTesting?: boolean; documentConversion?: boolean; capabilities?: CapabilityGrant[] }): CapabilityGrant[] {
   const legacy: CapabilityGrant[] = [
     ...(p.browserTesting ? [{ slug: LEGACY_CAPABILITY_SLUGS.browserTesting }] : []),
     ...(p.documentConversion ? [{ slug: LEGACY_CAPABILITY_SLUGS.documentConversion }] : []),
-    ...(p.openDesign ? [{ slug: LEGACY_CAPABILITY_SLUGS.openDesign }] : []),
   ];
   return [...legacy, ...(p.capabilities ?? [])];
 }
@@ -981,7 +942,7 @@ export function resolveProfile(
   const startupPrompt = agent.startupPrompt ?? "";
   if (!profile) {
     // The backstop: a null/absent profile confers NO browser/document capability (false) — today's behavior.
-    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, openDesign: false, restrictedTools: false, noCommit: false, connections: [], vaultWrite: false, capabilities: [] };
+    return { role: null, startupPrompt, allow: [], skills: null, model: null, icon: null, browserTesting: false, documentConversion: false, restrictedTools: false, noCommit: false, connections: [], vaultWrite: false, capabilities: [] };
   }
   return {
     role: profile.role ?? null,
@@ -993,7 +954,6 @@ export function resolveProfile(
     // Pass the flag through when the profile sets it; backstop false for an unset/absent flag.
     browserTesting: profile.browserTesting ?? false,
     documentConversion: profile.documentConversion ?? false,
-    openDesign: profile.openDesign ?? false,
     // Restricted-tools (subtractive spawn effect: dangerous native tools → --disallowedTools). Backstop false.
     restrictedTools: profile.restrictedTools ?? false,
     // Declared no-commit role (lifecycle-only; no spawn-time effect). Backstop false.
@@ -1104,10 +1064,6 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       rateLimitWindowMs: po?.connections?.rateLimitWindowMs ?? d.connections.rateLimitWindowMs,
     },
     integrations: {
-      openDesign: {
-        path: po?.integrations?.openDesign?.path ?? d.integrations.openDesign.path,
-        mcpConfig: po?.integrations?.openDesign?.mcpConfig ?? d.integrations.openDesign.mcpConfig,
-      },
       codescape: { path: po?.integrations?.codescape?.path ?? d.integrations.codescape.path },
     },
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,

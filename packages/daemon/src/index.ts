@@ -388,11 +388,9 @@ async function main(): Promise<void> {
     resolveConnectionSecret: (connectionId: string, projectId?: string) => resolveScopedConnectionSecret(db, connectionId, projectId),
     // Card 8dc5ebb9: DB-first host-tool integration paths — read LIVE per-spawn (like the capability
     // catalog above), never boot-bound, so a Settings change reaches the very next new session.
-    // `openDesignMcpConfig` (card e8eee68c) is the full verbatim stdio spec escape hatch — wins over
-    // `openDesign`/LOOM_OPEN_DESIGN_BIN entirely inside openDesignMcpServer when set.
     getIntegrationPaths: () => {
       const i = db.getPlatformConfig().integrations;
-      return { openDesign: i?.openDesign?.path, codescape: i?.codescape?.path, openDesignMcpConfig: i?.openDesign?.mcpConfig };
+      return { codescape: i?.codescape?.path };
     },
   });
 

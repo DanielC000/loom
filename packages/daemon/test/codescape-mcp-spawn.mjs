@@ -1,12 +1,11 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Codescape wiring epic `369dde3c`, card C2 REWRITE (card e068a2ab) — inject the built-in Codescape MCP
 // for agents on a LOOM_DEV Codescape-enabled project. DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE,
-// hermetic like open-design-spawn.mjs: isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService
+// hermetic: isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService
 // driven against a FAKE pty injected via PtyHost's createPty() seam, and a FAKE CodescapeSupervisor (just
 // `ingestToGraph`) injected via SessionService's `opts.codescape` — no real supervisor/serve process, no
 // real claude spawn. `LOOM_CODESCAPE_BIN` points at the fixture CLI (test/fixtures/fake-codescape-cli.mjs)
-// so `codescapeMcpServer`'s spawn-shape assertions are real (mirrors open-design-spawn.mjs's
-// LOOM_OPEN_DESIGN_BIN pattern) without needing a real `codescape` install.
+// so `codescapeMcpServer`'s spawn-shape assertions are real without needing a real `codescape` install.
 //
 // WAS: a shared `codescape serve` HTTP mount scoped by the LOOM projectId — codescape ingested the repo
 // under its OWN derived id, so scope lookups 400/404'd and the MCP never registered (agents got zero
@@ -56,7 +55,7 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 // The isLoomDev() gate check below needs the TRUE default-off state — delete any inherited LOOM_DEV=1
-// (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell; mirrors open-design-spawn.mjs).
+// (e.g. this test running inside a LOOM_DEV=1 self-hosting/orchestration shell).
 delete process.env.LOOM_DEV;
 delete process.env.LOOM_CODESCAPE_ENABLED;
 
@@ -195,8 +194,7 @@ const graphPathA = codescapeGraphPath("projA");
 // ===================== REAL cross-process spawn: the direct-launch (non-.mjs) shape actually runs =====================
 {
   // The .mjs-shape real spawn is already proven for Codescape by the C1/C3 real-spawn coverage elsewhere
-  // (codescape-supervisor.mjs actually execs fixtureCli via the production spawn path) and by
-  // open-design-spawn.mjs's cross-process proof of the SAME resolveHostToolBin wrap. Here we prove the
+  // (codescape-supervisor.mjs actually execs fixtureCli via the production spawn path). Here we prove the
   // OTHER shape — a bare/compiled binary launched directly, unwrapped — using process.execPath as a
   // stand-in real OS binary (it has no .js/.mjs/.cjs suffix, so resolveHostToolBin resolves it exactly
   // like it would a real compiled `codescape` binary).

@@ -20,8 +20,6 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import net from "node:net";
-import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
 import { requireHermeticEnv } from "./_guard.mjs";
 
@@ -39,9 +37,6 @@ const { Db } = await import("../dist/db.js");
 const { validatePlatformConfigOverride, validatePlatformConfigPatch } = await import("../dist/mcp/platform.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { detectIntegrations } = await import("../dist/integrations/detect.js");
-
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const fakeOdCli = path.join(__dirname, "fixtures", "fake-open-design-cli.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -419,54 +414,23 @@ const dbFile = path.join(TMP, "loom.db");
 
 // ============================ (14) host-tool integrations (card 8dc5ebb9) ============================
 {
-  // --- resolvePlatform: default + override precedence + deep-partial sibling isolation ---
-  check("(14) default resolveConfig(undefined).platform.integrations ⇒ both tools present, no path set",
-    resolveConfig(undefined).platform.integrations.openDesign.path === undefined &&
+  // --- resolvePlatform: default + override precedence ---
+  check("(14) default resolveConfig(undefined).platform.integrations ⇒ codescape present, no path set",
     resolveConfig(undefined).platform.integrations.codescape.path === undefined);
-  const withOd = resolveConfig(undefined, { integrations: { openDesign: { path: "/abs/od" } } });
-  check("(14) a global integrations.openDesign.path override reaches resolved.platform.integrations",
-    withOd.platform.integrations.openDesign.path === "/abs/od");
-  check("(14) untouched sibling (codescape) still inherits the default (deep-partial)",
-    withOd.platform.integrations.codescape.path === undefined);
+  const withCs = resolveConfig(undefined, { integrations: { codescape: { path: "/abs/cs" } } });
+  check("(14) a global integrations.codescape.path override reaches resolved.platform.integrations",
+    withCs.platform.integrations.codescape.path === "/abs/cs");
 
   // --- validatePlatformConfigOverride: accept / reject ---
   check("(14) {integrations:{}} accepted", validatePlatformConfigOverride({ integrations: {} }).ok === true);
-  const okOne = validatePlatformConfigOverride({ integrations: { openDesign: { path: "/abs/od" } } });
-  check("(14) one-tool integrations override accepted + round-trips", okOne.ok && okOne.value.integrations?.openDesign?.path === "/abs/od");
-  check("(14) unknown nested key under a tool rejected", validatePlatformConfigOverride({ integrations: { openDesign: { bogus: 1 } } }).ok === false);
+  const okOne = validatePlatformConfigOverride({ integrations: { codescape: { path: "/abs/cs" } } });
+  check("(14) one-tool integrations override accepted + round-trips", okOne.ok && okOne.value.integrations?.codescape?.path === "/abs/cs");
+  check("(14) unknown nested key under a tool rejected", validatePlatformConfigOverride({ integrations: { codescape: { bogus: 1 } } }).ok === false);
   check("(14) unknown top-level tool name rejected", validatePlatformConfigOverride({ integrations: { unknownTool: { path: "/x" } } }).ok === false);
   check("(14) non-string path rejected", validatePlatformConfigOverride({ integrations: { codescape: { path: 123 } } }).ok === false);
   check("(14) empty-string path rejected (min(1))", validatePlatformConfigOverride({ integrations: { codescape: { path: "" } } }).ok === false);
-
-  // --- (14b) full stdio MCP spec (card e8eee68c): mcpConfig schema validation ---
-  const odMcpSpec = { command: "/abs/od.exe", args: ["/abs/daemon-cli.mjs", "mcp"], env: { OD_DATA_DIR: "/x", ELECTRON_RUN_AS_NODE: "1" } };
-  const okSpec = validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: odMcpSpec } } });
-  check("(14b) a full mcpConfig (command+args+env) accepted + round-trips",
-    okSpec.ok && JSON.stringify(okSpec.value.integrations?.openDesign?.mcpConfig) === JSON.stringify(odMcpSpec));
-  check("(14b) mcpConfig with ONLY command (args/env both optional) accepted",
-    validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { command: "/abs/od.exe" } } } }).ok === true);
-  check("(14b) mcpConfig missing 'command' rejected", validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { args: ["mcp"] } } } }).ok === false);
-  check("(14b) mcpConfig with empty-string command rejected (min(1))",
-    validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { command: "" } } } }).ok === false);
-  check("(14b) mcpConfig.args with a non-string element rejected",
-    validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { command: "/abs/od.exe", args: ["mcp", 5] } } } }).ok === false);
-  check("(14b) mcpConfig.env with a non-string value rejected",
-    validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { command: "/abs/od.exe", env: { X: 5 } } } } }).ok === false);
-  check("(14b) mcpConfig with an unknown nested key rejected (.strict())",
-    validatePlatformConfigOverride({ integrations: { openDesign: { mcpConfig: { command: "/abs/od.exe", bogus: 1 } } } }).ok === false);
-  check("(14b) path and mcpConfig coexist on the same tool (path is the fallback, mcpConfig wins at spawn time)",
-    validatePlatformConfigOverride({ integrations: { openDesign: { path: "/abs/od", mcpConfig: odMcpSpec } } }).ok === true);
-  check("(14b) codescape is path-only: an mcpConfig is REJECTED at validation (fail-closed, not silently ignored)",
-    validatePlatformConfigOverride({ integrations: { codescape: { mcpConfig: odMcpSpec } } }).ok === false);
-  check("(14b) codescape still accepts a bare path override",
-    validatePlatformConfigOverride({ integrations: { codescape: { path: "/abs/codescape" } } }).ok === true);
-
-  // --- (14b) resolvePlatform threads mcpConfig through, deep-partial-isolated from codescape/path ---
-  const withOdMcp = resolveConfig(undefined, { integrations: { openDesign: { mcpConfig: odMcpSpec } } });
-  check("(14b) a global integrations.openDesign.mcpConfig override reaches resolved.platform.integrations",
-    JSON.stringify(withOdMcp.platform.integrations.openDesign.mcpConfig) === JSON.stringify(odMcpSpec));
-  check("(14b) default resolveConfig(undefined).platform.integrations.openDesign.mcpConfig is undefined",
-    resolveConfig(undefined).platform.integrations.openDesign.mcpConfig === undefined);
+  check("(14) codescape is path-only: an mcpConfig is REJECTED at validation (.strict())",
+    validatePlatformConfigOverride({ integrations: { codescape: { mcpConfig: { command: "/abs/x" } } } }).ok === false);
 
   // --- SQLite round-trip ---
   const intDbFile = path.join(TMP, "integrations.db");
@@ -501,7 +465,7 @@ const dbFile = path.join(TMP, "loom.db");
       check("(14) pre-migration blob (no `integrations` key) reads back untouched", override.watchers?.wakeMs === 45000 && override.integrations === undefined);
       const resolved = resolveConfig(undefined, override);
       check("(14) resolveConfig against a pre-migration override defaults integrations cleanly (no throw)",
-        resolved.platform.integrations.openDesign.path === undefined && resolved.platform.integrations.codescape.path === undefined);
+        resolved.platform.integrations.codescape.path === undefined);
       check("(14) resolveConfig against a pre-migration override still resolves its OWN fields correctly",
         resolved.platform.watchers.wakeMs === 45000 && resolved.platform.coalesceAgentMessages === true);
     } finally {
@@ -518,56 +482,34 @@ const dbFile = path.join(TMP, "loom.db");
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
     try {
-      const patch = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { openDesign: { path: fakeOdCli } } } });
-      check("(14) PATCH integrations.openDesign.path → 200", patch.statusCode === 200 && patch.json().override.integrations.openDesign.path === fakeOdCli);
-      check("(14) persisted to the DB", db.getPlatformConfig().integrations?.openDesign?.path === fakeOdCli);
+      const patch = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { codescape: { path: process.execPath } } } });
+      check("(14) PATCH integrations.codescape.path → 200", patch.statusCode === 200 && patch.json().override.integrations.codescape.path === process.execPath);
+      check("(14) persisted to the DB", db.getPlatformConfig().integrations?.codescape?.path === process.execPath);
 
-      const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { openDesign: { path: 5 } } } });
+      const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { codescape: { path: 5 } } } });
       check("(14) PATCH a non-string path → 400", bad.statusCode === 400 && /integrations/.test(bad.json().error));
-      check("(14) rejected PATCH did not clobber the persisted path", db.getPlatformConfig().integrations?.openDesign?.path === fakeOdCli);
+      check("(14) rejected PATCH did not clobber the persisted path", db.getPlatformConfig().integrations?.codescape?.path === process.execPath);
 
       // A sibling top-level field PATCH must leave `integrations` byte-identical (shallow-merge, test (12)'s guard).
       const siblingPatch = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { watchers: { wakeMs: 90000 } } });
       check("(14) sibling-field PATCH → 200", siblingPatch.statusCode === 200);
-      check("(14) sibling-field PATCH leaves integrations untouched", db.getPlatformConfig().integrations?.openDesign?.path === fakeOdCli);
+      check("(14) sibling-field PATCH leaves integrations untouched", db.getPlatformConfig().integrations?.codescape?.path === process.execPath);
 
       // GET reflects it too.
       const g = (await app.inject({ method: "GET", url: "/api/platform/config" })).json();
-      check("(14) GET /api/platform/config reflects the persisted integrations override", g.override.integrations?.openDesign?.path === fakeOdCli);
+      check("(14) GET /api/platform/config reflects the persisted integrations override", g.override.integrations?.codescape?.path === process.execPath);
 
       // CLEAR-BACK (code-review fix): the whole-key shallow-merge means a submitted `integrations` object
-      // REPLACES the persisted one wholesale — so a caller that resends `{ openDesign: {} }` (path omitted,
+      // REPLACES the persisted one wholesale — so a caller that resends `{ codescape: {} }` (path omitted,
       // exactly what the fixed Settings form now always sends for a blanked field) actually CLEARS the
       // previously-set path, rather than the stale path surviving because the key was omitted entirely
       // (the pre-fix Settings behavior). This is the backend half of the fix; the browser half (Settings.tsx
       // always emitting `integrations`) is covered end-to-end by e2e/settings.spec.ts.
-      const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { openDesign: {} } } });
-      check("(14) PATCH integrations.openDesign:{} (path omitted) → 200", clear.statusCode === 200);
-      check("(14) clear-back: the persisted path is actually GONE, not stale", db.getPlatformConfig().integrations?.openDesign?.path === undefined);
+      const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { codescape: {} } } });
+      check("(14) PATCH integrations.codescape:{} (path omitted) → 200", clear.statusCode === 200);
+      check("(14) clear-back: the persisted path is actually GONE, not stale", db.getPlatformConfig().integrations?.codescape?.path === undefined);
       const gAfterClear = (await app.inject({ method: "GET", url: "/api/platform/config" })).json();
-      check("(14) clear-back: GET reflects no path (resolves to env/none on the next spawn)", gAfterClear.override.integrations?.openDesign?.path === undefined);
-    } finally {
-      try { await app.close(); } catch { /* ignore */ }
-      db.close();
-    }
-  }
-
-  // --- (14b) REST /api/platform/config: mcpConfig rides the SAME PATCH surface, round-trips, and an
-  // invalid shape 400s without clobbering the persisted spec. ---
-  {
-    const mcpRestDbFile = path.join(TMP, "integrations-mcp-rest.db");
-    const db = new Db(mcpRestDbFile);
-    const stub = {};
-    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
-    try {
-      const patch = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { openDesign: { mcpConfig: odMcpSpec } } } });
-      check("(14b) PATCH integrations.openDesign.mcpConfig → 200", patch.statusCode === 200);
-      check("(14b) persisted to the DB", JSON.stringify(db.getPlatformConfig().integrations?.openDesign?.mcpConfig) === JSON.stringify(odMcpSpec));
-
-      const badMcp = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { integrations: { openDesign: { mcpConfig: { args: ["mcp"] } } } } });
-      check("(14b) PATCH an mcpConfig missing 'command' → 400", badMcp.statusCode === 400 && /integrations/.test(badMcp.json().error));
-      check("(14b) rejected PATCH did not clobber the persisted mcpConfig",
-        JSON.stringify(db.getPlatformConfig().integrations?.openDesign?.mcpConfig) === JSON.stringify(odMcpSpec));
+      check("(14) clear-back: GET reflects no path (resolves to env/none on the next spawn)", gAfterClear.override.integrations?.codescape?.path === undefined);
     } finally {
       try { await app.close(); } catch { /* ignore */ }
       db.close();
@@ -575,71 +517,24 @@ const dbFile = path.join(TMP, "loom.db");
   }
 
   // --- GET /api/integrations: the live detect/validate read, exercised via the REAL detectIntegrations()
-  // (never mocked) — proves the three states without a real OD/Codescape install. ---
+  // (never mocked) — proves the states without a real Codescape install. ---
   {
-    // A deterministically-CLOSED port for the "unreachable" case (code-review fix): bind an ephemeral
-    // listener, capture its port, then close it — a subsequent connect to that exact port reliably
-    // refuses, unlike gambling on OD's hardcoded default 7456 happening to be free on whatever host runs
-    // this test. detectIntegrations' odDaemonPort override is a TEST SEAM ONLY (production always probes
-    // the real OD_DAEMON_PORT default).
-    const closedPort = await new Promise((resolve, reject) => {
-      const srv = net.createServer();
-      srv.listen(0, "127.0.0.1", () => {
-        const p = srv.address().port;
-        srv.close((err) => (err ? reject(err) : resolve(p)));
-      });
-      srv.once("error", reject);
-    });
-
-    // Nothing configured at all (neither DB nor env) ⇒ not-found, source none, for both tools.
-    const savedOdEnv = process.env.LOOM_OPEN_DESIGN_BIN;
+    // Nothing configured at all (neither DB nor env) ⇒ not-found, source none.
     const savedCsEnv = process.env.LOOM_CODESCAPE_BIN;
-    delete process.env.LOOM_OPEN_DESIGN_BIN;
     delete process.env.LOOM_CODESCAPE_BIN;
-    const none = await detectIntegrations({}, { odDaemonPort: closedPort });
-    const odNone = none.find((s) => s.slug === "openDesign");
+    const none = await detectIntegrations({});
     const csNone = none.find((s) => s.slug === "codescape");
-    check("(14) detectIntegrations: nothing configured ⇒ openDesign not-found, source none", odNone.state === "not-found" && odNone.source === "none" && odNone.path === null);
     check("(14) detectIntegrations: nothing configured ⇒ codescape not-found, source none", csNone.state === "not-found" && csNone.source === "none" && csNone.path === null);
 
     // A bogus configured path ⇒ not-found, source db (misconfigured, not merely absent).
-    const bogus = await detectIntegrations({ integrations: { openDesign: { path: path.join(TMP, "does-not-exist.mjs") }, codescape: { path: path.join(TMP, "also-missing") } } }, { odDaemonPort: closedPort });
-    check("(14) detectIntegrations: a bogus DB path ⇒ not-found, source db", bogus.find((s) => s.slug === "openDesign").state === "not-found" && bogus.find((s) => s.slug === "openDesign").source === "db");
+    const bogus = await detectIntegrations({ integrations: { codescape: { path: path.join(TMP, "also-missing") } } });
+    check("(14) detectIntegrations: a bogus DB path ⇒ not-found, source db", bogus.find((s) => s.slug === "codescape").state === "not-found" && bogus.find((s) => s.slug === "codescape").source === "db");
 
-    // A REAL, existing OD fixture ⇒ the binary resolves (detected) but the reachability probe targets our
-    // deterministically-closed port, so it correctly downgrades to "unreachable" (residual risk 2's exact
-    // scenario) rather than falsely reporting "detected" — with no dependency on what's bound to 7456.
-    const odReachable = await detectIntegrations({ integrations: { openDesign: { path: fakeOdCli } } }, { odDaemonPort: closedPort });
-    const od = odReachable.find((s) => s.slug === "openDesign");
-    check("(14) detectIntegrations: a real OD binary but no daemon listening ⇒ unreachable (not falsely detected)",
-      od.state === "unreachable" && od.source === "db" && od.path === fakeOdCli && typeof od.detail === "string");
-
-    // Codescape has no reachability concept — a real, existing bin (process.execPath stands in for a
-    // real compiled binary) is simply "detected".
+    // A real, existing bin (process.execPath stands in for a real compiled binary) is simply "detected".
     const csDetected = await detectIntegrations({ integrations: { codescape: { path: process.execPath } } });
     const cs = csDetected.find((s) => s.slug === "codescape");
-    check("(14) detectIntegrations: a real codescape bin ⇒ detected (no reachability check)", cs.state === "detected" && cs.source === "db");
+    check("(14) detectIntegrations: a real codescape bin ⇒ detected", cs.state === "detected" && cs.source === "db");
 
-    // --- (14b) a full mcpConfig (card e8eee68c): the TCP daemon-port probe doesn't apply to the
-    // desktop-app's named-pipe sidecar, so detectOpenDesign skips it entirely and reports "detected" on
-    // binary presence alone — even against the SAME deterministically-closed port that downgrades the
-    // plain-path form above to "unreachable". Proves the two forms are handled distinctly.
-    const mcpSpecDetected = await detectIntegrations(
-      { integrations: { openDesign: { mcpConfig: { command: process.execPath, args: ["-e", "process.exit(0)"] } } } },
-      { odDaemonPort: closedPort },
-    );
-    const odMcp = mcpSpecDetected.find((s) => s.slug === "openDesign");
-    check("(14b) detectIntegrations: a full mcpConfig ⇒ detected on binary presence alone, no TCP probe",
-      odMcp.state === "detected" && odMcp.source === "db" && odMcp.path === process.execPath);
-    const mcpSpecMissing = await detectIntegrations(
-      { integrations: { openDesign: { mcpConfig: { command: path.join(TMP, "no-such-exe") } } } },
-      { odDaemonPort: closedPort },
-    );
-    check("(14b) detectIntegrations: a full mcpConfig with a missing command ⇒ not-found, source db",
-      mcpSpecMissing.find((s) => s.slug === "openDesign").state === "not-found" &&
-      mcpSpecMissing.find((s) => s.slug === "openDesign").source === "db");
-
-    if (savedOdEnv === undefined) delete process.env.LOOM_OPEN_DESIGN_BIN; else process.env.LOOM_OPEN_DESIGN_BIN = savedOdEnv;
     if (savedCsEnv === undefined) delete process.env.LOOM_CODESCAPE_BIN; else process.env.LOOM_CODESCAPE_BIN = savedCsEnv;
   }
 
@@ -902,6 +797,6 @@ const dbFile = path.join(TMP, "loom.db");
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the new `integrations` key with deep-partial sibling isolation, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/unreachable/detected across not-configured, misconfigured, real-binary-but-nothing-listening (OD residual risk 2), and real-binary (Codescape) cases; (card e8eee68c) the full mcpConfig escape hatch: the zod schema accepts a valid command+args+env spec (args/env optional, command required + non-empty), rejects a bad shape (.strict() unknown key, non-string args/env values), rides the SAME PATCH surface with a 400 that never clobbers a valid persisted spec, resolvePlatform threads it through, and detectIntegrations skips the TCP daemon-port probe entirely for a full spec (reporting detected/not-found on binary presence alone — the desktop app's named-pipe sidecar makes that probe inapplicable) even against the same closed port that downgrades the plain-path form to unreachable; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

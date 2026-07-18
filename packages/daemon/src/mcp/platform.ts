@@ -422,31 +422,11 @@ const remoteAccessOverride = z.object({
 // `integrations` reaches an agent no differently than gateCommand reaches one via the project schema —
 // it simply isn't reachable. Named keys (not a generic record) mirror `obsidian`/`python`/`codescape`
 // above, keeping the `.strict()` typo-guard.
-// `mcpConfig` (card e8eee68c): the full verbatim stdio MCP spec escape hatch — same human-only-by-
-// construction reasoning applies (this whole subtree is unreachable to any agent), so no separate
-// forbidden-key split is needed here the way AGENT_FORBIDDEN_PROFILE_KEYS guards the profile-level
-// `openDesign` boolean grant. `command` is required WITHIN an mcpConfig object (a spec with no command
-// is meaningless), but the object itself stays optional at the parent level.
-const hostToolMcpSpecOverride = z.object({
-  command: z.string().min(1),
-  args: z.array(z.string()).optional(),
-  env: z.record(z.string(), z.string()).optional(),
-}).strict();
-// openDesign's full stdio-spec schema (command/args/env via mcpConfig, or a bare path).
-const hostToolIntegrationOverride = z.object({
-  path: z.string().min(1).optional(),
-  mcpConfig: hostToolMcpSpecOverride.optional(),
-}).strict();
-// codescape is PATH-only: `codescapeMcpServer` (pty/host.ts) only ever reads a resolved bin path, never
-// an `mcpConfig` — sharing `hostToolIntegrationOverride` let a hand-authored `mcpConfig` VALIDATE,
-// PERSIST, and thread through `resolvePlatform` while silently never being read (a silent no-op trap).
-// Rejecting it here at validation is strictly better than accepting-and-ignoring: a config author gets a
-// clear error instead of a feature that quietly does nothing.
+// codescape is PATH-only: `codescapeMcpServer` (pty/host.ts) only ever reads a resolved bin path.
 const codescapeIntegrationOverride = z.object({
   path: z.string().min(1).optional(),
 }).strict();
 const integrationsOverride = z.object({
-  openDesign: hostToolIntegrationOverride.optional(),
   codescape: codescapeIntegrationOverride.optional(),
 }).strict();
 const platformConfigOverrideSchema = z.object({
@@ -941,7 +921,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_profiles",
       {
-        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, openDesign, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
+        description: "List every Profile (rig) on the platform. Profiles are cross-project by nature (a rig is not bound to one project), so this is the whole set — each a FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Read-only. Use to discover a profileId before agent_create/profile_assign/profile_update.",
         inputSchema: {},
       },
       async () => ok(db.listProfiles()),
@@ -982,7 +962,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_get",
       {
-        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, openDesign, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
+        description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
         inputSchema: { profileId: z.string() },
       },
       async ({ profileId }) =>
@@ -1005,7 +985,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_create",
       {
-        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections`/`capabilities`/`openDesign`/`vaultWrite` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities`/`openDesign` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault; not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
+        description: "Create a cross-project Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). `connections`/`capabilities`/`vaultWrite` are REJECTED here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault; not even the Platform Lead may set them. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
         inputSchema: { profile: z.object({}).passthrough() },
       },
       async ({ profile }) => {
@@ -1022,7 +1002,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "profile_update",
       {
-        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`openDesign`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the Open Design MCP-injection flag / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
+        description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The patch may not touch `connections`/`capabilities`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
         inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
       },
       async ({ profileId, patch }) => {

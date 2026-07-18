@@ -252,12 +252,10 @@ export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }):
 
 /**
  * Shape-aware host-tool launch resolver — the ONE helper every optional host-tool resolver (Codescape,
- * Open Design, and any future one) shares, so a new tool gets this for free instead of re-deriving it (or
- * getting it wrong, as Open Design's original code did — see openDesignMcpServer in pty/host.ts: OD ships
- * as `apps/daemon/bin/od.mjs`, a node ESM script, but was launched directly, which fails on Windows —
- * there's no reliable shebang/association to exec a bare `.mjs` file cross-platform). Given ANY bin (a
- * `.js`/`.mjs`/`.cjs` script path, an absolute compiled-binary path, or a bare PATH-resolvable name),
- * returns the correct `{command, args}` spawn pair:
+ * and any future one) shares, so a new tool gets this for free instead of re-deriving it (a node ESM
+ * script bin launched directly fails on Windows — there's no reliable shebang/association to exec a bare
+ * `.mjs` file cross-platform). Given ANY bin (a `.js`/`.mjs`/`.cjs` script path, an absolute
+ * compiled-binary path, or a bare PATH-resolvable name), returns the correct `{command, args}` spawn pair:
  *   - a `.js`/`.mjs`/`.cjs` path runs via node explicitly (`process.execPath`, the script as its one arg);
  *   - anything else resolves through {@link resolveExecutable} (PATH + Windows PATHEXT, e.g. a `.cmd`
  *     npm shim or a compiled binary) and launches directly with NO shell — sidesteps the shell-quoting
@@ -279,8 +277,7 @@ export function resolveHostToolBin(bin: string): { command: string; args: string
  * unchanged when nothing resolves — `fs.existsSync` on the unresolved bare name then correctly reads
  * false in the overwhelming common case). Used ONLY by the human-only `/api/integrations` detect
  * endpoint (a live "is this configured tool actually there" check) — NEVER on the synchronous spawn hot
- * path, which stays each resolver's own fast existsSync/isAbsolute check (openDesignMcpServer,
- * codescapeMcpServer), unchanged.
+ * path, which stays each resolver's own fast existsSync/isAbsolute check (codescapeMcpServer), unchanged.
  */
 export function hostToolBinExists(bin: string): boolean {
   const target = HOST_TOOL_SCRIPT_RE.test(bin) ? bin : resolveExecutable(bin);
@@ -304,7 +301,7 @@ export function codescapeBinCandidate(dbPath?: string): string {
  * not require an absolute path: the supervisor spawns via plain `child_process.spawn` (not node-pty), so
  * a bare PATH-resolvable name is fine too (CONTRACT Q5: "PATH or absolute both acceptable"). Card
  * 8dc5ebb9: `dbPath` (the DB-persisted `integrations.codescape.path`, when the caller has one) wins over
- * `LOOM_CODESCAPE_BIN`, mirroring `openDesignMcpServer`'s DB-first precedence — see
+ * `LOOM_CODESCAPE_BIN`, mirroring every other host-tool resolver's DB-first precedence — see
  * {@link codescapeBinCandidate}. Shape resolution itself is the shared {@link resolveHostToolBin}.
  */
 export function resolveCodescapeBin(dbPath?: string): { command: string; args: string[] } {

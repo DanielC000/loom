@@ -10,7 +10,6 @@ import {
   type PlatformConfigOverride,
   type PlatformConfigPatch,
   type RemoteAccessConfig,
-  type HostToolMcpSpec,
   type ConnectionAuthScheme,
   type OAuthProviderSlug,
   type PollJob,
@@ -114,34 +113,6 @@ const ta = {
 
 function parseLines(text: string): string[] {
   return text.split("\n").map((l) => l.trim()).filter(Boolean);
-}
-
-// Card e8eee68c: client-side shape validation for the Open Design full-MCP-config JSON textarea, so an
-// obviously-wrong paste (bad JSON, missing "command", a non-string arg) is caught before Save rather
-// than round-tripping to the daemon's 400. Mirrors the daemon's own hostToolMcpSpecOverride zod shape
-// (mcp/platform.ts) — kept in sync by hand since the web package doesn't import zod schemas from the
-// daemon. Blank input is valid (⇒ no override, value undefined).
-function parseOpenDesignMcpConfig(json: string): { ok: true; value?: HostToolMcpSpec } | { ok: false; error: string } {
-  const s = json.trim();
-  if (!s) return { ok: true, value: undefined };
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(s);
-  } catch (e) {
-    return { ok: false, error: `invalid JSON: ${(e as Error).message}` };
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { ok: false, error: "must be a JSON object" };
-  const o = parsed as Record<string, unknown>;
-  if (typeof o.command !== "string" || !o.command.trim()) return { ok: false, error: '"command" must be a non-empty string' };
-  if (o.args !== undefined && (!Array.isArray(o.args) || !o.args.every((x) => typeof x === "string"))) {
-    return { ok: false, error: '"args" must be a string array when present' };
-  }
-  if (o.env !== undefined) {
-    if (typeof o.env !== "object" || o.env === null || Array.isArray(o.env) || !Object.values(o.env as Record<string, unknown>).every((v) => typeof v === "string")) {
-      return { ok: false, error: '"env" must be an object of string values when present' };
-    }
-  }
-  return { ok: true, value: { command: o.command, args: o.args as string[] | undefined, env: o.env as Record<string, string> | undefined } };
 }
 
 // Repository binding — the one place a project's `repoPath` changes after creation. Distinct from the
@@ -511,18 +482,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [maxConcurrentGates, setMaxConcurrentGates] = useState(numStr(override.maxConcurrentGates));
   // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
-  const [openDesignPath, setOpenDesignPath] = useState(override.integrations?.openDesign?.path ?? "");
   const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
-  // Card e8eee68c: Open Design's full stdio MCP spec (command + args[] + env{}) — the escape hatch for a
-  // host tool whose real invocation isn't "one bin path + one hardcoded arg" (OD's desktop-app
-  // distribution needs a two-arg command plus env vars). Free-text JSON, exactly the payload OD's own
-  // settings emit (`claude mcp add-json`) — parsed client-side so an invalid shape is caught before Save
-  // rather than round-tripping to a 400. Blank = no override; `mcpConfig` wins over the path field above
-  // when both are set (see openDesignMcpServer).
-  const [openDesignMcpConfigJson, setOpenDesignMcpConfigJson] = useState(
-    override.integrations?.openDesign?.mcpConfig ? JSON.stringify(override.integrations.openDesign.mcpConfig, null, 2) : "",
-  );
-  const odMcpParsed = parseOpenDesignMcpConfig(openDesignMcpConfigJson);
 
   // Build the PATCH body from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field sends the explicit PER-FIELD `null` clear-to-inherit sentinel (card ba9ccd75) — NOT
@@ -572,17 +532,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     }
     // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
     // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
-    // persisted one wholesale. Omitting it when both paths are blank (the old behavior) meant clearing the
+    // persisted one wholesale. Omitting it when blank (the old behavior) meant clearing the
     // last configured path left the stale path persisted forever — an exec-surface path a user removed
-    // must actually clear. Always resending both tools' CURRENT state (blank ⇒ `{}`, no `path`) makes a
+    // must actually clear. Always resending the tool's CURRENT state (blank ⇒ `{}`, no `path`) makes a
     // clear-to-blank take effect, while a save that never touched integrations at all just resends the
-    // unchanged persisted value (idempotent, since openDesignPath/codescapePath are seeded from — and
-    // stay in sync with — the loaded override).
+    // unchanged persisted value (idempotent, since codescapePath is seeded from — and stays in sync with
+    // — the loaded override).
     o.integrations = {
-      openDesign: {
-        ...(openDesignPath.trim() ? { path: openDesignPath.trim() } : {}),
-        ...(odMcpParsed.ok && odMcpParsed.value ? { mcpConfig: odMcpParsed.value } : {}),
-      },
       codescape: codescapePath.trim() ? { path: codescapePath.trim() } : {},
     };
     return o;
@@ -732,33 +688,16 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <Hint>
           Optional host-tool paths (a host EXEC surface, human-only — never an agent MCP write). A new
           session picks up a change here immediately, no daemon restart needed. Blank falls back to the
-          matching env var (LOOM_OPEN_DESIGN_BIN / LOOM_CODESCAPE_BIN) for headless/CI setups.
+          matching env var (LOOM_CODESCAPE_BIN) for headless/CI setups.
         </Hint>
         <div style={{ display: "flex", flexDirection: "column", gap: 12, marginTop: 8 }}>
-          <IntegrationRow slug="openDesign" label="Open Design" path={openDesignPath} setPath={setOpenDesignPath}
-            placeholder="absolute path to OD's od entry (od.mjs / od.exe)" />
-          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
-            <span style={fieldLabel}>Open Design — full MCP config (JSON)</span>
-            <textarea value={openDesignMcpConfigJson} onChange={(e) => setOpenDesignMcpConfigJson(e.target.value)}
-              spellCheck={false} style={{ ...ta, minHeight: 90 }}
-              placeholder={'{\n  "command": "C:\\\\...\\\\Open Design.exe",\n  "args": ["C:\\\\...\\\\daemon-cli.mjs", "mcp"],\n  "env": { "OD_DATA_DIR": "...", "OD_SIDECAR_IPC_PATH": "...", "ELECTRON_RUN_AS_NODE": "1" }\n}'} />
-            {!odMcpParsed.ok
-              ? <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>{odMcpParsed.error}</span>
-              : <Hint>
-                  Optional — for a host tool whose real invocation needs more than a bin path (e.g. Open
-                  Design&apos;s desktop-app distribution: a two-arg command plus env vars). Paste the exact
-                  MCP-server-config JSON the tool&apos;s own settings emit (a &quot;command&quot;/&quot;args&quot;/&quot;env&quot; object —
-                  the <code>claude mcp add-json</code> payload). When set, it wins over the path field above
-                  entirely. Blank clears it.
-                </Hint>}
-          </label>
           <IntegrationRow slug="codescape" label="Codescape" path={codescapePath} setPath={setCodescapePath}
             placeholder="inherit (PATH: codescape)" />
         </div>
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending || !odMcpParsed.ok} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
@@ -776,12 +715,12 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
 }
 
 // One row per host-tool integration (card 8dc5ebb9): a path Input (this row's slice of the shared
-// GlobalConfigForm save/dirty state above — no per-row save) + a live "detected/not-found/unreachable"
-// badge read from GET /api/integrations, polled while the Settings page is mounted (existsSync + OD's
-// bounded TCP probe are both cheap, so a light interval is fine — mirrors MarkitdownProvisioning's poll
-// in Profiles.tsx, though that one narrows to `installing` only since a venv build is a one-time event).
-const INTEGRATION_TONE: Record<IntegrationStatus["state"], Tone> = { detected: "phosphor", "not-found": "muted", unreachable: "amber" };
-const INTEGRATION_LABEL: Record<IntegrationStatus["state"], string> = { detected: "detected", "not-found": "not found", unreachable: "unreachable" };
+// GlobalConfigForm save/dirty state above — no per-row save) + a live "detected/not-found"
+// badge read from GET /api/integrations, polled while the Settings page is mounted (existsSync is
+// cheap, so a light interval is fine — mirrors MarkitdownProvisioning's poll in Profiles.tsx, though
+// that one narrows to `installing` only since a venv build is a one-time event).
+const INTEGRATION_TONE: Record<IntegrationStatus["state"], Tone> = { detected: "phosphor", "not-found": "muted" };
+const INTEGRATION_LABEL: Record<IntegrationStatus["state"], string> = { detected: "detected", "not-found": "not found" };
 function IntegrationRow({ slug, label, path, setPath, placeholder }:
   { slug: IntegrationStatus["slug"]; label: string; path: string; setPath: (v: string) => void; placeholder: string }) {
   const q = useQuery({
@@ -791,7 +730,7 @@ function IntegrationRow({ slug, label, path, setPath, placeholder }:
   });
   const status = q.data?.integrations.find((s) => s.slug === slug);
   // A "not-found" badge reads as neutral (not an error) when nothing is configured at all (source
-  // "none") — that's the common case for most users (OD/Codescape simply aren't installed).
+  // "none") — that's the common case for most users (Codescape simply isn't installed).
   const t = status ? (status.state === "not-found" && status.source === "none" ? "muted" : INTEGRATION_TONE[status.state]) : "muted";
   const accent = tone[t];
   // The label span is a DIRECT child of this <label> (like every other field on this page) so the e2e

@@ -148,9 +148,9 @@ try {
   }
 
   // --- (d) an agent-facing profile writer REJECTS vaultWrite:true (AGENT_FORBIDDEN_PROFILE_KEYS) ---
-  // (d0) the underlying agentProfileKeyError unit itself, mirroring open-design-spawn.mjs's coverage
-  // of the same guard for `openDesign` — both setup's and platform's profile_create/update funnel
-  // through this ONE function, so this direct unit assertion is the load-bearing one.
+  // (d0) the underlying agentProfileKeyError unit itself — both setup's and platform's
+  // profile_create/update funnel through this ONE function, so this direct unit assertion is the
+  // load-bearing one.
   {
     check("(d0) agentProfileKeyError REJECTS a payload setting vaultWrite:true",
       typeof agentProfileKeyError({ vaultWrite: true }) === "string");

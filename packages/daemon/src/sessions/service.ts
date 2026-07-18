@@ -710,7 +710,7 @@ export class SessionService {
    */
   private resolveAgentSpawn(
     agent: Agent, config: ResolvedConfig, explicitRole?: SessionRole, forcePlain = false, companionName?: string,
-  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; openDesign: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean } {
+  ): { role: SessionRole | undefined; startupPrompt: string | undefined; permission: PermissionPolicy; browserTesting: boolean; documentConversion: boolean; capabilities: CapabilityGrant[]; restrictedTools: boolean; noCommit: boolean; model: string | undefined; skills: string[] | null; connections: string[]; vaultWrite: boolean } {
     // forcePlain drops the profile lookup → resolveProfile's backstop yields role null, the agent's
     // own prompt, and NO allow delta (exactly a profile-less agent's "+New").
     const profile = (forcePlain || !agent.profileId) ? undefined : this.db.getProfile(agent.profileId);
@@ -752,8 +752,6 @@ export class SessionService {
       browserTesting: resolved.browserTesting,
       // Opt-in document-conversion capability from the resolved profile (backstop false under forcePlain / no profile).
       documentConversion: resolved.documentConversion,
-      // Opt-in Open Design capability from the resolved profile (backstop false under forcePlain / no profile).
-      openDesign: resolved.openDesign,
       // Agent-tooling P4: registry-capability grants BEYOND the two booleans above, RAW passthrough
       // (backstop [] under forcePlain / no profile).
       capabilities: resolved.capabilities,
@@ -832,7 +830,7 @@ export class SessionService {
     // prompt is always the agent's own). No caller role here (plain "+New"), so the profile's role
     // applies when present. No profile ⇒ role undefined, the config permission unchanged — today's session.
     // forcePlain (P3) pins role to undefined even on a profile agent (see resolveAgentSpawn).
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, undefined, opts.forcePlain ?? false, opts.companionName);
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -851,7 +849,6 @@ export class SessionService {
       role, // phase-2: profile-conferred role (undefined ⇒ today's plain, role-null session)
       browserTesting, // profile-conferred browser opt-in (false ⇒ today's plain spawn)
       documentConversion, // profile-conferred document-conversion opt-in (false ⇒ today's plain spawn)
-      openDesign, // profile-conferred Open Design opt-in (false ⇒ today's plain spawn)
       capabilities, // profile-conferred registry-capability grants, pinned ([] ⇒ today's plain spawn)
       restrictedTools, // profile-conferred restricted-tools, pinned (false ⇒ today's plain spawn)
       noCommit, // profile-conferred no-commit role, pinned (lifecycle-only; false ⇒ today's behavior)
@@ -916,7 +913,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -944,7 +940,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'manager' role from the caller (scheduler/REST) ALWAYS wins; the profile (if any) only
     // layers its prompt + allowDelta. No profile ⇒ byte-identical to today's manager spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "manager");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "manager");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -963,7 +959,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
       restrictedTools,
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
@@ -1006,7 +1001,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -1044,7 +1038,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'platform' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. No profile ⇒ byte-identical to today's platform-lead spawn.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "platform");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "platform");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -1063,7 +1057,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
       restrictedTools,
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
@@ -1092,7 +1085,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -1124,7 +1116,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'auditor' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the restricted loom-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "auditor");
     const codescapeEnabled = config.codescape.enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -1144,7 +1136,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
       restrictedTools,
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
@@ -1167,7 +1158,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -1206,7 +1196,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'workspace-auditor' role from the caller ALWAYS wins; the profile (if any) only layers its
     // prompt + allowDelta. The locked role — NOT the profile role — drives the loom-user-audit surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "workspace-auditor");
     const codescapeEnabled = config.codescape.enabled; // card C2: Codescape MCP wiring, per-project opt-in
 
     const now = new Date().toISOString();
@@ -1226,7 +1216,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
       restrictedTools,
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
@@ -1249,7 +1238,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -1290,7 +1278,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'setup' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-setup surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "setup");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "setup");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -1309,7 +1297,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
       restrictedTools,
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
@@ -1332,7 +1319,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -1376,7 +1362,7 @@ export class SessionService {
     const config = resolveConfig(project.config);
     // Explicit 'operator' role from the caller ALWAYS wins; the profile (if any) only layers its prompt +
     // allowDelta. The locked role — NOT the profile role — drives the curated loom-operator surface.
-    const { role, startupPrompt, permission, browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "operator");
+    const { role, startupPrompt, permission, browserTesting, documentConversion, capabilities, restrictedTools, noCommit, model, skills, connections, vaultWrite } = this.resolveAgentSpawn(agent, config, "operator");
 
     const now = new Date().toISOString();
     const session: Session = {
@@ -1395,7 +1381,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // profile-pinned registry-capability grants, pinned on the row ([] ⇒ today's behavior)
       restrictedTools,
       noCommit, // declared no-commit role, pinned on the row (lifecycle-only; false ⇒ today's behavior)
@@ -1418,7 +1403,6 @@ export class SessionService {
       role,
       browserTesting,
       documentConversion,
-      openDesign,
       capabilities, // agent-tooling P4: registry-capability grants beyond the two booleans above
       restrictedTools,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -1522,9 +1506,6 @@ export class SessionService {
       // Carry the document-conversion capability across resume too (pinned on the row at spawn): a
       // resumed document-worker must keep its per-session markitdown MCP, exactly as role is re-passed.
       documentConversion: session.documentConversion ?? false,
-      // Carry the Open Design capability across resume too (pinned on the row at spawn): a resumed session
-      // must keep its per-session OD MCP, exactly as role is re-passed.
-      openDesign: session.openDesign ?? false,
       // Carry the registry-capability grants across resume too (pinned on the row at spawn, agent-tooling
       // P4): a resumed session mounts the SAME capability MCPs, exactly as browserTesting is re-passed.
       capabilities: session.capabilities ?? [],
@@ -1686,9 +1667,9 @@ export class SessionService {
     // call, respawn or not. They're written here anyway (not via a separate live-effect-only path) purely
     // because this is the one place that re-pins the whole surface from a single `resolveAgentSpawn` call —
     // sourced from the human-set Profile, never from agent input, same as every other field here.
-    const { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
+    const { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite } =
       this.resolveAgentSpawn(agent, config, "assistant");
-    this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, openDesign, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
+    this.db.setSessionCapabilitySurface(sessionId, { browserTesting, documentConversion, capabilities, restrictedTools, noCommit, skills, connections, vaultWrite });
     const carried: QueuedMessage[] = [];
     const drain = (): void => { carried.push(...this.pty.flushPending(sessionId)); };
     if (this.pty.isAlive(sessionId)) {
@@ -2596,7 +2577,6 @@ export class SessionService {
       role: src.role ?? undefined, // a forked manager stays a manager (keeps its MCP surface)
       browserTesting: src.browserTesting ?? false, // a fork inherits the source's browser capability
       documentConversion: src.documentConversion ?? false, // a fork inherits the source's document-conversion capability
-      openDesign: src.openDesign ?? false, // a fork inherits the source's Open Design capability
       capabilities: src.capabilities ?? [], // a fork inherits the source's registry-capability grants
       restrictedTools: src.restrictedTools ?? false, // a fork inherits the source's restricted-tools disallow
       noCommit: src.noCommit ?? false, // a fork inherits the source's declared no-commit role
@@ -2633,7 +2613,6 @@ export class SessionService {
       role: src.role ?? undefined,
       browserTesting: src.browserTesting ?? false,
       documentConversion: src.documentConversion ?? false,
-      openDesign: src.openDesign ?? false,
       capabilities: src.capabilities ?? [], // carry the registry-capability grants onto the fork's pty (matches the fork row)
       restrictedTools: src.restrictedTools ?? false, // carry the restricted-tools disallow onto the fork's pty (matches the fork row)
       skills: src.skills ?? null, // carry the pinned subset onto the fork's pty (matches the fork row)
@@ -2674,7 +2653,7 @@ export class SessionService {
     // its SpawnOpts and DROPPED both (a model-pinned agent ran on the engine default; a skills-pinned agent
     // got ALL store skills). We thread ONLY model + skills; the run's deliberate differences stay: role is
     // hardcoded "run" below (not the profile role), permission is the VERBATIM boot recipe (config.permission,
-    // no allowDelta), browserTesting/documentConversion/openDesign stay false, and buildMcpServers mounts ONLY loom-run.
+    // no allowDelta), browserTesting/documentConversion stay false, and buildMcpServers mounts ONLY loom-run.
     const { model, skills } = this.resolveAgentSpawn(agent, config, "run");
 
     const now = new Date().toISOString();
@@ -2720,7 +2699,7 @@ export class SessionService {
       cwd: snapshotDir, // the disposable snapshot — NEVER the live repoPath
       processState: "starting", resumability: "unknown", busy: false,
       createdAt: now, lastActivity: now, lastError: null,
-      role: "run", browserTesting: false, documentConversion: false, openDesign: false, capabilities: [], restrictedTools: false, noCommit: false,
+      role: "run", browserTesting: false, documentConversion: false, capabilities: [], restrictedTools: false, noCommit: false,
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections: [], // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
       vaultWrite: false, // a run never mounts loom-tasks (buildMcpServers: ONLY loom-run), so this is moot
@@ -2741,7 +2720,6 @@ export class SessionService {
       role: "run", // buildMcpServers mounts ONLY loom-run; createPty allowlists mcp__loom-run
       browserTesting: false,
       documentConversion: false,
-      openDesign: false,
       capabilities: [],
       restrictedTools: false,
       model, // profile-pinned model → `--model` (undefined ⇒ no `--model`, byte-identical to today)
@@ -3170,7 +3148,6 @@ export class SessionService {
     const workerSpawn = this.resolveAgentSpawn(workerAgent, config, "worker");
     const browserTesting = workerSpawn.browserTesting;
     const documentConversion = workerSpawn.documentConversion;
-    const openDesign = workerSpawn.openDesign;
     const capabilities = workerSpawn.capabilities; // registry-capability grants (profile-pinned; [] ⇒ none)
     const restrictedTools = workerSpawn.restrictedTools; // curated dangerous-native-tool disallow (blast-radius control)
     const noCommit = workerSpawn.noCommit; // declared no-commit role (e.g. a Code Reviewer rig) — lifecycle-only
@@ -3300,7 +3277,6 @@ export class SessionService {
         role: "worker",
         browserTesting, // QA worker (profile opt-in) ⇒ per-session Playwright MCP; else false (plain)
         documentConversion, // document worker (profile opt-in) ⇒ per-session markitdown MCP; else false (plain)
-        openDesign, // open-design worker (profile opt-in) ⇒ per-session OD MCP; else false (plain)
         capabilities, // registry-capability grants (profile opt-in) ⇒ their own MCP(s); else [] (plain)
         restrictedTools, // restricted-tools worker (profile opt-in) ⇒ dangerous native tools disallowed; else false (plain)
         noCommit, // declared no-commit role (e.g. Code Reviewer) ⇒ 0-commit done auto-retires + skips the warning
@@ -3341,7 +3317,6 @@ export class SessionService {
         role: "worker", // gives the worker the orchestration surface (worker_report only)
         browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
         documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
-        openDesign, // inject the per-session OD MCP iff this worker's profile opted in
         capabilities, // inject any registry-capability MCP(s) iff this worker's profile opted in
         restrictedTools, // union the dangerous-native-tool disallow into --disallowedTools iff this worker's profile opted in
         model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
@@ -5263,7 +5238,6 @@ export class SessionService {
       role: "worker",
       browserTesting: old.browserTesting ?? false, // a recycled QA worker keeps its browser capability
       documentConversion: old.documentConversion ?? false, // a recycled document worker keeps its conversion capability
-      openDesign: old.openDesign ?? false, // carries the Open Design opt-in forward across recycle
       capabilities: old.capabilities ?? [], // a recycled worker keeps its registry-capability grants
       restrictedTools: old.restrictedTools ?? false, // a recycled worker keeps its restricted-tools disallow
       noCommit: old.noCommit ?? false, // a recycled reviewer keeps its declared no-commit role
@@ -5311,7 +5285,6 @@ export class SessionService {
       role: "worker",
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
-      openDesign: old.openDesign ?? false, // carries the Open Design opt-in forward across recycle
       capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
@@ -5399,7 +5372,6 @@ export class SessionService {
       role: "manager",
       browserTesting: old.browserTesting ?? false, // carry the capability forward (managers rarely set it)
       documentConversion: old.documentConversion ?? false, // carry the capability forward (managers rarely set it)
-      openDesign: old.openDesign ?? false, // carries the Open Design opt-in forward across recycle
       capabilities: old.capabilities ?? [], // carry the registry-capability grants forward (managers rarely set them)
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward
       noCommit: old.noCommit ?? false, // carry the declared no-commit role forward
@@ -5424,7 +5396,6 @@ export class SessionService {
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
-      openDesign: old.openDesign ?? false, // carries the Open Design opt-in forward across recycle
       capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: managerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
@@ -5547,7 +5518,6 @@ export class SessionService {
       role: "platform", // successor keeps the elevated platform surface
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
-      openDesign: old.openDesign ?? false, // carries the Open Design opt-in forward across recycle
       capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward
       noCommit: old.noCommit ?? false, // carry the declared no-commit role forward
@@ -5579,7 +5549,6 @@ export class SessionService {
       role: "platform", // successor keeps the platform surface
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
-      openDesign: old.openDesign ?? false, // carries the Open Design opt-in forward across recycle
       capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
       restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
       model: leadSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`)

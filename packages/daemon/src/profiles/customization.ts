@@ -23,7 +23,6 @@ export const MERGEABLE_PROFILE_FIELDS = [
   "icon",
   "browserTesting",
   "documentConversion",
-  "openDesign",
   "restrictedTools",
   "noCommit",
   "connections",
@@ -78,7 +77,6 @@ function normalizeFields(p: Partial<Profile>): Record<MergeableField, unknown> {
     icon: p.icon ?? null,
     browserTesting: p.browserTesting ?? false,
     documentConversion: p.documentConversion ?? false,
-    openDesign: p.openDesign ?? false,
     restrictedTools: p.restrictedTools ?? false,
     noCommit: p.noCommit ?? false,
     // Unlike skills, absent always means [] (no access) — never "all". A shipped bundled profile never

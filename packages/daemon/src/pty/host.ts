@@ -4,7 +4,7 @@ import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
 import { spawn as spawnProcess } from "node:child_process";
 import { spawn, type IPty } from "node-pty";
-import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant, HostToolMcpSpec } from "@loom/shared";
+import type { PermissionPolicy, PtyGeometry, SessionRole, CompanionRoute, CapabilityGrant } from "@loom/shared";
 import type { TerminalControl, StopMode } from "@loom/shared";
 import { resolveProfileCapabilities } from "@loom/shared";
 import { resolveExecutable } from "./resolve-bin.js";
@@ -718,63 +718,6 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 }
 
 /**
- * The stdio MCP-config entry for an openDesign session, or null when nothing resolves — a CLEAN-SKIP
- * mirroring markitdownMcpServer's "not warm yet" fallback: an unresolvable open-design (OD,
- * github.com/nexu-io/open-design) install never breaks the spawn. NOT additionally gated by
- * `isLoomDev()` — OD is a public, OSS project, so it ships to every loomctl user.
- *
- * Card e8eee68c: `dbMcpConfig` (the DB-persisted `integrations.openDesign.mcpConfig`, when the caller has
- * one) wins over EVERYTHING below and is injected VERBATIM — no `resolveHostToolBin` shape-guessing, no
- * appended `"mcp"` arg. This is the shape OD's DESKTOP-APP distribution actually needs: a two-arg command
- * (`[daemon-cli.mjs, "mcp"]`) plus env vars (its data dir, its sidecar named-pipe IPC path, an
- * Electron-run-as-node flag) that a single bin path could never express. The only gate is
- * `fs.existsSync(dbMcpConfig.command)` — same synchronous, non-blocking, binary-presence-only posture as
- * every other host-tool resolver below (see the risk note at the end of this comment for why nothing
- * heavier belongs on this hot path).
- *
- * Absent an `mcpConfig`, this falls back to the ORIGINAL card 8dc5ebb9 behavior for a plain host-installed
- * `od` CLI/MCP entry: `dbPath` (`integrations.openDesign.path`) wins over `LOOM_OPEN_DESIGN_BIN`,
- * mirroring every other host-tool resolver's DB-first-env-fallback precedence. Either way, the resolved
- * bin must be an ABSOLUTE path. Launch shape is resolved via the shared {@link resolveHostToolBin} (card
- * 8dc5ebb9's fix for OD residual risk 1) — a node ESM script bin is wrapped in `process.execPath` rather
- * than launched directly (direct launch of a bare `.mjs` file fails on Windows); a compiled/PATH binary
- * still launches directly. Either way the daemon appends a single `"mcp"` arg (mirrors `od mcp`, OD's own
- * documented from-source stdio-MCP invocation) — this appended-arg behavior is exactly what `dbMcpConfig`
- * exists to bypass, since the desktop app's real invocation isn't that shape. No venv/provisioning step —
- * OD is a host dependency the human installs and points a path/spec at once (DB or env); Loom never
- * bundles or auto-installs it (see the profile flag's own doc for the full trust posture).
- *
- * RESIDUAL RISK (unverified — no OD install available to test against at the time this resolver was
- * written; now narrowed by card e8eee68c): OD's desktop-app distribution pairs this stdio MCP process
- * with OD's own running desktop app via a Windows named-pipe sidecar (`OD_SIDECAR_IPC_PATH`) — if OD's MCP
- * process blocks/hangs its own handshake when that app isn't running (rather than degrading a tool call
- * gracefully), a session that opts into `openDesign` with a present-but-not-running OD install could see
- * its `claude` boot hang waiting on this MCP's initialize response. This resolver only ever gates on
- * BINARY presence (fs.existsSync) here, never on OD's own app/daemon reachability (a handshake probe on
- * this synchronous spawn hot path would itself risk blocking the daemon) — the reachability check is
- * instead surfaced OFF this hot path, in the human-only `/api/integrations` detect endpoint (see
- * integrations/detect.ts), covering the same risk as a Settings-page warning rather than a spawn guard.
- */
-export function openDesignMcpServer(
-  dbPath?: string,
-  dbMcpConfig?: HostToolMcpSpec,
-): { type: "stdio"; command: string; args: string[]; env?: Record<string, string> } | null {
-  if (dbMcpConfig) {
-    if (!path.isAbsolute(dbMcpConfig.command) || !fs.existsSync(dbMcpConfig.command)) return null;
-    return {
-      type: "stdio",
-      command: dbMcpConfig.command,
-      args: dbMcpConfig.args ?? [],
-      ...(dbMcpConfig.env ? { env: dbMcpConfig.env } : {}),
-    };
-  }
-  const bin = dbPath?.trim() || process.env.LOOM_OPEN_DESIGN_BIN;
-  if (!bin || !path.isAbsolute(bin) || !fs.existsSync(bin)) return null;
-  const { command, args } = resolveHostToolBin(bin);
-  return { type: "stdio", command, args: [...args, "mcp"] };
-}
-
-/**
  * The stdio MCP-config entry for a codescape-enabled session, or null when `graphPath` doesn't exist
  * yet — a CLEAN-SKIP mirroring markitdownMcpServer's "venv not warm yet" fallback: an ingest that
  * hasn't completed (or hasn't run at all) never breaks the spawn, it just skips the mount for THIS
@@ -783,11 +726,11 @@ export function openDesignMcpServer(
  * Card C2 REWRITE (`369dde3c`, card e068a2ab): replaces the old shared `codescape serve` HTTP mount
  * (scoped by the LOOM projectId, which never matched codescape's OWN ingested project id — the MCP
  * never registered) with a per-session STDIO `codescape mcp --graph <graphPath>` process, the SAME
- * per-session-MCP shape as Playwright/markitdown/OD above. `resolveCodescapeBin(dbPath)` already
+ * per-session-MCP shape as Playwright/markitdown above. `resolveCodescapeBin(dbPath)` already
  * encodes the two spawn shapes (a `.js` checkout wrapped in `process.execPath`; a resolved PATH/compiled
- * binary launched directly, exactly like {@link openDesignMcpServer}) via the shared
- * {@link resolveHostToolBin} — reused here rather than re-derived. `dbPath` (card 8dc5ebb9's
- * `integrations.codescape.path`) wins over `LOOM_CODESCAPE_BIN`, mirroring OD's own DB-first precedence.
+ * binary launched directly) via the shared {@link resolveHostToolBin} — reused here rather than
+ * re-derived. `dbPath` (card 8dc5ebb9's `integrations.codescape.path`) wins over `LOOM_CODESCAPE_BIN`,
+ * mirroring every other host-tool resolver's DB-first-env-fallback precedence.
  */
 export function codescapeMcpServer(graphPath: string, dbPath?: string): { type: "stdio"; command: string; args: string[] } | null {
   if (!fs.existsSync(graphPath)) return null;
@@ -821,7 +764,7 @@ export function codescapeMcpServer(graphPath: string, dbPath?: string): { type: 
  * tool world, so a prompt-injection in an audited transcript has no outward/destructive tool to reach.
  */
 export function buildMcpServers(o: {
-  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean; openDesign?: boolean;
+  sessionId: string; port: number; role?: SessionRole; browserTesting?: boolean; documentConversion?: boolean;
   /** HUMAN-only `python.interpreterPath` (carried via session env) — forwarded to the markitdown venv resolver. */
   pythonInterpreterPath?: string;
   /** Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (raw, un-bridged —
@@ -842,12 +785,10 @@ export function buildMcpServers(o: {
   /**
    * Card 8dc5ebb9: DB-persisted host-tool integration paths (`PlatformConfigOverride.integrations`),
    * resolved PER-SPAWN (not boot-bound) via PtyHost's `getIntegrationPaths` seam and threaded straight
-   * into `openDesignMcpServer`/`codescapeMcpServer` below — DB path wins, env var falls back, neither set
-   * is the byte-identical today-behavior. Default `{}` (no DB path for either tool). `openDesignMcpConfig`
-   * (card e8eee68c) is the full verbatim stdio spec escape hatch (`integrations.openDesign.mcpConfig`) —
-   * when set it wins over `openDesign`/`LOOM_OPEN_DESIGN_BIN` entirely inside `openDesignMcpServer`.
+   * into `codescapeMcpServer` below — DB path wins, env var falls back, neither set is the
+   * byte-identical today-behavior. Default `{}` (no DB path set).
    */
-  integrationPaths?: { openDesign?: string; codescape?: string; openDesignMcpConfig?: HostToolMcpSpec };
+  integrationPaths?: { codescape?: string };
 }): Record<string, unknown> {
   // Agent Runs R2: a `run` session gets ONLY the restricted run surface — NOT even loom-tasks. This is
   // the one path that does not mount loom-tasks (every other role layers ON TOP of it). The early return
@@ -933,21 +874,6 @@ export function buildMcpServers(o: {
       } else {
         // eslint-disable-next-line no-console
         console.warn(`[pty] ${o.sessionId} documentConversion set but the markitdown venv isn't warm yet — spawning WITHOUT the document MCP (provisioning in the background; a later spawn will pick it up). Needs a base Python >=3.10 on PATH (or python.interpreterPath).`);
-      }
-      continue;
-    }
-    if (grant.slug === "open-design") {
-      // Open Design (OD) is a PUBLIC OSS project — ships to every loomctl user, so this
-      // branch is deliberately NOT gated by isLoomDev(). A plain synchronous existence check (no venv/
-      // provisioning) — a null means neither the DB path nor LOOM_OPEN_DESIGN_BIN resolves, so THIS spawn
-      // just skips the MCP (logged, never crashes). No background kick: OD is a host-side install the
-      // human points a path at once (DB, or the env fallback for headless/CI/reproducible deploys).
-      const od = openDesignMcpServer(o.integrationPaths?.openDesign, o.integrationPaths?.openDesignMcpConfig);
-      if (od) {
-        mcpServers["open-design"] = od;
-      } else {
-        // eslint-disable-next-line no-console
-        console.warn(`[pty] ${o.sessionId} openDesign set but neither the DB path/mcpConfig nor LOOM_OPEN_DESIGN_BIN resolved to an existing command — spawning WITHOUT the Open Design MCP. Configure Settings › Integrations › Open Design (a path, or the full command+args+env spec), or LOOM_OPEN_DESIGN_BIN.`);
       }
       continue;
     }
@@ -1096,10 +1022,6 @@ export function capabilityToolAllowlist(grants: CapabilityGrant[], catalog: Capa
   return grants.flatMap((grant) => {
     if (grant.slug === "browser-testing") return ["mcp__playwright"];
     if (grant.slug === "document-conversion") return ["mcp__markitdown__convert_to_markdown"];
-    // OD's exact tool surface isn't known here (no live OD install to enumerate it against) — allow the
-    // WHOLE `mcp__open-design` server prefix, mirroring browser-testing's `mcp__playwright` whole-server
-    // allow, so every tool OD's MCP actually advertises is usable.
-    if (grant.slug === "open-design") return ["mcp__open-design"];
     const def = catalog.find((c) => c.slug === grant.slug);
     if (!def) return [];
     try { return JSON.parse(def.toolAllowlistJson) as string[]; } catch { return []; }
@@ -1392,13 +1314,6 @@ export interface SpawnOpts {
    * allowlist its tool surface. Default OFF — every existing spawn is byte-identical when unset/false.
    */
   documentConversion?: boolean;
-  /**
-   * Opt-in Open Design (OD, resolved from the session's Profile, gated). When true AND `LOOM_OPEN_DESIGN_BIN`
-   * resolves, inject a per-session stdio OD MCP server and allowlist its tool surface. NOT additionally
-   * gated by isLoomDev() — OD is a public OSS project. Default OFF — every
-   * existing spawn is byte-identical when unset/false.
-   */
-  openDesign?: boolean;
   /**
    * Card C2 (Codescape wiring epic `369dde3c`): the project's RAW `codescape.enabled` config flag — NOT
    * yet combined with `isLoomDev()` (buildMcpServers applies that gate itself). Default OFF — every
@@ -2170,14 +2085,14 @@ export class PtyHost {
    * Defaults to a harmless no-op (`{}`) so a PtyHost built without this opt — every existing hermetic
    * test — behaves byte-identically: both resolvers fall back to their env var exactly as before.
    */
-  private readonly getIntegrationPaths: () => { openDesign?: string; codescape?: string; openDesignMcpConfig?: HostToolMcpSpec };
+  private readonly getIntegrationPaths: () => { codescape?: string };
   constructor(
     private events: PtyHostEvents,
     opts?: {
       busyStaleMs?: number; coalesceAgentMessages?: boolean;
       getCapabilityCatalog?: () => CapabilityDefRow[];
       resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
-      getIntegrationPaths?: () => { openDesign?: string; codescape?: string; openDesignMcpConfig?: HostToolMcpSpec };
+      getIntegrationPaths?: () => { codescape?: string };
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
@@ -2595,7 +2510,7 @@ export class PtyHost {
     // tool allowlist off the actual mount decision, rather than re-deriving the same isLoomDev()/port/
     // project-enabled condition a second time here.
     const mcpServers = buildMcpServers({
-      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion, openDesign: opts.openDesign,
+      sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
       codescapeEnabled: opts.codescapeEnabled, projectId: opts.projectId,

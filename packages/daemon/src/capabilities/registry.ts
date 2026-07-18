@@ -10,9 +10,9 @@
  * python-venv AND github-binary (so N provisioning capabilities — of either kind — provision independently,
  * never sharing one in-flight flag).
  *
- * The BUILTIN capabilities (browser-testing/document-conversion/open-design) are NOT rows in this
+ * The BUILTIN capabilities (browser-testing/document-conversion) are NOT rows in this
  * table — they stay special-cased in `buildMcpServers` (pty/host.ts), reusing their existing,
- * already-hardened resolution code (`playwrightMcpServer`/`markitdownMcpServer`/`openDesignMcpServer`)
+ * already-hardened resolution code (`playwrightMcpServer`/`markitdownMcpServer`)
  * UNTOUCHED. Their reserved slugs are
  * rejected here (`RESERVED_CAPABILITY_SLUGS`) so an owner can never shadow/rename over them.
  *
@@ -82,10 +82,10 @@ export type CapabilityProvision =
 const NAME_MAX = 200;
 const DESCRIPTION_MAX = 2000;
 const SLUG_RE = /^[a-z0-9][a-z0-9-]{0,63}$/;
-/** The three legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
+/** The legacy-bridged slugs (@loom/shared's `LEGACY_CAPABILITY_SLUGS`) — reserved so an owner-added
  *  row can never collide with or shadow a builtin. Duplicated as string literals (not imported) to keep
  *  this module's validation independent of the shared bridge helper's own location. */
-export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion", "open-design"] as const;
+export const RESERVED_CAPABILITY_SLUGS = ["browser-testing", "document-conversion"] as const;
 
 function isNonBlankStr(v: unknown, max: number): v is string {
   return typeof v === "string" && v.trim().length > 0 && v.length <= max;
@@ -214,11 +214,6 @@ export const BUILTIN_CAPABILITY_SUMMARIES: CapabilitySummary[] = [
     slug: "document-conversion", name: "Document conversion",
     description: "Inject a per-session markitdown MCP so a rig can convert files (PDF / Office / images / HTML) to Markdown to save tokens.",
     transport: "stdio", kind: "python-venv", requiresConnection: false, builtin: true,
-  },
-  {
-    slug: "open-design", name: "Open Design",
-    description: "Inject a per-session Open Design (OD, github.com/nexu-io/open-design) MCP so a design/mockup rig can generate prototypes, dashboards, decks, and other design artifacts. Needs OD installed on this host (LOOM_OPEN_DESIGN_BIN pointed at its od entry) — Loom only mounts an OD the owner already installed, never bundles or auto-installs it. A PUBLIC OSS capability — never hidden on a non-dev build.",
-    transport: "stdio", kind: "bundled", requiresConnection: false, builtin: true,
   },
 ];
 

@@ -84,14 +84,14 @@ export interface PythonProvisioning {
   lastAttemptAt?: number;
 }
 
-// Host-tool integrations (card 8dc5ebb9, GET /api/integrations) — one row per optional host tool (Open
-// Design, Codescape, …). `state` mirrors the daemon's live resolver (never a re-derived client-side
+// Host-tool integrations (card 8dc5ebb9, GET /api/integrations) — one row per optional host tool
+// (Codescape, …). `state` mirrors the daemon's live resolver (never a re-derived client-side
 // check); `detail` is a one-line human hint present whenever state !== "detected". See
 // packages/daemon/src/integrations/detect.ts.
 export type IntegrationSource = "db" | "env" | "none";
-export type IntegrationState = "detected" | "not-found" | "unreachable";
+export type IntegrationState = "detected" | "not-found";
 export interface IntegrationStatus {
-  slug: "openDesign" | "codescape";
+  slug: "codescape";
   label: string;
   path: string | null;
   source: IntegrationSource;

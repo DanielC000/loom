@@ -3617,8 +3617,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // reads above). READ-ONLY: writing a path goes through the EXISTING PATCH /api/platform/config above
   // (the `integrations` key just slots into that same validator) — no separate write endpoint needed.
   // Derives each tool's state by calling the SAME resolver the real spawn path uses, so this can never
-  // drift from actual spawn behavior; the OD reachability probe is a bounded async TCP check that stays
-  // OFF the synchronous spawn hot path entirely (see integrations/detect.ts).
+  // drift from actual spawn behavior (see integrations/detect.ts).
   app.get("/api/integrations", async () => ({ integrations: await detectIntegrations(deps.db.getPlatformConfig()) }));
 
   app.post("/api/projects/:id/agents", async (req, reply) => {
