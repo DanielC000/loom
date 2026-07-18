@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, type UseQueryResult } from "@tanstack/react-query";
-import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAgent, UsageHistoryProject, SessionUsageHistory, SessionUsageTotals, SessionUsageAgent, SessionUsageProject, SessionUsageDay } from "@loom/shared";
+import type { SessionListItem, UsageHistory, UsageHistoryTotals, UsageHistoryAgent, UsageHistoryProject, SessionUsageHistory, SessionUsageTotals, SessionUsageAgent, SessionUsageProject, SessionUsageDay, SessionUsageSession } from "@loom/shared";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -86,6 +86,19 @@ function fmtUsd(n: number): string {
   // Thousands separators — estimated interactive totals run to the thousands ($6,020.00 reads far better
   // than $6020.00).
   return `$${n.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+// Prompt-cache hit ratio (cacheRead / (cacheRead + cacheCreation + input)) — the fixed-prefix cache-health
+// tripwire. null = no usage in the row to divide by (never rendered as a misleading "0%").
+function fmtRatio(r: number | null): string {
+  return r == null ? "—" : `${Math.round(r * 100)}%`;
+}
+// Warm (read-dominated, byte-stable prefix) reads phosphor-green; a collapsing ratio (broken prefix,
+// re-paying the whole prefix every turn) escalates amber then red; unmeasured stays muted.
+function ratioTone(r: number | null): Tone {
+  if (r == null) return "muted";
+  if (r >= 0.8) return "phosphor";
+  if (r >= 0.4) return "amber";
+  return "red";
 }
 
 // ── Historical window controls ─────────────────────────────────────────────────
@@ -510,8 +523,15 @@ function SessionUsageSection({
               <Stat label="input tok" value={fmtTokens(totals.inputTokens)} tone="cyan" />
               <Stat label="output tok" value={fmtTokens(totals.outputTokens)} tone="cyan" />
               <Stat label="cache tok" value={fmtTokens(totals.cacheCreationTokens + totals.cacheReadTokens)} tone="muted" />
+              <Stat label="cache hit" value={fmtRatio(totals.cacheHitRatio)} tone={ratioTone(totals.cacheHitRatio)} />
               <Stat label="samples" value={fmtTokens(totals.samples)} tone="muted" />
             </div>
+            <span style={{ fontFamily: font.mono, fontSize: 10, color: color.textMuted, lineHeight: 1.5 }}>
+              "cache hit" = cache_read / (cache_read + cache_creation + input) across this whole scope/window —
+              a warm, byte-stable session startup prefix keeps this near 100%; a broken prefix (re-paying the
+              prefix as cache_creation every turn) collapses it toward 0%. Blended across every sampled
+              session here — see "By session" below for the per-session read that isolates one fixed prefix.
+            </span>
 
             {/* Over-time chart from byDay — ascending by day, legible up to ~365 buckets. */}
             <ByDayChart byDay={data!.byDay} metric={chartMetric} onMetric={setChartMetric} allTime={allTime} />
@@ -556,6 +576,21 @@ function SessionUsageSection({
                 })()}
               </Panel>
             </div>
+
+            {/* Per-SESSION breakdown — the prompt-cache hit-ratio tripwire (rec#1 follow-up, card 0dd60be4):
+                one session = one fixed startup prefix, so ITS ratio (unlike the blended byAgent/byProject
+                rows above) is the direct empirical read on whether that prefix stayed byte-stable. Capped
+                + ranked by cost server-side; managers — this project's long-running sessions — are marked
+                with the same ★ the live-occupancy section uses. */}
+            <div>
+              <SectionLabel>By session · cache hit ratio</SectionLabel>
+              <Panel>
+                {data!.bySession.length === 0 && (
+                  <span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No per-session rows.</span>
+                )}
+                {data!.bySession.map((s) => <SessionRatioRow key={s.sessionId} row={s} />)}
+              </Panel>
+            </div>
           </>
         )
       )}
@@ -577,6 +612,32 @@ function SessionHistoryRow({ name, subtitle, row, max }: { name: string; subtitl
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
         {max != null && <Meter value={tok} max={max} tone="cyan" width={90} />}
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.amber, minWidth: 72, textAlign: "right" }}>{fmtUsd(row.costUsd)}</span>
+      </span>
+    </div>
+  );
+}
+
+// One per-session breakdown row — the cache-hit-ratio tripwire's actual unit of measure. Marks a manager
+// session with the same ★ the live-occupancy section uses (role-derived, not a guess), shows sample/token
+// volume for context, and renders cacheHitRatio as a color-coded percentage (warm→phosphor, degrading→
+// amber→red, unmeasured→muted "—").
+function SessionRatioRow({ row }: { row: SessionUsageSession }) {
+  const tok = sessionTotalTokens(row);
+  const isManager = row.role === "manager";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "4px 0", flexWrap: "wrap", borderBottom: `1px solid ${color.border}` }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, minWidth: 160, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ color: isManager ? color.phosphor : color.textDim }}>{isManager ? "★ " : ""}{row.role ?? "session"}</span>{" "}
+        <span style={{ color: color.textMuted }}>{row.sessionId.slice(0, 8)}</span>
+      </span>
+      <RowName name={row.agentName ?? "(no agent)"} subtitle={row.projectName} />
+      <Chip label="samples" value={fmtTokens(row.samples)} />
+      <span style={{ flex: 1 }} />
+      <span style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, minWidth: 64, textAlign: "right" }}>{fmtTokens(tok)} tok</span>
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: tone[ratioTone(row.cacheHitRatio)], minWidth: 44, textAlign: "right", fontWeight: 700 }}>
+          {fmtRatio(row.cacheHitRatio)}
+        </span>
       </span>
     </div>
   );

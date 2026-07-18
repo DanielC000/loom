@@ -648,12 +648,17 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return { since: sinceIso, projectId: filter, ...agg };
   });
   // --- INTERACTIVE-session usage telemetry over a timespan (epic c9924bcd): grand totals + per-project +
-  // per-agent + per-DAY breakdowns, aggregated read-only from the daemon-sampled `session_usage_samples`
-  // table — the OWNER'S OWN interactive usage over time (DISTINCT from /api/usage/history above, which is
-  // Agent-Runs-backed). Loopback, human-only, NOT an agent MCP tool — same posture as /api/usage/history.
-  // The `since` clamp is IDENTICAL: a missing/unparseable/future value defaults to the trailing 30 days,
-  // and a cutoff older than 1 year is floored at 1 year ago (never an unbounded scan). `projectId` is
-  // optional; omitted or "all" → every project. The applied (clamped) since + filter are echoed back. ---
+  // per-agent + per-session + per-DAY breakdowns, aggregated read-only from the daemon-sampled
+  // `session_usage_samples` table — the OWNER'S OWN interactive usage over time (DISTINCT from
+  // /api/usage/history above, which is Agent-Runs-backed). Loopback, human-only, NOT an agent MCP tool —
+  // same posture as /api/usage/history. The `since` clamp is IDENTICAL: a missing/unparseable/future value
+  // defaults to the trailing 30 days, and a cutoff older than 1 year is floored at 1 year ago (never an
+  // unbounded scan). `projectId` is optional; omitted or "all" → every project. The applied (clamped)
+  // since + filter are echoed back. Every breakdown row (incl. `totals` itself) also carries a
+  // `cacheHitRatio` — a prompt-cache hit-ratio tripwire (card 0dd60be4): a warm, byte-stable session
+  // startup prefix keeps cache_read dominant (ratio near 1); a broken prefix collapses it toward 0. The
+  // new `bySession` breakdown is the granularity that ratio is actually meaningful at (one session = one
+  // fixed prefix — byProject/byAgent blend many prefixes together). ---
   app.get("/api/usage/sessions/history", async (req): Promise<SessionUsageHistory> => {
     const { since, projectId } = req.query as { since?: string; projectId?: string };
     const nowMs = Date.now();

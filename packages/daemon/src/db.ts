@@ -37,12 +37,12 @@ import type {
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
   UsageHistoryTotals, UsageHistoryProject, UsageHistoryAgent,
-  UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay,
+  UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
-import { isOwnerHeldTaskTitle, describeCron } from "@loom/shared";
+import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio } from "@loom/shared";
 import { mintApiKey, parseApiKey, verifySecret, mintPairingCode as mintPairingToken, mintGatewayToken, parseGatewayToken } from "./keys/hash.js";
 import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security/lockout.js";
 // Type-only — companion/types.ts has zero runtime imports, so this can never form a runtime cycle with
@@ -3291,9 +3291,11 @@ export class Db {
   // usage. Each `session_usage_samples` row is a per-interval DELTA (additive), so totals/buckets are a
   // plain SUM — no read-time monotonicity math (the sampler, card B, computes the deltas + handles
   // transcript resets). insertUsageSample appends one row; aggregateSessionUsage reads totals +
-  // byProject/byAgent/byDay over a window; pruneUsageSamples enforces retention. Mirrors aggregateRunUsage's
-  // COALESCE(SUM(...)) + LEFT JOIN projects/agents-for-names + GROUP BY shape, but SUMs the stored numeric
-  // DELTA columns directly (each row is already a delta — not a json_extract of a cumulative snapshot). ---
+  // byProject/byAgent/byDay/bySession over a window (each row also carries its own `cacheHitRatio` — the
+  // prompt-cache-health tripwire, card 0dd60be4); pruneUsageSamples enforces retention. Mirrors
+  // aggregateRunUsage's COALESCE(SUM(...)) + LEFT JOIN projects/agents-for-names + GROUP BY shape, but
+  // SUMs the stored numeric DELTA columns directly (each row is already a delta — not a json_extract of a
+  // cumulative snapshot). ---
 
   /** Append one usage sample (a per-interval billed-usage DELTA for a session segment). */
   insertUsageSample(s: UsageSample): void {
@@ -3313,19 +3315,24 @@ export class Db {
 
   /**
    * Read-only HISTORICAL interactive-session usage aggregation for GET /api/usage/sessions/history: grand
-   * totals + per-project + per-agent + per-DAY breakdowns over every sample at/after `sinceIso`, optionally
-   * scoped to ONE project. Mirrors aggregateRunUsage's COALESCE(SUM(...)) + LEFT JOIN projects/agents-for-
-   * names + GROUP BY shape, but SUMs the stored numeric DELTA columns directly (each row is already a
-   * per-interval delta — no json_extract, no monotonicity math). `byDay` buckets via GROUP BY substr(ts,1,10)
-   * (the ISO date), ordered ascending, for the over-time chart. When projectId is omitted/null/"all" the
-   * aggregation spans every project. `bucket` is reserved for future granularities (the over-time series is
-   * day-grained today). Cost is best-effort — an unpriced model's samples contribute 0 costUsd.
+   * totals + per-project + per-agent + per-SESSION + per-DAY breakdowns over every sample at/after
+   * `sinceIso`, optionally scoped to ONE project. Mirrors aggregateRunUsage's COALESCE(SUM(...)) + LEFT
+   * JOIN projects/agents-for-names + GROUP BY shape, but SUMs the stored numeric DELTA columns directly
+   * (each row is already a per-interval delta — no json_extract, no monotonicity math). `byDay` buckets
+   * via GROUP BY substr(ts,1,10) (the ISO date), ordered ascending, for the over-time chart; `bySession`
+   * (capped, cost/samples-ranked — see its own comment above) is the one breakdown fine enough to score a
+   * meaningful prompt-cache hit ratio, since it isn't blended across sessions with different startup
+   * prefixes. Every row of every breakdown (plus `totals` itself) carries its own `cacheHitRatio`. When
+   * projectId is omitted/null/"all" the aggregation spans every project. `bucket` is reserved for future
+   * granularities (the over-time series is day-grained today). Cost is best-effort — an unpriced model's
+   * samples contribute 0 costUsd.
    */
   aggregateSessionUsage(opts: { sinceIso: string; projectId?: string | null; bucket?: "day" }): {
     totals: SessionUsageTotals;
     byProject: SessionUsageProject[];
     byAgent: SessionUsageAgent[];
     byDay: SessionUsageDay[];
+    bySession: SessionUsageSession[];
   } {
     const scoped = opts.projectId != null && opts.projectId !== "all";
     const params: Record<string, string> = { sinceIso: opts.sinceIso };
@@ -3341,14 +3348,17 @@ export class Db {
       COALESCE(SUM(s.cache_read_tokens), 0) AS cacheReadTokens,
       COALESCE(SUM(s.cost_usd), 0) AS costUsd`;
     const num = (v: unknown): number => Number(v) || 0;
-    const measures = (row: Row): SessionUsageTotals => ({
-      samples: num(row.samples),
-      inputTokens: num(row.inputTokens),
-      outputTokens: num(row.outputTokens),
-      cacheCreationTokens: num(row.cacheCreationTokens),
-      cacheReadTokens: num(row.cacheReadTokens),
-      costUsd: num(row.costUsd),
-    });
+    const measures = (row: Row): SessionUsageTotals => {
+      const t = {
+        samples: num(row.samples),
+        inputTokens: num(row.inputTokens),
+        outputTokens: num(row.outputTokens),
+        cacheCreationTokens: num(row.cacheCreationTokens),
+        cacheReadTokens: num(row.cacheReadTokens),
+        costUsd: num(row.costUsd),
+      };
+      return { ...t, cacheHitRatio: cacheHitRatio(t) };
+    };
 
     const t = this.db.prepare(`SELECT ${sums} FROM session_usage_samples s WHERE ${where}`).get(params) as Row;
     const totals = measures(t);
@@ -3385,7 +3395,33 @@ export class Db {
       ...measures(row),
     }));
 
-    return { totals, byProject, byAgent, byDay };
+    // Per-SESSION breakdown (rec#1 follow-up, card 0dd60be4): the one granularity fine enough to score a
+    // meaningful cacheHitRatio per below — byProject/byAgent blend many sessions' prefixes together, but
+    // one long-running session (a manager, most usefully) has ONE fixed startup prefix, so its OWN ratio
+    // is the direct empirical read on prefix byte-stability. LEFT JOIN sessions for `role` (a session row
+    // can be pruned/gone; NULL is fine — the row still reports by id). Capped + ranked by cost/samples
+    // (same ORDER as byProject/byAgent) since a long-lived install accumulates far more distinct sessions
+    // than projects/agents — the top spenders by usage are exactly the long-running managers this is for.
+    const SESSION_BREAKDOWN_LIMIT = 50;
+    const bySession = (this.db.prepare(
+      `SELECT s.session_id AS sessionId, ses.role AS role, s.agent_id AS agentId, a.name AS agentName,
+              s.project_id AS projectId, p.name AS projectName, ${sums}
+       FROM session_usage_samples s
+       LEFT JOIN sessions ses ON s.session_id = ses.id
+       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN projects p ON s.project_id = p.id
+       WHERE ${where} GROUP BY s.session_id ORDER BY costUsd DESC, samples DESC LIMIT @limit`,
+    ).all({ ...params, limit: SESSION_BREAKDOWN_LIMIT }) as Row[]).map((row) => ({
+      sessionId: row.sessionId as string,
+      role: (row.role as string | null) ?? null,
+      agentId: (row.agentId as string | null) ?? null,
+      agentName: (row.agentName as string | null) ?? null,
+      projectId: row.projectId as string,
+      projectName: (row.projectName as string | null) ?? null,
+      ...measures(row),
+    }));
+
+    return { totals, byProject, byAgent, byDay, bySession };
   }
 
   /** Retention: delete every sample older than `beforeIso` (ts < beforeIso). Returns rows removed. */

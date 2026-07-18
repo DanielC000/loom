@@ -621,8 +621,10 @@ export const api = {
   // INTERACTIVE-SESSION usage telemetry (GET /api/usage/sessions/history) — the OWNER'S OWN
   // interactive-session BILLED usage over time, sampled token-free from transcripts (epic c9924bcd).
   // Mirrors usageHistory's since/projectId handling exactly (drop projectId when "all"); the server
-  // echoes the clamped since + applied filter and adds a per-DAY breakdown (byDay) for the over-time
-  // chart. Human-only loopback — NOT an agent MCP tool. DISTINCT from the runs-backed usageHistory.
+  // echoes the clamped since + applied filter and adds a per-DAY breakdown (byDay) plus a per-SESSION
+  // breakdown (bySession, capped/ranked by cost) for the over-time chart + the prompt-cache hit-ratio
+  // tripwire (every row, incl. totals, also carries its own cacheHitRatio). Human-only loopback — NOT an
+  // agent MCP tool. DISTINCT from the runs-backed usageHistory.
   sessionUsageHistory: (sinceIso: string, projectId?: string) => {
     const params = new URLSearchParams({ since: sinceIso });
     if (projectId && projectId !== "all") params.set("projectId", projectId);

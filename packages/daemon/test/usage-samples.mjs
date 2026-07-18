@@ -10,11 +10,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   • TOTALS — grand sums over the window (sample count + tokens + costUsd).
 //   • byProject / byAgent — GROUP BY breakdowns joined to project/agent names.
 //   • byDay — GROUP BY substr(ts,1,10) buckets, ascending; same-day deltas accumulate into one bucket.
-//   • projectId FILTER — scoping to one project narrows totals + every breakdown; "all"/omitted spans all.
-//   • EMPTY case — a project with no samples → zeroed totals + empty breakdowns.
+//   • bySession + cacheHitRatio (card 0dd60be4, rec#1 follow-up) — the per-SESSION breakdown (ranked by
+//     cost, role-attributed via a LEFT JOIN sessions so a gone/never-recorded session still reports) and
+//     the prompt-cache hit-ratio carried on EVERY breakdown row (totals/byProject/byAgent/byDay/bySession).
+//     See test/cache-hit-ratio.mjs for the pure-function unit coverage (warm/broken-prefix/divide-by-zero
+//     edge cases); this file covers the DB-layer + wire integration of the SAME guard.
+//   • projectId FILTER — scoping to one project narrows totals + every breakdown (incl. bySession); "all"/
+//     omitted spans all.
+//   • EMPTY case — a project with no samples → zeroed totals + empty breakdowns (incl. cacheHitRatio: null).
 //   • SINCE cutoff — a row older than the cutoff is excluded; widening re-includes it.
 //   • pruneUsageSamples — drops rows older than a cutoff (and is a no-op the second time).
-//   • ROUTE — GET /api/usage/sessions/history clamps a bad/missing `since` to 30d, echoes since+filter.
+//   • ROUTE — GET /api/usage/sessions/history clamps a bad/missing `since` to 30d, echoes since+filter,
+//     and carries bySession + cacheHitRatio over the wire.
 // Run: 1) build (turbo builds shared first), 2) node test/usage-samples.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -77,6 +84,18 @@ try {
   seed("s5", "pB", "aB1", ts5, [400, 100, 40, 16, 0.40]);
   seed("sOld", "pA", "aA1", tsOld, [9999, 8888, 7777, 6666, 99]); // outside 30d; prune target
 
+  // bySession/cacheHitRatio fixtures (card 0dd60be4): a `sessions` row for each of sess-s1/s3/s4 so the
+  // bySession LEFT JOIN can attribute a role; sess-s2/s5 deliberately get NO row, to prove a gone/never-
+  // recorded session still reports its usage (role: null) instead of vanishing from the breakdown.
+  const mkSession = (id, projectId, agentId, role) => db.insertSession({
+    id, projectId, agentId, engineSessionId: null, title: null, cwd: tmpHome,
+    processState: "exited", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role,
+  });
+  mkSession("sess-s1", "pA", "aA1", "manager");
+  mkSession("sess-s3", "pA", "aA2", "worker");
+  mkSession("sess-s4", "pB", "aB1", "manager");
+
   // =====================================================================================================
   // 1) TOTALS over the 30-day window — all projects. sOld (100d) excluded.
   // =====================================================================================================
@@ -114,6 +133,36 @@ try {
   check("2 byAgent[aB1] owning project (pB / Beta)", ag.aB1.projectId === "pB" && ag.aB1.projectName === "Beta");
 
   // =====================================================================================================
+  // 2b) cacheHitRatio (card 0dd60be4) — carried on EVERY breakdown row (totals/byProject/byAgent), each
+  //     scored against ITS OWN cacheRead/cacheCreation/input sums.
+  // =====================================================================================================
+  check("2b totals.cacheHitRatio = 43/(43+105+1050)", approx(all.totals.cacheHitRatio, 43 / (43 + 105 + 1050)));
+  check("2b byProject[pA].cacheHitRatio = 15/(15+35+350)", approx(proj.pA.cacheHitRatio, 15 / (15 + 35 + 350)));
+  check("2b byProject[pB].cacheHitRatio = 28/(28+70+700)", approx(proj.pB.cacheHitRatio, 28 / (28 + 70 + 700)));
+  check("2b byAgent[aA1].cacheHitRatio = 7/(7+15+150)", approx(ag.aA1.cacheHitRatio, 7 / (7 + 15 + 150)));
+
+  // =====================================================================================================
+  // 2c) bySession (card 0dd60be4) — the per-SESSION breakdown the cache hit ratio is actually meaningful
+  //     at (one session = one fixed startup prefix). Ranked by costUsd desc (same as byProject/byAgent).
+  //     sess-s1/s3/s4 have a real `sessions` row (role attributed); sess-s2/s5 deliberately don't — a
+  //     gone/never-recorded session STILL reports its usage via the LEFT JOIN, with role: null.
+  // =====================================================================================================
+  check("2c bySession covers exactly the 5 in-window sessions", all.bySession.length === 5);
+  check("2c bySession ordered by costUsd desc (s5 0.40, s4 0.30, s3 0.20, s1 0.10, s2 0.05)",
+    all.bySession.map((r) => r.sessionId).join(",") === "sess-s5,sess-s4,sess-s3,sess-s1,sess-s2");
+  const sess = Object.fromEntries(all.bySession.map((r) => [r.sessionId, r]));
+  check("2c bySession[sess-s1] role manager (a real sessions row) + samples/tokens + ratio 5/115",
+    sess["sess-s1"].role === "manager" && sess["sess-s1"].agentId === "aA1" && sess["sess-s1"].projectId === "pA" &&
+    sess["sess-s1"].samples === 1 && sess["sess-s1"].inputTokens === 100 &&
+    approx(sess["sess-s1"].cacheHitRatio, 5 / 115));
+  check("2c bySession[sess-s3] role worker + ratio 8/228", sess["sess-s3"].role === "worker" && approx(sess["sess-s3"].cacheHitRatio, 8 / 228));
+  check("2c bySession[sess-s4] role manager + ratio 12/342", sess["sess-s4"].role === "manager" && approx(sess["sess-s4"].cacheHitRatio, 12 / 342));
+  check("2c bySession[sess-s2] NO sessions row ⇒ role null, usage still reported (not dropped)",
+    sess["sess-s2"].role === null && sess["sess-s2"].inputTokens === 50 && approx(sess["sess-s2"].cacheHitRatio, 2 / 57));
+  check("2c bySession[sess-s5] NO sessions row ⇒ role null, usage still reported (not dropped)",
+    sess["sess-s5"].role === null && sess["sess-s5"].inputTokens === 400 && approx(sess["sess-s5"].cacheHitRatio, 16 / 456));
+
+  // =====================================================================================================
   // 3) byDay buckets — GROUP BY substr(ts,1,10), ascending; same-day deltas accumulate into one bucket.
   // =====================================================================================================
   check("3 byDay has 3 buckets ordered ASCending (D5 < D3 < D2)",
@@ -138,6 +187,8 @@ try {
   check("4 filter=pA byDay is D3 + D2 only (s4 on D2 belongs to pB, excluded)",
     onlyA.byDay.length === 2 && onlyA.byDay[0].day === d3 && onlyA.byDay[1].day === d2 &&
     onlyA.byDay.find((r) => r.day === d2).inputTokens === 150);
+  check("4 filter=pA bySession excludes pB's sessions (sess-s1/s2/s3 only)",
+    onlyA.bySession.length === 3 && onlyA.bySession.every((r) => r.projectId === "pA"));
   // "all" is treated identically to omitted (spans every project).
   const allKeyword = db.aggregateSessionUsage({ sinceIso: since30, projectId: "all" });
   check("4 projectId=\"all\" spans every project (same as omitted)", allKeyword.totals.samples === 5 && allKeyword.byProject.length === 2);
@@ -147,7 +198,12 @@ try {
   // =====================================================================================================
   const empty = db.aggregateSessionUsage({ sinceIso: since30, projectId: "pEmpty" });
   check("5 empty project → totals all zero", empty.totals.samples === 0 && empty.totals.inputTokens === 0 && empty.totals.costUsd === 0);
-  check("5 empty project → empty byProject + byAgent + byDay", empty.byProject.length === 0 && empty.byAgent.length === 0 && empty.byDay.length === 0);
+  check("5 empty project → empty byProject + byAgent + byDay + bySession", empty.byProject.length === 0 && empty.byAgent.length === 0 && empty.byDay.length === 0 && empty.bySession.length === 0);
+  // DIVIDE-BY-ZERO GUARD (card 0dd60be4) — a totals row with zero cacheRead+cacheCreation+input (no
+  // samples at all) reports cacheHitRatio: null, never 0/NaN — a real end-to-end read of the same guard
+  // cache-hit-ratio.mjs unit-tests directly against the pure function.
+  check("5 empty project → totals.cacheHitRatio is null (nothing to divide by), not 0/NaN",
+    empty.totals.cacheHitRatio === null);
 
   // =====================================================================================================
   // 6) SINCE cutoff — older rows excluded; widening re-includes them.
@@ -160,6 +216,8 @@ try {
     wide.totals.samples === 6 && wide.totals.inputTokens === 11049);
   const veryTight = db.aggregateSessionUsage({ sinceIso: isoAgo(1) });
   check("6 a now-ish cutoff excludes every sample (samples 0)", veryTight.totals.samples === 0 && veryTight.byDay.length === 0);
+  check("6 a now-ish cutoff → totals.cacheHitRatio null + bySession empty (nothing to score)",
+    veryTight.totals.cacheHitRatio === null && veryTight.bySession.length === 0);
 
   // =====================================================================================================
   // 7) pruneUsageSamples — drops rows older than the cutoff; a second prune is a no-op.
@@ -184,6 +242,12 @@ try {
     r30.statusCode === 200 && b30.since === since30 && b30.projectId === null &&
     b30.totals.samples === 5 && b30.totals.inputTokens === 1050);
   check("8 route returns byProject + byAgent + byDay breakdowns", b30.byProject.length === 2 && b30.byAgent.length === 3 && b30.byDay.length === 3);
+  check("8 route returns bySession (5 rows) with cacheHitRatio on every row (incl. totals)",
+    b30.bySession.length === 5 && typeof b30.totals.cacheHitRatio === "number" &&
+    b30.bySession.every((r) => r.cacheHitRatio === null || typeof r.cacheHitRatio === "number"));
+  const b30Sess1 = b30.bySession.find((r) => r.sessionId === "sess-s1");
+  check("8 route bySession[sess-s1] carries role manager + matching ratio (5/115) over the wire",
+    b30Sess1?.role === "manager" && approx(b30Sess1.cacheHitRatio, 5 / 115));
 
   const rFilter = await get(`?since=${encodeURIComponent(since30)}&projectId=pA`);
   const bFilter = rFilter.json();
@@ -212,6 +276,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — session usage telemetry data layer: insertUsageSample + aggregateSessionUsage (totals + byProject/byAgent name-joins + byDay buckets + projectId filter + empty + since cutoff) + pruneUsageSamples, and GET /api/usage/sessions/history clamp/echo — claude-free, network-free."
+  ? "\n✅ ALL PASS — session usage telemetry data layer: insertUsageSample + aggregateSessionUsage (totals + byProject/byAgent name-joins + byDay buckets + bySession role-joins + cacheHitRatio + projectId filter + empty + since cutoff) + pruneUsageSamples, and GET /api/usage/sessions/history clamp/echo/bySession/cacheHitRatio — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

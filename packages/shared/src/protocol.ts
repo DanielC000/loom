@@ -180,6 +180,25 @@ export interface SessionUsageTotals {
   cacheCreationTokens: number;
   cacheReadTokens: number;
   costUsd: number;
+  /** {@link cacheHitRatio} of this row's own token sums — carried on the wire so a reader never has to
+   *  recompute it. `null` when the row has zero cacheRead+cacheCreation+input to divide by. */
+  cacheHitRatio: number | null;
+}
+
+/**
+ * The prompt-cache HIT RATIO over an aggregated usage window: `cacheRead / (cacheRead + cacheCreation +
+ * input)`. Loom drives real interactive `claude` sessions with a fixed startup prefix — a warm,
+ * byte-stable prefix means `cache_read` dominates after turn 1 (ratio near 1); a broken prefix (the
+ * prefix stopped being byte-identical turn to turn) re-pays ~the whole prefix as `cache_creation` EVERY
+ * turn instead (ratio collapses toward 0). This is a pure function over already-aggregated sums — no new
+ * data, just a read-time computation — so ANY {@link SessionUsageTotals}-shaped row (totals, or a
+ * byProject/byAgent/byDay/bySession breakdown) can be scored the same way. `null` (not 0) when there is
+ * no usage in the window to divide by — a 0 would misleadingly read as "totally broken" rather than
+ * "no data".
+ */
+export function cacheHitRatio(t: Pick<SessionUsageTotals, "cacheReadTokens" | "cacheCreationTokens" | "inputTokens">): number | null {
+  const denom = t.cacheReadTokens + t.cacheCreationTokens + t.inputTokens;
+  return denom > 0 ? t.cacheReadTokens / denom : null;
 }
 
 /** Per-project breakdown row — the totals plus the project id and its display name (null if the project
@@ -206,9 +225,27 @@ export interface SessionUsageDay extends SessionUsageTotals {
   day: string;
 }
 
-/** GET /api/usage/sessions/history response: grand totals over the window + per-project, per-agent, and
- *  per-day breakdowns. `since` echoes the (clamped) ISO cutoff actually applied; `projectId` echoes the
- *  applied filter (null = all projects). */
+/** Per-SESSION breakdown row — the totals plus the session id, its `role` (e.g. "manager"/"worker", null
+ *  for a legacy/roleless session), and the owning agent/project names (all nullable — the session or its
+ *  agent may since be gone). This is the one breakdown granular enough to carry a meaningful
+ *  {@link cacheHitRatio}: `byAgent`/`byProject` blend many sessions' prefixes together, but a single
+ *  long-running session (a manager, most usefully) has ONE fixed startup prefix, so ITS ratio is the
+ *  direct empirical read on whether that prefix stayed byte-stable across the window. Ordered by
+ *  `costUsd` desc (same as byProject/byAgent) and capped at the top `SESSION_BREAKDOWN_LIMIT` rows — a
+ *  long-lived install accumulates far more distinct sessions than projects/agents, and the top spenders
+ *  by usage are exactly the long-running managers this ratio is for. */
+export interface SessionUsageSession extends SessionUsageTotals {
+  sessionId: string;
+  role: string | null;
+  agentId: string | null;
+  agentName: string | null;
+  projectId: string;
+  projectName: string | null;
+}
+
+/** GET /api/usage/sessions/history response: grand totals over the window + per-project, per-agent,
+ *  per-session, and per-day breakdowns. `since` echoes the (clamped) ISO cutoff actually applied;
+ *  `projectId` echoes the applied filter (null = all projects). */
 export interface SessionUsageHistory {
   since: string;
   projectId: string | null;
@@ -216,6 +253,7 @@ export interface SessionUsageHistory {
   byProject: SessionUsageProject[];
   byAgent: SessionUsageAgent[];
   byDay: SessionUsageDay[];
+  bySession: SessionUsageSession[];
 }
 
 // ── Session/run AUDIT LOG (the replayable + diffable timeline) ──────────────────────────────────
