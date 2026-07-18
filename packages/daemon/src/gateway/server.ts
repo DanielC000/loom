@@ -5,8 +5,9 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
@@ -181,6 +182,14 @@ export interface GatewayDeps {
    * bind decision simply omit it.
    */
   onHttpsResolved?: (active: boolean) => void;
+  /**
+   * C2 of the WS delta-push umbrella (1efde4ba) — the registry backing `/ws/fleet` (connected fleet
+   * sockets + their per-manager event-subscription bookkeeping; see gateway/fleet-hub.ts). Test-injectable
+   * so a daemon test can hold a reference and assert hub state directly; a real caller (index.ts) omits it
+   * and buildServer creates its own. A later card that needs to PUSH data into the same hub from OUTSIDE
+   * the gateway (session/status/event emission, C3/C5/C7) threads its own instance through here.
+   */
+  fleetHub?: FleetHub;
 }
 
 /** The daemon's own non-UI route prefixes. An unmatched GET under any of these must NEVER fall back to
@@ -399,7 +408,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       }
       // Tier 1: require a valid gateway token on a remote request (Phase B: gateway_tokens, verified via
       // deps.verifyGatewayToken — see index.ts). A browser cannot set an Authorization header on a
-      // WebSocket upgrade, so the two WS routes ALSO accept the token via the Sec-WebSocket-Protocol
+      // WebSocket upgrade, so the three WS routes (/ws/term, /ws/companion, /ws/fleet) ALSO accept the
+      // token via the Sec-WebSocket-Protocol
       // subprotocol (preferred — the double-subprotocol contract, card 42abca6a: the client offers
       // `[loom.v1, loom.bearer.<token>]`, resolveWsSubprotocolToken extracts the token BY PREFIX, and the
       // 101 response's own echoed subprotocol is always the fixed `loom.v1` marker — see
@@ -414,7 +424,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       // every other Tier-1 rejection respects. Instead it's folded into the SAME rate-limited 401 path as
       // an unverified token, below.
       let wsProtocolRejected = false;
-      if (!token && (routePattern === "/ws/term/:sessionId" || routePattern === "/ws/companion/:sessionId")) {
+      if (!token && (routePattern === "/ws/term/:sessionId" || routePattern === "/ws/companion/:sessionId" || routePattern === "/ws/fleet")) {
         const proto = req.headers["sec-websocket-protocol"];
         const resolved = resolveWsSubprotocolToken(typeof proto === "string" ? proto : undefined);
         if (resolved.outcome === "rejected") {
@@ -447,6 +457,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // to BE the token. selectWsSubprotocol always negotiates the fixed generic marker (or nothing, if the
   // client didn't offer it), never the token-carrying `loom.bearer.*` entry — see gateway/trust-tier.ts.
   await app.register(websocket, { options: { handleProtocols: selectWsSubprotocol } });
+
+  // C2 of the WS delta-push umbrella (1efde4ba) — see GatewayDeps.fleetHub's doc above for why this is
+  // test-injectable rather than always-fresh.
+  const fleetHub = deps.fleetHub ?? new FleetHub();
 
   // --- Inbound webhook ingress (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public route
   // (POST /hooks/:endpointPath, gateway/trust-tier.ts). Registered UNCONDITIONALLY (ships inert, mirrors
@@ -4491,6 +4505,38 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       else if (msg.type === "resize") deps.pty.resize(sessionId, msg.cols, msg.rows);
     });
     socket.on("close", unsub); // detach does NOT kill the pty — sessions/shells outlive viewers
+  });
+
+  // --- Fleet delta-push transport (C2 of umbrella 1efde4ba): ONE socket per client/tab, NOT per session
+  // (contrast /ws/term above). TRANSPORT SKELETON ONLY — no data feeds flow yet (session/status/event
+  // emission are later cards, C3/C5/C7); this card just registers the socket, sends the hello handshake,
+  // and records/clears the caller's per-manager event subscriptions on the hub for those later cards to
+  // read. See gateway/fleet-hub.ts.
+  app.get("/ws/fleet", { websocket: true }, (socket: WebSocket) => {
+    fleetHub.add(socket);
+    socket.send(JSON.stringify({ t: "hello", v: 1 } satisfies ServerFleetMessage));
+    socket.on("message", (raw: Buffer) => {
+      let parsed: unknown;
+      try { parsed = JSON.parse(raw.toString()); } catch { return; }
+      // `JSON.parse` happily returns non-throwing scalars (null/number/string/array) for a frame like
+      // "null" or "42" — none of those have a `.t`, so touching `msg.t` below without this guard would
+      // throw on a non-object payload (CR-caught crash: an uncaught TypeError in a ws 'message' listener
+      // takes down the whole daemon process under the supervisor, a 4-byte-frame DoS). Reject anything
+      // that isn't a plain object BEFORE ever reading `.t`.
+      if (!parsed || typeof parsed !== "object") return;
+      const msg = parsed as ClientFleetMessage;
+      // Bookkeeping only in this card — no replay/streaming (that's C7). Any other/unknown `t` is
+      // silently ignored (forward-compat: an older daemon shouldn't reject a newer client's message kind).
+      // Field-shape validation matters even in this bookkeeping-only card: C7 will TRUST subscriptionsFor's
+      // contents (managerId as a broadcastEvent fan-out key, sinceSeq as a replay cursor) without
+      // re-validating, so a malformed field must never reach hub state.
+      if (msg.t === "sub:events") {
+        if (typeof msg.managerId === "string" && Number.isFinite(msg.sinceSeq)) fleetHub.subscribeEvents(socket, msg.managerId, msg.sinceSeq);
+      } else if (msg.t === "unsub:events") {
+        if (typeof msg.managerId === "string") fleetHub.unsubscribeEvents(socket, msg.managerId);
+      }
+    });
+    socket.on("close", () => fleetHub.remove(socket));
   });
 
   // --- Live IN-APP companion chat: attach/detach (JSON chat + audio frames only) ---

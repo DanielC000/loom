@@ -159,7 +159,7 @@ const ALL_ROUTES = [
   ["DELETE", "/mcp/:sessionId"], ["GET", "/mcp/:sessionId"], ["PATCH", "/mcp/:sessionId"],
   ["POST", "/mcp/:sessionId"], ["PUT", "/mcp/:sessionId"],
   ["GET", "/oauth/callback"],
-  ["GET", "/ws/companion/:sessionId"], ["GET", "/ws/term/:sessionId"],
+  ["GET", "/ws/companion/:sessionId"], ["GET", "/ws/fleet"], ["GET", "/ws/term/:sessionId"],
 ];
 
 const EXPECTED_TIER_1 = new Set([
@@ -172,7 +172,7 @@ const EXPECTED_TIER_1 = new Set([
   "GET /api/questions", "GET /api/questions/:id",
   "POST /api/questions/:id/answer", "POST /api/questions/:id/dismiss", "POST /api/sessions/:id/input", "POST /api/sessions/:id/end",
   "POST /api/sessions/:id/stop", "POST /api/sessions/:id/resume", "POST /api/sessions/:id/rate-limit/clear",
-  "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId",
+  "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
   // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
   "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
   "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
@@ -345,6 +345,8 @@ try {
     await wsReject("/ws/companion/sess1", {}));
   check("(3d) remote WS upgrade to /ws/term with NO token → rejected before the 101 response",
     await wsReject("/ws/term/sess1", {}));
+  check("(3d) remote WS upgrade to /ws/fleet (C2, umbrella 1efde4ba) with NO token → rejected before the 101 response",
+    await wsReject("/ws/fleet", {}));
   check("(3d) remote WS upgrade to /ws/companion with a [generic, bearer(WRONG)] offer → rejected",
     await wsReject("/ws/companion/sess1", { "sec-websocket-protocol": bearerProto("wrong-token") }));
   check("(3d) remote WS upgrade to /ws/companion with a BEARER-ONLY offer (no generic marker, valid token) → rejected outright",
@@ -364,6 +366,10 @@ try {
   const wsOkQuery = await appOn.injectWS(`/ws/companion/sess1?token=${GOOD_TOKEN}`, { headers: { host: "127.0.0.1" }, socket: remoteSocket });
   check("(3d) remote WS upgrade to /ws/companion with a VALID ?token= query fallback → accepted", !!wsOkQuery);
   wsOkQuery.close();
+
+  const wsOkFleet = await appOn.injectWS("/ws/fleet", { headers: { host: "127.0.0.1", "sec-websocket-protocol": bearerProto(GOOD_TOKEN) }, socket: remoteSocket });
+  check("(3d) remote WS upgrade to /ws/fleet with a VALID [generic, bearer] offer → accepted (real handshake completes)", !!wsOkFleet);
+  wsOkFleet.close();
 
   // --- (3e) CR follow-up on card 42abca6a: a rejected bearer-only WS offer must share the SAME per-ip
   // rate-limit/lockout gate as any other 401 — NOT bypass it via an early return before isIpLockedOut/
