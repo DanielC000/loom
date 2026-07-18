@@ -185,8 +185,8 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
   const [compareTo, setCompareTo] = useState<string>(""); // "" = closed; "predecessor" or a session id
 
   // The full session set drives `session` scope: a manager's workers are sessions whose parent is it.
-  // Reuse the shared ["allSessions"] cache the rest of Mission Control already polls (no new prop).
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 5000 });
+  // Reuse the shared ["allSessions"] cache — kept live by FleetSocketProvider's /ws/fleet deltas (no new prop).
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const allSessions = sessionsQ.data ?? [];
 
   // Climb a subject to its anchoring MANAGER: a worker → its parent; a manager (or unknown) → itself.

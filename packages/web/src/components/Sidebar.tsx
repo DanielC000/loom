@@ -47,7 +47,7 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
   const btnRef = useRef<HTMLButtonElement>(null);
   const ref = useDismissable<HTMLDivElement>(open, () => { setOpen(false); onOpenChange(false); });
 
-  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const sessionsQ = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const liveByProject = useMemo(() => {
     const m = new Map<string, number>();
     for (const s of sessionsQ.data ?? []) {

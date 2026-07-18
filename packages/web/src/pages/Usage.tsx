@@ -137,7 +137,7 @@ export default function Usage() {
   // Window: governs the historical section ONLY.
   const [span, setSpan] = useState<Timespan>("7d");
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const allSessions = sessions.data ?? [];
   const all = scope === "all" ? allSessions : allSessions.filter((s) => s.projectId === scope);
 

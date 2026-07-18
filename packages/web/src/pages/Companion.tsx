@@ -59,7 +59,7 @@ export default function Companion() {
   const bindings = useQuery({ queryKey: ["companionBindings"], queryFn: api.companionBindings });
   // Shared cache key (["allSessions"], used app-wide) — read here ONLY for each companion's ctxTurns/
   // createdAt, to pick the history-bearing default selection below. Never used to reorder the switcher.
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
 
   // Merge configs + bindings into companions, keyed by session id. A session may hold MANY bindings
   // (one per channel), so collect them into a list. MULTI-COMPANION (55f1b62): the daemon now arms EVERY

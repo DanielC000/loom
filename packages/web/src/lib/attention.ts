@@ -134,7 +134,7 @@ export function attentionOpenTarget(item: AttentionItem): string | null {
 }
 
 export function useAttention(): { items: AttentionItem[]; count: number } {
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const all = sessions.data ?? [];
   // Manager→human DECISION INBOX (card 8701bdbb): the GLOBAL "waiting on me" queue. A PENDING question is
   // ONE attention item (tone cyan — the signed "actionable question" color); it clears the instant the

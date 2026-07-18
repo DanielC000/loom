@@ -4,6 +4,7 @@ import "./styles/global.css";
 import { QueryClient, QueryClientProvider, MutationCache } from "@tanstack/react-query";
 import { BrowserRouter } from "react-router-dom";
 import App from "./App";
+import { FleetSocketProvider } from "./components/FleetSocketProvider";
 
 // Surface mutation failures instead of swallowing them — resume/stop/fork/input used to fail
 // silently (a dead-looking button). One global handler covers every mutation; no per-call onError.
@@ -23,6 +24,7 @@ const queryClient = new QueryClient({
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
+      <FleetSocketProvider />
       <BrowserRouter>
         <App />
       </BrowserRouter>

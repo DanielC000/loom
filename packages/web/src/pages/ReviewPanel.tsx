@@ -28,7 +28,7 @@ function ReviewPanelInner({ workerId }: { workerId: string }) {
   const [note, setNote] = useState("");
   const [result, setResult] = useState<string | null>(null);
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const worker = (sessions.data ?? []).find((s) => s.id === workerId);
   const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), enabled: !!workerId });
 

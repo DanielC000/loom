@@ -26,7 +26,7 @@ type SessionRow = SessionRowGroup<SessionListItem>;
 export default function Terminals() {
   const [filter, setFilter] = useState<string>("");      // projectName filter ("" = all)
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const stop = useStopSession();
   const fork = useForkSession();
   // Companion (assistant-role) sessions are EXCLUDED here at the source: a companion is driven ONLY

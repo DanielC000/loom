@@ -43,7 +43,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   const board = useQuery({ queryKey: ["board", projectId], queryFn: () => api.board(projectId), enabled: !!projectId, refetchInterval: 4000, placeholderData: keepPreviousData });
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
   // live worker's status + branch for the task they represent.
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 3000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const workerByTask = new Map<string, SessionListItem>();
   for (const s of sessions.data ?? []) if (s.taskId) workerByTask.set(s.taskId, s);
 

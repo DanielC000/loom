@@ -48,7 +48,7 @@ export function PlatformView({ edition }: { edition: PlatformEdition }) {
   const home = useQuery({ queryKey: [edition.homeQueryKey], queryFn: load });
   // Profiles resolve each agent's role (operator/auditor) — the human spawn role + chip.
   const profiles = useQuery({ queryKey: ["profiles"], queryFn: api.profiles });
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 4000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   // Entry A — the guided-onboarding wizard, launched from the band below. Human-only; stands up a new
   // project + a templated team over the existing setup REST (nothing here spawns an agent).
   const [wizardOpen, setWizardOpen] = useState(false);

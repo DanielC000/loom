@@ -43,7 +43,7 @@ export default function MissionControl() {
   const navigate = useNavigate();
   const openRequest = useOpenRequest();
 
-  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions, refetchInterval: 2000 });
+  const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 2000 });
   // Archived (now-exited) sessions across all projects, newest-archived first — the live feed above
   // EXCLUDES archived rows, and sessions auto-archive on exit, so past runs only live here. Used for
