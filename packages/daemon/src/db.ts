@@ -1443,6 +1443,15 @@ export class Db {
    * listener by design (one emitter); not an event-bus.
    */
   private eventListener?: (evt: OrchestrationEvent) => void;
+  /**
+   * Post-commit session change-feed hook (C3 of the WS delta-push umbrella, 1efde4ba) — the gateway
+   * wires this with a direct assignment (`db.sessionChangeListener = (id) => fleetHub.markSessionDirty(id)`
+   * in `buildServer`), not a setter, since there's exactly one consumer and no invariant to guard beyond
+   * what `notifySessionChanged`'s try/catch already gives it. Mirrors `eventListener`'s best-effort
+   * contract: invoked AFTER the row write commits, and a listener fault must never break the mutator
+   * that triggered it.
+   */
+  sessionChangeListener?: (id: string) => void;
   constructor(file = DB_PATH) {
     assertNotProdDbInTest(file);
     this.db = new Database(file);
@@ -1999,6 +2008,7 @@ export class Db {
       this.db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
     })();
+    for (const sid of sessionIds) this.notifySessionChanged(sid);
     return { sessionIds };
   }
   /** Count of a project's sessions still in processState 'live' — the archive/delete guard ("stop the fleet first"). */
@@ -2852,6 +2862,7 @@ export class Db {
       this.db.prepare("DELETE FROM sessions WHERE agent_id = ?").run(id);
       this.db.prepare("DELETE FROM agents WHERE id = ?").run(id);
     })();
+    for (const sid of sessionIds) this.notifySessionChanged(sid);
     return { sessionIds };
   }
   /** Count of an agent's sessions still in processState 'live' — the agent-delete guard ("stop the fleet first"). */
@@ -3612,6 +3623,19 @@ export class Db {
     return rows.map((r) => ({ ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string }));
   }
   /**
+   * Single-row form of {@link listAllSessions} — the point-read backing FleetHub's coalesced delta (C3 of
+   * the WS delta-push umbrella, 1efde4ba). SAME JOIN + enrichment as the list form; null when the row is
+   * gone or archived, so a caller resolving a dirty id treats null as "emit session:remove".
+   */
+  getSessionListItemById(id: string): SessionListItem | null {
+    const r = this.db.prepare(
+      `SELECT s.*, p.name AS project_name, a.name AS agent_name
+       FROM sessions s JOIN projects p ON s.project_id = p.id JOIN agents a ON s.agent_id = a.id
+       WHERE s.id = ? AND s.archived_at IS NULL`,
+    ).get(id) as Row | undefined;
+    return r ? { ...toSession(r), projectName: r.project_name as string, agentName: r.agent_name as string } : null;
+  }
+  /**
    * EVERY session including archived, enriched with names — for the boot-time orchestration reconcile
    * ONLY (finish orphaned merges + GC orphaned worktrees). An archived worker whose worktree still
    * lingers must still be reconciled, so this deliberately bypasses the archived_at filter that the
@@ -3712,10 +3736,12 @@ export class Db {
   /** Soft-archive a session (stamp archived_at) — hidden from the rail/god-eye lists; row retained. */
   archiveSession(id: string): void {
     this.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /** Restore an archived session back to the rail (clear archived_at). */
   restoreSession(id: string): void {
     this.db.prepare("UPDATE sessions SET archived_at = NULL WHERE id = ?").run(id);
+    this.notifySessionChanged(id);
   }
   /**
    * One-time boot backfill: sessions that EXITED before auto-archive-on-exit (card b37750a4) shipped never
@@ -3743,6 +3769,12 @@ export class Db {
    */
   backfillArchivedAtOnce(): number {
     if (this.getMeta(ARCHIVED_AT_BACKFILL_KEY) !== undefined) return 0; // guard: already run (one-shot)
+    const affectedIds = (this.db.prepare(
+      `SELECT id FROM sessions
+        WHERE archived_at IS NULL
+          AND process_state = 'exited'
+          AND (role IS NULL OR role <> 'run')`,
+    ).all() as Row[]).map((r) => r.id as string);
     const res = this.db.prepare(
       `UPDATE sessions
           SET archived_at = COALESCE(last_activity, created_at)
@@ -3751,6 +3783,7 @@ export class Db {
           AND (role IS NULL OR role <> 'run')`,
     ).run();
     this.setMeta(ARCHIVED_AT_BACKFILL_KEY, new Date().toISOString()); // stamp last — the one-shot guarantee
+    for (const id of affectedIds) this.notifySessionChanged(id);
     return res.changes;
   }
   /**
@@ -3790,6 +3823,7 @@ export class Db {
     this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(id);
     this.db.prepare("DELETE FROM sessions WHERE id = ?").run(id);
+    this.notifySessionChanged(id);
   }
   insertSession(s: Session): void {
     this.db.prepare(
@@ -3836,17 +3870,21 @@ export class Db {
       rateLimitedUntil: s.rateLimitedUntil ?? null,
       rateLimitDeadline: s.rateLimitDeadline ?? null,
     });
+    this.notifySessionChanged(s.id);
   }
   setEngineSessionId(id: string, engineId: string): void {
     this.db.prepare("UPDATE sessions SET engine_session_id = ?, resumability = 'resumable', last_activity = ? WHERE id = ?")
       .run(engineId, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   setProcessState(id: string, state: ProcessState): void {
     this.db.prepare("UPDATE sessions SET process_state = ?, last_activity = ? WHERE id = ?")
       .run(state, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   setResumability(id: string, r: Resumability): void {
     this.db.prepare("UPDATE sessions SET resumability = ? WHERE id = ?").run(r, id);
+    this.notifySessionChanged(id);
   }
   /**
    * Set ONLY the human-readable lastError (without touching the rate-limit park, unlike
@@ -3857,11 +3895,13 @@ export class Db {
   setLastError(id: string, lastError: string | null): void {
     this.db.prepare("UPDATE sessions SET last_error = ?, last_activity = ? WHERE id = ?")
       .run(lastError, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /** Turn in-flight flag — driven hook-side (UserPromptSubmit rising, Stop/StopFailure falling). */
   setBusy(id: string, busy: boolean): void {
     this.db.prepare("UPDATE sessions SET busy = ?, last_activity = ? WHERE id = ?")
       .run(busy ? 1 : 0, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /**
    * Re-pin the session-row `restrictedTools` flag directly (the human-only Companion Manage toggle) —
@@ -3873,6 +3913,7 @@ export class Db {
   setRestrictedTools(id: string, restrictedTools: boolean): void {
     this.db.prepare("UPDATE sessions SET restricted_tools = ?, last_activity = ? WHERE id = ?")
       .run(restrictedTools ? 1 : 0, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /**
    * Re-pin the FULL companion capability-shaping surface on the session ROW directly (Companion Capability
@@ -3911,6 +3952,7 @@ export class Db {
     const set = names.map((c) => `${c} = ?`).join(", ");
     this.db.prepare(`UPDATE sessions SET ${set}, last_activity = ? WHERE id = ?`)
       .run(...names.map((c) => cols[c]), new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /**
    * On daemon boot, no pty from a previous run survives — reconcile any session still
@@ -3925,6 +3967,7 @@ export class Db {
     this.db.prepare(
       "UPDATE sessions SET process_state = 'exited', busy = 0 WHERE process_state IN ('live','starting')",
     ).run();
+    for (const s of stale) this.notifySessionChanged(s.id);
     return stale;
   }
   /** Sessions that have a captured engine id and aren't already marked dead. */
@@ -3950,6 +3993,7 @@ export class Db {
     const set = names.map((c) => `${c} = ?`).join(", ");
     const vals = names.map((c) => cols[c]);
     this.db.prepare(`UPDATE sessions SET ${set} WHERE id = ?`).run(...vals, id);
+    this.notifySessionChanged(id);
   }
   /**
    * Update measured context occupancy, bumping ctx_updated_at. Also records the model id read
@@ -3959,6 +4003,7 @@ export class Db {
   setContextCounters(id: string, c: { ctxInputTokens: number; ctxTurns: number; model?: string | null }): void {
     this.db.prepare("UPDATE sessions SET ctx_input_tokens = ?, ctx_turns = ?, model = COALESCE(?, model), ctx_updated_at = ? WHERE id = ?")
       .run(c.ctxInputTokens, c.ctxTurns, c.model ?? null, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /**
    * §19c usage-limit park: stamp when the session may resume (null clears the park) and the
@@ -3968,6 +4013,7 @@ export class Db {
   setRateLimitedUntil(id: string, until: string | null, lastError: string | null): void {
     this.db.prepare("UPDATE sessions SET rate_limited_until = ?, last_error = ?, last_activity = ? WHERE id = ?")
       .run(until, lastError, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
   }
   /**
    * §19c-b: arm the give-up deadline for a recovery episode. COALESCE keeps an already-set
@@ -3976,10 +4022,12 @@ export class Db {
    */
   armRateLimitDeadline(id: string, deadline: string): void {
     this.db.prepare("UPDATE sessions SET rate_limit_deadline = COALESCE(rate_limit_deadline, ?) WHERE id = ?").run(deadline, id);
+    this.notifySessionChanged(id);
   }
   /** Clear the episode deadline — on recovery (success) or after bailing. */
   clearRateLimitDeadline(id: string): void {
     this.db.prepare("UPDATE sessions SET rate_limit_deadline = NULL WHERE id = ?").run(id);
+    this.notifySessionChanged(id);
   }
   /** Live sessions in an active usage-limit episode (deadline armed) — the resume watcher's work set. */
   listRateLimitEpisodes(): Session[] {
@@ -4002,6 +4050,7 @@ export class Db {
    */
   clearRateLimit(id: string): void {
     this.db.prepare("UPDATE sessions SET rate_limited_until = NULL, rate_limit_deadline = NULL WHERE id = ?").run(id);
+    this.notifySessionChanged(id);
   }
 
   // --- Asleep-at-the-Wheel idle watchdog state (FOUNDATION; persisted per-manager, parity with the
@@ -4028,11 +4077,13 @@ export class Db {
   setIdleNudgePolicy(id: string, policy: IdleNudgePolicy, snoozeUntil: string | null = null): void {
     this.db.prepare("UPDATE sessions SET idle_nudge_policy = ?, idle_nudge_snooze_until = ? WHERE id = ?")
       .run(policy, snoozeUntil, id);
+    this.notifySessionChanged(id);
   }
   /** Record that an idle nudge fired: stamp last_idle_nudge_at and increment the unanswered counter. */
   recordIdleNudge(id: string, atIso: string): void {
     this.db.prepare("UPDATE sessions SET last_idle_nudge_at = ?, idle_nudge_unanswered = idle_nudge_unanswered + 1 WHERE id = ?")
       .run(atIso, id);
+    this.notifySessionChanged(id);
   }
   /**
    * Reset the watchdog when a manager produces genuine new orchestration activity (back at work):
@@ -4041,6 +4092,7 @@ export class Db {
   resetIdleNudgeState(id: string): void {
     this.db.prepare("UPDATE sessions SET idle_nudge_policy = 'watching', idle_nudge_snooze_until = NULL, idle_nudge_unanswered = 0 WHERE id = ?")
       .run(id);
+    this.notifySessionChanged(id);
   }
 
   // --- ContextWatcher recycle-nudge state (persisted per-manager, parity with the idle accessors above
@@ -4061,15 +4113,27 @@ export class Db {
   /** Set the context-nudge policy. 'escalated' is the once-per-session gate that stops further nudges. */
   setContextNudgePolicy(id: string, policy: ContextNudgePolicy): void {
     this.db.prepare("UPDATE sessions SET context_nudge_policy = ? WHERE id = ?").run(policy, id);
+    this.notifySessionChanged(id);
   }
   /** Record that a context-recycle nudge fired: stamp last_context_nudge_at + increment the unanswered counter. */
   recordContextNudge(id: string, atIso: string): void {
     this.db.prepare("UPDATE sessions SET last_context_nudge_at = ?, context_nudge_unanswered = context_nudge_unanswered + 1 WHERE id = ?")
       .run(atIso, id);
+    this.notifySessionChanged(id);
   }
   /** Register the post-write event listener (the alert-webhook emitter). At most one; replaces any prior. */
   setEventListener(fn: (evt: OrchestrationEvent) => void): void {
     this.eventListener = fn;
+  }
+  /**
+   * Notify the (optional) session-change listener AFTER a sessions-table row write commits — call this
+   * at the tail of EVERY sessions mutator (insert/archive/every `UPDATE sessions`). Best-effort, like
+   * `appendEvent`'s eventListener dispatch: a listener fault must never break the mutator that triggered it.
+   */
+  private notifySessionChanged(id: string): void {
+    if (this.sessionChangeListener) {
+      try { this.sessionChangeListener(id); } catch { /* listener faults never break a session write */ }
+    }
   }
   /** Append an orchestration audit record (detail serialized to JSON). */
   appendEvent(evt: OrchestrationEvent): void {
@@ -4185,8 +4249,13 @@ export class Db {
   }
   /** Re-parent a recycled manager's LIVE workers onto its successor so the fleet survives the handoff. */
   reparentLiveWorkers(oldManagerId: string, newManagerId: string): number {
-    return this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")
+    const ids = (this.db.prepare(
+      "SELECT id FROM sessions WHERE parent_session_id = ? AND process_state = 'live'",
+    ).all(oldManagerId) as Row[]).map((r) => r.id as string);
+    const changes = this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE parent_session_id = ? AND process_state = 'live'")
       .run(newManagerId, oldManagerId).changes;
+    for (const id of ids) this.notifySessionChanged(id);
+    return changes;
   }
   /**
    * Fleet-lockout self-heal (P1): repair EXACTLY ONE worker row's stale `parent_session_id`, on demand,
@@ -4198,6 +4267,7 @@ export class Db {
    */
   relinkWorkerToManager(workerId: string, newManagerId: string): void {
     this.db.prepare("UPDATE sessions SET parent_session_id = ? WHERE id = ?").run(newManagerId, workerId);
+    this.notifySessionChanged(workerId);
   }
   /** Move a session's pending wakes to a successor on recycle: the successor inherits the scheduled
    *  nudges, and the retired session is left with nothing to fire (so a due wake can't zombie it). */

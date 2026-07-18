@@ -474,6 +474,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // C2 of the WS delta-push umbrella (1efde4ba) — see GatewayDeps.fleetHub's doc above for why this is
   // test-injectable rather than always-fresh.
   const fleetHub = deps.fleetHub ?? new FleetHub();
+  // C3: wire the DB/SessionService reads the coalescer needs, then register it as the Db's post-commit
+  // session change-feed sink — every sessions-table mutation (insert/archive/every UPDATE) now resolves,
+  // after fleet-hub's own debounce, into a coalesced session:upsert/session:remove broadcast. Inert with
+  // no fleet socket connected (markSessionDirty's own early-out).
+  fleetHub.attach(deps.db, deps.sessions);
+  deps.db.sessionChangeListener = (id) => fleetHub.markSessionDirty(id);
 
   // --- Inbound webhook ingress (agent-tooling epic P5b, card 8fbedcac) — the Tier-2 public route
   // (POST /hooks/:endpointPath, gateway/trust-tier.ts). Registered UNCONDITIONALLY (ships inert, mirrors
