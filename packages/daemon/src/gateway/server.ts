@@ -241,6 +241,19 @@ export function parseIdsParam(raw: string | undefined): string[] {
   return [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
 }
 
+// Shared by every `/ws/*` JSON message handler (term, companion, fleet). `JSON.parse` happily returns a
+// non-throwing scalar (null/number/string) or an array for a frame like "null" or "42" or "[]" — none of
+// those have the field the caller is about to read (msg.type / msg.t), so dereferencing one without this
+// guard throws on a non-object payload. That throw is an uncaught TypeError in a ws 'message' listener,
+// which propagates past the socket's own 'error' handler straight to `process` and crashes the whole
+// daemon (a 4-byte-frame DoS under the supervisor's plain-exit-stays-down posture). Reject anything that
+// isn't a plain object BEFORE any handler ever reads a field off it.
+export function parseWsJsonObject(raw: Buffer | string): Record<string, unknown> | null {
+  let parsed: unknown;
+  try { parsed = JSON.parse(typeof raw === "string" ? raw : raw.toString()); } catch { return null; }
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, unknown>) : null;
+}
+
 export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // trustProxy is DELIBERATELY left at its default (false) — LOAD-BEARING for every `req.ip` loopback
   // gate in this file (the /internal/* checks below, and the trust-tier onRequest hook's own peer check).
@@ -4496,8 +4509,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       onControl: (e) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(e)); },
     });
     socket.on("message", (raw: Buffer) => {
-      let msg: TerminalInput;
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      const msg = parseWsJsonObject(raw) as TerminalInput | null;
+      if (!msg) return;
       // RAW passthrough — NOT the busy-gated enqueueStdin (which is for programmatic agent turns).
       if (msg.type === "stdin") deps.pty.writeStdin(sessionId, msg.data);
       else if (msg.type === "repaint") deps.pty.repaint(sessionId);
@@ -4516,15 +4529,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     fleetHub.add(socket);
     socket.send(JSON.stringify({ t: "hello", v: 1 } satisfies ServerFleetMessage));
     socket.on("message", (raw: Buffer) => {
-      let parsed: unknown;
-      try { parsed = JSON.parse(raw.toString()); } catch { return; }
-      // `JSON.parse` happily returns non-throwing scalars (null/number/string/array) for a frame like
-      // "null" or "42" — none of those have a `.t`, so touching `msg.t` below without this guard would
-      // throw on a non-object payload (CR-caught crash: an uncaught TypeError in a ws 'message' listener
-      // takes down the whole daemon process under the supervisor, a 4-byte-frame DoS). Reject anything
-      // that isn't a plain object BEFORE ever reading `.t`.
-      if (!parsed || typeof parsed !== "object") return;
-      const msg = parsed as ClientFleetMessage;
+      const msg = parseWsJsonObject(raw) as ClientFleetMessage | null;
+      if (!msg) return;
       // Bookkeeping only in this card — no replay/streaming (that's C7). Any other/unknown `t` is
       // silently ignored (forward-compat: an older daemon shouldn't reject a newer client's message kind).
       // Field-shape validation matters even in this bookkeeping-only card: C7 will TRUST subscriptionsFor's
@@ -4567,8 +4573,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       deliver: (frame) => { if (socket.readyState === socket.OPEN) socket.send(JSON.stringify(frame)); },
     });
     socket.on("message", (raw: Buffer) => {
-      let msg: { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown };
-      try { msg = JSON.parse(raw.toString()); } catch { return; }
+      const msg = parseWsJsonObject(raw) as { type?: unknown; text?: unknown; data?: unknown; mimeType?: unknown } | null;
+      if (!msg) return;
       if (msg.type === "chat" && typeof msg.text === "string") {
         // Route through the bindings-authoritative gateway. Fire-and-forget: any routing/submit error is
         // contained by the gateway (structured result), so this .catch is only a backstop against an
