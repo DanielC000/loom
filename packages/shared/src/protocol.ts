@@ -1,4 +1,4 @@
-import type { OrchestrationEventKind, SessionRole } from "./types.js";
+import type { OrchestrationEvent, OrchestrationEventKind, PendingMerge, SessionListItem, SessionRole } from "./types.js";
 
 // Wire protocol shared by daemon and web.
 //
@@ -358,3 +358,23 @@ export interface AuditDiff {
   kindDeltas: AuditKindDelta[];
   summary: { sameCount: number; addedCount: number; removedCount: number; changed: boolean };
 }
+
+// ── Fleet WebSocket delta-push protocol (C1 of umbrella 1efde4ba) ───────────────────────────────
+// ADDITIVE ONLY — no runtime code, no consumers, no change to any existing type (TerminalControl /
+// TerminalInput and every REST DTO above stay byte-identical). `v:1` here is just a literal field on
+// `hello`; there is no handshake/version-enforcement logic in this card. Reuses SessionListItem /
+// PendingMerge / OrchestrationEvent VERBATIM so a delta message's shape matches what the REST
+// endpoints (`/api/sessions`, `/api/orchestration/events`) already return.
+
+/** Server → client fleet delta messages (a future `/ws/fleet`, not wired up by this card). */
+export type ServerFleetMessage =
+  | { t: "hello"; v: 1 }
+  | { t: "session:upsert"; session: SessionListItem & { pendingMerge: PendingMerge | null } }
+  | { t: "session:remove"; id: string }
+  | { t: "status"; pausedScopes: string[]; schedulerEnabled: boolean }
+  | { t: "event"; managerId: string; event: OrchestrationEvent & { seq: number } };
+
+/** Client → server fleet subscription messages (a future `/ws/fleet`, not wired up by this card). */
+export type ClientFleetMessage =
+  | { t: "sub:events"; managerId: string; sinceSeq: number }
+  | { t: "unsub:events"; managerId: string };
