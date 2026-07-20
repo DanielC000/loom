@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Navigate, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import ReviewPanel from "./pages/ReviewPanel";
 import QuestionAnswer from "./pages/QuestionAnswer";
@@ -9,9 +9,9 @@ import { Button } from "./components/ui";
 import { Sidebar } from "./components/Sidebar";
 import { CommandPalette } from "./components/CommandPalette";
 import { SetupWizard } from "./components/SetupWizard";
-import { RequestModalProvider, useOpenRequest } from "./components/requests";
+import { RequestModalProvider } from "./components/requests";
 import { api } from "./lib/api";
-import { useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
+import { useAttention, useNewAttention, attentionOpenTarget, type AttentionItem } from "./lib/attention";
 import { useDismissable } from "./lib/useDismissable";
 import { ActiveProjectProvider } from "./lib/activeProject";
 import { color, font, radius, tone } from "./theme";
@@ -75,16 +75,33 @@ function UpdateBanner() {
   );
 }
 
-// In-app surface of the same "new attention item" signal the rail's Alerts row counts: a transient toast
-// stack so the human notices a merge-request / rate-limit / stuck-busy / idle-escalation without watching
-// the rail. Shares useNewAttention with the browser Notification, so each new item pings once per surface —
-// never twice on one surface. Each toast auto-dismisses (~6s), has a manual ×, and clicks through to the item.
+// In-app surface of the same "new attention item" signal the rail's Alerts row counts: a bottom-right
+// stack so the human notices attention without watching the rail. Shares useNewAttention with the browser
+// Notification, so each new item pings once per surface — never twice on one surface.
+//
+// Two lanes, deliberately different (card 0d27f20c — N requests used to stack N persistent toasts over the
+// bottom-right of every page, occluding primary actions and triple-announcing state already in the sidebar
+// badge + Mission Control queue + /inbox):
+//   • OPERATIONAL alerts (merge request / rate-limit / stuck-busy / idle-escalation) — a transient toast
+//     each, auto-dismissing (~6s), edge-triggered off useNewAttention. These are the toast surface's real
+//     job (no other always-on surface carries them) and are rarely numerous, so they don't stack up.
+//   • Pending REQUESTS (decision/input/permission/credential — anything carrying a questionId) — collapsed
+//     into ONE compact count pill, level-triggered off the current count. They're already shown by the
+//     sidebar badge, the Mission Control / Overview attention queues, and the /inbox page, so N requests
+//     no longer stack N toasts; the pill returns the screen while keeping the signal (+ its deep-link).
 const TOAST_TTL_MS = 6000;
 let nextToastId = 0;
 
+// Routes whose page ALREADY renders the full pending-Request queue: Mission Control ("/") and the project
+// Overview both show the attention queue, and /inbox IS the queue. On those the count pill is pure
+// duplication — suppress it there and let the page be the surface. (The sidebar badge is everywhere and is
+// only a bare count, so the pill's "→ inbox" affordance still earns its place on every OTHER route.)
+const REQUEST_PILL_SUPPRESSED_ROUTES = new Set(["/", "/overview", "/inbox"]);
+
 function ToastContainer() {
   const navigate = useNavigate();
-  const openRequest = useOpenRequest();
+  const location = useLocation();
+  const { items } = useAttention();
   const [toasts, setToasts] = useState<{ id: number; item: AttentionItem }[]>([]);
   const dismiss = (id: number) => setToasts((ts) => ts.filter((t) => t.id !== id));
 
@@ -95,27 +112,78 @@ function ToastContainer() {
   }, []);
 
   useNewAttention((item) => {
-    const id = nextToastId++;
-    setToasts((ts) => [...ts, { id, item }]);
+    // The desktop ping still fires for EVERY new item (non-occluding, off-screen), including requests.
     if (typeof Notification !== "undefined" && Notification.permission === "granted") {
       new Notification(`Loom · ${item.kind}`, { body: item.text });
     }
+    // On-screen, a pending REQUEST is carried by the collapsed count pill below — never its own toast.
+    if (item.questionId) return;
+    const id = nextToastId++;
+    setToasts((ts) => [...ts, { id, item }]);
   });
 
-  if (toasts.length === 0) return null;
+  // The collapsed pending-Request count, level-triggered off the current attention set (NOT the edge-
+  // triggered new-item signal), so it always shows the true number waiting — not a burst of arrivals.
+  const requestCount = items.filter((it) => it.questionId).length;
+  // Dismiss survives client navigation: this container mounts ONCE at the app root (outside <Routes>), so
+  // in-memory state persists across route changes. We remember the count that was dismissed so a LATER,
+  // larger batch re-surfaces the pill (keep the signal) while dismissing the current batch stays dismissed
+  // as the user moves between pages. When the queue empties, reset so the next batch shows.
+  const [dismissedAtCount, setDismissedAtCount] = useState(0);
+  useEffect(() => {
+    if (requestCount < dismissedAtCount) setDismissedAtCount(requestCount);
+  }, [requestCount, dismissedAtCount]);
+  const showPill = requestCount > dismissedAtCount && !REQUEST_PILL_SUPPRESSED_ROUTES.has(location.pathname);
+
+  if (toasts.length === 0 && !showPill) return null;
   return (
-    <div style={{ position: "fixed", right: 16, bottom: 16, display: "flex", flexDirection: "column", gap: 8, zIndex: 2000, maxWidth: 380 }}>
+    <div style={{ position: "fixed", right: 16, bottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8, zIndex: 2000, maxWidth: 380 }}>
       {toasts.map(({ id, item }) => (
         <Toast key={id} item={item}
           onDismiss={() => dismiss(id)}
           onOpen={() => {
-            // A pending REQUEST (any type — it carries a questionId) opens the shared in-place modal;
-            // a MERGE REQUEST → review panel; every other openable kind → its session view.
-            if (item.questionId) openRequest(item.questionId);
-            else { const target = attentionOpenTarget(item); if (target) navigate(target); }
+            // Only operational alerts reach this lane: a MERGE REQUEST → review panel; every other openable
+            // kind → its session view (requests are the pill, never a toast, so no questionId branch here).
+            const target = attentionOpenTarget(item);
+            if (target) navigate(target);
             dismiss(id);
           }} />
       ))}
+      {showPill && (
+        <RequestCountPill count={requestCount}
+          onOpen={() => navigate("/inbox")}
+          onDismiss={() => setDismissedAtCount(requestCount)} />
+      )}
+    </div>
+  );
+}
+
+// The collapsed pending-Request signal — ONE compact pill ("N requests need you → inbox") in place of the
+// former per-request toast stack. Clicking the body jumps to /inbox; the × dismisses it (a larger batch
+// re-surfaces it — see dismissedAtCount above). Cyan = the signed "actionable request" tone.
+function RequestCountPill({ count, onOpen, onDismiss }: { count: number; onOpen: () => void; onDismiss: () => void }) {
+  const [shown, setShown] = useState(false);
+  useEffect(() => {
+    const raf = requestAnimationFrame(() => setShown(true));
+    return () => cancelAnimationFrame(raf);
+  }, []);
+  const c = tone.cyan;
+  return (
+    <div onClick={onOpen} role="button" title="open the Requests inbox" data-testid="request-count-pill"
+      style={{
+        display: "flex", alignItems: "center", gap: 8,
+        background: color.panel, border: `1px solid ${color.borderStrong}`, borderLeft: `3px solid ${c}`,
+        borderRadius: radius.base, padding: "7px 11px", boxShadow: "0 6px 20px rgba(0,0,0,0.45)",
+        cursor: "pointer", fontFamily: font.mono, fontSize: 12,
+        opacity: shown ? 1 : 0, transform: shown ? "translateY(0)" : "translateY(8px)",
+        transition: "opacity 160ms ease, transform 160ms ease",
+      }}>
+      <Dot tone="cyan" glow />
+      <span style={{ color: c, fontVariantNumeric: "tabular-nums" }}>{count}</span>
+      <span style={{ color: color.textDim }}>{count === 1 ? "request needs you" : "requests need you"}</span>
+      <span aria-hidden style={{ color: color.textMuted }}>→ inbox</span>
+      <button onClick={(e) => { e.stopPropagation(); onDismiss(); }} title="dismiss" aria-label="dismiss"
+        style={{ background: "transparent", border: "none", color: color.textMuted, cursor: "pointer", fontFamily: font.mono, fontSize: 14, lineHeight: 1, padding: 0, marginLeft: 2 }}>×</button>
     </div>
   );
 }
