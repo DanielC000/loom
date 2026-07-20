@@ -894,6 +894,16 @@ export const api = {
       `/api/companion/${encodeURIComponent(sessionId)}/grants?${params.toString()}`,
     );
   },
+  // --- Companion LEAD MODE (companion lead-mode epic — the owner-only, FLEET-WIDE "full capability, no
+  // guardrails" alternative to the per-project grants above). HUMAN-only loopback REST — INTENTIONALLY NO
+  // agent MCP path (an injection-exposed companion must never widen its own scope; same trust posture as
+  // every other companion writer here). GET reads the flag; PUT sets it (400 if not boolean). When ON, the
+  // per-capability grants above are SUPERSEDED — saved but inactive — until it's turned back off. ---
+  companionLeadMode: (sessionId: string) =>
+    get<{ sessionId: string; leadMode: boolean }>(`/api/companion/${encodeURIComponent(sessionId)}/lead-mode`),
+  setCompanionLeadMode: (sessionId: string, leadMode: boolean) =>
+    putErr<{ sessionId: string; leadMode: boolean }>(`/api/companion/${encodeURIComponent(sessionId)}/lead-mode`, { leadMode }),
+
   // The conversation-preserving RESPAWN that APPLIES a grant change: stops the old companion process and
   // resumes a fresh one under the re-resolved capability surface, keeping the SAME conversation thread. A
   // grant write does NOT auto-respawn (a respawn has a brief availability gap, so the owner picks WHEN); the

@@ -33,6 +33,12 @@ const fieldLabel: CSSProperties = {
 const hint: CSSProperties = { fontSize: 11, color: color.textMuted, fontFamily: font.mono, lineHeight: 1.5 };
 const errStyle: CSSProperties = { color: color.red, fontSize: 12, fontFamily: font.mono };
 
+// Danger/attention fill washes for the elevated lead-mode surfaces — single-sourced to the actual --loom-red
+// (#ff5c5c) / --loom-amber tokens rather than new hex, matching how the existing grant banners inline rgba.
+const RED_WASH = "rgba(255,92,92,0.06)";
+const RED_WASH_2 = "rgba(255,92,92,0.14)";
+const AMBER_WASH = "rgba(232,168,68,0.07)";
+
 function Field({ label, sub, children }: { label: string; sub?: string; children: ReactNode }) {
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -518,7 +524,7 @@ function CompanionDetail({ companion, label, onChanged, onDeleted }: {
           <MemorySection sessionId={companion.sessionId} />
           <RemindersSection sessionId={companion.sessionId} />
           <RestrictToolsSection sessionId={companion.sessionId} />
-          <CapabilityGrantsSection sessionId={companion.sessionId} />
+          <CapabilityGrantsSection sessionId={companion.sessionId} companionName={label} />
           <PairingSection sessionId={companion.sessionId} />
           <DeleteCompanionSection companion={companion} label={label} onDeleted={onDeleted} />
         </div>
@@ -1330,9 +1336,224 @@ function RestrictToolsSection({ sessionId }: { sessionId: string }) {
 // respawn button — never a silent no-op grant. The one exception is `attention-push` (appliesLive): a daemon
 // watcher arms it live, so it never sets the restart-pending state. The two ELEVATED act-only levers (send
 // media, session control) are flagged distinctly so the owner grants them deliberately.
-function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
+// ── Lead-mode hero card (companion lead-mode UI, card fdcee75f) ──────────────────────────────────────
+// The owner-only, FLEET-WIDE "full capability, no guardrails" alternative to the per-project levers below.
+// An inline red-bordered hero pinned to the TOP of the Capabilities panel with three states: OFF (a bare
+// enable affordance), ENABLING (an in-place disclosure of the blast radius, gated behind a MUST-CHECK
+// acknowledgement — Option A, owner-approved), and ON (the grants below shadowed as superseded). Wired to
+// the human-only GET/PUT /api/companion/:sessionId/lead-mode: turning ON requires the ack, turning OFF is a
+// bare toggle (instant revert). NO agent MCP path — an injection-exposed companion can never widen itself.
+// Inline expand-in-place confirm (NOT a modal — Loom's established destructive-action pattern).
+const leadRedBorder = `1px solid ${color.red}`;
+
+function ShieldBolt() {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" style={{ width: 18, height: 18 }} aria-hidden>
+      <path d="M12 2 4 5v6c0 5 3.5 8 8 11 4.5-3 8-6 8-11V5l-8-3Z" />
+      <path d="M12 8l-2.2 4.2h3.6L11 16.5" />
+    </svg>
+  );
+}
+// A grants/keeps disclosure row: a leading icon + rich text. `tone` tints the icon (red = a grant, amber = a keep).
+function DiscItem({ tone: t, children }: { tone: "red" | "amber"; children: ReactNode }) {
+  const c = t === "red" ? color.red : color.amber;
+  return (
+    <li style={{ display: "flex", gap: 9, alignItems: "flex-start", fontSize: 11.5, lineHeight: 1.55, color: color.textDim }}>
+      <svg viewBox="0 0 24 24" fill="none" stroke={c} strokeWidth={2.2} strokeLinecap="round" strokeLinejoin="round" style={{ flex: "none", marginTop: 2, width: 13, height: 13 }} aria-hidden>
+        {t === "red"
+          ? <path d="M5 12h14M13 6l6 6-6 6" />
+          : <path d="M12 9v4M12 17h.01M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" />}
+      </svg>
+      <span>{children}</span>
+    </li>
+  );
+}
+
+function LeadModeHero({ sessionId, companionName, leadMode }: { sessionId: string; companionName: string; leadMode: boolean }) {
+  const qc = useQueryClient();
+  // The inline disclosure is only meaningful while lead mode is OFF (turning it ON always routes through the
+  // disclosure; turning it OFF is a bare toggle). `ack` gates the confirm button — Option A, owner-approved.
+  const [enabling, setEnabling] = useState(false);
+  const [ack, setAck] = useState(false);
+
+  const setLead = useMutation({
+    mutationFn: (on: boolean) => api.setCompanionLeadMode(sessionId, on),
+    onSuccess: () => {
+      setEnabling(false);
+      setAck(false);
+      qc.invalidateQueries({ queryKey: ["companionLeadMode", sessionId] });
+    },
+  });
+
+  const beginEnable = () => { setAck(false); setLead.reset(); setEnabling(true); };
+  const cancel = () => { setEnabling(false); setAck(false); setLead.reset(); };
+  // The physical switch: OFF → route through the disclosure; ON → instant revert (matches the "off reverts
+  // instantly" copy). Disabled mid-write so a double-toggle can't race two PUTs.
+  const onSwitch = () => { if (setLead.isPending) return; if (leadMode) setLead.mutate(false); else beginEnable(); };
+
+  return (
+    <div
+      data-testid="companion-lead-mode"
+      style={{
+        position: "relative", display: "flex", flexDirection: "column", gap: 14, padding: 16,
+        border: leadRedBorder, borderRadius: radius.base,
+        background: leadMode
+          ? `linear-gradient(180deg, ${RED_WASH_2}, transparent 55%), ${color.panel2}`
+          : `linear-gradient(180deg, ${RED_WASH}, transparent 60%), ${color.panel2}`,
+        ...(leadMode ? { boxShadow: "inset 0 0 0 1px rgba(255,92,92,0.28), 0 0 40px rgba(255,92,92,0.05)" } : null),
+      }}
+    >
+      {/* ── Header: mark + titles + the physical switch ── */}
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+        <span style={{
+          width: 34, height: 34, flex: "none", borderRadius: radius.base, border: leadRedBorder,
+          display: "grid", placeItems: "center", color: color.red, background: "rgba(255,92,92,0.06)",
+        }} aria-hidden>
+          <ShieldBolt />
+        </span>
+        <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0, flex: 1 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 13, color: color.text }}>Lead mode</span>
+            <Badge tone="red">owner only</Badge>
+            <StatusPill tone="red" glow label={leadMode ? "no guardrails · live" : "no guardrails"} />
+          </div>
+          <p style={{ fontSize: 11.5, color: color.textDim, lineHeight: 1.55, margin: 0, maxWidth: 640 }}>
+            One switch instead of per-project grants: full capability across{" "}
+            <strong style={{ color: color.text }}>every project</strong>, current and future. Loom's most
+            powerful setting — turn it on knowing exactly what it opens.
+          </p>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12, flex: "none" }}>
+          <span style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", minWidth: 26, color: leadMode ? color.red : color.textMuted }}>
+            {leadMode ? "on" : "off"}
+          </span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={leadMode}
+            aria-label="Lead mode"
+            data-testid="companion-lead-mode-switch"
+            onClick={onSwitch}
+            disabled={setLead.isPending}
+            style={{
+              position: "relative", width: 52, height: 28, borderRadius: 999, padding: 0, flex: "none",
+              cursor: setLead.isPending ? "wait" : "pointer",
+              border: `1px solid ${leadMode ? color.red : color.borderStrong}`,
+              background: leadMode ? "rgba(255,92,92,0.22)" : color.panel,
+              transition: "background 120ms linear, border-color 120ms linear",
+            }}
+          >
+            <span style={{
+              position: "absolute", top: 3, left: 3, width: 20, height: 20, borderRadius: 999,
+              background: leadMode ? color.red : color.textMuted,
+              transform: leadMode ? "translateX(24px)" : "translateX(0)",
+              transition: "transform 140ms cubic-bezier(0.2,0.8,0.2,1), background 140ms linear",
+              ...(leadMode ? { boxShadow: "0 0 8px rgba(255,92,92,0.7)" } : null),
+            }} />
+          </button>
+        </div>
+      </div>
+
+      {/* ── OFF: the enable affordance ── */}
+      {!leadMode && !enabling && (
+        <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+          <Button variant="danger" data-testid="companion-lead-mode-enable" onClick={beginEnable}>Enable lead mode…</Button>
+          <span style={{ fontSize: 11, color: color.textMuted, fontFamily: font.mono }}>Opens a full disclosure before anything changes.</span>
+        </div>
+      )}
+
+      {/* ── ENABLING: the inline blast-radius disclosure, gated behind the ack ── */}
+      {!leadMode && enabling && (
+        <div
+          role="alertdialog"
+          aria-label="Enable lead mode"
+          data-testid="companion-lead-mode-disclosure"
+          style={{ display: "flex", flexDirection: "column", gap: 14, padding: 14, border: leadRedBorder, borderRadius: radius.base, background: RED_WASH }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+            <StatusPill tone="red" glow label="Lead mode — fleet-wide" />
+            <span style={{ fontFamily: font.head, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 12, color: color.text }}>Read this before you enable it</span>
+          </div>
+          <p style={{ fontSize: 12.5, color: color.text, lineHeight: 1.6, margin: 0 }}>
+            You are about to give <strong>{companionName}</strong> full capability across your whole fleet with{" "}
+            <strong>no per-project guardrails</strong>. This supersedes the per-capability grants below — they
+            stay saved, but inactive, while lead mode is on.
+          </p>
+
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: "1px solid rgba(255,92,92,0.35)", background: "rgba(255,92,92,0.04)" }}>
+              <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: color.red }}>What lead mode grants</span>
+              <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+                <DiscItem tone="red"><strong style={{ color: color.text }}>Full act-scope on every lever</strong>, in every project — including any project you create later.</DiscItem>
+                <DiscItem tone="red"><strong style={{ color: color.text }}>Session control with no confirmation</strong> — message, stop, or resume <strong style={{ color: color.text }}>any</strong> session, of any role, in any project.</DiscItem>
+                <DiscItem tone="red">That reach <strong style={{ color: color.text }}>includes Loom's own infrastructure sessions</strong> — Platform Lead, Operator, Setup. Fleet-wide, no exclusions.</DiscItem>
+              </ul>
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 9, padding: 12, borderRadius: radius.base, border: "1px solid rgba(232,168,68,0.35)", background: AMBER_WASH }}>
+              <span style={{ fontFamily: font.head, fontSize: 10, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: color.amber }}>What still asks you first</span>
+              <ul style={{ listStyle: "none", margin: 0, padding: 0, display: "flex", flexDirection: "column", gap: 8 }}>
+                <DiscItem tone="amber"><strong style={{ color: color.text }}>Deploy &amp; irreversible decisions</strong> still require a fresh confirmation each time.</DiscItem>
+                <DiscItem tone="amber"><strong style={{ color: color.text }}>Spawning a session</strong> still asks every time — that step-up is untouched.</DiscItem>
+                <DiscItem tone="amber"><strong style={{ color: color.text }}>Turning it off reverts instantly</strong> — every per-project grant below is back in force at once.</DiscItem>
+              </ul>
+            </div>
+          </div>
+
+          <label
+            data-testid="companion-lead-mode-ack-row"
+            style={{ display: "flex", alignItems: "flex-start", gap: 9, padding: "10px 12px", border: `1px dashed ${color.borderStrong}`, borderRadius: radius.base, background: color.panel2, cursor: "pointer" }}
+          >
+            <input
+              type="checkbox"
+              checked={ack}
+              onChange={(e) => setAck(e.target.checked)}
+              data-testid="companion-lead-mode-ack"
+              style={{ marginTop: 2, width: 15, height: 15, accentColor: color.red, cursor: "pointer", flex: "none" }}
+            />
+            <span style={{ fontSize: 11.5, color: color.textDim, lineHeight: 1.5 }}>
+              I understand lead mode gives {companionName} <strong style={{ color: color.text }}>fleet-wide control with no guardrails</strong>, including Loom's own infrastructure sessions.
+            </span>
+          </label>
+
+          {setLead.isError && <span style={errStyle}>{(setLead.error as Error).message}</span>}
+
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <Button variant="danger" disabled={!ack || setLead.isPending} data-testid="companion-lead-mode-confirm" onClick={() => setLead.mutate(true)}>
+              {setLead.isPending ? "Enabling…" : "Enable lead mode"}
+            </Button>
+            <Button variant="ghost" disabled={setLead.isPending} data-testid="companion-lead-mode-cancel" onClick={cancel}>Cancel</Button>
+          </div>
+        </div>
+      )}
+
+      {/* ── ON: the active banner ── */}
+      {leadMode && (
+        <div
+          data-testid="companion-lead-mode-active"
+          style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", padding: "10px 12px", border: leadRedBorder, borderRadius: radius.base, background: RED_WASH }}
+        >
+          <StatusPill tone="red" glow label="Active · fleet-wide" />
+          <span style={{ flex: 1, minWidth: 200, fontSize: 11.5, color: color.textDim, lineHeight: 1.5 }}>
+            <strong style={{ color: color.text }}>{companionName}</strong> has full act-scope across every
+            project, no guardrails. Your per-project grants are shadowed below and return the moment you switch this off.
+          </span>
+          {setLead.isError && <span style={errStyle}>{(setLead.error as Error).message}</span>}
+          <Button variant="danger" disabled={setLead.isPending} data-testid="companion-lead-mode-disable" onClick={() => setLead.mutate(false)}>
+            {setLead.isPending ? "Turning off…" : "Turn off"}
+          </Button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CapabilityGrantsSection({ sessionId, companionName }: { sessionId: string; companionName: string }) {
   const qc = useQueryClient();
   const grants = useQuery({ queryKey: ["companionGrants", sessionId], queryFn: () => api.companionGrants(sessionId) });
+  // Lead mode supersedes every per-project grant below (owner-only, fleet-wide). Its own hero card owns the
+  // GET/PUT; here we only read the flag to SHROUD the grant surface when it's on.
+  const leadModeQuery = useQuery({ queryKey: ["companionLeadMode", sessionId], queryFn: () => api.companionLeadMode(sessionId) });
+  const leadMode = leadModeQuery.data?.leadMode ?? false;
   const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   // A within-session hint: a mode/config CHANGE (or a revoke) doesn't move a grant's createdAt, so the
   // server-derived signal below can't see it after the fact — flag it locally so the banner shows THIS
@@ -1389,6 +1610,30 @@ function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
         <span style={errStyle}>{(grants.error as Error).message}</span>
       ) : (
         <>
+          <LeadModeHero sessionId={sessionId} companionName={companionName} leadMode={leadMode} />
+
+          {/* The per-project grant surface. Lead mode SUPERSEDES it — when on, it renders dimmed +
+              non-interactive (the grants stay saved, just inactive) under a "superseded" tag. */}
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", gap: 12 }}>
+            {leadMode && (
+              <span
+                data-testid="companion-grants-superseded"
+                style={{
+                  position: "absolute", top: 8, right: 8, zIndex: 5, display: "inline-flex", alignItems: "center", gap: 7,
+                  padding: "5px 10px", border: `1px solid ${color.red}`, borderRadius: 999, background: "rgba(20,10,11,0.92)",
+                  fontFamily: font.mono, fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.08em", color: color.red,
+                }}
+              >
+                <Dot tone="red" /> Superseded by lead mode
+              </span>
+            )}
+            <div style={{
+              display: "flex", flexDirection: "column", gap: 12,
+              transition: "opacity 160ms linear, filter 160ms linear",
+              ...(leadMode ? { opacity: 0.42, filter: "saturate(0.55)", pointerEvents: "none" } : null),
+            }}
+            {...(leadMode ? { "aria-hidden": true } : {})}
+            >
           {showRestart && (
             <div
               data-testid="companion-grants-apply"
@@ -1458,6 +1703,8 @@ function CapabilityGrantsSection({ sessionId }: { sessionId: string }) {
                 onMutated={onGrantMutated}
               />
             ))}
+          </div>
+            </div>
           </div>
         </>
       )}

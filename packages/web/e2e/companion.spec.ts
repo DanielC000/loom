@@ -585,6 +585,68 @@ test("Capabilities: co-granting transcript-read + session control surfaces a gra
   await expect(page.getByTestId("companion-grants-cogrant-warning")).toHaveCount(0);
 });
 
+test("Lead mode: enable is ack-gated, flips the hero ON + shrouds the grants, and turning off reverts (persists)", async ({ page, loomDaemon }) => {
+  // Companion lead mode (card fdcee75f, Option A): the owner-only, FLEET-WIDE "full capability, no
+  // guardrails" alternative to the per-project grants — a red hero at the top of the Capabilities panel.
+  // Turning it ON routes through an inline blast-radius disclosure gated behind a MUST-CHECK ack; turning it
+  // OFF is a bare toggle. Wired to the human-only GET/PUT /api/companion/:sessionId/lead-mode. The seeded
+  // companion is provisioned:false + NOT live, so the PUT (a DB column write via db.setCompanionLeadMode)
+  // round-trips WITHOUT a session respawn — no real claude (the fixture's [pty] spawn no-spawn guard).
+  const name = `Ada-${randomUUID().slice(0, 8)}`;
+  await loomDaemon.seedCompanion({ name });
+  await page.goto(`${loomDaemon.baseURL}/companion`);
+
+  await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
+  const focus = async () => {
+    const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
+    if (await pickerBtn.count()) {
+      await pickerBtn.click();
+      await expect(pickerBtn).toHaveAttribute("aria-pressed", "true");
+    }
+    await page.getByRole("tab", { name: "Manage" }).click();
+  };
+  await focus();
+
+  // The hero renders OFF: the switch reads unchecked and the enable affordance is present.
+  const hero = page.getByTestId("companion-lead-mode");
+  await expect(hero).toBeVisible();
+  const leadSwitch = page.getByTestId("companion-lead-mode-switch");
+  await expect(leadSwitch).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByTestId("companion-lead-mode-enable")).toBeVisible();
+  // OFF ⇒ no active banner, no superseded shroud tag.
+  await expect(page.getByTestId("companion-lead-mode-active")).toHaveCount(0);
+  await expect(page.getByTestId("companion-grants-superseded")).toHaveCount(0);
+
+  // Open the disclosure → the confirm is DISABLED until the ack box is checked (Option A gate).
+  await page.getByTestId("companion-lead-mode-enable").click();
+  await expect(page.getByTestId("companion-lead-mode-disclosure")).toBeVisible();
+  const confirm = page.getByTestId("companion-lead-mode-confirm");
+  await expect(confirm).toBeDisabled();
+
+  // Check the ack → confirm enables → click → the PUT fires and the hero flips ON (observable state change).
+  await page.getByTestId("companion-lead-mode-ack").check();
+  await expect(confirm).toBeEnabled();
+  await confirm.click();
+
+  await expect(leadSwitch).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("companion-lead-mode-active")).toBeVisible();
+  // The per-project grants below are now shrouded as superseded.
+  await expect(page.getByTestId("companion-grants-superseded")).toBeVisible();
+
+  // Persistence across a FULL reload — a fresh GET, not the post-mutation optimistic cache.
+  await page.reload();
+  await focus();
+  await expect(page.getByTestId("companion-lead-mode-switch")).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("companion-lead-mode-active")).toBeVisible();
+  await expect(page.getByTestId("companion-grants-superseded")).toBeVisible();
+
+  // Turn off (a bare toggle — no ack) → reverts instantly (observable): switch unchecked, shroud gone.
+  await page.getByTestId("companion-lead-mode-disable").click();
+  await expect(page.getByTestId("companion-lead-mode-switch")).toHaveAttribute("aria-checked", "false");
+  await expect(page.getByTestId("companion-lead-mode-active")).toHaveCount(0);
+  await expect(page.getByTestId("companion-grants-superseded")).toHaveCount(0);
+});
+
 test("multi-companion: the create form opens over the current companion and cancels back", async ({ page, loomDaemon }) => {
   await loomDaemon.seedCompanion({ name: `Ada-${randomUUID().slice(0, 8)}` });
   await page.goto(`${loomDaemon.baseURL}/companion`);
