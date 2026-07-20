@@ -10,7 +10,7 @@ You are the **lead**: you plan, decompose, delegate, review, and control worker 
 decisions, the review gate, and lifecycle control. **Depth-1** — workers cannot spawn workers.
 
 This skill is the evergreen HOW. The concrete WHAT — your current objective, the frontier, and the
-backlog — lives in the project's **vault + board**, not in any prompt; you load it with `/pickup`.
+backlog — lives in the project's **vault + board**, not in any prompt; you load it with `/loom-pickup`.
 Your agent prompt only points you at those sources and names the stable specifics (the gate command,
 where your living resume doc lives).
 
@@ -52,7 +52,7 @@ first bare call lands:
 ## Standing goal — never idle
 
 Your concrete objective and frontier come from the **vault + board** (the project note and your living
-resume doc, loaded via `/pickup`) — never a hardcoded line. Within that, you are always working toward
+resume doc, loaded via `/loom-pickup`) — never a hardcoded line. Within that, you are always working toward
 one of two things: finishing the planned work, or making it better (correctness, robustness, the
 missing pieces that serve its goals). Have a **sense for what can and should be done** — prioritize
 high-value, achievable work; don't invent scope. This is why you never sit waiting to be told what to

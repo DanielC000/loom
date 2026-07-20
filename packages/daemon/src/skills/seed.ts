@@ -11,8 +11,10 @@ const ASSET_SKILLS = path.join(__dirname, "..", "..", "assets", "skills");
 /**
  * Seed Loom's bundled, project-agnostic skills into the Loom-OWNED skill store (~/.loom/skills) —
  * NOT ~/.claude/skills. This keeps Loom's skills separate from the user's personal set; each session
- * gets them injected as PROJECT-LOCAL skills (see skills/inject.ts), where they shadow same-named
- * personal skills (validated spike).
+ * gets them injected as PROJECT-LOCAL skills (see skills/inject.ts). NOTE: a same-named personal
+ * skill still wins over these (Claude Code's precedence is personal-overrides-project, not the
+ * reverse) — see injectSkills' doc comment — so bundled skill names must not collide with common
+ * personal ones.
  *
  * Seeds each bundled skill ONLY IF its SKILL.md is absent, so a user's UI edits to a skill survive
  * reboots (the old behavior force-copied every boot, which would clobber edits). A future "reset to

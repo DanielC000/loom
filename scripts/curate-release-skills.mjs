@@ -8,7 +8,7 @@
 //   - INSTALL-SPECIFIC: bespoke to the owner's own vault, not general end-user doctrine (research — a
 //     geopolitics/history research rig with a hardcoded source blocklist, dual-terminology rules, and
 //     vault-local tooling). Kept in the repo, just not bundled by default.
-// The CORE orchestration skills (orchestrate / worker / pickup / etc.) ALWAYS ship. Curation is by
+// The CORE orchestration skills (orchestrate / worker / loom-pickup / etc.) ALWAYS ship. Curation is by
 // skill-DIR NAME so it is trivially unit-testable against the real asset listing, with no filesystem or
 // build side effects on import.
 

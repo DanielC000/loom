@@ -73,7 +73,7 @@ test.describe("actors (Profiles + Skills consolidation)", () => {
 
     // Open a seeded bundled skill (sidebar rows are <button>s; the unique name pins one — the Segmented tabs
     // are role="tab", so they never collide with this button filter).
-    await page.getByRole("button").filter({ hasText: "pickup" }).first().click();
+    await page.getByRole("button").filter({ hasText: "loom-pickup" }).first().click();
     await expect(page.getByText("· SKILL.md", { exact: false })).toBeVisible();
 
     // The always-present bundled control renders — so the editor really mounted (this isn't a false negative).

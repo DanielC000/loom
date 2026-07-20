@@ -7,7 +7,7 @@ const MANIFEST = ".loom-skills.json"; // records which skill names EACH session 
 
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
  *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
-const OBSIDIAN_FRAGMENT_SKILLS = new Set(["pickup", "session-end"]);
+const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "session-end"]);
 
 /** Map a Loom-DRIVEN session role to its operating-doctrine skill name in the store. A role here MUST get
  *  its doctrine skill no matter what the profile's pinned subset says (a subset that omits "worker" must
@@ -108,9 +108,14 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
 
 /**
  * Deliver Loom's managed skills to a session by mirroring ~/.loom/skills/<name> into
- * <cwd>/.claude/skills/<name>. Claude discovers these as PROJECT-LOCAL skills (bare names), and they
- * SHADOW the user's personal ~/.claude/skills (validated spike) — so Loom owns its skill names
- * without touching the user's personal set or CLAUDE_CONFIG_DIR.
+ * <cwd>/.claude/skills/<name>. Claude discovers these as PROJECT-LOCAL skills (bare names) —
+ * WITHOUT touching the user's personal set or CLAUDE_CONFIG_DIR. CORRECTION (2026-07-20, card
+ * d63585ca): project-local does NOT shadow same-named personal skills — Claude Code's documented
+ * precedence is the OPPOSITE (enterprise overrides personal, personal overrides project; see
+ * https://code.claude.com/docs/en/skills.md). A bundled Loom skill whose name collides with one the
+ * user already has under ~/.claude/skills loses the collision and never fires. There is no config
+ * lever to reverse this, so Loom's own skill names must simply not collide (e.g. `pickup` was
+ * renamed to `loom-pickup` after a real collision with a personal skill of the same name).
  *
  * `subset` (profile-pinned, per session): when a non-empty list, deliver ONLY those skills; null/empty ⇒
  * ALL store skills (today's behavior — the regression-guarded default). A subset name not in the store is
@@ -138,10 +143,10 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  *  - Hides the injected skills from git via .git/info/exclude (local only; never edits a tracked .gitignore).
  *
  * `obsidianEnabled` (per session, from `opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1"` at the spawn
- * seam): when TRUE, the Obsidian "vault preflight" fragment is appended to the injected pickup/session-end
+ * seam): when TRUE, the Obsidian "vault preflight" fragment is appended to the injected loom-pickup/session-end
  * SKILL.md (after its body; frontmatter untouched). Default FALSE ⇒ NO fragment read, NO append — every
  * injected file is byte-identical to the store base (the additive-when-off invariant, mirroring
- * browserTesting/documentConversion). Only pickup + session-end are affected; all other skills are
+ * browserTesting/documentConversion). Only loom-pickup + session-end are affected; all other skills are
  * byte-identical regardless.
  */
 export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false): void {

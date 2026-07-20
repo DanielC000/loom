@@ -16,7 +16,7 @@ import { expect, test } from "./fixtures/daemon";
 
 // CORE bundled skills seeded on every boot (packages/daemon/assets/skills) regardless of LOOM_DEV — the
 // platform-* skills are dev-gated in the npm build, so we assert only on the always-present CORE set.
-const CORE_SKILLS = ["worker", "orchestrate", "web-design", "task-start", "session-end", "pickup", "doc-hygiene"];
+const CORE_SKILLS = ["worker", "orchestrate", "web-design", "task-start", "session-end", "loom-pickup", "doc-hygiene"];
 
 // The sidebar skill entries are <button>s whose text is "<name>  ·  bundled". Each CORE name is a unique
 // substring across the button set, so a hasText filter pins exactly one. (Nav items are <a> links, not
@@ -74,7 +74,7 @@ test("opening a skill loads its SKILL.md body", async ({ page, loomDaemon }) => 
 
 test("editing a bundled skill flips it from pristine to customized (observable before/after)", async ({ page, loomDaemon }) => {
   // Use a CORE skill and restore it at the end so the shared worker-scoped daemon stays pristine.
-  const target = "pickup";
+  const target = "loom-pickup";
   await page.goto(`${loomDaemon.baseURL}/actors?tab=skills`);
 
   await skillButton(page, target).click();

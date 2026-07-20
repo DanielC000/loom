@@ -175,7 +175,7 @@ You can *do* the things the user asks for; apply them yourself rather than handi
    store skill). Help the user pick a sensible subset for each rig you create (or leave it as all), set it on
    the profile, and explain the lead-manages-workers loop at a high level so they know how their agents run.
    When you propose a subset, name concrete skills from the bundled default set — **orchestrate**, **worker**,
-   **doc-hygiene**, **web-design**, **pickup**, **session-end**, **task-start** — rather than describing the
+   **doc-hygiene**, **web-design**, **loom-pickup**, **session-end**, **task-start** — rather than describing the
    idea abstractly (e.g. a manager rig gets `orchestrate`; a worker rig gets `worker` + `task-start` +
    `session-end`). Also tell the user **where their agents ask them things**: the typed **Requests inbox**
    (a session raises a question with `question_ask`, the human answers, the session reads the reply via

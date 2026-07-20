@@ -102,7 +102,7 @@ Loom's **Platform layer** — the reserved "Loom Platform" project + the Platfor
 - **Runtime seeding** is gated behind `LOOM_DEV` (one helper, `packages/daemon/src/paths.ts` › `isLoomDev`,
   read like `LOOM_SCHEDULER_ENABLED`): without the flag, the seeders skip the reserved project, the platform agents, and the two platform profiles. CORE orchestration always seeds.
 - **The published bundle** drops the two platform skill dirs. `scripts/build-npm-package.mjs` curates the
-  staged `assets/skills/` via the pure `curateSkillDirs()` helper in `scripts/curate-release-skills.mjs` (the same helper the daemon's `platform-dev-flag` test asserts against, so the build and the test never drift). The core orchestration skills (`orchestrate`/`worker`/`pickup`/…) always ship.
+  staged `assets/skills/` via the pure `curateSkillDirs()` helper in `scripts/curate-release-skills.mjs` (the same helper the daemon's `platform-dev-flag` test asserts against, so the build and the test never drift). The core orchestration skills (`orchestrate`/`worker`/`loom-pickup`/…) always ship.
 
 To add or remove a dev-only skill from the published package, edit `DEV_ONLY_SKILLS` in `scripts/curate-release-skills.mjs` — that one list drives both the build curation and the test.
 

@@ -346,5 +346,5 @@ You may also call **`my_context`** (no args) at a clean seam to self-assess your
 
 ## To start
 
-Read your assigned task and its DoD; get oriented (`/pickup` if the project context helps). Then
+Read your assigned task and its DoD; get oriented (`/loom-pickup` if the project context helps). Then
 implement the change, verify it against the DoD, and `worker_report` — done or blocked.

@@ -123,7 +123,7 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
 
 ## The operating loop
 
-1. **Pick up.** Re-orient from your living resume doc + the platform board (run `/pickup` if available).
+1. **Pick up.** Re-orient from your living resume doc + the platform board (run `/loom-pickup` if available).
    Know the open escalations, the backlog, and what's mid-flight before acting. **Cold-boot discipline:**
    a fresh session with NO pending human directive AND no fresh escalation is NOT a mandate to act —
    orient, report the platform's state up as a short status, then **PARK**. The backlog merely *existing*

@@ -80,9 +80,12 @@ export const BACKUPS_DIR = path.join(LOOM_HOME, "backups");
 export const AUTO_BACKUP_DIR = path.join(BACKUPS_DIR, "auto");
 /**
  * Loom's OWN editable skill set (UI-managed). Each session gets these injected as PROJECT-LOCAL
- * skills (<cwd>/.claude/skills) so they're discovered as bare names and SHADOW the user's personal
- * ~/.claude/skills — keeping Loom's skills separate from the user's bespoke personal set (validated
- * spike: project-local shadowing wins). Bundled defaults are seeded here on boot; then user-editable.
+ * skills (<cwd>/.claude/skills) so they're discovered as bare names — keeping Loom's skills separate
+ * from the user's bespoke personal set without ever touching ~/.claude/skills. NOTE: this does NOT
+ * shadow a same-named personal skill — Claude Code's documented precedence is personal-overrides-
+ * project (see inject.ts's injectSkills doc comment for the full correction and citation), so a
+ * bundled Loom skill name must not collide with a common personal one. Bundled defaults are seeded
+ * here on boot; then user-editable.
  */
 export const SKILLS_DIR = path.join(LOOM_HOME, "skills");
 
@@ -165,7 +168,7 @@ export const SYNTHESIZE_SCRIPT = path.join(__dirname, "..", "assets", "python", 
 
 /**
  * The Obsidian "vault preflight" skill fragment — appended (live-read from the package dir) to the
- * injected pickup/session-end SKILL.md ONLY when a session's project has `obsidian.autoStart` on. Kept
+ * injected loom-pickup/session-end SKILL.md ONLY when a session's project has `obsidian.autoStart` on. Kept
  * OUT of the store SKILL.md so the base skills stay short + Obsidian-free (byte-identical when off); see
  * skills/inject.ts. Read live like the other assets, so an asset edit applies on the next spawn.
  */

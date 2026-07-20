@@ -1,5 +1,5 @@
 ---
-name: pickup
+name: loom-pickup
 description: Use when resuming work or getting up to speed on a Loom task — "pickup", "continue", "what were we doing", "get back to". Reads the project board, recent git history, CLAUDE.md, and (if relevant) your living resume doc to brief the current state and a concrete next step.
 ---
 

@@ -19,7 +19,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3e) card 809cc4b5: an oversized on-disk resume doc gets a [loom:resume-doc-size] note PREPENDED
 //        ahead of the "Where things live" block (mirrors the Platform Lead's own size-warning, now
 //        shared via resume-doc-notes.ts); a missing or small doc emits no note;
-//   (4) the pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
+//   (4) the loom-pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/manager-context-block.mjs
 import fs from "node:fs";
@@ -261,11 +261,11 @@ try {
   check("(2) worker spawn opts.startupPrompt does NOT carry the manager 'Where things live' block", !oW?.startupPrompt?.includes("Where things live"));
 
   // ===================== (4) skill ASSETS instruct read-by-absolute-path =====================
-  const pickup = fs.readFileSync(path.join(__dirname, "..", "assets", "skills", "pickup", "SKILL.md"), "utf8");
+  const pickup = fs.readFileSync(path.join(__dirname, "..", "assets", "skills", "loom-pickup", "SKILL.md"), "utf8");
   const orchestrate = fs.readFileSync(path.join(__dirname, "..", "assets", "skills", "orchestrate", "SKILL.md"), "utf8");
-  check("(4) pickup asset references the 'Where things live' context block", /Where things live/.test(pickup));
-  check("(4) pickup asset derives the resume doc path (Orchestrator Log.md)", /Orchestrator Log\.md/.test(pickup));
-  check("(4) pickup asset instructs ABSOLUTE-path read, never Glob", /ABSOLUTE path/.test(pickup) && /never Glob/i.test(pickup));
+  check("(4) loom-pickup asset references the 'Where things live' context block", /Where things live/.test(pickup));
+  check("(4) loom-pickup asset derives the resume doc path (Orchestrator Log.md)", /Orchestrator Log\.md/.test(pickup));
+  check("(4) loom-pickup asset instructs ABSOLUTE-path read, never Glob", /ABSOLUTE path/.test(pickup) && /never Glob/i.test(pickup));
   check("(4) orchestrate asset references the 'Where things live' context block", /Where things live/.test(orchestrate));
   check("(4) orchestrate asset derives the resume doc path (Orchestrator Log.md)", /Orchestrator Log\.md/.test(orchestrate));
   check("(4) orchestrate asset instructs ABSOLUTE-path read, never Glob", /ABSOLUTE path/.test(orchestrate) && /never Glob/i.test(orchestrate));
@@ -278,6 +278,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — managers get the 'Where things live' block (both absolute roots), workers stay byte-identical, the pickup/orchestrate assets instruct absolute-path reads, and a project's orchestration.resumeDocFilename override (card c1f2f095) is the single source of truth for the injected resume-doc path, defense-in-depth-contained to the vault root — claude-free."
+  ? "\n✅ ALL PASS — managers get the 'Where things live' block (both absolute roots), workers stay byte-identical, the loom-pickup/orchestrate assets instruct absolute-path reads, and a project's orchestration.resumeDocFilename override (card c1f2f095) is the single source of truth for the injected resume-doc path, defense-in-depth-contained to the vault root — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

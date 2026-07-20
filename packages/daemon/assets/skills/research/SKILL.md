@@ -8,7 +8,7 @@ description: The cross-project doctrine for writing, reviewing, and integrating 
 The evergreen HOW for a vault history/geopolitics project: how a rigorous note is **written**,
 **reviewed**, and **integrated**. It plugs into your role skill — a writer also loads `/worker`, a lead
 also loads `/orchestrate`, an integrator loads `/worker`. The concrete subject, paths, sibling links,
-and frontier come from your agent prompt + the vault/board (`/pickup`), not here.
+and frontier come from your agent prompt + the vault/board (`/loom-pickup`), not here.
 
 The canonical, authoritative method is the vault note **[[Research and Analysis Guideline]]** — the
 source tiers, the blocklist, the three-layer separation, the credibility-laundering trap. Read it; this
