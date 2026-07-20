@@ -19,6 +19,16 @@ export interface ContextStats {
    * null if no assistant line carries text content.
    */
   lastAssistantText: string | null;
+  /**
+   * The LAST real (human-submitted) "user"-role turn's raw text — a plain string content is returned
+   * verbatim; an array-content turn concatenates its `text` blocks. A `type:"user"` transcript line whose
+   * content is ENTIRELY `tool_result` blocks (Claude Code's on-disk encoding for a tool's return value,
+   * not anything a human typed — see transcript.ts's `classifyRole`) is skipped, so this always reflects
+   * the last turn a human/Loom actually SUBMITTED, not an intervening tool result. Used by host.ts's
+   * bare-pasted-text-placeholder tripwire (paste-tripwire.ts) to compare against `live.lastPrompt` — the
+   * exact text `submit()` sent — off this SAME single-pass read. null if no such line exists.
+   */
+  lastUserText: string | null;
 }
 
 function num(x: unknown): number {
@@ -27,6 +37,26 @@ function num(x: unknown): number {
 
 /** Text-only extraction from an assistant message's `content` array — tool_use/tool_result excluded. */
 function textOnlyContent(content: unknown): string | null {
+  if (!Array.isArray(content)) return null;
+  const parts: string[] = [];
+  for (const c of content as Array<Record<string, unknown>>) {
+    if (c.type === "text" && typeof c.text === "string") parts.push(c.text);
+  }
+  return parts.length ? parts.join("\n") : null;
+}
+
+/** True iff `content` is a non-empty array of ONLY `tool_result` blocks (mirrors transcript.ts's classifyRole). */
+function isToolResultOnly(content: unknown): boolean {
+  return (
+    Array.isArray(content) &&
+    content.length > 0 &&
+    content.every((b) => b !== null && typeof b === "object" && (b as Record<string, unknown>).type === "tool_result")
+  );
+}
+
+/** Raw text of a "user"-role message: a string content verbatim, or array "text" blocks joined. */
+function userTurnText(content: unknown): string | null {
+  if (typeof content === "string") return content;
   if (!Array.isArray(content)) return null;
   const parts: string[] = [];
   for (const c of content as Array<Record<string, unknown>>) {
@@ -54,10 +84,19 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
   let lastUsage: Record<string, unknown> | null = null;
   let lastModel: string | null = null;
   let lastText: string | null = null;
+  let lastUserTurnText: string | null = null;
   for (const line of raw.split("\n")) {
     if (!line.trim()) continue;
     let o: Record<string, unknown>;
     try { o = JSON.parse(line); } catch { continue; }
+    if (o.type === "user" && o.message) {
+      const msg = o.message as { content?: unknown };
+      if (!isToolResultOnly(msg.content)) {
+        const t = userTurnText(msg.content);
+        if (t !== null) lastUserTurnText = t; // …the last REAL (non-tool-result) user turn's raw text
+      }
+      continue;
+    }
     if (o.type !== "assistant" || !o.message) continue;
     turns++;
     const msg = o.message as { usage?: Record<string, unknown>; model?: string; content?: unknown };
@@ -72,7 +111,7 @@ export function readContextStats(cwd: string, engineSessionId: string): ContextS
     num(lastUsage.input_tokens) +
     num(lastUsage.cache_read_input_tokens) +
     num(lastUsage.cache_creation_input_tokens);
-  return { inputTokens, turns, model: lastModel, lastAssistantText: lastText };
+  return { inputTokens, turns, model: lastModel, lastAssistantText: lastText, lastUserText: lastUserTurnText };
 }
 
 /** Cumulative usage summed across ALL of a run's turns (Agent Runs #2 — the per-run cost meter source). */

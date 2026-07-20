@@ -15,6 +15,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
+import { detectBarePastePlaceholderTripwire } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, resolveCodescapeBin, codescapeGraphPath, resolveHostToolBin } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -2712,6 +2713,15 @@ export class PtyHost {
           // box above before making this (or anything here) async.
           const stats = live.engineSessionId ? readContextStats(live.cwd, live.engineSessionId) : null;
           if (stats) this.events.onContextStats(sessionId, stats);
+          // Bare-pasted-text-placeholder tripwire (card eef4883c, DETECTION ONLY — see paste-tripwire.ts's
+          // doc for the 8a39f544 background). Compares the SUBMITTED turn (`live.lastPrompt`, the exact
+          // text submit() sent) against the transcript's recorded turn for that same turn (`stats.
+          // lastUserText`, from the SAME single-pass read above — no extra file I/O). A future recurrence
+          // of a submitted paste silently collapsing to a bare placeholder is now LOGGED instead of silent.
+          if (detectBarePastePlaceholderTripwire(live.lastPrompt, stats?.lastUserText)) {
+            // eslint-disable-next-line no-console
+            console.warn(`[paste-tripwire] ${sessionId} submitted turn resolved to a bare pasted-text placeholder (engineSessionId=${live.engineSessionId ?? "?"}, claudeVersion=${getCachedClaudeVersion() ?? "?"}) — content may have been lost to an upstream CLI paste-collapse race (see card eef4883c / 8a39f544)`);
+          }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
           // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
           // account (the pending queue is held intact for #19c-b's resume). billing_error / a clean Stop
