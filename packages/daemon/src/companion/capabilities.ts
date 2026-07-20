@@ -166,8 +166,23 @@ export interface ResolvedGrantScope {
  * throwing. That's the semantically correct answer, not just a defensive shim: a store that can't even
  * list grants genuinely has none, so every capability stays OFF, which is exactly the byte-identical
  * default this framework promises for every session it doesn't know about.
+ *
+ * Companion "lead mode" (Option B, no guardrails — owner decision `b5c606aa`, 2026-07-20) is checked
+ * FIRST, ahead of any grant-row read: when `sessions.companion_lead_mode` is set on this session, this
+ * SHORT-CIRCUITS to {@link synthesizeLeadModeScope}'s synthesized full-scope answer instead of reading
+ * `companion_capability_grants` at all — SUPERSEDING the rows, never deleting/mutating them, so toggling
+ * lead mode back off instantly reverts to whatever was granted before. Every lever downstream of this gate
+ * (registration, per-call `mayAct`/`configFor` re-checks, Primitive A/B/C, friction tiers, trust windows)
+ * runs completely unchanged — lead mode only changes what THIS function returns, never how a lever
+ * consumes it.
  */
 export function resolveCompanionGrant(db: Db, sessionId: string, capability: string): ResolvedGrantScope | null {
+  if (isCompanionLeadModeEnabled(db, sessionId)) {
+    const synthesized = synthesizeLeadModeScope(db, capability);
+    if (synthesized) return synthesized;
+    // A lead-mode session with zero live projects (or a `db` too minimal to even list them) falls through
+    // to the ordinary grant-row path below — never throws, never fabricates an empty-but-truthy scope.
+  }
   if (typeof db.listCompanionCapabilityGrantsForSession !== "function") return null;
   const rows = db.listCompanionCapabilityGrantsForSession(sessionId).filter((g) => g.capability === capability);
   if (rows.length === 0) return null;
@@ -184,6 +199,86 @@ export function resolveCompanionGrant(db: Db, sessionId: string, capability: str
     modeFor: (projectId) => perProject.get(projectId)?.mode,
     mayAct: (projectId) => perProject.get(projectId)?.mode === "act",
     configFor: (projectId) => perProject.get(projectId)?.config ?? {},
+  };
+}
+
+/**
+ * LIVE read of the `companion_lead_mode` row flag — mirrors `mcp/operator.ts`'s `isOperatorEnabled`: read
+ * at CALL time, never spawn-pinned/boot-memoized, so toggling it off revokes the synthesized scope on the
+ * very next `resolveCompanionGrant` call rather than waiting for a respawn (matches `vaultWrite`'s own
+ * live-per-request posture, NOT `browserTesting`'s spawn-pinned one — see the session-capability-surface
+ * project memory note). Exported so the REST GET/PUT (gateway/server.ts, `/api/companion/:sessionId/
+ * lead-mode`) reads the EXACT same flag rather than a second, potentially-drifting resolution.
+ *
+ * Tolerates a `db` that doesn't implement `getSession` at all (an even more minimal test double than the
+ * `listCompanionCapabilityGrantsForSession`-less one `resolveCompanionGrant` already tolerates — e.g. the
+ * bare `{ listEnabledCompanionReminders }` stub `CompanionController`'s own reconcile-path tests use) by
+ * treating it as "lead mode off", never throwing — this is called UNCONDITIONALLY, ahead of every other
+ * check in `resolveCompanionGrant`, so it must be at least as tolerant as the checks it now runs in front of.
+ */
+export function isCompanionLeadModeEnabled(db: Db, sessionId: string): boolean {
+  if (typeof db.getSession !== "function") return false;
+  return db.getSession(sessionId)?.companionLeadMode === true;
+}
+
+/**
+ * Synthesizes a FULL, all-project act-mode {@link ResolvedGrantScope} for `capability` (Companion "lead
+ * mode", Option B — owner decision `b5c606aa`, 2026-07-20: maximal control, NO guardrails). Iterates
+ * `db.listAllProjects()` LIVE on every call (never cached) — the INCLUSIVE list (Framework-adjacent
+ * `listProjects()`'s reserved-excluding picker feed is deliberately NOT used here): a project created
+ * AFTER lead mode was enabled is included on the very next read, and a reserved/system project (e.g. the
+ * Platform home) is in scope too — "every project" means every project. Every project resolves to
+ * mode:'act', so every lever's own `hasActGrant` gate + per-project `mayAct` check pass unconditionally,
+ * and `session-steer`'s per-project `roleFilter` (config-driven, absent here ⇒ `{}`) stays unset — NO role
+ * exclusion, reaching an infrastructure (platform/operator/setup) session exactly like an ordinary
+ * worker/manager one, per Option B's explicit "no exclusions" ruling.
+ *
+ * Per-capability config is synthesized only where a lever actually reads one (every other capability gets
+ * `{}`, matching an ordinary grant's own absent-config default — including `session-steer`'s `roleFilter`
+ * and `board-reach`'s `authoredContent`, DELIBERATELY left conservative: Option B's decision covers the
+ * session-steer exclusion floor and decision/alert visibility only, never a relaxation of verbatim-relay):
+ *   - `decisions-relay` → `{decisionClasses: [...DECISION_CLASSES]}` (all 3 classes — a deploy/irreversible
+ *     decision still ALWAYS steps up via Tier X; lead mode only widens which classes are ELIGIBLE, never
+ *     the friction tier a resolve runs through).
+ *   - `attention-push` → `{alertClasses: ["*"]}` — a wildcard sentinel `attention-push.ts`'s own
+ *     `resolveConfig` expands to its FULL `ATTENTION_ALERT_CLASSES` set, rather than importing that array
+ *     here (attention-push.ts already imports `resolveCompanionGrant` FROM this file — importing back
+ *     would be a module cycle). The REST grant-config validator only ever accepts a literal class name
+ *     (gateway/server.ts), so `"*"` can never be written by a human grant — it is reachable ONLY through
+ *     this synthesis path.
+ *   - `media-out` → `{roots: [project.vaultPath]}` when that project has one, else `{}` — the one lever
+ *     with no safe host-wide wildcard (arbitrary host FS, no closed vocabulary), so lead mode's default is
+ *     bounded to each project's OWN vault content rather than granting nothing or every path on the host.
+ *
+ * Returns `null` (never an empty-but-truthy scope, mirroring `resolveCompanionGrant`'s own contract) when
+ * there are zero live projects, or when `db` doesn't implement `listAllProjects` at all (the same minimal
+ * test-double tolerance `resolveCompanionGrant` extends to `listCompanionCapabilityGrantsForSession`).
+ */
+function synthesizeLeadModeScope(db: Db, capability: string): ResolvedGrantScope | null {
+  if (typeof db.listAllProjects !== "function") return null;
+  const projects = db.listAllProjects();
+  if (projects.length === 0) return null;
+  const projectIds = new Set(projects.map((p) => p.id));
+  const vaultPathById = new Map(projects.map((p) => [p.id, p.vaultPath]));
+  const configFor = (projectId: string): Record<string, unknown> => {
+    switch (capability) {
+      case "decisions-relay":
+        return { decisionClasses: [...DECISION_CLASSES] };
+      case "attention-push":
+        return { alertClasses: ["*"] };
+      case "media-out": {
+        const vaultPath = vaultPathById.get(projectId);
+        return vaultPath ? { roots: [vaultPath] } : {};
+      }
+      default:
+        return {};
+    }
+  };
+  return {
+    projectIds,
+    modeFor: (projectId) => (projectIds.has(projectId) ? "act" : undefined),
+    mayAct: (projectId) => projectIds.has(projectId),
+    configFor,
   };
 }
 

@@ -106,6 +106,7 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/companion/conversations/:sessionId" },
   { method: "GET", pattern: "/api/companion/conversations/:sessionId/:seq" },
   { method: "GET", pattern: "/api/companion/home" },
+  { method: "GET", pattern: "/api/companion/:sessionId/lead-mode" },
   { method: "GET", pattern: "/api/companion/memory/:sessionId" },
   { method: "GET", pattern: "/api/companion/memory/:sessionId/:name" },
   { method: "GET", pattern: "/api/companion/messages/:sessionId" },

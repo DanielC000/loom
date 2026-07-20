@@ -635,6 +635,20 @@ export interface Session {
    */
   vaultWrite?: boolean;
   /**
+   * Opt-in Companion "lead mode" (Option B, no guardrails): when true, this companion's
+   * `resolveCompanionGrant` reads (companion/capabilities.ts) short-circuit to a SYNTHESIZED full
+   * act-scope over EVERY live project (`listAllProjects()`, computed LIVE — a project created after
+   * enabling is included on the very next read), superseding this session's own
+   * `companion_capability_grants` rows without deleting or mutating them — toggling this back off
+   * instantly reverts to those untouched rows. Mirrors `vaultWrite`, NOT `browserTesting`: read LIVE off
+   * this row on every `resolveCompanionGrant` call (never threaded into `pty.spawn`, no respawn needed
+   * for a toggle to take effect). HUMAN-only REST (`PUT /api/companion/:sessionId/lead-mode`) — like
+   * every other companion capability control, there is NO agent MCP write path (an injection-exposed
+   * Companion must never widen its own scope). Absent/false on every existing session ⇒ today's
+   * per-capability-grant behavior, byte-identical.
+   */
+  companionLeadMode?: boolean;
+  /**
    * Agent-tooling P4: registry-capability grants resolved from the session's Profile at spawn and PINNED
    * here (mirrors `browserTesting`, spawn-time not tool-call-time — UNLIKE `connections`, which is only
    * ever read by the MCP layer at call time and never threaded into the spawn recipe): each enabled

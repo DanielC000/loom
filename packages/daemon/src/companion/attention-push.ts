@@ -288,9 +288,18 @@ export class AttentionPushWatcher {
     for (const pid of scope.projectIds) {
       const cfg = scope.configFor(pid) as { alertClasses?: unknown; digestMinutes?: unknown };
       if (Array.isArray(cfg.alertClasses)) {
-        for (const c of cfg.alertClasses) {
-          if (typeof c === "string" && (ATTENTION_ALERT_CLASSES as readonly string[]).includes(c)) {
-            alertClasses.add(c as AttentionAlertClass);
+        // Companion "lead mode" wildcard (companion/capabilities.ts's synthesizeLeadModeScope) — "*" is
+        // reachable ONLY through that internal synthesis path (the REST grant-config validator only ever
+        // accepts a literal class name), and expands to every currently-known class here rather than
+        // being duplicated as a literal list in capabilities.ts (which would drift if a class is ever
+        // added/renamed here without a matching edit there).
+        if (cfg.alertClasses.includes("*")) {
+          for (const c of ATTENTION_ALERT_CLASSES) alertClasses.add(c);
+        } else {
+          for (const c of cfg.alertClasses) {
+            if (typeof c === "string" && (ATTENTION_ALERT_CLASSES as readonly string[]).includes(c)) {
+              alertClasses.add(c as AttentionAlertClass);
+            }
           }
         }
       }

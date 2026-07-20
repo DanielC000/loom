@@ -369,7 +369,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   context_nudge_unanswered INTEGER NOT NULL DEFAULT 0,   -- consecutive unanswered context nudges
   -- Per-project session Archive (mirrors projects.archived_at): the ISO instant a dead/exited
   -- session was archived out of the rail. NULL = not archived. Excluded from the live lists.
-  archived_at TEXT
+  archived_at TEXT,
+  -- Opt-in Companion "lead mode" (Option B, no guardrails): read LIVE by resolveCompanionGrant on every
+  -- call (mirrors vault_write, NOT browser_testing — no respawn needed for a toggle to take effect).
+  -- HUMAN-only REST write (PUT /api/companion/:sessionId/lead-mode); legacy rows backfill to 0 (off).
+  companion_lead_mode INTEGER NOT NULL DEFAULT 0
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 -- seq (attention-push watcher fix, CR-caught): the sqlite rowid is NOT a safe tail-poll cursor for this
@@ -1172,6 +1176,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   context_nudge_unanswered: "INTEGER NOT NULL DEFAULT 0",
   // Per-project session Archive (nullable; legacy rows backfill to NULL = not archived).
   archived_at: "TEXT",
+  // Opt-in Companion "lead mode" (read LIVE by resolveCompanionGrant); legacy rows backfill to 0 (off).
+  companion_lead_mode: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -3908,6 +3914,18 @@ export class Db {
     this.notifySessionChanged(id);
   }
   /**
+   * Re-pin the session-row `companion_lead_mode` flag directly (the human-only REST toggle, `PUT
+   * /api/companion/:sessionId/lead-mode`) — a DIRECT row write, mirroring {@link setRestrictedTools}'s
+   * shape but NOT its spawn-time posture: `companion_lead_mode` is read LIVE by `resolveCompanionGrant`
+   * on every call (like `vaultWrite`), so this write is effective on the companion's very next tool
+   * call — no respawn needed.
+   */
+  setCompanionLeadMode(id: string, enabled: boolean): void {
+    this.db.prepare("UPDATE sessions SET companion_lead_mode = ?, last_activity = ? WHERE id = ?")
+      .run(enabled ? 1 : 0, new Date().toISOString(), id);
+    this.notifySessionChanged(id);
+  }
+  /**
    * Re-pin the FULL companion capability-shaping surface on the session ROW directly (Companion Capability
    * & Permission-Lever Framework §6, the conversation-preserving respawn) — the generalized sibling of
    * {@link setRestrictedTools} above, covering every field `resolveAgentSpawn` resolves that a resume/fork/
@@ -5781,6 +5799,8 @@ function toSession(r0: unknown): Session {
     connections: (() => { try { return JSON.parse((r.connections as string) || "[]") as string[]; } catch { return []; } })(),
     // pinned confined vault-write grant; read LIVE by TaskMcpRouter at vault_write call time (mirrors connections).
     vaultWrite: (r.vault_write as number) === 1,
+    // Companion "lead mode"; read LIVE by resolveCompanionGrant on every call (mirrors vaultWrite).
+    companionLeadMode: (r.companion_lead_mode as number) === 1,
     // pinned registry-capability grants (agent-tooling P4); malformed/absent degrades to [] = none.
     capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
     parentSessionId: (r.parent_session_id as string) ?? null,

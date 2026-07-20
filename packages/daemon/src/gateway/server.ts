@@ -36,7 +36,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, computeCoGrantWarnings } from "../companion/capabilities.js";
+import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
@@ -1935,6 +1935,32 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     deps.db.setRestrictedTools(sessionId, b.restrictedTools);
     return { sessionId, restrictedTools: b.restrictedTools };
+  });
+
+  // --- Companion "LEAD MODE" (Option B, no guardrails — owner decision `b5c606aa`, 2026-07-20): the
+  // human-only REST toggle for `sessions.companion_lead_mode`. UNLIKE restrictedTools above, this is read
+  // LIVE by `resolveCompanionGrant` on every call (mirrors `vaultWrite`'s live-per-request posture, not
+  // `restrictedTools`'s spawn-pinned one) — so a write here takes effect on the companion's very NEXT tool
+  // call, no restart needed. HUMAN-ONLY loopback REST, INTENTIONALLY NO MCP path (same trust posture as
+  // every other companion capability writer in this file): an injection-exposed Companion must never
+  // widen its own scope. Resolves the SPECIFIC companion by sessionId (mirrors resolveCompanionAgent
+  // above), never "the first assistant-role session".
+  app.get("/api/companion/:sessionId/lead-mode", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    return { sessionId, leadMode: isCompanionLeadModeEnabled(deps.db, sessionId) };
+  });
+  app.put("/api/companion/:sessionId/lead-mode", async (req, reply) => {
+    const sessionId = (req.params as { sessionId: string }).sessionId;
+    const r = resolveCompanionAgent(sessionId);
+    if (!r.ok) return reply.code(r.code).send({ error: r.error });
+    const b = (req.body ?? {}) as { leadMode?: unknown };
+    if (typeof b.leadMode !== "boolean") {
+      return reply.code(400).send({ error: "leadMode must be a boolean" });
+    }
+    deps.db.setCompanionLeadMode(sessionId, b.leadMode);
+    return { sessionId, leadMode: b.leadMode };
   });
 
   // --- Owner-controlled encrypted credential store (agent-tooling epic, P1 foundation). HUMAN-ONLY
