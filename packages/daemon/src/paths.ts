@@ -168,7 +168,7 @@ export const SYNTHESIZE_SCRIPT = path.join(__dirname, "..", "assets", "python", 
 
 /**
  * The Obsidian "vault preflight" skill fragment — appended (live-read from the package dir) to the
- * injected loom-pickup/session-end SKILL.md ONLY when a session's project has `obsidian.autoStart` on. Kept
+ * injected loom-pickup/loom-session-end SKILL.md ONLY when a session's project has `obsidian.autoStart` on. Kept
  * OUT of the store SKILL.md so the base skills stay short + Obsidian-free (byte-identical when off); see
  * skills/inject.ts. Read live like the other assets, so an asset edit applies on the next spawn.
  */

@@ -4247,7 +4247,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text));
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
-  // the /session-end skill (log progress to the board, leave it resumable) and then call the `end_me`
+  // the /loom-session-end skill (log progress to the board, leave it resumable) and then call the `end_me`
   // self-stop tool (card 3b015fc7) — so the human doesn't have to watch for the skill to finish and hit
   // Stop. HUMAN/REST only — NOT an agent MCP tool (same trust posture as stop/input). Role-gated to
   // NON-worker: a worker wraps up via worker_report → its manager gates/merges, so a human must never
@@ -4261,7 +4261,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (session.role === "worker")
       return reply.code(403).send({ error: "cannot end a worker session; a worker wraps up via its manager" });
     const text =
-      "Run the /session-end skill to wrap up (update the board task, leave it resumable), then call `end_me` to close this session.";
+      "Run the /loom-session-end skill to wrap up (update the board task, leave it resumable), then call `end_me` to close this session.";
     // 'human' source + kind:"agent" — mirrors the composer input route exactly: a human directive that
     // must land as its own turn (not coalesced with a Loom operational nudge).
     return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent"));

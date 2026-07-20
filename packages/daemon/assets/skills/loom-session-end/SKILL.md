@@ -1,5 +1,5 @@
 ---
-name: session-end
+name: loom-session-end
 description: Use when wrapping up work — "done for now", "wrapping up", "end session", "log this", "save progress". Records progress + decisions on the board task and leaves the work clean and resumable by the next session.
 ---
 
@@ -21,7 +21,7 @@ prose. The daemon auto-commits the vault — never run manual vault git.
    follows the card's Conventional-Commits title (`type(scope): summary`). Push with plain `git push`
    (it already refuses a non-fast-forward — there is no valid `--ff-only` push flag); reach for
    `--force-with-lease` only as a deliberate guard when a force is genuinely intended.
-3. **Prose** — if you changed design/architecture notes in the project's vault, apply `/doc-hygiene`
+3. **Prose** — if you changed design/architecture notes in the project's vault, apply `/loom-doc-hygiene`
    (rewrite in place, no contradictions, bounded).
 4. **Living resume doc** (leads) — if you keep one, make sure it's current: what's merged, the
    prioritized backlog, key decisions, where things stand. A successor should be able to read it cold.

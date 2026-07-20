@@ -64,7 +64,7 @@ function cleanup(e) {
     (() => { const s = e.db.getContextNudgeState("mgr-first"); return s?.policy === "watching" && s?.unanswered === 0 && s?.lastContextNudgeAt === null; })());
   e.watcher.tick(NOW);
   check("(1) over-ratio manager IS nudged", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-first");
-  check("(1) nudge text steers to /session-end + recycle_me", e.enqueued[0]?.text.includes("/session-end") && e.enqueued[0]?.text.includes("recycle_me"));
+  check("(1) nudge text steers to /loom-session-end + recycle_me", e.enqueued[0]?.text.includes("/loom-session-end") && e.enqueued[0]?.text.includes("recycle_me"));
   const s = e.db.getContextNudgeState("mgr-first");
   check("(1) recordContextNudge incremented unanswered 0→1 + stamped last_context_nudge_at", s?.unanswered === 1 && s?.lastContextNudgeAt === NOW.toISOString());
   check("(1) policy stays 'watching' after a nudge (escalation not yet)", s?.policy === "watching");

@@ -91,7 +91,7 @@ try {
     DEV_ONLY_SKILLS.every((n) => allSkillDirs.includes(n)));
   check("(3) staged release EXCLUDES every omitted skill (dev-only + install-specific)", DEV_ONLY_SKILLS.every((n) => !kept.includes(n)));
   check("(3) staged release KEEPS the core orchestration skills",
-    ["orchestrate", "worker", "loom-pickup", "doc-hygiene", "web-design"].every((n) => kept.includes(n)));
+    ["orchestrate", "worker", "loom-pickup", "loom-doc-hygiene", "web-design"].every((n) => kept.includes(n)));
   // The install-specific `research` skill (bespoke to the owner's geopolitics/history vault) must NOT
   // ship to regular `loomctl` users — it lives in DEV_ONLY_SKILLS and is dropped from the staged set.
   check("(3) research skill exists in the bundled assets", allSkillDirs.includes("research"));

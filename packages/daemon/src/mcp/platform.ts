@@ -1251,7 +1251,7 @@ export class PlatformMcpRouter {
         description:
           "Recycle YOURSELF (the Platform Lead) before your context fills up — hand off to a fresh successor " +
           "Lead in ONE atomic operation. Loom nudges you as you near your context limit; on that nudge: FIRST run " +
-          "/session-end (update your living resume doc + the platform board), THEN call this with a self-contained " +
+          "/loom-session-end (update your living resume doc + the platform board), THEN call this with a self-contained " +
           "continuationPrompt for your successor — current cross-project state, what's in flight, the next steps, and " +
           "key decisions. Loom retires YOU and boots a FRESH successor Lead (your same identity/agent + warm-up) seeded " +
           "with your continuationPrompt; the successor boots into a normal pickup (reads its resume doc + the platform " +

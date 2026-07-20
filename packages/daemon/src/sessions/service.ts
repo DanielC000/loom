@@ -5351,7 +5351,7 @@ export class SessionService {
 
   /**
    * Recycle a MANAGER near its context limit (the `recycle_me` flow). The manager has already run
-   * /session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
+   * /loom-session-end and written `continuationPrompt`; here Loom boots a FRESH successor manager seeded
    * with the agent warm-up prompt + that continuation (NOT --resume — fresh context, intent carried),
    * RE-PARENTS the old manager's live workers onto the successor so the fleet survives, then closes
    * the old manager (deferred, so this call's tool response flushes first). gen+1; recycledFrom = old.
@@ -5481,7 +5481,7 @@ export class SessionService {
 
   /**
    * Recycle the PLATFORM LEAD near its context limit (the platform-surface `recycle_me` flow) — the
-   * platform analogue of recycleManager. The Lead has already run /session-end and written
+   * platform analogue of recycleManager. The Lead has already run /loom-session-end and written
    * `continuationPrompt`; Loom boots a FRESH successor Lead seeded with the agent warm-up + that
    * continuation (NOT --resume — fresh context, intent carried), carries the predecessor's wakes +
    * in-flight inbound queue onto it, then closes the predecessor (deferred, so this call's tool

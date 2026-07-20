@@ -274,7 +274,7 @@ export interface OrchestrationConfig {
    * Manager context-recycle threshold: the fraction of a manager's MODEL context window
    * (`contextWindowForModel`, so it scales with the model — 1M for Opus/Sonnet 4.x, 200k otherwise)
    * at which the daemon's ContextWatcher nudges the manager to hand off to a fresh successor (run
-   * /session-end, write a continuation prompt, call recycle_me). Agent-confirmed — the watcher only
+   * /loom-session-end, write a continuation prompt, call recycle_me). Agent-confirmed — the watcher only
    * prompts; the manager performs the handoff. Default 0.80; 0 disables. Env: LOOM_RECYCLE_CONTEXT_RATIO.
    */
   recycleAtContextRatio: number;

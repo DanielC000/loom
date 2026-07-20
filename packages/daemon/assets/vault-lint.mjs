@@ -2,15 +2,15 @@
 // Loom vault-lint PostToolUse hook (phase-2 Pillar D). Invoked by Claude Code as:
 //   node vault-lint.mjs <vaultPath>
 // Reads the PostToolUse payload on stdin. If a Write/Edit/MultiEdit touched a .md UNDER the
-// project's vault, it runs the doc-hygiene skill's MECHANICALLY-checkable subset and surfaces an
+// project's vault, it runs the loom-doc-hygiene skill's MECHANICALLY-checkable subset and surfaces an
 // ADVISORY warning to the agent (never blocks — the agent self-corrects). Everything else (non-.md,
-// a write outside the vault, a clean note) is a fast no-op. The LLM-judgment rules of doc-hygiene
+// a write outside the vault, a clean note) is a fast no-op. The LLM-judgment rules of loom-doc-hygiene
 // (contradictions, consolidation) are NOT checked here — that's the scheduled worker (#21b).
 //
 // False-positive guards (driven by real production noise):
 //   - `doc-lint: false` in the note's leading YAML frontmatter → skip ALL checks, stay silent.
 //   - Scar/correction patterns (UPDATE:/EDIT:, Note (YYYY):, ~~strike~~) inside a ```fenced code
-//     block``` are legitimate quoting (meta-docs about doc-hygiene) and are NOT flagged.
+//     block``` are legitimate quoting (meta-docs about doc hygiene) and are NOT flagged.
 //   - The broken-wikilink check is OPT-IN (default OFF): this vault uses intentional red-links and
 //     cross-project links a single-subfolder index can't resolve. Enable per-note with
 //     `doc-lint-links: true` in frontmatter. Append-scar + oversized checks stay default-on.
@@ -21,7 +21,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-const MAX_LINES = 400; // doc-hygiene rule 4 (keep docs bounded) — advisory threshold
+const MAX_LINES = 400; // loom-doc-hygiene rule 4 (keep docs bounded) — advisory threshold
 
 /** Parse the leading `---`…`---` YAML frontmatter (top of file only) into a flat lowercased key→value map. */
 function parseFrontmatter(content) {
@@ -118,14 +118,14 @@ async function main() {
   const warnings = [
     ...checkAppendScars(content),
     ...((content.split(/\r?\n/).length > MAX_LINES)
-      ? [`oversized note: ${content.split(/\r?\n/).length} lines (doc-hygiene keeps notes bounded; aim < ${MAX_LINES})`]
+      ? [`oversized note: ${content.split(/\r?\n/).length} lines (loom-doc-hygiene keeps notes bounded; aim < ${MAX_LINES})`]
       : []),
     // broken-wikilink check is opt-in (default OFF) — too noisy on intentional red-links + cross-project links.
     ...(fm["doc-lint-links"] === "true" ? checkBrokenWikilinks(content, vaultPath) : []),
   ];
   if (warnings.length === 0) return;
 
-  const msg = `doc-hygiene (vault-lint) flagged ${path.basename(filePath)}:\n- ${warnings.join("\n- ")}\n`
+  const msg = `loom-doc-hygiene (vault-lint) flagged ${path.basename(filePath)}:\n- ${warnings.join("\n- ")}\n`
     + `Advisory: rewrite in place (don't append UPDATE:/EDIT: notes), keep the note bounded, and fix or remove dead [[links]].`;
   process.stdout.write(JSON.stringify({
     systemMessage: msg,

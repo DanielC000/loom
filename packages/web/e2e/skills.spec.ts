@@ -16,7 +16,7 @@ import { expect, test } from "./fixtures/daemon";
 
 // CORE bundled skills seeded on every boot (packages/daemon/assets/skills) regardless of LOOM_DEV — the
 // platform-* skills are dev-gated in the npm build, so we assert only on the always-present CORE set.
-const CORE_SKILLS = ["worker", "orchestrate", "web-design", "task-start", "session-end", "loom-pickup", "doc-hygiene"];
+const CORE_SKILLS = ["worker", "orchestrate", "web-design", "loom-task-start", "loom-session-end", "loom-pickup", "loom-doc-hygiene"];
 
 // The sidebar skill entries are <button>s whose text is "<name>  ·  bundled". Each CORE name is a unique
 // substring across the button set, so a hasText filter pins exactly one. (Nav items are <a> links, not

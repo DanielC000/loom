@@ -25,7 +25,7 @@ export function useForkSession() {
   });
 }
 
-// One-click graceful wrap-up (card f55bd338): inject a turn telling the session to run /session-end
+// One-click graceful wrap-up (card f55bd338): inject a turn telling the session to run /loom-session-end
 // (log progress, leave it resumable) and then call the `end_me` self-stop tool. The mutation only
 // enqueues the turn — the session stays live until the agent runs the skill and self-stops (or end_me
 // refuses and it just stays up). Non-worker only — the route (and the button) gate that. Idle-gated

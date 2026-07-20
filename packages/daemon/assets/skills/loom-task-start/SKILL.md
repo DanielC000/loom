@@ -1,5 +1,5 @@
 ---
-name: task-start
+name: loom-task-start
 description: Use when starting a new task, feature, bugfix, or refactor in a Loom project — "let's start", "new task", "working on", "implement", "begin". Ensures a board task exists with a clear scope and a sharp definition of done, then loads context before any code changes.
 ---
 

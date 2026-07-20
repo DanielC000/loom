@@ -1,5 +1,5 @@
 ---
-name: doc-hygiene
+name: loom-doc-hygiene
 description: Apply whenever writing or editing documentation, notes, or knowledge files (vault notes, READMEs, design/architecture docs, changelogs). Enforces rewrite-in-place over append, no contradictions, bounded docs, and no hard-wrapped prose. Shipped and kept current by Loom.
 ---
 

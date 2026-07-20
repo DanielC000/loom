@@ -909,7 +909,7 @@ async function main(): Promise<void> {
   console.log(`[boot] periodic transcript-snapshot on (tick ${snapshotMs}ms)`);
 
   // Manager context-recycle watcher — nudges a manager nearing its model's context window to hand off
-  // to a fresh successor (run /session-end → recycle_me). Ratio scales with the model. 0 disables.
+  // to a fresh successor (run /loom-session-end → recycle_me). Ratio scales with the model. 0 disables.
   // LOOM_RECYCLE_CONTEXT_RATIO, if set, is a GLOBAL FORCE that overrides every project's own ratio —
   // it is NOT baked together with the platform default here; ContextWatcher/IdleWatcher instead resolve
   // each manager's threshold from ITS OWN project's config (resolveConfig folds the platform default
@@ -1003,7 +1003,7 @@ async function main(): Promise<void> {
   );
 
   // Vault auto-committer — start ONE VaultVersioner per UNIQUE governing repo root so agent doc rewrites
-  // (the mandated rewrite-in-place doc-hygiene flow, done with the plain Write/Edit tool) accrue git
+  // (the mandated rewrite-in-place loom-doc-hygiene flow, done with the plain Write/Edit tool) accrue git
   // history and a destructive overwrite has a recovery path. Without this the class was dead code: only
   // commitVault (the UI-write path) ever ran. Deduped by the resolved repo ROOT — the owner's real layout
   // is ONE repo at the vault root with each project's vaultPath a SUBFOLDER, so sibling subfolders collapse

@@ -27,7 +27,7 @@ export interface ContextWatcherDeps {
  * Context-recycle watcher (manager-recycle-by-context). Each tick, for every LIVE manager whose
  * measured context occupancy (`ctxInputTokens`, refreshed at each Stop) crosses `ratio` of its
  * MODEL window (`contextWindowForModel` — 1M for Opus/Sonnet 4.x, 200k otherwise, so the trigger
- * scales with the model), it injects a nudge telling the manager to wind down: run /session-end, write
+ * scales with the model), it injects a nudge telling the manager to wind down: run /loom-session-end, write
  * a continuation prompt, and call `recycle_me`. Agent-confirmed — the watcher only prompts; the manager
  * performs the handoff and Loom (recycleManager) boots the successor.
  *
@@ -104,7 +104,7 @@ export class ContextWatcher {
 
       const msg =
         `[loom:context] Your context is ~${pct}% of your ${kw}k window — hand off before it fills. ` +
-        `Wind down NOW: run /session-end to log progress to the vault, then call recycle_me with a ` +
+        `Wind down NOW: run /loom-session-end to log progress to the vault, then call recycle_me with a ` +
         `self-contained continuation prompt for your successor (current goal, what's done, your in-flight ` +
         `workers + their tasks/status, next steps, key decisions). Your successor boots with this agent's ` +
         `warm-up + your continuation and inherits your workers — finish merges/reviews you can close quickly first.`;

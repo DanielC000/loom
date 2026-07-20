@@ -55,7 +55,7 @@ function cleanup(e) {
   e.watcher.tick();
   check("per-model: 200k-window manager at 170k (85%) is nudged", e.enqueued.some((x) => x.id === "mgr-200k"));
   check("per-model: 1M Opus manager at 170k (17%) is NOT nudged", !e.enqueued.some((x) => x.id === "mgr-opus"));
-  check("nudge text steers to /session-end + recycle_me", e.enqueued[0]?.text.includes("/session-end") && e.enqueued[0]?.text.includes("recycle_me"));
+  check("nudge text steers to /loom-session-end + recycle_me", e.enqueued[0]?.text.includes("/loom-session-end") && e.enqueued[0]?.text.includes("recycle_me"));
   cleanup(e);
 }
 

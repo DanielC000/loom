@@ -3,7 +3,7 @@
 //   1. SHOW/HIDE — it renders on a live NON-worker row and is ABSENT on a worker row (live && role !==
 //      "worker"). One project + one manager + one nested worker ⇒ exactly ONE End Session button.
 //   2. CLICK → INJECT — clicking it POSTs the thin daemon route (POST /api/sessions/:id/end), which
-//      enqueues the /session-end + end_me wrap-up turn and returns 200. The seeded session has no real
+//      enqueues the /loom-session-end + end_me wrap-up turn and returns 200. The seeded session has no real
 //      pty (no `[pty] spawn` — the no-spawn invariant), so the enqueue is a benign delivered:false; the
 //      route accepting a non-worker target and returning 200 is the witness the button did its job.
 //   3. ROLE-GATE BACKSTOP — a direct POST against the WORKER session is refused 403: a human must never

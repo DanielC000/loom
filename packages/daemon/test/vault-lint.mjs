@@ -1,6 +1,6 @@
 // Vault-lint PostToolUse hook test (PR #21a, Pillar D). Fully deterministic — no daemon, no claude.
 // Invokes the shipped vault-lint.mjs asset directly with synthetic PostToolUse payloads on stdin and
-// asserts the mechanical doc-hygiene checks fire (advisory, via stdout JSON) on the anti-patterns and
+// asserts the mechanical loom-doc-hygiene checks fire (advisory, via stdout JSON) on the anti-patterns and
 // stay silent on clean / out-of-scope writes. Also asserts writeSessionSettings wires the PostToolUse
 // Write|Edit entry pointing at the script.
 //

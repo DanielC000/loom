@@ -41,9 +41,9 @@ try {
   check("store SKILL.md content intact", fs.readFileSync(path.join(skillsDir, "loom-a", "SKILL.md"), "utf8").includes("name: loom-a"));
 
   // (b) seedGlobalSkills self-heals a hollow dir (SKILL.md missing) while preserving a genuine edit.
-  //   - doc-hygiene: dir exists but EMPTY (the post-junction-bug state) → must be re-seeded.
+  //   - loom-doc-hygiene: dir exists but EMPTY (the post-junction-bug state) → must be re-seeded.
   //   - worker: dir has an EDITED SKILL.md → must be left untouched.
-  const hollow = path.join(skillsDir, "doc-hygiene");
+  const hollow = path.join(skillsDir, "loom-doc-hygiene");
   fs.mkdirSync(hollow, { recursive: true }); // exists but no SKILL.md
   const edited = path.join(skillsDir, "worker");
   const EDIT = "---\nname: worker\ndescription: edited\n---\nMY LOCAL EDIT";
@@ -53,7 +53,7 @@ try {
   const seeded = seedGlobalSkills();
 
   check("hollow skill dir re-seeded (SKILL.md restored)", fs.existsSync(path.join(hollow, "SKILL.md")));
-  check("re-seeded doc-hygiene reported as seeded", seeded.includes("doc-hygiene"));
+  check("re-seeded loom-doc-hygiene reported as seeded", seeded.includes("loom-doc-hygiene"));
   check("edited skill left untouched (UI edit preserved)", fs.readFileSync(path.join(edited, "SKILL.md"), "utf8") === EDIT);
   check("edited skill NOT reported as seeded", !seeded.includes("worker"));
 

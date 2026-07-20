@@ -1558,7 +1558,7 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Recycle YOURSELF before your context fills up — hand off to a fresh successor manager. " +
-          "Loom nudges you when you near your context limit; when you get that nudge: FIRST run /session-end " +
+          "Loom nudges you when you near your context limit; when you get that nudge: FIRST run /loom-session-end " +
           "(log progress to the vault) and take stock, THEN call this with a self-contained continuationPrompt " +
           "for your successor — current goal, what's done, your in-flight workers and their tasks/status, the " +
           "next steps, and key decisions. Loom boots a fresh manager seeded with this agent's warm-up + your " +

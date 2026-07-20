@@ -7,7 +7,7 @@ const MANIFEST = ".loom-skills.json"; // records which skill names EACH session 
 
 /** The skills whose injected SKILL.md gets the Obsidian "vault preflight" fragment appended — and ONLY
  *  these — when the session's project has `obsidian.autoStart` on. Every other skill is untouched. */
-const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "session-end"]);
+const OBSIDIAN_FRAGMENT_SKILLS = new Set(["loom-pickup", "loom-session-end"]);
 
 /** Map a Loom-DRIVEN session role to its operating-doctrine skill name in the store. A role here MUST get
  *  its doctrine skill no matter what the profile's pinned subset says (a subset that omits "worker" must
@@ -143,10 +143,10 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  *  - Hides the injected skills from git via .git/info/exclude (local only; never edits a tracked .gitignore).
  *
  * `obsidianEnabled` (per session, from `opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1"` at the spawn
- * seam): when TRUE, the Obsidian "vault preflight" fragment is appended to the injected loom-pickup/session-end
- * SKILL.md (after its body; frontmatter untouched). Default FALSE ⇒ NO fragment read, NO append — every
+ * seam): when TRUE, the Obsidian "vault preflight" fragment is appended to the injected loom-pickup/
+ * loom-session-end SKILL.md (after its body; frontmatter untouched). Default FALSE ⇒ NO fragment read, NO append — every
  * injected file is byte-identical to the store base (the additive-when-off invariant, mirroring
- * browserTesting/documentConversion). Only loom-pickup + session-end are affected; all other skills are
+ * browserTesting/documentConversion). Only loom-pickup + loom-session-end are affected; all other skills are
  * byte-identical regardless.
  */
 export function injectSkills(cwd: string, sessionId: string, subset?: string[] | null, role?: SessionRole | null, obsidianEnabled = false): void {

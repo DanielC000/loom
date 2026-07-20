@@ -2,7 +2,7 @@
 // injectSkills(cwd, sid, subset, role, obsidianEnabled):
 //   - obsidianEnabled=false (default) → every injected SKILL.md is BYTE-IDENTICAL to the store base
 //     (no fragment read, no append) — the additive-when-off invariant.
-//   - obsidianEnabled=true → ONLY loom-pickup/session-end get the Obsidian "vault preflight" fragment appended
+//   - obsidianEnabled=true → ONLY loom-pickup/loom-session-end get the Obsidian "vault preflight" fragment appended
 //     after their body (frontmatter intact); every other skill stays byte-identical; repo-own untouched.
 // The fragment is the REAL shipped asset (packages/daemon/assets/skill-fragments/obsidian-preflight.md),
 // read live from the package dir — this test reads that same file for its expected content.
@@ -28,7 +28,7 @@ const skillsDir = path.join(home, "skills");
 // Store skills: the two fragment targets + one non-target. Distinct base bodies, each ending in a newline.
 const BASE = {
   "loom-pickup": "---\nname: pickup\ndescription: P\n---\n# Pickup\n\nRead the board.\n",
-  "session-end": "---\nname: session-end\ndescription: S\n---\n# Session End\n\nUpdate the board.\n",
+  "loom-session-end": "---\nname: session-end\ndescription: S\n---\n# Session End\n\nUpdate the board.\n",
   "other-skill": "---\nname: other-skill\ndescription: O\n---\n# Other\n\nUnrelated.\n",
 };
 for (const [name, body] of Object.entries(BASE)) {
@@ -60,7 +60,7 @@ try {
   // (a) OFF (default) → byte-identical to the store base for EVERY skill (incl. the fragment targets).
   injectSkills(repoOff, "sess-off", null, null, false);
   check("(a) off: pickup byte-identical to store base", injected(repoOff, "loom-pickup") === BASE["loom-pickup"]);
-  check("(a) off: session-end byte-identical to store base", injected(repoOff, "session-end") === BASE["session-end"]);
+  check("(a) off: session-end byte-identical to store base", injected(repoOff, "loom-session-end") === BASE["loom-session-end"]);
   check("(a) off: no fragment text anywhere in pickup", !injected(repoOff, "loom-pickup").includes("Vault preflight"));
 
   // Explicit default-arg check: omitting obsidianEnabled entirely is the same byte-identical off behavior.
@@ -71,7 +71,7 @@ try {
   // (b) ON → pickup/session-end END with the fragment, frontmatter intact.
   injectSkills(repoOn, "sess-on", null, null, true);
   check("(b) on: pickup == base + separator + real fragment", injected(repoOn, "loom-pickup") === expectedWithFragment("loom-pickup"));
-  check("(b) on: session-end == base + separator + real fragment", injected(repoOn, "session-end") === expectedWithFragment("session-end"));
+  check("(b) on: session-end == base + separator + real fragment", injected(repoOn, "loom-session-end") === expectedWithFragment("loom-session-end"));
   check("(b) on: pickup ends with the fragment", injected(repoOn, "loom-pickup").endsWith(FRAGMENT));
   check("(b) on: pickup frontmatter block intact at the top", injected(repoOn, "loom-pickup").startsWith("---\nname: pickup\ndescription: P\n---\n"));
   check("(b) on: fragment lands AFTER the body (base body precedes the fragment)", injected(repoOn, "loom-pickup").indexOf("Read the board.") < injected(repoOn, "loom-pickup").indexOf("Vault preflight"));

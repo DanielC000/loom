@@ -3,7 +3,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // SEPARATE daemon (new build) on an alt port + temp LOOM_HOME, spawns a session into a FRESH project,
 // and proves the real spawn path now:
 //   1. boots past the plugin-MCP enable-prompt unattended (engine id captured) — the host.ts Esc dismiss;
-//   2. injects Loom's managed skills into the project as project-local (doc-hygiene + a marker).
+//   2. injects Loom's managed skills into the project as project-local (loom-doc-hygiene + a marker).
 // Spawns one real claude. Surgically removes the trust key it adds to ~/.claude.json. Run after build.
 import fs from "node:fs";
 import os from "node:os";
@@ -55,7 +55,7 @@ try {
   // Skills injected into the project as project-local.
   const skillsDir = path.join(repo, ".claude", "skills");
   check("Loom marker skill injected (project-local)", fs.existsSync(path.join(skillsDir, "loom-e2e-marker", "SKILL.md")));
-  check("bundled doc-hygiene injected", fs.existsSync(path.join(skillsDir, "doc-hygiene", "SKILL.md")));
+  check("bundled loom-doc-hygiene injected", fs.existsSync(path.join(skillsDir, "loom-doc-hygiene", "SKILL.md")));
   check(".git/info/exclude hides the injected skills", (() => { try { return fs.readFileSync(path.join(repo, ".git", "info", "exclude"), "utf8").includes("/.claude/skills/loom-e2e-marker"); } catch { return false; } })());
 
   try { await post(`/api/sessions/${session.id}/stop`, { mode: "hard" }); } catch { /* ignore */ }

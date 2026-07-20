@@ -387,7 +387,7 @@ export const api = {
   sendInput: (id: string, text: string) =>
     post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/input`, { text }),
   // One-click graceful wrap-up (HUMAN-only; non-worker only — mirrors stop/input, no agent MCP surface):
-  // injects a /session-end + end_me turn so the session logs progress, stays resumable, then self-stops.
+  // injects a /loom-session-end + end_me turn so the session logs progress, stays resumable, then self-stops.
   endSession: (id: string) =>
     post<{ delivered: boolean; position?: number }>(`/api/sessions/${id}/end`),
   stopSession: (id: string, mode: "graceful" | "hard") =>

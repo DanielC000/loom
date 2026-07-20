@@ -41,12 +41,12 @@ export function SessionActions({
     <>
       {rateLimited && <Button disabled={clearingRateLimit} title="Clear the rate-limit hold + the global usage latch and re-submit the held turn now (mirrors the auto-resume path)"
         onClick={(ev) => { ev.stopPropagation(); onClearRateLimit(); }}>Clear rate limit &amp; retry now</Button>}
-      {/* End Session — one-click graceful wrap-up (card f55bd338): injects a /session-end + end_me turn.
+      {/* End Session — one-click graceful wrap-up (card f55bd338): injects a /loom-session-end + end_me turn.
           Sits LEFT of Fork. NON-worker only — a human must never end a worker out from under its manager
           (the terminal-card cluster renders for manager/platform/setup/auditor; the role guard is the
           explicit backstop). Idle-gated like Fork (disabled while busy). */}
       {live && s.role !== "worker" && <Button disabled={ending || s.busy}
-        title="Run /session-end to log progress + leave it resumable, then stop this session (graceful, resumable — lives on Archive)."
+        title="Run /loom-session-end to log progress + leave it resumable, then stop this session (graceful, resumable — lives on Archive)."
         onClick={(ev) => { ev.stopPropagation(); onEnd(); }}>End Session</Button>}
       {live && <Button disabled={forking || s.busy} onClick={(ev) => { ev.stopPropagation(); onFork(); }}
         title={s.busy ? "Fork is available when the session is idle" : "Fork — branch this conversation into a new divergent session"}>Fork</Button>}
