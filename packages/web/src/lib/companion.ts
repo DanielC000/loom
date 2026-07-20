@@ -8,7 +8,7 @@
 //   • a config UPDATE with a BLANK token OMITS `botToken` from the request body entirely, so the daemon
 //     keeps the stored encrypted token (a "replace token" is the ONLY way a new token is ever sent).
 
-import type { CompanionBinding, CompanionConfigMasked, SessionListItem } from "@loom/shared";
+import type { CompanionBinding, CompanionConfigMasked } from "@loom/shared";
 // Type-only (erased under the strip-types test runner, so it pulls NO runtime code from api.ts) — the
 // reminder helpers below format a CompanionReminderEntry for display.
 import type { CompanionReminderEntry } from "./api";
@@ -317,30 +317,6 @@ export function channelBadgeLabel(channel: string): string | null {
 // once Telegram is connected (and to keep the connect idempotent from the UI's side).
 export function hasChannelBinding(bindings: CompanionBinding[], channel: string): boolean {
   return bindings.some((b) => b.channel === channel);
-}
-
-// ── Header-nav gating (UI-audit finding #4) ──────────────────────────────────────────────────────────
-// Companion renders as a primary header tab ONLY when a companion is ACTIVE — an enabled companion
-// config exists, and/or a live bound `assistant` session exists. Otherwise it stays where it lives today,
-// tucked under "More ▾ · Config" (nav.tsx). Reuses the SAME REST reads the Companion page already queries
-// (companionConfigs / allSessions) — no new endpoint. Pulled out here rather than nav.tsx: nav.tsx has
-// top-level JSX (page element imports), which node's `--experimental-strip-types` test runner can't parse,
-// so the gating logic needs a JSX-free home to be hermetically testable.
-export function isCompanionActive(
-  configs: Pick<CompanionConfigMasked, "enabled">[] | undefined,
-  sessions: Pick<SessionListItem, "role">[] | undefined,
-): boolean {
-  return (configs ?? []).some((c) => c.enabled) || (sessions ?? []).some((s) => s.role === "assistant");
-}
-
-// Promotes the `/companion` entry to a primary header tab when active; every other page (and Companion's
-// own `group`, used only for its "More ▾" bucket when NOT primary) passes through untouched. Toggling a
-// single boolean on one entry means Companion is always in exactly one place — never both.
-export function withCompanionNavGating<T extends { to: string; primary?: boolean }>(
-  pages: T[],
-  companionActive: boolean,
-): T[] {
-  return pages.map((p) => (p.to === "/companion" ? { ...p, primary: companionActive } : p));
 }
 
 // ── Companion reminders: pure display helpers behind the Manage → Reminders section ──────────────────

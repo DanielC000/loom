@@ -133,10 +133,16 @@ export function Sidebar() {
   const [pinned, setPinned] = useState<boolean>(() => localStorage.getItem(PIN_KEY) === "1");
   const [projOpen, setProjOpen] = useState(false);
 
-  // Alerts = the shell attention queue count (same signal the old header bell showed). Requests badge =
-  // pending manager→human requests, from the shared openQuestions poll (react-query dedups it with the
-  // attention hook's own use of the key).
-  const { count: alertCount } = useAttention();
+  // Alerts = the heuristic/session attention queue (merge-review, idle, context, rate-limit, stuck-busy,
+  // crash-loop, orphaned-fleet). Pending manager→human REQUESTS are DELIBERATELY excluded here — they get
+  // their own Requests badge below, so counting them in both made the two badges show the same number and
+  // mean the same thing (they read identical 4/4 whenever pending requests dominated the queue). A request
+  // item is the one attention kind that carries a `questionId` (the structural "is a request" check —
+  // preferred over a kind-string compare, see lib/attention.ts), so filtering on its absence de-dups the
+  // two badges. Requests badge = pending requests, from the shared openQuestions poll (react-query dedups
+  // it with the attention hook's own use of the key).
+  const { items: attentionItems } = useAttention();
+  const alertCount = attentionItems.filter((it) => !it.questionId).length;
   const questions = useQuery({ queryKey: ["openQuestions"], queryFn: () => api.openQuestions(), refetchInterval: 4000 });
   const pendingRequests = (questions.data ?? []).filter((q) => q.state === "pending").length;
   const status = useQuery({ queryKey: ["orchStatus"], queryFn: api.orchestrationStatus, refetchInterval: 4000 });

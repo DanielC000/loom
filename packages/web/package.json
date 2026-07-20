@@ -15,7 +15,6 @@
     "test:column-sort": "node --experimental-strip-types test/column-sort.mjs",
     "test:fleet": "node --experimental-strip-types test/fleet.mjs",
     "test:fleet-socket": "node --experimental-strip-types test/fleetSocket.mjs",
-    "test:nav-companion-gating": "node --experimental-strip-types test/nav-companion-gating.mjs",
     "test:orchestration-no-global-cluster": "node --experimental-strip-types test/orchestration-no-global-cluster.mjs",
     "test:usage-consumption-wording": "node --experimental-strip-types test/usage-consumption-wording.mjs",
     "test:overview-stats": "node --experimental-strip-types test/overview-stats.mjs",

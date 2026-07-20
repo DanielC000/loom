@@ -1,7 +1,9 @@
 // Manager→human DECISION INBOX e2e (card 8701bdbb, child B). Exercises the full web flow end-to-end
 // against the isolated daemon, with NO real claude:
 //   1. A seeded PENDING question surfaces as a "DECISION NEEDED" attention item in Mission Control and
-//      badges the shell bell (Alerts N).
+//      badges the Requests nav item (its pending-requests count). (The footer Alerts badge deliberately
+//      counts only NON-request heuristic/session attention, so a pending request does NOT badge it — see
+//      the nav-cleanup pass; nav-cleanup.spec.ts covers that de-duplication directly.)
 //   2. The global /inbox lists it cross-project with a working per-project facet.
 //   3. The /question/:id answer page renders the ask + options; picking an option + Submit answer
 //      flips the question pending→answered — the OBSERVABLE change: the attention item clears, and the
@@ -25,13 +27,15 @@ test.describe("decision inbox (card 8701bdbb, child B)", () => {
       recommendation: "Fail fast — free the slots now",
     });
 
-    // (1) Mission Control: the DECISION NEEDED attention item renders + the bell badges it.
+    // (1) Mission Control: the DECISION NEEDED attention item renders + the Requests nav item badges it.
     await page.goto(`${loomDaemon.baseURL}/`);
     const attnRow = page.locator("main").getByText("DECISION NEEDED").first();
     await expect(attnRow).toBeVisible();
     await expect(page.locator("main").getByText(title)).toBeVisible();
-    // The shell bell shows a non-zero count (Alerts N). It starts at "Alerts 0" and ticks up on the poll.
-    await expect(page.getByRole("button", { name: /Alerts [1-9]/ })).toBeVisible();
+    // The Requests rail item shows a non-zero pending-requests count — a pending decision IS a request.
+    // (The footer Alerts badge is NOT expected to tick here: it counts only non-request attention now.)
+    await expect(page.locator(".loom-rail-item", { hasText: "Requests" }).locator(".loom-rail-badge"))
+      .toHaveText(/[1-9]/, { timeout: 10_000 });
 
     // (2) The global inbox lists it with a project facet.
     await page.goto(`${loomDaemon.baseURL}/inbox`);
