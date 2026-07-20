@@ -53,15 +53,33 @@ export default function MissionControl() {
   // cross-project archived set (previously 2137 rows / 2.4MB measured live).
   const archived = useQuery({ queryKey: ["allArchivedSessions", 300], queryFn: () => api.allArchivedSessions({ limit: 300 }), refetchInterval: 15000 });
   const archivedItems = archived.data?.items ?? [];
+  // Wave Replay is a forensic scrub/compare tool, not an operational-home widget — so it's COLLAPSED by
+  // default (persisted open-state below). Its archived-manager picker feed (`archivedManagersQ`) is the
+  // ONLY consumer of that 300-row poll, so we gate the query on the open state: closed ⇒ `enabled:false`
+  // ⇒ the recurring 15s poll never fires while the panel is shut; opening it fetches lazily (and the panel
+  // itself only mounts when open, so its own audit-timeline poll is likewise off while closed). NOTE this
+  // does NOT gate the all-roles `archived` poll above — that one feeds the always-visible fleet
+  // (inactive-projects strip + per-project archived history), a different consumer that must keep running.
+  const [replayOpen, setReplayOpen] = useState<boolean>(() => {
+    try { return localStorage.getItem("mc.replayOpen") === "1"; } catch { return false; }
+  });
+  const toggleReplay = () => setReplayOpen((v) => {
+    const next = !v;
+    try { localStorage.setItem("mc.replayOpen", next ? "1" : "0"); } catch { /* ignore */ }
+    return next;
+  });
   // Archived MANAGERS ONLY, for Run Replay's picker — a SEPARATE role-scoped page (not derived by
   // client-side filtering `archivedItems` above), so the 300-row budget is spent entirely on managers.
   // The mixed all-roles page above interleaves managers with the far more numerous archived
   // worker/setup/etc. rows in the same archived_at ordering, so an archived manager older than the
   // newest 300 archived sessions GLOBALLY could fall off the page and become unreachable/unselectable
-  // in the picker even though far fewer than 300 managers actually existed (card 9f010283).
+  // in the picker even though far fewer than 300 managers actually existed (card 9f010283). Fetched LAZILY
+  // — `enabled` only while Wave Replay is open — so the poll is idle on the closed operational home; the
+  // limit/role are unchanged, so on expand the picker still lists old archived managers (guardrail 3a93313).
   const archivedManagersQ = useQuery({
     queryKey: ["allArchivedSessions", "manager", 300],
     queryFn: () => api.allArchivedSessions({ limit: 300, role: "manager" }),
+    enabled: replayOpen,
     refetchInterval: 15000,
   });
   // The reserved/system homes (the dev "Loom Platform" home + the shipping "Platform" home) — discovered
@@ -97,6 +115,10 @@ export default function MissionControl() {
   const allEvents = eventQueries
     .flatMap((q) => (q.data as OrchestrationEvent[] | undefined) ?? [])
     .sort((a, b) => +new Date(b.ts) - +new Date(a.ts));
+  // Owning project per event — resolved via its manager (events are fetched per LIVE manager and keyed by
+  // managerSessionId, so every event's manager is in this set). Feeds the per-row project chip so the
+  // god-eye feed, which interleaves rows from every active project, carries which project each event is for.
+  const projectByManager = new Map(managers.map((m) => [m.id, m.projectName]));
 
   // Order projects by recent activity: each project ranks by its most-recent-active member across
   // any of its managers/workers, most-recent first — so the project you're actively driving floats
@@ -268,15 +290,34 @@ export default function MissionControl() {
           <SectionLabel>Activity</SectionLabel>
           <Panel grid style={{ maxHeight: "62vh", overflow: "auto" }}>
             {allEvents.length === 0 && <span style={{ color: color.textMuted, fontSize: 12 }}>No events yet.</span>}
-            {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} />)}
+            {allEvents.slice(0, 100).map((e) => <EventRow key={e.id} e={e} projectName={projectByManager.get(e.managerSessionId)} />)}
           </Panel>
         </div>
       </div>
 
       {/* Wave replay — scrub a wave/session's durable audit timeline + diff it against another run. The
           observability surface for "what actually happened" once a wave is several agents deep. Roots are
-          managers, live first then by recency, so the default subject is the wave you're driving now. */}
-      <AuditReplayPanel managers={replayRoots} />
+          managers, live first then by recency, so the default subject is the wave you're driving now.
+          COLLAPSED by default (persisted): a forensic tool, not an operational-home widget — kept closed it
+          both stays out of the way AND leaves its archived-manager picker poll idle (gated above). The
+          toggle IS the section header, so the panel renders with hideLabel to avoid a duplicate "Wave replay". */}
+      <div>
+        <button type="button" onClick={toggleReplay} aria-expanded={replayOpen} className="loom-btn"
+          title={replayOpen ? "Collapse Wave replay" : "Expand Wave replay — scrub & compare wave audit timelines"}
+          style={{ display: "flex", alignItems: "baseline", gap: 8, width: "100%", textAlign: "left", background: "transparent",
+            border: "none", cursor: "pointer", padding: "4px 0 8px", fontFamily: font.head, fontSize: 11, fontWeight: 700,
+            textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>
+          <span style={{ color: color.textMuted }}>{replayOpen ? "▾" : "▸"}</span>
+          Wave replay
+          {!replayOpen && (
+            <span style={{ fontFamily: font.mono, fontSize: 11, fontWeight: 400, textTransform: "none",
+              letterSpacing: 0, color: color.textMuted }}>
+              scrub &amp; compare wave audit timelines
+            </span>
+          )}
+        </button>
+        {replayOpen && <AuditReplayPanel managers={replayRoots} hideLabel />}
+      </div>
     </div>
   );
 }

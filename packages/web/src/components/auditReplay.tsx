@@ -174,7 +174,9 @@ function subjectLabel(s: SessionListItem): string {
   return `${role} ${s.id.slice(0, 8)}${hint ? ` · ${hint}` : ""}${s.processState === "live" ? " (live)" : ""}`;
 }
 
-export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) {
+// `hideLabel` — suppress the panel's own "Wave replay" SectionLabel. Set by a caller (Mission Control) that
+// wraps the panel in a collapsible section whose toggle IS the header, so the label isn't rendered twice.
+export function AuditReplayPanel({ managers, hideLabel }: { managers: SessionListItem[]; hideLabel?: boolean }) {
   // The selected replay SUBJECT. In `wave` scope it's always a manager (the wave head); in `session`
   // scope it's the anchored manager OR one of its workers (so you can focus a single agent's slice).
   const [rootId, setRootId] = useState<string>(managers[0]?.id ?? "");
@@ -267,7 +269,7 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
   if (managers.length === 0) {
     return (
       <div>
-        <SectionLabel>Wave replay</SectionLabel>
+        {!hideLabel && <SectionLabel>Wave replay</SectionLabel>}
         <Panel><span style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 12 }}>No manager waves to replay yet.</span></Panel>
       </div>
     );
@@ -275,7 +277,7 @@ export function AuditReplayPanel({ managers }: { managers: SessionListItem[] }) 
 
   return (
     <div>
-      <SectionLabel>Wave replay</SectionLabel>
+      {!hideLabel && <SectionLabel>Wave replay</SectionLabel>}
       <Panel style={{ display: "flex", flexDirection: "column", gap: 10 }}>
         {/* Subject + scope + compare controls */}
         <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>

@@ -373,11 +373,22 @@ export function FleetCard({ name, managers, workers, archived = [], attention, o
   );
 }
 
-export function EventRow({ e }: { e: OrchestrationEvent }) {
+// `projectName` — the owning project of this event. Optional + only passed at the god-eye Mission Control
+// call-site, where rows from every active project interleave and need attribution; the project-scoped
+// Overview feed omits it (all its rows already belong to the one project on screen), so that surface stays
+// byte-identical. Rendered as a small muted chip in a stable second column so it reads as scannable
+// attribution, truncating instead of shoving the event kind off the row.
+export function EventRow({ e, projectName }: { e: OrchestrationEvent; projectName?: string }) {
   return (
-    <div style={{ display: "flex", gap: 8, fontFamily: font.mono, fontSize: 12, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
-      <span style={{ color: color.textMuted, whiteSpace: "nowrap" }}>{new Date(e.ts).toLocaleTimeString()}</span>
-      <span style={{ color: color.cyan, whiteSpace: "nowrap" }}>{e.kind}</span>
+    <div style={{ display: "flex", alignItems: "baseline", gap: 8, fontFamily: font.mono, fontSize: 12, padding: "2px 0", borderBottom: `1px solid ${color.border}` }}>
+      <span style={{ color: color.textMuted, whiteSpace: "nowrap", flexShrink: 0 }}>{new Date(e.ts).toLocaleTimeString()}</span>
+      {projectName && (
+        <span title={projectName} style={{ flexShrink: 0, maxWidth: 116, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+          fontSize: 10, color: color.textMuted, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "0 5px" }}>
+          {projectName}
+        </span>
+      )}
+      <span style={{ color: color.cyan, whiteSpace: "nowrap", flexShrink: 0 }}>{e.kind}</span>
       <span style={{ color: color.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {e.workerSessionId ? `w:${e.workerSessionId.slice(0, 8)}` : ""}{e.taskId ? ` t:${e.taskId.slice(0, 8)}` : ""}
       </span>
