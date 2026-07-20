@@ -336,6 +336,97 @@ export function cancelQuestionForAgent(
 }
 
 /**
+ * `question_resolve` (card feat(mcp): let an owner chat reply resolve a pending Request as answered,
+ * origin finding 308259e5) — the shared implementation behind BOTH manager (`mcp/orchestration.ts`) and
+ * Lead (`mcp/platform.ts`) registrations, mirroring how `cancelQuestionForAgent` is shared. Lets an asker
+ * mark its OWN still-pending Request answered from a live owner chat reply, instead of the file-then-
+ * cancel workaround (the owner's reasoning otherwise only exists in chat scrollback, and the Requests
+ * history shows "cancelled"/moot rather than "answered").
+ *
+ * **THE ANTI-FABRICATION INVARIANT (load-bearing — do not weaken):** `note` is ALWAYS `ownerText` —
+ * the CALLER-SUPPLIED, server-captured-verbatim text of the session's current in-flight turn (from
+ * `PtyHost.getActiveTurnOwnerText`, populated only when the turn was formed from an actual human
+ * composer submission — see `pty/host.ts`'s `submit()`). The agent NEVER supplies free-text note
+ * content here; only `questionId` and (for a question that offers them) `chosenOption`. This is what
+ * lets an agent write its OWN question's answer without reopening the self-answer hole the human-only
+ * `POST /api/questions/:id/answer` route exists to close — the daemon captured the words, not the agent.
+ *
+ * **Why this may skip the Companion's propose/confirm friction ladder (`decision_resolve`,
+ * `companion/capabilities.ts`):** that ladder exists because the Companion relays an EXTERNAL,
+ * injection-exposed chat channel — the text reaching it was never itself authenticated as the owner's
+ * own bytes until Primitive A/B/C says so. A manager/Lead session's `ownerText` comes from the SAME
+ * loopback-only, human-authenticated REST composer (`POST /api/sessions/:id/input`) that answers a
+ * question directly — there is no relay hop and nothing to attest beyond "this turn was actually formed
+ * from that route", which `getActiveTurnOwnerText` already guarantees. Do not "harden" this into a
+ * second confirm round-trip; that would just be the Companion's cross-channel-injection defense applied
+ * to a channel that was never exposed to that risk.
+ *
+ * Rejects (mirroring `cancelQuestionForAgent`'s ownership scoping + the REST answer route's per-type
+ * validation): an unknown session/question; a question asked by a DIFFERENT agent lineage; a
+ * non-'pending' question (an answered/consumed/cancelled question is never re-answered); `null`
+ * `ownerText` (the current turn was not formed from an owner composer message — nothing to attest);
+ * `type:"credential"` (secrets stay on the encrypted human-only REST flow, never chat text); and a
+ * `chosenOption` that doesn't match what the question actually offers (its `options` for "decision", or
+ * `PERMISSION_ANSWERS` for "permission" — REQUIRED for "permission", optional-but-validated for
+ * "decision", and refused outright for a question with no offered options at all).
+ *
+ * Reuses `db.answerQuestion` verbatim — the SAME write the human REST route makes, so the resulting
+ * 'answered' row is identical in shape to a REST answer: `question_pull`/`listAnsweredStuckQuestions`/
+ * history all behave exactly as they do for any other answer, no new terminal state.
+ */
+export function resolveQuestionForAgent(
+  db: Db,
+  askerSessionId: string,
+  questionId: string,
+  chosenOption: string | undefined,
+  ownerText: string | null,
+): { resolved: true; questionId: string; chosenOption: string | null; note: string } | { error: string } {
+  if (ownerText === null) {
+    return {
+      error: "no owner reply this turn — question_resolve can only act on a turn formed by the owner's " +
+        "own composer message; wait for the owner's reply to land as your current turn, then call this " +
+        "again in that same turn",
+    };
+  }
+  const asker = db.getSession(askerSessionId);
+  if (!asker) return { error: "session not found" };
+  const question = db.getQuestion(questionId);
+  if (!question) return { error: "question not found" };
+  const askingSession = db.getSession(question.sessionId);
+  if (!askingSession || askingSession.agentId !== asker.agentId) {
+    return { error: "you may only resolve a request asked by your own agent lineage — not another agent's" };
+  }
+  if (question.state !== "pending") {
+    return { error: `question is already ${question.state}, not pending` };
+  }
+  if (question.type === "credential") {
+    return {
+      error: "a credential request must be answered via the secure human-only REST flow (the owner " +
+        "provides the secret directly), never through chat text — question_resolve refuses type:\"credential\"",
+    };
+  }
+  const hasOptions = !!(question.options && question.options.length > 0);
+  let resolvedChosenOption: string | null = null;
+  if (question.type === "permission") {
+    if (!chosenOption || !(PERMISSION_ANSWERS as readonly string[]).includes(chosenOption)) {
+      return { error: `chosenOption is required for a "permission" request and must be one of: ${PERMISSION_ANSWERS.join(", ")}` };
+    }
+    resolvedChosenOption = chosenOption;
+  } else if (chosenOption != null) {
+    if (!hasOptions) {
+      return { error: "this question has no offered options — omit chosenOption; the owner's reply is captured verbatim as the note" };
+    }
+    if (!question.options!.includes(chosenOption)) {
+      return { error: `chosenOption must be one of: ${question.options!.join(", ")}` };
+    }
+    resolvedChosenOption = chosenOption;
+  }
+  const updated = db.answerQuestion(questionId, { chosenOption: resolvedChosenOption, note: ownerText, answeredAt: new Date().toISOString() });
+  if (!updated) return { error: "question was answered or changed concurrently — nothing to resolve" };
+  return { resolved: true, questionId: updated.id, chosenOption: updated.chosenOption, note: updated.note ?? ownerText };
+}
+
+/**
  * `question_ask`'s optional `supersedes:<questionId>` handling (card feat(orchestration): add an explicit
  * supersedes:<id> param to question_ask that auto-cancels the named prior pending ask). The originating
  * card floated an AUTO-supersede heuristic ("this new ask obviously replaces that old one") — deliberately

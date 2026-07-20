@@ -599,8 +599,10 @@ async function main(): Promise<void> {
   // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
   // SessionService (the cross-project session_spawn/session_stop lifecycle ops). P3 also threads the
   // BOOT-BOUND git-write timeouts so the Lead's elevated git tools (git_checkout/commit/push) bound a
-  // git op EXACTLY like the human REST git routes (gateway/server.ts resolves the same numbers).
-  const platformMcp = new PlatformMcpRouter(db, sessions, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs });
+  // git op EXACTLY like the human REST git routes (gateway/server.ts resolves the same numbers). `pty`
+  // (added for `question_resolve`, card feat(mcp): let an owner chat reply resolve a pending Request as
+  // answered) mirrors OrchestrationMcpRouter's own trailing-optional pty param just above.
+  const platformMcp = new PlatformMcpRouter(db, sessions, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs }, pty);
   // Audit MCP (P5) — the Platform Auditor's RESTRICTED read-and-file-only surface. Needs the registry
   // (transcript reads + session list) AND SessionService (audit_file_finding → reserved Platform board).
   // Deliberately gets NO git-write timeouts: it has no git/vault/config/spawn tools, by design.

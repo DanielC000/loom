@@ -4222,7 +4222,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // 'human' source: ONLY this composer path tags its entries human; every programmatic enqueue
     // (worker reports, nudges, resume notes) defaults to 'system'. That tag is what gates the mutators.
     // kind:"agent" — a human composer message is the human's own directive; it must land as its own turn.
-    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent"));
+    // ownerText:text (card feat(mcp): let an owner chat reply resolve a pending Request as answered) —
+    // this route is ALREADY the loopback-only, human-authenticated boundary (same trust tier as
+    // POST /api/questions/:id/answer); passing the literal text through as `ownerText` just stops
+    // discarding it, so PtyHost.getActiveTurnOwnerText/getRecentOwnerTurns (pty/host.ts) are populated
+    // for a manager/Lead's own composer turns, not only Companion inbound. This does NOT newly expose the
+    // Companion's decision_resolve or any other ctx.attest-gated lever to a non-Companion session — those
+    // stay hard role-gated to role==="assistant" (registerCompanionCapabilities, companion/capabilities.ts)
+    // regardless of whether ownerText is populated; the only new reader is question_resolve
+    // (mcp/questionTool.ts's resolveQuestionForAgent), which calls getActiveTurnOwnerText directly.
+    return reply.send(deps.pty.enqueueStdin(id, text, "human", undefined, undefined, "agent", undefined, text));
   });
   // One-click graceful wrap-up (card f55bd338). Injects ONE wrap-up turn that tells the session to run
   // the /session-end skill (log progress to the board, leave it resumable) and then call the `end_me`

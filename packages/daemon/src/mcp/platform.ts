@@ -8,7 +8,8 @@ import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformCo
 import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
-import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, applySupersede } from "./questionTool.js";
+import type { PtyHost } from "../pty/host.js";
+import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { resolveAlias } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
@@ -579,6 +580,11 @@ export class PlatformMcpRouter {
     private db: Db,
     private sessions: SessionService,
     private gitWriteTimeouts?: { gitLocalMs: number; gitPushMs: number },
+    // `pty` is OPTIONAL and LAST — mirrors OrchestrationMcpRouter's own constructor (mcp/orchestration.ts):
+    // appended after the existing (db, sessions, gitWriteTimeouts) shape so every existing call site stays
+    // byte-identical. Only `question_resolve` reads it (via getActiveTurnOwnerText); a caller that omits it
+    // just gets that one tool refusing with "no owner reply this turn" (ownerText degrades to null).
+    private pty?: PtyHost,
   ) {}
 
   /** Role gate: only a platform-lead gets this surface. */
@@ -590,6 +596,7 @@ export class PlatformMcpRouter {
     const db = this.db;
     const sessions = this.sessions;
     const gitWriteTimeouts = this.gitWriteTimeouts;
+    const pty = this.pty;
     const server = new McpServer({ name: "loom-platform", version: "0.1.0" });
 
     server.registerTool(
@@ -1752,6 +1759,37 @@ export class PlatformMcpRouter {
       async ({ questionId, reason }) => {
         if (!callerSessionId) return ok({ error: "no caller session" });
         return ok(cancelQuestionForAgent(db, callerSessionId, questionId, reason));
+      },
+    );
+
+    // question_resolve (card feat(mcp): let an owner chat reply resolve a pending Request as answered,
+    // origin finding 308259e5) — ports the manager surface's tool (mcp/orchestration.ts) so the Lead has
+    // the same live-chat-answer path; shares resolveQuestionForAgent (mcp/questionTool.ts) verbatim so the
+    // ownership check, per-type validation, and the anti-fabrication invariant (note is ALWAYS
+    // server-captured owner text, never agent-authored) can never drift between the two callers.
+    server.registerTool(
+      "question_resolve",
+      {
+        description:
+          "Mark a still-PENDING request YOU asked via question_ask as ANSWERED, using the OWNER'S OWN " +
+          "words from the reply they JUST sent you in THIS chat — for when the owner answers " +
+          "conversationally instead of using the web Requests UI. You do NOT supply the answer text: the " +
+          "`note` recorded is always the exact, server-captured text of the owner's current turn (never " +
+          "something you write or paraphrase) — this is what lets you resolve your OWN question without " +
+          "reopening the human-only answer boundary. Refused if there is no owner-authored turn in " +
+          "flight right now (the owner hasn't replied this turn — nothing to attest), if the request " +
+          "isn't yours (own agent lineage only) or isn't still 'pending', and for type:\"credential\" " +
+          "(a secret must go through the secure REST answer flow, never chat text). `chosenOption` is " +
+          "REQUIRED for type:\"permission\" (must be \"authorize\" or \"deny\"), optional-but-validated " +
+          "for a \"decision\" that offers `options` (must be one of them), and must be OMITTED for a " +
+          "question with no offered options — the owner's reply stands alone as the note either way. " +
+          "Prefer this over question_ask-then-question_cancel whenever the owner has already answered " +
+          "live in this chat. Returns {resolved:true, questionId, chosenOption, note} or {error}.",
+        inputSchema: { questionId: z.string(), chosenOption: z.string().optional() },
+      },
+      async ({ questionId, chosenOption }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        return ok(resolveQuestionForAgent(db, callerSessionId, questionId, chosenOption, pty?.getActiveTurnOwnerText(callerSessionId) ?? null));
       },
     );
 
