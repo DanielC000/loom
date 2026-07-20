@@ -867,7 +867,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_agents",
       {
-        description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project (incl. the reserved home). DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED (a full aggregate overflowed at ~104K chars). Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project (incl. the reserved home). DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED (a full aggregate overflowed at ~104K chars). Pass full:true for whole agent rows — uncapped by default, capped only if you also pass an explicit limit. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare agents array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {agents, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
         inputSchema: {
           projectId: z.string().optional(),
           full: z.boolean().optional(),
@@ -891,7 +891,19 @@ export class PlatformMcpRouter {
           : db.listAllProjects().flatMap((p) => db.listAgents(p.id));
         // Backstop the summary feed so an aggregate read can't overflow the tool-result cap with no limit.
         const effLimit = limit ?? (full ? undefined : DEFAULT_AGENT_SUMMARY_CAP);
-        return ok(projectAgentList(all, { full, limit: effLimit, offset }));
+        const total = all.length;
+        const off = offset ?? 0;
+        const page = projectAgentList(all, { full, limit: effLimit, offset });
+        const returned = page.length;
+        // nextOffset mirrors session_transcript's pageTranscript convention exactly: offset+returned while
+        // more remains under the SAME effective limit, else null — never set when effLimit is unbounded
+        // (full:true with no explicit limit already read everything there is).
+        const nextOffset = effLimit !== undefined && off + returned < total ? off + returned : null;
+        const explicit = offset !== undefined || limit !== undefined;
+        // Card 57cb355d: a capped read with NO cap signal let a caller mistake "capped at N" for "N total".
+        // Mirror session_transcript's own shape — bare array when the whole matching set fit in one page
+        // and the caller didn't page explicitly (today's behavior, unchanged); otherwise the envelope.
+        return ok(!explicit && nextOffset === null ? page : { agents: page, total, returned, offset: off, nextOffset });
       },
     );
 
@@ -1488,8 +1500,14 @@ export class PlatformMcpRouter {
           "window, or a git read failure), never an authoritative 'never merged' — this is the field that " +
           "kills a stale handoff claiming a card is unbuilt when it's actually already shipped; check it " +
           "before relaying such a claim as fact. Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
-          "default — page with limit/offset for more. A genuine no-match returns an explicit " +
-          "{ tasks: [], message } payload, never a bare empty.",
+          "default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, " +
+          "returns the bare tasks array (today's shape, unchanged) — otherwise, or whenever you pass " +
+          "offset/limit explicitly, it returns a page envelope {tasks, total, returned, offset, nextOffset}, " +
+          "the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is " +
+          "offset+returned while more remains, else null. Page deterministically by calling again with " +
+          "offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake " +
+          "a bare array at the cap for 'that's everything'. A genuine no-match returns an explicit " +
+          "{ tasks: [], total, returned: 0, offset, nextOffset: null, message } payload, never a bare empty.",
         inputSchema: {
           projectId: z.string().optional(),
           includeBody: z.boolean().optional(),
@@ -1523,13 +1541,24 @@ export class PlatformMcpRouter {
         const perProject = await Promise.all(projectIds.map(
           (pid) => listProjectTasks(db, pid, { includeBody: true, excludeDone: !includeDone, columns }) as Promise<TaskWithMerged[]>,
         ));
-        let page = perProject.flat();
-        if (offset !== undefined) page = page.slice(offset);
-        page = page.slice(0, limit ?? DEFAULT_TASK_SUMMARY_CAP);
+        const all = perProject.flat();
+        const total = all.length;
+        const off = offset ?? 0;
+        const eff = limit ?? DEFAULT_TASK_SUMMARY_CAP;
+        const page = all.slice(off, off + eff);
+        const returned = page.length;
+        // nextOffset mirrors session_transcript's pageTranscript convention exactly: offset+returned while
+        // more remains, else null.
+        const nextOffset = off + returned < total ? off + returned : null;
         // A genuine no-match returns an EXPLICIT payload — a bare [] renders in the harness as the generic
         // "(completed with no output)" artifact, which reads as a tool malfunction rather than "0 results".
-        if (page.length === 0) return ok({ tasks: [], message: "no matching tasks" });
-        return ok(includeBody ? page : page.map(toTaskSummary));
+        if (returned === 0) return ok({ tasks: [], total, returned: 0, offset: off, nextOffset: null, message: "no matching tasks" });
+        const tasks = includeBody ? page : page.map(toTaskSummary);
+        const explicit = offset !== undefined || limit !== undefined;
+        // Card 57cb355d: a capped read with NO cap signal let a caller mistake "capped at N" for "N total".
+        // Mirror session_transcript's own shape — bare array when the whole matching set fit in one page
+        // and the caller didn't page explicitly (today's behavior, unchanged); otherwise the envelope.
+        return ok(!explicit && nextOffset === null ? tasks : { tasks, total, returned, offset: off, nextOffset });
       },
     );
 

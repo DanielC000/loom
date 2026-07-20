@@ -123,14 +123,36 @@ try {
   const callAgents = (args) => pClient.callTool({ name: "list_all_agents", arguments: args });
 
   const agentsDefault = await callAgents({});
-  const agentsDefaultRows = parse(agentsDefault);
+  const agentsDefaultParsed = parse(agentsDefault);
   const agentsDefaultSize = size(agentsDefault);
+  // Card 57cb355d: this fixture's N_AGENTS(250) exceeds DEFAULT_AGENT_SUMMARY_CAP(100), so the default
+  // (no offset/limit passed) now returns the {agents,total,returned,offset,nextOffset} envelope — the
+  // SAME shape session_transcript uses — instead of a bare capped array with no cap signal.
+  check("list_all_agents default (capped) returns the pagination envelope, not a bare array",
+    !Array.isArray(agentsDefaultParsed) && Array.isArray(agentsDefaultParsed.agents));
+  const agentsDefaultRows = agentsDefaultParsed.agents;
   console.log(`   list_all_agents default: ${agentsDefaultRows.length} rows, ${agentsDefaultSize} chars (~${approxTokens(agentsDefaultSize)} tok)`);
   check("list_all_agents default FITS the char budget", agentsDefaultSize < CHAR_BUDGET);
   check(`list_all_agents default is capped at DEFAULT_AGENT_SUMMARY_CAP (${DEFAULT_AGENT_SUMMARY_CAP})`, agentsDefaultRows.length === DEFAULT_AGENT_SUMMARY_CAP);
+  check("list_all_agents envelope reports the TRUE total (not just the capped row count) + a non-null nextOffset",
+    agentsDefaultParsed.total === N_AGENTS && agentsDefaultParsed.returned === DEFAULT_AGENT_SUMMARY_CAP &&
+    agentsDefaultParsed.offset === 0 && agentsDefaultParsed.nextOffset === DEFAULT_AGENT_SUMMARY_CAP);
   check("list_all_agents default DROPS the heavy startupPrompt + ioSchema", agentsDefaultRows.every((a) => !("startupPrompt" in a) && !("ioSchema" in a)));
   check("list_all_agents default keeps the orient fields (id/projectId/name/position/profileId/endpoint)",
     agentsDefaultRows.every((a) => ["id", "projectId", "name", "position", "profileId", "endpoint"].every((k) => k in a)));
+
+  // Paging PAST the cap with offset:nextOffset walks the WHOLE set exactly once, ending at nextOffset:null
+  // (N_AGENTS(250) needs 3 pages of DEFAULT_AGENT_SUMMARY_CAP(100): 100+100+50).
+  const agentsPage2 = await callAgents({ offset: agentsDefaultParsed.nextOffset });
+  const agentsPage2Parsed = parse(agentsPage2);
+  check("list_all_agents page 2 (offset:nextOffset) returns the next capped page, more remaining",
+    agentsPage2Parsed.total === N_AGENTS && agentsPage2Parsed.offset === DEFAULT_AGENT_SUMMARY_CAP &&
+    agentsPage2Parsed.returned === DEFAULT_AGENT_SUMMARY_CAP && agentsPage2Parsed.nextOffset === 2 * DEFAULT_AGENT_SUMMARY_CAP);
+  const agentsPage3 = await callAgents({ offset: agentsPage2Parsed.nextOffset });
+  const agentsPage3Parsed = parse(agentsPage3);
+  check("list_all_agents page 3 (offset:nextOffset) reaches the true end (nextOffset:null)",
+    agentsPage3Parsed.total === N_AGENTS && agentsPage3Parsed.offset === 2 * DEFAULT_AGENT_SUMMARY_CAP &&
+    agentsPage3Parsed.returned === N_AGENTS - 2 * DEFAULT_AGENT_SUMMARY_CAP && agentsPage3Parsed.nextOffset === null);
 
   // The OLD behavior — full, unbounded rows — would have overflowed: prove the fixture is representative.
   const agentsFull = await callAgents({ full: true });

@@ -202,8 +202,9 @@ try {
   // payload — never a bare [] that the harness renders as "(completed with no output)" (card 0c34189c bug #3).
   db.insertProject({ id: "pEmpty", name: "Empty", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
   const emptyRes = await call("list_all_tasks", { projectId: "pEmpty" });
-  check("(4) a genuine no-match returns an explicit { tasks: [], message } payload",
-    Array.isArray(emptyRes.tasks) && emptyRes.tasks.length === 0 && typeof emptyRes.message === "string");
+  check("(4) a genuine no-match returns an explicit { tasks: [], total:0, nextOffset:null, message } payload",
+    Array.isArray(emptyRes.tasks) && emptyRes.tasks.length === 0 && emptyRes.total === 0 &&
+    emptyRes.nextOffset === null && typeof emptyRes.message === "string");
 
   // ===================== (5) bounded-read pagination + a measured cap =====================
   db.insertProject({ id: "pBulk", name: "Bulk", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
@@ -214,13 +215,29 @@ try {
   // Unit: listProjectTasks honors offset/limit (pure slicing).
   const sliced = await listProjectTasks(db, "pBulk", { limit: 10, offset: 5 });
   check("(5) listProjectTasks honors limit/offset", sliced.length === 10 && sliced[0].id === "bulk-5");
-  // list_all_tasks default is CAPPED; an explicit limit pages past it; offset skips.
+  // Card 57cb355d: list_all_tasks default is CAPPED, and — since this board's BULK(105) rows exceed the
+  // cap — the default (no offset/limit passed) now returns the {tasks,total,returned,offset,nextOffset}
+  // envelope instead of a bare capped array with no cap signal, mirroring session_transcript's own shape.
   const capped = await call("list_all_tasks", { projectId: "pBulk", includeBody: true });
-  check(`(5) list_all_tasks default is capped at ${DEFAULT_TASK_SUMMARY_CAP} (got ${capped.length})`, capped.length === DEFAULT_TASK_SUMMARY_CAP);
+  check("(5) list_all_tasks default (capped) returns the pagination envelope, not a bare array",
+    !Array.isArray(capped) && Array.isArray(capped.tasks));
+  check(`(5) list_all_tasks default is capped at ${DEFAULT_TASK_SUMMARY_CAP} (got ${capped.tasks.length})`, capped.tasks.length === DEFAULT_TASK_SUMMARY_CAP);
+  check("(5) list_all_tasks envelope reports the TRUE total + a non-null nextOffset",
+    capped.total === BULK && capped.returned === DEFAULT_TASK_SUMMARY_CAP && capped.offset === 0 && capped.nextOffset === DEFAULT_TASK_SUMMARY_CAP);
   const pagedPast = await call("list_all_tasks", { projectId: "pBulk", includeBody: true, limit: DEFAULT_TASK_SUMMARY_CAP + 50 });
-  check("(5) list_all_tasks pages past the cap with an explicit limit", pagedPast.length === BULK);
+  check("(5) list_all_tasks pages past the cap with an explicit limit (envelope, nextOffset:null — nothing left)",
+    pagedPast.tasks.length === BULK && pagedPast.total === BULK && pagedPast.nextOffset === null);
   const aggOff = await call("list_all_tasks", { projectId: "pBulk", limit: 10, offset: 5 });
-  check("(5) list_all_tasks honors limit/offset", aggOff.length === 10);
+  check("(5) list_all_tasks honors limit/offset (envelope, nextOffset:15 — more remains)",
+    aggOff.tasks.length === 10 && aggOff.offset === 5 && aggOff.nextOffset === 15);
+  // Paging to the true end: offset:nextOffset from `capped` walks the remaining rows, ending at nextOffset:null.
+  const lastPage = await call("list_all_tasks", { projectId: "pBulk", includeBody: true, offset: capped.nextOffset });
+  check("(5) list_all_tasks offset:nextOffset walk reaches the end (nextOffset:null, no gaps/overlaps)",
+    lastPage.tasks.length === BULK - DEFAULT_TASK_SUMMARY_CAP && lastPage.nextOffset === null &&
+    lastPage.tasks[0].id === `bulk-${DEFAULT_TASK_SUMMARY_CAP}`);
+  // A SMALL board (well under the cap, e.g. `noDone` above on pTarget) stays a BARE array — today's
+  // shape, unchanged, since nothing is truncated.
+  check("(5) list_all_tasks on a small/uncapped board returns a bare array (no envelope)", Array.isArray(noDone));
   // The in-project tasks_list surface caps its default read too.
   const inProjServer = new TaskMcpRouter(db, wakes).buildServer("pBulk", "S");
   const [ipT, ipS] = InMemoryTransport.createLinkedPair();
