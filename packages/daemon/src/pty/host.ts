@@ -482,7 +482,17 @@ const RECENT_OWNER_TURNS_WINDOW = 5;
  * roots, no configurable extra-roots list in this pinned version, and that cwd is NOT independently
  * settable per MCP server (a `"cwd"` field on the stdio server entry is silently ignored — verified by
  * spawning a real `claude` and observing the child still inherit claude's own cwd). So a caller-absolute
- * path OUTSIDE both roots is DENIED, not just "unaffected". `outputDir` also governs the DEFAULT (implicit,
+ * path OUTSIDE both roots is DENIED, not just "unaffected". **A caller-supplied RELATIVE/bare filename is
+ * the footgun, not a safe third case**: traced against the pinned `@playwright/mcp@0.0.75` bundle
+ * (`playwright-core`'s `Response.resolveClientFile` → `resolveClientFilename` → `context.workspaceFile`),
+ * a supplied filename — even a bare one — resolves against `context.options.cwd` (the worktree/repo root),
+ * NOT `outputDir`; only the OMIT-filename default path goes through `context.outputFile()`/`outputDir`.
+ * So a bare `browser_take_screenshot({ filename: "foo.png" })` silently lands in the repo root, not scratch
+ * — `checkFile` allows it (cwd is one of its two roots) rather than denying it. This is baked into
+ * playwright-core's bundled classes; no `Config` field or CLI flag redirects it, so it is NOT something
+ * Loom's spawn config can fix — omit the filename (auto-names into `outputDir`) or pass an absolute path
+ * under `LOOM_SCRATCH_DIR` (see `browserScratchEnv` below) to actually land in scratch. `outputDir` also
+ * governs the DEFAULT (implicit,
  * no-filename) artifact for every snapshot-bearing tool response, not just an explicit screenshot — the
  * MCP's default `snapshot.mode` writes the page's ARIA snapshot to `page-{timestamp}.yml` in `outputDir`
  * on essentially every browser tool call, so `outputDir` is a HIGH-FREQUENCY write target, not an
