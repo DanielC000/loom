@@ -175,9 +175,12 @@ MCP — spawns with one), use it:
    generic session scratch/temp dir, and a path outside Playwright's own allowed roots is rejected ("…
    is outside allowed roots"); a bare or relative name also resolves against the browser tool's client
    workspace (the repo root), litters the tree, and risks an accidental commit (`git status` will flag
-   it). **If your session has browser-testing tools, that allowed root is exposed to you directly as the
-   `$LOOM_SCRATCH_DIR` environment variable** — persist a shot there rather than your generic session
-   scratch/temp dir. To persist a shot **as a file**, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
+   it). **The auto-name-into-scratch and `$LOOM_SCRATCH_DIR` mechanics here are `@playwright/mcp`-specific:
+   only a session that mounts Playwright gets that allowed root exposed as the `$LOOM_SCRATCH_DIR`
+   environment variable** — persist a shot there rather than your generic session scratch/temp dir. A
+   session on a DIFFERENT browser tool (e.g. claude-in-chrome) has no `$LOOM_SCRATCH_DIR` and no
+   auto-naming — use that tool's own capture flow instead. To persist a shot **as a file** under
+   Playwright, don't rely on claude-in-chrome `save_to_disk` — it renders the inline base64 but writes no
    reachable file (Claude Code issue #40141). Use Playwright `page.screenshot({ path })` against the
    loopback page (launch with `{ channel: 'chrome' }` to reuse system Chrome and skip a download), or
    decode the base64 from the transcript for a shot you already captured.
@@ -203,8 +206,15 @@ A short gate — not an exhaustive audit. Run it before calling any screen done:
 9. **Layout tells** — no nested cards, no eyebrow chips, no numbered section markers, no three-equal-cards.
 10. **Responsive** — single-column mobile works; nothing overflows or touches the viewport edge.
 11. **A11y** — headings not skipped, images have alt text, touch targets ≥44px.
-12. **Eyeballed** — you looked at the rendered result, not just the code.
-13. **E2E** — if the project has an end-to-end test suite, a new or changed screen ships with (or
+12. **Image framing** — for any embedded photo/portrait, the subject is framed correctly: faces/heads
+    not cropped, not cut off by `object-fit: cover` or a fixed container aspect ratio. Verify against the
+    ACTUAL rendered crop in the browser, not the source image — a center-crop that looks fine full-bleed
+    can decapitate a portrait once it's constrained to the container. And don't reach for an optional,
+    IRREVERSIBLE transform (a square/center crop, a destructive resize) unless the layout truly needs it:
+    correctness of the shown subject comes before optimization, and a crop you can't undo isn't worth a
+    marginal layout gain.
+13. **Eyeballed** — you looked at the rendered result, not just the code.
+14. **E2E** — if the project has an end-to-end test suite, a new or changed screen ships with (or
     updates) a test in it, run green — see the project's own docs for the harness.
 
 ## Provenance

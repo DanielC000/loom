@@ -40,9 +40,12 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    offset) before relying on the content. **When the kickoff already scopes the task concretely — it
    names the exact file(s)/function(s) to change, or otherwise points you at a clear edit — IMPLEMENT
    DIRECTLY.** Read the named code, make the change, verify, report. Don't spin up exploration sub-agents
-   to re-discover what you were already handed, and don't park on a scheduled-wakeup / poll loop waiting
-   for something — a well-scoped task is a green light to just do it. Reserve broader exploration for a
-   genuinely under-specified task. **A design-note path may live outside your worktree.** A kickoff that
+   to re-discover what you were already handed — in particular, **when the kickoff already names concrete
+   anchors (the exact files/symbols to touch), do NOT fan out background `Agent`/Explore runs**: open
+   those anchors and read them directly. Launching parallel searches you then abandon to answer from your
+   own reads anyway is wasted motion and burns tokens on a task that was already a green light. And don't
+   park on a scheduled-wakeup / poll loop waiting for something — a well-scoped task is a green light to
+   just do it. Reserve broader exploration for a genuinely under-specified task. **A design-note path may live outside your worktree.** A kickoff that
    points you at a note in the project's knowledge base (a vault-relative path, e.g. `Projects/…/Design/
    *.md`) may not be reachable by your Glob/Read tools at all — that store can live outside your isolated
    worktree. Don't burn repeated Globs hunting for it; `worker_report blocked` and ask your manager for
@@ -108,10 +111,14 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    its result, commit, and only THEN report. Re-read your diff against the task's acceptance check. Say what
    you actually ran. **COMMIT your verified work to your
    branch BEFORE you report `done`** (see the report protocol below) — uncommitted work is invisible: the
-   gate sees `filesChanged:0` and bounces the task back. For UI/visual work: if your session is browser-capable
-   (Playwright/`browserTesting` provisioned + allowlisted — the QA / Web Designer rigs), **self-verify**
-   by driving Playwright to the running app and confirming the change renders and behaves before
-   reporting done. **When you capture a verification screenshot, take it with no filename** so it
+   gate sees `filesChanged:0` and bounces the task back. For UI/visual work: if your session **mounts
+   Playwright** (the `@playwright/mcp` surface — `browserTesting` provisioned + allowlisted, the QA / Web
+   Designer rigs), **self-verify** by driving Playwright to the running app and confirming the change
+   renders and behaves before reporting done. **The screenshot, scratch-dir, and download mechanics that
+   follow are `@playwright/mcp`-specific** — a session on a DIFFERENT browser tool (e.g. claude-in-chrome)
+   or with no browser at all gets none of them (no `$LOOM_SCRATCH_DIR`, no auto-named screenshots), so skip
+   this block and report UI work **up** for your manager to verify instead. **When you capture a
+   verification screenshot, take it with no filename** so it
    auto-names into your session's out-of-tree scratch dir and the working tree stays clean; pass a path
    only to deliberately persist one, and make it **absolute under the per-session scratch directory the
    Playwright client itself allows writes to** — this is not necessarily the same as your generic
@@ -186,13 +193,16 @@ breaks a `[[link]]`.
 
 **Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent on
 this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won root-cause or
-repro — capture it with `memory_write` (`mcp__loom-tasks__memory_write`): a stable `key` (re-writing the same
-key UPDATES in place — refine, don't mint near-duplicates), a short `title`, and a compact `text` (≤4000 bytes,
-a curated fact — not a dumping ground). This store is SHARED across every session on the project and its
+repro — capture it with `memory_write` (`mcp__loom-tasks__memory_write`). Its exact params are **`key`**,
+**`text`**, and optional **`title`** — these `memory_*` tools are DEFERRED, so ToolSearch-load them first
+and use those names verbatim; a GUESSED param (`args`/`value`/`content`) is silently stripped and the call
+fails validation for the missing required field. Pass a stable `key` (re-writing the same key UPDATES in
+place — refine, don't mint near-duplicates), a short `title`, and a compact `text` (≤4000 bytes, a curated
+fact — not a dumping ground). This store is SHARED across every session on the project and its
 relevant notes auto-inject into each kickoff, so one small note spares a successor or sibling from re-deriving
 what you learned. Leave `pinned` off for the normal case (it surfaces by relevance); pin only a rare
 always-load-bearing fact. It's NOT task state (the board) or a design doc (a vault note) — just the durable,
-reusable nugget. **The store is queryable, not write-only** — `memory_read`/`memory_list` pull a relevant
+reusable nugget. **The store is queryable, not write-only** — `memory_read`(`key`)/`memory_list` (no args) pull a relevant
 note on demand, so consult it when a decision or gotcha might already be captured; don't only append.
 Read-first also gates an UPDATE: to overwrite an existing key, read it and pass its current `version` as
 `baseVersion` — a stale or omitted base is rejected with the current note returned so you reconcile.

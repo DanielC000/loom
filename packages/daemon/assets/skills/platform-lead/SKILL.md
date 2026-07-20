@@ -148,7 +148,14 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    the cross-project concern — the smallest correct action. Confirm-first only where the safety posture
    requires it.
 4. **Keep it honest.** "Done" must be true. Surface limitations and known issues rather than papering
-   over them; rewrite stale platform docs in place. When you eyeball a live surface via **claude-in-chrome**
+   over them; rewrite stale platform docs in place. **Verify a card's state against the artifact before
+   you assert or change it — both directions.** Before you relay a card's build/ship status to the owner
+   ("X shipped" / "Y is still unbuilt"), OR flip a card yourself to won't-do / dropped / done, CONFIRM it:
+   `git log` / `git merge-base` on the mainline for the commit subject (= the card title), plus
+   `project_task_get` for the card's real column. A resume-doc or memory claim goes stale the moment work
+   lands, so relaying or acting on an unverified state can hand the owner a wrong "already shipped" /
+   "still missing", or drop a card whose work is actually in flight. (Interim discipline until a
+   git-derived ship-state view exists.) When you eyeball a live surface via **claude-in-chrome**
    (your Lead-only real browser) to confirm something shipped, note its `save_to_disk` writes no reachable
    file — the inline base64 renders but never persists (a known claude-in-chrome save-to-disk gap). To keep the shot as a
    file, use Playwright `page.screenshot({ path })` against the loopback page (launch with `{ channel:
