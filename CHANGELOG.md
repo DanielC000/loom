@@ -4,6 +4,9 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Internal
+- `serve-static.mjs` gains a tracked-pid `start`/`stop` lifecycle (mirroring `dev-server.mjs`), so a manager eyeballing a static artifact no longer has to hand-hunt `netstat`/`taskkill` for the listener PID.
+
 ## [0.23.0] — 2026-07-20
 
 **A performance and cleanup release.** Session/fleet state now streams to the web UI over a WebSocket **delta-push** channel instead of universal HTTP polling; the Usage page surfaces **prompt-cache hit ratios**; a malformed-frame daemon crash is hardened across all three WebSocket routes; and the opt-in **Open Design** integration is removed.

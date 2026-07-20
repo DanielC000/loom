@@ -526,10 +526,14 @@ mid-report — before sending anything.
    To eyeball a **static on-disk HTML artifact** (no dev server) — or when the deliverable *itself* is a
    static artifact a worker is building (a CV, a report, a static site) — don't navigate `file://`
    (Playwright blocks it) and don't hand-roll a `python -m http.server` per render cycle. Serve its
-   directory over loopback with the **bundled** helper and open the printed URL:
-   `node .claude/skills/orchestrate/scripts/serve-static.mjs <dir>`. It's dependency-free and already
-   ships in this skill's `scripts/` dir — point a worker producing such an artifact at it rather than
-   letting them reinvent an ephemeral server.
+   directory over loopback with the **bundled** helper: `node
+   .claude/skills/orchestrate/scripts/serve-static.mjs start <dir>` prints the URL + the exact tracked
+   pid and returns immediately (the server keeps running); eyeball via Playwright at the printed URL,
+   then `node .claude/skills/orchestrate/scripts/serve-static.mjs stop <dir>` tears down EXACTLY that
+   tracked pid before you request a merge for that worktree — same tracked-pid discipline as
+   `dev-server.mjs` below, never a `netstat`/`taskkill` port hunt. It's dependency-free and already ships
+   in this skill's `scripts/` dir — point a worker producing such an artifact at it rather than letting
+   them reinvent an ephemeral server.
 
    To eyeball a **live dev server** you launch yourself against a worker's worktree (not a static
    artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: that output is

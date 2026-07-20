@@ -20,11 +20,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (g) a SYMLINK inside the served dir pointing OUTSIDE it is never followed to serve the external
 //       target's content (the exfil vector `<dir>/leak.html -> /etc/passwd` — the same class rejected
 //       when picking loopback-serving over a file:// Playwright allowance in the first place).
+//   (h) the tracked-pid `start`/`stop` lifecycle (card 06a1d2c5): `start` spawns a detached server,
+//       records its exact pid, and prints the pid + the ACTUAL bound port; the server really serves the
+//       dir; a second `start` over the same live dir refuses; `stop` kills EXACTLY that tracked pid (the
+//       pid is confirmably gone AND the port stops accepting connections afterward) and removes the
+//       tracking file; a `stop` with nothing tracked is a safe no-op — mirrors dev-server.mjs's own
+//       tracked-pid lifecycle (see test/dev-server.mjs), never a port/name search.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 
@@ -141,7 +147,69 @@ try {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(outsideDir, { recursive: true, force: true }); break; } catch { /* retry */ } }
 }
 
+// (h) tracked-pid start/stop lifecycle — REAL child-process spawn/kill, per the repo's "mocking the
+// exec impl never exercises the actual cross-platform spawn/kill" rule.
+const isAlivePid = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } };
+const waitUntilLifecycle = async (predicate, timeoutMs = 5000, stepMs = 50) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+  return false;
+};
+
+const ssDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-serve-static-lifecycle-"));
+fs.writeFileSync(path.join(ssDir, "index.html"), "<html><body>lifecycle</body></html>");
+let ssPid = null;
+let ssPort = null;
+
+try {
+  const startResult = spawnSync(process.execPath, [ORCHESTRATE_SCRIPT, "start", ssDir], { encoding: "utf8", timeout: 10_000 });
+  check("(h) start exits 0", startResult.status === 0);
+  const startMatch = /http:\/\/127\.0\.0\.1:(\d+)\/ \(pid (\d+)\)/.exec(startResult.stdout || "");
+  check("(h) start prints a URL + pid", !!startMatch);
+  ssPort = startMatch ? Number(startMatch[1]) : null;
+  ssPid = startMatch ? Number(startMatch[2]) : null;
+
+  check("(h) tracked pid is alive", ssPid != null && isAlivePid(ssPid));
+
+  const ssUrl = `http://127.0.0.1:${ssPort}/`;
+  const served = ssPort != null ? await get(ssUrl) : null;
+  check(
+    "(h) start's server actually serves the dir",
+    served != null && served.status === 200 && served.body === "<html><body>lifecycle</body></html>",
+  );
+
+  // A second start over the same still-alive dir must refuse, not spawn a second untracked process.
+  const doubleStart = spawnSync(process.execPath, [ORCHESTRATE_SCRIPT, "start", ssDir], { encoding: "utf8", timeout: 10_000 });
+  check("(h) double-start over a live tracked dir refuses (nonzero exit)", doubleStart.status !== 0);
+
+  const stopResult = spawnSync(process.execPath, [ORCHESTRATE_SCRIPT, "stop", ssDir], { encoding: "utf8", timeout: 10_000 });
+  check("(h) stop exits 0", stopResult.status === 0);
+  check("(h) stop reports the tracked pid", ssPid != null && stopResult.stdout.includes(String(ssPid)));
+
+  const ssGone = ssPid != null && await waitUntilLifecycle(() => !isAlivePid(ssPid));
+  check("(h) tracked pid is gone after stop()", ssGone);
+
+  // The port itself must stop accepting connections too — proves stop() actually tore the listener
+  // down, not just that SOME process died.
+  let refused = false;
+  try { await get(ssUrl); } catch { refused = true; }
+  check("(h) port is freed after stop() (connection refused)", refused);
+
+  const noopStop = spawnSync(process.execPath, [ORCHESTRATE_SCRIPT, "stop", ssDir], { encoding: "utf8", timeout: 10_000 });
+  check("(h) stop with no tracked server exits 0", noopStop.status === 0);
+  check("(h) stop with no tracked server says so, not an error", /nothing to do/.test(noopStop.stdout || ""));
+} catch (e) {
+  console.log(`FAIL  unexpected error (start/stop lifecycle): ${(e && e.stack) || e}`);
+  failures++;
+} finally {
+  if (ssPid != null && isAlivePid(ssPid)) { try { process.kill(ssPid, "SIGKILL"); } catch { /* best effort */ } }
+  for (let i = 0; i < 5; i++) { try { fs.rmSync(ssDir, { recursive: true, force: true }); break; } catch { /* retry */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — serve-static.mjs serves a static dir over loopback (nested files, 404 on miss, traversal-safe), and the web-design/orchestrate copies stay identical."
+  ? "\n✅ ALL PASS — serve-static.mjs serves a static dir over loopback (nested files, 404 on miss, traversal-safe), the web-design/orchestrate copies stay identical, and the tracked-pid start/stop lifecycle works end-to-end."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
