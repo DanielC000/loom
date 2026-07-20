@@ -598,6 +598,14 @@ test("Lead mode: enable is ack-gated, flips the hero ON + shrouds the grants, an
 
   await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
   const focus = async () => {
+    // Wait for the switcher itself before probing the picker: on the SHARED e2e daemon dozens of sibling
+    // companions accumulate across the suite, so the "Select companion" group DOES render (many > 1) — but
+    // only once the companions list query resolves. `.count()` below does not auto-wait, so calling it
+    // before that resolves (e.g. right after this test's own `page.reload()`) races the fetch: it silently
+    // reads 0, skips re-selecting THIS companion, and leaves whatever companion the default-selection
+    // fallback in Companion.tsx resolves to focused instead. Same guard the neighboring co-grant test
+    // already uses after its own reload — this just folds it into the helper so every call site is safe.
+    await expect(page.getByRole("button", { name: "+ New companion" })).toBeVisible();
     const pickerBtn = page.getByRole("group", { name: "Select companion" }).getByRole("button", { name });
     if (await pickerBtn.count()) {
       await pickerBtn.click();
