@@ -259,6 +259,130 @@ try {
   svc.resume(rawWorkerId); // immediately again, no further writes — must dedup against the JUST-updated digest too
   check("(dedup) a resume right after the delta injection ALSO dedups (the newly-persisted digest is the new baseline)",
     !host.enqueued.some((e) => e.sessionId === rawWorkerId && e.text.includes(PROJECT_MEMORY_TAG)));
+
+  // ===================== task 1b27e123: recycleManager is a FRESH spawn (no --resume) — it must ALSO get
+  // project memory appended to its composed startup prompt, exactly like recycleWorker/spawnWorker, or a
+  // context-limit MANAGER recycle silently loses every note its predecessor saw. The continuation text
+  // deliberately avoids "vite"/"port" wording so its digest matches what a plain resume of the successor
+  // will later compute from the agent's own startup prompt (a manager carries no taskId) — isolating the
+  // dedup-stamp proof from the "related note matches differently at resume time" complication
+  // recycleWorker's task-bound handoff doesn't have. =====================
+  host.capture.length = 0;
+  const managerContinuation = "Handing off: nothing task-specific to report, general fleet status only.";
+  const recycledManager = await svc.recycleManager("mgrA", managerContinuation);
+  const recycledManagerOpts = optsFor(recycledManager.id);
+  check("(recycleManager) captured startupPrompt carries the PROJECT_MEMORY_TAG",
+    typeof recycledManagerOpts?.startupPrompt === "string" && recycledManagerOpts.startupPrompt.includes(PROJECT_MEMORY_TAG));
+  check("(recycleManager) the PINNED note rides on a manager recycle spawn",
+    recycledManagerOpts.startupPrompt.includes("daemon default port is 4317"));
+  check("(recycleManager) the continuation handoff text itself is still present (append, not replace)",
+    recycledManagerOpts.startupPrompt.includes(managerContinuation));
+  check("(recycleManager) the successor's own agent warm-up prompt is still present too",
+    recycledManagerOpts.startupPrompt.includes("MANAGER_PROMPT_A"));
+
+  // FRESH-SPAWN STAMP (card ea648f89, extended to this seed point): the recycled manager's FIRST resume
+  // must not redundantly re-show the identical block recycleManager's own fresh-spawn kickoff already
+  // carried.
+  {
+    const engIdMgr = "dddddddd-eeee-ffff-0000-111111111111";
+    db.setEngineSessionId(recycledManager.id, engIdMgr);
+    const tpathMgr = engineTranscriptPath(repo, engIdMgr);
+    fs.mkdirSync(path.dirname(tpathMgr), { recursive: true });
+    fs.writeFileSync(tpathMgr, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    host.enqueued.length = 0;
+    svc.resume(recycledManager.id);
+    check("(recycleManager fresh-spawn stamp) the recycled manager's FIRST resume enqueues NOTHING project-memory-related",
+      !host.enqueued.some((e) => e.sessionId === recycledManager.id && e.text.includes(PROJECT_MEMORY_TAG)));
+
+    db.upsertProjectMemory(projA, {
+      key: "new-note-after-manager-recycle-stamp",
+      title: "New note added after the manager recycle fresh-spawn stamp",
+      text: "this note was written after recycleManager's own stamp and must still reach the very next resume.",
+      pinned: true,
+    }, cfg.maxNotes);
+    host.enqueued.length = 0;
+    svc.resume(recycledManager.id);
+    const mgrDedupMsg = host.enqueued.find((e) => e.sessionId === recycledManager.id);
+    check("(recycleManager fresh-spawn stamp) a resume AFTER a genuinely new note still enqueues (the digest changed)",
+      !!mgrDedupMsg && mgrDedupMsg.text.includes(PROJECT_MEMORY_TAG));
+    check("(recycleManager fresh-spawn stamp) the new note's content is present in the re-injected block",
+      mgrDedupMsg?.text.includes("written after recycleManager's own stamp"));
+  }
+
+  // ===================== task 1b27e123: forkSession has NO startup prompt of its own (--fork-session
+  // carries the SOURCE transcript forward, mirrors resume()'s "resume injects nothing" invariant) — it
+  // must inject project memory via enqueueStdin instead, exactly like resume() does, or a forked session
+  // would silently lose every note its source saw =====================
+  const forkSrcId = "forkSrcA";
+  const forkSrcEngId = "eeeeeeee-ffff-0000-1111-222222222222";
+  db.insertSession({
+    id: forkSrcId, projectId: projA, agentId: "workerAgentA", engineSessionId: forkSrcEngId, title: null,
+    cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker",
+  });
+  const forkSrcTpath = engineTranscriptPath(repo, forkSrcEngId);
+  fs.mkdirSync(path.dirname(forkSrcTpath), { recursive: true });
+  fs.writeFileSync(forkSrcTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+  host.enqueued.length = 0;
+  const forked = svc.forkSession(forkSrcId);
+  const forkMsg = host.enqueued.find((e) => e.sessionId === forked.id);
+  check("(fork) forkSession enqueues a project-memory recall turn for the new fork session id",
+    !!forkMsg && forkMsg.text.includes(PROJECT_MEMORY_TAG));
+  check("(fork) the PINNED note rides on a fork spawn",
+    forkMsg?.text.includes("daemon default port is 4317"));
+  check("(fork) injected as kind:\"warning\" (operational/coalescible, never \"agent\" direction, mirrors resume())",
+    forkMsg?.kind === "warning");
+
+  // FRESH-SPAWN STAMP: the fork's OWN first resume must not redundantly re-show the identical block
+  // forkSession's own inject already delivered. The fork carries no taskId (by design — the Session
+  // literal in forkSession deliberately omits it, unrelated to this feature), and neither does its
+  // source (forkSrcId), so BOTH forkSession's own search text and the fork's later resume() search text
+  // fall back to the SAME agent startup prompt — same digest either way.
+  {
+    const forkEngId = "ffffffff-0000-1111-2222-333333333333";
+    db.setEngineSessionId(forked.id, forkEngId);
+    const forkTpath = engineTranscriptPath(repo, forkEngId);
+    fs.mkdirSync(path.dirname(forkTpath), { recursive: true });
+    fs.writeFileSync(forkTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    host.enqueued.length = 0;
+    svc.resume(forked.id);
+    check("(fork fresh-spawn stamp) the fork's FIRST resume enqueues NOTHING project-memory-related",
+      !host.enqueued.some((e) => e.sessionId === forked.id && e.text.includes(PROJECT_MEMORY_TAG)));
+
+    db.upsertProjectMemory(projA, {
+      key: "new-note-after-fork-stamp",
+      title: "New note added after the fork fresh-spawn stamp",
+      text: "this note was written after forkSession's own stamp and must still reach the very next resume.",
+      pinned: true,
+    }, cfg.maxNotes);
+    host.enqueued.length = 0;
+    svc.resume(forked.id);
+    const forkDedupMsg = host.enqueued.find((e) => e.sessionId === forked.id);
+    check("(fork fresh-spawn stamp) a resume AFTER a genuinely new note still enqueues (the digest changed)",
+      !!forkDedupMsg && forkDedupMsg.text.includes(PROJECT_MEMORY_TAG));
+    check("(fork fresh-spawn stamp) the new note's content is present in the re-injected block",
+      forkDedupMsg?.text.includes("written after forkSession's own stamp"));
+  }
+
+  // ===================== additive guard: forking a session on the ZERO-notes project enqueues NOTHING
+  // project-memory-related =====================
+  const forkSrcBId = "forkSrcB";
+  const forkSrcBEngId = "12121212-3434-4343-8565-565656565656";
+  db.insertSession({
+    id: forkSrcBId, projectId: projB, agentId: "workerAgentB", engineSessionId: forkSrcBEngId, title: null,
+    cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+    lastError: null, role: "worker",
+  });
+  const forkSrcBTpath = engineTranscriptPath(repo, forkSrcBEngId);
+  fs.mkdirSync(path.dirname(forkSrcBTpath), { recursive: true });
+  fs.writeFileSync(forkSrcBTpath, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+  host.enqueued.length = 0;
+  const forkedB = svc.forkSession(forkSrcBId);
+  check("(fork additive) zero-notes project: NO project-memory enqueue at all",
+    !host.enqueued.some((e) => e.sessionId === forkedB.id && e.text.includes(PROJECT_MEMORY_TAG)));
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
@@ -270,6 +394,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — cross-session sharing PROVEN (a note written in one session is retrieved and injected into a DIFFERENT, freshly-spawned worker session's kickoff via spawnWorker on a real worktree branch); pinned-always + FTS5-related-on-match both land; fresh-spawn injection covers spawnWorker/startManager/startNew/recycleWorker; resume() injects via enqueueStdin as kind:\"warning\"; a zero-notes project stays byte-identical to composeWorkerStartupPrompt alone with no tag anywhere and no resume enqueue; a resume with an unchanged project-memory digest does NOT re-inject (whether unchanged since a PRIOR resume or since the session's own FRESH-SPAWN kickoff), while a genuinely new note still reaches the very next resume every time (card ea648f89) — claude-free, network-free."
+  ? "\n✅ ALL PASS — cross-session sharing PROVEN (a note written in one session is retrieved and injected into a DIFFERENT, freshly-spawned worker session's kickoff via spawnWorker on a real worktree branch); pinned-always + FTS5-related-on-match both land; fresh-spawn injection covers spawnWorker/startManager/startNew/recycleWorker/recycleManager; resume() and forkSession both inject via enqueueStdin as kind:\"warning\"; a zero-notes project stays byte-identical to composeWorkerStartupPrompt alone with no tag anywhere and no resume/fork enqueue; a resume with an unchanged project-memory digest does NOT re-inject (whether unchanged since a PRIOR resume or since the session's own FRESH-SPAWN/recycle/fork kickoff), while a genuinely new note still reaches the very next resume every time (card ea648f89) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

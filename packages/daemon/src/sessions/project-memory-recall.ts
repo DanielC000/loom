@@ -25,12 +25,13 @@ import type { Db } from "../db.js";
  * startup prompt at all (the "resume injects nothing" invariant), so it is queued via the ordinary
  * `enqueueStdin` turn-injection primitive instead — see sessions/service.ts call sites.
  *
- * v1 coverage (sessions/service.ts): startNew, startManager, spawnWorker, recycleWorker (all fresh-spawn
- * paths) + resume() (every role). Known v1-uncovered limitation: recycleManager, forkSession, and the
- * platform/auditor spawn paths do NOT inject project memory — none of them are the card's explicit
- * "fresh-spawn AND resume" ask, and each is a secondary continuation path (recycleManager already carries
- * forward its predecessor's own context via the continuation prompt; forkSession/platform/auditor are
- * comparatively rare). A worthwhile fast-follow if broader coverage is wanted later.
+ * Coverage (sessions/service.ts): startNew, startManager, spawnWorker, recycleWorker, recycleManager (all
+ * fresh-spawn paths, appending to the composed startup prompt) + resume() and forkSession (both --resume/
+ * --fork-session paths, which carry NO startup prompt of their own — injected via the ordinary
+ * `enqueueStdin` turn-injection primitive instead, exactly like resume()'s own project-memory half).
+ * Known remaining gap: the platform/auditor spawn paths do not inject project memory — they sit above/
+ * outside the per-project board this feature is scoped to, so there's no natural project to retrieve
+ * notes from; not pursued further here.
  */
 
 export const PROJECT_MEMORY_TAG = "[loom:project-memory]";

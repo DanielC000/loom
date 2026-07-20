@@ -2631,6 +2631,21 @@ export class SessionService {
       restrictedTools: src.restrictedTools ?? false, // carry the restricted-tools disallow onto the fork's pty (matches the fork row)
       skills: src.skills ?? null, // carry the pinned subset onto the fork's pty (matches the fork row)
     });
+    // Project memory (card 2fd9abf9, fork half): --fork-session carries the SOURCE transcript forward
+    // with NO startup prompt of its own (mirrors resume()'s "resume injects nothing" invariant), so
+    // without this a fork would never see project notes the way resume()'s own inject already does for
+    // every role. Enqueued via the SAME ordinary enqueueStdin turn-injection primitive resume() uses
+    // (kind defaults to "warning", ready-gated in host.ts). Search text mirrors resume()'s own kickoffText
+    // derivation — the SOURCE session's bound task (title+body), else the agent's startup prompt — since
+    // the fork's own row deliberately carries no taskId (see the Session literal above; unrelated to this
+    // feature, left untouched). Stamp the dedup map (card ea648f89) so this fork's OWN first resume
+    // compares against what this fork spawn just showed it, exactly as recycleWorker/spawnWorker already
+    // do for their fresh spawns. null (no notes match) ⇒ no enqueue, byte-identical to today.
+    const forkBoundTask = src.taskId ? this.db.getTask(src.taskId) : undefined;
+    const forkKickoffText = forkBoundTask ? `${forkBoundTask.title}\n${forkBoundTask.body}` : (agent?.startupPrompt ?? "");
+    const forkProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, forkKickoffText);
+    if (forkProjectMemoryFramed) this.pty.enqueueStdin(session.id, forkProjectMemoryFramed, "system");
+    this.stampProjectMemoryDigest(session.id, forkProjectMemoryFramed);
     return { ...session, processState: "live" };
   }
 
@@ -5398,6 +5413,14 @@ export class SessionService {
     this.db.insertSession(fresh);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(fresh.id, "live");
+    // Project memory (card 2fd9abf9): a manager recycle spawns FRESH (no --resume), so — unlike resume(),
+    // which injects for every role — a recycled manager would otherwise lose project notes its
+    // predecessor saw. Same one-liner as recycleWorker/spawnWorker, searched against the predecessor's
+    // continuation handoff (the richest match text available here); null (no notes) ⇒ byte-identical to
+    // today. Stamp the dedup map (card ea648f89) so this recycled manager's FIRST resume compares against
+    // what this fresh spawn just showed it.
+    const recycleManagerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, continuationPrompt);
+    this.stampProjectMemoryDigest(fresh.id, recycleManagerProjectMemoryFramed);
     this.pty.spawn({
       sessionId: fresh.id,
       cwd: fresh.cwd,
@@ -5406,7 +5429,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, projectId: project.id, // card C2
-      startupPrompt,
+      startupPrompt: appendMemoryRecallToStartupPrompt(startupPrompt, recycleManagerProjectMemoryFramed),
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
       documentConversion: old.documentConversion ?? false,
