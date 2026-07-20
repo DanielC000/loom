@@ -100,6 +100,25 @@ for (let i = 0; i < N_SESSIONS; i++) {
   db.archiveSession(id); // archived rows are the auditor's history, kept at scope:"all" regardless of state
 }
 
+// --- Over-sized LIVE-SESSION fixture: many NON-archived "live" sessions (the state platform/setup
+// list_all_sessions defaults to) so paging past DEFAULT_SESSION_SUMMARY_CAP is exercised on the SAME
+// state the default reads — the archived fixture above is audit-only (scope:"all" keeps archived rows,
+// which listAllSessions excludes entirely; see db.ts's "rail/god-eye lists EXCLUDE archived" comment). ---
+const N_LIVE_SESSIONS = 120;
+for (let i = 0; i < N_LIVE_SESSIONS; i++) {
+  const id = `livesess-${String(i).padStart(24, "0")}`;
+  db.insertSession({
+    id, projectId: "00000000-0000-0000-0000-0000000proj", agentId: "agent-0000000000000000000000000000",
+    engineSessionId: `live-eng-${i}`, title: `A live worker session #${i}`,
+    cwd: repo, processState: "live", resumability: "resumable", busy: false,
+    createdAt: now, lastActivity: new Date(Date.now() - i * 1000).toISOString(),
+    lastError: null, role: "worker", parentSessionId: null,
+    model: "claude-opus-4-8", ctxInputTokens: 1000, ctxTurns: 3,
+  });
+}
+// The "AUD" session inserted above is also state:"live", so the unfiltered default aggregates it too.
+const N_TOTAL_LIVE = N_LIVE_SESSIONS + 1;
+
 // Fake pty seam (no real claude) — the routers need a SessionService, but list tools only hit the Db.
 class SeamHost extends PtyHost {
   createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
@@ -164,6 +183,40 @@ try {
   check("list_all_agents full:true returns EVERY agent (no cap on the explicit heavy opt-in)", agentsFullRows.length === N_AGENTS);
   check("list_all_agents full:true RESTORES the heavy startupPrompt", agentsFullRows.every((a) => typeof a.startupPrompt === "string" && a.startupPrompt.length > 0));
   check("FIXTURE IS REPRESENTATIVE: the OLD unbounded full-row response BLOWS the budget", agentsFullSize > CHAR_BUDGET);
+
+  // ===================== platform list_all_sessions — card 9ad4dce7: the sibling pagination gap ==========
+  // list_all_tasks/list_all_agents got the cap/pagination envelope (a33a713); list_all_sessions was left on
+  // a bare-capped-array shape with no cap signal. Same envelope shape, keyed "sessions" instead of "agents".
+  const callPlatSessions = (args) => pClient.callTool({ name: "list_all_sessions", arguments: args });
+
+  const platSessDefault = await callPlatSessions({});
+  const platSessDefaultParsed = parse(platSessDefault);
+  check("platform list_all_sessions default (capped) returns the pagination envelope, not a bare array",
+    !Array.isArray(platSessDefaultParsed) && Array.isArray(platSessDefaultParsed.sessions));
+  const platSessDefaultRows = platSessDefaultParsed.sessions;
+  check(`platform list_all_sessions default is capped at DEFAULT_SESSION_SUMMARY_CAP (${DEFAULT_SESSION_SUMMARY_CAP})`, platSessDefaultRows.length === DEFAULT_SESSION_SUMMARY_CAP);
+  check("platform list_all_sessions envelope reports the TRUE total (not just the capped row count) + a non-null nextOffset",
+    platSessDefaultParsed.total === N_TOTAL_LIVE && platSessDefaultParsed.returned === DEFAULT_SESSION_SUMMARY_CAP &&
+    platSessDefaultParsed.offset === 0 && platSessDefaultParsed.nextOffset === DEFAULT_SESSION_SUMMARY_CAP);
+
+  // Paging PAST the cap with offset:nextOffset walks the WHOLE set exactly once, ending at nextOffset:null
+  // (N_TOTAL_LIVE(121) needs 3 pages of DEFAULT_SESSION_SUMMARY_CAP(50): 50+50+21).
+  const platSessPage2 = await callPlatSessions({ offset: platSessDefaultParsed.nextOffset });
+  const platSessPage2Parsed = parse(platSessPage2);
+  check("platform list_all_sessions page 2 (offset:nextOffset) returns the next capped page, more remaining",
+    platSessPage2Parsed.total === N_TOTAL_LIVE && platSessPage2Parsed.offset === DEFAULT_SESSION_SUMMARY_CAP &&
+    platSessPage2Parsed.returned === DEFAULT_SESSION_SUMMARY_CAP && platSessPage2Parsed.nextOffset === 2 * DEFAULT_SESSION_SUMMARY_CAP);
+  const platSessPage3 = await callPlatSessions({ offset: platSessPage2Parsed.nextOffset });
+  const platSessPage3Parsed = parse(platSessPage3);
+  check("platform list_all_sessions page 3 (offset:nextOffset) reaches the true end (nextOffset:null)",
+    platSessPage3Parsed.total === N_TOTAL_LIVE && platSessPage3Parsed.offset === 2 * DEFAULT_SESSION_SUMMARY_CAP &&
+    platSessPage3Parsed.returned === N_TOTAL_LIVE - 2 * DEFAULT_SESSION_SUMMARY_CAP && platSessPage3Parsed.nextOffset === null);
+
+  // full:true still returns every row uncapped (unchanged behavior) — proves the envelope-wrap didn't
+  // regress the explicit heavy opt-in.
+  const platSessFull = await callPlatSessions({ full: true });
+  const platSessFullRows = parse(platSessFull);
+  check("platform list_all_sessions full:true returns EVERY session (no cap on the explicit heavy opt-in)", platSessFullRows.length === N_TOTAL_LIVE);
   await pClient.close();
 
   // ===================== setup-surface list_all_agents — card 6500b707: the sibling gap ==================
@@ -201,6 +254,39 @@ try {
   const setupAgentsFull = await callSetupAgents({ full: true });
   const setupAgentsFullRows = parse(setupAgentsFull);
   check("setup list_all_agents full:true returns EVERY agent (no cap on the explicit heavy opt-in)", setupAgentsFullRows.length === N_AGENTS);
+
+  // ===================== setup-surface list_all_sessions — card 9ad4dce7: the sibling pagination gap ====
+  // Same envelope treatment as setup list_all_agents above, applied to setup's OWN list_all_sessions —
+  // the mirror of the platform list_all_sessions block above, against the setup router instead.
+  const callSetupSessions = (args) => sClient.callTool({ name: "list_all_sessions", arguments: args });
+
+  const setupSessDefault = await callSetupSessions({});
+  const setupSessDefaultParsed = parse(setupSessDefault);
+  check("setup list_all_sessions default (capped) returns the pagination envelope, not a bare array",
+    !Array.isArray(setupSessDefaultParsed) && Array.isArray(setupSessDefaultParsed.sessions));
+  const setupSessDefaultRows = setupSessDefaultParsed.sessions;
+  check(`setup list_all_sessions default is capped at DEFAULT_SESSION_SUMMARY_CAP (${DEFAULT_SESSION_SUMMARY_CAP})`, setupSessDefaultRows.length === DEFAULT_SESSION_SUMMARY_CAP);
+  check("setup list_all_sessions envelope reports the TRUE total (not just the capped row count) + a non-null nextOffset",
+    setupSessDefaultParsed.total === N_TOTAL_LIVE && setupSessDefaultParsed.returned === DEFAULT_SESSION_SUMMARY_CAP &&
+    setupSessDefaultParsed.offset === 0 && setupSessDefaultParsed.nextOffset === DEFAULT_SESSION_SUMMARY_CAP);
+
+  // Paging PAST the cap with offset:nextOffset reaches the true end (mirrors the platform walk above).
+  const setupSessPage2 = await callSetupSessions({ offset: setupSessDefaultParsed.nextOffset });
+  const setupSessPage2Parsed = parse(setupSessPage2);
+  check("setup list_all_sessions page 2 (offset:nextOffset) returns the next capped page, more remaining",
+    setupSessPage2Parsed.total === N_TOTAL_LIVE && setupSessPage2Parsed.offset === DEFAULT_SESSION_SUMMARY_CAP &&
+    setupSessPage2Parsed.returned === DEFAULT_SESSION_SUMMARY_CAP && setupSessPage2Parsed.nextOffset === 2 * DEFAULT_SESSION_SUMMARY_CAP);
+  const setupSessPage3 = await callSetupSessions({ offset: setupSessPage2Parsed.nextOffset });
+  const setupSessPage3Parsed = parse(setupSessPage3);
+  check("setup list_all_sessions page 3 (offset:nextOffset) reaches the true end (nextOffset:null)",
+    setupSessPage3Parsed.total === N_TOTAL_LIVE && setupSessPage3Parsed.offset === 2 * DEFAULT_SESSION_SUMMARY_CAP &&
+    setupSessPage3Parsed.returned === N_TOTAL_LIVE - 2 * DEFAULT_SESSION_SUMMARY_CAP && setupSessPage3Parsed.nextOffset === null);
+
+  // full:true still returns every row uncapped (unchanged behavior) — proves the envelope-wrap didn't
+  // regress the explicit heavy opt-in.
+  const setupSessFull = await callSetupSessions({ full: true });
+  const setupSessFullRows = parse(setupSessFull);
+  check("setup list_all_sessions full:true returns EVERY session (no cap on the explicit heavy opt-in)", setupSessFullRows.length === N_TOTAL_LIVE);
   await sClient.close();
 
   // ===================== audit list_sessions — the "200-row default lied" overflow (finding part 2) =========

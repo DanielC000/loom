@@ -100,10 +100,15 @@ const parse = (res) => JSON.parse(res.content[0].text);
 const SUMMARY_KEYS = ["id", "projectId", "projectName", "agentName", "role", "processState", "busy", "archivedAt", "createdAt", "lastActivity", "model", "ctxInputTokens", "ctxTurns"];
 const HEAVY_KEYS = ["title", "cwd", "engineSessionId", "worktreePath", "branch", "lastError", "resumability", "parentSessionId", "recycledFrom", "ctxUpdatedAt"];
 
+// An explicit limit/offset on platform.list_all_sessions (unlike audit.list_sessions, untouched by card
+// 9ad4dce7) now returns the {sessions,total,returned,offset,nextOffset} pagination envelope rather than a
+// bare array — mirrors list_all_agents. Unwrap either shape down to its row array.
+const toRows = (result) => Array.isArray(result) ? result : result.sessions;
+
 // Shared assertions over a given tool's result rows (default summary + full record).
 async function assertProjection(toolLabel, callTool) {
   // --- DEFAULT: lightweight summary ---
-  const def = await callTool({});
+  const def = toRows(await callTool({}));
   check(`(${toolLabel}) default returns rows`, Array.isArray(def) && def.length > 0);
   const heavyRow = def.find((s) => s.id === "WHEAVY");
   check(`(${toolLabel}) default: the heavy session is present`, !!heavyRow);
@@ -113,16 +118,16 @@ async function assertProjection(toolLabel, callTool) {
   check(`(${toolLabel}) default: context meters survive the projection`, !!heavyRow && heavyRow.ctxInputTokens === 123456 && heavyRow.ctxTurns === 42 && heavyRow.model === "claude-opus-4-8");
 
   // --- full:true: the WHOLE record ---
-  const full = await callTool({ full: true });
+  const full = toRows(await callTool({ full: true }));
   const fullHeavy = full.find((s) => s.id === "WHEAVY");
   check(`(${toolLabel}) full:true: heavy fields are RESTORED`, !!fullHeavy && fullHeavy.title?.startsWith("A long") && fullHeavy.cwd === repo && fullHeavy.engineSessionId === "eng-heavy-1" && fullHeavy.branch === "loom/feature-branch" && fullHeavy.worktreePath === "C:/some/worktree/path");
   check(`(${toolLabel}) full:true: key fields still present too`, !!fullHeavy && SUMMARY_KEYS.every((k) => k in fullHeavy));
 
   // --- limit/offset paginate ---
-  const limited = await callTool({ limit: 2 });
+  const limited = toRows(await callTool({ limit: 2 }));
   check(`(${toolLabel}) limit:2 returns exactly 2 rows`, limited.length === 2);
   check(`(${toolLabel}) limit:2 keeps the newest-first order (WHEAVY first)`, limited[0].id === "WHEAVY");
-  const offset = await callTool({ limit: 1, offset: 1 });
+  const offset = toRows(await callTool({ limit: 1, offset: 1 }));
   check(`(${toolLabel}) limit:1 offset:1 returns the 2nd row`, offset.length === 1 && offset[0].id === limited[1].id);
 }
 

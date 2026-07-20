@@ -940,7 +940,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "list_all_sessions",
       {
-        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished sessions that have NOT been archived are dropped, so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session (id, projectId, projectName, agentId, agentName, role, processState, busy, archivedAt, createdAt, lastActivity, model, ctxInputTokens, ctxTurns) so the list stays bounded; heavy fields (title, cwd, engineSessionId, branch, worktree, lineage, errors) are dropped. Pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare sessions array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {sessions, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
         inputSchema: {
           projectId: z.string().optional(),
           state: z.enum(["live", "exited", "all"]).optional(),
@@ -963,7 +963,19 @@ export class PlatformMcpRouter {
         const filtered = resolvedProjectId === undefined ? all : all.filter((s) => s.projectId === resolvedProjectId);
         // Backstop the summary feed so an `all`/`exited` history read can't overflow with no explicit limit.
         const effLimit = limit ?? (full ? undefined : DEFAULT_SESSION_SUMMARY_CAP);
-        return ok(projectSessionList(filtered, { full, limit: effLimit, offset }));
+        const total = filtered.length;
+        const off = offset ?? 0;
+        const page = projectSessionList(filtered, { full, limit: effLimit, offset });
+        const returned = page.length;
+        // nextOffset mirrors session_transcript's pageTranscript convention exactly: offset+returned while
+        // more remains under the SAME effective limit, else null — never set when effLimit is unbounded
+        // (full:true with no explicit limit already read everything there is).
+        const nextOffset = effLimit !== undefined && off + returned < total ? off + returned : null;
+        const explicit = offset !== undefined || limit !== undefined;
+        // Card 9ad4dce7: list_all_sessions was the sibling gap list_all_agents (6500b707) already closed.
+        // Mirror session_transcript's own shape — bare array when the whole matching set fit in one page
+        // and the caller didn't page explicitly (today's behavior, unchanged); otherwise the envelope.
+        return ok(!explicit && nextOffset === null ? page : { sessions: page, total, returned, offset: off, nextOffset });
       },
     );
 
