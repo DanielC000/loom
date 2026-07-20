@@ -368,6 +368,19 @@ try {
       (await findLandedSquashCommit(repo, brM2)) === null);
     await removeWorktree(repo, wtM2);
     await deleteBranch(repo, brM2);
+
+    // Card 51d92800: boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY (GitConstructError)
+    // for a nonexistent repoPath — findLandedSquashCommit must fail safe to null, never throw (matches
+    // scanMergedCommitMap's fix in 4d97a312, which findLandedSquashCommit predates and had missed).
+    const noRepoPath = path.join(process.env.LOOM_HOME, `no-such-repo-${Date.now()}`);
+    let threwForNoRepo = false;
+    let noRepoResult;
+    try {
+      noRepoResult = await findLandedSquashCommit(noRepoPath, brM);
+    } catch {
+      threwForNoRepo = true;
+    }
+    check("(m) a nonexistent repoPath fails safe to null, never throws", threwForNoRepo === false && noRepoResult === null);
   }
 
   // (n) toConventionalSubject — the PURE merge safety-net that guarantees every squash subject is

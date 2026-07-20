@@ -1256,8 +1256,12 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
 export async function findLandedSquashCommit(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
 ): Promise<string | null> {
-  const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
+    // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent repoPath
+    // (GitConstructError) — this must be INSIDE the try, not before it (mirrors scanMergedCommitMap's fix),
+    // or a vault-only/moved-repo project's repoPath breaks the fail-safe-null contract instead of resolving
+    // to null.
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
     const sha = (await withTimeout(
       git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H", "--max-count=1"]),
       timeoutMs, "git log --grep trailer",
