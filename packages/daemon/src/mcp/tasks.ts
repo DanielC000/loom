@@ -20,8 +20,14 @@ export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
 /** The lightweight task row tasks_list returns by default — no body (the unbounded field). */
 export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged">;
 
-/** Resolve a project's git-derived merged state for one task, or null with no git call for a vault-only project (no repoPath). */
-async function resolveMergedInfo(db: Db, projectId: string, taskId: string): Promise<MergedCommitInfo | null> {
+/**
+ * Resolve a project's git-derived merged state for one task, or null with no git call for a
+ * vault-only project (no repoPath) OR when `includeMerged` is false (card f6753002) — the latter
+ * lets a latency-sensitive, non-surfacing caller (the companion board) skip the enrichment
+ * entirely rather than pay for a field it discards.
+ */
+async function resolveMergedInfo(db: Db, projectId: string, taskId: string, includeMerged = true): Promise<MergedCommitInfo | null> {
+  if (!includeMerged) return null;
   const repoPath = db.getProject(projectId)?.repoPath;
   return repoPath ? getTaskMergedInfo(repoPath, taskId) : null;
 }
@@ -60,6 +66,13 @@ export interface ListTasksOptions {
   offset?: number;
   /** Return at most N rows (after offset) — bounded-read pagination. Omit = no slice (caller caps). */
   limit?: number;
+  /**
+   * Compute the git-derived `merged` enrichment per row. Default true (preserves tasks_list /
+   * list_all_tasks behavior). Pass false to skip the enrichment ENTIRELY (no `readHeadSha`, no
+   * cached-map lookup, no scan) for a caller — e.g. the companion board — that never surfaces
+   * `merged` and would otherwise pay for a field it discards (card f6753002).
+   */
+  includeMerged?: boolean;
 }
 
 /** Project ONE (already merged-enriched) Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
@@ -109,7 +122,7 @@ export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): Bo
 export async function listProjectTasks(
   db: Db, projectId: string, opts: ListTasksOptions = {},
 ): Promise<TaskWithMerged[] | TaskSummary[]> {
-  const { columns, excludeDone = true, includeBody = false, minPriority, idPrefix, titleContains, offset, limit } = opts;
+  const { columns, excludeDone = true, includeBody = false, minPriority, idPrefix, titleContains, offset, limit, includeMerged = true } = opts;
   let tasks = db.listTasks(projectId);
   if (excludeDone) {
     const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
@@ -134,9 +147,9 @@ export async function listProjectTasks(
   if (limit !== undefined) tasks = tasks.slice(0, limit);
   // Merged-state enrichment (card 9983eed6): one cached, bounded git-log scan per repo backs every
   // task's O(1) map lookup here — see getTaskMergedInfo — so this stays cheap regardless of board size.
-  const repoPath = db.getProject(projectId)?.repoPath;
+  // Skipped entirely when includeMerged is false (card f6753002).
   const withMerged: TaskWithMerged[] = await Promise.all(
-    tasks.map(async (t) => ({ ...t, merged: repoPath ? await getTaskMergedInfo(repoPath, t.id) : null })),
+    tasks.map(async (t) => ({ ...t, merged: await resolveMergedInfo(db, projectId, t.id, includeMerged) })),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
 }
@@ -216,12 +229,16 @@ function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
  * agent-supplied and unvalidated against the asking session's project, so a foreign-project question
  * that happens to carry this project's task id must never surface here — see `db.listQuestionsForTask`).
  * Also includes `merged` (card 9983eed6) — the task's git-derived ship state on this project's repo, or
- * `null` if not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract.
+ * `null` if not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract. Pass
+ * `includeMerged:false` (default true) to skip that git lookup entirely for a caller that never
+ * surfaces `merged` — e.g. the companion board (card f6753002).
  */
-export async function getProjectTask(db: Db, projectId: string, taskId: string): Promise<TaskWithRequests | { error: string }> {
+export async function getProjectTask(
+  db: Db, projectId: string, taskId: string, opts: { includeMerged?: boolean } = {},
+): Promise<TaskWithRequests | { error: string }> {
   const found = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in found) return found;
-  const merged = await resolveMergedInfo(db, projectId, found.id);
+  const merged = await resolveMergedInfo(db, projectId, found.id, opts.includeMerged ?? true);
   return { ...found, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
 }
 

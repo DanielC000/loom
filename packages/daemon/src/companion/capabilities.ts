@@ -1083,7 +1083,10 @@ const BOARD_REACH: CompanionCapability = {
         // cached/bounded per repo, so awaiting it per project here stays cheap.
         const cards = (await Promise.all([...targetProjects].map(async (pid) => {
           const projectName = db.getProject(pid)?.name ?? null;
-          const tasks = await listProjectTasks(db, pid, { excludeDone: !includeDone, columns }) as TaskSummary[];
+          // includeMerged:false (card f6753002) — this row projection never reads `merged`, so skip
+          // the git ship-state enrichment (readHeadSha + cached-map lookup) entirely on this
+          // latency-sensitive path rather than compute it only to discard it below.
+          const tasks = await listProjectTasks(db, pid, { excludeDone: !includeDone, columns, includeMerged: false }) as TaskSummary[];
           return tasks.map((t) => ({
             id: t.id, title: t.title, columnKey: t.columnKey, priority: t.priority,
             position: t.position, updatedAt: t.updatedAt, projectId: pid, projectName,
@@ -1116,7 +1119,9 @@ const BOARD_REACH: CompanionCapability = {
         if (!ctx.scope.projectIds.has(project)) {
           return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
-        const found = await getProjectTask(db, project, taskId);
+        // includeMerged:false (card f6753002) — the card projection below never reads `merged`,
+        // so skip the git ship-state enrichment entirely on this latency-sensitive path.
+        const found = await getProjectTask(db, project, taskId, { includeMerged: false });
         if ("error" in found) return ok({ error: found.error });
         const projectName = db.getProject(project)?.name ?? null;
         return ok({
