@@ -4234,10 +4234,16 @@ export class SessionService {
    * `db.listTasks()`/`getTask`, which would leak whether an out-of-scope id exists. An ambiguous prefix
    * names the candidate ids (still project-scoped); a true miss — unknown OR simply out-of-scope — still
    * returns `{ found: false }` uniformly, unchanged.
+   *
+   * LIST MODE (no `taskId`) is bounded to OPEN escalations by default — `pending`/`in_progress` only —
+   * so a manager checking in isn't handed every escalation ever filed, most of it days-stale `resolved`/
+   * `closed` history it didn't ask for (card 107b595b: a manager paid ~44KB of stale history twice when
+   * it only needed the open ones). Pass `includeResolved:true` to opt back into the full unfiltered
+   * history. The single-`taskId` lookup above is unaffected either way — it's already cheap.
    */
   escalationStatus(
     managerSessionId: string,
-    input: { taskId?: string },
+    input: { taskId?: string; includeResolved?: boolean },
   ): { found: false } | { found: true; escalation: EscalationStatusItem } | { found: true; escalations: EscalationStatusItem[] } | { error: string } {
     const caller = this.db.getSession(managerSessionId);
     if (!caller || caller.role !== "manager") throw new Error("escalation_status is a manager-only surface");
@@ -4256,7 +4262,9 @@ export class SessionService {
       if (r.kind === "none") return { found: false };
       return { found: true, escalation: this.describeEscalation(r.record.event) };
     }
-    return { found: true, escalations: events.map((e) => this.describeEscalation(e)) };
+    const all = events.map((e) => this.describeEscalation(e));
+    const scoped = input.includeResolved ? all : all.filter((it) => it.status === "pending" || it.status === "in_progress");
+    return { found: true, escalations: scoped };
   }
 
   /** One `platform_escalate` event → its current escalation status, read fresh off the live Platform task

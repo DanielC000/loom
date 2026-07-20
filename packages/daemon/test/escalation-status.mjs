@@ -175,10 +175,13 @@ try {
   check("(c) a DIFFERENT managerSessionId in the SAME project (simulated recycle) still sees T2",
     recycled.found === true && recycled.escalation.taskId === t2 && recycled.escalation.status === "pending");
   const recycledList = await callAs("MGR_A2", "manager", "escalation_status", {});
-  check("(c) MGR_A2's list includes BOTH T1 (closed) and T2 (pending) — origin-project scoped, not session-scoped",
-    recycledList.escalations.length === 2 &&
-    recycledList.escalations.some((e) => e.taskId === t1 && e.status === "closed") &&
-    recycledList.escalations.some((e) => e.taskId === t2 && e.status === "pending"));
+  check("(c) MGR_A2's default (open-only) list includes ONLY T2 (pending) — T1 (closed) is bounded out by default",
+    recycledList.escalations.length === 1 && recycledList.escalations[0].taskId === t2 && recycledList.escalations[0].status === "pending");
+  const recycledListAll = await callAs("MGR_A2", "manager", "escalation_status", { includeResolved: true });
+  check("(c) includeResolved:true on the SAME query restores the full history — BOTH T1 (closed) and T2 (pending)",
+    recycledListAll.escalations.length === 2 &&
+    recycledListAll.escalations.some((e) => e.taskId === t1 && e.status === "closed") &&
+    recycledListAll.escalations.some((e) => e.taskId === t2 && e.status === "pending"));
 
   // ===================== (b) scoping — project B must see NOTHING of project A's escalations =====================
   const bDirect = await callAs("MGR_B", "manager", "escalation_status", { taskId: t2 });
