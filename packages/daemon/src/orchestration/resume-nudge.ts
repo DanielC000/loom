@@ -43,7 +43,17 @@ export const RESUME_NUDGE_TAIL =
  *
  * Real-engine probes (card: pasted-text-attachment-survives-restart) confirmed a SUBMITTED turn's pasted
  * text is fully durable — the engine resolves it to full content before persisting, and `--resume`
- * reconstructs it correctly every time. The ONE genuine gap is a draft that was pasted/typed but never
+ * reconstructs it correctly every time. That original probe (`test/_probe-paste-resume.mjs`) validated this
+ * via a single raw `writeStdin` write mimicking a human raw-terminal paste — NOT the companion/system
+ * delivery path (`enqueueStdin` → `submit()` → `writeChunked()`, isolated `pty.write` calls for the bracket
+ * markers). Task 16c50cdd re-validated the claim against that REAL path (`test/_probe-paste-companion.mjs`,
+ * incl. the queued-while-busy/`drainPending` timing companion messages actually use) and it still holds on
+ * claude 2.1.215. A real production incident (3 pastes on session 5db71873, all pinned to claude 2.1.212,
+ * with zero recurrence across 8 later versions of continued use on the SAME session) showed a submitted
+ * companion paste CAN collapse to a bare placeholder with no recoverable text — but that was a transient
+ * upstream CLI race around Stop-hook timing, not a Loom defect, and does not reproduce on current tooling.
+ * If pastes-losing-content resurfaces, suspect a CLI regression before Loom's write path. The ONE genuine gap
+ * this note is actually about is a draft that was pasted/typed but never
  * submitted (Enter not yet pressed) at the moment of the restart: it lives only in the now-dead pty's (and
  * engine's) in-memory composer, commonly collapsed on-screen to a "[Pasted text #N]" placeholder, and is
  * not part of the transcript at all — so it is NOT replayed and NOT recoverable. Without this note that
