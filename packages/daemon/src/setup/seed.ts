@@ -139,6 +139,7 @@ export function seedSetupHome(db: Db): string[] {
     archivedAt: null,
     reserved: true, // a reserved home — hidden from the picker, minted only here at boot-seed
     referenceRepos: [],
+    noGateByDesign: false,
   };
   db.insertProject(project);
 

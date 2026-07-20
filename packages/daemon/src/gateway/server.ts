@@ -2926,7 +2926,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // plain notes folder. Same trust posture as the other setup REST writers — loopback, human-only, NO MCP
   // router (orchestration/platform/setup/audit) exposes this path.
   app.post("/api/setup/project-init", async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride; referenceRepos?: unknown };
+    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown };
     if (!b.name || !b.name.trim()) return reply.code(400).send({ error: "name required" });
     // referenceRepos: HUMAN-only on this REST create path, same validation + trust class as POST
     // /api/projects — each entry MUST be an absolute path to an existing git repo (validateReferenceRepos).
@@ -2937,6 +2937,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: check.error });
       referenceRepos = check.value;
     }
+    // noGateByDesign (card 58b0bb60): HUMAN-only, same trust class as referenceRepos/repoPath — a plain
+    // boolean, no separate validator needed. Most relevant to kind:"vault" (no buildable code).
+    const noGateByDesign = b.noGateByDesign === true;
     const isGit = (b.kind ?? "git") === "git";
     const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
     if (!boot.ok) return reply.code(400).send({ error: boot.error });
@@ -2945,6 +2948,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
       referenceRepos,
+      noGateByDesign,
     };
     deps.db.insertProject(project);
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
@@ -3392,7 +3396,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown };
+    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown };
     if (!b.name || !b.repoPath || !b.vaultPath)
       return reply.code(400).send({ error: "name, repoPath, vaultPath required" });
     // repoPath must be an existing git repo — matches the elevated platform MCP project_create and the
@@ -3410,11 +3414,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: check.error });
       referenceRepos = check.value;
     }
+    // noGateByDesign (card 58b0bb60): HUMAN-only on this REST create path, same trust class as
+    // referenceRepos/repoPath — suppresses the per-merge "unverified: no gateCommand" warning.
+    const noGateByDesign = b.noGateByDesign === true;
     const project: Project = {
       id: randomUUID(), name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
       referenceRepos,
+      noGateByDesign,
     };
     deps.db.insertProject(project);
     return reply.code(201).send(project);
@@ -3437,7 +3445,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const p = deps.db.getProject(id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown; referenceRepos?: unknown };
+    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown; referenceRepos?: unknown; noGateByDesign?: unknown };
     if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && (typeof b.vaultPath !== "string" || !b.vaultPath.trim()))
@@ -3463,11 +3471,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: check.error });
       referenceRepos = check.value;
     }
+    // noGateByDesign (card 58b0bb60): HUMAN-only on this REST PATCH path — same trust posture as
+    // referenceRepos/repoPath above. A plain boolean; `undefined` leaves the stored value untouched.
+    if (b.noGateByDesign !== undefined && typeof b.noGateByDesign !== "boolean")
+      return reply.code(400).send({ error: "noGateByDesign must be a boolean" });
     deps.db.updateProject(id, {
       name: b.name === undefined ? undefined : (b.name as string).trim(),
       vaultPath: b.vaultPath === undefined ? undefined : (b.vaultPath as string).trim(),
       repoPath,
       referenceRepos,
+      noGateByDesign: b.noGateByDesign as boolean | undefined,
     });
     return deps.db.getProject(id);
   });

@@ -6611,7 +6611,12 @@ export class SessionService {
     // any build/DoD check, rather than silently rubber-stamping it with no signal either way. `notified`
     // is left undefined here (unlike every other branch): the GREEN path sends no direct nudge of its
     // own, so confirmWorkerMergeTracked's generic `[loom:merge-done]` echo is the sole terminal signal.
-    const gateWarning = gate ? undefined : "unverified: no gateCommand is configured for this project — the merge was NOT checked by any build/DoD gate";
+    // SUPPRESSED when the project is flagged `noGateByDesign` (card 58b0bb60) — a deliberately gateless
+    // project (vault/markdown/knowledge, no buildable code) opted OUT of this signal; an UNFLAGGED
+    // gateless project still warns, so a genuinely missing gate stays surfaced.
+    const gateWarning = gate || project.noGateByDesign
+      ? undefined
+      : "unverified: no gateCommand is configured for this project — the merge was NOT checked by any build/DoD gate";
     const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;
     return warning ? { merged: true, opId: thisOpId, warning } : { merged: true, opId: thisOpId };
   }

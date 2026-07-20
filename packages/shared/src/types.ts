@@ -34,6 +34,20 @@ export interface Project {
    * legacy rows backfill to false (0).
    */
   reserved: boolean;
+  /**
+   * Deliberate no-build-gate declaration (card 58b0bb60): when true, the per-merge "unverified: no
+   * gateCommand is configured" warning (worker_merge_confirm / confirmWorkerMerge) is SUPPRESSED for
+   * this project — a vault/markdown/knowledge project has no buildable code, so that warning is pure
+   * noise, not a signal of a missing gate worth asking the owner about. An UNFLAGGED gateless project
+   * still warns on every merge (a genuinely missing gate stays surfaced) — this flag opts OUT of the
+   * warning, it does not touch gate execution: a project WITH a `gateCommand` configured is unaffected
+   * either way (the gate still runs; this flag only silences the no-gate warning path). Default false
+   * and fully additive — legacy rows backfill to false (0), byte-identical to today. HUMAN-set only
+   * (the REST project create/update surface) — same trust posture as `gateCommand`/`repoPath`: it
+   * silences a merge-integrity signal, so no agent MCP tool (setup or the elevated Platform Lead) may
+   * set it; those surfaces simply don't declare the field, so an agent-passed value is stripped.
+   */
+  noGateByDesign: boolean;
 }
 
 /**

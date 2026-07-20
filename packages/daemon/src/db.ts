@@ -163,7 +163,11 @@ CREATE TABLE IF NOT EXISTS projects (
   -- Reference-only repos a manager + its workers may READ but never own (JSON array of absolute host
   -- paths); repoPath stays the one primary repo. Added to existing DBs via the idempotent migration
   -- below; NOT NULL + constant DEFAULT '[]' backfills legacy rows to [] (mirrors connections/capabilities).
-  reference_repos TEXT NOT NULL DEFAULT '[]'
+  reference_repos TEXT NOT NULL DEFAULT '[]',
+  -- Deliberate no-build-gate declaration (card 58b0bb60): suppresses the per-merge "unverified: no
+  -- gateCommand" warning for a project with no buildable code. Added to existing DBs via the idempotent
+  -- migration below; NOT NULL + constant DEFAULT 0 backfills legacy rows to 0 (still warns, unchanged).
+  no_gate_by_design INTEGER NOT NULL DEFAULT 0
 );
 -- Profiles (platform-level rig: role + model + permission-delta + skill-subset + icon). NO project
 -- FK — a profile is cross-project, reused by agents across projects. allow_delta/skills are JSON text.
@@ -1187,6 +1191,8 @@ const PROJECT_ADDED_COLUMNS: Record<string, string> = {
   reserved: "INTEGER NOT NULL DEFAULT 0",
   // Reference-only repos (JSON array of absolute host paths); legacy rows backfill to '[]' (no refs).
   reference_repos: "TEXT NOT NULL DEFAULT '[]'",
+  // Deliberate no-build-gate declaration (card 58b0bb60); legacy rows backfill to 0 (still warns).
+  no_gate_by_design: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
@@ -1933,14 +1939,15 @@ export class Db {
   }
   insertProject(p: Project): void {
     this.db.prepare(
-      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos)
-       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos)`,
+      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos,no_gate_by_design)
+       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos,@noGateByDesign)`,
     ).run({
       ...p,
       config: JSON.stringify(p.config),
       archivedAt: p.archivedAt,
       reserved: p.reserved ? 1 : 0,
       referenceRepos: JSON.stringify(p.referenceRepos ?? []),
+      noGateByDesign: p.noGateByDesign ? 1 : 0,
     });
   }
   /**
@@ -1952,11 +1959,15 @@ export class Db {
    * `referenceRepos` (reference-repos epic Phase 2, card f4888775) is editable ONLY via the HUMAN-only
    * REST create/update paths, fronted by `validateReferenceRepos` (absolute path + isGitRepo per entry) —
    * same trust posture as repoPath, and likewise never exposed on any agent-facing surface.
+   * `noGateByDesign` (card 58b0bb60) is editable ONLY via the HUMAN-only REST create/update paths — same
+   * trust posture as repoPath/referenceRepos: it silences a merge-integrity warning, so no agent MCP
+   * tool (setup or the elevated Platform Lead) ever declares this key.
    */
-  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[] }): void {
+  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; noGateByDesign?: boolean }): void {
     const cols: Record<string, unknown> = {
       name: patch.name, vault_path: patch.vaultPath, repo_path: patch.repoPath,
       reference_repos: patch.referenceRepos === undefined ? undefined : JSON.stringify(patch.referenceRepos),
+      no_gate_by_design: patch.noGateByDesign === undefined ? undefined : (patch.noGateByDesign ? 1 : 0),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -5667,6 +5678,7 @@ function toProject(r0: unknown): Project {
     createdAt: r.created_at as string, archivedAt: (r.archived_at as string) ?? null,
     reserved: (r.reserved as number) === 1,
     referenceRepos: JSON.parse((r.reference_repos as string) || "[]") as string[],
+    noGateByDesign: (r.no_gate_by_design as number) === 1,
   };
 }
 function toAgent(r0: unknown): Agent {

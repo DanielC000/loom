@@ -656,6 +656,7 @@ export class PlatformMcpRouter {
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],
+          noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, even on this elevated surface
         };
         db.insertProject(project);
         return ok(project);
@@ -689,6 +690,7 @@ export class PlatformMcpRouter {
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],
+          noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, even on this elevated surface
         };
         db.insertProject(project);
         return ok(project);
