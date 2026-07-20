@@ -3,20 +3,20 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Loom · orchestrate real Claude Code agents on your subscription</title>
+    <title>Loom · orchestrate real Claude Code agents, durable and on your machine</title>
     <meta
       name="description"
-      content="Loom weaves a fleet of real interactive Claude Code agents into one fabric. Every agent runs on your Claude subscription (Pro/Max), with no per-token API bill for the orchestration. Durable local sessions, multi-agent orchestration, and your data on your own machine. (Agents still consume your subscription's usage and obey its rate limits.)"
+      content="Loom weaves a fleet of real interactive Claude Code agents into one fabric — durable daemon-owned sessions, review-gated multi-agent orchestration, and your data on your own machine. Every agent is a genuine claude session, so a whole fleet also runs on the Claude subscription (Pro/Max) you already pay for, with no per-token API bill for the orchestration. (Agents still consume your subscription's usage and obey its rate limits.)"
     />
     <link rel="icon" type="image/svg+xml" href="favicon.svg" />
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0a0b0c" />
 
     <!-- Open Graph / social -->
-    <meta property="og:title" content="Loom · orchestrate real Claude Code agents on your subscription" />
+    <meta property="og:title" content="Loom · orchestrate real Claude Code agents, durable and on your machine" />
     <meta
       property="og:description"
-      content="Weave a fleet of real interactive Claude Code sessions into one fabric on the Claude subscription you already pay for, with a lead agent delegating to workers on isolated branches, all on your own machine."
+      content="Weave a fleet of real interactive Claude Code sessions into one fabric — a lead agent delegates to workers on isolated branches, reviews each diff, and merges, all durable and on your own machine. Runs on the Claude subscription you already pay for."
     />
     <meta property="og:type" content="website" />
 
@@ -67,18 +67,19 @@
           <div class="hero-copy reveal">
             <p class="kicker">
               <span class="dot dot-phosphor"></span>
-              On your Claude subscription · not metered API
+              Durable · local-first · review-gated orchestration
             </p>
             <h1 class="hero-title">
               Weave a fleet of <span class="accent">real</span> Claude&nbsp;Code
               agents into <span class="grad">one&nbsp;fabric</span>.
             </h1>
             <p class="hero-lede">
-              Every agent is the genuine interactive <code>claude</code> driven
-              over a PTY, so a whole fleet runs on the Claude subscription
-              (Pro/Max) you already pay for, with no per-token API bill for the
-              orchestration. A lead decomposes a goal and delegates to workers on
-              isolated branches, all on your own machine.
+              Every agent is the genuine interactive <code>claude</code>, driven
+              over a PTY and owned by a daemon on your own machine, so sessions
+              are durable: a lead decomposes a goal, delegates to workers on
+              isolated branches, and reviews each diff before it merges. A whole
+              fleet runs on the Claude subscription (Pro/Max) you already pay for,
+              with no per-token API bill for the orchestration.
             </p>
             <div class="hero-cta">
               <a class="btn btn-primary" href="https://github.com/DanielC000/loom">
@@ -88,12 +89,14 @@
               <a class="btn btn-ghost" href="#how">See how it works</a>
             </div>
             <ul class="hero-meta" aria-label="At a glance">
-              <li><span class="dot dot-phosphor"></span> Runs on your Pro/Max plan</li>
-              <li><span class="dot dot-cyan"></span> No per-token API bill</li>
-              <li><span class="dot dot-amber"></span> Your data, on your hardware</li>
+              <li><span class="dot dot-phosphor"></span> Durable, on your machine</li>
+              <li><span class="dot dot-cyan"></span> Review-gated merges</li>
+              <li><span class="dot dot-amber"></span> Runs on your Pro/Max plan</li>
             </ul>
             <p class="hero-foot">
-              Agents still consume your subscription's usage and obey its rate limits.
+              Agents still consume your subscription's usage and obey its rate
+              limits, and how that usage is billed is Anthropic's policy to set
+              and evolve.
             </p>
           </div>
 
@@ -183,10 +186,6 @@
       <section class="specband" aria-label="At a glance">
         <div class="wrap specband-grid">
           <div class="spec reveal">
-            <p class="spec-k">Subscription</p>
-            <p class="spec-v">Claude <strong>Pro / Max</strong>, not metered API</p>
-          </div>
-          <div class="spec reveal">
             <p class="spec-k">Engine</p>
             <p class="spec-v">Real interactive <code>claude</code>, over PTY</p>
           </div>
@@ -196,7 +195,11 @@
           </div>
           <div class="spec reveal">
             <p class="spec-k">Orchestration</p>
-            <p class="spec-v">1 lead → N workers, isolated branches</p>
+            <p class="spec-v">1 lead → N workers, review-gated merges</p>
+          </div>
+          <div class="spec reveal">
+            <p class="spec-k">Subscription</p>
+            <p class="spec-v">Claude <strong>Pro / Max</strong>, not metered API</p>
           </div>
         </div>
       </section>
@@ -213,14 +216,15 @@
           <p class="prose reveal">
             Loom drives the <strong>real interactive <code>claude</code></strong>,
             the same terminal session you'd run by hand rather than a headless
-            one-shot or an API-key agent loop. Because every agent is a genuine
-            <code>claude</code> session, a whole fleet of them runs on your
-            <strong>existing Claude subscription (Pro/Max)</strong>, with no
-            separate per-token API bill for the orchestration. Those sessions are
-            durable: a daemon on your own machine owns them, so closing the window
-            never kills the work, and your code, transcripts, and vault stay on
-            your hardware. Around them, one lead agent decomposes a goal, delegates
-            to workers on isolated branches, reviews their diffs, and merges.
+            one-shot or an API-key agent loop. A daemon on your own machine owns
+            those sessions, so they're <strong>durable</strong> — closing the
+            window never kills the work — and one lead agent decomposes a goal,
+            delegates to workers on isolated branches, reviews their diffs, and
+            merges through a build gate. Your code, transcripts, and vault stay on
+            your hardware. And because every agent is a genuine <code>claude</code>
+            session, a whole fleet of them runs on your <strong>existing Claude
+            subscription (Pro/Max)</strong>, with no separate per-token API bill
+            for the orchestration.
           </p>
         </div>
       </section>
@@ -243,14 +247,16 @@
                 </svg>
               </span>
               <div class="card-text">
-                <h3 class="card-title">Runs on your subscription</h3>
+                <h3 class="card-title">Durable real sessions</h3>
                 <p class="card-body">
                   Every agent is the genuine interactive <code>claude</code> driven
                   over a PTY, never <code>claude -p</code> / headless, never an
-                  API-key agent loop, so a whole fleet runs on the Claude
+                  API-key agent loop, and owned by a daemon rather than your shell,
+                  so sessions are resumable and outlive any viewer: a closed tab or
+                  a reboot doesn't lose the thread. And because each one is a real
+                  <code>claude</code> session, a whole fleet runs on the Claude
                   subscription (Pro/Max) you already pay for, with no per-token API
-                  bill for the orchestration. Sessions are resumable and outlive any
-                  viewer, so a closed tab or a reboot doesn't lose the thread.
+                  bill for the orchestration.
                 </p>
               </div>
             </li>
@@ -312,11 +318,12 @@
                   <path d="M20 5v30 M7 12.5 20 20l13-7.5 M20 20v15" />
                 </svg>
               </span>
-              <h3 class="card-title">Vault-backed knowledge</h3>
+              <h3 class="card-title">Vault + Lore knowledge</h3>
               <p class="card-body">
                 Design notes, decisions, and session logs live in an Obsidian vault
-                woven alongside the code, and Loom auto-commits vault writes so the
-                knowledge layer stays versioned with the work.
+                woven alongside the code, auto-committed so they stay versioned. On
+                top of it, Lore is a browsable window into the durable memory the
+                fleet itself writes and recalls across sessions.
               </p>
             </li>
 
@@ -650,10 +657,10 @@
           <span class="brand-word">loom</span>
         </a>
         <p class="footer-note">
-          Weave real Claude Code agents into one fabric on your Claude
-          subscription, not per-token API bills. Runs on your own machine. MIT
-          licensed. Agents still consume your subscription's usage and obey its
-          rate limits.
+          Weave real Claude Code agents into one durable, local-first fabric — a
+          lead delegates to workers, reviews each diff, and merges, all on your own
+          machine. Runs on the Claude subscription you already pay for. MIT
+          licensed.
         </p>
         <a class="footer-link" href="https://github.com/DanielC000/loom"
           >github.com/DanielC000/loom</a

@@ -2,7 +2,7 @@
 
 <img src="docs/images/logo.svg" alt="Loom" width="320" />
 
-### Orchestrate a fleet of real Claude Code agents on your Claude subscription — not per-token API bills
+### Orchestrate a fleet of real Claude Code agents — durable, review-gated, and entirely on your machine
 
 <p>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue.svg" /></a> <a href="https://github.com/DanielC000/loom/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/DanielC000/loom/actions/workflows/ci.yml/badge.svg" /></a> <a href="https://github.com/DanielC000/loom/releases"><img alt="Release" src="https://img.shields.io/github/v/release/DanielC000/loom?sort=semver" /></a> <img alt="Node 22+" src="https://img.shields.io/badge/node-%3E%3D22-brightgreen.svg" /> </p>
@@ -10,28 +10,28 @@
 </div>
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="Loom's Mission Control: live agent fleets across two projects on isolated git branches with context meters, a review queue holding a merge awaiting approval, and a real-time activity feed — one phosphor-on-dark cockpit." width="100%" /> </p>
+  <img src="docs/images/hero.png" alt="Loom's Mission Control: live agent fleets across three projects on isolated git branches with context meters, an attention queue of decisions and secrets awaiting the owner, and a real-time activity feed — one phosphor-on-dark cockpit." width="100%" /> </p>
 
-Loom orchestrates the **real interactive `claude`** — the same terminal session you'd run by hand, driven over a PTY, never a headless `claude -p` one-shot or an API-key agent loop. Because every agent is a genuine `claude` session, a whole fleet of them runs on your **existing Claude subscription (Pro/Max)** — there's no separate per-token API bill for the orchestration the way there is with tools that drive the Anthropic API directly. (To be precise: the agents still consume your subscription's usage and live within its rate limits — Loom rides the plan you already pay for, it doesn't make Claude free.)
+Loom orchestrates the **real interactive `claude`** — the same terminal session you'd run by hand, driven over a PTY, never a headless `claude -p` one-shot or an API-key agent loop. A daemon on your own machine owns those sessions, so they're **durable**: closing the window — or rebooting — never kills the work. Around them, one lead agent decomposes a goal, delegates to workers on isolated git branches, **reviews each diff, and merges through a build gate** — while your code, transcripts, task board, and the knowledge the fleet accumulates all stay **local, on your hardware**. It even self-hosts: Loom is built using Loom.
 
-Those sessions are durable: they're owned by a daemon on your machine, so closing the window — or rebooting — never kills the work. Around them Loom binds your Obsidian vault and a per-project task board into a single view, and lets one lead agent decompose a goal, delegate to workers on isolated branches, review their diffs, and merge. It even self-hosts: Loom is built using Loom.
+Because every agent is a genuine `claude` session rather than an API-key agent loop, a whole fleet of them also runs on the **Claude subscription (Pro/Max)** you already pay for — there's no separate per-token API bill for the orchestration the way there is with tools that drive the Anthropic API directly. That's an honest property, not the headline: the agents still consume your subscription's usage and live within its rate limits (Loom rides the plan you already pay for, it doesn't make Claude free), and how that usage is billed is Anthropic's policy to set and evolve.
 
 ## Features
 
-- **💳 Runs on your subscription, not metered API costs.** Every agent is the genuine interactive
-  `claude` driven over a PTY (`node-pty`) — never `claude -p` / headless, never an API-key agent loop — so a whole fleet of them runs on the **Claude subscription (Pro/Max)** you already pay for. There's no per-token API bill for the orchestration the way there is with tools that call the Anthropic API directly. (Honest caveat: the agents still consume your subscription's usage and obey its rate limits.)
-- **🖥️ Durable real sessions, not headless.** Those sessions are owned by a daemon, not your shell, so
-  they're resumable and **outlive any viewer** — a closed tab or a reboot doesn't lose the thread.
-- **⛓️ Multi-agent orchestration.** A lead session plans, delegates to worker sessions on isolated
-  git **worktree branches**, reviews each diff, and merges through a gate. Workers report up; the lead holds the whole picture. Loom even orchestrates its own development with this loop.
+- **🖥️ Durable real sessions, not headless.** Every agent is the genuine interactive `claude` driven
+  over a PTY (`node-pty`) — never `claude -p` / headless, never an API-key agent loop — and its session is owned by a daemon, not your shell, so it's resumable and **outlives any viewer**: a closed tab or a reboot doesn't lose the thread.
+- **⛓️ Review-gated multi-agent orchestration.** A lead session plans, delegates to worker sessions on
+  isolated git **worktree branches**, reviews each diff, and merges through a build gate — a failing gate bounces the card back instead of merging. Workers report up; the lead holds the whole picture. Loom even orchestrates its own development with this loop.
 - **🏠 Your data, on your hardware.** Everything Loom keeps lives on your machine — an **SQLite** store,
   your git checkouts, your transcripts, and your vault. Loom adds **no cloud service of its own**, so your code and history never leave your machine through Loom, and the daemon binds to **loopback only** (`127.0.0.1`) as its security boundary. To reach the daemon from another device, put a tunnel in front (see [Reach Loom from another device](#reach-loom-from-another-device)).
-- **✦ Vault-backed knowledge.** Design notes, decisions, and session logs live in an Obsidian vault
-  woven alongside the code, and Loom auto-commits vault writes so the knowledge layer stays versioned with the work.
+- **✦ A versioned knowledge layer — vault + Lore.** Design notes, decisions, and session logs live in
+  an Obsidian **vault** woven alongside the code, auto-committed so they stay versioned with the work. On top of it, **Lore** is a browsable window into the durable memory the fleet itself writes and recalls, so hard-won context carries across sessions instead of being re-derived.
 - **◧ A task board agents can use.** Tasks are a first-class, project-scoped surface backed by an MCP
   server, so agents read the board, create cards, and move work through columns as part of the same loop you watch — rendered as a per-project kanban.
+- **💳 Runs on your subscription, not metered API costs.** Because every agent is a genuine interactive
+  `claude` session rather than an API-key agent loop, a whole fleet of them runs on the **Claude subscription (Pro/Max)** you already pay for — there's no per-token API bill for the orchestration the way there is with tools that call the Anthropic API directly. (Honest caveat: the agents still consume your subscription's usage and obey its rate limits.)
 - **❯ The terminal cockpit.** A stateless React/Vite web viewport attaches over WebSockets and
-  detaches freely: Mission Control, the task board, live terminals, runs, and git — one phosphor-on-dark instrument panel.
+  detaches freely — Mission Control, the task board, live terminals, Lore, runs, and git, navigated from a collapsible instrument-rail sidebar, all one phosphor-on-dark panel.
 - **💬 A chat-native personal companion.** Spin up a long-lived **companion** agent you talk to over
   **Telegram** or an in-app web chat — the same durable, real-`claude` runtime, now reachable from your phone. Give it a name and it holds the thread across restarts: it keeps a **durable memory** of what matters to you (recalled automatically at the start of each chat), sets **one-shot and recurring reminders** that ping you back on your own channel, authors its own private skills, and can proactively check in. You manage it from one **Companion** page — chat plus config, channels, memory, reminders, and its persona — behind a fail-closed security model: an encrypted bot token, sender allowlists, DM pairing codes, and human-only configuration.
 - **🌐 Opt-in per-worker browser testing.** A worker profile can be granted its own isolated headless
@@ -186,7 +186,7 @@ You set it up and run it from a single **Companion** page: chat on one side; con
 ## Screenshots
 
 <p align="center">
-  <img src="docs/images/screenshot-terminals.png" alt="Loom's terminal cockpit: several lead sessions each driving their own worker fleet across multiple projects side by side — live interactive claude transcripts, per-session context meters, and voice controls in one phosphor-on-dark panel." width="100%" /> <br /> <em>The terminal cockpit — multiple leads each orchestrating a worker fleet across projects at once, every pane a real interactive <code>claude</code> session with its own context meter and branch.</em> </p>
+  <img src="docs/images/screenshot-terminals.png" alt="Loom's terminal cockpit: a lead session and its worker fleet tiled side by side — live interactive claude transcripts, per-session context meters, branch names, and voice controls in one phosphor-on-dark panel." width="100%" /> <br /> <em>The terminal cockpit — a lead orchestrating its worker fleet, every pane a real interactive <code>claude</code> session with its own context meter and branch.</em> </p>
 
 <p align="center">
   <img src="docs/images/screenshot-board.png" alt="Loom's per-project task board: a kanban of cards that both you and the agents read and move through columns." width="100%" /> <br /> <em>The per-project task board — a kanban you and the agents share, with live worker status and branch on each card.</em> </p>
@@ -198,7 +198,7 @@ You set it up and run it from a single **Companion** page: chat on one side; con
   <img src="docs/images/screenshot-companion.png" alt="Loom's Companion page: a chat with a long-lived personal agent, on the same daemon-owned real-claude runtime, reachable over Telegram or in-app web chat." width="100%" /> <br /> <em>The Companion — chat with a long-lived personal agent over Telegram or in-app web chat, on the same durable runtime.</em> </p>
 
 <p align="center">
-  <img src="docs/images/screenshot-skills.png" alt="Loom's Skills page: the editable skill store, showing a SKILL.md open in the editor with save, reset, and adopt-update controls." width="100%" /> <br /> <em>The editable skill store — read, edit, and three-way-merge Loom's shipped skills; changes apply on the next session spawn.</em> </p>
+  <img src="docs/images/screenshot-skills.png" alt="Loom's Skills store (under Actors): a SKILL.md open in the editor with save, publish-to-repo, and reset-to-shipped controls, beside the list of bundled skills." width="100%" /> <br /> <em>The editable skill store — read, edit, and three-way-merge Loom's shipped skills; changes apply on the next session spawn.</em> </p>
 
 <p align="center">
   <img src="docs/images/screenshot-platform.png" alt="Loom's Platform page: the standing Platform operator and the suggest-only Workspace Auditor, with the auditor's run-on-a-schedule control." width="100%" /> <br /> <em>The Platform operator and suggest-only Workspace Auditor — set up your workspace and review your own sessions, on a deliberately narrow tool surface.</em> </p>
