@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SKILLS_DIR } from "../paths.js";
-import { seedBaseSnapshots, autoFastForwardPristineSkills } from "./store.js";
+import { seedBaseSnapshots, autoFastForwardPristineSkills, retireOrphanedBundledSkillDirs } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> dist -> daemon root -> assets/skills
@@ -53,6 +53,11 @@ export function seedGlobalSkills(): string[] {
   // customized / updateAvailable state and the adopt-update 3-way merge has a common ancestor. Lives
   // OUTSIDE SKILLS_DIR (never injected); store.ts owns the asset-path resolution (LOOM_ASSET_SKILLS-aware).
   seedBaseSnapshots();
+  // Auto-retire store dirs left behind by a bundled-skill RENAME (e.g. `pickup` -> `loom-pickup`) — see
+  // retireOrphanedBundledSkillDirs' own doc for the safety predicate. Uses each retired name's OWN base
+  // snapshot (already backfilled above, or from a prior boot while it was still bundled), so it must run
+  // AFTER seedBaseSnapshots.
+  retireOrphanedBundledSkillDirs();
   // AFTER the base backfill (base must exist for the equality to mean anything): auto-fast-forward only
   // bundled skills that are customized:false (mine == base) and have a shipped update — lossless, since
   // there are no user edits to preserve. This deploys self-host doctrine changes on restart like code.

@@ -176,6 +176,59 @@ export function autoFastForwardPristineSkills(): string[] {
   return advanced;
 }
 
+/**
+ * Store dir names left behind by a Loom bundled-skill RENAME — the old name that seedGlobalSkills()
+ * (seed-if-absent) never removes once the new `loom-*` name takes over. Growing this list is how a
+ * future rename gets auto-retired too. Deliberately HARDCODED, never derived (e.g. from "no matching
+ * asset dir") — asset-absence alone can't distinguish a retired bundled skill from a user's own
+ * UI-created skill of the same name, and only a name Loom itself shipped and renamed away belongs here.
+ */
+export const RETIRED_BUNDLED_SKILL_NAMES: readonly string[] = [
+  "pickup",       // -> loom-pickup
+  "doc-hygiene",  // -> loom-doc-hygiene
+  "session-end",  // -> loom-session-end
+  "task-start",   // -> loom-task-start
+];
+
+/**
+ * Boot-only auto-retire of orphaned store dirs left behind by a bundled-skill rename (card 5ddc2289).
+ * seedGlobalSkills() is seed-IF-ABSENT — it adds the new `loom-*` name but never removes the old store
+ * dir, so a renamed-away skill lingers forever: injectSkills mirrors the whole store, so every session
+ * keeps getting it injected, spending skillListingBudgetFraction on a name nothing references anymore.
+ *
+ * A store dir `name` is retired ONLY when ALL hold:
+ *  (a) `name` is in the hardcoded RETIRED_BUNDLED_SKILL_NAMES allowlist above.
+ *  (b) `name` is NOT a CURRENT bundled asset (bundledNames() lacks it) — guards against ever deleting a
+ *      live bundled skill even if a future asset ships reusing a retired name.
+ *  (c) it is PRISTINE — the store's `mine` still equals its OWN `base` snapshot (the last-synced shipped
+ *      content from before the rename, written by seedBaseSnapshots while `name` was still bundled and
+ *      never deleted since). This is exactly `customized:false`. A MISSING base is NOT proof of pristine
+ *      (it could be a user-created dir that happens to share a retired name) — that case is left
+ *      untouched, fail-closed, same posture as a user-created asset-less skill.
+ *
+ * NEVER touches `~/.claude/skills` (the user's personal store) — this only ever walks SKILLS_DIR /
+ * SKILL_BASE_DIR. Best-effort + boot-safe: each name is wrapped in try/catch and this never throws
+ * (mirrors seedBaseSnapshots' / autoFastForwardPristineSkills' tolerance). Returns the names retired.
+ */
+export function retireOrphanedBundledSkillDirs(): string[] {
+  const retired: string[] = [];
+  const bundled = bundledNames();
+  for (const name of RETIRED_BUNDLED_SKILL_NAMES) {
+    try {
+      if (bundled.has(name)) continue; // re-shipped under this name — never touch
+      const mine = readFileOrNull(skillMd(name));
+      if (mine == null) continue; // no store SKILL.md — nothing to retire
+      const base = readFileOrNull(baseFile(name));
+      if (base == null) continue; // no base snapshot on record — can't prove pristine, fail closed
+      if (normalizeForCompare(mine) !== normalizeForCompare(base)) continue; // customized — never touch
+      fs.rmSync(path.join(SKILLS_DIR, name), { recursive: true, force: true });
+      try { fs.rmSync(baseFile(name), { force: true }); } catch { /* best-effort cleanup */ }
+      retired.push(name);
+    } catch { /* best-effort per name — a bad entry must never break boot */ }
+  }
+  return retired;
+}
+
 // --- 3-way adopt-update merge ----------------------------------------------------------------------
 export interface SkillConflictHunk { mine: string; base: string; shipped: string; }
 export interface SkillMergeResult { clean: boolean; merged: string; conflicts?: SkillConflictHunk[]; }
