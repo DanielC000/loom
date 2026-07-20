@@ -114,7 +114,11 @@ function RailProjectControl({ onOpenChange }: { onOpenChange: (open: boolean) =>
       {open && rect && hasOptions && (
         <div role="listbox"
           style={{ position: "fixed", left: rect.right + 8, top: rect.top, zIndex: 60, minWidth: 220, maxWidth: 320,
-            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, overflow: "hidden",
+            // Capped to the viewport space below the trigger + scrollable: a fixed-position panel can't be
+            // brought into view by window-scrolling, so with no cap a long project list would render rows
+            // permanently below the fold (unreachable by mouse, keyboard, or Playwright's auto-scroll alike).
+            maxHeight: `calc(100vh - ${rect.top + 16}px)`, overflowY: "auto", overflowX: "hidden",
+            background: color.panel, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base,
             display: "flex", flexDirection: "column", padding: "4px 0", boxShadow: "0 6px 20px rgba(0,0,0,0.45)" }}>
           {liveProjects.map(renderItem)}
           {liveProjects.length > 0 && idleProjects.length > 0 && (
