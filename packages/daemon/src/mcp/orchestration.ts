@@ -1086,9 +1086,13 @@ export class OrchestrationMcpRouter {
           "worker_report tool behind an interactive permission prompt nobody can answer, so pushing a worker " +
           "into plan silently traps it — use a kickoff instruction for 'investigate first' instead. " +
           "(bypassPermissions and anything outside acceptEdits|auto|plan are REJECTED outright — a worker " +
-          "must never be escalated out of its sandbox.) Pure keystroke injection: bypasses the busy/turn " +
-          "queue (~0 worker tokens), does not submit a turn. Returns the FEEDBACK-VERIFIED landed mode (read " +
-          "off the footer after the cycle settles) — may differ from `mode` if the cycle gave up early.",
+          "must never be escalated out of its sandbox.) A spawned worker already DEFAULTS to `auto`; reach " +
+          "for `acceptEdits` only for a rare edits-only worker (`acceptEdits` auto-approves file EDITS ONLY " +
+          "— Edit/Write/NotebookEdit — while Bash/`gh`/build/test and any non-allowlisted MCP tool call " +
+          "still prompt for confirmation nobody at an unattended worker's TUI can answer, so it stalls). " +
+          "Pure keystroke injection: bypasses the busy/turn queue (~0 worker tokens), does not submit a " +
+          "turn. Returns the FEEDBACK-VERIFIED landed mode (read off the footer after the cycle settles) " +
+          "— may differ from `mode` if the cycle gave up early.",
         inputSchema: { workerSessionId: z.string(), mode: z.enum(["acceptEdits", "auto", "plan"]) },
       },
       async ({ workerSessionId, mode }) => {

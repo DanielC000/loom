@@ -10,7 +10,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
@@ -723,7 +723,7 @@ export class SessionService {
     // UNION the task-board baseline a custom allow must never strip (see BASELINE_SESSION_ALLOW). When the
     // baseline is already present (the default config + every profile-delta on top of it), this returns the
     // SAME reference, so the common path stays byte-identical; only a custom allow that dropped it is healed.
-    const permission = withBaselineAllow(layered);
+    const baselinePermission = withBaselineAllow(layered);
     // LEAST-PRIVILEGE backstop: a profile may confer ONLY manager|worker|assistant (or no role). An
     // elevated/locked profile role (platform/auditor/setup/run) is dropped to undefined here, so a role-omitted "+New"
     // spawn yields a plain session, never a silent elevation. An EXPLICIT caller role is untouched and
@@ -733,6 +733,17 @@ export class SessionService {
     // An explicit caller role still wins; then the (clamped) profile role (null under forcePlain), then
     // undefined (today's plain). The force-plain path passes no explicitRole, so it resolves null.
     const role = explicitRole ?? profileRole ?? undefined;
+    // WORKER structural default (audit finding 760cd01d, sev medium): `acceptEdits` auto-approves file
+    // edits ONLY — Bash/`gh`/build/test and non-allowlisted MCP calls still prompt, and a spawned worker
+    // has no human at its TUI to answer, so it stalls (the owner had to manually worker_set_mode('auto')
+    // twice before this fix). Pin a WORKER's boot-cycle target to `auto` INDEPENDENT of the shared
+    // `config.permission.startupModeCycles` knob, so a project-level cycles customization (made for
+    // manager/other-role reasons) can never silently leave a worker un-cycled. Every OTHER role keeps
+    // config's startupModeCycles verbatim — byte-identical to before this change. A manager can still pin
+    // a specific worker to the rare edits-only `acceptEdits` mode after spawn via `worker_set_mode`.
+    const permission = role === "worker"
+      ? { ...baselinePermission, startupModeCycles: cyclesToReachFromAcceptEdits("auto") }
+      : baselinePermission;
     // Same `|| undefined` empties-to-undefined coercion today's start paths use on the agent prompt.
     const ownPrompt = resolved.startupPrompt || undefined;
     // Companion (epic Phase 1): an "assistant" session gets the server-owned base brief PREPENDED here (the
@@ -1487,9 +1498,12 @@ export class SessionService {
       // lands (modeAfterCyclesFromAcceptEdits of the same startupModeCycles → auto by default), so a
       // resumed session matches a fresh one exactly. `startupModeCycles` itself is moot on this path:
       // host.ts prefers `resumeModeTarget` when set (`??`), so pin it 0 here defensively rather than
-      // relying on that precedence.
+      // relying on that precedence. Read off `resumePermission` (resolveAgentSpawn's ROLE-AWARE result),
+      // not the bare `config.permission` — a worker's startupModeCycles is pinned to reach `auto`
+      // independent of the project's own knob (see resolveAgentSpawn), and this must match so a resumed
+      // worker converges to the exact same target its fresh spawn did.
       permission: { ...resumePermission, startupModeCycles: 0 },
-      resumeModeTarget: modeAfterCyclesFromAcceptEdits(config.permission.startupModeCycles ?? 0),
+      resumeModeTarget: modeAfterCyclesFromAcceptEdits(resumePermission.startupModeCycles ?? 0),
       geometry: config.pty,
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook

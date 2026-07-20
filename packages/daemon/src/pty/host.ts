@@ -295,6 +295,19 @@ export function modeAfterCyclesFromAcceptEdits(cycles: number): LandedMode {
   // The index is always in [0,4) so this is always defined; the ?? keeps the type non-optional.
   return ACCEPT_EDITS_CYCLE_ORDER[(((n % 4) + 4) % 4)] ?? "acceptEdits";
 }
+/**
+ * The INVERSE of {@link modeAfterCyclesFromAcceptEdits}: how many blind Shift+Tab presses from the
+ * gate-free `acceptEdits` boot mode land on `target`. Lets a caller pin a session's boot-cycle target to
+ * a SPECIFIC mode (e.g. a worker's structural `auto` default — card 760cd01d) without hand-copying the
+ * cycle-order index, so a future change to {@link ACCEPT_EDITS_CYCLE_ORDER} can't silently desync the two.
+ * `target` not found in the cycle (e.g. `bypassPermissions`/`unknown`, never reachable by this cycle) ⇒ 0
+ * (stay at the gate-free boot mode) rather than throwing — mirrors `modeAfterCyclesFromAcceptEdits`'s own
+ * fail-safe `?? "acceptEdits"` fallback.
+ */
+export function cyclesToReachFromAcceptEdits(target: LandedMode): number {
+  const idx = ACCEPT_EDITS_CYCLE_ORDER.indexOf(target);
+  return idx === -1 ? 0 : idx;
+}
 
 /** One step of the feedback cycler: at the target → stop; out of presses → stop; else press once. */
 export type CycleAction = "done" | "press" | "giveup";
