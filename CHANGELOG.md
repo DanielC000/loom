@@ -4,6 +4,20 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.23.0] — 2026-07-20
+
+**A performance and cleanup release.** Session/fleet state now streams to the web UI over a WebSocket **delta-push** channel instead of universal HTTP polling; the Usage page surfaces **prompt-cache hit ratios**; a malformed-frame daemon crash is hardened across all three WebSocket routes; and the opt-in **Open Design** integration is removed.
+
+### Added
+- **Prompt-cache hit-ratio.** The Usage page shows the prompt-cache hit ratio — overall and broken down per session (a manager's cached-token efficiency) — read from the persisted `session_usage_samples` cache columns. Read-only, human-facing.
+
+### Changed
+- **Fleet state streams over WebSocket instead of polling.** A new versioned `/ws/fleet` channel seeds the session list once, then patches it with deltas as sessions change — so the web UI no longer polls `/api/sessions` on every page. Recurring session polling is eliminated (measured), with a disconnected-fallback poll retained for safety. Built on a versioned fleet WS delta protocol and a daemon-side session change-feed emitted from the session mutators.
+- **Act on `main` CI failures.** The Windows self-host merge gate can't catch Linux/env-specific test failures, so a red Linux `ci.yml` run on `main` is now treated as actionable rather than passing unnoticed.
+
+### Fixed
+- **WebSocket crash hardening.** A malformed WebSocket text frame that parses to JSON `null` could null-deref and crash the whole daemon; the `/ws/fleet`, `/ws/term`, and `/ws/companion` message handlers now share a guard that rejects non-object frames.
+
 ### Removed
 - **Open Design integration removed.** The opt-in Open Design (`openDesign`) capability — its per-session MCP-server injection, profile/session fields, capability-registry entry, integration detection, and Settings UI — is gone from Loom's built-in surface. The owner found it too limited for real use.
 
