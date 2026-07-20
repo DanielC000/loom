@@ -334,6 +334,16 @@ async function main(): Promise<void> {
       // is NOT archived (it would silently strand that fleet off every rail/god's-eye list); every other
       // case archives exactly as before. See that method's doc for the full reasoning.
       if (exited && exited.role !== "run") sessions.archiveOnExit(exited);
+      // AUTO-DRAIN the cap-queue (card 81b7e346): the DEFAULT slot-free trigger — covers manual
+      // worker_stop, confirmWorkerMerge's own hard-stop of the merged worker, and a crash/kill. The
+      // no-commit auto-retire, sibling-retirement, and finalizeMerge paths retire a worker's DB row
+      // SYNCHRONOUSLY ahead of their own (possibly deferred) pty.stop, so they each call
+      // maybeDrainCapQueue directly rather than waiting for this hook; a redundant second call from here
+      // once their pty actually exits is harmless (idempotent — the queue is either already drained or
+      // still genuinely has room). Suppressed automatically while a recycleWorker is mid-swap on this
+      // worker's manager (see recycleDrainSuppressed's doc) — recycleWorker calls it itself once settled.
+      // Best-effort + never blocks the exit path: fire-and-forget.
+      if (exited && exited.role === "worker" && exited.parentSessionId) void sessions.maybeDrainCapQueue(exited.parentSessionId);
       // Disarm a leaked companion heartbeat/reminder timer on exit (fix 9227335b): an enabled companion's
       // config row survives the pty death (see companion/revive.ts), so a plain reconcile() would no-op —
       // onSessionExit bypasses that diff and tears down THIS session's live gateway/heartbeat/reminders

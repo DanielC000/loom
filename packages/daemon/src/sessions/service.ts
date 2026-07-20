@@ -595,13 +595,37 @@ export class SessionService {
    */
   private readonly inFlightSpawnTaskIds = new Set<string>();
   /**
-   * BOUNDED visibility marker for a worker_spawn REJECTED purely because the concurrency cap was at
-   * capacity (a distinct failure mode from {@link inFlightSpawnTaskIds}, which guards a live in-flight
-   * spawn against a same-taskId race — this records an intent that never even started). See
-   * {@link CapQueueRegistry} for the full contract; surfaced via {@link listCapQueuedSpawns} as a
-   * worker_list placeholder row, and NEVER auto-dispatched — the manager re-drives it itself.
+   * BOUNDED record of a worker_spawn REJECTED purely because the concurrency cap was at capacity (a
+   * distinct failure mode from {@link inFlightSpawnTaskIds}, which guards a live in-flight spawn against a
+   * same-taskId race — this records an intent that never even started). See {@link CapQueueRegistry} for
+   * the full contract; surfaced via {@link listCapQueuedSpawns} as a worker_list placeholder row, and
+   * auto-drained by {@link maybeDrainCapQueue} whenever a concurrency slot actually frees (card 81b7e346)
+   * — a manager can still re-drive an entry by hand via worker_spawn, but no longer has to.
    */
   private readonly capQueue = new CapQueueRegistry();
+  /**
+   * Per-manager REFCOUNTED suppression for {@link maybeDrainCapQueue} — guards the ONE retirement path
+   * that reuses a just-freed slot for a session it inserts DIRECTLY, bypassing spawnWorker's own cap-admit
+   * entirely: {@link recycleWorker} hard-stops the predecessor, then (up to ~5s later, after its own
+   * bounded wait for the pty to actually die) unconditionally `insertSession`s the successor as a 1:1
+   * swap. If the predecessor's exit fired an auto-drain in that window, a queued entry could steal the
+   * "freed" slot and the successor's own insert would then push the manager one OVER cap — the ONE place
+   * in the whole retirement surface where a slot-free is followed by an uncapped re-claim of it (every
+   * other retirement path listed in maybeDrainCapQueue's doc is a genuine, final free with nothing behind
+   * it). Refcounted (not a boolean) so two overlapping recycles on the SAME manager can't have the first's
+   * cleanup prematurely un-suppress the second's still-in-flight window.
+   */
+  private readonly recycleDrainSuppressed = new Map<string, number>();
+
+  private suppressCapQueueDrain(managerSessionId: string): void {
+    this.recycleDrainSuppressed.set(managerSessionId, (this.recycleDrainSuppressed.get(managerSessionId) ?? 0) + 1);
+  }
+
+  private unsuppressCapQueueDrain(managerSessionId: string): void {
+    const n = (this.recycleDrainSuppressed.get(managerSessionId) ?? 0) - 1;
+    if (n > 0) this.recycleDrainSuppressed.set(managerSessionId, n);
+    else this.recycleDrainSuppressed.delete(managerSessionId);
+  }
   /**
    * CLIENT-TIMEOUT RESILIENCE registry (card fb8df559 Part 1) — a THIN OUTER layer around
    * spawnWorker/confirmWorkerMerge (via {@link spawnWorkerTracked}/{@link confirmWorkerMergeTracked}),
@@ -3072,6 +3096,12 @@ export class SessionService {
   async spawnWorker(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
+    /** INTERNAL — set ONLY by {@link maybeDrainCapQueue}'s own re-call of this method. `skipCapQueueRecord`
+     *  suppresses the normal cap-reject `record()` call (see {@link CapQueueRejectedError}'s doc for why:
+     *  the drain already holds the original popped entry and re-queues THAT itself, preserving its opId/
+     *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
+     *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
+    internal?: { skipCapQueueRecord?: boolean },
   ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
@@ -3265,6 +3295,11 @@ export class SessionService {
     const liveWorkers = this.db.listWorkers(managerSessionId).filter((w) => w.processState === "live").length;
     const cap = config.orchestration.maxConcurrentWorkers;
     if (liveWorkers + this.inFlightSpawnTaskIds.size >= cap) {
+      // internal.skipCapQueueRecord (maybeDrainCapQueue's own re-call): the caller already holds the
+      // ORIGINAL popped entry and re-queues THAT at the front itself — record()-ing a fresh one here would
+      // mint a new opId at the BACK of the queue, demoting it behind younger entries and invalidating any
+      // worker_stop({opId}) already held for it (see CapQueueRejectedError's doc).
+      if (internal?.skipCapQueueRecord) throw new CapQueueRejectedError(cap);
       // Record the rejected intent so it stays VISIBLE via worker_list instead of silently
       // disappearing — see CapQueueRegistry's class doc. Purely additive: the thrown error's
       // `.message` is byte-identical to before; only CapQueueRejectedError.capQueued is new.
@@ -3476,6 +3511,87 @@ export class SessionService {
    *  IN-FLIGHT (still provisioning); a cap-queued entry never started at all. */
   listCapQueuedSpawns(managerSessionId: string): CapQueuedSpawn[] {
     return this.capQueue.listByManager(managerSessionId);
+  }
+
+  /**
+   * Withdraw ONE cap-queued entry (card 81b7e346's cancellation half) — the counterpart to
+   * {@link stopWorker} for an intent that never got a real session/pty at all (a queued entry's
+   * `sessionId` is null, so `stopWorker` has nothing to stop). Ownership-scoped exactly like every other
+   * worker_* write (a manager can only cancel its OWN queued entries — enforced inside
+   * {@link CapQueueRegistry.cancel}). Returns whether an entry was actually found+removed; false is not an
+   * error — the entry may already have auto-fired or TTL-reaped, which the caller should treat as "nothing
+   * left to cancel," not a failure.
+   */
+  cancelCapQueuedSpawn(managerSessionId: string, opId: string): boolean {
+    return this.capQueue.cancel(managerSessionId, opId);
+  }
+
+  /**
+   * Drain this manager's cap-queue: while a concurrency slot is free and an entry is queued, pop the
+   * OLDEST one (FIFO) and replay it through the SAME {@link spawnWorker} a manual worker_spawn call uses —
+   * so the atomic per-taskId claim and the atomic cap-admit (both proven race-free there) apply to an
+   * auto-fired spawn exactly as they do to a manual one; nothing here re-implements either guarantee, and
+   * a drain can never race a concurrent fresh worker_spawn past the cap because they share that one
+   * admission chokepoint. Called from every point a worker's slot actually frees: the pty `onExit` hook
+   * (index.ts — the default path: manual worker_stop, confirmWorkerMerge's own hard-stop of the merged
+   * worker, a crash), the no-commit auto-retire block, {@link retireSiblingSessionsForTask}, and the end of
+   * `finalizeMerge`. Fire-and-forget by every caller (never awaited) — a real spawn (worktree + pty) is as
+   * slow as a manual one, and none of those retirement paths should block on it. Never throws.
+   *
+   * SUPPRESSED while {@link recycleDrainSuppressed} holds this manager (see its own doc): recycleWorker is
+   * the one retirement path that re-claims its own just-freed slot directly, bypassing spawnWorker's
+   * cap-admit — an auto-drain racing into that window could push the manager over cap.
+   *
+   * Bounded by construction: each loop iteration either returns (queue empty, cap genuinely full again, or
+   * the manager is paused) or permanently disposes of exactly one popped entry (a successful spawn, a
+   * transient-condition requeue-and-stop, or a dropped+notified failure) — so it can't wedge or loop
+   * forever on a broken entry, and a repeatedly-failing entry costs at most one attempt per drain call.
+   */
+  async maybeDrainCapQueue(managerSessionId: string): Promise<void> {
+    if ((this.recycleDrainSuppressed.get(managerSessionId) ?? 0) > 0) return;
+    for (;;) {
+      // Checked BEFORE popping (not caught after) so a paused manager's queue is left completely
+      // untouched — e.g. killAllWorkers pauses THEN hard-stops every worker, and every one of those exits
+      // would otherwise reach here; without this check each queued entry would be mistaken for a genuinely
+      // broken spawn and dropped, which is exactly wrong for an emergency stop-everything.
+      if (this.control.isPaused(managerSessionId)) return;
+      const entry = this.capQueue.takeOldest(managerSessionId);
+      if (!entry) return;
+      try {
+        await this.spawnWorker(managerSessionId, {
+          taskId: entry.taskId ?? undefined,
+          agentId: entry.agentId,
+          kickoffPrompt: entry.kickoffPrompt, // the FULL prompt — never the truncated kickoffLabel
+        }, { skipCapQueueRecord: true }); // WE re-queue on a cap-race ourselves — see the catch branch below
+        // Success: loop again in case more than one slot is free (e.g. two workers retired back-to-back).
+      } catch (e) {
+        if (e instanceof CapQueueRejectedError) {
+          // Raced back to cap-full (a concurrent fresh worker_spawn won the slot first). skipCapQueueRecord
+          // means spawnWorker did NOT record a fresh entry — put the ORIGINAL popped entry back at the
+          // front ourselves, preserving its opId and FIFO position (a record()'d replacement would mint a
+          // new opId at the BACK, demoting it behind younger entries and invalidating any
+          // worker_stop({opId}) a caller already holds for it).
+          this.capQueue.requeueFront(entry);
+          return;
+        }
+        if (e instanceof UsageLimitError) {
+          // Transient/recoverable — the manager itself just got parked on a usage cap, not a broken entry.
+          // Put it back at the front so it isn't dropped or reshuffled behind newer arrivals.
+          this.capQueue.requeueFront(entry);
+          return;
+        }
+        // A genuine failure (worktree create failed, the task went terminal/held, its agent was deleted,
+        // …) — the entry is already popped; don't retry it forever (that's the wedge this method must
+        // avoid). Notify the manager with enough to re-drive it by hand, then keep draining the rest.
+        try {
+          this.pty.enqueueStdin(
+            managerSessionId,
+            `[loom:cap-queue-autofire-failed] queued spawn (opId ${entry.opId}, task ${entry.taskId ?? "taskless"}, agent ${entry.agentId}) failed to auto-fire: ${(e as Error).message} — dropped from the queue; re-call worker_spawn yourself if it's still needed.`,
+            "system", undefined, undefined, "agent",
+          );
+        } catch { /* best-effort — never let the notification disturb the drain */ }
+      }
+    }
   }
 
   /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it). */
@@ -4842,6 +4958,10 @@ export class SessionService {
         // ordering so a pty-stop hiccup can never leave the row stuck "live" with its slot still claimed.
         this.db.setProcessState(workerSessionId, "exited");
         this.db.setBusy(workerSessionId, false);
+        // The slot just freed DETERMINISTICALLY (see the comment above) — drain now rather than waiting
+        // for the deferred pty.stop below to actually exit and reach the generic onExit-driven drain
+        // several seconds later. Fire-and-forget (card 81b7e346); never disturbs this report path.
+        if (managerSessionId) void this.maybeDrainCapQueue(managerSessionId);
         this.db.appendEvent({
           id: randomUUID(), ts: new Date().toISOString(),
           managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
@@ -5242,111 +5362,126 @@ export class SessionService {
     // the fresh worker below — see carryPendingToSuccessor. Wakes are moved below too.
     const carried = this.pty.flushPending(workerSessionId);
     const carriedDurable = this.db.listUnresolvedQueuedMessagesForWorker(workerSessionId);
-    // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
-    // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
-    this.pty.stop(workerSessionId, "hard");
-    for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
-      await new Promise((r) => setTimeout(r, 100));
-    }
-    if (this.pty.isAlive(workerSessionId)) {
-      // eslint-disable-next-line no-console
-      console.warn(`[recycle] old worker ${workerSessionId} still alive after ~5s; proceeding`);
-    }
-    // SIBLING SWEEP (incident 35fc823f): the fresh successor reuses this SAME worktree, so retire any OTHER
-    // live session bound to the task before respawning — else a stray sibling would run concurrently with
-    // the successor on the shared worktree/branch (the zombie end of the 2-workers-on-one-branch bug). The
-    // keep is the old worker being recycled (just hard-stopped above). No-op when there are no siblings.
-    await this.retireSiblingSessionsForTask(taskId, workerSessionId);
+    // SUPPRESS auto-drain for this manager from the moment the old worker's slot MIGHT free (its hard-stop,
+    // below) until the fresh successor's row is itself live again — recycleWorker re-claims that freed
+    // slot directly (insertSession + setProcessState below is a 1:1 swap, never routed through spawnWorker's
+    // own cap-admit), so a drain sneaking into this window could hand the "freed" slot to a queued entry
+    // and then this method's own insert would push the manager one OVER cap. See recycleDrainSuppressed's
+    // class doc. Lifted in a finally so a throw anywhere in this window can never leave it stuck suppressed.
+    this.suppressCapQueueDrain(managerSessionId);
+    try {
+      // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
+      // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
+      this.pty.stop(workerSessionId, "hard");
+      for (let i = 0; i < 50 && this.pty.isAlive(workerSessionId); i++) {
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      if (this.pty.isAlive(workerSessionId)) {
+        // eslint-disable-next-line no-console
+        console.warn(`[recycle] old worker ${workerSessionId} still alive after ~5s; proceeding`);
+      }
+      // SIBLING SWEEP (incident 35fc823f): the fresh successor reuses this SAME worktree, so retire any OTHER
+      // live session bound to the task before respawning — else a stray sibling would run concurrently with
+      // the successor on the shared worktree/branch (the zombie end of the 2-workers-on-one-branch bug). The
+      // keep is the old worker being recycled (just hard-stopped above). No-op when there are no siblings.
+      await this.retireSiblingSessionsForTask(taskId, workerSessionId);
 
-    const now = new Date().toISOString();
-    const fresh: Session = {
-      id: randomUUID(),
-      projectId: old.projectId,
-      agentId: old.agentId,
-      engineSessionId: null,
-      title: null,
-      cwd: worktreePath, // SAME worktree — code state persists
-      processState: "starting",
-      resumability: "unknown",
-      busy: false,
-      createdAt: now,
-      lastActivity: now,
-      lastError: null,
-      role: "worker",
-      browserTesting: old.browserTesting ?? false, // a recycled QA worker keeps its browser capability
-      documentConversion: old.documentConversion ?? false, // a recycled document worker keeps its conversion capability
-      capabilities: old.capabilities ?? [], // a recycled worker keeps its registry-capability grants
-      restrictedTools: old.restrictedTools ?? false, // a recycled worker keeps its restricted-tools disallow
-      noCommit: old.noCommit ?? false, // a recycled reviewer keeps its declared no-commit role
-      skills: old.skills ?? null, // a recycled worker keeps its pinned skill subset (null ⇒ all)
-      connections: old.connections ?? [], // a recycled worker keeps its authenticated-egress allowlist
-      vaultWrite: old.vaultWrite ?? false, // a recycled worker keeps its confined vault-write grant
-      parentSessionId: managerSessionId,
-      taskId,
-      worktreePath,
-      branch,
-      gen: newGen,
-      recycledFrom: old.id,
-    };
-    this.db.insertSession(fresh);
-    // The handoff is the fresh worker's startup prompt (the proven positional-arg path, run on
-    // boot) — NOT --resume, which would carry the old context forward and defeat the recycle.
-    const framed =
-      `[loom:handoff] You are continuing a task in an existing git worktree on branch ${branch ?? "(unknown)"}. ` +
-      `Your predecessor's handoff:\n\n${handoffSummary}\n\nContinue from here.`;
-    // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
-    this.db.setProcessState(fresh.id, "live");
-    // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
-    // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
-    // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
-    // available here); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so
-    // this recycled worker's FIRST resume compares against what this fresh spawn just showed it.
-    const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
-    this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
-    this.pty.spawn({
-      sessionId: fresh.id,
-      cwd: worktreePath,
-      permission: workerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
-      geometry: config.pty,
-      sessionEnv: config.sessionEnv,
-      vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-      codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
-      projectId: project.id,
-      // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
-      // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
-      // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
-      startupPrompt: appendMemoryRecallToStartupPrompt(
-        composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos),
-        recycleProjectMemoryFramed,
-      ),
-      role: "worker",
-      browserTesting: old.browserTesting ?? false,
-      documentConversion: old.documentConversion ?? false,
-      capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
-      restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
-      model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
-      skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
-      // Card f9b47cd1: RECOMPUTED (not carried from `old`) from the CURRENT agent name + task title, so a
-      // recycled worker "keeps its name" for free as long as neither changed — the same agent/task pair
-      // always slugs identically. EXCLUDE both fresh.id (already inserted+live by this point — the row
-      // would otherwise "collide with itself", code review fix) and workerSessionId (the predecessor,
-      // which can still show `live` mid-teardown and must never count as its successor's collision).
-      sessionName: composeWorkerSessionName(
-        project.name, agent?.name ?? "worker", taskId ? this.db.getTask(taskId)?.title ?? null : null, fresh.id,
-        this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([fresh.id, workerSessionId])),
-      ),
-    });
-    // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
-    // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
-    // (busy-gated; they drain on its first turn boundary, after its handoff turn).
-    this.db.reparentWakes(workerSessionId, fresh.id);
-    this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
-    this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(),
-      managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
-      detail: { recycledFrom: old.id, gen: newGen },
-    });
-    return { ...fresh, processState: "live" };
+      const now = new Date().toISOString();
+      const fresh: Session = {
+        id: randomUUID(),
+        projectId: old.projectId,
+        agentId: old.agentId,
+        engineSessionId: null,
+        title: null,
+        cwd: worktreePath, // SAME worktree — code state persists
+        processState: "starting",
+        resumability: "unknown",
+        busy: false,
+        createdAt: now,
+        lastActivity: now,
+        lastError: null,
+        role: "worker",
+        browserTesting: old.browserTesting ?? false, // a recycled QA worker keeps its browser capability
+        documentConversion: old.documentConversion ?? false, // a recycled document worker keeps its conversion capability
+        capabilities: old.capabilities ?? [], // a recycled worker keeps its registry-capability grants
+        restrictedTools: old.restrictedTools ?? false, // a recycled worker keeps its restricted-tools disallow
+        noCommit: old.noCommit ?? false, // a recycled reviewer keeps its declared no-commit role
+        skills: old.skills ?? null, // a recycled worker keeps its pinned skill subset (null ⇒ all)
+        connections: old.connections ?? [], // a recycled worker keeps its authenticated-egress allowlist
+        vaultWrite: old.vaultWrite ?? false, // a recycled worker keeps its confined vault-write grant
+        parentSessionId: managerSessionId,
+        taskId,
+        worktreePath,
+        branch,
+        gen: newGen,
+        recycledFrom: old.id,
+      };
+      this.db.insertSession(fresh);
+      // The handoff is the fresh worker's startup prompt (the proven positional-arg path, run on
+      // boot) — NOT --resume, which would carry the old context forward and defeat the recycle.
+      const framed =
+        `[loom:handoff] You are continuing a task in an existing git worktree on branch ${branch ?? "(unknown)"}. ` +
+        `Your predecessor's handoff:\n\n${handoffSummary}\n\nContinue from here.`;
+      // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
+      this.db.setProcessState(fresh.id, "live");
+      // Project memory (card 2fd9abf9): a recycle spawns FRESH (no --resume), so — unlike resume(), which
+      // injects for every role — a recycled worker would otherwise lose project notes its predecessor saw.
+      // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
+      // available here); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so
+      // this recycled worker's FIRST resume compares against what this fresh spawn just showed it.
+      const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
+      this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
+      this.pty.spawn({
+        sessionId: fresh.id,
+        cwd: worktreePath,
+        permission: workerSpawn?.permission ?? config.permission, // re-resolved layered allowlist (was bare config.permission)
+        geometry: config.pty,
+        sessionEnv: config.sessionEnv,
+        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+        codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
+        projectId: project.id,
+        // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
+        // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
+        // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
+        startupPrompt: appendMemoryRecallToStartupPrompt(
+          composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos),
+          recycleProjectMemoryFramed,
+        ),
+        role: "worker",
+        browserTesting: old.browserTesting ?? false,
+        documentConversion: old.documentConversion ?? false,
+        capabilities: old.capabilities ?? [], // carry the registry-capability grants forward across recycle
+        restrictedTools: old.restrictedTools ?? false, // carry the restricted-tools disallow forward across recycle
+        model: workerSpawn?.model, // re-resolved profile model pin (undefined if agent gone ⇒ no `--model`); was dropped
+        skills: old.skills ?? null, // carry the pinned skill subset forward across recycle (null ⇒ all)
+        // Card f9b47cd1: RECOMPUTED (not carried from `old`) from the CURRENT agent name + task title, so a
+        // recycled worker "keeps its name" for free as long as neither changed — the same agent/task pair
+        // always slugs identically. EXCLUDE both fresh.id (already inserted+live by this point — the row
+        // would otherwise "collide with itself", code review fix) and workerSessionId (the predecessor,
+        // which can still show `live` mid-teardown and must never count as its successor's collision).
+        sessionName: composeWorkerSessionName(
+          project.name, agent?.name ?? "worker", taskId ? this.db.getTask(taskId)?.title ?? null : null, fresh.id,
+          this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([fresh.id, workerSessionId])),
+        ),
+      });
+      // Hand the carried queue + scheduled wakes to the successor: re-point the old worker's wakes (so a
+      // due wake can't resurrect the retired worker) and re-drive the held messages onto the fresh worker
+      // (busy-gated; they drain on its first turn boundary, after its handoff turn).
+      this.db.reparentWakes(workerSessionId, fresh.id);
+      this.carryPendingToSuccessor(workerSessionId, fresh.id, carried, carriedDurable);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId, workerSessionId: fresh.id, taskId, kind: "recycle_complete",
+        detail: { recycledFrom: old.id, gen: newGen },
+      });
+      return { ...fresh, processState: "live" };
+    } finally {
+      this.unsuppressCapQueueDrain(managerSessionId);
+      // A drain suppressed during the window above may have left real headroom on the table (e.g. the
+      // manager's cap was raised mid-recycle, or another slot freed independently while suppressed) — catch
+      // up now that the swap is settled. Fire-and-forget, never blocks the caller.
+      void this.maybeDrainCapQueue(managerSessionId);
+    }
   }
 
   /**
@@ -6922,6 +7057,16 @@ export class SessionService {
       this.db.setProcessState(sib.id, "exited");
       this.db.setBusy(sib.id, false);
     }
+    // Each sibling's slot just freed DETERMINISTICALLY (same reasoning as the no-commit auto-retire path)
+    // — drain now rather than waiting for the graceful stop above to actually land and reach the generic
+    // onExit-driven drain later. A sibling can belong to a DIFFERENT manager than this call's caller (this
+    // lookup is board-wide — see the class doc), so drain each one's OWN parentSessionId, deduped; a
+    // manager mid-recycleWorker is protected by maybeDrainCapQueue's own recycleDrainSuppressed check —
+    // this call doesn't need to know which caller (finalizeMerge vs. recycleWorker) it's running under.
+    // Fire-and-forget: never blocks the caller's own worktree-removal/wait below.
+    for (const managerId of new Set(siblings.map((s) => s.parentSessionId).filter((id): id is string => !!id))) {
+      void this.maybeDrainCapQueue(managerId);
+    }
     for (let i = 0; i < 50 && siblings.some((s) => this.pty.isAlive(s.id)); i++) {
       await new Promise((r) => setTimeout(r, 100));
     }
@@ -7241,6 +7386,12 @@ export class SessionService {
     // big-repo ingest can take up to ~2 minutes, so awaiting it here would hold the merge caller for that
     // whole window. Best-effort by construction.
     this.fireCodescapeReingest(args.projectId, args.repoPath);
+    // The merged worker's slot is now genuinely, finally free — nothing else claims it afterward (unlike
+    // recycleWorker's own predecessor exit), so drain here rather than waiting for the caller's own
+    // hard-stop of the merged worker to reach the generic onExit-driven drain. Fire-and-forget; a
+    // redundant second drain from that later onExit is harmless (idempotent — the queue is either already
+    // empty or still genuinely has room). Safe on the idempotent ALREADY_MERGED replay path too.
+    void this.maybeDrainCapQueue(args.managerSessionId);
     return nestedRepoBlock ? { nestedRepoBlock } : {};
   }
 
