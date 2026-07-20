@@ -519,7 +519,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "list_all_agents",
       {
-        description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project. DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED. Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default — page with limit/offset for more.",
+        description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project. DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED. Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare agents array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {agents, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
         inputSchema: {
           projectId: z.string().optional(),
           full: z.boolean().optional(),
@@ -539,8 +539,22 @@ export class SetupMcpRouter {
         const all = resolvedProjectId !== undefined
           ? db.listAgents(resolvedProjectId)
           : db.listAllProjects().flatMap((p) => db.listAgents(p.id));
+        // Backstop the summary feed so an aggregate read can't overflow the tool-result cap with no limit.
         const effLimit = limit ?? (full ? undefined : DEFAULT_AGENT_SUMMARY_CAP);
-        return ok(projectAgentList(all, { full, limit: effLimit, offset }));
+        const total = all.length;
+        const off = offset ?? 0;
+        const page = projectAgentList(all, { full, limit: effLimit, offset });
+        const returned = page.length;
+        // nextOffset mirrors session_transcript's pageTranscript convention exactly: offset+returned while
+        // more remains under the SAME effective limit, else null — never set when effLimit is unbounded
+        // (full:true with no explicit limit already read everything there is).
+        const nextOffset = effLimit !== undefined && off + returned < total ? off + returned : null;
+        const explicit = offset !== undefined || limit !== undefined;
+        // Card 57cb355d / 6500b707: a capped read with NO cap signal let a caller mistake "capped at N" for
+        // "N total" — mirrors the platform surface's list_all_agents (c30cf4aa) exactly.
+        // Mirror session_transcript's own shape — bare array when the whole matching set fit in one page
+        // and the caller didn't page explicitly (today's behavior, unchanged); otherwise the envelope.
+        return ok(!explicit && nextOffset === null ? page : { agents: page, total, returned, offset: off, nextOffset });
       },
     );
 

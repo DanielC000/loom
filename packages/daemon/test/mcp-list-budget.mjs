@@ -40,6 +40,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { DEFAULT_SESSION_SUMMARY_CAP } = await import("../dist/mcp/sessionView.js");
 const { DEFAULT_AGENT_SUMMARY_CAP } = await import("../dist/mcp/agentView.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -108,6 +109,7 @@ const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats(
 const svc = new SessionService(db, host, new OrchestrationControl());
 const auditRouter = new AuditMcpRouter(db, svc);
 const platformRouter = new PlatformMcpRouter(db, svc);
+const setupRouter = new SetupMcpRouter(db, svc);
 
 const connect = async (server, name) => {
   const [cT, sT] = InMemoryTransport.createLinkedPair();
@@ -163,6 +165,43 @@ try {
   check("list_all_agents full:true RESTORES the heavy startupPrompt", agentsFullRows.every((a) => typeof a.startupPrompt === "string" && a.startupPrompt.length > 0));
   check("FIXTURE IS REPRESENTATIVE: the OLD unbounded full-row response BLOWS the budget", agentsFullSize > CHAR_BUDGET);
   await pClient.close();
+
+  // ===================== setup-surface list_all_agents — card 6500b707: the sibling gap ==================
+  // c30cf4aa envelope-wrapped the PLATFORM list_all_agents (above) but left the setup-assistant surface's
+  // OWN list_all_agents (mcp/setup.ts) on the old bare-capped-array shape with no cap signal. Same fixture,
+  // same assertions, against the setup router instead.
+  const sClient = await connect(setupRouter.buildServer(), "mlb-setup");
+  const callSetupAgents = (args) => sClient.callTool({ name: "list_all_agents", arguments: args });
+
+  const setupAgentsDefault = await callSetupAgents({});
+  const setupAgentsDefaultParsed = parse(setupAgentsDefault);
+  check("setup list_all_agents default (capped) returns the pagination envelope, not a bare array",
+    !Array.isArray(setupAgentsDefaultParsed) && Array.isArray(setupAgentsDefaultParsed.agents));
+  const setupAgentsDefaultRows = setupAgentsDefaultParsed.agents;
+  check(`setup list_all_agents default is capped at DEFAULT_AGENT_SUMMARY_CAP (${DEFAULT_AGENT_SUMMARY_CAP})`, setupAgentsDefaultRows.length === DEFAULT_AGENT_SUMMARY_CAP);
+  check("setup list_all_agents envelope reports the TRUE total (not just the capped row count) + a non-null nextOffset",
+    setupAgentsDefaultParsed.total === N_AGENTS && setupAgentsDefaultParsed.returned === DEFAULT_AGENT_SUMMARY_CAP &&
+    setupAgentsDefaultParsed.offset === 0 && setupAgentsDefaultParsed.nextOffset === DEFAULT_AGENT_SUMMARY_CAP);
+  check("setup list_all_agents default DROPS the heavy startupPrompt + ioSchema", setupAgentsDefaultRows.every((a) => !("startupPrompt" in a) && !("ioSchema" in a)));
+
+  // Paging PAST the cap with offset:nextOffset reaches the true end (mirrors the platform walk above).
+  const setupAgentsPage2 = await callSetupAgents({ offset: setupAgentsDefaultParsed.nextOffset });
+  const setupAgentsPage2Parsed = parse(setupAgentsPage2);
+  check("setup list_all_agents page 2 (offset:nextOffset) returns the next capped page, more remaining",
+    setupAgentsPage2Parsed.total === N_AGENTS && setupAgentsPage2Parsed.offset === DEFAULT_AGENT_SUMMARY_CAP &&
+    setupAgentsPage2Parsed.returned === DEFAULT_AGENT_SUMMARY_CAP && setupAgentsPage2Parsed.nextOffset === 2 * DEFAULT_AGENT_SUMMARY_CAP);
+  const setupAgentsPage3 = await callSetupAgents({ offset: setupAgentsPage2Parsed.nextOffset });
+  const setupAgentsPage3Parsed = parse(setupAgentsPage3);
+  check("setup list_all_agents page 3 (offset:nextOffset) reaches the true end (nextOffset:null)",
+    setupAgentsPage3Parsed.total === N_AGENTS && setupAgentsPage3Parsed.offset === 2 * DEFAULT_AGENT_SUMMARY_CAP &&
+    setupAgentsPage3Parsed.returned === N_AGENTS - 2 * DEFAULT_AGENT_SUMMARY_CAP && setupAgentsPage3Parsed.nextOffset === null);
+
+  // full:true still returns every row uncapped (unchanged behavior) — proves the envelope-wrap didn't
+  // regress the explicit heavy opt-in.
+  const setupAgentsFull = await callSetupAgents({ full: true });
+  const setupAgentsFullRows = parse(setupAgentsFull);
+  check("setup list_all_agents full:true returns EVERY agent (no cap on the explicit heavy opt-in)", setupAgentsFullRows.length === N_AGENTS);
+  await sClient.close();
 
   // ===================== audit list_sessions — the "200-row default lied" overflow (finding part 2) =========
   const aClient = await connect(auditRouter.buildServer("AUD"), "mlb-audit");
