@@ -42,7 +42,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { composeManagerStartupPrompt } = await import("../dist/sessions/manager-prompt.js");
-const { RESUME_DOC_WARN_BYTES } = await import("../dist/sessions/resume-doc-notes.js");
+const { RESUME_DOC_WARN_BYTES, resolveResumeDocPath } = await import("../dist/sessions/resume-doc-notes.js");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off, and a
 //     SEPARATE vault dir so we can prove BOTH absolute roots land in the block (not one path twice) ---
@@ -159,6 +159,40 @@ try {
   check("(3e) the agent's own doctrine still rides along after everything", noteOversized.includes("BODY"));
   try { fs.rmSync(sizeVault, { recursive: true, force: true }); } catch { /* best-effort */ }
 
+  // ===================== (3f) card c1f2f095: composeManagerStartupPrompt honors a per-project
+  // resumeDocFilename override instead of always hardcoding "Orchestrator Log.md" =====================
+  const customName = "Selbstläufer — Orchestrator Resume.md"; // the real-world drifted filename from the incident
+  const customComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", resumeDocFilename: customName });
+  check("(3f) pure: a resumeDocFilename override changes the emitted Resume doc path", customComposed.includes(path.join("/abs/vault", customName)));
+  check("(3f) pure: the default filename is NOT emitted when an override is set", !customComposed.includes(path.join("/abs/vault", "Orchestrator Log.md")));
+  const omittedComposed = composeManagerStartupPrompt("BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
+  check("(3f) pure: an OMITTED resumeDocFilename still falls back to the default (byte-identical to before this card)", omittedComposed.includes(path.join("/abs/vault", "Orchestrator Log.md")));
+
+  // ===================== (3g) card c1f2f095: resolveResumeDocPath defense-in-depth — even a
+  // traversal value that somehow bypassed the agent-facing validator (e.g. a direct DB edit) can never
+  // make the daemon vouch for a path OUTSIDE the project's vault =====================
+  check("(3g) resolveResumeDocPath: a plain filename resolves under vaultPath", resolveResumeDocPath("/abs/vault", "Custom.md") === path.join("/abs/vault", "Custom.md"));
+  check("(3g) resolveResumeDocPath: undefined ⇒ default filename", resolveResumeDocPath("/abs/vault", undefined) === path.join("/abs/vault", "Orchestrator Log.md"));
+  check("(3g) resolveResumeDocPath: empty string ⇒ default filename", resolveResumeDocPath("/abs/vault", "") === path.join("/abs/vault", "Orchestrator Log.md"));
+  const escaped = resolveResumeDocPath("/abs/vault", "../../etc/passwd");
+  check("(3g) resolveResumeDocPath: a traversal override does NOT escape vaultPath (never contains 'passwd')", !escaped.includes("passwd"));
+  check("(3g) resolveResumeDocPath: a traversal override falls back to the DEFAULT filename, not the raw escape target", escaped === path.join("/abs/vault", "Orchestrator Log.md"));
+
+  // ===================== (1e) card c1f2f095: an end-to-end manager spawn for a project whose config
+  // sets orchestration.resumeDocFilename picks up the CUSTOM path, not the hardcoded default =====================
+  const vaultCustom = path.join(os.tmpdir(), `loom-mctxblk-vaultcustom-${Date.now()}`);
+  fs.mkdirSync(vaultCustom, { recursive: true });
+  db.insertProject({
+    id: "pCustom", name: "CustomProj", repoPath: repo, vaultPath: vaultCustom,
+    config: { orchestration: { resumeDocFilename: customName } }, createdAt: now, archivedAt: null,
+  });
+  db.insertAgent({ id: "agentMgrCustom", projectId: "pCustom", name: "Orchestrator", startupPrompt: "AGENT_MGR_CUSTOM_DOCTRINE", position: 0, profileId: null });
+  const sMCustom = svc.startManager("agentMgrCustom");
+  const oMCustom = optsFor(sMCustom.id);
+  check("(1e) manager spawn with a project resumeDocFilename override carries the CUSTOM resume-doc path", oMCustom?.startupPrompt?.includes(path.join(vaultCustom, customName)));
+  check("(1e) manager spawn with a project resumeDocFilename override does NOT carry the default filename", !oMCustom?.startupPrompt?.includes(path.join(vaultCustom, "Orchestrator Log.md")));
+  try { fs.rmSync(vaultCustom, { recursive: true, force: true }); } catch { /* best-effort */ }
+
   // ===================== (1) MANAGER spawn → composed startupPrompt CONTAINS both absolute roots =====================
   const sM = svc.startManager("agentMgr");
   const oM = optsFor(sM.id);
@@ -244,6 +278,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — managers get the 'Where things live' block (both absolute roots), workers stay byte-identical, and the pickup/orchestrate assets instruct absolute-path reads — claude-free."
+  ? "\n✅ ALL PASS — managers get the 'Where things live' block (both absolute roots), workers stay byte-identical, the pickup/orchestrate assets instruct absolute-path reads, and a project's orchestration.resumeDocFilename override (card c1f2f095) is the single source of truth for the injected resume-doc path, defense-in-depth-contained to the vault root — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

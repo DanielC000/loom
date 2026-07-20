@@ -885,7 +885,7 @@ export class SessionService {
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name)))
       : role === "manager"
-      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos })
+      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename })
       : startupPrompt;
     // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
     // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
@@ -1000,7 +1000,7 @@ export class SessionService {
       // through UNCHANGED — byte-identical to today.
       startupPrompt: ((): string | undefined => {
         const scheduled = appendScheduledPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos }),
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename }),
           prompt,
         );
         const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
@@ -5366,7 +5366,7 @@ export class SessionService {
         `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
         `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
         `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos },
+      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename },
     );
 
     const now = new Date().toISOString();

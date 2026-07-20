@@ -93,6 +93,30 @@ const alertWebhookSchema = z.object({
   url: z.string().url(),
   events: z.array(z.string().min(1)),
 }).strict();
+// Card c1f2f095 — resumeDocFilename is joined onto the project's vaultPath (resolveResumeDocPath) and
+// then presented in the TRUSTED "Where things live" manager prompt block as the authoritative resume-doc
+// path, so — unlike the other benign strings on this shape — it needs its own validation: a strict BARE
+// FILENAME, not an arbitrary path. Reject any path separator, a bare "." or "..", and a Windows drive
+// prefix, so a malicious/injection-planted config can't smuggle a traversal (e.g. "../../.ssh/id_rsa")
+// that would make a cold successor Read+TRUST an arbitrary host file as its handoff state — a
+// trust-laundering vector even though the manager already has plain Read access, because the danger here
+// is the DAEMON vouching for the path, not just the agent reading it. `resolveResumeDocPath`
+// (daemon/sessions/resume-doc-notes.ts) re-checks the resolved path stays under vaultPath as
+// defense-in-depth on top of this.
+const resumeDocFilenameSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(255)
+  .refine((s) => !s.includes("/") && !s.includes("\\"), {
+    message: "must be a bare filename — no path separators",
+  })
+  .refine((s) => s !== "." && s !== "..", {
+    message: "must not be '.' or '..'",
+  })
+  .refine((s) => !/^[a-zA-Z]:/.test(s), {
+    message: "must not be an absolute/drive-qualified path",
+  });
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
@@ -146,6 +170,10 @@ const orchestrationOverride = z.object({
   // generous ceiling guards a fat-fingered value from authorizing an unbounded resume loop. 0-floor
   // honored as a real value (disable), same rationale as the leashes above.
   crashRecoveryMaxAttempts: z.number().int().min(0).max(100).optional(),
+  // Resume-doc basename (card c1f2f095) — benign STRING (no host-launch/exfil capability), so it stays
+  // on the agent path too (not omitted in agentOrchestrationOverride below), unlike gateCommand/
+  // alertWebhook — but see resumeDocFilenameSchema's own doc for why it still needs strict validation.
+  resumeDocFilename: resumeDocFilenameSchema.optional(),
 }).strict();
 // Obsidian auto-start. `autoStart` (boolean, OS-default install location) is benign and stays on the
 // agent path; `path` is an arbitrary host EXECUTABLE the daemon-spawned preflight launches — host-launch

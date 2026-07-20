@@ -346,6 +346,23 @@ export interface OrchestrationConfig {
    * project; default 3. Sibling of `stuckWorkerMinutes` — both are per-project orchestration leashes.
    */
   crashRecoveryMaxAttempts: number;
+  /**
+   * Card c1f2f095 — the BASENAME of this project's manager resume doc, resolved against the project's
+   * `vaultPath` (via `resolveResumeDocPath`, `daemon/sessions/resume-doc-notes.ts`) into the ABSOLUTE
+   * path injected into every manager's "Where things live" spawn/recycle block AND checked by
+   * `ResumeDocWatcher` — ONE resolution both sites share, so they can never derive two different
+   * answers. Default `"Orchestrator Log.md"` (Loom's own convention) preserves today's behavior for
+   * every project that doesn't override it. A project whose real doc uses a different filename (e.g.
+   * a translated/renamed title) sets this so the daemon-injected path is actually authoritative,
+   * instead of a hand-written "Resume doc:" prompt line drifting from the real file on disk.
+   * Benign string (no host-launch/exfil capability) — stays on the agent-facing config path, but is
+   * validated there as a STRICT BARE FILENAME (no path separators, no `..`) precisely because it's a
+   * PATH COMPONENT the daemon then vouches for as authoritative in a TRUSTED prompt block; an
+   * unvalidated value could otherwise be used to make a cold successor Read+trust an arbitrary host
+   * file as its handoff state. See the validator in `daemon/mcp/platform.ts` and the defense-in-depth
+   * vault-containment check in `resolveResumeDocPath`.
+   */
+  resumeDocFilename: string;
 }
 
 /**
@@ -783,7 +800,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentGates: 1, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3 },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentGates: 1, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1187,6 +1204,9 @@ export function resolveConfig(
       stuckWorkerMinutes: override.orchestration?.stuckWorkerMinutes ?? d.orchestration.stuckWorkerMinutes,
       // Crash-recovery auto-resume cap (0 disables the watcher). `??` so an explicit 0 survives.
       crashRecoveryMaxAttempts: override.orchestration?.crashRecoveryMaxAttempts ?? d.orchestration.crashRecoveryMaxAttempts,
+      // Resume-doc basename (card c1f2f095). `??` so an explicit override survives; an empty string is
+      // treated as "unset" by the resolver (resolveResumeDocPath), not by this merge.
+      resumeDocFilename: override.orchestration?.resumeDocFilename ?? d.orchestration.resumeDocFilename,
     },
     // Daemon-global (no per-project override): platform default, with the env applying to the cadence
     // at this layer. `??` (not `||`) so an explicit env 0 is preserved (0 disables the periodic ticker).

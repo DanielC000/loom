@@ -1,6 +1,6 @@
-import path from "node:path";
+import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
-import { resumeDocSizeWarning } from "../sessions/resume-doc-notes.js";
+import { resumeDocSizeWarning, resolveResumeDocPath } from "../sessions/resume-doc-notes.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests claude-free). */
 export interface ResumeDocPty {
@@ -28,10 +28,10 @@ const DEFAULT_COOLDOWN_MS = 30 * 60_000;
  * SPAWN/RECYCLE time if its resume doc is already oversized, but that's too late for a single long-lived
  * manager session that keeps rewriting its doc without ever recycling — nothing warns until the doc is
  * ALREADY past the harness Read cap. This watcher closes that gap: a periodic tick over every LIVE
- * manager, deriving its resume-doc path the SAME way `composeManagerStartupPrompt` does
- * (`path.join(vaultPath, "Orchestrator Log.md")`), and nudging with the SAME `resumeDocSizeWarning`
- * check (`sessions/resume-doc-notes.ts`) used at spawn time — one threshold, one message, two trigger
- * points.
+ * manager, deriving its resume-doc path via the SAME `resolveResumeDocPath` (`sessions/resume-doc-notes.ts`)
+ * `composeManagerStartupPrompt` calls — honoring a project's `orchestration.resumeDocFilename` override
+ * (card c1f2f095) instead of a second hardcoded guess — and nudging with the SAME `resumeDocSizeWarning`
+ * check used at spawn time — one threshold, one message, two trigger points.
  *
  * Structural twin of ContextWatcher/IdleWatcher, but SIMPLER on purpose: unlike context occupancy (which
  * only grows within a session and needs an explicit recycle to reset), a resume doc's size is
@@ -61,7 +61,10 @@ export class ResumeDocWatcher {
         const project = db.getProject(m.projectId ?? "");
         if (!project) continue;
 
-        const resumeDoc = path.join(project.vaultPath, "Orchestrator Log.md");
+        // Card c1f2f095: resolve via the SAME `resolveResumeDocPath` composeManagerStartupPrompt uses,
+        // honoring this project's `orchestration.resumeDocFilename` override — one source of truth, so
+        // this watcher can never check a different file than the one the manager was actually told about.
+        const resumeDoc = resolveResumeDocPath(project.vaultPath, resolveConfig(project.config).orchestration.resumeDocFilename);
         const note = resumeDocSizeWarning(resumeDoc);
         if (!note) {
           // Under threshold (or the doc doesn't exist / can't be stat'd) — clear any stale cooldown so a

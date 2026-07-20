@@ -172,7 +172,38 @@ const resumeDocPath = (e) => path.join(e.vaultPath, "Orchestrator Log.md");
   cleanup(e);
 }
 
+// Card c1f2f095: a project with orchestration.resumeDocFilename set — the watcher checks THAT file, not
+// the hardcoded default (which may not even exist for this project).
+{
+  const e = makeEnv();
+  const customName = "Selbstläufer — Orchestrator Resume.md";
+  e.db.setProjectConfig(e.projId, { orchestration: { resumeDocFilename: customName } });
+  seedManager(e, "mgr-custom");
+  // The DEFAULT-named file is oversized, but this project's REAL doc is the custom-named one — the
+  // watcher must ignore the default-named file entirely and only ever look at the custom one.
+  fs.writeFileSync(path.join(e.vaultPath, "Orchestrator Log.md"), "x".repeat(RESUME_DOC_WARN_BYTES + 1024));
+  e.watcher.tick();
+  check("custom resumeDocFilename: an oversized DEFAULT-named file is ignored (wrong file for this project)", e.enqueued.length === 0);
+  fs.writeFileSync(path.join(e.vaultPath, customName), "x".repeat(RESUME_DOC_WARN_BYTES + 1024));
+  e.watcher.tick();
+  check("custom resumeDocFilename: the oversized CUSTOM-named file is nudged", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-custom");
+  cleanup(e);
+}
+
+// Card c1f2f095 defense-in-depth: even if a traversal value somehow reached the stored config (bypassing
+// the agent-facing validator — e.g. a direct DB edit), the watcher must never stat a file OUTSIDE the
+// project's vault; it silently falls back to the default filename within the vault instead.
+{
+  const e = makeEnv();
+  e.db.setProjectConfig(e.projId, { orchestration: { resumeDocFilename: "../../escaped.md" } });
+  seedManager(e, "mgr-traversal");
+  fs.writeFileSync(resumeDocPath(e), "x".repeat(RESUME_DOC_WARN_BYTES + 1024)); // the DEFAULT-path file, oversized
+  check("traversal override: tick() does not throw", (() => { try { e.watcher.tick(); return true; } catch { return false; } })());
+  check("traversal override: falls back to the default filename (still nudges — the fallback file IS oversized)", e.enqueued.length === 1 && e.enqueued[0].id === "mgr-traversal");
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ResumeDocWatcher nudges over-threshold LIVE managers' resume docs, respects a cooldown, self-clears on rotation so regrowth nudges fresh, and never throws on a missing resume-doc file — claude-free."
+  ? "\n✅ ALL PASS — ResumeDocWatcher nudges over-threshold LIVE managers' resume docs, respects a cooldown, self-clears on rotation so regrowth nudges fresh, never throws on a missing resume-doc file, honors a project's resumeDocFilename override (card c1f2f095) as the single source of truth shared with composeManagerStartupPrompt, and contains a traversal override to the vault root — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

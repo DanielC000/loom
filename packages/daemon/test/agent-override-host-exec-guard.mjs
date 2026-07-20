@@ -94,7 +94,39 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   check("default sessionEnv alt-screen vars preserved", base.CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN === "1" && base.CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT === "1");
 }
 
+// --- Fix C (card c1f2f095): orchestration.resumeDocFilename is a STRICT BARE FILENAME ------------------
+// Unlike gateCommand/alertWebhook (dropped entirely from the agent shape), resumeDocFilename stays
+// agent-settable on BOTH validators — it's benign (no host-launch/exfil capability) — but it's a PATH
+// COMPONENT the daemon later joins onto vaultPath and presents as an AUTHORITATIVE path in a TRUSTED
+// prompt block, so a traversal value must be rejected at validation time on both surfaces, not just
+// caught by the resolver's own defense-in-depth (resolveResumeDocPath — covered separately).
+{
+  const traversalPayloads = [
+    "../../.ssh/id_rsa",
+    "..\\..\\Windows\\System32\\config\\SAM",
+    "/etc/passwd",
+    "C:\\Users\\evil.md",
+    "C:evil.md",
+    "..",
+    ".",
+    "sub/dir.md",
+    "sub\\dir.md",
+  ];
+  for (const bad of traversalPayloads) {
+    const a = validateAgentProjectConfigOverride({ orchestration: { resumeDocFilename: bad } });
+    check(`agent path: resumeDocFilename "${bad}" REJECTED`, a.ok === false);
+    const h = validateProjectConfigOverride({ orchestration: { resumeDocFilename: bad } });
+    check(`human path: resumeDocFilename "${bad}" REJECTED too (not just agent-gated)`, h.ok === false);
+  }
+  // A legitimate bare filename (incl. spaces + non-ASCII, a real-world project convention) passes on both.
+  const good = "Selbstläufer — Orchestrator Resume.md";
+  const a = validateAgentProjectConfigOverride({ orchestration: { resumeDocFilename: good } });
+  check("agent path: a bare filename with spaces/unicode is accepted", a.ok === true && a.value.orchestration?.resumeDocFilename === good);
+  const h = validateProjectConfigOverride({ orchestration: { resumeDocFilename: good } });
+  check("human path: same bare filename accepted", h.ok === true && h.value.orchestration?.resumeDocFilename === good);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — sessionEnv is HUMAN-only on the agent VALIDATOR (rejects every host-exec env payload) while the human path + the server-side python/obsidian sessionEnv SYNTHESIS transport are untouched, and a custom permission.allow UNIONS the full default baseline (mcp__loom-tasks + git globs) deduped (idempotent with the spawn-path withBaselineAllow re-add) instead of substituting it wholesale."
+  ? "\n✅ ALL PASS — sessionEnv is HUMAN-only on the agent VALIDATOR (rejects every host-exec env payload) while the human path + the server-side python/obsidian sessionEnv SYNTHESIS transport are untouched, a custom permission.allow UNIONS the full default baseline (mcp__loom-tasks + git globs) deduped (idempotent with the spawn-path withBaselineAllow re-add) instead of substituting it wholesale, and orchestration.resumeDocFilename rejects every path-traversal/absolute-path payload on BOTH the agent and human validators while accepting a real bare filename."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

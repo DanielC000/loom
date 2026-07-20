@@ -1,5 +1,4 @@
-import path from "node:path";
-import { resumeDocSizeWarning } from "./resume-doc-notes.js";
+import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.js";
 
 /**
  * PL Auditor finding #8 — inject a small "Where things live" context block (the project's absolute
@@ -14,13 +13,15 @@ import { resumeDocSizeWarning } from "./resume-doc-notes.js";
  * MANAGERS ONLY (lowest blast radius): only `startManager` calls this, so every worker/run/plain/
  * platform/auditor spawn byte-stream is unchanged.
  *
- * The block emits the resume doc as a FULLY-RESOLVED absolute path, built SERVER-SIDE from the resolved
- * `vaultPath` via the SAME `path.join` the daemon uses for the vault (so a vault folder with a SPACE —
- * `Obsidian Vault`, not `Obsidian\Vault` — resolves correctly). `vaultPath` IS the project's vault
- * directory (e.g. `.../Obsidian Vault/Projects/Loom`) — NOT the vault root — so the resume doc is just
- * `vaultPath/Orchestrator Log.md`. The agent Reads it verbatim with zero derivation, instead of
- * reconstructing the path from memory and mis-spelling the vault root (the bug that drove the forbidden
- * Glob fallback).
+ * The block emits the resume doc as a FULLY-RESOLVED absolute path, built SERVER-SIDE via
+ * `resolveResumeDocPath` (`resume-doc-notes.ts`) from the resolved `vaultPath` PLUS the project's
+ * `orchestration.resumeDocFilename` config (defaults to `"Orchestrator Log.md"` — Loom's own convention —
+ * when unset, so every project that doesn't override it is byte-identical to before). `vaultPath` IS the
+ * project's vault directory (e.g. `.../Obsidian Vault/Projects/Loom`) — NOT the vault root. The agent
+ * Reads it verbatim with zero derivation, instead of reconstructing the path from memory and mis-spelling
+ * the vault root OR assuming a filename that isn't this project's actual convention (card c1f2f095 — both
+ * failure modes were observed: a hand-written prompt line AND the generic derivation formula drifted from
+ * the real file when a project's resume doc used a non-default name).
  *
  * Card 809cc4b5 — a manager's resume doc grew past the harness Read cap and broke a successor's cold
  * Read. `resumeDocSizeWarning` (`resume-doc-notes.ts` — the SAME check the Platform Lead's resume doc
@@ -29,14 +30,17 @@ import { resumeDocSizeWarning } from "./resume-doc-notes.js";
  * `composePlatformLeadStartupPrompt`'s ordering, so a cold-booting successor sees "rotate this" before
  * it's told where to read it. This only covers the spawn/recycle moment; the mid-session case (a doc
  * that grows oversized while its manager stays live, never recycling) is covered separately by
- * `ResumeDocWatcher` (`orchestration/resume-doc-watcher.ts`).
+ * `ResumeDocWatcher` (`orchestration/resume-doc-watcher.ts`), which resolves the SAME path via the SAME
+ * `resolveResumeDocPath` — one source of truth for both call sites.
  */
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
-  loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[] },
+  loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; resumeDocFilename?: string },
 ): string {
-  // Same path-join the daemon uses for the vault (handles spaces correctly — no string concatenation).
-  const resumeDoc = path.join(loc.vaultPath, "Orchestrator Log.md");
+  // Card c1f2f095: resolve via the ONE shared function ResumeDocWatcher also calls, so the injected path
+  // and the mid-session size-watchdog's own path can never diverge. Handles spaces + a per-project
+  // filename override correctly (no string concatenation).
+  const resumeDoc = resolveResumeDocPath(loc.vaultPath, loc.resumeDocFilename);
   const sizeNote = resumeDocSizeWarning(resumeDoc);
   const block =
     "## Where things live (this project's absolute paths)\n" +
