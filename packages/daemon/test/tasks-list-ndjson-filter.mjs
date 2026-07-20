@@ -62,13 +62,13 @@ mkTask(T_BETA, "Write release notes");
 mkTask(T_GAMMA, "Fix the logout bug");
 
 // (5) pure-function filter checks (business logic, no MCP round-trip).
-const byIdPrefix = listProjectTasks(db, "pFilter", { idPrefix: "aaaa" }).map((t) => t.id).sort();
+const byIdPrefix = (await listProjectTasks(db, "pFilter", { idPrefix: "aaaa" })).map((t) => t.id).sort();
 check("(3) listProjectTasks idPrefix narrows to matching ids", byIdPrefix.join(",") === [T_ALPHA, T_GAMMA].sort().join(","));
-const byTitle = listProjectTasks(db, "pFilter", { titleContains: "fix the log" }).map((t) => t.id).sort();
+const byTitle = (await listProjectTasks(db, "pFilter", { titleContains: "fix the log" })).map((t) => t.id).sort();
 check("(4) listProjectTasks titleContains narrows by case-insensitive substring", byTitle.join(",") === [T_ALPHA, T_GAMMA].sort().join(","));
-const byTitleCase = listProjectTasks(db, "pFilter", { titleContains: "RELEASE" }).map((t) => t.id);
+const byTitleCase = (await listProjectTasks(db, "pFilter", { titleContains: "RELEASE" })).map((t) => t.id);
 check("(4) titleContains is case-insensitive", byTitleCase.join(",") === T_BETA);
-const noMatch = listProjectTasks(db, "pFilter", { idPrefix: "ffffffff" });
+const noMatch = await listProjectTasks(db, "pFilter", { idPrefix: "ffffffff" });
 check("(3) an idPrefix matching nothing is an empty list, not an error", Array.isArray(noMatch) && noMatch.length === 0);
 
 // Minimal WakePty stub — wake_me/wake_cancel/wake_list are registered on this router but not exercised here.

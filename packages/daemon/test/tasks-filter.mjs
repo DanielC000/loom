@@ -38,7 +38,7 @@ try {
   mk("b-archived", "projB", "archived", 2);  // terminal on projB's overridden board
 
   // (1) DEFAULT: lightweight summary (no body) + done-excluded.
-  const def = listProjectTasks(db, "projA");
+  const def = await listProjectTasks(db, "projA");
   const defIds = def.map((t) => t.id).sort();
   check("default drops the terminal/done card (a-done absent)", !defIds.includes("a-done"));
   check("default keeps non-terminal cards (a-backlog, a-review)", defIds.join(",") === "a-backlog,a-review");
@@ -48,34 +48,34 @@ try {
 
   // (3) terminal column is DERIVED from resolveConfig, not the literal "done": projB's terminal is
   // "archived" — so b-archived is dropped while a "done"-less board has nothing special about "done".
-  const bDef = listProjectTasks(db, "projB").map((t) => t.id).sort();
+  const bDef = (await listProjectTasks(db, "projB")).map((t) => t.id).sort();
   check("config-derived terminal: projB drops b-archived (its last column), keeps b-todo",
     bDef.join(",") === "b-todo");
 
   // (2a) excludeDone:false includes the terminal card.
-  const withDone = listProjectTasks(db, "projA", { excludeDone: false }).map((t) => t.id).sort();
+  const withDone = (await listProjectTasks(db, "projA", { excludeDone: false })).map((t) => t.id).sort();
   check("excludeDone:false includes a-done", withDone.join(",") === "a-backlog,a-done,a-review");
 
   // (2b) columns filter restricts to the given column keys (and still summary by default).
-  const onlyReview = listProjectTasks(db, "projA", { columns: ["review"] });
+  const onlyReview = await listProjectTasks(db, "projA", { columns: ["review"] });
   check("columns:['review'] returns only a-review", onlyReview.length === 1 && onlyReview[0].id === "a-review");
   // columns + excludeDone compose: asking for ['done'] alone yields nothing while done is excluded.
   check("columns:['done'] with default excludeDone yields nothing",
-    listProjectTasks(db, "projA", { columns: ["done"] }).length === 0);
+    (await listProjectTasks(db, "projA", { columns: ["done"] })).length === 0);
   check("columns:['done'] + excludeDone:false yields a-done",
-    listProjectTasks(db, "projA", { columns: ["done"], excludeDone: false }).map((t) => t.id).join(",") === "a-done");
+    (await listProjectTasks(db, "projA", { columns: ["done"], excludeDone: false })).map((t) => t.id).join(",") === "a-done");
 
   // (2c) includeBody:true returns full rows WITH body.
-  const full = listProjectTasks(db, "projA", { includeBody: true });
+  const full = await listProjectTasks(db, "projA", { includeBody: true });
   check("includeBody:true returns full rows with body", full.every((t) => typeof t.body === "string" && t.body.startsWith("BODY-")));
   check("includeBody:true still respects excludeDone (a-done absent)", !full.some((t) => t.id === "a-done"));
 
   // (4) tasks_get: one FULL task, project-scoped.
-  const got = getProjectTask(db, "projA", "a-done");
+  const got = await getProjectTask(db, "projA", "a-done");
   check("tasks_get returns the full task (title + body), even a done card", got.id === "a-done" && got.body === "BODY-a-done" && got.title === "T-a-done");
-  const cross = getProjectTask(db, "projA", "b-todo"); // projB's task, queried as projA
+  const cross = await getProjectTask(db, "projA", "b-todo"); // projB's task, queried as projA
   check("tasks_get is project-scoped: cross-project id → not-found", !!cross.error && !("id" in cross));
-  const missing = getProjectTask(db, "projA", "does-not-exist");
+  const missing = await getProjectTask(db, "projA", "does-not-exist");
   check("tasks_get unknown id → not-found", !!missing.error);
 } finally {
   db.close();

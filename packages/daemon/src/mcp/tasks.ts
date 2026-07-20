@@ -4,12 +4,27 @@ import { DEFAULT_TASK_PRIORITY, resolveConfig, columnKeyForRole } from "@loom/sh
 import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
 import { taskRequestGetItem } from "./questionTool.js";
+import { getTaskMergedInfo, type MergedCommitInfo } from "../git/worktrees.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
 
+/**
+ * A task/board row bolted with its git-derived ship state (card 9983eed6) — `null` when not proven
+ * merged (never merged, landed outside the scan window, or a git read failure); see
+ * {@link getTaskMergedInfo}'s fail-safe contract. Purely a RESPONSE-layer enrichment: not persisted, not
+ * part of the `Task` DB row/type, so create/update payloads are unaffected.
+ */
+export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
+
 /** The lightweight task row tasks_list returns by default — no body (the unbounded field). */
-export type TaskSummary = Pick<Task, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt">;
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged">;
+
+/** Resolve a project's git-derived merged state for one task, or null with no git call for a vault-only project (no repoPath). */
+async function resolveMergedInfo(db: Db, projectId: string, taskId: string): Promise<MergedCommitInfo | null> {
+  const repoPath = db.getProject(projectId)?.repoPath;
+  return repoPath ? getTaskMergedInfo(repoPath, taskId) : null;
+}
 
 /**
  * Backstop cap on a DEFAULT board read so a big board can't overflow the tool-result token cap with no
@@ -47,9 +62,9 @@ export interface ListTasksOptions {
   limit?: number;
 }
 
-/** Project ONE Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
-export const toTaskSummary = (t: Task): TaskSummary => ({
-  id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt,
+/** Project ONE (already merged-enriched) Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
+export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
+  id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged,
 });
 
 /**
@@ -83,11 +98,17 @@ export function toBoardTasks(tasks: Task[], terminalKey: string | undefined): Bo
  * Bounded-read pagination (offset/limit) is applied AFTER all filtering and BEFORE projection — the pure
  * slicing sibling of projectAgentList/projectSessionList (no internal default cap; the caller computes the
  * effective limit from {@link DEFAULT_TASK_SUMMARY_CAP}). Slicing before projection keeps the body off the
- * dropped rows.
+ * dropped rows, and (when this call is given an offset/limit) bounds the merged-state enrichment below
+ * to whatever rows this call actually returns.
+ *
+ * Every row (summary or full) also carries `merged` (card 9983eed6) — the task's git-derived ship state,
+ * or `null` if not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract. ASYNC because that
+ * lookup shells out to git, but stays cheap even over an unpaginated per-project call: ONE bounded,
+ * cached git-log scan backs every task's O(1) map lookup here, not one git subprocess per task.
  */
-export function listProjectTasks(
+export async function listProjectTasks(
   db: Db, projectId: string, opts: ListTasksOptions = {},
-): Task[] | TaskSummary[] {
+): Promise<TaskWithMerged[] | TaskSummary[]> {
   const { columns, excludeDone = true, includeBody = false, minPriority, idPrefix, titleContains, offset, limit } = opts;
   let tasks = db.listTasks(projectId);
   if (excludeDone) {
@@ -111,7 +132,13 @@ export function listProjectTasks(
   }
   if (offset !== undefined) tasks = tasks.slice(offset);
   if (limit !== undefined) tasks = tasks.slice(0, limit);
-  return includeBody ? tasks : tasks.map(toTaskSummary);
+  // Merged-state enrichment (card 9983eed6): one cached, bounded git-log scan per repo backs every
+  // task's O(1) map lookup here — see getTaskMergedInfo — so this stays cheap regardless of board size.
+  const repoPath = db.getProject(projectId)?.repoPath;
+  const withMerged: TaskWithMerged[] = await Promise.all(
+    tasks.map(async (t) => ({ ...t, merged: repoPath ? await getTaskMergedInfo(repoPath, t.id) : null })),
+  );
+  return includeBody ? withMerged : withMerged.map(toTaskSummary);
 }
 
 /**
@@ -161,8 +188,8 @@ export interface TaskRequestsSummary {
   items: Array<{ id: string; type: QuestionType; title: string; state: QuestionState }>;
 }
 
-/** A task extended with its connected-requests summary — what getProjectTask/tasks_get returns. */
-export type TaskWithRequests = Task & { requests: TaskRequestsSummary };
+/** A task extended with its connected-requests summary + git-derived merged state — what getProjectTask/tasks_get returns. */
+export type TaskWithRequests = TaskWithMerged & { requests: TaskRequestsSummary };
 
 function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
   // Each bucket is derived EXPLICITLY by state — never `total - pending` (that silently mis-groups any
@@ -188,11 +215,14 @@ function summarizeTaskRequests(questions: Question[]): TaskRequestsSummary {
  * AND whose own `project_id` matches THIS project (CR follow-up: `question_ask`'s `taskId` is
  * agent-supplied and unvalidated against the asking session's project, so a foreign-project question
  * that happens to carry this project's task id must never surface here — see `db.listQuestionsForTask`).
+ * Also includes `merged` (card 9983eed6) — the task's git-derived ship state on this project's repo, or
+ * `null` if not proven merged; see {@link getTaskMergedInfo}'s fail-safe contract.
  */
-export function getProjectTask(db: Db, projectId: string, taskId: string): TaskWithRequests | { error: string } {
+export async function getProjectTask(db: Db, projectId: string, taskId: string): Promise<TaskWithRequests | { error: string }> {
   const found = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in found) return found;
-  return { ...found, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
+  const merged = await resolveMergedInfo(db, projectId, found.id);
+  return { ...found, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
 }
 
 /** The lightweight row {@link listProjectTaskRequests} returns per connected request — title-altitude, not

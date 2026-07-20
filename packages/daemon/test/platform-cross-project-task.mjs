@@ -212,7 +212,7 @@ try {
     db.insertTask({ id: `bulk-${i}`, projectId: "pBulk", title: `b${i}`, body: "x".repeat(40), columnKey: "backlog", position: i, priority: "p2", createdAt: now, updatedAt: now });
   }
   // Unit: listProjectTasks honors offset/limit (pure slicing).
-  const sliced = listProjectTasks(db, "pBulk", { limit: 10, offset: 5 });
+  const sliced = await listProjectTasks(db, "pBulk", { limit: 10, offset: 5 });
   check("(5) listProjectTasks honors limit/offset", sliced.length === 10 && sliced[0].id === "bulk-5");
   // list_all_tasks default is CAPPED; an explicit limit pages past it; offset skips.
   const capped = await call("list_all_tasks", { projectId: "pBulk", includeBody: true });

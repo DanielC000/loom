@@ -1079,13 +1079,16 @@ const BOARD_REACH: CompanionCapability = {
           return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
         const targetProjects = project !== undefined ? new Set([project]) : ctx.scope.projectIds;
-        const cards = [...targetProjects].flatMap((pid) => {
+        // Promise.all (not flatMap) because listProjectTasks is ASYNC — its merged-state git read is
+        // cached/bounded per repo, so awaiting it per project here stays cheap.
+        const cards = (await Promise.all([...targetProjects].map(async (pid) => {
           const projectName = db.getProject(pid)?.name ?? null;
-          return (listProjectTasks(db, pid, { excludeDone: !includeDone, columns }) as TaskSummary[]).map((t) => ({
+          const tasks = await listProjectTasks(db, pid, { excludeDone: !includeDone, columns }) as TaskSummary[];
+          return tasks.map((t) => ({
             id: t.id, title: t.title, columnKey: t.columnKey, priority: t.priority,
             position: t.position, updatedAt: t.updatedAt, projectId: pid, projectName,
           }));
-        });
+        }))).flat();
         // Project-id DISCOVERY (the READ half — no grant semantics move; this only echoes the caller's OWN
         // grants back to it, the same reasoning that makes scopeDenialMessage safe). Without this, an
         // act-granted Companion whose board is still EMPTY has no way to construct a valid board_create
@@ -1113,7 +1116,7 @@ const BOARD_REACH: CompanionCapability = {
         if (!ctx.scope.projectIds.has(project)) {
           return ok({ error: scopeDenialMessage(db, ctx.sessionId, "board-reach", project) });
         }
-        const found = getProjectTask(db, project, taskId);
+        const found = await getProjectTask(db, project, taskId);
         if ("error" in found) return ok({ error: found.error });
         const projectName = db.getProject(project)?.name ?? null;
         return ok({

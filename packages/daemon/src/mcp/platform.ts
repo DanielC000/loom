@@ -4,7 +4,7 @@ import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, Task } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule } from "@loom/shared";
 import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
@@ -25,7 +25,7 @@ import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP 
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
-import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP } from "./tasks.js";
+import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
@@ -1409,14 +1409,18 @@ export class PlatformMcpRouter {
           "Read ONE full task (title + body) by id on ANOTHER project's board, by explicit projectId + taskId. " +
           "Reuses the SAME project-scoped read the in-project loom-tasks tasks_get uses, so a taskId that " +
           "doesn't belong to the named project resolves to not-found. projectId accepts the full id OR an " +
-          "unambiguous 8-char id-prefix (mirrors project_get). Read-only. Error if unknown or an ambiguous " +
+          "unambiguous 8-char id-prefix (mirrors project_get). Also returns `merged` — this card's git-derived " +
+          "ship state ({sha,date} of its squash-merge commit on that project's repo, else null). null means NOT " +
+          "PROVEN merged (never merged, landed outside the scan window, or a git read failure), never an " +
+          "authoritative 'never merged' — verify against this before relaying a predecessor's stale " +
+          "'unbuilt'/'won't-do' claim about this card as fact. Read-only. Error if unknown or an ambiguous " +
           "prefix (the error names the candidate ids).",
         inputSchema: { projectId: z.string(), taskId: z.string() },
       },
       async ({ projectId, taskId }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok(getProjectTask(db, project.id, taskId));
+        return ok(await getProjectTask(db, project.id, taskId));
       },
     );
 
@@ -1470,10 +1474,15 @@ export class PlatformMcpRouter {
           "filter, aggregates the non-terminal cards of every live project (incl. the reserved home) — pass " +
           "includeDone:true to include terminal/done cards too, and/or columns to narrow to specific column " +
           "keys (mirrors tasks_list's excludeDone/columns filters). DEFAULT returns a lightweight SUMMARY per " +
-          "card (id, title, columnKey, position, priority, updatedAt) so the aggregate stays bounded; the " +
+          "card (id, title, columnKey, position, priority, updatedAt, merged) so the aggregate stays bounded; the " +
           "unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — page it). " +
-          "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset for " +
-          "more. A genuine no-match returns an explicit { tasks: [], message } payload, never a bare empty.",
+          "`merged` is each card's git-derived ship state — {sha,date} of its squash-merge commit on that " +
+          "card's project repo, else null. null means NOT PROVEN merged (never merged, landed outside the scan " +
+          "window, or a git read failure), never an authoritative 'never merged' — this is the field that " +
+          "kills a stale handoff claiming a card is unbuilt when it's actually already shipped; check it " +
+          "before relaying such a claim as fact. Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
+          "default — page with limit/offset for more. A genuine no-match returns an explicit " +
+          "{ tasks: [], message } payload, never a bare empty.",
         inputSchema: {
           projectId: z.string().optional(),
           includeBody: z.boolean().optional(),
@@ -1497,9 +1506,17 @@ export class PlatformMcpRouter {
         }
         // Per-project FULL filtered rows (excludeDone/columns applied by listProjectTasks), concatenated,
         // then projected + paginated at the AGGREGATE level — so the cap bounds the whole feed, not each project.
-        let page = projectIds.flatMap(
-          (pid) => listProjectTasks(db, pid, { includeBody: true, excludeDone: !includeDone, columns }) as Task[],
-        );
+        // Promise.all (not flatMap) because listProjectTasks is ASYNC — its merged-state enrichment awaits a
+        // (cached, bounded) git read; each project's scan is independent so they run concurrently.
+        // ACKNOWLEDGED tradeoff: merged-state enrichment happens INSIDE listProjectTasks, i.e. over each
+        // project's FULL filtered set, BEFORE the offset/limit/DEFAULT_TASK_SUMMARY_CAP slice below — not
+        // just the rows this call ends up returning. That's fine cost-wise: the expensive part (one
+        // git-log scan per repo) is shared across every task in that repo via getMergedCommitMapCached's
+        // in-flight-promise dedup, so enriching 15 vs 1500 tasks from the same repo costs the same one scan.
+        const perProject = await Promise.all(projectIds.map(
+          (pid) => listProjectTasks(db, pid, { includeBody: true, excludeDone: !includeDone, columns }) as Promise<TaskWithMerged[]>,
+        ));
+        let page = perProject.flat();
         if (offset !== undefined) page = page.slice(offset);
         page = page.slice(0, limit ?? DEFAULT_TASK_SUMMARY_CAP);
         // A genuine no-match returns an EXPLICIT payload — a bare [] renders in the harness as the generic

@@ -63,7 +63,7 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
+          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt,merged}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. `merged` is this card's git-derived ship state — {sha,date} of its squash-merge commit on this project's repo if one is found, else null; null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), not an authoritative 'never merged' — treat a predecessor's 'unbuilt'/'won't-do' claim as suspect if merged is non-null. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
         inputSchema: {
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
@@ -77,18 +77,18 @@ export class TaskMcpRouter {
       },
       // Backstop the read with a default cap (caller-applied, the agentView/sessionView pattern) so an
       // includeBody read on a board with hundreds of cards can't overflow the tool-result cap.
-      async (args) => okLines(listProjectTasks(db, projectId, { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP })),
+      async (args) => okLines(await listProjectTasks(db, projectId, { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP })),
     );
     server.registerTool(
       "tasks_get",
       {
-        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list.",
+        description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list. Also returns `merged` — this card's git-derived ship state ({sha,date} of its squash-merge commit on this project's repo, else null). null means NOT PROVEN merged, never an authoritative 'never merged' — don't trust a stale handoff claiming this card is unbuilt without checking this first.",
         inputSchema: { id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() },
       },
       async ({ id, taskId }) => {
         const resolvedId = id ?? taskId;
         if (!resolvedId) return ok({ error: "id (or taskId) is required" });
-        return ok(getProjectTask(db, projectId, resolvedId));
+        return ok(await getProjectTask(db, projectId, resolvedId));
       },
     );
     server.registerTool(

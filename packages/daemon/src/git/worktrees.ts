@@ -1535,6 +1535,198 @@ export function __workerDiffCacheSizeForTest(): number {
   return diffCache.size;
 }
 
+/** A task's landed squash-merge commit on main, as surfaced by {@link getTaskMergedInfo}. */
+export interface MergedCommitInfo {
+  /** Short (7-char) sha of the squash-merge commit. */
+  sha: string;
+  /** Strict ISO-8601 author date of that commit (git's `%aI`). */
+  date: string;
+}
+
+/**
+ * Bounded window over `base`'s history for {@link scanMergedCommitMap} — recent-first, so a repo with a
+ * very long history can't make a `list_all_tasks`/`project_task_get` read scan unboundedly. A task
+ * whose landed squash commit falls OUTSIDE this window resolves to `merged: null` — indistinguishable
+ * from a genuinely never-merged task; see the fail-safe note on {@link getTaskMergedInfo}.
+ */
+const MERGED_LOOKUP_SCAN_LIMIT = 5000;
+
+const MERGED_MAP_FIELD_SEP = "\x1f";
+const MERGED_MAP_RECORD_SEP = "\x1e";
+const LOOM_WORKER_BRANCH_TRAILER = /^Loom-Worker-Branch:\s*(\S+)/m;
+
+/**
+ * One bounded `git log` pass over `base`'s history (default HEAD), extracting every commit's
+ * `Loom-Worker-Branch: <branch>` trailer into a `branch -> {sha, date}` map — the batch-friendly
+ * sibling of {@link findLandedSquashCommit}'s single-branch `--grep`. Building ONE map per repo
+ * (cached by {@link getMergedCommitMapCached}) and looking a task's branch up in it is an O(1) map read
+ * per task instead of one git subprocess per task, which is what bounds a `list_all_tasks` page's cost
+ * regardless of how many cards it returns. First occurrence per branch wins (log is reverse-chronological,
+ * so that's the MOST RECENT landing — matches findLandedSquashCommit's `--max-count=1` semantics).
+ * FAILS SAFE: any error/timeout returns an EMPTY map (every lookup then misses -> null), never throws.
+ */
+async function scanMergedCommitMap(
+  repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
+): Promise<Map<string, MergedCommitInfo>> {
+  const map = new Map<string, MergedCommitInfo>();
+  try {
+    // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent baseDir
+    // (GitConstructError) — this must be INSIDE the try, not before it, or a vault-only/moved-repo
+    // project's repoPath breaks the fail-safe contract instead of resolving to an empty map.
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const format = `%H${MERGED_MAP_FIELD_SEP}%aI${MERGED_MAP_FIELD_SEP}%B${MERGED_MAP_RECORD_SEP}`;
+    const out = await withTimeout(
+      git.raw(["log", base, `--format=${format}`, "-n", String(MERGED_LOOKUP_SCAN_LIMIT)]),
+      timeoutMs, "git log merged-commit scan",
+    );
+    for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
+      if (!record.trim()) continue;
+      const sep1 = record.indexOf(MERGED_MAP_FIELD_SEP);
+      const sep2 = record.indexOf(MERGED_MAP_FIELD_SEP, sep1 + 1);
+      if (sep1 === -1 || sep2 === -1) continue;
+      const sha = record.slice(0, sep1).trim();
+      const date = record.slice(sep1 + 1, sep2).trim();
+      const body = record.slice(sep2 + 1);
+      const trailer = body.match(LOOM_WORKER_BRANCH_TRAILER);
+      if (!sha || !trailer) continue;
+      const branch = trailer[1]!;
+      if (!map.has(branch)) map.set(branch, { sha, date }); // first hit = most recent (reverse-chron)
+    }
+  } catch {
+    return map; // fail safe: empty map -> every lookup misses -> caller treats as not-(yet)-landed
+  }
+  return map;
+}
+
+/** Keyed per REPO (not per branch/task like {@link diffCache}), so its entry count is bounded by the
+ *  number of distinct repos Loom touches, never by board/task size. */
+const MERGED_MAP_CACHE_MAX_ENTRIES = 100;
+
+interface MergedMapCacheEntry {
+  headSha: string;
+  map: Map<string, MergedCommitInfo>;
+}
+
+const mergedMapCache = new Map<string, MergedMapCacheEntry>();
+
+/**
+ * In-flight scan promises, keyed by repoPath — CR follow-up (card 9983eed6): a cold cache invalidates on
+ * EVERY HEAD move, i.e. every merge, which is exactly when a manager/companion board read fans out across
+ * many tasks (`listProjectTasks`'s `Promise.all` over a project's tasks, or `list_all_tasks` over many
+ * projects, or a companion + a manager reading concurrently). Without this map, ALL of those callers would
+ * pass the `mergedMapCache` miss check before any of them finishes scanning (`readHeadSha`'s fs read
+ * resolves far faster than the `git log -n 5000` subprocess), each spawning its OWN full scan — N
+ * concurrent git-log-5000 processes on one repo instead of one. Registering the promise HERE,
+ * SYNCHRONOUSLY, before any await (see {@link getOrStartMergedMapScan}), closes that race: every caller
+ * that arrives while a scan is in flight joins the SAME promise instead of starting a new one.
+ */
+const mergedMapInFlight = new Map<string, Promise<MergedMapCacheEntry>>();
+
+/**
+ * Synchronous check-and-register: returns the ALREADY in-flight promise for `repoPath` if one exists,
+ * else starts exactly one and registers it before returning — so two calls issued back-to-back (as
+ * `Array.prototype.map`/`Promise.all` do) can never both see "no scan in flight" and each start their own.
+ * Not `async` itself — the async work lives in the IIFE, whose synchronous prefix (up to its first
+ * `await`) still runs before this function returns, but the `mergedMapInFlight.set` below happens with NO
+ * await in between the `.get` check and the `.set`, which is what makes the dedup race-free.
+ */
+function getOrStartMergedMapScan(repoPath: string, deps: BoundedGitDeps): Promise<MergedMapCacheEntry> {
+  const existing = mergedMapInFlight.get(repoPath);
+  if (existing) return existing;
+  const scan = (async (): Promise<MergedMapCacheEntry> => {
+    try {
+      const headSha = (await readHeadSha(repoPath)) ?? "-";
+      const cached = mergedMapCache.get(repoPath);
+      if (cached && cached.headSha === headSha) {
+        mergedMapCache.delete(repoPath);
+        mergedMapCache.set(repoPath, cached); // move to the Map's end (most-recently-used)
+        return cached;
+      }
+      const map = await scanMergedCommitMap(repoPath, "HEAD", deps);
+      const entry: MergedMapCacheEntry = { headSha, map };
+      mergedMapCache.delete(repoPath);
+      mergedMapCache.set(repoPath, entry);
+      while (mergedMapCache.size > MERGED_MAP_CACHE_MAX_ENTRIES) {
+        const oldest = mergedMapCache.keys().next().value;
+        if (oldest === undefined) break;
+        mergedMapCache.delete(oldest);
+      }
+      return entry;
+    } finally {
+      // Always clear, even on an (unexpected — scanMergedCommitMap itself never throws) failure, so a
+      // one-off error can't permanently wedge every future read of this repo behind a dead in-flight slot.
+      mergedMapInFlight.delete(repoPath);
+    }
+  })();
+  mergedMapInFlight.set(repoPath, scan);
+  return scan;
+}
+
+/**
+ * Cached wrapper around {@link scanMergedCommitMap}: reuses the map across repeat reads of the same
+ * repo state, keyed on the canonical repo's current HEAD sha (fs-only, no subprocess — the SAME
+ * freshness-key idiom as {@link getWorkerDiffCached}'s `diffCache`). A merge landing on main advances
+ * HEAD, which invalidates the cache on the VERY NEXT read — a just-merged task resolves as soon as
+ * HEAD moves, never stale. Concurrent callers on a cold/stale entry are deduped onto ONE scan by
+ * {@link getOrStartMergedMapScan} — see its comment for why that dedup has to be synchronous.
+ */
+async function getMergedCommitMapCached(
+  repoPath: string, deps: BoundedGitDeps = {},
+): Promise<Map<string, MergedCommitInfo>> {
+  const entry = await getOrStartMergedMapScan(repoPath, deps);
+  return entry.map;
+}
+
+/**
+ * Is `taskId` merged + shipped on `repoPath`'s main line? Resolves the task's DETERMINISTIC branch
+ * (`loom/<taskKey(taskId)>`) and looks it up in the cached {@link getMergedCommitMapCached} map — keyed
+ * by the same `Loom-Worker-Branch:` trailer {@link findLandedSquashCommit} greps for, rather than by
+ * TITLE TEXT: a card's title can be edited after merge, or coerced through `toConventionalSubject`
+ * (`git/worktrees.ts` › mergeBranch), while the trailer never drifts. Applies the SAME re-task ancestry
+ * guard as findLandedSquashCommit for the rare case the branch ref still exists (a re-spawned task
+ * carrying NEW live work over a prior landed squash) — that guard's extra git calls are only paid for
+ * an actual map hit, not for every task.
+ *
+ * Returns `null` when no landed trailer is found FOR ANY REASON: genuinely never merged, landed outside
+ * the {@link MERGED_LOOKUP_SCAN_LIMIT} scan window, a re-task in progress, or any git error/timeout
+ * (fail-safe). Treat `null` as "not proven merged (within this window)", NEVER as an authoritative
+ * "never merged" — that distinction matters because this exists specifically to replace stale-handoff
+ * claims with ground truth, and a false-confident null would just move the same failure elsewhere.
+ */
+export async function getTaskMergedInfo(
+  repoPath: string, taskId: string, deps: BoundedGitDeps = {},
+): Promise<MergedCommitInfo | null> {
+  const branch = `loom/${taskKey(taskId)}`;
+  const map = await getMergedCommitMapCached(repoPath, deps);
+  const hit = map.get(branch);
+  if (!hit) return null;
+  try {
+    // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
+    // OWN `branch --list` check exactly) — NOT the shared branchExists() helper, whose bare `simpleGit()`
+    // has no block-timeout and no withTimeout race, so a hung `git branch --list` would hang this whole
+    // (awaited-inside-a-tool-handler) function despite the catch-all below never seeing it throw.
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const branchPresent = (await withTimeout(
+      git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
+    )).trim() !== "";
+    if (branchPresent) {
+      const mergeBase = (await withTimeout(
+        git.raw(["merge-base", hit.sha, branch]), timeoutMs, "git merge-base",
+      )).trim();
+      if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
+    }
+  } catch {
+    return null; // fail safe
+  }
+  return { sha: hit.sha.slice(0, 7), date: hit.date };
+}
+
+/** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos. */
+export function __resetMergedCommitMapCacheForTest(): void {
+  mergedMapCache.clear();
+  mergedMapInFlight.clear();
+}
+
 /** The Conventional Commits types Loom recognizes (the allowed type list, documented once in CLAUDE.md). */
 const CONVENTIONAL_TYPES = [
   "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",

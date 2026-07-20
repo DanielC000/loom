@@ -64,7 +64,7 @@ try {
   const upd = updateProjectTask(db, "projA", "legacy-1", { priority: "p1" });
   check("updateProjectTask returns the patched priority", upd.priority === "p1");
   check("updateProjectTask persists priority", db.getTask("legacy-1").priority === "p1");
-  const summary = listProjectTasks(db, "projA");
+  const summary = await listProjectTasks(db, "projA");
   check("tasks_list summary rows carry priority", summary.every((t) => typeof t.priority === "string"));
   check("tasks_list reflects the updated priority", summary.find((t) => t.id === "legacy-1")?.priority === "p1");
 
@@ -76,9 +76,9 @@ try {
 
   // (5) minPriority filter: only tasks at or above the level. State now: legacy-1=p1, legacy-2=p2,
   // "New default"=p2, "New crit"=p0. minPriority:p1 → keep p0 + p1, drop p2.
-  const high = listProjectTasks(db, "projA", { minPriority: "p1" }).map((t) => t.priority).sort();
+  const high = (await listProjectTasks(db, "projA", { minPriority: "p1" })).map((t) => t.priority).sort();
   check("minPriority:p1 keeps only p0+p1 (drops p2)", high.length === 2 && high.every((p) => p === "p0" || p === "p1"));
-  check("minPriority:p0 keeps only the p0 card", listProjectTasks(db, "projA", { minPriority: "p0" }).every((t) => t.priority === "p0"));
+  check("minPriority:p0 keeps only the p0 card", (await listProjectTasks(db, "projA", { minPriority: "p0" })).every((t) => t.priority === "p0"));
 
   db.close();
 } finally {
