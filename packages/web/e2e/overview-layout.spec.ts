@@ -181,3 +181,89 @@ test.describe("project Overview — Agents spawn grid excludes worker-role agent
     await expect(workersStat).toContainText("1");
   });
 });
+
+// The Fleet accordion folds ARCHIVED sessions in alongside the live ones (so Resume has a row to act on —
+// finding #15), but it must fold in ONLY the ~10 MOST-RECENT archived, not the project's entire archived
+// history (~101 rows on live Loom) — folding everything re-implemented the Archive page inline and made the
+// page enormous. The overflow surfaces as a truthful "N more archived → Archive" pointer to the real
+// Archive page, and the header "archived" Stat stays wired to the server-side TRUE total (not the slice).
+//
+// Seeding: one live manager + 12 worker sessions in ONE project, then archived (archived_at set via the
+// test-only seed endpoint) so they fold in as archived rows, not live ones. No real claude spawn (seeded
+// `processState:"live"` rows + an archive flag, never startSession).
+const ARCHIVED_FOLD_CAP = 10;
+
+test.describe("project Overview — Fleet accordion caps the archived fold-in + links to Archive", () => {
+  test("folds only the ~10 most recent archived; the rest surface as an 'N more archived → Archive' link", async ({ page, loomDaemon }) => {
+    const archivedCount = 12;
+    // A live manager keeps the accordion populated with a live row; the workers get archived below.
+    const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "ArchCapMgr" });
+    const archivedIds: string[] = [];
+    for (let i = 0; i < archivedCount; i++) {
+      const w = await loomDaemon.seedLiveSession({ project: mgr.project, agentId: mgr.agentId, role: "worker" });
+      archivedIds.push(w.sessionId);
+    }
+    // Archive them (sets archived_at) so they arrive via the archive query, folding in as the durable-Resume
+    // path rather than as live rows.
+    await apiJson(`${loomDaemon.baseURL}/internal/test/seed`, { method: "POST", body: JSON.stringify({ archiveSessions: archivedIds }) });
+
+    await pinActiveProject(page, mgr.projectId);
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+
+    // The header "archived" Stat shows the TRUE server-side total (12), never the capped fold-in slice.
+    const archivedStat = page.locator("main").getByText("archived", { exact: true }).locator("..");
+    await expect(archivedStat).toContainText(String(archivedCount));
+
+    // The Fleet accordion is expanded by default. It renders the live manager + ONLY the 10 most-recent
+    // archived rows (each a collapsed cockpit toggle) → 1 + 10 = 11, NOT 1 + 12. Counting the row toggles
+    // is the witness that the fold-in was CAPPED (uncapped would render every archived row).
+    const rowToggles = page.locator("main").locator(`button[title="Expand to this session's cockpit"]`);
+    await expect(rowToggles).toHaveCount(1 + ARCHIVED_FOLD_CAP);
+
+    // The archived rows beyond the cap (12 − 10 = 2) surface as a truthful pointer to the Archive page.
+    const hidden = archivedCount - ARCHIVED_FOLD_CAP;
+    const moreLink = page.locator("main").getByRole("button", { name: new RegExp(`${hidden} more archived`) });
+    await expect(moreLink).toBeVisible();
+
+    // It routes to the (project-scoped) Archive page.
+    await moreLink.click();
+    await expect(page).toHaveURL(/\/archive$/);
+  });
+});
+
+// A project with NO schedules used to render a full Schedules section (SectionLabel heading + a Panel whose
+// only content was "add one on the Automation page"). Empty, that whole section collapses to a single muted
+// pointer line — no heading, no Panel — with a clickable "add one on the Automation page →" that routes to
+// Automation. Seed a schedule and the FULL section returns (the cron row renders, the pointer is gone).
+test.describe("project Overview — empty Schedules collapses to a one-line pointer", () => {
+  test("no schedules → single pointer line to Automation; a seeded schedule → the full section returns", async ({ page, loomDaemon }) => {
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`ov-sched-${stamp}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, `SchedAgent-${stamp}`);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+
+    // EMPTY: the collapsed pointer is a clickable button routing to Automation — and the OLD full-section
+    // empty copy ("No schedules for this project.") is gone, proving the section chrome collapsed.
+    const pointer = page.locator("main").getByRole("button", { name: /add one on the Automation page/i });
+    await expect(pointer).toBeVisible();
+    await expect(page.locator("main").getByText(/No schedules for this project\./i)).toHaveCount(0);
+
+    // It routes to Automation.
+    await pointer.click();
+    await expect(page).toHaveURL(/\/automation$/);
+
+    // NON-EMPTY: seed a schedule for this project's agent, return to Overview → the FULL section renders its
+    // cron row and the collapsed pointer is gone (the section un-collapses when there's content).
+    const cron = "0 9 * * *";
+    const res = await fetch(`${loomDaemon.baseURL}/api/schedules`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: `OvSched ${stamp}`, agentId: agent.id, cron }),
+    });
+    expect(res.ok).toBeTruthy();
+
+    await page.goto(`${loomDaemon.baseURL}/overview`);
+    await expect(page.locator("main").getByText(cron, { exact: true })).toBeVisible();
+    await expect(page.locator("main").getByRole("button", { name: /add one on the Automation page/i })).toHaveCount(0);
+  });
+});

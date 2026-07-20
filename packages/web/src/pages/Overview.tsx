@@ -97,13 +97,19 @@ export default function Overview() {
     try { localStorage.setItem(`overview.fleetCollapsed.${projectId}`, open ? "0" : "1"); } catch { /* ignore */ }
   };
 
-  // The EXPANDED accordion folds the project's ARCHIVED managers/workers in alongside the live ones —
-  // without this, SessionActions' Resume never gets an archived row to act on (canResumeSession alone
-  // isn't enough if the caller never feeds it one — finding #15). Kept SEPARATE from managers/workers/
-  // all above, which stay live-only for the roll-up severity + worst-context math (fleetRollup/
-  // worstContext are deliberately fed the running set only, per lib/fleet.ts).
-  const archivedManagers = archivedItems.filter((s) => s.role === "manager");
-  const archivedWorkers = archivedItems.filter((s) => s.role === "worker");
+  // The EXPANDED accordion folds ARCHIVED managers/workers in alongside the live ones so
+  // SessionActions' Resume has a row to act on (canResumeSession alone isn't enough if the caller never
+  // feeds it one — finding #15). It folds in ONLY the ~10 most recent archived, NOT the project's entire
+  // archived history (~101 rows on live Loom): folding the whole history re-implemented the Archive page
+  // inline and made the page enormous. The rest are reachable via the truthful "N archived → Archive"
+  // link the accordion renders below. archivedItems arrives recency-ordered from the archive endpoint, so
+  // the leading slice IS the most-recent set. Kept SEPARATE from managers/workers/all above, which stay
+  // live-only for the roll-up severity + worst-context math (fleetRollup/worstContext are deliberately
+  // fed the running set only, per lib/fleet.ts).
+  const ARCHIVED_FOLD_CAP = 10;
+  const recentArchived = archivedItems.slice(0, ARCHIVED_FOLD_CAP);
+  const archivedManagers = recentArchived.filter((s) => s.role === "manager");
+  const archivedWorkers = recentArchived.filter((s) => s.role === "worker");
   // Dedupe the live+archived merge by id (live-first ⇒ keep the LIVE row): a session mid-transition
   // live→archived can appear in BOTH source lists, and rendering both yields a duplicate React key
   // (card efd191ea). Presentational only — drops the duplicate, never changes which sessions show.
@@ -112,7 +118,12 @@ export default function Overview() {
   const accordionLooseWorkers = accordionWorkers
     .filter((w) => !accordionManagers.some((m) => m.id === w.parentSessionId))
     .sort(bySessionActivity);
-  const hasAnySessions = all.length > 0 || (archived.data?.total ?? 0) > 0;
+  // Archived rows beyond the folded-in slice → a truthful pointer to the full Archive page, so the
+  // accordion stops re-implementing the whole archive inline. total (server-side count) minus the recent
+  // slice actually shown = how many more live only on the Archive page.
+  const archivedTotal = archived.data?.total ?? 0;
+  const archivedHidden = Math.max(0, archivedTotal - recentArchived.length);
+  const hasAnySessions = all.length > 0 || archivedTotal > 0;
 
   if (!projectId) return <p style={{ color: color.textMuted, fontFamily: font.mono }}>No project selected — pick a project in the header.</p>;
 
@@ -217,16 +228,15 @@ export default function Overview() {
           </div>
         )}
         {hasAnySessions && fleetOpen && (
-          <FleetAccordion managers={accordionManagers} workers={accordionWorkers} looseWorkers={accordionLooseWorkers} />
+          <FleetAccordion managers={accordionManagers} workers={accordionWorkers} looseWorkers={accordionLooseWorkers}
+            archivedHidden={archivedHidden} />
         )}
       </section>
 
-      {/* --- Schedules (the project's cron schedules, by agent→project) --- */}
-      <section>
-        <SectionLabel>Schedules</SectionLabel>
-        <ProjectSchedules agentIds={new Set((agents.data ?? []).map((a) => a.id))}
-          agentName={(id) => agents.data?.find((a) => a.id === id)?.name ?? id.slice(0, 8)} />
-      </section>
+      {/* --- Schedules (the project's cron schedules, by agent→project) — the component owns its own
+             section chrome so an EMPTY project collapses to a single pointer line instead of a full section. --- */}
+      <ProjectSchedules agentIds={new Set((agents.data ?? []).map((a) => a.id))}
+        agentName={(id) => agents.data?.find((a) => a.id === id)?.name ?? id.slice(0, 8)} />
 
       {/* --- Activity (the project's manager event feed) --- */}
       <section>
@@ -355,10 +365,12 @@ function AgentControl({ agent, role, session }: { agent: Agent; role: SessionRol
 // the card never eats the whole screen on a short viewport.
 const FLEET_LIST_MAX_HEIGHT = "min(60vh, 620px)";
 
-function FleetAccordion({ managers, workers, looseWorkers }: {
+function FleetAccordion({ managers, workers, looseWorkers, archivedHidden }: {
   managers: SessionListItem[]; workers: SessionListItem[]; looseWorkers: SessionListItem[];
+  archivedHidden: number;
 }) {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [openId, setOpenId] = useState<string | null>(null);
   const toggle = (id: string) => setOpenId((cur) => (cur === id ? null : id));
   // Rows here can now be ARCHIVED (folded in by the caller so Resume has something to act on — finding
@@ -415,6 +427,15 @@ function FleetAccordion({ managers, workers, looseWorkers }: {
           <span style={{ color: color.textMuted, fontSize: 12 }}>idle — no live manager</span>
         )}
       </div>
+      {/* The accordion folds in only the most-recent archived rows (ARCHIVED_FOLD_CAP); everything older
+          lives on the Archive page. This truthful pointer replaces the old inline whole-history fold-in. */}
+      {archivedHidden > 0 && (
+        <Button variant="ghost" onClick={() => navigate("/archive")}
+          title="Browse this project's full archive"
+          style={{ alignSelf: "flex-start", padding: "2px 8px", fontFamily: font.mono, fontSize: 11 }}>
+          {archivedHidden} more archived → Archive
+        </Button>
+      )}
     </Panel>
   );
 }
@@ -552,14 +573,31 @@ function ProjectTerminals({ sessions }: { sessions: SessionListItem[] }) {
 
 // The project's cron schedules — every Schedule whose agent belongs to this project (agent→project),
 // read-only here (create/enable/delete live on the Automation page, Time tab). Reuses GET /api/schedules.
+// Owns its OWN section chrome: with schedules, the full SectionLabel + Panel; with NONE, a single muted
+// pointer line (no heading, no Panel box) so an empty project doesn't spend a whole section on "add one".
 function ProjectSchedules({ agentIds, agentName }: { agentIds: Set<string>; agentName: (id: string) => string }) {
+  const navigate = useNavigate();
   const schedules = useQuery({ queryKey: ["schedules"], queryFn: api.schedules });
   const mine = (schedules.data ?? []).filter((s) => agentIds.has(s.agentId));
-  if (mine.length === 0) return <Panel><span style={{ color: color.textMuted, fontSize: 12 }}>No schedules for this project. Add one on the Automation page.</span></Panel>;
+  if (mine.length === 0) {
+    return (
+      <div style={{ display: "flex", alignItems: "baseline", gap: 8, flexWrap: "wrap", fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+        <span style={{ textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim }}>Schedules</span>
+        <span>· none —</span>
+        <button onClick={() => navigate("/automation")} title="Create a schedule on the Automation page"
+          style={{ background: "transparent", border: "none", padding: 0, cursor: "pointer", color: color.cyan, fontFamily: font.mono, fontSize: 11 }}>
+          add one on the Automation page →
+        </button>
+      </div>
+    );
+  }
   return (
-    <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-      {mine.map((s) => <ScheduleRow key={s.id} s={s} agentName={agentName(s.agentId)} />)}
-    </Panel>
+    <section>
+      <SectionLabel>Schedules</SectionLabel>
+      <Panel style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+        {mine.map((s) => <ScheduleRow key={s.id} s={s} agentName={agentName(s.agentId)} />)}
+      </Panel>
+    </section>
   );
 }
 
