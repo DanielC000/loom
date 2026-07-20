@@ -63,12 +63,18 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     // The primary action on each inbox row is fully visible (no overlay here at all).
     await expect(page.locator("main").getByRole("button", { name: "Answer →" }).first()).toBeVisible();
 
-    // (4) Dismiss survives client navigation: dismiss on /platform, then navigate — the pill stays gone.
+    // (4) Dismiss survives CLIENT navigation: dismiss on /platform, then navigate via the sidebar's
+    // React-Router link (NOT page.goto, which is a hard browser reload) — the pill stays gone. ToastContainer
+    // mounts ONCE at the app root outside <Routes>, so its dismissedAtCount state only survives a route change
+    // that stays within the SPA; a page.goto here would remount the whole app (dismissedAtCount resets to 0)
+    // and made this assertion an outright race against the openQuestions poll, flaky in-suite under shared-
+    // daemon load (card ba6522e1) even though it happened to pass standalone on a fast local daemon.
     await page.goto(`${loomDaemon.baseURL}/platform`);
     await expect(pill).toBeVisible();
     await pill.getByRole("button", { name: "dismiss" }).click();
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
-    await page.goto(`${loomDaemon.baseURL}/lore`);
+    await page.getByRole("link", { name: /Lore/ }).click();
+    await expect(page).toHaveURL(/\/lore$/);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
 
     // (5) A fresh load resets the in-memory dismiss; clicking the pill body jumps to /inbox.
