@@ -606,8 +606,11 @@ async function main(): Promise<void> {
   // `pty` is threaded directly (not via SessionService) so worker_list/worker_status can read the live
   // in-memory `lastOutputAt` intra-turn liveness signal (pty/host.ts) without adding a passthrough to
   // SessionService. It's the constructor's optional trailing param (added after companion) so every
-  // other (non-index.ts) call site stays byte-identical.
-  const orchMcp = new OrchestrationMcpRouter(db, sessions, companionHooks, pty);
+  // other (non-index.ts) call site stays byte-identical. `gitWriteTimeouts` (card a3c3ade8, the
+  // companion `git-push` lever) mirrors `platformMcp`'s own trailing git-write-timeouts param just below —
+  // the SAME boot-resolved numbers, so a companion's git_commit/git_push bound exactly like the human
+  // REST git routes and the Platform Lead's own git tools.
+  const orchMcp = new OrchestrationMcpRouter(db, sessions, companionHooks, pty, { gitLocalMs: timeouts.gitLocalMs, gitPushMs: timeouts.gitPushMs });
   // Platform MCP (Pillar C / P2) needs the registry (project/agent/profile/schedule + config) AND
   // SessionService (the cross-project session_spawn/session_stop lifecycle ops). P3 also threads the
   // BOOT-BOUND git-write timeouts so the Lead's elevated git tools (git_checkout/commit/push) bound a

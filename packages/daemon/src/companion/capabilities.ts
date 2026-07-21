@@ -15,7 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import type { CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionRoute, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
+import type { CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionRoute, Project, Question, Session, SessionRole, Task, TaskPriority } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
@@ -26,6 +26,8 @@ import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, app
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
+import type { GitWriter } from "../git/writer.js";
+import { resolveVaultGitTarget } from "../vault/versioner.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -34,7 +36,7 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  *  own cards land, without a REST change per lever. */
 export const COMPANION_CAPABILITY_SLUGS = [
   "session-status", "decisions-relay", "attention-push", "session-steer",
-  "board-reach", "vault-read", "media-out", "transcript-read", "session-spawn",
+  "board-reach", "vault-read", "media-out", "transcript-read", "session-spawn", "git-push",
 ] as const;
 export type CapabilitySlug = (typeof COMPANION_CAPABILITY_SLUGS)[number];
 
@@ -55,10 +57,11 @@ const SESSION_STEER_CLASS_SLUGS: readonly string[] = ["session-steer"];
 
 /** The levers whose ACT half flows through the ONE shared per-(session,route,sender) Tier-A trust window
  *  (a confirm on any of them warms it for the rest until it cools) — `decisions-relay` (a "general"
- *  decision) and `board-reach` (create/update). `session-spawn` (Tier X, always steps up) and
+ *  decision), `board-reach` (create/update), and `git-push`'s own `git_commit` (Tier A — its sibling
+ *  `git_push` tool is Tier X and never touches the window). `session-spawn` (Tier X, always steps up) and
  *  `session-steer` (friction-free, never touches the window) are deliberately EXCLUDED — see the secondary
  *  advisory's own doc. Used only to count DISTINCT co-granted Tier-A act capabilities for that advisory. */
-const TIER_A_ACT_SLUGS: readonly string[] = ["decisions-relay", "board-reach"];
+const TIER_A_ACT_SLUGS: readonly string[] = ["decisions-relay", "board-reach", "git-push"];
 
 /**
  * Compute the grant-time co-grant advisories for a companion session's WHOLE resolved grant set (pass every
@@ -385,7 +388,13 @@ export interface GrantSessions {
   spawnSession(projectId: string, agentId: string, role: string, senderSessionId: string): Session;
 }
 
-/** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound`/`sessions` are
+/** Builds a bounded, non-interactive `GitWriter` for ONE repo path — the ONLY way the `git-push` lever
+ *  may touch git. Injected from the router (mirrors `pty`/`outbound`/`sessions`) so it shares the SAME
+ *  boot-resolved timeouts the human git-write REST routes and the Platform Lead's own `git_commit`/
+ *  `git_push` tools use (`mcp/platform.ts`'s `gitWriterFor`) — never a second, drifting timeout config. */
+export type GitWriterFactory = (repoPath: string) => GitWriter;
+
+/** Per-lever registration context — `sessionId`/`scope`/`attest`/`pty`/`outbound`/`sessions`/`git` are
  *  SERVER-DERIVED (never agent-passed); a lever's `register()` closes over these to pre-scope every tool
  *  it adds. `attest` (Companion injection-guard primitives, card 8e511951) is the ONLY surface an ACT
  *  lever may use to verify a privileged action traces back to the owner's own literal words. `pty` (card
@@ -394,7 +403,8 @@ export interface GrantSessions {
  *  lever may put text in front of the OWNER directly. `sessions` (card 305a54fb) is the ONLY way a lever
  *  may drive another session's lifecycle (message/steer/stop/resume/spawn) — every lever that doesn't
  *  need one of these (every read-only lever, and `decision_resolve`/`board_create`/`board_update`/
- *  `send_media` for `sessions`) simply never touches it. */
+ *  `send_media` for `sessions`) simply never touches it. `git` (card a3c3ade8) is the ONLY way the
+ *  `git-push` lever may run a git write — every other lever ignores it. */
 export interface GrantContext {
   sessionId: string;
   scope: ResolvedGrantScope;
@@ -402,6 +412,7 @@ export interface GrantContext {
   pty: GrantPty;
   outbound: GrantOutbound;
   sessions: GrantSessions;
+  git: GitWriterFactory;
   /** Companion Trust Window (Framework Card 0) — the ONE shared instance a sensitive ACT lever consults
    *  through {@link mayProceedWithoutConfirm}/{@link onStepUpCommitted}, never directly (mirrors how a
    *  lever never touches `OwnerConfirmStore` directly, only through `attest`). */
@@ -923,19 +934,20 @@ function pendingAuthoredGrantKey(sessionId: string, route: CompanionRoute | null
   return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${AUTHORED_CONTENT_GRANT_SLUG}`;
 }
 
-/** Clears every outstanding proposal PAYLOAD held for `sessionId`, across all FOUR ACT levers' own
- *  module-scoped pending-payload maps (decisions-relay/board-reach/authored-content-grant/session-spawn —
- *  `pendingSpawns`, declared further down this file with `SESSION_SPAWN_SLUG`'s registration, is in scope
- *  here the same way `pendingBoardWrites`/`pendingAuthoredGrants` are: a module-level `const`, safe to
- *  reference from an exported function that only ever runs after the whole module has finished
- *  evaluating) — the lever side of the session-close hygiene fix; a caller must ALSO call
- *  `OwnerConfirmStore.clearSession` (attestation.ts) for the SAME sessionId, since this only clears the
- *  levers' own remembered payloads, never the confirm tokens themselves (card 327bcaaa). Before this,
- *  `closeCompanionTrustWindow` cleared neither store, so a recycled/unbound/re-paired session's pending
- *  proposal became permanently-orphaned dead memory — never a security issue (nothing can ever confirm it
- *  once the session is gone), but genuine leaked state. CR follow-up (this card): the first pass missed
- *  `pendingSpawns` — session_spawn uses the identical proposeConfirmation→pending→confirm shape via the
- *  same `OwnerConfirmStore`, so it needed the same clear as the other three. Prefix-matches on
+/** Clears every outstanding proposal PAYLOAD held for `sessionId`, across all FIVE ACT levers' own
+ *  module-scoped pending-payload maps (decisions-relay/board-reach/authored-content-grant/session-spawn/
+ *  git-push — `pendingSpawns`/`pendingGitWrites`, each declared further down this file with their own
+ *  lever's registration, are in scope here the same way `pendingBoardWrites`/`pendingAuthoredGrants` are:
+ *  a module-level `const`, safe to reference from an exported function that only ever runs after the
+ *  whole module has finished evaluating) — the lever side of the session-close hygiene fix; a caller must
+ *  ALSO call `OwnerConfirmStore.clearSession` (attestation.ts) for the SAME sessionId, since this only
+ *  clears the levers' own remembered payloads, never the confirm tokens themselves (card 327bcaaa).
+ *  Before this, `closeCompanionTrustWindow` cleared neither store, so a recycled/unbound/re-paired
+ *  session's pending proposal became permanently-orphaned dead memory — never a security issue (nothing
+ *  can ever confirm it once the session is gone), but genuine leaked state. CR follow-up (this card): the
+ *  first pass missed `pendingSpawns` — session_spawn uses the identical proposeConfirmation→pending→
+ *  confirm shape via the same `OwnerConfirmStore`, so it needed the same clear as the other three.
+ *  `pendingGitWrites` (card a3c3ade8) joins the set for the identical reason. Prefix-matches on
  *  `${sessionId}::`, mirroring every pending*Key helper's own key shape. */
 export function clearPendingProposalsForSession(sessionId: string): void {
   const prefix = `${sessionId}::`;
@@ -943,10 +955,11 @@ export function clearPendingProposalsForSession(sessionId: string): void {
   for (const k of pendingBoardWrites.keys()) if (k.startsWith(prefix)) pendingBoardWrites.delete(k);
   for (const k of pendingAuthoredGrants.keys()) if (k.startsWith(prefix)) pendingAuthoredGrants.delete(k);
   for (const k of pendingSpawns.keys()) if (k.startsWith(prefix)) pendingSpawns.delete(k);
+  for (const k of pendingGitWrites.keys()) if (k.startsWith(prefix)) pendingGitWrites.delete(k);
 }
 
 /** TEST-ONLY introspection (not called from any production path): the count of outstanding proposal
- *  PAYLOADS currently held for `sessionId`, summed across all four maps `clearPendingProposalsForSession`
+ *  PAYLOADS currently held for `sessionId`, summed across all five maps `clearPendingProposalsForSession`
  *  clears. Exists because the commit path on every lever checks the confirm TOKEN (`OwnerConfirmStore`)
  *  BEFORE it ever reads its own payload map — so a test that only proves "the captured token no longer
  *  commits" can pass even if a payload-map clear silently regressed (CR follow-up, card 327bcaaa: this is
@@ -955,7 +968,7 @@ export function clearPendingProposalsForSession(sessionId: string): void {
 export function pendingProposalCountForSession(sessionId: string): number {
   const prefix = `${sessionId}::`;
   const matching = (m: ReadonlyMap<string, unknown>) => [...m.keys()].filter((k) => k.startsWith(prefix)).length;
-  return matching(pendingDecisionResolves) + matching(pendingBoardWrites) + matching(pendingAuthoredGrants) + matching(pendingSpawns);
+  return matching(pendingDecisionResolves) + matching(pendingBoardWrites) + matching(pendingAuthoredGrants) + matching(pendingSpawns) + matching(pendingGitWrites);
 }
 
 /**
@@ -2421,14 +2434,319 @@ const SESSION_SPAWN: CompanionCapability = {
   },
 };
 
+// --- `git-push` (Framework §4, card a3c3ade8) — the deferred "Option C" companion git commit+push lever.
+// Scoped, owner-granted, OFF by default: commit (Tier A) + push (Tier X) to a project's OWN daemon-
+// resolved repo — never an agent-supplied path/remote. Reuses `GitWriter` (git/writer.ts) verbatim, the
+// SAME bounded/non-interactive class the Platform Lead's own `git_commit`/`git_push` tools use.
+// INCREMENT 1 ships the "vault" target ONLY (`GIT_PUSH_TARGETS` below) — the project's Obsidian vault
+// repo, resolved to its GOVERNING repo root (never the raw `vaultPath`; see `resolveVaultGitTarget`'s own
+// doc for why). Increment 2 widens `GIT_PUSH_TARGETS` to add `"repo"` (the project's own `repoPath`).
+
+/** `target` vocabulary for `git_commit`/`git_push` — shared by the tools' own zod inputSchema and the
+ *  REST grant config validator (gateway/server.ts), so both stay in lockstep with exactly one vocabulary. */
+export const GIT_PUSH_TARGETS = ["vault"] as const;
+export type GitPushTarget = (typeof GIT_PUSH_TARGETS)[number];
+
+const GIT_PUSH_SLUG = "git-push";
+
+/** A validated, NOT-YET-CONFIRMED git-push write, keyed by (sessionId, route) — mirrors
+ *  `pendingBoardWrites`/`pendingSpawns` exactly (see their doc). `git_commit`'s cold-window step-up path
+ *  and `git_push`'s ALWAYS-step-up path share this ONE map (and the ONE `GIT_PUSH_SLUG` proposal
+ *  namespace), mirroring how `board_create`/`board_update`/`board_relocate` share `BOARD_REACH_SLUG` — a
+ *  route only ever has a single outstanding git-push-capability confirmation at a time. */
+type PendingGitWrite =
+  | { action: "commit"; project: string; target: GitPushTarget; message: string }
+  | { action: "push"; project: string; target: GitPushTarget };
+const pendingGitWrites = new Map<string, PendingGitWrite>();
+
+/** Mirrors `pendingBoardKey`/`pendingSpawnKey` exactly, namespaced by `GIT_PUSH_SLUG` instead. */
+function pendingGitWriteKey(sessionId: string, route: CompanionRoute | null): string {
+  return `${sessionId}::${route ? `${route.channel}:${route.chatId}` : ""}::${GIT_PUSH_SLUG}`;
+}
+
+/** Resolve `target`'s actual git working-tree path for `project`, server-side only (the agent supplies
+ *  ONLY the closed-vocabulary `target` enum — never a path). INCREMENT 1: `"vault"` is the only value
+ *  `GIT_PUSH_TARGETS` admits, so this only ever resolves the vault's governing repo (never raw
+ *  `vaultPath` — see `resolveVaultGitTarget`'s own doc); Increment 2 adds a `"repo"` branch resolving to
+ *  `project.repoPath` directly (mirrors `mcp/platform.ts`'s `git_commit`/`git_push`, verbatim reuse). */
+async function resolveGitPushTarget(project: Pick<Project, "vaultPath">, _target: GitPushTarget): Promise<{ ok: true; repoPath: string } | { ok: false; error: string }> {
+  const r = await resolveVaultGitTarget(project.vaultPath);
+  if (r.ok) return { ok: true, repoPath: r.repoPath };
+  const messages: Record<typeof r.reason, string> = {
+    "no-vault": "this project has no vault configured",
+    "no-repo": "this project's vault has no git repository yet — set one up before using this lever",
+    "externally-managed": "this vault's history is managed by the Obsidian Git plugin — Loom will not commit or push it",
+  };
+  return { ok: false, error: messages[r.reason] };
+}
+
+const GIT_PUSH_SUBJECT_MAX = 120;
+/** Bound a commit subject line before it's echoed into a delivered confirm prompt — a defensive cap
+ *  (mirrors `vault_lookup`'s own excerpt-bounding discipline), not a security guard by itself. */
+function truncateSubject(s: string): string {
+  return s.length > GIT_PUSH_SUBJECT_MAX ? `${s.slice(0, GIT_PUSH_SUBJECT_MAX - 1)}…` : s;
+}
+
+/**
+ * `git-push` (Framework §4, card a3c3ade8) — ACT-only (mirrors `media-out`/`session-steer`/
+ * `session-spawn`'s own `hasActGrant` gate; no read half). Two tools:
+ *
+ * `git_commit` is Tier **A** — flows inside a warm session-trust window with no per-call confirm (a cold
+ * window, or `friction:"per-action"`, runs one step-up first, exactly like `decision_resolve`'s "general"
+ * path). `message` defaults to requiring Primitive B (a verbatim owner quote) — mirroring `board_create`'s
+ * own default-verbatim posture — UNLESS this project's grant config sets `authoredContent:true` (the SAME
+ * reused key/semantics as `board-reach`'s own Tier-A residual opt-in), in which case the companion may
+ * author a real commit message. This is deliberate hardening beyond the card's own explicit spec: without
+ * it, a warm Tier-A window would let an injected turn commit fabricated local history with ZERO owner
+ * disclosure (nothing is shown to the owner on the low-friction direct-commit path) — the same class of
+ * risk `board_create`'s own `authoredContent` gate already defends against. Only ever touches the target
+ * `resolveGitPushTarget` resolves — never an agent-supplied path.
+ *
+ * `git_push` is Tier **X** — ALWAYS steps up, even inside an otherwise-warm window (mirrors
+ * `board_relocate`/`session_spawn`'s dead-branch-guarded Tier-X shape verbatim: `mayProceedWithoutConfirm`
+ * returns `false` unconditionally for "X", so the low-friction branch below is unreachable today; kept so
+ * a regression there fails SAFE rather than silently publishing with zero owner confirm). The confirm text
+ * discloses the branch, how many commits are about to publish, and the latest commit's subject (bounded —
+ * a vault repo can sit hundreds of commits ahead; a full log dump would flood the chat) so the owner sees
+ * what's about to leave the box before approving, even though the commit itself may have landed silently
+ * moments earlier under `git_commit`'s own Tier-A path.
+ *
+ * Both tools share ONE Primitive-C proposal namespace (`GIT_PUSH_SLUG`) and pending-payload map
+ * (`pendingGitWrites`) — a fresh propose of either always overwrites any prior pending entry for that
+ * route, matching `board_create`/`board_update`/`board_relocate`'s own shared-map precedent.
+ */
+const GIT_PUSH: CompanionCapability = {
+  slug: "git-push",
+  supportsMode: ["act"],
+  register(server, ctx, db) {
+    // ACT-only lever — mirrors media-out/session-steer/session-spawn's own hasActGrant gate.
+    const hasActGrant = [...ctx.scope.projectIds].some((pid) => ctx.scope.mayAct(pid));
+    if (!hasActGrant) return;
+
+    server.registerTool(
+      "git_commit",
+      {
+        description:
+          "Commit ALL pending changes in one of your granted projects' git repos, on behalf of the " +
+          "owner. `target` selects WHICH repo — INCREMENT 1 supports \"vault\" only (the project's " +
+          "Obsidian vault repo; Loom resolves its ACTUAL git root itself — never a path you supply). By " +
+          "default `message` MUST be a verbatim quote of words the owner actually said (Primitive B) — " +
+          "if the owner just says \"commit my vault\" without dictating exact wording, this is REJECTED " +
+          "unless the project's grant has `authoredContent` enabled, in which case you may write a real " +
+          "commit message yourself. A clean tree (nothing to commit) is reported as an error, not a " +
+          "silent no-op. An ORDINARY commit resolves IMMEDIATELY once the owner has recently confirmed " +
+          "something in this chat ({status:'committed'}) — no per-call confirmation needed while that " +
+          "trust window stays warm. Otherwise (a cold window, or this grant configured to always " +
+          "confirm) Loom sends a confirmation request DIRECTLY to the owner's chat itself (you do NOT " +
+          "see or relay any prompt/token — just tell the owner you've requested their confirmation) and " +
+          "returns {status:'proposed', expiresAt}. Only once the owner replies to THAT message do you " +
+          "call git_commit AGAIN with the SAME arguments to actually commit it ({status:'committed'}). " +
+          "Nothing is ever pushed by this tool — call git_push separately (it ALWAYS confirms, every time).",
+        inputSchema: { project: z.string(), target: z.enum(GIT_PUSH_TARGETS), message: z.string() },
+      },
+      async ({ project, target, message }) => {
+        if (!ctx.scope.projectIds.has(project)) {
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "git-push", project) });
+        }
+        if (!ctx.scope.mayAct(project)) {
+          return ok({ error: "you only have a read-mode grant on this project — git_commit needs act-mode" });
+        }
+        const p = db.getProject(project);
+        if (!p) return ok({ error: `no project "${project}"` });
+        const cfg = ctx.scope.configFor(project) as { targets?: unknown; authoredContent?: unknown; friction?: unknown };
+        const allowedTargets = new Set(Array.isArray(cfg.targets) ? cfg.targets as string[] : []);
+        if (!allowedTargets.has(target)) {
+          return ok({ error: `this project's git-push grant does not allow the "${target}" target — an owner must add it to the grant config first` });
+        }
+        const resolved = await resolveGitPushTarget(p, target);
+        if (!resolved.ok) return ok({ error: resolved.error });
+
+        // Primitive A — every call (direct-commit, propose, OR confirm) must be on an owner-authored turn.
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — git_commit can only act on an owner-authored turn" });
+        }
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+
+        // Content guard — applies on EVERY path that can actually commit `message` content THIS call (the
+        // low-friction direct-commit below, and the fresh-propose path further down); never on a bare
+        // CONFIRM reply, whose own text is just "CONFIRM <token>", not the original message.
+        const messageIsAcceptable = authoredContentAllowed(cfg) || ctx.attest.isVerbatimOwnerText(ctx.sessionId, message);
+
+        const friction = resolveFrictionMode(cfg);
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: GIT_PUSH_SLUG,
+        };
+        const key = pendingGitWriteKey(ctx.sessionId, route);
+
+        // Low-friction path (Framework Card 0): a warm Tier-A trust window commits DIRECTLY, no
+        // propose/confirm round-trip at all.
+        if (mayProceedWithoutConfirm(ctx.trustWindow, "A", friction, frictionScope)) {
+          if (!messageIsAcceptable) {
+            return ok({ error: "message must be a verbatim quote of what the owner said, or this project's git-push grant must have authoredContent enabled" });
+          }
+          const committed = await ctx.git(resolved.repoPath).commit(message);
+          if (!committed.ok) return ok({ error: committed.error });
+          return ok({ status: "committed", hash: committed.hash });
+        }
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, GIT_PUSH_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingGitWrites.get(key);
+          pendingGitWrites.delete(key); // single-use, whether or not it still matches below.
+          if (!pending || pending.action !== "commit" || pending.project !== project || pending.target !== target || pending.message !== message) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call git_commit again to re-propose" });
+          }
+          const committed = await ctx.git(resolved.repoPath).commit(message);
+          if (!committed.ok) return ok({ error: committed.error });
+          // Tier-A step-up ARMS the trust window for subsequent Tier-A calls (session-trust friction only).
+          onStepUpCommitted(ctx.trustWindow, "A", friction, frictionScope);
+          return ok({ status: "committed", hash: committed.hash });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        // An EXPIRED (or never-existed) proposal's payload is dead weight — evict before the fresh
+        // propose below unconditionally overwrites this key.
+        pendingGitWrites.delete(key);
+
+        if (!messageIsAcceptable) {
+          return ok({ error: "message must be a verbatim quote of what the owner said, or this project's git-push grant must have authoredContent enabled" });
+        }
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: GIT_PUSH_SLUG,
+          summary: `Commit project "${p.name}"'s ${target} repo? Message: "${message}".`,
+        });
+        // CR hardening (inherited from decision_resolve/board_create) — deliver DIRECTLY to the owner;
+        // never hand promptText/the token back to the companion. Fail closed on a delivery failure.
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingGitWrites.set(key, { action: "commit", project, target, message });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
+      },
+    );
+
+    server.registerTool(
+      "git_push",
+      {
+        description:
+          "Push one of your granted projects' git repos to its remote, on behalf of the owner — the " +
+          "single OUTWARD-facing tool in this lever (git_commit stays local; nothing leaves the box " +
+          "until this runs). `target` selects WHICH repo (see git_commit's own doc). THIS ALWAYS " +
+          "requires a fresh owner confirmation, even inside an otherwise-warm trust window — it does NOT " +
+          "push on the first call: Loom sends a confirmation request DIRECTLY to the owner's chat itself " +
+          "(you do NOT see or relay any prompt/token — just tell the owner you've requested their " +
+          "confirmation) and returns {status:'proposed', expiresAt}. The confirm text names the branch, " +
+          "how many commits are about to publish, and the latest commit's subject line, so the owner " +
+          "sees what's about to leave the box before approving. Only once the owner replies to THAT " +
+          "message do you call git_push AGAIN with the SAME arguments to actually push it " +
+          "({status:'pushed'}) — Loom detects the owner's confirming reply itself. A mismatched confirm " +
+          "reply returns {status:'confirm-mismatch'}; tell the owner to reply again, don't re-propose.",
+        inputSchema: { project: z.string(), target: z.enum(GIT_PUSH_TARGETS) },
+      },
+      async ({ project, target }) => {
+        if (!ctx.scope.projectIds.has(project)) {
+          return ok({ error: scopeDenialMessage(db, ctx.sessionId, "git-push", project) });
+        }
+        if (!ctx.scope.mayAct(project)) {
+          return ok({ error: "you only have a read-mode grant on this project — git_push needs act-mode" });
+        }
+        const p = db.getProject(project);
+        if (!p) return ok({ error: `no project "${project}"` });
+        const cfg = ctx.scope.configFor(project) as { targets?: unknown; friction?: unknown };
+        const allowedTargets = new Set(Array.isArray(cfg.targets) ? cfg.targets as string[] : []);
+        if (!allowedTargets.has(target)) {
+          return ok({ error: `this project's git-push grant does not allow the "${target}" target — an owner must add it to the grant config first` });
+        }
+        const resolved = await resolveGitPushTarget(p, target);
+        if (!resolved.ok) return ok({ error: resolved.error });
+
+        const ownerText = ctx.attest.getActiveTurnOwnerText(ctx.sessionId);
+        if (ownerText === null) {
+          return ok({ error: "no owner text this turn — git_push can only act on an owner-authored turn" });
+        }
+        const route = ctx.pty.getActiveTurnOrigin(ctx.sessionId);
+        if (route === null) {
+          return ok({ error: "no reply-to route for this turn — Loom has no verified channel to confirm this with the owner" });
+        }
+
+        // Friction tiering (Framework §6.2): push is ALWAYS Tier X (catastrophic, outward/network) — it
+        // ALWAYS steps up, even inside an otherwise-warm trust window.
+        const friction = resolveFrictionMode(cfg);
+        const frictionScope: FrictionScope = {
+          sessionId: ctx.sessionId, route, senderId: ctx.pty.getActiveTurnSenderId(ctx.sessionId), capability: GIT_PUSH_SLUG,
+        };
+        const key = pendingGitWriteKey(ctx.sessionId, route);
+
+        if (mayProceedWithoutConfirm(ctx.trustWindow, "X", friction, frictionScope)) {
+          // Never reached — Tier X always returns false — kept so this lever runs through the SAME
+          // shared friction chokepoint every other sensitive ACT lever does, and fails SAFE (never
+          // pushes with zero owner confirm) if that invariant ever regressed.
+          return ok({ error: "internal: tier-X action reported a low-friction path" });
+        }
+
+        // Primitive C — try to COMMIT a pending proposal for this exact (route, capability) first.
+        const confirmOutcome = ctx.attest.confirmPending(ctx.sessionId, route, GIT_PUSH_SLUG);
+        if (confirmOutcome.committed) {
+          const pending = pendingGitWrites.get(key);
+          pendingGitWrites.delete(key); // single-use, whether or not it still matches below.
+          if (!pending || pending.action !== "push" || pending.project !== project || pending.target !== target) {
+            return ok({ error: "the confirmed action no longer matches what was proposed — call git_push again to re-propose" });
+          }
+          const pushed = await ctx.git(resolved.repoPath).push();
+          if (!pushed.ok) return ok({ error: pushed.error });
+          // Tier X never arms the trust window (onStepUpCommitted is a no-op for any tier but "A") — a
+          // confirmed push must never lower friction for the next outward act.
+          onStepUpCommitted(ctx.trustWindow, "X", friction, frictionScope);
+          return pushed.warning
+            ? ok({ status: "pushed", branch: pushed.branch, warning: pushed.warning })
+            : ok({ status: "pushed", branch: pushed.branch });
+        }
+        if (confirmOutcome.reason === "token-mismatch") {
+          return ok({ status: "confirm-mismatch", error: "that doesn't contain the exact confirm token — ask the owner to reply again with it verbatim" });
+        }
+        pendingGitWrites.delete(key);
+
+        // No (or expired) pending confirmation for this route — this is a fresh PROPOSE. Read-only, bounded
+        // preview of what's about to publish (never a full log dump — see truncateSubject's own doc).
+        const summary = await ctx.git(resolved.repoPath).pendingPushSummary();
+        const aheadText = summary?.ahead != null ? `${summary.ahead} commit(s) ahead` : "an unknown number of commits ahead";
+        const subjectText = summary?.latestSubject ? ` — latest: "${truncateSubject(summary.latestSubject)}"` : "";
+        const proposal = ctx.attest.proposeConfirmation({
+          sessionId: ctx.sessionId,
+          route,
+          capability: GIT_PUSH_SLUG,
+          summary: `Push project "${p.name}"'s ${target} repo (branch ${summary?.branch ?? "?"}) to its remote? ${aheadText}${subjectText}.`,
+        });
+        const delivered = await ctx.outbound.deliverToOwner(ctx.sessionId, proposal.promptText);
+        if (!delivered) {
+          return ok({ error: "couldn't deliver the confirmation to the owner's chat — nothing was proposed; try again" });
+        }
+        pendingGitWrites.set(key, { action: "push", project, target });
+        return ok({ status: "proposed", expiresAt: proposal.expiresAt });
+      },
+    );
+  },
+};
+
 /** The full lever registry (Framework §2). `session-status`, `decisions-relay`'s READ half,
  *  `board-reach`'s READ half, `vault-read` (read-only, no act half), `media-out` (act-only, no read
  *  half), `session-steer` (act-only, no read half — session VISIBILITY is `session-status`'s own
- *  separately-granted lever), `transcript-read` (read-only, no act half, Tier R), and `session-spawn`
- *  (act-only, no read half, Tier X, manager|plain ONLY — the epic's self-elevation surface) are built —
- *  any remaining sensitive ACT levers append here behind their own injection-guard primitives. */
+ *  separately-granted lever), `transcript-read` (read-only, no act half, Tier R), `session-spawn`
+ *  (act-only, no read half, Tier X, manager|plain ONLY — the epic's self-elevation surface), and
+ *  `git-push` (act-only, no read half, commit Tier A / push Tier X — the deferred "Option C" git
+ *  commit+push lever) are built — any remaining sensitive ACT levers append here behind their own
+ *  injection-guard primitives. */
 export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
-  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT, SESSION_STEER, TRANSCRIPT_READ, SESSION_SPAWN];
+  [SESSION_STATUS, DECISIONS_RELAY, BOARD_REACH, VAULT_READ, MEDIA_OUT, SESSION_STEER, TRANSCRIPT_READ, SESSION_SPAWN, GIT_PUSH];
 
 /**
  * The single chokepoint (Framework §2): called ONCE per `buildServer`, right after the existing companion
@@ -2445,15 +2763,16 @@ export const COMPANION_CAPABILITIES: readonly CompanionCapability[] =
  * not be enough, by itself, to light up a capability tool there.
  *
  * `attest` (Companion injection-guard primitives, card 8e511951), `pty`, `outbound` (both card a8ddd6d2),
- * and `sessions` (card 305a54fb) are injected from the router exactly like a lever's other server-derived
- * reads — additive: every lever that doesn't read them (every lever except `decision_resolve`/
- * `board_create`/`board_update`/`send_media`/`session-steer`/`session-spawn` today) sees nothing different.
+ * `sessions` (card 305a54fb), and `git` (card a3c3ade8) are injected from the router exactly like a
+ * lever's other server-derived reads — additive: every lever that doesn't read them (every lever except
+ * `decision_resolve`/`board_create`/`board_update`/`send_media`/`session-steer`/`session-spawn`/
+ * `git_commit`/`git_push` today) sees nothing different.
  */
-export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound, sessions: GrantSessions, trustWindow: CompanionTrustWindow): void {
+export function registerCompanionCapabilities(server: McpServer, sessionId: string, role: SessionRole, db: Db, attest: OwnerAttestation, pty: GrantPty, outbound: GrantOutbound, sessions: GrantSessions, trustWindow: CompanionTrustWindow, git: GitWriterFactory): void {
   if (role !== "assistant") return;
   for (const cap of COMPANION_CAPABILITIES) {
     const scope = resolveCompanionGrant(db, sessionId, cap.slug);
     if (!scope) continue;
-    cap.register(server, { sessionId, scope, attest, pty, outbound, sessions, trustWindow }, db);
+    cap.register(server, { sessionId, scope, attest, pty, outbound, sessions, git, trustWindow }, db);
   }
 }

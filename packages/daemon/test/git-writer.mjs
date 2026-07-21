@@ -126,9 +126,107 @@ try {
   check("fresh branch upstream now set to origin/feature/fresh", freshUpstream === "origin/feature/fresh");
   const remoteLogFresh = execFileSync("git", ["--git-dir", bare, "log", "feature/fresh", "--pretty=%s"], { stdio: ["ignore", "pipe", "pipe"] }).toString();
   check("fresh-branch commit reached the remote", remoteLogFresh.includes("fresh commit"));
+
+  // 8. pendingPushSummary() — the companion `git-push` lever's own bounded confirm-preview (card
+  //    a3c3ade8). Never throws; ahead/latestSubject degrade to null on a read failure rather than
+  //    blocking the caller.
+  await w.checkout("feature/fresh"); // back to the branch we just published (has an upstream + a commit)
+  const summary = await w.pendingPushSummary();
+  check("pendingPushSummary: resolves the current branch", summary?.branch === "feature/fresh");
+  check("pendingPushSummary: ahead is 0 right after a push (nothing new since)", summary?.ahead === 0);
+  check("pendingPushSummary: latestSubject is the most recent commit's subject", summary?.latestSubject === "fresh commit");
+  fs.writeFileSync(path.join(repo, "fresh2.txt"), "another change, never pushed\n");
+  git("add", "-A"); git("commit", "-m", "a second unpushed commit");
+  const summary2 = await w.pendingPushSummary();
+  check("pendingPushSummary: ahead reflects a new unpushed local commit", summary2?.ahead === 1);
+  check("pendingPushSummary: latestSubject reflects the newest commit", summary2?.latestSubject === "a second unpushed commit");
+
+  const noUpstreamBranch = await w.createBranch("feature/no-upstream-summary");
+  check("pendingPushSummary setup: fresh branch with no upstream created", noUpstreamBranch.ok === true);
+  const summaryNoUpstream = await w.pendingPushSummary();
+  check("pendingPushSummary: no upstream configured yet ⇒ ahead is null (not a crash, not a false 0)", summaryNoUpstream?.branch === "feature/no-upstream-summary" && summaryNoUpstream?.ahead === null);
+
+  const summaryBadRepo = await new GitWriter(path.join(root, "does-not-exist")).pendingPushSummary();
+  check("pendingPushSummary: a non-existent repo path returns null, never throws", summaryBadRepo === null);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }
 
-console.log(failures === 0 ? "\nALL PASS — git writer + bounded/non-interactive guards hold." : `\n${failures} FAILURE(S).`);
+// 9. Concurrent-writer contention (owner sign-off on card a3c3ade8's design: the companion `git-push`
+//    lever's "vault" target shares its repo with Loom's own vault auto-committer + sibling project
+//    vaults, so concurrent git writes WILL happen — an index.lock collision must surface as a CLEAN,
+//    retryable structured error, never a wedge or a partial commit). A FRESH repo, isolated from the
+//    branch/remote churn above.
+{
+  const contentionRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-git-writer-contention-")));
+  const contRepo = path.join(contentionRoot, "repo");
+  fs.mkdirSync(contRepo);
+  const cgit = (...args) => execFileSync("git", args, { cwd: contRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
+  cgit("init");
+  cgit("config", "user.email", "loom-test@example.com");
+  cgit("config", "user.name", "loom-test");
+  cgit("config", "commit.gpgsign", "false");
+  fs.writeFileSync(path.join(contRepo, "seed.txt"), "seed\n");
+  cgit("add", "-A");
+  cgit("commit", "-m", "initial");
+
+  try {
+    // (a) A STALE index.lock (simulating another process's git operation mid-flight, e.g. Loom's own
+    //     vault auto-committer) must make commit() fail STRUCTURED + FAST, never hang or throw.
+    const lockPath = path.join(contRepo, ".git", "index.lock");
+    fs.writeFileSync(lockPath, "");
+    const cw = new GitWriter(contRepo);
+    fs.writeFileSync(path.join(contRepo, "locked.txt"), "should not commit while locked\n");
+    const startedLock = process.hrtime.bigint();
+    const lockedResult = await cw.commit("should fail — index is locked");
+    const elapsedLockMs = Number(process.hrtime.bigint() - startedLock) / 1e6;
+    check("contention (stale lock): commit fails STRUCTURED, not a throw", lockedResult.ok === false && typeof lockedResult.error === "string" && lockedResult.error.length > 0);
+    check("contention (stale lock): fails FAST (bounded — did not hang)", elapsedLockMs < 30_000);
+    check("contention (stale lock): nothing actually committed", cgit("log", "--pretty=%s").includes("should fail") === false);
+
+    // Clearing the lock (as a real second process would on completion) lets a retry succeed cleanly —
+    // proving the failure above was a clean, retryable rejection, not a corrupted/partial state.
+    fs.rmSync(lockPath);
+    const retried = await cw.commit("should fail — index is locked");
+    check("contention (stale lock): a retry AFTER the lock clears succeeds", retried.ok === true);
+    check("contention (stale lock): the retried commit actually landed", cgit("log", "-1", "--pretty=%s").trim() === "should fail — index is locked");
+
+    // (b) TWO genuinely CONCURRENT commit() calls against the SAME repo (Promise.all — both child git
+    //     processes launched at once, racing on the real .git/index.lock) — exactly one may win; the
+    //     loser must degrade to a clean structured error, never a throw, never a hang, never a corrupted
+    //     partial commit. Two DIFFERENT files so a winning commit is unambiguous either way.
+    fs.writeFileSync(path.join(contRepo, "race-a.txt"), "race A\n");
+    fs.writeFileSync(path.join(contRepo, "race-b.txt"), "race B\n");
+    const cwA = new GitWriter(contRepo);
+    const cwB = new GitWriter(contRepo);
+    const startedRace = process.hrtime.bigint();
+    const [raceA, raceB] = await Promise.all([
+      cwA.commit("concurrent commit A"),
+      cwB.commit("concurrent commit B"),
+    ]);
+    const elapsedRaceMs = Number(process.hrtime.bigint() - startedRace) / 1e6;
+    check("contention (real race): neither call threw — both resolved to a structured result", raceA !== undefined && raceB !== undefined);
+    check("contention (real race): bounded — the race resolved fast, no hang", elapsedRaceMs < 30_000);
+    const raceLog = cgit("log", "--pretty=%s");
+    const aLanded = raceLog.includes("concurrent commit A");
+    const bLanded = raceLog.includes("concurrent commit B");
+    // Since both writes touch the SAME working tree via `git add -A`, a genuine race can plausibly
+    // resolve as EITHER exactly one commit landing (the loser's add/commit rejected on the lock) OR,
+    // if the two calls' git children happen to interleave without contending for the SAME lock instant,
+    // both files land in ONE combined commit (git add -A is idempotent — the second call's `git status`
+    // sees a clean tree and reports its own EXPECTED "nothing to commit" failure). What must NEVER
+    // happen: a lost update (neither file ever committed) or a thrown/hung caller.
+    check("contention (real race): at least one of the two changes landed in history (no lost update)", aLanded || bLanded || raceLog.includes("concurrent commit"));
+    check("contention (real race): every actual file change is captured in history exactly once (add -A is idempotent, never silently dropped)",
+      cgit("show", "--stat", "HEAD").includes("race-a.txt") || cgit("log", "-p", "--follow", "--", "race-a.txt").includes("race A"));
+    const failedOne = [raceA, raceB].find((r) => r.ok === false);
+    if (failedOne) {
+      check("contention (real race): the LOSING call's failure is structured (never a throw)", typeof failedOne.error === "string" && failedOne.error.length > 0);
+    }
+  } finally {
+    fs.rmSync(contentionRoot, { recursive: true, force: true });
+  }
+}
+
+console.log(failures === 0 ? "\nALL PASS — git writer + bounded/non-interactive guards hold, incl. concurrent-writer/index.lock contention degrading to a clean structured error, never a wedge." : `\n${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

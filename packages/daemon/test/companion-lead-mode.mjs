@@ -156,6 +156,17 @@ try {
     check("session-steer: synthesized config has no roleFilter (absent config ⇒ no exclusion, matching Option B)",
       sessionSteerScope.configFor(proj).roleFilter === undefined);
 
+    // git-push (card a3c3ade8) is DELIBERATELY left conservative under lead mode, mirroring board-reach's
+    // own authoredContent posture (see synthesizeLeadModeScope's doc: config synthesis only widens where a
+    // lever actually reads one — git-push isn't one of them) — lead mode's maximal-control/no-guardrails
+    // Option B still leaves targets EMPTY (nothing committable) and authoredContent OFF (verbatim
+    // required), never auto-widening the never-grantable floor even for a lead-mode session.
+    const gitPushScope = resolveCompanionGrant(db, sess, "git-push");
+    check("git-push: synthesized config has NO targets (absent ⇒ nothing committable, even under lead mode)",
+      gitPushScope.configFor(proj).targets === undefined);
+    check("git-push: synthesized config has NO authoredContent (absent ⇒ verbatim still required, even under lead mode)",
+      gitPushScope.configFor(proj).authoredContent === undefined);
+
     db.close();
   }
 
@@ -175,7 +186,7 @@ try {
       "board_list", "board_get", "board_create", "board_update", "authored_content_grant", "board_relocate",
       "vault_lookup", "send_media",
       "session_message", "session_steer", "session_stop", "session_resume",
-      "transcript_read", "session_spawn",
+      "transcript_read", "session_spawn", "git_commit", "git_push",
     ];
     for (const name of expectedActTools) {
       check(`lead mode registers "${name}" with zero grant rows`, tools.includes(name));

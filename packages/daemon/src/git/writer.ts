@@ -277,4 +277,42 @@ export class GitWriter {
       return undefined; // detection must NEVER block or fail the push
     }
   }
+
+  /**
+   * Read-only preview of what a `push()` call would publish — the current branch, how many local
+   * commits sit ahead of its upstream tracking ref (null if unresolvable, e.g. no upstream configured
+   * yet — a first push), and the SUBJECT (first line only) of the most recent commit. Built for a
+   * confirm-prompt's BOUNDED disclosure (the companion `git-push` lever): a vault repo can sit hundreds
+   * of commits ahead of its remote, so a caller shows "N ahead, latest: …", never a full log dump.
+   * NEVER throws — returns `null` on any read failure (no repo, no commits, git error), mirroring
+   * `identityWarning`'s own fail-safe posture; a caller degrades to a generic confirm text rather than
+   * blocking on preview detail. Read-only + bounded like `vault/versioner.ts`'s `checkVaultPushStatus`
+   * (the analogous helper for a project's vault repo) — this is the project CODE repo's own version.
+   */
+  async pendingPushSummary(): Promise<{ branch: string; ahead: number | null; latestSubject: string | null } | null> {
+    try {
+      const git = this.git(this.localMs);
+      const branch = (await withTimeout(git.branchLocal(), this.localMs, "git branch")).current;
+      if (!branch) return null;
+      let ahead: number | null = null;
+      try {
+        const upstream = (await withTimeout(
+          git.raw(["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"]), this.localMs, "git rev-parse @{u}",
+        )).trim();
+        if (upstream) {
+          const count = parseInt(
+            (await withTimeout(git.raw(["rev-list", "--count", `${upstream}..HEAD`]), this.localMs, "git rev-list --count")).trim(), 10,
+          );
+          if (Number.isFinite(count)) ahead = count;
+        }
+      } catch { /* no upstream configured yet (a first push) — ahead stays null, still a valid summary */ }
+      let latestSubject: string | null = null;
+      try {
+        latestSubject = (await withTimeout(git.raw(["log", "-1", "--pretty=%s"]), this.localMs, "git log subject")).trim() || null;
+      } catch { /* no commits yet */ }
+      return { branch, ahead, latestSubject };
+    } catch {
+      return null;
+    }
+  }
 }

@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { resolveConfig, type CompanionConfigMasked, type CompanionBinding, type CompanionCapabilityGrant, type Project } from "@loom/shared";
 import { api, restartCompanionSession, type CompanionProvisionError, type CompanionSkillEntry, type CompanionMemoryEntry, type CompanionReminderEntry } from "../lib/api";
 import {
-  COMPANION_LEVERS, DECISION_CLASSES, ATTENTION_ALERT_CLASSES, grantsForLever, configStringArray, configNumber,
+  COMPANION_LEVERS, DECISION_CLASSES, ATTENTION_ALERT_CLASSES, GIT_PUSH_TARGETS, grantsForLever, configStringArray, configNumber,
   defaultGrantMode, type LeverMeta, type GrantMode,
 } from "../lib/companionCapabilities";
 import {
@@ -2029,6 +2029,42 @@ function GrantScopeRow({ meta, grant, projectName, busy, onSetMode, onSetConfig,
             disabled={busy}
             onChange={(next) => onSetConfig({ ...grant.config, roleFilter: next })}
           />
+        </div>
+      )}
+
+      {meta.configKind === "gitPushTargets" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <span style={{ ...hint, margin: 0 }}>
+              Which repo(s) this lever may commit/push — nothing is committable until you allow at least one.
+            </span>
+            <ClassChipRow
+              all={GIT_PUSH_TARGETS}
+              selected={configStringArray(grant.config, "targets")}
+              disabled={busy}
+              onChange={(next) => onSetConfig({ ...grant.config, targets: next })}
+            />
+          </div>
+          <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: busy ? "default" : "pointer" }}>
+            <input
+              type="checkbox"
+              checked={grant.config.authoredContent === true}
+              disabled={busy}
+              onChange={(e) => onSetConfig({ ...grant.config, authoredContent: e.target.checked })}
+              style={{ marginTop: 3 }}
+            />
+            <span style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+              <span style={{ ...fieldLabel, color: color.text }}>Let it write the commit message</span>
+              <span style={{ ...hint, margin: 0 }}>
+                OFF (default): a commit's message must be an exact quote of words you actually said — so
+                asking it to "commit my vault" alone is REJECTED unless you also dictate the message. ON:
+                the companion may write a real commit message itself — turn this on if you just want to say
+                "commit/push my vault" and have it work. Push always shows you the branch, how many commits
+                are about to publish, and the latest commit's subject before it asks for your confirmation,
+                regardless of this setting.
+              </span>
+            </span>
+          </label>
         </div>
       )}
     </div>

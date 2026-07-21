@@ -38,6 +38,7 @@ import {
 import { registerCompanionCapabilities, clearPendingProposalsForSession } from "../companion/capabilities.js";
 import { createOwnerAttestation, OwnerConfirmStore, AuthoredContentGrantStore } from "../companion/attestation.js";
 import { CompanionTrustWindow } from "../companion/trust-window.js";
+import { GitWriter } from "../git/writer.js";
 
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -112,11 +113,17 @@ export class OrchestrationMcpRouter {
   // was already load-bearing across every test call site (many positional, some omitting `companion`
   // entirely). Appending it here keeps every existing call site byte-identical; a caller that doesn't
   // pass it just gets `lastEngineOutputAt: null` on every row (see fleetView/worker_status below).
+  // `gitWriteTimeouts` (card a3c3ade8, `git-push` lever) is appended AFTER `pty` for the same reason —
+  // every existing call site (many of them test doubles omitting it) stays byte-identical. Mirrors
+  // `PlatformMcpRouter`'s own constructor shape (mcp/platform.ts) so the companion's `git_commit`/
+  // `git_push` tools bound a git op EXACTLY like the human REST git routes and the Lead's own git tools;
+  // undefined ⇒ `GitWriter`'s own module-default timeouts (used by every existing test double).
   constructor(
     private db: Db,
     private sessions: SessionService,
     private companion: CompanionHooks = {},
     private pty?: PtyHost,
+    private gitWriteTimeouts?: { gitLocalMs: number; gitPushMs: number },
   ) {}
 
   // Companion injection-guard Primitive C's pending-proposal store (card 8e511951) — ONE per router
@@ -629,7 +636,12 @@ export class OrchestrationMcpRouter {
       // spawnableRoleError guard before this is reachable, so the narrowing cast here is safe.
       spawnSession: (projectId, agentId, role, _senderSessionId) =>
         sessions.spawnSessionAsPlatform(projectId, agentId, role as "manager" | "plain"),
-    }, this.trustWindow);
+    }, this.trustWindow,
+    // `git-push` lever's own seam (card a3c3ade8) — builds a bounded, non-interactive GitWriter for ONE
+    // repo path, sharing the SAME boot-resolved timeouts the human git-write REST routes and the Platform
+    // Lead's own git tools use (mcp/platform.ts's `gitWriterFor`). Undefined `gitWriteTimeouts` (every
+    // existing test double) ⇒ GitWriter's own module-default timeouts.
+    (repoPath) => new GitWriter(repoPath, this.gitWriteTimeouts));
 
     // Companion (epic Phase 1): the long-lived `assistant` role gets a MINIMAL surface — the read-only
     // my_context PLUS (only when this IS the bound companion session) the chat_reply registered just above.

@@ -179,6 +179,37 @@ try {
     // Test isolation: clean up the board-reach validation grant, same as media-out above.
     const cleanupBoardReach = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=board-reach` });
     check("DELETE: cleanup the board-reach validation grant (test isolation)", cleanupBoardReach.statusCode === 200);
+
+    // git-push's own config shape (card a3c3ade8: {targets:("vault"|"repo")[], authoredContent:boolean})
+    // — checked ON TOP of the generic floor, mirroring media-out's roots + board-reach's authoredContent
+    // checks above. Fail-closed default: absent targets is a VALID config (nothing committable until the
+    // owner explicitly allows a target), only an unknown target value or a non-boolean authoredContent
+    // is rejected. INCREMENT 1: "repo" is a well-formed STRING but not (yet) in GIT_PUSH_TARGETS, so it
+    // must be rejected exactly like a genuinely unknown value — proving the validator checks membership,
+    // not just element type.
+    const badGitPushTargetsType = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: "not-an-array" } } });
+    check("POST: git-push config.targets not an array → 400", badGitPushTargetsType.statusCode === 400);
+
+    const badGitPushTargetsUnknown = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["vault", "bogus"] } } });
+    check("POST: git-push config.targets with an unknown element → 400", badGitPushTargetsUnknown.statusCode === 400);
+
+    const badGitPushTargetsRepoIncrement1 = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["repo"] } } });
+    check("POST: git-push config.targets:['repo'] → 400 (INCREMENT 1 only admits \"vault\")", badGitPushTargetsRepoIncrement1.statusCode === 400);
+
+    const badGitPushAuthoredContentType = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { authoredContent: "true" } } });
+    check("POST: git-push config.authoredContent as a string (not boolean) → 400", badGitPushAuthoredContentType.statusCode === 400);
+
+    const goodGitPushConfig = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["vault"], authoredContent: true } } });
+    check("POST: a well-formed git-push config → 201", goodGitPushConfig.statusCode === 201);
+
+    // Absent targets/authoredContent is still a VALID config (fail-closed default: nothing committable,
+    // verbatim required — mirrors media-out's absent-roots / board-reach's absent-authoredContent default).
+    const emptyGitPushConfig = await app.inject({ method: "PUT", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: {} } });
+    check("PUT: an absent git-push targets/authoredContent config is still valid (200)", emptyGitPushConfig.statusCode === 200);
+
+    // Test isolation: clean up the git-push validation grant, same as media-out/board-reach above.
+    const cleanupGitPush = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=git-push` });
+    check("DELETE: cleanup the git-push validation grant (test isolation)", cleanupGitPush.statusCode === 200);
   }
   // ============ POST: a second, project-scoped grant for the SAME capability coexists ============
   // NOTE: this lifecycle section (through DELETE below) exercises a read→act flip mid-flow, so it uses

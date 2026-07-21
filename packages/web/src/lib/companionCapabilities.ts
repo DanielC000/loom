@@ -15,7 +15,8 @@ import type { CompanionCapabilityGrant } from "@loom/shared";
 
 export type CapabilitySlug =
   | "session-status" | "decisions-relay" | "attention-push"
-  | "session-steer" | "board-reach" | "vault-read" | "media-out" | "transcript-read" | "session-spawn";
+  | "session-steer" | "board-reach" | "vault-read" | "media-out" | "transcript-read" | "session-spawn"
+  | "git-push";
 
 export type GrantMode = "read" | "act";
 
@@ -26,7 +27,7 @@ export type LeverTier = "read" | "act-capable" | "elevated";
 
 // The per-lever extra scope shape (opaque to the framework; each lever validates its own). "none" = no
 // config; the rest name the ONE config key the daemon validates for that slug.
-export type LeverConfigKind = "none" | "decisionClasses" | "roots" | "roleFilter" | "alertClasses";
+export type LeverConfigKind = "none" | "decisionClasses" | "roots" | "roleFilter" | "alertClasses" | "gitPushTargets";
 
 export interface LeverMeta {
   slug: CapabilitySlug;
@@ -69,6 +70,11 @@ export const ATTENTION_ALERT_CLASSES = [
   "merge-gate", "worker-blocked", "worker-crashed", "decision-pending",
   "manager-idle", "context-overflow", "escalation", "usage-limit",
 ] as const;
+
+// Mirrors GIT_PUSH_TARGETS (daemon companion/capabilities.ts) — which repo(s) the git-push lever may
+// commit/push. INCREMENT 1 ships "vault" only; a later increment widens this to add "repo". Same
+// source-of-truth caveat as DECISION_CLASSES/ATTENTION_ALERT_CLASSES.
+export const GIT_PUSH_TARGETS = ["vault"] as const;
 
 // The panel's lever order: the owner's immediate need first (fleet status + decisions relay), then the
 // other read/informational levers, with the ELEVATED act-only levers grouped LAST so the sensitive
@@ -148,6 +154,16 @@ export const COMPANION_LEVERS: readonly LeverMeta[] = [
     configKind: "roleFilter",
     appliesLive: false,
     elevatedAction: "message, steer, stop and resume sessions on your behalf",
+  },
+  {
+    slug: "git-push",
+    name: "Git commit & push",
+    summary: "Commit and push a granted project's vault git repo on your behalf. Push ALWAYS asks for a fresh confirmation, even right after another confirmed action; a plain commit may apply directly once you've recently confirmed something in this chat.",
+    modes: ["act"],
+    tier: "elevated",
+    configKind: "gitPushTargets",
+    appliesLive: false,
+    elevatedAction: "commit and push your vault's git repo on your behalf",
   },
   {
     slug: "session-spawn",

@@ -36,7 +36,7 @@ import type { InAppChannel } from "../companion/in-app.js";
 import { IN_APP_CHANNEL, decodeInAppAudioToTempFile } from "../companion/in-app.js";
 import { TELEGRAM_CHANNEL } from "../companion/telegram.js";
 import { maskCompanionConfig, findEnabledTokenCollision, findEnabledAgentCollision } from "../companion/store.js";
-import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
+import { COMPANION_CAPABILITIES, COMPANION_CAPABILITY_SLUGS, DECISION_CLASSES, FRICTION_MODES, GIT_PUSH_TARGETS, computeCoGrantWarnings, isCompanionLeadModeEnabled } from "../companion/capabilities.js";
 import { ATTENTION_ALERT_CLASSES } from "../companion/attention-push.js";
 import { listConnections, createConnection, deleteConnection, getConnectionMetadata, createOAuthConnection, getOAuthTokenBundle, saveOAuthTokens, OAUTH_PROVIDER_TEMPLATES, provisionConnection } from "../connections/store.js";
 import { generateCodeVerifier, codeChallengeFromVerifier, generateOAuthState, PendingOAuthConsents, exchangeAuthorizationCode } from "../connections/oauth.js";
@@ -1695,6 +1695,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (v.authoredContent !== undefined && typeof v.authoredContent !== "boolean") return false;
     return true;
   };
+  // `git-push`'s own config shape (card a3c3ade8: `{targets:("vault"|"repo")[], authoredContent:boolean}`)
+  // — checked ON TOP of isValidGrantConfig's generic floor, only when capability === "git-push". Absent
+  // `targets` is valid (the lever's own fail-closed default: no target allowed until the owner explicitly
+  // opts one in — mirrors decisions-relay's absent-decisionClasses / media-out's absent-roots default).
+  // `authoredContent` reuses board-reach's own boolean shape/semantics verbatim (owner sign-off, card
+  // a3c3ade8): default false requires a verbatim owner quote for `git_commit`'s message.
+  const isValidGitPushConfig = (v: Record<string, unknown> | undefined): v is Record<string, unknown> | undefined => {
+    if (v === undefined) return true;
+    if (v.targets !== undefined) {
+      if (!Array.isArray(v.targets)) return false;
+      if (!v.targets.every((t) => typeof t === "string" && (GIT_PUSH_TARGETS as readonly string[]).includes(t))) return false;
+    }
+    if (v.authoredContent !== undefined && typeof v.authoredContent !== "boolean") return false;
+    return true;
+  };
   // `friction` (Companion Trust Window, Framework Card 0, §4.7): `"session-trust" | "per-action"` — a
   // CROSS-CAPABILITY config key (unlike decisionClasses/roots above, which are one lever's own shape), so
   // it's checked on EVERY grant write regardless of `capability`, not gated to one slug. Absent is valid
@@ -1752,6 +1767,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     }
     if (b.capability === "board-reach" && !isValidBoardReachConfig(b.config as Record<string, unknown> | undefined)) {
       return { ok: false, code: 400, error: "board-reach config.authoredContent must be a boolean" };
+    }
+    if (b.capability === "git-push" && !isValidGitPushConfig(b.config as Record<string, unknown> | undefined)) {
+      return {
+        ok: false, code: 400,
+        error: `git-push config.targets must be an array drawn from: ${GIT_PUSH_TARGETS.join(", ")}; config.authoredContent (if set) must be a boolean`,
+      };
     }
     if (!isValidFrictionConfig(b.config as Record<string, unknown> | undefined)) {
       return { ok: false, code: 400, error: `config.friction must be one of: ${FRICTION_MODES.join(", ")}` };

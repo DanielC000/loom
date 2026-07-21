@@ -103,6 +103,34 @@ async function resolveVaultRepoContext(
   return { commitPath, externallyManaged: fs.existsSync(obsidianGitMarker) };
 }
 
+export type VaultGitTargetResult =
+  | { ok: true; repoPath: string }
+  | { ok: false; reason: "no-vault" | "no-repo" | "externally-managed" };
+
+/**
+ * Resolve a project's vault to the git repo a WRITE lever (the companion `git-push` capability) may
+ * commit/push to — reusing `resolveVaultRepoContext` (the SAME resolution the auto-committer itself
+ * uses, so a companion push can never disagree with what Loom already considers "the vault's repo": a
+ * vault may be a subfolder of a larger repo, and sibling project vaults can share ONE governing root —
+ * see `startVaultVersioners`'s own dedupe-by-root doc). Read-only — never mutates, never `git init`s.
+ *
+ * Unlike `resolveVaultRepoContext` (whose caller git-inits a bare vault folder itself), this checks
+ * whether the resolved `commitPath` is ACTUALLY a repo yet and REFUSES (`"no-repo"`) if not — a
+ * companion-facing write lever must never silently create a new git repository on the host on the
+ * owner's behalf; that host-write is out of scope for "commit to an EXISTING repo." Also refuses
+ * (`"externally-managed"`) when the resolved repo is Obsidian-Git-managed — a real external
+ * auto-committer already owns that history, mirroring `VaultVersioner`'s own backoff.
+ */
+export async function resolveVaultGitTarget(vaultPath: string): Promise<VaultGitTargetResult> {
+  const trimmed = vaultPath?.trim();
+  if (!trimmed) return { ok: false, reason: "no-vault" };
+  const ctx = await resolveVaultRepoContext(trimmed);
+  if (ctx.externallyManaged) return { ok: false, reason: "externally-managed" };
+  const isRepo = await simpleGit(ctx.commitPath).checkIsRepo().catch(() => false);
+  if (!isRepo) return { ok: false, reason: "no-repo" };
+  return { ok: true, repoPath: ctx.commitPath };
+}
+
 /**
  * Auto-commits a project's vault so doc rewrites are never truly lost (§7). Debounces writes and commits
  * at idle. Resolves the vault to its GOVERNING repo root (see `resolveVaultRepoContext`) and watches +
