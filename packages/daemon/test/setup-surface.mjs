@@ -195,10 +195,11 @@ try {
     forbidden.every((t) => !tools.includes(t)));
 
   // ============ (c) the curated tools work end-to-end ============
-  // project_create with a REAL git repo → created; vaultPath omitted → defaults to repoPath.
+  // project_create with a REAL git repo → created; vaultPath omitted → NO vault bound (card cdc3792d —
+  // never defaulted to repoPath, which would make the auto-committer watch + commit the code repo).
   const created = await call("project_create", { name: "MyProj", repoPath: repo });
   check("(c) project_create: returns a project with an id", !!created.id && !created.error);
-  check("(c) project_create: vaultPath defaults to repoPath", created.vaultPath === repo);
+  check("(c) project_create: vaultPath omitted ⇒ no vault bound (NOT defaulted to repoPath)", created.vaultPath === "");
   check("(c) project_create: persisted (db.getProject)", !!db.getProject(created.id) && db.getProject(created.id).reserved === false);
   // Guardrail: a non-git dir is rejected, nothing created.
   const nBefore = db.listAllProjects().length;

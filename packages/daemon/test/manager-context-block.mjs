@@ -178,6 +178,17 @@ try {
   check("(3g) resolveResumeDocPath: a traversal override does NOT escape vaultPath (never contains 'passwd')", !escaped.includes("passwd"));
   check("(3g) resolveResumeDocPath: a traversal override falls back to the DEFAULT filename, not the raw escape target", escaped === path.join("/abs/vault", "Orchestrator Log.md"));
 
+  // ===================== (3h) card cdc3792d: a project with NO vault bound (`vaultPath === ""`) must
+  // NOT throw when composing a manager's startup prompt or resolving its resume-doc path — the vault
+  // dir + resume-doc lines are omitted entirely instead of resolving "" against the daemon's own cwd. =====
+  const noVaultComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "", name: "NoVaultDemo" });
+  check("(3h) no-vault: does not throw and still carries the repoPath", noVaultComposed.includes("/abs/repo"));
+  check("(3h) no-vault: omits the 'Project vault dir' line", !noVaultComposed.includes("Project vault dir"));
+  check("(3h) no-vault: omits the 'Resume doc' line", !noVaultComposed.includes("Resume doc"));
+  check("(3h) no-vault: names the no-vault state explicitly instead", /no vault bound/i.test(noVaultComposed));
+  check("(3h) no-vault: still carries the agent's own doctrine", noVaultComposed.includes("DOCTRINE_BODY"));
+  check("(3h) resolveResumeDocPath('') returns \"\" rather than resolving against the daemon's cwd", resolveResumeDocPath("", undefined) === "");
+
   // ===================== (1e) card c1f2f095: an end-to-end manager spawn for a project whose config
   // sets orchestration.resumeDocFilename picks up the CUSTOM path, not the hardcoded default =====================
   const vaultCustom = path.join(os.tmpdir(), `loom-mctxblk-vaultcustom-${Date.now()}`);
@@ -252,6 +263,17 @@ try {
   try { fs.rmSync(refRepoB, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repoR, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(vaultR, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (1f) card cdc3792d: a REAL manager spawn against a vault-less project
+  // (vaultPath === "") does NOT throw, and its startupPrompt omits the vault/resume-doc lines. =====
+  db.insertProject({ id: "pNoVault", name: "NoVaultProj", repoPath: repo, vaultPath: "", config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "agentMgrNoVault", projectId: "pNoVault", name: "Orchestrator", startupPrompt: "AGENT_MGR_NOVAULT_DOCTRINE", position: 0, profileId: null });
+  const sMNoVault = svc.startManager("agentMgrNoVault");
+  const oMNoVault = optsFor(sMNoVault.id);
+  check("(1f) no-vault manager spawn does not throw and carries the repoPath", oMNoVault?.startupPrompt?.includes(repo));
+  check("(1f) no-vault manager spawn omits the 'Resume doc' line", !oMNoVault?.startupPrompt?.includes("Resume doc"));
+  check("(1f) no-vault manager spawn still carries the agent's own doctrine", oMNoVault?.startupPrompt?.includes("AGENT_MGR_NOVAULT_DOCTRINE"));
+  check("(1f) no-vault manager session is live + role manager", db.getSession(sMNoVault.id).processState === "live" && oMNoVault?.role === "manager");
 
   // ===================== (2) WORKER spawn does NOT get the MANAGER block (card af902717: it DOES now carry its agent brief) =====================
   const w = await svc.spawnWorker("mgr1", { taskId: taskW, agentId: "agentWorker", kickoffPrompt: "WORKER_KICKOFF" });

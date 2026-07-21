@@ -117,7 +117,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_create",
       {
-        description: "Bind a Loom project to an EXISTING path (use project_init to create one from nothing). Give repoPath to bind a CODE project — it MUST exist and be a git repository (rejected otherwise); vaultPath defaults to repoPath. OMIT repoPath and give vaultPath to set up a VAULT-ONLY (research/notes) project whose folder need NOT be a git repo — vaultPath must be an existing directory, and repoPath binds to it too. Optional config is validated against the AGENT project-config schema — orchestration.gateCommand (host-RCE) and alertWebhook (exfil) are REJECTED unknown keys, so the setup assistant can never set them.",
+        description: "Bind a Loom project to an EXISTING path (use project_init to create one from nothing). Give repoPath to bind a CODE project — it MUST exist and be a git repository (rejected otherwise); vaultPath is OPTIONAL for a code project (an Obsidian vault for design docs) — omit it for a project with no vault bound (never defaulted to repoPath, which would make the auto-committer watch the code repo itself). OMIT repoPath and give vaultPath to set up a VAULT-ONLY (research/notes) project whose folder need NOT be a git repo — vaultPath must be an existing directory, and repoPath binds to it too. Optional config is validated against the AGENT project-config schema — orchestration.gateCommand (host-RCE) and alertWebhook (exfil) are REJECTED unknown keys, so the setup assistant can never set them.",
         inputSchema: {
           name: z.string(),
           repoPath: z.string().optional(),
@@ -132,14 +132,16 @@ export class SetupMcpRouter {
         let vault: string;
         let isCodeRepo = false;
         if (repoPath !== undefined) {
-          // CODE project (today's behavior): repoPath must be an existing git repository.
+          // CODE project: repoPath must be an existing git repository. vaultPath is OPTIONAL — an
+          // omitted vaultPath stores "" (no vault bound), NEVER defaulted to repoPath: that would make
+          // the vault auto-committer watch + auto-commit the user's CODE repo, fighting the worker/
+          // merge flow (card cdc3792d).
           if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
           repo = repoPath;
-          vault = vaultPath ?? repoPath;
-          // Scaffold a vaultPath that differs from repoPath (repoPath is already confirmed to exist
-          // as a git repo, so this is a no-op in the default case) so the project's vault is writable
-          // immediately — a vault_write against an uncreated root otherwise looks like a path escape.
-          ensureVaultRoot(vault);
+          vault = vaultPath ?? "";
+          // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated
+          // root otherwise looks like a path escape) — only when a real vaultPath was actually given.
+          if (vault) ensureVaultRoot(vault);
           isCodeRepo = true;
         } else {
           // VAULT-ONLY project: no repo. vaultPath must be an existing directory (need NOT be a git repo) —

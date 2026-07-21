@@ -33,6 +33,11 @@ export const DEFAULT_RESUME_DOC_FILENAME = "Orchestrator Log.md";
  * the default filename rather than let the daemon vouch for an escaped path in a TRUSTED prompt block.
  */
 export function resolveResumeDocPath(vaultPath: string, filenameOverride?: string | null): string {
+  // No vault bound (`""`) — there's no vault root to resolve against; every caller MUST check this
+  // before using the result (a bare `path.resolve("")` would otherwise silently root against the
+  // DAEMON's own cwd rather than fail cleanly). Belt-and-suspenders: both current callers already
+  // guard, this is defense-in-depth for a future one that doesn't.
+  if (!vaultPath) return "";
   const filename = filenameOverride?.trim() || DEFAULT_RESUME_DOC_FILENAME;
   const resolvedVaultPath = path.resolve(vaultPath);
   const candidate = path.resolve(vaultPath, filename);

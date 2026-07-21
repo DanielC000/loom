@@ -2033,6 +2033,7 @@ export class PlatformMcpRouter {
       async ({ projectId, path: relPath, content }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
+        if (!p.vaultPath) return ok({ error: "no vault path for this project" });
         return ok(await writeVaultFile(p.vaultPath, relPath, content));
       },
     );

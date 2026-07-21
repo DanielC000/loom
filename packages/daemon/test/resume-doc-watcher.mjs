@@ -203,7 +203,18 @@ const resumeDocPath = (e) => path.join(e.vaultPath, "Orchestrator Log.md");
   cleanup(e);
 }
 
+// Card cdc3792d: a project with NO vault bound (vaultPath === "") is skipped entirely — no resume doc
+// to watch, so tick() must never throw trying to resolve "" against the daemon's own cwd.
+{
+  const e = makeEnv();
+  e.db.updateProject(e.projId, { vaultPath: "" });
+  seedManager(e, "mgr-no-vault");
+  check("no vault bound: tick() does not throw", (() => { try { e.watcher.tick(); return true; } catch { return false; } })());
+  check("no vault bound: no nudge fires (nothing to watch)", e.enqueued.length === 0);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — ResumeDocWatcher nudges over-threshold LIVE managers' resume docs, respects a cooldown, self-clears on rotation so regrowth nudges fresh, never throws on a missing resume-doc file, honors a project's resumeDocFilename override (card c1f2f095) as the single source of truth shared with composeManagerStartupPrompt, and contains a traversal override to the vault root — claude-free."
+  ? "\n✅ ALL PASS — ResumeDocWatcher nudges over-threshold LIVE managers' resume docs, respects a cooldown, self-clears on rotation so regrowth nudges fresh, never throws on a missing resume-doc file or a project with no vault bound (card cdc3792d), honors a project's resumeDocFilename override (card c1f2f095) as the single source of truth shared with composeManagerStartupPrompt, and contains a traversal override to the vault root — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

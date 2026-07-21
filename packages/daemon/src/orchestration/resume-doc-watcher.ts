@@ -60,6 +60,7 @@ export class ResumeDocWatcher {
 
         const project = db.getProject(m.projectId ?? "");
         if (!project) continue;
+        if (!project.vaultPath) continue; // no vault bound — no resume doc to watch, mirrors startVaultVersioners
 
         // Card c1f2f095: resolve via the SAME `resolveResumeDocPath` composeManagerStartupPrompt uses,
         // honoring this project's `orchestration.resumeDocFilename` override — one source of truth, so

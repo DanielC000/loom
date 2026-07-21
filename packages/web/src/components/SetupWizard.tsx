@@ -125,7 +125,7 @@ function WizardBody({ onClose }: { onClose: () => void }) {
   const canContinueFrom1 = choice !== null;
   const canContinueFrom2 = mode === "new"
     ? !!name.trim()
-    : !!name.trim() && !!repoPath.trim() && !!vaultPath.trim();
+    : !!name.trim() && !!repoPath.trim(); // vaultPath is optional — a project may have no vault bound
 
   const goToBoard = () => { setProjectId(created!.projectId); onClose(); navigate("/board"); };
   const goSpawnOrchestrator = () => { setProjectId(created!.projectId); onClose(); navigate("/overview"); };
@@ -420,7 +420,7 @@ function StepProject({
                 placeholder="aurora-api" aria-label="Project name" style={{ width: "100%", boxSizing: "border-box" }} />
             </Field>
 
-            <Field label="Vault path" hint="An Obsidian vault folder for this project's design docs.">
+            <Field label="Vault path (optional)" hint="An Obsidian vault folder for this project's design docs — leave blank if you don't use one.">
               <Input value={vaultPath} onChange={(e) => onVaultPath(e.target.value)} spellCheck={false}
                 placeholder="/Users/you/vault/aurora-api" aria-label="Vault path" style={{ width: "100%", boxSizing: "border-box" }} />
             </Field>
@@ -527,7 +527,7 @@ function StepReview({
           {mode === "bind" ? (
             <>
               <ReceiptLine k="repo" v={repoPath} mono />
-              <ReceiptLine k="vault" v={vaultPath} mono />
+              {vaultPath && <ReceiptLine k="vault" v={vaultPath} mono />}
             </>
           ) : (
             <p style={{ fontFamily: font.mono, fontSize: 12.5, color: color.textDim, margin: "2px 0 0", lineHeight: 1.5 }}>

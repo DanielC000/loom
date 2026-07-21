@@ -316,7 +316,10 @@ export class TaskMcpRouter {
               "escape, 'is-dir', 'error'). There is no delete — this tool only ever creates or overwrites.",
             inputSchema: { path: z.string(), content: z.string() },
           },
-          async ({ path: relPath, content }) => ok(await writeVaultFile(project.vaultPath, relPath, content)),
+          async ({ path: relPath, content }) => {
+            if (!project.vaultPath) return ok({ error: "no vault path for this project" });
+            return ok(await writeVaultFile(project.vaultPath, relPath, content));
+          },
         );
       }
     }

@@ -49,7 +49,7 @@ import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
-import { bootstrapProjectDir } from "../setup/bootstrap.js";
+import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
@@ -3346,11 +3346,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/projects/:id/vault", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
     return listVaultTree(p.vaultPath);
   });
   app.get("/api/projects/:id/vault/file", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
     const rel = (req.query as { path?: string }).path ?? "";
     const content = readVaultFile(p.vaultPath, rel);
     if (content === null) return reply.code(404).send({ error: "file not found" });
@@ -3365,6 +3367,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/projects/:id/vault/raw", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
     const rel = (req.query as { path?: string }).path ?? "";
     if (!rel) return reply.code(400).send({ error: "path required" });
     const stat = statVaultFile(p.vaultPath, rel); // null on traversal/symlink-escape/missing/non-file
@@ -3394,6 +3397,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.put("/api/projects/:id/vault/file", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
     const b = (req.body ?? {}) as { path?: string; content?: string };
     if (!b.path || typeof b.content !== "string") return reply.code(400).send({ error: "path and content required" });
     return writeReply(reply, await writeVaultFile(p.vaultPath, b.path, b.content), b.path);
@@ -3402,6 +3406,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.post("/api/projects/:id/vault/file", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
     const b = (req.body ?? {}) as { path?: string; content?: string };
     if (!b.path) return reply.code(400).send({ error: "path required" });
     return writeReply(reply, await createVaultFile(p.vaultPath, b.path, b.content ?? ""), b.path);
@@ -3410,6 +3415,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.delete("/api/projects/:id/vault/file", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    if (!p.vaultPath) return reply.code(400).send({ error: "project has no vault" });
     const rel = (req.query as { path?: string }).path ?? "";
     if (!rel) return reply.code(400).send({ error: "path required" });
     return writeReply(reply, await deleteVaultFile(p.vaultPath, rel), rel);
@@ -3482,14 +3488,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {
     const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown };
-    if (!b.name || !b.repoPath || !b.vaultPath)
-      return reply.code(400).send({ error: "name, repoPath, vaultPath required" });
-    // repoPath must be an existing git repo — matches the elevated platform MCP project_create and the
-    // PATCH /api/projects/:id rebind path (checkRepoRebind), both of which already isGitRepo-validate it.
-    // This create path previously only presence-checked repoPath, leaving it a laxer bar than the
-    // referenceRepos entries validated just below.
-    if (!(await isGitRepo(b.repoPath)))
-      return reply.code(400).send({ error: `repoPath is not an existing git repository: ${b.repoPath}` });
+    const repoPath = b.repoPath?.trim() || undefined;
+    const vaultPath = b.vaultPath?.trim() || undefined;
+    // The Obsidian vault is OPTIONAL (card cdc3792d) — mirrors the setup operator's project_create rule:
+    // require a name + at least one of {repoPath, vaultPath}. A vault-less CODE project stores
+    // vaultPath as "" (never defaulted to repoPath — that would make the auto-committer watch + commit
+    // the user's code repo, fighting the worker/merge flow). Omitting repoPath binds a VAULT-ONLY
+    // (no-repo) project instead, exactly like mcp/setup.ts's project_create.
+    if (!b.name || (!repoPath && !vaultPath))
+      return reply.code(400).send({ error: "name required, plus at least one of repoPath or vaultPath" });
+    let finalRepoPath: string;
+    let finalVaultPath: string;
+    if (repoPath) {
+      // repoPath must be an existing git repo — matches the elevated platform MCP project_create and the
+      // PATCH /api/projects/:id rebind path (checkRepoRebind), both of which already isGitRepo-validate it.
+      // This create path previously only presence-checked repoPath, leaving it a laxer bar than the
+      // referenceRepos entries validated just below.
+      if (!(await isGitRepo(repoPath)))
+        return reply.code(400).send({ error: `repoPath is not an existing git repository: ${repoPath}` });
+      finalRepoPath = repoPath;
+      finalVaultPath = vaultPath ?? "";
+    } else {
+      // VAULT-ONLY project: no repo. vaultPath must be an existing directory (need not be a git repo) —
+      // a research/notes user whose vault isn't a code repo. The project's cwd binds to that folder too.
+      if (!isExistingDir(vaultPath!))
+        return reply.code(400).send({ error: `vaultPath is not an existing directory: ${vaultPath}` });
+      finalRepoPath = vaultPath!;
+      finalVaultPath = vaultPath!;
+    }
     // referenceRepos (reference-repos epic Phase 2, card f4888775): HUMAN-only on this REST create path —
     // each entry MUST be an absolute path to an existing git repo (validateReferenceRepos), never a
     // relative one (meaningless to a worker whose cwd is a worktree elsewhere on disk).
@@ -3503,7 +3529,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // referenceRepos/repoPath — suppresses the per-merge "unverified: no gateCommand" warning.
     const noGateByDesign = b.noGateByDesign === true;
     const project: Project = {
-      id: randomUUID(), name: b.name, repoPath: b.repoPath, vaultPath: b.vaultPath,
+      id: randomUUID(), name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a human-created project via REST is an ordinary project (never reserved/system)
       referenceRepos,

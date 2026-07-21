@@ -92,7 +92,11 @@ function ancestorDirs(path: string): string[] {
 
 export default function Vault() {
   const qc = useQueryClient();
-  const { projectId } = useActiveProject();
+  const { projectId, projects } = useActiveProject();
+  // A project with no vault bound (card cdc3792d) has nothing for this page to browse — show that
+  // explicitly rather than fetching the tree (which would 400) and rendering it as "Empty vault folder".
+  const activeProject = projects.find((p) => p.id === projectId);
+  const hasVault = !!activeProject?.vaultPath;
   const [file, setFile] = useState<string>("");
   const [editing, setEditing] = useState(false);
   const [newName, setNewName] = useState("");
@@ -107,7 +111,7 @@ export default function Vault() {
   useEffect(() => { setFile(""); setEditing(false); setNewName(""); setQuery(""); setExpanded(new Set()); }, [projectId]);
   useEffect(() => { setEditing(false); }, [file]); // leave edit mode when switching files
 
-  const tree = useQuery({ queryKey: ["vault", projectId], queryFn: () => api.vaultTree(projectId), enabled: !!projectId });
+  const tree = useQuery({ queryKey: ["vault", projectId], queryFn: () => api.vaultTree(projectId), enabled: !!projectId && hasVault });
   const entries = tree.data ?? [];
   const kind = file ? classify(file) : null;
   const isTextual = kind === "md" || kind === "text";
@@ -165,7 +169,8 @@ export default function Vault() {
   return (
     <div>
       {!projectId && <p style={{ color: color.textMuted }}>No project selected.</p>}
-      {projectId && (
+      {projectId && !hasVault && <p style={{ color: color.textMuted }}>This project has no vault bound — there's nothing to browse here.</p>}
+      {projectId && hasVault && (
         <div style={{ display: "grid", gridTemplateColumns: "320px 1fr", gap: 12, marginTop: 12 }}>
           <Panel style={{ height: "74vh", overflow: "hidden", padding: 6, display: "flex", flexDirection: "column" }}>
             <Input

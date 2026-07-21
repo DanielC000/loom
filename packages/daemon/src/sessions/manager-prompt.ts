@@ -37,19 +37,23 @@ export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
   loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; resumeDocFilename?: string },
 ): string {
-  // Card c1f2f095: resolve via the ONE shared function ResumeDocWatcher also calls, so the injected path
-  // and the mid-session size-watchdog's own path can never diverge. Handles spaces + a per-project
-  // filename override correctly (no string concatenation).
-  const resumeDoc = resolveResumeDocPath(loc.vaultPath, loc.resumeDocFilename);
-  const sizeNote = resumeDocSizeWarning(resumeDoc);
+  // A project with no vault bound (`vaultPath === ""` — see shared/types.ts) has no resume doc to
+  // resolve: omit both the vault-dir and resume-doc lines entirely rather than feed "" into
+  // resolveResumeDocPath (which would resolve it against the DAEMON's own cwd, not fail cleanly).
+  const hasVault = !!loc.vaultPath;
+  const resumeDoc = hasVault ? resolveResumeDocPath(loc.vaultPath, loc.resumeDocFilename) : "";
+  const sizeNote = hasVault ? resumeDocSizeWarning(resumeDoc) : "";
   const block =
     "## Where things live (this project's absolute paths)\n" +
     `- **Repo root (your cwd):** \`${loc.repoPath}\`\n` +
-    `- **Project vault dir:** \`${loc.vaultPath}\`\n` +
-    `- **Resume doc:** \`${resumeDoc}\`\n\n` +
+    (hasVault
+      ? `- **Project vault dir:** \`${loc.vaultPath}\`\n- **Resume doc:** \`${resumeDoc}\`\n\n`
+      : "\n") +
     "Read project files by ABSOLUTE path from these roots — never Glob from your home directory " +
-    "for them (a broad Glob hits the search timeout). Read your resume doc from the exact absolute " +
-    "path above, verbatim — do not reconstruct it.";
+    "for them (a broad Glob hits the search timeout)." +
+    (hasVault
+      ? " Read your resume doc from the exact absolute path above, verbatim — do not reconstruct it."
+      : " This project has no vault bound — there is no resume doc; keep any handoff/progress notes on the board task instead.");
   const blockWithNote = sizeNote ? `${sizeNote}\n\n${block}` : block;
   // Reference-repos epic Phase 3 ("Interpretation A"): additional repos this project's manager may
   // READ but never owns — no worktree/branch/gate exists for them, so they're never a cwd or a merge

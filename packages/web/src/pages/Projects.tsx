@@ -524,7 +524,7 @@ function ProjectForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: st
     <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
       <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
       <Input placeholder="repo path" value={repoPath} onChange={(e) => setRepo(e.target.value)} />
-      <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+      <Input placeholder="vault path (optional)" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
       <label style={{ display: "flex", flexDirection: "column", gap: 4, fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
         board preset
         <Select value={presetId} onChange={(e) => setPreset(e.target.value)} aria-label="Board preset">
@@ -543,7 +543,7 @@ function ProjectForm({ onCreate, pending, onCancel }: { onCreate: (b: { name: st
         seed starter agents (Orchestrator · Planning · Dev · Bugfix · Content)
       </label>
       <div style={{ display: "flex", gap: 8, marginTop: 2 }}>
-        <Button variant="primary" disabled={!name || !repoPath || !vaultPath || pending}
+        <Button variant="primary" disabled={!name || !repoPath || pending}
           onClick={() => onCreate({ name, repoPath, vaultPath, seedAgents, presetId })}>{pending ? "Creating…" : "Create project"}</Button>
         <Button onClick={onCancel}>Cancel</Button>
       </div>
