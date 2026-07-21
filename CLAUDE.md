@@ -51,8 +51,11 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 **Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these three footguns:
 - A bash `run_in_background` PID is the **shell's** PID, not the daemon's — `taskkill //PID <that-pid>`
   fails. Find the real node listener with `netstat -ano | grep :<port>`, then `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed.
-- Run a helper `.mjs` from **inside `packages/daemon`** so its deps (e.g. `ws`) resolve — a scratch-dir
-  script hits `ERR_MODULE_NOT_FOUND` (the scratch dir has no `node_modules`).
+- A helper `.mjs` must **LIVE under `packages/daemon`** for its deps (e.g. `ws`, `better-sqlite3`) to
+  resolve — ESM bare-specifier resolution walks up from the **script's own location**, ignoring cwd, so
+  running a scratch-dir script "from inside packages/daemon" still hits `ERR_MODULE_NOT_FOUND`.
+  (Alternative: keep the script wherever and anchor resolution explicitly via
+  `createRequire(path.join(daemonPkgDir, 'package.json'))`.)
 - Pass node / dynamic-`import()` paths as `file://` URLs (or `pathToFileURL`), never a bare drive-letter
   absolute path — a bare path throws `ERR_UNSUPPORTED_ESM_URL_SCHEME` on Windows.
 
