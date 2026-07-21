@@ -6,6 +6,8 @@ import {
   type Project,
   type ProjectConfigOverride,
   type OrchestrationConfig,
+  type OrchestrationEventKind,
+  type MemoryConfig,
   type PlatformConfig,
   type PlatformConfigOverride,
   type PlatformConfigPatch,
@@ -225,6 +227,20 @@ function ConfigEditor({ project }: { project: Project }) {
   // SECONDS (÷1000 display, ×1000 store) — blank inherits the platform default.
   const [gateTimeout, setGateTimeout] = useState(msStr(ov.orchestration?.gateCommandTimeoutMs, "s"));
   const [webhookTimeout, setWebhookTimeout] = useState(msStr(ov.orchestration?.alertWebhookTimeoutMs, "s"));
+  // Scoped per-project deploy command (mirrors gateCommand exactly — same human-only, host-RCE-capable
+  // exec surface, own paired timeout). Sweep §2: schema-complete (projectConfigOverrideSchema), no UI yet.
+  const [deployCommand, setDeployCommand] = useState(ov.orchestration?.deployCommand ?? "");
+  const [deployTimeout, setDeployTimeout] = useState(msStr(ov.orchestration?.deployCommandTimeoutMs, "s"));
+  // Outbound alert webhook (exfil-adjacent, human-only like gateCommand/deployCommand). Only its timeout
+  // had a field before this — the URL + event-kind list had none. `events` is a free-text one-per-line
+  // list (mirrors the Permission Allowlist textarea): the server validates each as a non-empty string,
+  // not a strict enum (an unrecognized kind just never matches the emitter's `.includes()` check).
+  const [alertWebhookUrl, setAlertWebhookUrl] = useState(ov.orchestration?.alertWebhook?.url ?? "");
+  const [alertWebhookEventsText, setAlertWebhookEventsText] = useState(ov.orchestration?.alertWebhook?.events?.join("\n") ?? "");
+  // Project-scoped shared-memory tuning (card 2fd9abf9) — schema-complete, no Settings field yet.
+  const [memoryBudgetTokens, setMemoryBudgetTokens] = useState(numStr(ov.memory?.budgetTokens));
+  const [memoryTopK, setMemoryTopK] = useState(numStr(ov.memory?.topK));
+  const [memoryMaxNotes, setMemoryMaxNotes] = useState(numStr(ov.memory?.maxNotes));
 
   // Build the OVERRIDE from the current form. CRITICAL: the PATCH REPLACES the whole override, so we
   // start from a clone of the stored one and apply only the fields this UI models — preserving keys it
@@ -254,7 +270,19 @@ function ConfigEditor({ project }: { project: Project }) {
     delete orch.schedulerEnabled;
     if (gateCommand.trim()) orch.gateCommand = gateCommand.trim(); else delete orch.gateCommand;
     applyMs(orch, "gateCommandTimeoutMs", gateTimeout, "s");
+    if (deployCommand.trim()) orch.deployCommand = deployCommand.trim(); else delete orch.deployCommand;
+    applyMs(orch, "deployCommandTimeoutMs", deployTimeout, "s");
     applyMs(orch, "alertWebhookTimeoutMs", webhookTimeout, "s");
+    // alertWebhook: sent when either half is non-blank, so a partial entry (URL with no events, or vice
+    // versa) still round-trips to the server's readable "both required" 400 rather than being silently
+    // dropped. Both blank ⇒ not configured, delete the key.
+    const webhookUrlTrim = alertWebhookUrl.trim();
+    const webhookEvents = parseLines(alertWebhookEventsText);
+    if (webhookUrlTrim || webhookEvents.length) {
+      orch.alertWebhook = { url: webhookUrlTrim, events: webhookEvents as OrchestrationEventKind[] };
+    } else {
+      delete orch.alertWebhook;
+    }
     applyNum(orch, "maxConcurrentWorkers", maxWorkers);
     applyNum(orch, "maxConcurrentManagers", maxManagers);
     applyNum(orch, "recycleAtContextRatio", recycle);
@@ -271,6 +299,14 @@ function ConfigEditor({ project }: { project: Project }) {
     const py = pythonInterpreter.trim();
     if (py) o.python = { ...o.python, interpreterPath: py };
     else if (o.python) { const { interpreterPath: _drop, ...rest } = o.python; if (Object.keys(rest).length) o.python = rest; else delete o.python; }
+
+    // memory: shared-notes tuning (budgetTokens/topK/maxNotes) — each field blank → delete (inherit the
+    // platform default, itself clamped to MEMORY_CONFIG_MAX by resolveConfig).
+    const mem: Partial<MemoryConfig> = { ...o.memory };
+    applyNumField(mem, "budgetTokens", memoryBudgetTokens);
+    applyNumField(mem, "topK", memoryTopK);
+    applyNumField(mem, "maxNotes", memoryMaxNotes);
+    if (Object.keys(mem).length) o.memory = mem; else delete o.memory;
 
     return o;
   }
@@ -347,9 +383,31 @@ function ConfigEditor({ project }: { project: Project }) {
             <Hint>build/test command run in a worker's worktree before merge · {effHint(resolved.orchestration.gateCommand || "none")}</Hint>
           </label>
         </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420 }}>
+            <span style={fieldLabel}>Deploy command</span>
+            <Input value={deployCommand} onChange={(e) => setDeployCommand(e.target.value)} placeholder="e.g. git push (blank = no deploy configured)" />
+            <Hint>run in this project's repo by the `deploy` manager tool · host-exec, human-set only · {effHint(resolved.orchestration.deployCommand || "none")}</Hint>
+          </label>
+        </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
           <MsField label="Gate command timeout (s)" value={gateTimeout} set={setGateTimeout} effectiveMs={resolved.orchestration.gateCommandTimeoutMs} defMs={defaults.orchestration.gateCommandTimeoutMs} unit="s" />
+          <MsField label="Deploy command timeout (s)" value={deployTimeout} set={setDeployTimeout} effectiveMs={resolved.orchestration.deployCommandTimeoutMs} defMs={defaults.orchestration.deployCommandTimeoutMs} unit="s" />
           <MsField label="Alert webhook timeout (s)" value={webhookTimeout} set={setWebhookTimeout} effectiveMs={resolved.orchestration.alertWebhookTimeoutMs} defMs={defaults.orchestration.alertWebhookTimeoutMs} unit="s" />
+        </div>
+        <div style={{ marginTop: 12 }}>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+            <span style={fieldLabel}>Alert webhook URL</span>
+            <Input value={alertWebhookUrl} onChange={(e) => setAlertWebhookUrl(e.target.value)} spellCheck={false}
+              placeholder="e.g. https://hooks.slack.com/services/… (blank = no webhook configured)" />
+            <Hint>outbound POST destination for orchestration events · data leaves this box · human-set only · {effHint(resolved.orchestration.alertWebhook?.url ?? "none")}</Hint>
+          </label>
+          <label style={{ display: "flex", flexDirection: "column", gap: 4, marginTop: 8 }}>
+            <span style={fieldLabel}>Alert webhook events</span>
+            <textarea value={alertWebhookEventsText} onChange={(e) => setAlertWebhookEventsText(e.target.value)} spellCheck={false}
+              style={{ ...ta, minHeight: 70 }} placeholder={"merge_done\nmerge_rejected\nidle_escalated"} />
+            <Hint>one event kind per line · which orchestration events trigger a POST · both URL and events are required together</Hint>
+          </label>
         </div>
       </Panel>
 
@@ -370,6 +428,19 @@ function ConfigEditor({ project }: { project: Project }) {
             placeholder={`inherit (PATH: ${defaults.python.interpreterPath ?? "python3 → python → py -3"})`} />
           <Hint>host path to a base Python ≥3.10 (e.g. C:\Python312\python.exe) · Loom builds its own shared venv from it for document conversion · blank inherits PATH discovery</Hint>
         </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Memory</SectionLabel>
+        <Hint>Shared project-notes tuning for the FTS5 kickoff-injection budget (card 2fd9abf9).</Hint>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginTop: 8 }}>
+          <NumField label="Budget (tokens)" value={memoryBudgetTokens} set={setMemoryBudgetTokens}
+            effective={resolved.memory.budgetTokens} def={defaults.memory.budgetTokens} note="0-8000" />
+          <NumField label="Related notes (top K)" value={memoryTopK} set={setMemoryTopK}
+            effective={resolved.memory.topK} def={defaults.memory.topK} note="1-50" />
+          <NumField label="Max unpinned notes" value={memoryMaxNotes} set={setMemoryMaxNotes}
+            effective={resolved.memory.maxNotes} def={defaults.memory.maxNotes} note="0-1000 · <= 0 disables the cap" />
+        </div>
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -413,12 +484,14 @@ const GLOBAL_FIELDS: GlobalFieldDesc[] = [
   { grp: "watchers", key: "schedulerMs", label: "Scheduler tick (s)", unit: "s" },
   { grp: "watchers", key: "reconcileMs", label: "Reconcile (s)", unit: "s" },
   { grp: "watchers", key: "snapshotMs", label: "Transcript snapshot (s)", unit: "s" },
+  { grp: "watchers", key: "crashRecoveryWatchMs", label: "Crash-recovery watch (s)", unit: "s" },
   // Timeouts
   { grp: "timeouts", key: "gitOpMs", label: "Git remote op (s)", unit: "s" },
   { grp: "timeouts", key: "gitLocalMs", label: "Git local op (s)", unit: "s" },
   { grp: "timeouts", key: "gitPushMs", label: "Git push (s)", unit: "s" },
   { grp: "timeouts", key: "provisionMs", label: "Worktree provision (s)", unit: "s" },
   { grp: "timeouts", key: "busyStaleMs", label: "PTY busy-stale (s)", unit: "s" },
+  { grp: "timeouts", key: "runMs", label: "Agent Run hard timeout (s)", unit: "s" },
 ];
 
 // Loads /api/platform/config then mounts the form (state seeded from the loaded override). Keeping the
@@ -525,6 +598,19 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
   const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
+  // Sweep §2 — rateLimit.exhaustedThresholdPct: a plain percentage (not ms-keyed), so it gets its own
+  // control alongside the GLOBAL_FIELDS ms grid rather than joining it. Per-field-nullable already
+  // (rateLimitPatchOverride is derived from rateLimitOverride.shape), so blank clears just this field.
+  const [exhaustedThresholdPct, setExhaustedThresholdPct] = useState(numStr(override.rateLimit?.exhaustedThresholdPct));
+  // Sweep §2 — the whole `connections` (P2 authenticated_request guard) group had zero UI. Unlike
+  // rateLimit/watchers/timeouts, `connections` is NOT one of server.ts's DEEP_MERGE_GROUPS — a submitted
+  // group REPLACES the persisted one wholesale (same as `integrations` below) — so all 4 fields must be
+  // modeled here and ALWAYS emitted together (a field left blank clears to default rather than surviving
+  // as a stale persisted value the next unrelated save would silently keep).
+  const [connRequestTimeoutS, setConnRequestTimeoutS] = useState(msStr(override.connections?.requestTimeoutMs, "s"));
+  const [connMaxResponseBytes, setConnMaxResponseBytes] = useState(numStr(override.connections?.maxResponseBytes));
+  const [connRateLimitMax, setConnRateLimitMax] = useState(numStr(override.connections?.rateLimitMax));
+  const [connRateLimitWindowM, setConnRateLimitWindowM] = useState(msStr(override.connections?.rateLimitWindowMs, "m"));
 
   // Build the PATCH body from the form — every non-blank field converted to canonical ms (× the unit).
   // A blank field sends the explicit PER-FIELD `null` clear-to-inherit sentinel (card ba9ccd75) — NOT
@@ -555,7 +641,45 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         const n = Number(s) * UNIT_MS[f.unit];
         entries[f.key] = Number.isFinite(n) ? n : s;
       }
+      // exhaustedThresholdPct is a plain percentage (no ms unit) sharing the rateLimit group's own
+      // per-field-nullable PATCH schema, so it's folded into the same entries object as the ms fields
+      // above rather than joining the GLOBAL_FIELDS grid.
+      if (grp === "rateLimit") {
+        const t = exhaustedThresholdPct.trim();
+        if (t === "") { entries.exhaustedThresholdPct = null; } else {
+          const n = Number(t);
+          entries.exhaustedThresholdPct = Number.isFinite(n) ? n : t;
+        }
+      }
       (o as Record<string, unknown>)[grp] = entries;
+    }
+    // Sweep §2: `connections` (P2 authenticated_request guard) is NOT a DEEP_MERGE_GROUPS member — a
+    // submitted group replaces the persisted one wholesale, exactly like `integrations` below — so it's
+    // ALWAYS emitted from all 4 fields' current state (blank omits that field, clearing it to default)
+    // rather than the blank→null clear-sentinel dance the deep-merged groups use.
+    {
+      const entries: Record<string, number | string> = {};
+      const rt = connRequestTimeoutS.trim();
+      if (rt !== "") {
+        const n = Number(rt) * UNIT_MS.s;
+        entries.requestTimeoutMs = Number.isFinite(n) ? n : rt;
+      }
+      const mrb = connMaxResponseBytes.trim();
+      if (mrb !== "") {
+        const n = Number(mrb);
+        entries.maxResponseBytes = Number.isFinite(n) ? n : mrb;
+      }
+      const rlm = connRateLimitMax.trim();
+      if (rlm !== "") {
+        const n = Number(rlm);
+        entries.rateLimitMax = Number.isFinite(n) ? n : rlm;
+      }
+      const rlw = connRateLimitWindowM.trim();
+      if (rlw !== "") {
+        const n = Number(rlw) * UNIT_MS.m;
+        entries.rateLimitWindowMs = Number.isFinite(n) ? n : rlw;
+      }
+      (o as Record<string, unknown>).connections = entries;
     }
     o.coalesceAgentMessages = coalesceAgentMsgs === "inherit" ? null : coalesceAgentMsgs === "true";
     o.operatorEnabled = operatorEnabled === "inherit" ? null : operatorEnabled === "true";
@@ -687,6 +811,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <SectionLabel>Rate Limits</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
           {group("rateLimit").map(renderField)}
+          <NumField label="Exhausted threshold (%)" value={exhaustedThresholdPct} set={setExhaustedThresholdPct}
+            effective={resolved.rateLimit.exhaustedThresholdPct} def={defaults.rateLimit.exhaustedThresholdPct}
+            note="Usage % at which a session is treated as rate-limit exhausted. Whole number, 50-100." />
         </div>
       </Panel>
 
@@ -701,6 +828,26 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
         <SectionLabel>Timeouts</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
           {group("timeouts").map(renderField)}
+        </div>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Authenticated Request Guard</SectionLabel>
+        <Hint>
+          Bounds for the P2 <code>authenticated_request</code> MCP tool — the outbound request timeout,
+          response-size cap, and per-connection rate limit that keep a hung/huge upstream response, or a
+          runaway agent loop, from wedging the daemon or burning through a connection&apos;s quota.
+        </Hint>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
+          <MsField label="Request timeout (s)" value={connRequestTimeoutS} set={setConnRequestTimeoutS}
+            effectiveMs={resolved.connections.requestTimeoutMs} defMs={defaults.connections.requestTimeoutMs} unit="s" />
+          <NumField label="Max response bytes" value={connMaxResponseBytes} set={setConnMaxResponseBytes}
+            effective={resolved.connections.maxResponseBytes} def={defaults.connections.maxResponseBytes}
+            note="1KB-20MB" />
+          <NumField label="Rate limit (requests / window)" value={connRateLimitMax} set={setConnRateLimitMax}
+            effective={resolved.connections.rateLimitMax} def={defaults.connections.rateLimitMax} />
+          <MsField label="Rate limit window (m)" value={connRateLimitWindowM} set={setConnRateLimitWindowM}
+            effectiveMs={resolved.connections.rateLimitWindowMs} defMs={defaults.connections.rateLimitWindowMs} unit="m" />
         </div>
       </Panel>
 
@@ -2112,6 +2259,12 @@ function numStr(v: number | undefined): string {
 function applyNum(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string): void {
   if (s.trim() === "") delete (orch as Record<string, unknown>)[key];
   else (orch as Record<string, unknown>)[key] = Number(s);
+}
+// Generic sibling of applyNum for a non-OrchestrationConfig numeric group (e.g. MemoryConfig) — same
+// blank→delete / non-numeric→NaN passthrough semantics, just not narrowed to one specific config shape.
+function applyNumField<T extends Record<string, unknown>>(obj: T, key: keyof T, s: string): void {
+  if (s.trim() === "") delete obj[key];
+  else (obj as Record<string, unknown>)[key as string] = Number(s);
 }
 
 // --- ms <-> human-unit helpers (display s/m/h, store canonical ms) -------------------------------

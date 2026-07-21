@@ -368,7 +368,7 @@ test("editing a message-delivery toggle (coalesceAgentMessages): set persists, c
   await expect(field(page, labelText)).toHaveValue("inherit");
 });
 
-test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a; deep-merge, card ba9ccd75)", () => {
+test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a; deep-merge, card ba9ccd75)", () => {
   // This spec seeds rateLimit.exhaustedThresholdPct directly and sets watchers.wakeMs through the UI, on
   // the SHARED worker-scoped daemon. Both are inert to every other spec today (nothing else reads
   // exhaustedThresholdPct; wakeMs is boot-bound, per event-triggers.spec.ts's determinism note this is
@@ -382,17 +382,15 @@ test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a; de
     });
   });
 
-  test("saving the Rate Limits grid with every rendered field blank PRESERVES a non-grid sibling it doesn't show", async ({ page, loomDaemon }) => {
-    // rateLimit.exhaustedThresholdPct has NO control anywhere in GLOBAL_FIELDS — the Rate Limits panel
-    // never renders it — but a human can still persist it directly over the loopback REST PATCH (there
-    // is no agent-facing writer for this daemon-global surface). Before card ba9ccd75 a submitted group
-    // REPLACED the persisted one wholesale (the PATCH handler's shallow TOP-LEVEL merge); now the handler
-    // DEEP-merges field by field, so a form that builds its group from ONLY the fields it renders is safe
-    // by construction (an unmentioned field is just left alone) — but this test still proves the
-    // end-to-end OUTCOME, not the mechanism: a save that touched a different group entirely must never
-    // disturb a sibling field this form never rendered. Seed it directly over REST (bypassing the grid,
-    // exactly as a human curl'ing the PATCH endpoint would), then save with the Rate Limits grid entirely
-    // blank (untouched) and confirm the sibling survives.
+  test("saving the Watcher Cadences grid PRESERVES a Rate Limits field it doesn't touch (cross-group, not just cross-panel)", async ({ page, loomDaemon }) => {
+    // rateLimit.exhaustedThresholdPct now has its OWN control (sweep §2 — "Exhausted threshold (%)"), but
+    // it's built in buildGlobalOverride as a hand-folded addition to the rateLimit group's entries object,
+    // not through the shared GLOBAL_FIELDS ms-loop — so it's still worth proving a save of a DIFFERENT
+    // group (watchers) round-trips this field's CURRENTLY-LOADED value unchanged rather than losing it.
+    // Before card ba9ccd75 a submitted group REPLACED the persisted one wholesale (the PATCH handler's
+    // shallow TOP-LEVEL merge); now the handler DEEP-merges field by field. Seed it directly over REST
+    // (bypassing the UI, exactly as a human curl'ing the PATCH endpoint would), confirm the control picks
+    // up the seeded value, then save with only an unrelated watchers field touched and confirm it survives.
     const seed = await fetch(`${loomDaemon.baseURL}/api/platform/config`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
@@ -404,15 +402,11 @@ test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a; de
     await pinActiveProject(page, project.id);
     await page.goto(`${loomDaemon.baseURL}/settings`);
 
-    // Assert the load-bearing premise, not just claim it in prose: every Rate Limits grid field really
-    // is blank before Save — so the test can't quietly stop testing "the grid stays untouched" if a
-    // future spec (or reordering) left a stray value seeded into one of them.
-    for (const label of ["Default backoff (h)", "Deadline after reset (m)", "Deadline, no reset (h)", "Recency window (h)", "Reset buffer (s)"]) {
-      await expect(field(page, label)).toHaveValue("");
-    }
+    // The seeded value loaded straight into its own control.
+    await expect(field(page, "Exhausted threshold (%)")).toHaveValue("77");
 
     // Touch an UNRELATED daemon-global field (Watcher Cadences, not Rate Limits) so Save enables — the
-    // "user never touched this panel" scenario: the Rate Limits grid stays entirely blank throughout.
+    // Rate Limits panel is never interacted with, only re-sent from its already-loaded state.
     const wakeMs = field(page, "Wake tick (s)");
     await expect(wakeMs).toBeVisible();
     await wakeMs.fill("50");
@@ -425,8 +419,8 @@ test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a; de
       const body = (await res.json()) as { override?: { rateLimit?: { exhaustedThresholdPct?: number } } };
       return body?.override?.rateLimit?.exhaustedThresholdPct ?? null;
     };
-    // Observable: the sibling this form never rendered is still there after a save that touched a
-    // different group entirely — not silently wiped by the whole-group replace.
+    // Observable: the sibling field survives a save that touched a different group entirely — not
+    // silently wiped by a whole-group replace.
     await expect.poll(readExhaustedThreshold).toBe(77);
     // And the edited, unrelated field actually took (proving the save was real, not a no-op).
     await expect
@@ -436,6 +430,35 @@ test.describe("non-grid sibling preservation (code-review fix, card fd55ac8a; de
         return body?.override?.watchers?.wakeMs ?? null;
       })
       .toBe(50_000);
+  });
+
+  test("editing Exhausted threshold (%) directly: a set value persists, blank clears to inherit (sweep §2)", async ({ page, loomDaemon }) => {
+    const project = await loomDaemon.createProject(`settings-exhausted-pct-${Date.now()}`);
+    await pinActiveProject(page, project.id);
+    await page.goto(`${loomDaemon.baseURL}/settings`);
+
+    const pct = field(page, "Exhausted threshold (%)");
+    await expect(pct).toBeVisible();
+    const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+
+    const readPct = async (): Promise<number | null> => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+      const body = (await res.json()) as { override?: { rateLimit?: { exhaustedThresholdPct?: number } } };
+      return body?.override?.rateLimit?.exhaustedThresholdPct ?? null;
+    };
+
+    await pct.fill("90");
+    await expect(globalSave).toBeEnabled();
+    await globalSave.click();
+    await expect.poll(readPct).toBe(90);
+    await page.reload();
+    await expect(field(page, "Exhausted threshold (%)")).toHaveValue("90");
+
+    // CLEAR: blanking the now-set field and saving reverts it to inherit (the per-field null sentinel).
+    await field(page, "Exhausted threshold (%)").fill("");
+    await expect(globalSave).toBeEnabled();
+    await globalSave.click();
+    await expect.poll(readPct).toBeNull();
   });
 
   test("blanking a PREVIOUSLY-SET rendered grid field actually clears it, while a resent sibling in the same group survives (card ba9ccd75)", async ({ page, loomDaemon }) => {
@@ -607,5 +630,190 @@ test("clearing a host-tool integration path actually clears it (code-review fix,
   // Observable #2: a reload does NOT re-seed the old value.
   await page.reload();
   await expect(field(page, "Codescape")).toHaveValue("");
+});
+
+test("editing the newly-added watcher/timeout fields (crashRecoveryWatchMs, runMs) persists (sweep §2)", async ({ page, loomDaemon }) => {
+  // Same GLOBAL_FIELDS grid + buildGlobalOverride ms-loop as every other watcher/timeout field (e.g. the
+  // "Git push (s)" test above) — these two were simply absent from GLOBAL_FIELDS until this card.
+  const project = await loomDaemon.createProject(`settings-watchtimeouts-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const crashRecovery = field(page, "Crash-recovery watch (s)");
+  const runTimeout = field(page, "Agent Run hard timeout (s)");
+  await expect(crashRecovery).toBeVisible();
+  await expect(runTimeout).toBeVisible();
+
+  await crashRecovery.fill("90");
+  await runTimeout.fill("900");
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+
+  await expect
+    .poll(async () => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+      const body = (await res.json()) as { override?: { watchers?: { crashRecoveryWatchMs?: number }; timeouts?: { runMs?: number } } };
+      return { crashRecoveryWatchMs: body?.override?.watchers?.crashRecoveryWatchMs ?? null, runMs: body?.override?.timeouts?.runMs ?? null };
+    })
+    .toEqual({ crashRecoveryWatchMs: 90_000, runMs: 900_000 });
+
+  await page.reload();
+  await expect(field(page, "Crash-recovery watch (s)")).toHaveValue("90");
+  await expect(field(page, "Agent Run hard timeout (s)")).toHaveValue("900");
+});
+
+test("editing the Authenticated Request Guard (connections) fields persists wholesale, and clearing all of them reverts to inherit (sweep §2)", async ({ page, loomDaemon }) => {
+  // `connections` is NOT a DEEP_MERGE_GROUPS member — a submitted group REPLACES the persisted one
+  // wholesale, exactly like `integrations` above — so all 4 fields are modeled and always emitted
+  // together (blank fields omit that key, clearing it to default).
+  const project = await loomDaemon.createProject(`settings-connections-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  await expect(page.getByText("Authenticated Request Guard", { exact: true })).toBeVisible();
+  const reqTimeout = field(page, "Request timeout (s)");
+  const maxBytes = field(page, "Max response bytes");
+  const rateLimitMax = field(page, "Rate limit (requests / window)");
+  const rateLimitWindow = field(page, "Rate limit window (m)");
+  await expect(reqTimeout).toBeVisible();
+
+  const readConnections = async () => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+    const body = (await res.json()) as { override?: { connections?: Record<string, number> } };
+    return body?.override?.connections ?? {};
+  };
+
+  await reqTimeout.fill("15");
+  await maxBytes.fill("2000000");
+  await rateLimitMax.fill("50");
+  await rateLimitWindow.fill("10");
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+
+  await expect
+    .poll(readConnections)
+    .toEqual({ requestTimeoutMs: 15_000, maxResponseBytes: 2_000_000, rateLimitMax: 50, rateLimitWindowMs: 600_000 });
+
+  await page.reload();
+  await expect(field(page, "Request timeout (s)")).toHaveValue("15");
+  await expect(field(page, "Max response bytes")).toHaveValue("2000000");
+  await expect(field(page, "Rate limit (requests / window)")).toHaveValue("50");
+  await expect(field(page, "Rate limit window (m)")).toHaveValue("10");
+
+  // CLEAR all 4 — since the group is always emitted, blanking every field replaces the persisted
+  // `connections` override with an empty object (every field reverts to its platform default).
+  await field(page, "Request timeout (s)").fill("");
+  await field(page, "Max response bytes").fill("");
+  await field(page, "Rate limit (requests / window)").fill("");
+  await field(page, "Rate limit window (m)").fill("");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readConnections).toEqual({});
+});
+
+test("editing the project Memory fields persists, and clearing them removes the override (card 2fd9abf9 UI, sweep §2)", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-memory-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const budget = field(page, "Budget (tokens)");
+  const topK = field(page, "Related notes (top K)");
+  const maxNotes = field(page, "Max unpinned notes");
+  await expect(budget).toBeVisible();
+  await expect(budget).toHaveValue("");
+
+  await budget.fill("3000");
+  await topK.fill("12");
+  await maxNotes.fill("200");
+  const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+
+  const readMemory = async () => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
+    const projects = (await res.json()) as Array<{ id: string; config?: { memory?: { budgetTokens?: number; topK?: number; maxNotes?: number } } }>;
+    return projects.find((p) => p.id === project.id)?.config?.memory ?? null;
+  };
+  await expect.poll(readMemory).toEqual({ budgetTokens: 3000, topK: 12, maxNotes: 200 });
+
+  await page.reload();
+  await expect(field(page, "Budget (tokens)")).toHaveValue("3000");
+  await expect(field(page, "Related notes (top K)")).toHaveValue("12");
+  await expect(field(page, "Max unpinned notes")).toHaveValue("200");
+
+  // CLEAR: blanking every field deletes the whole `memory` override key (inherits the platform default).
+  await field(page, "Budget (tokens)").fill("");
+  await field(page, "Related notes (top K)").fill("");
+  await field(page, "Max unpinned notes").fill("");
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+  await expect.poll(readMemory).toBeNull();
+});
+
+test("editing the project Deploy command + its timeout persists (mirrors gateCommand, sweep §2)", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-deploy-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const deployCommand = field(page, "Deploy command");
+  const deployTimeout = field(page, "Deploy command timeout (s)");
+  await expect(deployCommand).toBeVisible();
+  await expect(deployCommand).toHaveValue("");
+
+  await deployCommand.fill("git push origin main");
+  await deployTimeout.fill("60");
+  const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+
+  await expect
+    .poll(async () => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
+      const projects = (await res.json()) as Array<{ id: string; config?: { orchestration?: { deployCommand?: string; deployCommandTimeoutMs?: number } } }>;
+      const orch = projects.find((p) => p.id === project.id)?.config?.orchestration;
+      return { deployCommand: orch?.deployCommand ?? null, deployCommandTimeoutMs: orch?.deployCommandTimeoutMs ?? null };
+    })
+    .toEqual({ deployCommand: "git push origin main", deployCommandTimeoutMs: 60_000 });
+
+  await page.reload();
+  await expect(field(page, "Deploy command")).toHaveValue("git push origin main");
+  await expect(field(page, "Deploy command timeout (s)")).toHaveValue("60");
+});
+
+test("editing the project Alert webhook URL + events persists, and clearing both removes the override (sweep §2)", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-webhook-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const url = field(page, "Alert webhook URL");
+  const events = field(page, "Alert webhook events");
+  await expect(url).toBeVisible();
+  await expect(url).toHaveValue("");
+
+  await url.fill("https://hooks.example.com/incoming");
+  await events.fill("merge_done\nmerge_rejected");
+  const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+
+  const readWebhook = async () => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
+    const projects = (await res.json()) as Array<{ id: string; config?: { orchestration?: { alertWebhook?: { url?: string; events?: string[] } } } }>;
+    return projects.find((p) => p.id === project.id)?.config?.orchestration?.alertWebhook ?? null;
+  };
+  await expect.poll(readWebhook).toEqual({ url: "https://hooks.example.com/incoming", events: ["merge_done", "merge_rejected"] });
+
+  await page.reload();
+  await expect(field(page, "Alert webhook URL")).toHaveValue("https://hooks.example.com/incoming");
+  await expect(field(page, "Alert webhook events")).toHaveValue("merge_done\nmerge_rejected");
+
+  // CLEAR both — the key is dropped entirely, not left as a stale partial.
+  await field(page, "Alert webhook URL").fill("");
+  await field(page, "Alert webhook events").fill("");
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+  await expect.poll(readWebhook).toBeNull();
 });
 
