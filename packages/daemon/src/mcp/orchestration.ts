@@ -17,6 +17,7 @@ import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } fro
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { reminderNextFireAt, reminderNextFireAtBySession } from "../companion/reminders.js";
 import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix } from "../id-prefix.js";
@@ -1968,9 +1969,9 @@ export class OrchestrationMcpRouter {
       },
       async ({ agentId, cron, enabled, prompt, name }) => {
         try {
-          return ok(sessions.createSchedule(managerSessionId, { agentId, cron, enabled, prompt, name }));
+          return ok(withScheduleTimeEcho(sessions.createSchedule(managerSessionId, { agentId, cron, enabled, prompt, name })));
         } catch (e) {
-          return ok({ error: (e as Error).message });
+          return ok({ error: (e as Error).message, ...nowEcho() });
         }
       },
     );
@@ -1988,9 +1989,9 @@ export class OrchestrationMcpRouter {
       },
       async ({ scheduleId, cron, enabled, prompt, name }) => {
         try {
-          return ok(sessions.updateScheduleAsManager(managerSessionId, scheduleId, { cron, enabled, prompt, name }));
+          return ok(withScheduleTimeEcho(sessions.updateScheduleAsManager(managerSessionId, scheduleId, { cron, enabled, prompt, name })));
         } catch (e) {
-          return ok({ error: (e as Error).message });
+          return ok({ error: (e as Error).message, ...nowEcho() });
         }
       },
     );

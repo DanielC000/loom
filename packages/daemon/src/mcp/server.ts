@@ -13,6 +13,7 @@ import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, read
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { resolveAlias } from "./arg-alias.js";
+import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
@@ -241,21 +242,24 @@ export class TaskMcpRouter {
       },
       async ({ delaySeconds, minutes, wakeAt, note, reason }) => {
         try {
-          return ok(wakes.schedule(sessionId, { delaySeconds, minutes, wakeAt, note, reason }));
+          return ok(withWakeTimeEcho(wakes.schedule(sessionId, { delaySeconds, minutes, wakeAt, note, reason })));
         } catch (e) {
-          return ok({ error: (e as Error).message });
+          // Card 6cef30d5: the server-now stamp is what actually mattered on THIS path — the live
+          // incident was a wakeAt-in-the-past rejection mislabeled "ISO-Z parsed as local" because
+          // nothing in the error let the caller check its wakeAt against the server's real clock.
+          return ok({ error: (e as Error).message, ...nowEcho() });
         }
       },
     );
     server.registerTool(
       "wake_cancel",
       { description: "Cancel one of your pending wake-ups by id.", inputSchema: { wakeId: z.string() } },
-      async ({ wakeId }) => ok(wakes.cancel(sessionId, wakeId)),
+      async ({ wakeId }) => ok({ ...wakes.cancel(sessionId, wakeId), ...nowEcho() }),
     );
     server.registerTool(
       "wake_list",
       { description: "List your pending wake-ups.", inputSchema: {} },
-      async () => ok(wakes.list(sessionId)),
+      async () => ok(wakes.list(sessionId).map((w) => ({ ...w, wakeAtLocal: localTimeString(w.wakeAt) }))),
     );
 
     // Agent-tooling epic P2: the profile-gated authenticated-egress tool. OMITTED from tools/list

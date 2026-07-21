@@ -18,6 +18,7 @@ import { checkRepoRebind } from "../projects/rebind.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
+import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
@@ -1080,13 +1081,13 @@ export class PlatformMcpRouter {
       },
       async ({ projectId }) => {
         const all = db.listSchedules();
-        if (projectId === undefined) return ok(all);
+        if (projectId === undefined) return ok(all.map((s) => withScheduleTimeEcho(s)));
         // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
         // full id OR unambiguous 8-char prefix, error on unknown/ambiguous (sibling of card 7097f3fb / f10093f).
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
         // Schedules are keyed by agentId; a project filter resolves each schedule's agent → its project.
-        return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === project.id));
+        return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === project.id).map((s) => withScheduleTimeEcho(s)));
       },
     );
 
@@ -1703,9 +1704,9 @@ export class PlatformMcpRouter {
         inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() },
       },
       async ({ agentId, cron, enabled, kind, prompt, name }) => {
-        if (!db.getAgent(agentId)) return ok({ error: "agent not found" });
+        if (!db.getAgent(agentId)) return ok({ error: "agent not found", ...nowEcho() });
         let next: string;
-        try { next = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
+        try { next = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression", ...nowEcho() }); }
         const schedule: Schedule = {
           // Blank/omitted derives a friendly default from the cron at the DB write path (describeCron).
           id: randomUUID(), name: (name ?? "").trim(), agentId, cron, enabled: enabled ?? true,
@@ -1714,7 +1715,7 @@ export class PlatformMcpRouter {
           prompt: prompt ?? null,
         };
         db.insertSchedule(schedule);
-        return ok(schedule);
+        return ok(withScheduleTimeEcho(schedule));
       },
     );
 
@@ -1725,18 +1726,18 @@ export class PlatformMcpRouter {
         inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), kind: z.enum(["manager", "auditor", "workspace-auditor"]).optional(), prompt: z.string().optional(), name: z.string().optional() },
       },
       async ({ scheduleId, cron, enabled, kind, prompt, name }) => {
-        if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found" });
+        if (!db.getSchedule(scheduleId)) return ok({ error: "schedule not found", ...nowEcho() });
         const patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null } = {};
         if (typeof name === "string") patch.name = name;
         if (typeof enabled === "boolean") patch.enabled = enabled;
         if (kind !== undefined) patch.kind = kind;
         if (prompt !== undefined) patch.prompt = prompt;
         if (typeof cron === "string") {
-          try { patch.nextFireAt = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression" }); }
+          try { patch.nextFireAt = nextFireAt(cron, new Date()); } catch { return ok({ error: "invalid cron expression", ...nowEcho() }); }
           patch.cron = cron;
         }
         db.updateSchedule(scheduleId, patch);
-        return ok(db.getSchedule(scheduleId));
+        return ok(withScheduleTimeEcho(db.getSchedule(scheduleId)!));
       },
     );
 
@@ -1746,7 +1747,10 @@ export class PlatformMcpRouter {
         description: "Read ONE schedule by id — the FULL record ({id, agentId, cron, enabled, nextFireAt, lastFiredAt, kind, prompt}). Read-only. Error if the id is unknown.",
         inputSchema: { scheduleId: z.string() },
       },
-      async ({ scheduleId }) => ok(db.getSchedule(scheduleId) ?? { error: "schedule not found" }),
+      async ({ scheduleId }) => {
+        const schedule = db.getSchedule(scheduleId);
+        return ok(schedule ? withScheduleTimeEcho(schedule) : { error: "schedule not found", ...nowEcho() });
+      },
     );
 
     server.registerTool(
