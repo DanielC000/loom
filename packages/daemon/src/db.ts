@@ -382,7 +382,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- Spawn-origin marker (card 53edd8d5): 1 iff this manager was booted BY THE CRON SCHEDULER. Read by
   -- countLiveScheduledManagers — the Scheduler's OWN manager-cap budget, separate from the standing
   -- human/Lead-spawned fleet. Legacy rows backfill to 0 (never scheduler-spawned, correct for history).
-  scheduled_spawn INTEGER NOT NULL DEFAULT 0
+  scheduled_spawn INTEGER NOT NULL DEFAULT 0,
+  -- Resume-half memory-recall dedup gate (card ea648f89, hardened by finding 0e08c0b7): sha256 hex of the
+  -- LAST framed project-memory / companion-memory block actually delivered to this session's resume/fork
+  -- turn-injection (NULL = nothing delivered yet). Persisted (not an in-memory cache) so a repeat resume
+  -- with an unchanged digest can skip re-enqueueing it EVEN ACROSS a daemon restart. Added to existing DBs
+  -- via the idempotent migration below.
+  last_project_memory_digest TEXT,
+  last_companion_memory_digest TEXT
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 -- seq (attention-push watcher fix, CR-caught): the sqlite rowid is NOT a safe tail-poll cursor for this
@@ -1215,6 +1222,13 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   companion_lead_mode: "INTEGER NOT NULL DEFAULT 0",
   // Spawn-origin marker (card 53edd8d5): 1 iff booted by the cron Scheduler. Legacy rows backfill to 0.
   scheduled_spawn: "INTEGER NOT NULL DEFAULT 0",
+  // Resume-half memory-recall dedup gate (card ea648f89, hardened by finding 0e08c0b7): sha256 hex of the
+  // LAST framed project-memory / companion-memory block actually delivered to this session's resume/fork
+  // turn-injection, so a repeat resume with an unchanged digest can skip re-enqueueing it — persisted here
+  // (not an in-memory cache) so the dedup survives a daemon restart. Nullable; legacy rows backfill to
+  // NULL = "nothing delivered yet", which correctly triggers a real (not redundant) inject on first use.
+  last_project_memory_digest: "TEXT",
+  last_companion_memory_digest: "TEXT",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -3948,6 +3962,28 @@ export class Db {
     this.db.prepare("UPDATE sessions SET busy = ?, last_activity = ? WHERE id = ?")
       .run(busy ? 1 : 0, new Date().toISOString(), id);
     this.notifySessionChanged(id);
+  }
+  /**
+   * Resume-half memory-recall dedup gate (card ea648f89, hardened by finding 0e08c0b7) — see the
+   * `last_project_memory_digest`/`last_companion_memory_digest` column comments in SCHEMA. Plain reads/
+   * writes with NO `notifySessionChanged`/`last_activity` bump: this is internal dedup bookkeeping, not a
+   * user-visible session change. `null` ⇒ nothing delivered yet (a missing/deleted session also reads as
+   * `null`, which correctly triggers a real inject rather than a false dedup).
+   */
+  getLastProjectMemoryDigest(id: string): string | null {
+    const row = this.db.prepare("SELECT last_project_memory_digest AS d FROM sessions WHERE id = ?").get(id) as { d: string | null } | undefined;
+    return row?.d ?? null;
+  }
+  setLastProjectMemoryDigest(id: string, digest: string | null): void {
+    this.db.prepare("UPDATE sessions SET last_project_memory_digest = ? WHERE id = ?").run(digest, id);
+  }
+  /** Companion-memory sibling of {@link getLastProjectMemoryDigest}/{@link setLastProjectMemoryDigest}. */
+  getLastCompanionMemoryDigest(id: string): string | null {
+    const row = this.db.prepare("SELECT last_companion_memory_digest AS d FROM sessions WHERE id = ?").get(id) as { d: string | null } | undefined;
+    return row?.d ?? null;
+  }
+  setLastCompanionMemoryDigest(id: string, digest: string | null): void {
+    this.db.prepare("UPDATE sessions SET last_companion_memory_digest = ? WHERE id = ?").run(digest, id);
   }
   /**
    * Re-pin the session-row `restrictedTools` flag directly (the human-only Companion Manage toggle) —

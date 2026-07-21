@@ -581,39 +581,30 @@ export class SessionService {
   private readonly platformMessageDedupe = new Map<string, { result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string }; atMs: number }>();
   private static readonly PLATFORM_MESSAGE_DEDUP_TTL_MS = 5 * 60_000;
   /**
-   * Resume-half project-memory dedup gate (card ea648f89): sessionId → the sha256 hex digest of the LAST
-   * framed project-memory block this session was actually handed by resume() (or `null` when the last
-   * resume had nothing to inject). resume() re-retrieves on EVERY resume (idle-nudge resumes, wakes, and
-   * crash/restart recovery all call it) with no change-detection otherwise — re-injecting the IDENTICAL
-   * framed block verbatim every time (observed live as 3 consecutive identical injections, flagged
-   * unprompted as noise by the resumed manager). In-memory by design, exactly like {@link deployShaWindow}/
-   * {@link platformMessageDedupe} above: the FREQUENT resumes this fixes (idle-nudge/wake/crash-recovery)
-   * all happen within the SAME daemon process as the injection they're deduping against, so a plain Map
-   * catches every one of them with zero schema cost. The only case it can't dedupe is the very FIRST resume
-   * after a daemon RESTART (the map itself doesn't survive process exit) — but that's harmless, not merely
-   * tolerable: the resumed engine's own transcript already carries the prior injection from before the
-   * restart, so this is one redundant-but-correct re-inject on a rare event, not a persistent regression.
-   * Not persisted to the `sessions` table on purpose — this is a noise-reduction cache, not durable state;
-   * a core-table column + migration would be the wrong tool for a problem an in-memory map fully solves.
-   * Cleaned up on session deletion (see the deleteSession call site) so a long-lived daemon doesn't grow
-   * this map forever as sessions churn.
-   */
-  private readonly lastProjectMemoryDigest = new Map<string, string | null>();
-  /**
-   * Stamp {@link lastProjectMemoryDigest} for a session's FRESH-spawn project-memory injection (the
-   * `retrieveProjectMemoryForKickoff` result already appended to its startup prompt by the caller) — so the
-   * session's very FIRST resume dedups against the block the spawn kickoff already showed it, rather than
-   * treating the map as empty and redundantly re-injecting the same content resume() would otherwise
-   * recompute identically. Called by every fresh-spawn path that injects project memory (startNew,
-   * startManager, spawnWorker, recycleWorker — the same v1 coverage project-memory-recall.ts documents);
-   * resume() sets the SAME map directly (its own comment above explains the hashing). A fresh spawn whose
-   * kickoff/task search text differs from what its first resume will search (e.g. spawnWorker matches the
-   * manager's kickoff prompt, but resume matches the bound task's title+body once one exists) may still
-   * compute a DIFFERENT digest at that first resume — correctly triggering a real (not redundant) inject,
-   * since the matched notes genuinely differ; this stamp only dedupes the common case where they agree.
+   * Resume-half memory-recall dedup gate (card ea648f89, hardened by finding 0e08c0b7): every repeated
+   * turn-injection point for project memory (resume/fork, project-memory-recall.ts) and companion memory
+   * (resume, companion/memory-recall.ts) hashes its framed block (sha256 hex, `null` when nothing to
+   * inject) and compares it against the LAST digest actually delivered to that session, persisted on the
+   * `sessions` row itself (`last_project_memory_digest` / `last_companion_memory_digest` — see
+   * {@link Db.getLastProjectMemoryDigest}/{@link Db.setLastProjectMemoryDigest} and their companion-memory
+   * siblings). Unchanged ⇒ skip the enqueue entirely (the compare runs BEFORE `enqueueStdin`, so an
+   * unchanged digest never mints a standalone turn into a parked session); changed (incl. the very first
+   * resume, with nothing stored yet) ⇒ inject and persist the new hash.
+   *
+   * v1 of this gate (project memory only) kept the digest in an in-memory `Map`, which caught every
+   * SAME-PROCESS repeat (idle-nudge/wake resumes) but reset to empty on a daemon RESTART — assumed "rare
+   * and harmless" at the time, but Loom's own dev daemon (`tsx watch`) restarts on every merge touching
+   * `packages/daemon/src/**`, so for a self-hosting orchestrator this was routine, not rare (observed: a
+   * full block re-injected at kickoff + 3 daemon-restart resumes ≈ 30k+ redundant tokens in one session).
+   * The DB column survives a restart, closing that gap — and companion memory (which had NO dedupe at all
+   * — observed injecting the identical block 25+ times into one companion) now gets the identical guard.
    */
   private stampProjectMemoryDigest(sessionId: string, framed: string | null): void {
-    this.lastProjectMemoryDigest.set(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
+    this.db.setLastProjectMemoryDigest(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
+  }
+  /** Companion-memory sibling of {@link stampProjectMemoryDigest} — see the gate's doc comment above. */
+  private stampCompanionMemoryDigest(sessionId: string, framed: string | null): void {
+    this.db.setLastCompanionMemoryDigest(sessionId, framed ? createHash("sha256").update(framed).digest("hex") : null);
   }
   /**
    * TOCTOU spawn-claim (worker_spawn double-create race): the per-taskId set of worker spawns currently
@@ -873,10 +864,11 @@ export class SessionService {
     const companionName = this.db.getCompanionConfig(sessionId)?.name || undefined;
     const { startupPrompt } = this.resolveAgentSpawn(agent, config, "assistant", false, companionName);
     if (!startupPrompt) return undefined;
-    return appendMemoryRecallToStartupPrompt(
-      startupPrompt,
-      buildFramedMemoryRecall(listCompanionMemories(sessionId), (name) => readCompanionMemory(sessionId, name)),
-    );
+    const reinjectRecallFramed = buildFramedMemoryRecall(listCompanionMemories(sessionId), (name) => readCompanionMemory(sessionId, name));
+    // Card ea648f89/0e08c0b7: stamp the durable digest so this companion's NEXT resume compares against
+    // what this reinject just showed it, rather than redundantly re-injecting the identical block again.
+    this.stampCompanionMemoryDigest(sessionId, reinjectRecallFramed);
+    return appendMemoryRecallToStartupPrompt(startupPrompt, reinjectRecallFramed);
   }
 
   /**
@@ -933,15 +925,22 @@ export class SessionService {
     // MEMORY.md store is keyed by ITS session id (companionMemoryDir), so it is normally empty on a truly
     // fresh spawn — but this stays correct for any future path that seeds memory ahead of first spawn.
     // Appended via assistant-prompt.ts so the compose logic lives in one place; null (no memories) ⇒
-    // startupPrompt returned byte-identical, so a fresh companion with empty memory is unchanged.
+    // startupPrompt returned byte-identical, so a fresh companion with empty memory is unchanged. Card
+    // ea648f89/0e08c0b7: stamp the durable digest so this companion's FIRST resume compares against what
+    // this fresh spawn just showed it, instead of treating "nothing stored" as license to redundantly
+    // re-inject (mirrors stampProjectMemoryDigest's fresh-spawn stamping below).
     // PL Auditor finding #8, fresh-boot gap: a role-omitted "+New"/"Spawn from profile" call can still
     // resolve role==="manager" (a profile confers it — see PROFILE_SPAWNABLE_ROLES), but this generic
     // path used to skip composeManagerStartupPrompt entirely (only the EXPLICIT role:"manager" path,
     // startManager, applied it) — so the default "Spawn from profile" button on a manager-profiled agent
     // cold-booted with no "Where things live" block and Globbed its home dir for the resume doc. Mirror
     // startManager/recycleManager here so every manager boot, explicit or profile-derived, gets the block.
+    const companionRecallFramed = role === "assistant"
+      ? buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name))
+      : null;
+    if (role === "assistant") this.stampCompanionMemoryDigest(session.id, companionRecallFramed);
     const finalStartupPrompt = role === "assistant"
-      ? appendMemoryRecallToStartupPrompt(startupPrompt!, buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name)))
+      ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
       : role === "manager"
       ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename })
       : startupPrompt;
@@ -1605,15 +1604,25 @@ export class SessionService {
     // not see a fresh spawn again for months. Enqueued via the ordinary enqueueStdin turn-injection
     // primitive — ready-gated in host.ts, so it becomes the companion's FIRST turn once the resumed engine
     // is ready, ahead of anything queued below (the redelivered messages) or by a caller after resume()
-    // returns (e.g. a wake's own note). No extra "recalled once" bookkeeping needed: resume() only reaches
-    // this point once per activation (the isAlive short-circuit above skips it on an already-live session),
-    // so building + enqueueing inline here is naturally exactly-once. Empty memory ⇒ buildFramedMemoryRecall
-    // returns null ⇒ no enqueue — a companion with no memory, and every non-assistant resume (this whole
-    // block is role-gated), stay byte-identical to today. The frame itself tells the model to stay SILENT
-    // (never chat_reply just because this turn arrived) — see memory-recall.ts.
+    // returns (e.g. a wake's own note). Empty memory ⇒ buildFramedMemoryRecall returns null ⇒ no enqueue —
+    // a companion with no memory, and every non-assistant resume (this whole block is role-gated), stay
+    // byte-identical to today. The frame itself tells the model to stay SILENT (never chat_reply just
+    // because this turn arrived) — see memory-recall.ts.
+    //
+    // Dedup gate (card ea648f89, hardened by finding 0e08c0b7 — see the shared doc comment on
+    // stampProjectMemoryDigest/stampCompanionMemoryDigest above): resume() re-retrieves on EVERY resume
+    // (idle-nudge resumes, wakes, crash/restart recovery all call it) with no change-detection otherwise —
+    // this call site used to re-inject the IDENTICAL framed block verbatim every time (observed live as
+    // 25+ consecutive identical injections into one companion). Hash the framed block and compare against
+    // the digest PERSISTED on the session row (survives a daemon restart, unlike an in-memory cache); the
+    // compare runs BEFORE enqueueStdin, so an unchanged digest never mints a standalone turn.
     if (session.role === "assistant") {
       const recall = buildFramedMemoryRecall(listCompanionMemories(session.id), (name) => readCompanionMemory(session.id, name));
-      if (recall) this.pty.enqueueStdin(session.id, recall, "system");
+      const recallDigest = recall ? createHash("sha256").update(recall).digest("hex") : null;
+      if (recallDigest !== this.db.getLastCompanionMemoryDigest(session.id)) {
+        if (recall) this.pty.enqueueStdin(session.id, recall, "system");
+        this.db.setLastCompanionMemoryDigest(session.id, recallDigest);
+      }
     }
     // Project memory (card 2fd9abf9, resume half) — a DELIBERATE, DOCUMENTED exception to "resume
     // injects no prompt", exactly like the companion recall above but generalized to EVERY role (not
@@ -1624,23 +1633,20 @@ export class SessionService {
     // match source), else the agent's own startup prompt; both empty ⇒ pinned-only. null (no project
     // memory notes match) ⇒ no enqueue, byte-identical to today.
     //
-    // Dedup gate (card ea648f89): resume() re-retrieves on EVERY resume (idle-nudge resumes, wakes, and
-    // crash/restart recovery all call it), and with no change-detection that re-injected the FULL framed
-    // block verbatim even when byte-identical to what this same session was already handed — observed
-    // live as 3 consecutive identical injections, flagged unprompted by the resumed manager as noise.
-    // Fix: hash the framed block and compare against the digest held in {@link lastProjectMemoryDigest}
-    // (the in-memory dedup map, not a DB column — see its own doc comment for why); skip the enqueue when
-    // unchanged. This still preserves the "sees notes written since last spawn" intent — a genuinely
-    // new/edited note changes the digest and is injected — it just stops re-blasting identical content
-    // every resume within the SAME daemon process.
+    // Dedup gate (card ea648f89, hardened by finding 0e08c0b7): same shape as the companion-recall gate
+    // above — hash the framed block and compare against the digest persisted on the session row (see
+    // stampProjectMemoryDigest's doc comment for why this moved off an in-memory Map); skip the enqueue
+    // when unchanged. This still preserves the "sees notes written since last spawn" intent — a genuinely
+    // new/edited note changes the digest and is injected — it just stops re-blasting identical content,
+    // including across a daemon restart.
     {
       const boundTask = session.taskId ? this.db.getTask(session.taskId) : undefined;
       const kickoffText = boundTask ? `${boundTask.title}\n${boundTask.body}` : (agent?.startupPrompt ?? "");
       const projectRecall = retrieveProjectMemoryForKickoff(this.db, session.projectId, kickoffText);
       const digest = projectRecall ? createHash("sha256").update(projectRecall).digest("hex") : null;
-      if (digest !== this.lastProjectMemoryDigest.get(session.id)) {
+      if (digest !== this.db.getLastProjectMemoryDigest(session.id)) {
         if (projectRecall) this.pty.enqueueStdin(session.id, projectRecall, "system");
-        this.lastProjectMemoryDigest.set(session.id, digest);
+        this.db.setLastProjectMemoryDigest(session.id, digest);
       }
     }
     // Live-flip re-drive (card 225559e5): this recipient just transitioned to live, so re-drive any durable
@@ -3137,8 +3143,7 @@ export class SessionService {
     const ids = [s.id, ...(s.role === "manager" ? this.db.listArchivedWorkers(s.id).map((w) => w.id) : [])];
     for (const id of ids) {
       deleteArchivedTranscript(s.projectId, id); // best-effort snapshot removal
-      this.db.deleteSession(id);
-      this.lastProjectMemoryDigest.delete(id); // bound the resume-dedup map's growth (card ea648f89)
+      this.db.deleteSession(id); // the row's own last_{project,companion}_memory_digest columns go with it
     }
     return { deleted: ids };
   }

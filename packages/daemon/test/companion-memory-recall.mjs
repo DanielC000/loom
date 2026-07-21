@@ -265,6 +265,30 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
     check("resume+memory: the enqueued turn carries the SILENT-context instruction (no unsolicited reply)", /do not reply/i.test(pending[0] ?? "") && /chat_reply/i.test(pending[0] ?? ""));
     const oR = optsFor(hostR, sMem.id);
     check("resume+memory: resume() STILL injects NO startup prompt (SpawnOpts unaffected — a separate mechanism)", oR?.startupPrompt === undefined);
+
+    // ---- (b2) DEDUP (finding 0e08c0b7): companion memory-recall had NO dedupe of any kind before this fix
+    // — every resume re-enqueued the identical digest (observed live as 25+ consecutive identical
+    // injections into one companion). A second resume with an UNCHANGED memory set must enqueue NOTHING.
+    // `simulateResume` already constructs a BRAND-NEW SessionService+PtyHost on every call (originally just
+    // to dodge the isAlive short-circuit) — that incidentally makes this the exact right tool to also prove
+    // the dedup survives a simulated daemon restart: the v1-style in-memory-Map approach used for project
+    // memory would FAIL this (a fresh process has an empty Map), while the DB-column-backed digest
+    // (db.getLastCompanionMemoryDigest/setLastCompanionMemoryDigest) PASSES it, since it's persisted on the
+    // session row itself. ----
+    const hostR2 = simulateResume(sMem.id);
+    check("resume+memory dedup: a second resume with an UNCHANGED memory set enqueues NOTHING, even from a fresh SessionService/host (durable across a daemon-restart-equivalent)",
+      hostR2.getPending(sMem.id).length === 0);
+
+    const newContent = "---\nname: user-job\ndescription: what the user does for work\npinned: true\n---\n\nThe user works as a train conductor.";
+    check("resume+memory dedup: seed a NEW memory after the dedup baseline", authorCompanionMemory(sMem.id, "user-job", newContent).ok === true);
+    const hostR3 = simulateResume(sMem.id);
+    const pending3 = hostR3.getPending(sMem.id);
+    check("resume+memory dedup: a resume AFTER a genuinely new memory enqueues again (the digest changed)", pending3.length === 1);
+    check("resume+memory dedup: the new memory's content is present in the re-injected block", pending3[0]?.includes("train conductor"));
+
+    const hostR4 = simulateResume(sMem.id);
+    check("resume+memory dedup: a resume right after the delta injection ALSO dedups (the newly-persisted digest is the new baseline)",
+      hostR4.getPending(sMem.id).length === 0);
   }
 
   // ---- (c) RESUME with EMPTY memory ⇒ nothing enqueued (no block) ----
@@ -286,6 +310,6 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the two-tier [loom:memory] recall digest is correct, byte-bounded EXACTLY (headers + section separators counted, mixed pinned+index boundary verified) with deterministic (pinned-prefix / index-tail) truncation, framed as DATA/CONTEXT never an instruction and explicitly SILENT (never a reason to chat_reply on its own), appended byte-identical-when-empty on a fresh spawn, injected exactly once per activation on resume (a documented exception to \"resume injects nothing\"), and leaves every non-companion session and an empty-memory companion untouched."
+  ? "\n✅ ALL PASS — the two-tier [loom:memory] recall digest is correct, byte-bounded EXACTLY (headers + section separators counted, mixed pinned+index boundary verified) with deterministic (pinned-prefix / index-tail) truncation, framed as DATA/CONTEXT never an instruction and explicitly SILENT (never a reason to chat_reply on its own), appended byte-identical-when-empty on a fresh spawn, injected exactly once per activation on resume (a documented exception to \"resume injects nothing\"), leaves every non-companion session and an empty-memory companion untouched, AND (finding 0e08c0b7) a resume with an UNCHANGED memory set does NOT re-inject — proven durable across a simulated daemon restart (a brand-new SessionService/host instance still dedups the persisted digest) — while a genuinely new memory still reaches the very next resume."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

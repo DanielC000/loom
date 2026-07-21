@@ -229,13 +229,13 @@ try {
   check("(resume additive) zero-notes project: NO project-memory enqueue at all",
     !host.enqueued.some((e) => e.sessionId === workerB.id && e.text.includes(PROJECT_MEMORY_TAG)));
 
-  // ===================== RESUME DEDUP (card ea648f89): the resume half re-retrieves on EVERY resume
-  // (idle-nudge resumes, wakes, crash/restart recovery) with no change-detection — re-injecting the
-  // IDENTICAL framed block verbatim every time. Observed live as 3 consecutive identical injections on one
-  // manager, flagged unprompted as noise. Fix: hash the framed block and compare against the digest
-  // persisted from the session's LAST injection (in-memory, keyed by session id — see
-  // lastProjectMemoryDigest in service.ts); skip the enqueue when unchanged, but still inject when a
-  // genuinely NEW/edited note changes the digest. =====================
+  // ===================== RESUME DEDUP (card ea648f89, hardened by finding 0e08c0b7): the resume half
+  // re-retrieves on EVERY resume (idle-nudge resumes, wakes, crash/restart recovery) with no change-
+  // detection — re-injecting the IDENTICAL framed block verbatim every time. Observed live as 3 consecutive
+  // identical injections on one manager, flagged unprompted as noise. Fix: hash the framed block and
+  // compare against the digest PERSISTED on the session row (db.getLastProjectMemoryDigest/
+  // setLastProjectMemoryDigest — survives a daemon restart, unlike the original v1 in-memory Map); skip the
+  // enqueue when unchanged, but still inject when a genuinely NEW/edited note changes the digest. =====================
   host.enqueued.length = 0;
   svc.resume(rawWorkerId); // same session, SAME notes as its last resume above — nothing changed
   check("(dedup) a resume with NO change since the last injection enqueues NOTHING project-memory-related",
@@ -259,6 +259,38 @@ try {
   svc.resume(rawWorkerId); // immediately again, no further writes — must dedup against the JUST-updated digest too
   check("(dedup) a resume right after the delta injection ALSO dedups (the newly-persisted digest is the new baseline)",
     !host.enqueued.some((e) => e.sessionId === rawWorkerId && e.text.includes(PROJECT_MEMORY_TAG)));
+
+  // ===================== RESTART-DURABILITY (finding 0e08c0b7 — the gap v1's in-memory Map left open): a
+  // daemon restart constructs a BRAND-NEW SessionService (fresh process, empty in-memory state) against the
+  // SAME durable db. The v1 dedup gate (an in-memory Map keyed by session id) would NOT survive this — a
+  // fresh Map has no entry for rawWorkerId, so it would treat "nothing stored" as license to redundantly
+  // re-inject the unchanged digest. The DB-column-backed gate MUST survive it: a second SessionService
+  // instance sharing the same db reads the SAME persisted digest and still dedups. This is the exact
+  // real-world case named in the finding (Loom orch 3d3732f8: full block re-injected across 3 daemon-
+  // restart resumes ≈ 30k+ redundant tokens) — Loom's own dev daemon (tsx watch) restarts on every merge
+  // touching packages/daemon/src/**, so this is routine, not rare. =====================
+  {
+    const restartedHost = new SeamHost(events);
+    const restartedSvc = new SessionService(db, restartedHost, new OrchestrationControl());
+    restartedSvc.resume(rawWorkerId); // same session, same notes — nothing changed since the last resume above
+    check("(restart-durability) a resume from a BRAND-NEW SessionService (simulating a daemon restart) still dedups an unchanged digest",
+      !restartedHost.enqueued.some((e) => e.sessionId === rawWorkerId && e.text.includes(PROJECT_MEMORY_TAG)));
+
+    db.upsertProjectMemory(projA, {
+      key: "new-note-after-restart",
+      title: "New note added after the simulated daemon restart",
+      text: "this note was written after the simulated restart and must still reach the very next resume.",
+      pinned: true,
+    }, cfg.maxNotes);
+    const restartedHost2 = new SeamHost(events);
+    const restartedSvc2 = new SessionService(db, restartedHost2, new OrchestrationControl());
+    restartedSvc2.resume(rawWorkerId);
+    const restartDedupMsg = restartedHost2.enqueued.find((e) => e.sessionId === rawWorkerId);
+    check("(restart-durability) a resume (from yet another fresh SessionService) AFTER a genuinely new note still enqueues (the digest changed)",
+      !!restartDedupMsg && restartDedupMsg.text.includes(PROJECT_MEMORY_TAG));
+    check("(restart-durability) the new note's content is present in the re-injected block",
+      restartDedupMsg?.text.includes("written after the simulated restart"));
+  }
 
   // ===================== task 1b27e123: recycleManager is a FRESH spawn (no --resume) — it must ALSO get
   // project memory appended to its composed startup prompt, exactly like recycleWorker/spawnWorker, or a
@@ -394,6 +426,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — cross-session sharing PROVEN (a note written in one session is retrieved and injected into a DIFFERENT, freshly-spawned worker session's kickoff via spawnWorker on a real worktree branch); pinned-always + FTS5-related-on-match both land; fresh-spawn injection covers spawnWorker/startManager/startNew/recycleWorker/recycleManager; resume() and forkSession both inject via enqueueStdin as kind:\"warning\"; a zero-notes project stays byte-identical to composeWorkerStartupPrompt alone with no tag anywhere and no resume/fork enqueue; a resume with an unchanged project-memory digest does NOT re-inject (whether unchanged since a PRIOR resume or since the session's own FRESH-SPAWN/recycle/fork kickoff), while a genuinely new note still reaches the very next resume every time (card ea648f89) — claude-free, network-free."
+  ? "\n✅ ALL PASS — cross-session sharing PROVEN (a note written in one session is retrieved and injected into a DIFFERENT, freshly-spawned worker session's kickoff via spawnWorker on a real worktree branch); pinned-always + FTS5-related-on-match both land; fresh-spawn injection covers spawnWorker/startManager/startNew/recycleWorker/recycleManager; resume() and forkSession both inject via enqueueStdin as kind:\"warning\"; a zero-notes project stays byte-identical to composeWorkerStartupPrompt alone with no tag anywhere and no resume/fork enqueue; a resume with an unchanged project-memory digest does NOT re-inject (whether unchanged since a PRIOR resume or since the session's own FRESH-SPAWN/recycle/fork kickoff), while a genuinely new note still reaches the very next resume every time (card ea648f89) — AND that dedup now survives a simulated daemon restart (a brand-new SessionService instance sharing the same db still dedups the persisted digest, closing finding 0e08c0b7's gap) — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
