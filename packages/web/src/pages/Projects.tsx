@@ -383,7 +383,17 @@ function ProjectManage(
   // gateway/server.ts's PATCH route) can't unbind its vault: that'd leave it with nothing bound at all.
   // Any other project CAN clear the field to unbind (card 9fe578b3) — an explicit "" is distinct from
   // leaving the field untouched, so a blank Save sends the unbind, not a no-op.
-  const isVaultOnly = !!project.vaultPath && project.repoPath === project.vaultPath;
+  // repoPath === vaultPath is only a CANDIDATE for vault-only — it also matches a legacy repo-bound
+  // project from before cdc3792d (default was vaultPath = repoPath). Server-confirm via isGitRepo (card
+  // d867e478), queried only for that ambiguous case and only once the panel is open, so an ordinary
+  // repo-bound project never triggers the extra git check.
+  const ambiguous = !!project.vaultPath && project.repoPath === project.vaultPath;
+  const repoCheck = useQuery({
+    queryKey: ["isGitRepo", project.id],
+    queryFn: () => api.isGitRepo(project.id),
+    enabled: open && ambiguous,
+  });
+  const isVaultOnly = ambiguous && repoCheck.data?.isGitRepo !== true;
   const vaultTrim = vaultPath.trim();
   const dirty = (name.trim() !== project.name || vaultTrim !== project.vaultPath) && !!name.trim() && (vaultTrim !== "" || !isVaultOnly);
   const live = liveCount > 0;

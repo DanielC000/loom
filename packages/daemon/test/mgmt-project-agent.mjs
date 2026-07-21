@@ -17,6 +17,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
 
 const tmpHome = path.join(os.tmpdir(), `loom-mgmt-${Date.now()}-${process.pid}`);
@@ -93,6 +94,20 @@ try {
     db.getProject("pVaultOnly").vaultPath === "C:/tmp/loom-mgmt/notes");
   const badType = await app.inject({ method: "PATCH", url: "/api/projects/pUnbind", payload: { vaultPath: 123 } });
   check("A2: PATCH vaultPath as a non-string → 400", badType.statusCode === 400);
+
+  // A LEGACY repo-bound project (repoPath === vaultPath, but repoPath IS a real git repo — the shape a
+  // project created before cdc3792d has, when the default was vaultPath = repoPath) is NOT vault-only:
+  // it genuinely has a repo, so the unbind must SUCCEED (card d867e478 — the over-refusal fix).
+  const legacyRepo = path.join(os.tmpdir(), `loom-mgmt-legacyrepo-${Date.now()}-${process.pid}`);
+  fs.mkdirSync(legacyRepo, { recursive: true });
+  fs.writeFileSync(path.join(legacyRepo, "README.md"), "# legacy\n");
+  execSync(`git init -q && git add . && git -c user.email=t@loom -c user.name=t commit -q -m init`, { cwd: legacyRepo });
+  db.insertProject(mkProject("pLegacyRepoBound", { repoPath: legacyRepo, vaultPath: legacyRepo }));
+  const legacyUnbind = await app.inject({ method: "PATCH", url: "/api/projects/pLegacyRepoBound", payload: { vaultPath: "" } });
+  check("A2: PATCH vaultPath:\"\" on a legacy repo-bound project (repoPath===vaultPath, real git repo) → 200 (unbind)", legacyUnbind.statusCode === 200);
+  check("A2: legacy project's vaultPath cleared, repoPath untouched",
+    db.getProject("pLegacyRepoBound").vaultPath === "" && db.getProject("pLegacyRepoBound").repoPath === legacyRepo);
+  fs.rmSync(legacyRepo, { recursive: true, force: true });
 
   // ════════ B. archive → restore round-trip ════════
   const arch = await app.inject({ method: "DELETE", url: "/api/projects/pEdit" });

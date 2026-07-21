@@ -449,6 +449,10 @@ export const api = {
     get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
   gitBranches: (projectId: string) =>
     get<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
+  // Is repoPath an actual git repo — used to tell a genuine vault-only project apart from a legacy
+  // repo-bound project whose vaultPath happens to equal repoPath (card d867e478).
+  isGitRepo: (projectId: string) =>
+    get<{ isGitRepo: boolean }>(`/api/projects/${projectId}/is-git-repo`),
   // Read-only git log for a bound reference repo (reference-repos epic Phase 5). `index` is the position
   // in the project's OWN referenceRepos[] — the server resolves the path server-side, so this can never
   // reach an arbitrary host path. An out-of-range index 404s.

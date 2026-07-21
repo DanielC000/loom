@@ -3435,6 +3435,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return new GitReader(p.repoPath).branches();
   });
 
+  // Whether repoPath is a real git repo — lets the web Manage-project panel tell a genuine vault-only
+  // project (repoPath not a repo) apart from a legacy repo-bound project whose vaultPath happens to equal
+  // repoPath (card d867e478, mirrors the PATCH unbind-refusal check below), without spawning git for
+  // every project on every /api/projects list load — the client calls this only for the ambiguous case.
+  app.get("/api/projects/:id/is-git-repo", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    return { isGitRepo: await isGitRepo(p.repoPath) };
+  });
+
   // Reference-repo git log (reference-repos epic Phase 5, card f4888775, "Interpretation A") — read-only,
   // reusing the SAME GitReader as the primary-repo log above. SECURITY: the client passes an INDEX into
   // the project's OWN `referenceRepos` array, resolved server-side — it can never supply an arbitrary host
@@ -3569,8 +3579,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // from `vaultPath` omitted (undefined), which leaves the stored value untouched below. Keep the
     // at-least-one-of-{repo,vault} invariant: refuse on a VAULT-ONLY project, whose repoPath was bound to
     // the SAME folder as its vaultPath at create time (mcp/setup.ts / the no-repo branch above) — unbinding
-    // there would leave the project with nothing usable at all.
-    if (b.vaultPath !== undefined && !(b.vaultPath as string).trim() && p.repoPath === p.vaultPath) {
+    // there would leave the project with nothing usable at all. repoPath===vaultPath ALONE over-matches a
+    // LEGACY repo-bound project from before cdc3792d (when the default was vaultPath=repoPath) — that
+    // project genuinely has a repo, so the isGitRepo check (card d867e478) distinguishes it from a real
+    // vault-only bare folder before refusing.
+    if (b.vaultPath !== undefined && !(b.vaultPath as string).trim() && p.repoPath === p.vaultPath && !(await isGitRepo(p.repoPath))) {
       return reply.code(400).send({ error: "cannot unbind the vault of a vault-only project (it has no separate repoPath) — archive it instead" });
     }
     if (b.repoPath !== undefined && (typeof b.repoPath !== "string" || !b.repoPath.trim()))
