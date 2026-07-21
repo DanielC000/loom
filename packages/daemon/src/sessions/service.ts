@@ -428,15 +428,15 @@ const MERGE_PATCH_INLINE_CAP = 40_000;
 const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_000;
 
 /**
- * classifyIdleWorker's `parked-background` decay window (card c36bac53 round-2 CR Major): how long a
- * worker's self-attributed `worker_report({awaiting:"background"})` is trusted at face value before
- * classification falls through to the actionable `parked-background-stale` kind. A DOCUMENTED constant,
- * not a per-project config knob (this is a daemon-internal staleness bound, not a tunable orchestration
- * policy) — chosen to sit comfortably above a real gate's plausible run time (this repo's own daemon test
- * gate legitimately runs ~8-10 minutes) so it never resurrects the false alarms this card fixes, while
- * still being well short of `idleWorkerMinutes`'s 45-minute default periodic-recheck cadence so a
- * genuinely dead background park surfaces within roughly one more tick instead of sitting silently
- * "no reply owed" indefinitely.
+ * classifyIdleWorker's `parked-background`/`parked-gate` decay window: how long a worker's
+ * self-attributed `worker_report({awaiting:"background"})`, OR (card 8e0bd254) a live `PendingOpRegistry`
+ * `gate:<workerSessionId>` entry, is trusted at face value before classification falls through to the
+ * matching actionable `-stale` kind. A DOCUMENTED constant, not a per-project config knob (this is a
+ * daemon-internal staleness bound, not a tunable orchestration policy) — chosen to sit comfortably above a
+ * real gate's plausible run time (this repo's own daemon test gate legitimately runs ~8-10 minutes) so it
+ * never resurrects the false alarms this card fixes, while still being well short of `idleWorkerMinutes`'s
+ * 45-minute default periodic-recheck cadence so a genuinely dead park surfaces within roughly one more tick
+ * instead of sitting silently "no reply owed" indefinitely.
  */
 const BACKGROUND_PARK_STALE_MINUTES = 20;
 
@@ -5235,6 +5235,23 @@ export class SessionService {
    *   BOUNDED here: once `BACKGROUND_PARK_STALE_MINUTES` has elapsed since the flagged report with no
    *   ack/re-report, classification falls through to this actionable kind instead of repeating the "no
    *   reply owed" promise — nothing backs or bounds a bare self-attribution past that window.
+   * - `parked-gate` — card 8e0bd254, the STRUCTURAL replacement for a worker having to self-report
+   *   `awaiting:"background"` while parked on its OWN `run_gate` call: a pending `run_gate` is a
+   *   DAEMON-OWNED op, directly observable via `PendingOpRegistry.peek(\`gate:${workerSessionId}\`)` — no
+   *   self-report needed at all, so this is checked BEFORE the report-derived branches below and fires
+   *   even for a worker that went idle with NO `worker_report` in between (the exact self-report-reliance
+   *   gap that produced ~4-5 false `[loom:worker-idle]` "awaiting your reply" nudges per gate-running
+   *   worker per the origin finding — prior patches ab21da21/1c95a89b/cf94e19 only fixed the self-report
+   *   wording, not this). More trustworthy than a wake or a self-attributed `awaiting` flag: the daemon
+   *   itself started and is tracking this exact op, not merely a claim about it. Fresh (op still running,
+   *   started under `BACKGROUND_PARK_STALE_MINUTES` ago) → no reply owed, no manager turn. `peek()` never
+   *   consumes, so repeated ticks see the SAME running entry until it genuinely settles (evicted the
+   *   instant it does — see PendingOpRegistry's class doc), at which point this branch simply stops
+   *   matching and classification falls through to whatever the worker's own report (if any) says.
+   * - `parked-gate-stale` — mirrors `parked-background-stale`'s reasoning: a `run_gate` op that's been
+   *   RUNNING for `BACKGROUND_PARK_STALE_MINUTES` or more is past this repo's own ~8-10 minute real-gate
+   *   runtime — likely wedged rather than genuinely still executing — so classification stops asserting
+   *   "no reply owed" and falls through to this actionable kind instead.
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
@@ -5242,7 +5259,9 @@ export class SessionService {
     | { kind: "parked-ack"; status: string }
     | { kind: "parked-wake"; status: string; wakeAt: string }
     | { kind: "parked-background"; status: string }
-    | { kind: "parked-background-stale"; status: string; minutesSinceReport: number } {
+    | { kind: "parked-background-stale"; status: string; minutesSinceReport: number }
+    | { kind: "parked-gate" }
+    | { kind: "parked-gate-stale"; minutesSinceStart: number } {
     // TASKLESS is intentionally out of scope for THIS classifier (CR-flagged asymmetry, card 2514e6e1-
     // follow-up): every kind below `broken-spawn` reconciles via BOARD-COLUMN state (a task's active/
     // review/parked lane) — meaningless for a worker with no card. A taskless worker's OWN broken-spawn
@@ -5257,6 +5276,22 @@ export class SessionService {
     if (this.pty.getPendingEntries(workerSessionId).length > 0) return { kind: "not-evaluable" }; // direction queued, about to drain
 
     if (w.rateLimitedUntil && Date.parse(w.rateLimitedUntil) > Date.now()) return { kind: "not-stranded" };
+
+    // PENDING-GATE GUARD (card 8e0bd254): checked BEFORE any report-derived branch below — a running
+    // `run_gate` op is DAEMON-OWNED state (PendingOpRegistry), not a claim the worker has to make about
+    // itself, so this classifies a gate-parked worker correctly even if it never called worker_report at
+    // all before going idle (the self-report-reliance gap the false alarms in the origin finding trace
+    // back to). `peek()` only ever returns a "running" view for the "gate" kind (runWorkerGate passes no
+    // `retainMs`, so a settled op is evicted immediately, not retained) — so this branch simply stops
+    // matching the instant the gate actually finishes, with no separate cleanup needed here.
+    const pendingGate = this.pendingOps.peek(`gate:${workerSessionId}`);
+    if (pendingGate && pendingGate.state === "running") {
+      const minutesSinceStart = (Date.now() - Date.parse(pendingGate.startedAt)) / 60_000;
+      if (minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES) {
+        return { kind: "parked-gate-stale", minutesSinceStart: Math.round(minutesSinceStart) };
+      }
+      return { kind: "parked-gate" };
+    }
 
     // WAKE GUARD (card dfa87343): read the worker's pending self-scheduled wakes now, but DON'T branch on
     // them yet — a pending wake means different things depending on whether the worker also reported (see
@@ -5374,14 +5409,20 @@ export class SessionService {
     }
 
     const cls = this.classifyIdleWorker(workerSessionId);
-    if (cls.kind === "not-evaluable" || cls.kind === "not-stranded") return;
+    // FRESH parked-gate (card 8e0bd254): a running run_gate is a verified daemon-owned fact, not merely
+    // "not disprovable" — suppress the nudge ENTIRELY (never even enqueued), exactly like not-stranded,
+    // so a gate-running worker costs its manager zero turns while the gate is legitimately still going.
+    // Only parked-gate-stale (below) escalates.
+    if (cls.kind === "not-evaluable" || cls.kind === "not-stranded" || cls.kind === "parked-gate") return;
 
     if (cls.kind === "broken-spawn") {
       try { this.pty.enqueueStdin(w.parentSessionId, brokenSpawnMsg); } catch { /* manager not live */ }
       return;
     }
 
-    const msg = cls.kind === "parked-wake"
+    const msg = cls.kind === "parked-gate-stale"
+      ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) has a run_gate op that's been running ~${cls.minutesSinceStart} min — past this project's plausible gate runtime, so it may be wedged rather than genuinely still executing. Pull it: worker_transcript ${workerSessionId} to check what actually happened, then worker_message it or worker_stop/worker_recycle it if the gate is stuck.`
+      : cls.kind === "parked-wake"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and is parked on its OWN scheduled wake (self-resumes at ${cls.wakeAt}) — no reply owed; it will continue on its own. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
       : cls.kind === "parked-background"
       ? `[loom:worker-idle] worker ${workerSessionId} (task ${w.taskId}) reported worker_report(${cls.status}) and flagged it's parked on its OWN backgrounded task (not you) — no reply owed; it will continue on its own once that finishes. Only step in if you want to redirect it: worker_transcript ${workerSessionId} to check on it, or worker_message it.`
