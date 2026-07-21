@@ -2,6 +2,8 @@
 // (direct built Db) + agent-runs-rest.mjs (REAL buildServer driven by app.inject, all other deps STUBBED
 // — no pty/claude boots). Covers the card's DoD GUARDS + cascade + happy paths:
 //   A. PATCH /api/projects/:id renames + edits vaultPath (happy path); /config still works untouched.
+//   A2. PATCH vaultPath:"" UNBINDs a vault on a repo-bound project (distinct from omitting the field);
+//       refused on a VAULT-ONLY project (repoPath === vaultPath) to keep at-least-one-of-{repo,vault}.
 //   B. archive→restore round-trip (bare DELETE = soft archive; POST /restore brings it back).
 //   C. RESERVED guard: the reserved "Loom Platform" home refuses archive AND permanent-delete (4xx).
 //   D. LIVE-session block: a project (DELETE + /permanent) AND an agent (DELETE) with a live session
@@ -64,6 +66,33 @@ try {
   check("A: PATCH unknown project → 404", missing.statusCode === 404);
   // /config remains a SEPARATE route, untouched by the structural PATCH (config still {} after rename).
   check("A: PATCH name did NOT touch config", JSON.stringify(db.getProject("pEdit").config) === "{}");
+
+  // ════════ A2. UNBIND a vault via PATCH vaultPath:"" (card 9fe578b3 — complete the vault-optional story) ════════
+  // A repo-bound project (repoPath !== vaultPath) CAN clear its vault: an explicit "" is an UNBIND,
+  // distinct from omitting the field (which leaves the stored value untouched — proven by section A above,
+  // where PATCH {name} alone never touched vaultPath).
+  db.insertProject(mkProject("pUnbind", { repoPath: "C:/tmp/loom-mgmt/repo", vaultPath: "C:/tmp/loom-mgmt/vault" }));
+  const unbind = await app.inject({ method: "PATCH", url: "/api/projects/pUnbind", payload: { vaultPath: "" } });
+  check("A2: PATCH vaultPath:\"\" on a repo-bound project → 200 (unbind)", unbind.statusCode === 200);
+  check("A2: vaultPath cleared, repoPath untouched",
+    db.getProject("pUnbind").vaultPath === "" && db.getProject("pUnbind").repoPath === "C:/tmp/loom-mgmt/repo");
+  // Omitting vaultPath entirely is still a no-op (leave-as-is) — rebind it, then confirm a bare {name}
+  // PATCH does NOT re-clear it.
+  db.updateProject("pUnbind", { vaultPath: "C:/tmp/loom-mgmt/vault2" });
+  const noop = await app.inject({ method: "PATCH", url: "/api/projects/pUnbind", payload: { name: "pUnbind" } });
+  check("A2: PATCH with vaultPath OMITTED → 200, vaultPath left untouched",
+    noop.statusCode === 200 && db.getProject("pUnbind").vaultPath === "C:/tmp/loom-mgmt/vault2");
+
+  // A VAULT-ONLY project (no separate repo — repoPath === vaultPath, the shape mcp/setup.ts's project_create
+  // and the REST create route both produce for a no-repo bind) REFUSES the same unbind: it would otherwise
+  // leave the project with nothing usable bound at all.
+  db.insertProject(mkProject("pVaultOnly", { repoPath: "C:/tmp/loom-mgmt/notes", vaultPath: "C:/tmp/loom-mgmt/notes" }));
+  const refused = await app.inject({ method: "PATCH", url: "/api/projects/pVaultOnly", payload: { vaultPath: "" } });
+  check("A2: PATCH vaultPath:\"\" on a VAULT-ONLY project → 400 (refused)", refused.statusCode === 400);
+  check("A2: vault-only project's vaultPath UNCHANGED after the refusal",
+    db.getProject("pVaultOnly").vaultPath === "C:/tmp/loom-mgmt/notes");
+  const badType = await app.inject({ method: "PATCH", url: "/api/projects/pUnbind", payload: { vaultPath: 123 } });
+  check("A2: PATCH vaultPath as a non-string → 400", badType.statusCode === 400);
 
   // ════════ B. archive → restore round-trip ════════
   const arch = await app.inject({ method: "DELETE", url: "/api/projects/pEdit" });
@@ -172,6 +201,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — project rename/vaultPath; archive↔restore; reserved guard (archive + permanent); live-session block (project + agent); deleteProject cascades rows + on-disk snapshots; deleteAgent cascades its sessions/schedules only."
+  ? "\n✅ ALL PASS — project rename/vaultPath; vaultPath:\"\" unbinds on a repo-bound project but is refused on a vault-only one; archive↔restore; reserved guard (archive + permanent); live-session block (project + agent); deleteProject cascades rows + on-disk snapshots; deleteAgent cascades its sessions/schedules only."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -3563,8 +3563,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown; referenceRepos?: unknown; noGateByDesign?: unknown };
     if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
       return reply.code(400).send({ error: "name must be a non-empty string" });
-    if (b.vaultPath !== undefined && (typeof b.vaultPath !== "string" || !b.vaultPath.trim()))
-      return reply.code(400).send({ error: "vaultPath must be a non-empty string" });
+    if (b.vaultPath !== undefined && typeof b.vaultPath !== "string")
+      return reply.code(400).send({ error: "vaultPath must be a string" });
+    // An explicit "" is an UNBIND (card 9fe578b3, completing cdc3792d's vault-optional story) — distinct
+    // from `vaultPath` omitted (undefined), which leaves the stored value untouched below. Keep the
+    // at-least-one-of-{repo,vault} invariant: refuse on a VAULT-ONLY project, whose repoPath was bound to
+    // the SAME folder as its vaultPath at create time (mcp/setup.ts / the no-repo branch above) — unbinding
+    // there would leave the project with nothing usable at all.
+    if (b.vaultPath !== undefined && !(b.vaultPath as string).trim() && p.repoPath === p.vaultPath) {
+      return reply.code(400).send({ error: "cannot unbind the vault of a vault-only project (it has no separate repoPath) — archive it instead" });
+    }
     if (b.repoPath !== undefined && (typeof b.repoPath !== "string" || !b.repoPath.trim()))
       return reply.code(400).send({ error: "repoPath must be a non-empty string" });
     // repoPath REBIND (human-only): the SHARED guard (isGitRepo + live-worktree refusal), identical to

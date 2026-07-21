@@ -379,7 +379,13 @@ function ProjectManage(
   const [vaultPath, setVault] = useState(project.vaultPath);
   const [confirmText, setConfirmText] = useState("");
   const [showDelete, setShowDelete] = useState(false);
-  const dirty = (name.trim() !== project.name || vaultPath.trim() !== project.vaultPath) && !!name.trim() && !!vaultPath.trim();
+  // A vault-ONLY project (no separate repo — bound at create time with repoPath === vaultPath, see
+  // gateway/server.ts's PATCH route) can't unbind its vault: that'd leave it with nothing bound at all.
+  // Any other project CAN clear the field to unbind (card 9fe578b3) — an explicit "" is distinct from
+  // leaving the field untouched, so a blank Save sends the unbind, not a no-op.
+  const isVaultOnly = !!project.vaultPath && project.repoPath === project.vaultPath;
+  const vaultTrim = vaultPath.trim();
+  const dirty = (name.trim() !== project.name || vaultTrim !== project.vaultPath) && !!name.trim() && (vaultTrim !== "" || !isVaultOnly);
   const live = liveCount > 0;
   const liveTitle = live ? `stop the fleet first — ${liveCount} live session${liveCount === 1 ? "" : "s"}` : undefined;
   return (
@@ -393,9 +399,15 @@ function ProjectManage(
       {open && (
         <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 8 }}>
           <Input placeholder="name" value={name} onChange={(e) => setName(e.target.value)} />
-          <Input placeholder="vault path" value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+          <Input placeholder={isVaultOnly ? "vault path" : "vault path (clear + Save to unbind)"}
+            value={vaultPath} onChange={(e) => setVault(e.target.value)} />
+          {isVaultOnly && vaultTrim === "" && (
+            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim }}>
+              This project has no separate repo — its vault can't be unbound. Archive it instead.
+            </span>
+          )}
           <Button variant="primary" disabled={!dirty || saving}
-            onClick={() => onSave({ name: name.trim(), vaultPath: vaultPath.trim() })}>{saving ? "Saving…" : "Save changes"}</Button>
+            onClick={() => onSave({ name: name.trim(), vaultPath: vaultTrim })}>{saving ? "Saving…" : "Save changes"}</Button>
           <ReferenceReposEditor project={project} />
           <Button disabled={live || archiving} title={liveTitle}
             onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
