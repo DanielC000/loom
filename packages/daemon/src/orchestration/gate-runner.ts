@@ -52,7 +52,8 @@ const OUTPUT_TAIL_BYTES = 4096;
 export const GATE_EXTEND_IDLE_MS = Number(process.env.LOOM_GATE_EXTEND_IDLE_MS) || 60_000;
 
 /** Master on/off for the auto-extend-once behavior. Default ON; env-overridable so a test/op can force
- *  deterministic immediate-kill-at-first-deadline behavior, mirroring {@link GATE_RETRY_ENABLED}. */
+ *  deterministic immediate-kill-at-first-deadline behavior (the same `!== "0"` env-boolean shape the
+ *  merge gate's own retry policy uses — see @loom/shared's GateRetryConfig/`resolveConfig`). */
 export const GATE_TIMEOUT_EXTEND_ENABLED = process.env.LOOM_GATE_TIMEOUT_EXTEND_ENABLED !== "0";
 
 /** One gate step's outcome: exit code, spawn error (if any), the signal that killed it (if any — e.g. an
@@ -246,24 +247,27 @@ export async function runGateSequential(
   return { passed: true };
 }
 
-/** Whether the merge gate auto-retries ONCE on a transient-kill classification (see {@link
- *  classifyGateFailure}) before reporting a rejection. Default ON; env-overridable (mirrors host.ts's
- *  `Number(process.env.LOOM_X) || default` constants) so an op/test can force it off deterministically —
- *  e.g. to prove a genuine non-zero exit is NEVER retried regardless of this flag's own default. */
-export const GATE_RETRY_ENABLED = process.env.LOOM_GATE_RETRY_ENABLED !== "0";
-
-/** Settle delay before that one auto-retry, giving transient memory pressure a chance to actually clear
- *  before re-running the same gate. Env-overridable so a test can drive it near-zero instead of waiting
- *  out a real multi-second delay. */
-export const GATE_RETRY_SETTLE_MS = Number(process.env.LOOM_GATE_RETRY_SETTLE_MS) || 5_000;
+/**
+ * Sweep G3: whether the merge gate auto-retries ONCE on a transient-kill classification (see {@link
+ * classifyGateFailure}) before reporting a rejection, and the settle delay before that retry, are NO
+ * LONGER module-load constants here — they're promoted to a LIVE-resolvable daemon-global config
+ * (`OrchestrationConfig.gateRetry`, @loom/shared's `resolveConfig`/`GateRetryConfig`), resolved fresh at
+ * the SAME call sites that already read `orchestration.maxConcurrentGates` (SessionService's
+ * `confirmWorkerMerge`), and threaded into the retry call as a parameter rather than read here. The
+ * `LOOM_GATE_RETRY_ENABLED`/`LOOM_GATE_RETRY_SETTLE_MS` env vars still work exactly as before — they're
+ * now read as a lower-priority layer inside `resolveConfig` (override ?? env ?? default) instead of at
+ * this module's first import, so a change to either env var takes effect on the very next gate retry
+ * without needing gate-runner.js to be re-imported.
+ */
 
 /** After this many CONSECUTIVE `timedOut` gate results on the SAME branch AT THE SAME commit, the service
  *  layer (SessionService's `gateTimeoutStreak`) stops auto-spawning the gate for that branch and reports a
  *  distinct "likely hanging test" failure instead of retrying forever — part of card 3564fd1e's fix (a
  *  genuinely wedged test can never pass no matter how many times it's re-run, and every re-run risks
  *  leaking another process-tree survivor even with {@link runGateStep}'s tree-kill above). Env-overridable
- *  for a test, mirroring {@link GATE_RETRY_ENABLED}. The breaker clears itself once the branch's worktree
- *  HEAD advances past the commit it tripped on — see SessionService's `checkGateTimeoutBreaker`. */
+ *  for a test, mirroring the merge-gate retry policy's own env layer (see the note above). The breaker
+ *  clears itself once the branch's worktree HEAD advances past the commit it tripped on — see
+ *  SessionService's `checkGateTimeoutBreaker`. */
 export const GATE_TIMEOUT_BREAKER_THRESHOLD = Number(process.env.LOOM_GATE_TIMEOUT_BREAKER_THRESHOLD) || 3;
 
 /** {@link classifyGateFailure}'s three buckets. "kill" and "timeout" are both retry-ELIGIBLE (the merge

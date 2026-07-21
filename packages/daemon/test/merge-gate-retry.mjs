@@ -36,17 +36,21 @@ import { execSync } from "node:child_process";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgr-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
-// Drive the settle delay near-zero (env-overridable, read at gate-runner.js's first import below) so this
-// test doesn't burn real multi-second waits across its 3 retry scenarios — also doubles as a live proof
-// that LOOM_GATE_RETRY_SETTLE_MS actually takes effect (the disabled/default cases are covered by
+// Drive the settle delay near-zero (env-overridable — sweep G3: read LIVE inside resolveConfig on every
+// confirmWorkerMerge call, no longer at gate-runner.js's first import) so this test doesn't burn real
+// multi-second waits across its 3 retry scenarios — also doubles as a live proof that
+// LOOM_GATE_RETRY_SETTLE_MS actually takes effect (the disabled/default cases are covered by
 // gate-kill-classify.mjs and merge-gate-retry-disabled.mjs).
 process.env.LOOM_GATE_RETRY_SETTLE_MS = "20";
+// Matches the env var set above — the resolved value SessionService actually uses for the retry settle
+// delay (via resolveConfig's OrchestrationConfig.gateRetry.settleMs), asserted against directly below
+// rather than importing a since-removed gate-runner.js module constant.
+const GATE_RETRY_SETTLE_MS = 20;
 
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { GATE_RETRY_SETTLE_MS } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };

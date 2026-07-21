@@ -22,8 +22,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // via an injected gate runner in merge-gate-retry.mjs, where a deterministic fake is the only honest way
 // to represent "an OS killed this out from under us" on every platform this daemon runs on.
 // Run: 1) build daemon (pnpm build), 2) node test/gate-kill-classify.mjs
-import { classifyGateFailure, runGateStep, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS } from "../dist/orchestration/gate-runner.js";
+import { classifyGateFailure, runGateStep } from "../dist/orchestration/gate-runner.js";
 import { CONTROL_CHAR_RE } from "../dist/pty/host.js";
+import { resolveConfig } from "@loom/shared";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -67,11 +68,13 @@ check("(classify) 'kill' and 'timeout' are both distinct from 'genuine' (both re
     sanitized.includes("FAIL widget.spec.js") && sanitized.includes("rm -rf /") && sanitized.includes("trailing text"));
 }
 
-// --- env-overridable constants sanity (mirrors host.ts's Number(process.env.LOOM_X) || default pattern);
-//     the actual override-takes-effect proof lives in merge-gate-retry-disabled.mjs (a fresh process
-//     needs the env var set BEFORE this module is first imported) ---
-check("(env) GATE_RETRY_ENABLED defaults true with no env override", GATE_RETRY_ENABLED === true);
-check("(env) GATE_RETRY_SETTLE_MS defaults to a positive, sane delay", Number.isFinite(GATE_RETRY_SETTLE_MS) && GATE_RETRY_SETTLE_MS > 0);
+// --- gate-retry policy defaults sanity (sweep G3: promoted from gate-runner.js module constants to
+//     @loom/shared's live-resolvable OrchestrationConfig.gateRetry — see resolveConfig); the actual
+//     override-takes-effect proof lives in merge-gate-retry-disabled.mjs / merge-gate-retry.mjs, and the
+//     full precedence (override > env > default, both resolveConfig paths) in platform-config.mjs (23) ---
+const gateRetryDefault = resolveConfig(undefined).orchestration.gateRetry;
+check("(defaults) gateRetry.enabled defaults true with no env override", gateRetryDefault.enabled === true);
+check("(defaults) gateRetry.settleMs defaults to a positive, sane delay", Number.isFinite(gateRetryDefault.settleMs) && gateRetryDefault.settleMs > 0);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — classifyGateFailure's three buckets are correct, a real hanging child is genuinely killed by our own timeout bound (settled-race resolves once), and the control-char strip neutralizes an embedded bracketed-paste terminator while leaving ordinary output untouched."

@@ -531,6 +531,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // gate semaphore actually reads (it re-reads `cap` on every gate run, so no restart is involved).
   const gatesDefault = resolveConfig(undefined).orchestration.maxConcurrentGates;
   const gatesResolved = resolveConfig(undefined, override).orchestration.maxConcurrentGates;
+  // Sweep G3: gateRetry (see PlatformConfigOverride.gateRetry / OrchestrationConfig.gateRetry) is
+  // likewise a top-level PlatformConfigOverride key surfaced on ResolvedConfig.orchestration, same
+  // resolution shape as maxConcurrentGates above — LIVE (re-read fresh at the same merge-gate call site
+  // maxConcurrentGates already is), so this hint can never drift from what the very next gate retry
+  // actually uses; no restart involved.
+  const gateRetryDefault = resolveConfig(undefined).orchestration.gateRetry;
+  const gateRetryResolved = resolveConfig(undefined, override).orchestration.gateRetry;
   // maxConcurrentManagers (card 52ab5d45) is likewise a top-level PlatformConfigOverride key surfaced on
   // ResolvedConfig.orchestration — same resolution shape as maxConcurrentGates above. UNLIKE
   // maxConcurrentGates (re-read live on every gate run), the cron Scheduler is constructed ONCE at boot
@@ -583,6 +590,11 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [maxConcurrentManagers, setMaxConcurrentManagers] = useState(numStr(override.maxConcurrentManagers));
   // Sweep G2 — its own blank-to-inherit control, same pattern as maxConcurrentManagers above.
   const [maxConcurrentAuditors, setMaxConcurrentAuditors] = useState(numStr(override.maxConcurrentAuditors));
+  // Sweep G3 — the `gateRetry` deep-partial group (like `backup` below, but LIVE not restart-bound): a
+  // bool (enabled) + an ms field (settleMs), its own 2-field block rather than joining the ms-keyed
+  // GLOBAL_FIELDS grid (which assumes every field in a group is ms-shaped).
+  const [gateRetryEnabled, setGateRetryEnabled] = useState(triStr(override.gateRetry?.enabled));
+  const [gateRetrySettleMs, setGateRetrySettleMs] = useState(numStr(override.gateRetry?.settleMs));
   // Sweep G4 — the `backup` deep-partial group (like rateLimit/watchers/timeouts, but mixed int/bool
   // fields so it gets its own 3-field block rather than joining the ms-keyed GLOBAL_FIELDS grid).
   const [backupEnabled, setBackupEnabled] = useState(triStr(override.backup?.enabled));
@@ -711,6 +723,18 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     } else {
       const n = Number(auditorsTrim);
       (o as Record<string, unknown>).maxConcurrentAuditors = Number.isFinite(n) ? n : auditorsTrim;
+    }
+    // Sweep G3: `gateRetry` is a deep-partial group (like `backup` below) mixing a bool (enabled) and an
+    // int (settleMs). Same blank→null / non-finite→original-string discipline as every other field here.
+    {
+      const entries: Record<string, number | boolean | string | null> = {};
+      entries.enabled = gateRetryEnabled === "inherit" ? null : gateRetryEnabled === "true";
+      const settleTrim = gateRetrySettleMs.trim();
+      if (settleTrim === "") { entries.settleMs = null; } else {
+        const n = Number(settleTrim);
+        entries.settleMs = Number.isFinite(n) ? n : settleTrim;
+      }
+      (o as Record<string, unknown>).gateRetry = entries;
     }
     // Sweep G4: `backup` is a deep-partial group (like rateLimit/watchers/timeouts) but mixes an int
     // (intervalMinutes), an int (keep), and a bool (enabled) — built as its own per-field-nullable entry
@@ -919,6 +943,26 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           <Hint>
             Caps how many heavy merge/deploy gate runs execute at once across the whole host. Default 1
             (fully serialized). Takes effect on the next gate run, no daemon restart. Whole number, 1–50.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Merge-gate auto-retry enabled</span>
+          <TriSelect value={gateRetryEnabled} set={setGateRetryEnabled} def={gateRetryDefault.enabled} />
+          <Hint>{effHint(gateRetryResolved.enabled)}</Hint>
+          <Hint>
+            Whether the merge gate auto-retries ONCE, after a settle delay, on a transient-kill
+            classification (an OOM/SIGKILL or the gate&apos;s own timeout) before reporting a rejection — a
+            genuine non-zero exit is never retried. Takes effect on the next gate retry, no daemon restart.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Merge-gate retry settle delay (ms)</span>
+          <Input value={gateRetrySettleMs} onChange={(e) => setGateRetrySettleMs(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${gateRetryDefault.settleMs})`} />
+          <Hint>{effHint(gateRetryResolved.settleMs)}</Hint>
+          <Hint>
+            Delay before that one auto-retry, giving transient memory pressure a chance to actually clear.
+            Takes effect on the next gate retry, no daemon restart. Whole number, 0–60000.
           </Hint>
         </label>
       </Panel>

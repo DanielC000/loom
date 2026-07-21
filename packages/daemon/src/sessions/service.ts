@@ -40,7 +40,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
 import { GateSemaphore } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -6735,10 +6735,10 @@ export class SessionService {
       // the manager never even sees that a transient kill happened, and execution falls through to the
       // normal squash-merge below exactly as if the gate had been green the first time.
       let gateRetried = false;
-      if (!gateResult.passed && GATE_RETRY_ENABLED && classifyGateFailure(gateResult) !== "genuine") {
+      if (!gateResult.passed && orchestration.gateRetry.enabled && classifyGateFailure(gateResult) !== "genuine") {
         gateRetried = true;
         evt("build_gate_retry_attempt", { priorClass: classifyGateFailure(gateResult) });
-        await new Promise((resolve) => setTimeout(resolve, GATE_RETRY_SETTLE_MS));
+        await new Promise((resolve) => setTimeout(resolve, orchestration.gateRetry.settleMs));
         // allowExtend:false (card 24642c3d) — the FIRST attempt above already got one auto-extend chance;
         // letting this retry ALSO auto-extend would stack two "one more chance" mechanisms into an
         // excessive worst-case wall-clock (up to 4x gateTimeoutMs instead of ~3x) before the circuit
@@ -6801,7 +6801,7 @@ export class SessionService {
           gateResult.failedStep ? `step: ${gateResult.failedStep}` : undefined,
           phase ? `phase: ${phase}` : undefined,
           killNote,
-          gateRetried ? `retried once (settled ${GATE_RETRY_SETTLE_MS}ms)` : undefined,
+          gateRetried ? `retried once (settled ${orchestration.gateRetry.settleMs}ms)` : undefined,
           failingTest ? `failing: ${failingTest}` : undefined,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
@@ -7136,7 +7136,8 @@ export class SessionService {
           // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
           // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
           // one-time auto-extend since it has no outer retry-on-timeout of its own ("the worker can just
-          // re-call run_gate itself" — see the comment on GATE_RETRY_ENABLED's merge-only usage above).
+          // re-call run_gate itself" — see the `orchestration.gateRetry`-gated retry in confirmWorkerMerge
+          // above, which this function deliberately does not share).
           gateResult = await this.gateSemaphore.runExclusive(
             gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE), "low",
           );

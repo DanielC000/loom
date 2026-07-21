@@ -1,11 +1,13 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Merge-gate retry ENV-DISABLE test (card bcba83a1's env-overridable retry knob). HERMETIC, no daemon.
-// Proves LOOM_GATE_RETRY_ENABLED=0 actually takes effect end-to-end: a transient-kill classification that
-// would normally auto-retry (see merge-gate-retry.mjs case B) instead reports IMMEDIATELY, with a distinct
-// "auto-retry disabled" outcome note, and the gate runner is called exactly ONCE. This has to be its OWN
-// process/file — GATE_RETRY_ENABLED is a module-level constant read from process.env at gate-runner.js's
-// FIRST import, so toggling it after another test file already imported that module (even indirectly, via
-// dist/sessions/service.js) would be a no-op.
+// Merge-gate retry ENV-DISABLE test (card bcba83a1's env-overridable retry knob; sweep G3 promoted the
+// knob itself from a gate-runner.js module constant to a live-resolvable OrchestrationConfig.gateRetry —
+// see @loom/shared's resolveConfig). HERMETIC, no daemon. Proves LOOM_GATE_RETRY_ENABLED=0 actually takes
+// effect end-to-end: a transient-kill classification that would normally auto-retry (see
+// merge-gate-retry.mjs case B) instead reports IMMEDIATELY, with a distinct "auto-retry disabled" outcome
+// note, and the gate runner is called exactly ONCE. Sweep G3 note: the env var is now read LIVE inside
+// resolveConfig on every confirmWorkerMerge call, not at gate-runner.js's first import, so the historical
+// "must set before first import" ordering constraint this file used to be built around no longer applies
+// — it stays its own process/file regardless, for isolation from the other gate-retry env-var tests.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-retry-disabled.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -14,20 +16,23 @@ import { execSync } from "node:child_process";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgrd-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
-process.env.LOOM_GATE_RETRY_ENABLED = "0"; // MUST be set before gate-runner.js is first imported (below)
+process.env.LOOM_GATE_RETRY_ENABLED = "0";
 
+const { resolveConfig } = await import("@loom/shared");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
-const { GATE_RETRY_ENABLED } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const GIT_ID = "-c user.email=mgrd@loom -c user.name=mgrd";
 const now = new Date().toISOString();
 
-check("(env) GATE_RETRY_ENABLED reads false with LOOM_GATE_RETRY_ENABLED=0", GATE_RETRY_ENABLED === false);
+// Config-level proof the env var is actually disabling the policy (mirrors the old module-const check,
+// but against the now-authoritative resolved config instead of a since-removed gate-runner.js export).
+check("(config) resolveConfig reads gateRetry.enabled=false with LOOM_GATE_RETRY_ENABLED=0",
+  resolveConfig(undefined).orchestration.gateRetry.enabled === false);
 
 const db = new Db();
 const enqueued = [];

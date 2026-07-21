@@ -416,6 +416,14 @@ const backupOverride = z.object({
   keep: z.number().int().min(1).max(500).optional(),
   enabled: z.boolean().optional(),
 }).strict();
+// Sweep G3: merge-gate retry policy (see @loom/shared's GateRetryConfig) — the 5th deep-partial group
+// alongside rateLimit/watchers/timeouts/backup above. settleMs 0-60000 (0 = retry immediately, no settle
+// delay; a merge gate's own gateCommandTimeoutMs ceiling is far higher, so 60s is a generous upper bound
+// for a SETTLE delay specifically); enabled a plain master switch.
+const gateRetryOverride = z.object({
+  enabled: z.boolean().optional(),
+  settleMs: z.number().int().min(0).max(60000).optional(),
+}).strict();
 // P2 authenticated-request bounds + per-connection rate guard. HUMAN-only, exactly like the other
 // `platform` sub-groups (no agent variant — see the platformConfigOverrideSchema note above).
 const connectionsOverride = z.object({
@@ -484,6 +492,7 @@ const platformConfigOverrideSchema = z.object({
   watchers: watchersOverride.optional(),
   timeouts: timeoutsOverride.optional(),
   backup: backupOverride.optional(),
+  gateRetry: gateRetryOverride.optional(),
   connections: connectionsOverride.optional(),
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
@@ -561,19 +570,22 @@ const timeoutsPatchOverride = z.object(nullableShape(timeoutsOverride.shape)).st
 // Sweep G4: backup joins rateLimit/watchers/timeouts as the 4th deep-partial group with a per-field-
 // nullable PATCH variant (see server.ts's DEEP_MERGE_GROUPS for the merge side of this).
 const backupPatchOverride = z.object(nullableShape(backupOverride.shape)).strict();
+// Sweep G3: gateRetry joins rateLimit/watchers/timeouts/backup as the 5th deep-partial group with a
+// per-field-nullable PATCH variant (see server.ts's DEEP_MERGE_GROUPS for the merge side of this).
+const gateRetryPatchOverride = z.object(nullableShape(gateRetryOverride.shape)).strict();
 
 /**
  * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75, sweep
- * G2, sweep G4/G5/G6): field-for-field identical to `platformConfigOverrideSchema` above, except the
+ * G2, sweep G3/G4/G5/G6): field-for-field identical to `platformConfigOverrideSchema` above, except the
  * top-level keys the Settings global-config form can blank back to "inherit" — `rateLimit`/`watchers`/
- * `timeouts`/`backup` (the deep-partial groups) and `schedulerEnabled`/`operatorEnabled`/
+ * `timeouts`/`backup`/`gateRetry` (the deep-partial groups) and `schedulerEnabled`/`operatorEnabled`/
  * `coalesceAgentMessages`/`maxConcurrentGates`/`maxConcurrentManagers`/`maxConcurrentAuditors`/
  * `usageSampleIntervalMs`/`usageSampleRetentionDays`/`updateCheckIntervalMs` (the tri-state toggles + the
  * scalar cap/cadence inputs) — additionally accept an explicit
  * `null`. Whole-group `null` means "delete this whole group from the persisted override" (revert every
  * field in it to the resolved default). Within a submitted group object, EACH FIELD is also individually
- * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride`/
- * `backupPatchOverride` above) — a per-field
+ * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride`/`backupPatchOverride`/
+ * `gateRetryPatchOverride` above) — a per-field
  * `null` means "delete just this field"; an OMITTED field — whether at the top level or nested inside a
  * submitted group — means "not being edited, leave whatever is already persisted alone". The PATCH
  * handler in server.ts is what turns a `null` (whole-group or per-field) into an actual delete via a
@@ -588,6 +600,7 @@ const platformConfigPatchSchema = z.object({
   watchers: watchersPatchOverride.nullable().optional(),
   timeouts: timeoutsPatchOverride.nullable().optional(),
   backup: backupPatchOverride.nullable().optional(),
+  gateRetry: gateRetryPatchOverride.nullable().optional(),
   connections: connectionsOverride.optional(),
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().nullable().optional(),

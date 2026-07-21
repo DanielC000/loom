@@ -196,6 +196,20 @@ export interface AlertWebhook {
   events: OrchestrationEventKind[];
 }
 
+/**
+ * Sweep G3: merge-gate retry policy (promoted from gate-runner.ts's module-load
+ * `GATE_RETRY_ENABLED`/`GATE_RETRY_SETTLE_MS` constants, card bcba83a1's env-overridable knob) — whether
+ * the merge gate auto-retries ONCE on a transient-kill classification (see `classifyGateFailure` in
+ * gate-runner.ts) before reporting a rejection, and the settle delay before that retry. See
+ * OrchestrationConfig.gateRetry for the resolution precedence.
+ */
+export interface GateRetryConfig {
+  /** Master on/off for the one-time auto-retry. Default true. */
+  enabled: boolean;
+  /** Settle delay (ms) before the retry, giving transient memory pressure a chance to clear. Default 5000. */
+  settleMs: number;
+}
+
 /** Phase-2 orchestration settings. */
 export interface OrchestrationConfig {
   /**
@@ -290,6 +304,18 @@ export interface OrchestrationConfig {
    * project's own config.
    */
   maxConcurrentGates: number;
+  /**
+   * Sweep G3: merge-gate retry policy (see GateRetryConfig) — promoted from gate-runner.ts's module-load
+   * `GATE_RETRY_ENABLED`/`GATE_RETRY_SETTLE_MS` constants to a LIVE-resolvable daemon-global config, so a
+   * change takes effect on the very next gate retry with no daemon restart (mirrors `maxConcurrentGates`
+   * immediately above — re-read fresh at the SAME confirmWorkerMerge call site; see gate-semaphore.ts's
+   * own "cap read fresh per call" doc for the pattern this copies). Daemon-GLOBAL like maxConcurrentGates
+   * — NOT a per-project setting (ProjectConfigOverride.orchestration deliberately omits it); the value
+   * comes only from the daemon-global PlatformConfigOverride.gateRetry ?? the LOOM_GATE_RETRY_* env vars
+   * (kept as a lower-priority CI/ops escape hatch, mirroring the watchers.*Ms precedent) ?? these
+   * defaults (enabled:true, settleMs:5000 — zero behavior change from the old constants).
+   */
+  gateRetry: GateRetryConfig;
   /**
    * Pillar-B trigger gate (§19b): when false (default), the daemon does NOT start the cron
    * Scheduler, so no schedule auto-fires. Opt-in per the autonomy ladder — a daemon shouldn't
@@ -755,6 +781,18 @@ export interface PlatformConfigOverride {
    * (it fires before the Db that stores it is even open).
    */
   backup?: Partial<BackupConfig>;
+  /**
+   * Sweep G3: see OrchestrationConfig.gateRetry. Daemon-GLOBAL, deep-partial group like `backup` above —
+   * tuning one field (e.g. `settleMs`) inherits the other via the SAME field-by-field PATCH merge
+   * (server.ts's `DEEP_MERGE_GROUPS`). UNLIKE `backup` (resolved onto ResolvedConfig.backup, a top-level
+   * key), this resolves onto `ResolvedConfig.orchestration.gateRetry` — the same cross-nesting
+   * `maxConcurrentGates` already does (override lives top-level here, resolves under `orchestration`)
+   * because that's where the merge-gate retry call site already reads its sibling config
+   * (`orchestration.gateCommandTimeoutMs`/`orchestration.maxConcurrentGates`). `enabled`/`settleMs` each
+   * also have a LOOM_GATE_RETRY_* env layer beneath this override (mirrors backup.intervalMinutes's
+   * precedence: override ?? env ?? default).
+   */
+  gateRetry?: Partial<GateRetryConfig>;
   /** See PlatformConfig.connections. */
   connections?: Partial<ConnectionsGuardConfig>;
   /** See PlatformConfig.integrations. Deep-partial: setting one tool's path leaves the other untouched. */
@@ -835,12 +873,13 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "backup" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "gateRetry" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
   timeouts?: NullableFields<TimeoutConfig> | null;
   backup?: NullableFields<BackupConfig> | null;
+  gateRetry?: NullableFields<GateRetryConfig> | null;
   coalesceAgentMessages?: boolean | null;
   operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
@@ -887,7 +926,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md" },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, gateRetry: { enabled: true, settleMs: 5000 }, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1103,6 +1142,32 @@ function envBackupIntervalMinutes(): number | undefined {
 }
 
 /**
+ * Sweep G3: read the LOOM_GATE_RETRY_ENABLED env override for the merge-gate retry master switch —
+ * promoted from gate-runner.ts's module-load constant of the same shape (`!== "0"`). Returned beneath the
+ * PlatformConfigOverride layer in resolveConfig (an override still wins). Mirrors envIdleNudgeMinutes:
+ * undefined when unset/blank so the layer beneath applies; process-guarded for the browser-bundled `shared`.
+ */
+function envGateRetryEnabled(): boolean | undefined {
+  const raw = typeof process !== "undefined" ? process.env?.LOOM_GATE_RETRY_ENABLED : undefined;
+  if (raw == null || raw.trim() === "") return undefined;
+  return raw !== "0";
+}
+
+/**
+ * Sweep G3: read the LOOM_GATE_RETRY_SETTLE_MS env override for the merge-gate retry settle delay.
+ * UNLIKE the old `Number(process.env...) || 5_000` module constant it replaces, an explicit "0" IS
+ * honored here (not swallowed) — matching this file's established `??`-discipline (see
+ * envIdleNudgeMinutes's own note on why `||` is avoided). Returned beneath the PlatformConfigOverride
+ * layer in resolveConfig (an override still wins).
+ */
+function envGateRetrySettleMs(): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env?.LOOM_GATE_RETRY_SETTLE_MS : undefined;
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) ? n : undefined;
+}
+
+/**
  * Sweep G6: read the LOOM_UPDATE_CHECK_INTERVAL_MS env override for the update-check poll cadence.
  * Returned at the platform-default layer of resolveConfig (a platform override still wins). UNLIKE
  * envIdleNudgeMinutes/envBackupIntervalMinutes, a non-positive value (0 or negative) is treated as unset
@@ -1242,6 +1307,13 @@ export function resolveConfig(
     base.orchestration.maxConcurrentGates = platformOverride?.maxConcurrentGates ?? d.orchestration.maxConcurrentGates;
     base.orchestration.maxConcurrentManagers = platformOverride?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers;
     base.orchestration.maxConcurrentAuditors = platformOverride?.maxConcurrentAuditors ?? d.orchestration.maxConcurrentAuditors;
+    // Sweep G3: gate-retry policy is likewise daemon-GLOBAL — same fast-path fix as maxConcurrentGates
+    // above (this branch used to return the structuredClone(d) value untouched by platformOverride?.gateRetry,
+    // same stale-hint bug class). Precedence override ?? env ?? default, field by field.
+    base.orchestration.gateRetry = {
+      enabled: platformOverride?.gateRetry?.enabled ?? envGateRetryEnabled() ?? d.orchestration.gateRetry.enabled,
+      settleMs: platformOverride?.gateRetry?.settleMs ?? envGateRetrySettleMs() ?? d.orchestration.gateRetry.settleMs,
+    };
     // Sweep G4: backup is likewise daemon-GLOBAL — same fast-path fix as maxConcurrentGates/
     // maxConcurrentManagers above (this branch used to return the structuredClone(d) value untouched by
     // platformOverride?.backup, so resolveConfig(undefined, po) silently ignored a set po.backup, same
@@ -1326,6 +1398,13 @@ export function resolveConfig(
       // is intentionally ignored here, not read (see the field's own doc for why host contention isn't
       // a per-project concern).
       maxConcurrentGates: platformOverride?.maxConcurrentGates ?? d.orchestration.maxConcurrentGates,
+      // Sweep G3: merge-gate retry policy — daemon-GLOBAL like maxConcurrentGates above (no per-project
+      // layer; a per-project ProjectConfigOverride.orchestration has no gateRetry key at all), precedence
+      // override ?? env ?? default (mirrors watchers.*Ms). Read IDENTICALLY to the fast path above.
+      gateRetry: {
+        enabled: platformOverride?.gateRetry?.enabled ?? envGateRetryEnabled() ?? d.orchestration.gateRetry.enabled,
+        settleMs: platformOverride?.gateRetry?.settleMs ?? envGateRetrySettleMs() ?? d.orchestration.gateRetry.settleMs,
+      },
       recycleAtContextRatio: override.orchestration?.recycleAtContextRatio ?? d.orchestration.recycleAtContextRatio,
       // Context-recycle re-nudge cadence + escalation cap (per-project, no env layer). `??` so an explicit
       // value (incl. 0) survives the merge — mirrors maxUnansweredNudges below.

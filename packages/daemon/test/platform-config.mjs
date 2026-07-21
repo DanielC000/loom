@@ -1168,10 +1168,128 @@ clearWatcherEnvs();
   }
 }
 
+// ============================ (23) gateRetry: merge-gate retry policy (sweep G3) ============================
+// `gateRetry` is a DEEP-PARTIAL group (like rateLimit/watchers/timeouts/backup) — resolveConfig must fold
+// the platform override into `.orchestration.gateRetry` on BOTH paths (the two-path asymmetry bug class
+// that's bitten this sweep twice already), the PATCH validator needs per-field bounds + a per-field-
+// nullable PATCH variant, and server.ts's DEEP_MERGE_GROUPS must include it or a PATCH touching one field
+// silently wipes its sibling. UNLIKE `backup` (override AND resolved value both top-level), `gateRetry`
+// crosses levels: the override lives at PlatformConfigOverride's TOP level (like backup) but resolves
+// onto `ResolvedConfig.orchestration.gateRetry` (like `maxConcurrentGates`'s own resolved location) —
+// because that's where the merge-gate retry call site (SessionService.confirmWorkerMerge) already reads
+// its sibling config (orchestration.gateCommandTimeoutMs/orchestration.maxConcurrentGates). Also LIVE
+// (re-read fresh per gate run, unlike backup's boot-bound watcher), so no daemon-restart caveat applies.
+clearWatcherEnvs();
+{
+  delete process.env.LOOM_GATE_RETRY_ENABLED;
+  delete process.env.LOOM_GATE_RETRY_SETTLE_MS;
+  // --- resolveConfig: defaults ---
+  check("(23) default gateRetry is {enabled:true, settleMs:5000}",
+    resolveConfig(undefined).orchestration.gateRetry.enabled === true && resolveConfig(undefined).orchestration.gateRetry.settleMs === 5000);
+
+  // --- override → resolved cross-nesting: mirrors maxConcurrentGates's own resolved location, NOT
+  //     backup's (backup resolves to a top-level ResolvedConfig.backup key; gateRetry resolves under
+  //     orchestration, exactly where the merge-gate retry call site reads its sibling config). ---
+  check("(23) gateRetry resolves onto orchestration.* like maxConcurrentGates, not a top-level ResolvedConfig key (unlike backup)",
+    resolveConfig(undefined).orchestration.maxConcurrentGates !== undefined &&
+    resolveConfig(undefined).orchestration.gateRetry !== undefined &&
+    resolveConfig(undefined).gateRetry === undefined);
+
+  // --- THE FIX: platform override reaches resolved.orchestration.gateRetry on BOTH resolveConfig paths —
+  //     the exact two-path symmetry proof this card's own risk note calls out. ---
+  check("(23) platform override reaches resolved.orchestration.gateRetry (no-project-override fast path) — deep-partial: only `settleMs` changes",
+    resolveConfig(undefined, { gateRetry: { settleMs: 9000 } }).orchestration.gateRetry.settleMs === 9000 &&
+    resolveConfig(undefined, { gateRetry: { settleMs: 9000 } }).orchestration.gateRetry.enabled === true);
+  check("(23) platform override reaches resolved.orchestration.gateRetry (WITH a project override present, full-merge path) — deep-partial: only `settleMs` changes",
+    resolveConfig({ docLint: false }, { gateRetry: { settleMs: 9000 } }).orchestration.gateRetry.settleMs === 9000 &&
+    resolveConfig({ docLint: false }, { gateRetry: { settleMs: 9000 } }).orchestration.gateRetry.enabled === true);
+  check("(23) platform override can set both fields at once, IDENTICALLY on both paths",
+    JSON.stringify(resolveConfig(undefined, { gateRetry: { enabled: false, settleMs: 500 } }).orchestration.gateRetry) ===
+    JSON.stringify(resolveConfig({ docLint: false }, { gateRetry: { enabled: false, settleMs: 500 } }).orchestration.gateRetry) &&
+    JSON.stringify(resolveConfig(undefined, { gateRetry: { enabled: false, settleMs: 500 } }).orchestration.gateRetry) ===
+    JSON.stringify({ enabled: false, settleMs: 500 }));
+
+  // --- precedence: platform override > env > default, on BOTH paths, for BOTH fields ---
+  process.env.LOOM_GATE_RETRY_ENABLED = "0";
+  process.env.LOOM_GATE_RETRY_SETTLE_MS = "1234";
+  check("(23) env beats default (fast path)",
+    resolveConfig(undefined).orchestration.gateRetry.enabled === false && resolveConfig(undefined).orchestration.gateRetry.settleMs === 1234);
+  check("(23) env beats default (full-merge path)",
+    resolveConfig({ docLint: false }).orchestration.gateRetry.enabled === false && resolveConfig({ docLint: false }).orchestration.gateRetry.settleMs === 1234);
+  check("(23) platform override beats env (fast path)",
+    resolveConfig(undefined, { gateRetry: { enabled: true, settleMs: 7777 } }).orchestration.gateRetry.enabled === true &&
+    resolveConfig(undefined, { gateRetry: { enabled: true, settleMs: 7777 } }).orchestration.gateRetry.settleMs === 7777);
+  check("(23) platform override beats env (full-merge path)",
+    resolveConfig({ docLint: false }, { gateRetry: { enabled: true, settleMs: 7777 } }).orchestration.gateRetry.enabled === true &&
+    resolveConfig({ docLint: false }, { gateRetry: { enabled: true, settleMs: 7777 } }).orchestration.gateRetry.settleMs === 7777);
+  // an explicit env "0" for settleMs must NOT be swallowed to the default (unlike the old `||` module
+  // const it replaces, which would have silently reverted "0" to 5000).
+  process.env.LOOM_GATE_RETRY_SETTLE_MS = "0";
+  check("(23) explicit env settleMs:0 survives (not swallowed to 5000, unlike the old `||` module const)",
+    resolveConfig(undefined).orchestration.gateRetry.settleMs === 0);
+  delete process.env.LOOM_GATE_RETRY_ENABLED;
+  delete process.env.LOOM_GATE_RETRY_SETTLE_MS;
+
+  // --- validatePlatformConfigOverride: enabled bool, settleMs 0-60000 ---
+  check("(23) accepts gateRetry:{} (empty, deep-partial)", validatePlatformConfigOverride({ gateRetry: {} }).ok === true);
+  check("(23) accepts settleMs:0 (floor)", validatePlatformConfigOverride({ gateRetry: { settleMs: 0 } }).ok === true);
+  check("(23) accepts settleMs:60000 (ceiling)", validatePlatformConfigOverride({ gateRetry: { settleMs: 60000 } }).ok === true);
+  check("(23) rejects settleMs:-1", validatePlatformConfigOverride({ gateRetry: { settleMs: -1 } }).ok === false);
+  check("(23) rejects settleMs:60001 (>ceiling)", validatePlatformConfigOverride({ gateRetry: { settleMs: 60001 } }).ok === false);
+  check("(23) rejects non-integer settleMs", validatePlatformConfigOverride({ gateRetry: { settleMs: 1.5 } }).ok === false);
+  check("(23) accepts enabled:true", validatePlatformConfigOverride({ gateRetry: { enabled: true } }).ok === true);
+  check("(23) rejects non-boolean enabled", validatePlatformConfigOverride({ gateRetry: { enabled: "yes" } }).ok === false);
+  check("(23) rejects an unknown key nested inside gateRetry (.strict())", validatePlatformConfigOverride({ gateRetry: { bogus: 1 } }).ok === false);
+
+  // --- validatePlatformConfigPatch: whole-group null + per-field null ---
+  check("(23) PATCH accepts gateRetry:null (whole-group clear)", validatePlatformConfigPatch({ gateRetry: null }).ok === true);
+  check("(23) PATCH accepts a per-field null nested inside gateRetry", validatePlatformConfigPatch({ gateRetry: { settleMs: null } }).ok === true);
+  check("(23) PATCH still bounds a nested field", validatePlatformConfigPatch({ gateRetry: { settleMs: -1 } }).ok === false);
+
+  // --- REST round-trip + deep-merge (does NOT wipe siblings, steering-note #3) + whole-group clear ---
+  const dbFile = path.join(TMP, "gate-retry-g3.db");
+  const db = new Db(dbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    const set = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { gateRetry: { enabled: false, settleMs: 2000 } } });
+    check("(23) PATCH gateRetry:{...} → 200", set.statusCode === 200);
+    check("(23) persisted to the DB", JSON.stringify(db.getPlatformConfig().gateRetry) === JSON.stringify({ enabled: false, settleMs: 2000 }));
+    check("(23) reflected via resolveConfig",
+      resolveConfig(undefined, db.getPlatformConfig()).orchestration.gateRetry.settleMs === 2000 &&
+      resolveConfig(undefined, db.getPlatformConfig()).orchestration.gateRetry.enabled === false);
+
+    // Deep-merge: PATCHing ONE field must not silently wipe the sibling just persisted above — a partial
+    // PATCH (just settleMs, or just enabled) must field-merge, not replace (steering note #3).
+    const patchOneField = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { gateRetry: { settleMs: 3000 } } });
+    check("(23) PATCH a single gateRetry field → 200", patchOneField.statusCode === 200);
+    const afterOneField = db.getPlatformConfig();
+    check("(23) the submitted field applies", afterOneField.gateRetry?.settleMs === 3000);
+    check("(23) OMITTED sibling (enabled) survives — NOT silently wiped", afterOneField.gateRetry?.enabled === false);
+
+    // Whole-group null clears every field, unchanged from the deep-merge behavior.
+    const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { gateRetry: null } });
+    check("(23) whole-group null → 200", clear.statusCode === 200);
+    check("(23) cleared: no longer stale in the store", db.getPlatformConfig().gateRetry === undefined);
+    check("(23) resolveConfig reverts to platform default once cleared",
+      resolveConfig(undefined, db.getPlatformConfig()).orchestration.gateRetry.settleMs === 5000 &&
+      resolveConfig(undefined, db.getPlatformConfig()).orchestration.gateRetry.enabled === true);
+
+    // A non-numeric nested field still 400s (not treated as a clear) — mirrors the ms-keyed groups' guard.
+    db.setPlatformConfig({ gateRetry: { settleMs: 4000 } });
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { gateRetry: { settleMs: "not-a-number" } } });
+    check("(23) a non-numeric gateRetry.settleMs string still 400s (not treated as a clear)", bad.statusCode === 400);
+    check("(23) the rejected invalid PATCH did not clobber the persisted value", db.getPlatformConfig().gateRetry?.settleMs === 4000);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field; and (sweep G4/G5/G6) `backup` is now a 4th deep-partial group in DEEP_MERGE_GROUPS (mirroring rateLimit/watchers/timeouts end-to-end: resolveConfig fast-path + full-merge two-path symmetry, intervalMinutes' env-then-default fallback, validator bounds 0-1440/1-500, PATCH whole-group + per-field null, deep-merge-not-wipe on a single-field PATCH) and resolveBackupConfig(platformOverride) — the exact function index.ts/sessions/service.ts call — now actually threads a passed override through, fixing the pre-migration-boot-vs-post-Db-open split (the boot snapshot call site structurally can't consult it; every other call site now does; `usageSampleIntervalMs`/`usageSampleRetentionDays` are proven to now ACTUALLY consult `platformOverride` on both resolveConfig paths — the exact doc/code mismatch this sweep fixes (their own field docs already claimed this before the fix; resolveConfig silently never read it) — with validator bounds 60000-3600000 / 1-3650 and full PATCH round-trip coverage; and `updateCheckIntervalMs` is a NEW daemon-global scalar mirroring backup.intervalMinutes's override-then-env-then-default precedence (incl. env-0-treated-as-unset), validator bounds 1h-24h, and full PATCH round-trip coverage."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field; and (sweep G4/G5/G6) `backup` is now a 4th deep-partial group in DEEP_MERGE_GROUPS (mirroring rateLimit/watchers/timeouts end-to-end: resolveConfig fast-path + full-merge two-path symmetry, intervalMinutes' env-then-default fallback, validator bounds 0-1440/1-500, PATCH whole-group + per-field null, deep-merge-not-wipe on a single-field PATCH) and resolveBackupConfig(platformOverride) — the exact function index.ts/sessions/service.ts call — now actually threads a passed override through, fixing the pre-migration-boot-vs-post-Db-open split (the boot snapshot call site structurally can't consult it; every other call site now does; `usageSampleIntervalMs`/`usageSampleRetentionDays` are proven to now ACTUALLY consult `platformOverride` on both resolveConfig paths — the exact doc/code mismatch this sweep fixes (their own field docs already claimed this before the fix; resolveConfig silently never read it) — with validator bounds 60000-3600000 / 1-3650 and full PATCH round-trip coverage; and `updateCheckIntervalMs` is a NEW daemon-global scalar mirroring backup.intervalMinutes's override-then-env-then-default precedence (incl. env-0-treated-as-unset), validator bounds 1h-24h, and full PATCH round-trip coverage; and (sweep G3) `gateRetry` is a NEW deep-partial group whose override lives top-level (like `backup`) but resolves onto `orchestration.gateRetry` (like `maxConcurrentGates`) — proven correctly wired on BOTH resolveConfig paths, override-beats-env-beats-default for both fields (incl. an explicit env settleMs:0 surviving, unlike the old `||` module const it replaces), validator bounds (enabled bool, settleMs 0-60000), and full PATCH round-trip coverage incl. deep-merge-not-wipe on a single-field PATCH and whole-group clear."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
