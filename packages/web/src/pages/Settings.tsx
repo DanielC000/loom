@@ -983,6 +983,11 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             Master switch for automatic loom.db snapshots (boot + periodic + before a self-host restart).
             Off disables all three triggers.
           </Hint>
+          <Hint>
+            Caveat: the pre-migration boot snapshot fires before the DB opens, so it can&apos;t consult
+            this override — one snapshot is still taken on every daemon boot (using the env/default, not
+            this setting), even with this off. Intentional: it&apos;s the safety net for a bad migration.
+          </Hint>
         </label>
         <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
           <span style={fieldLabel}>Backup interval (minutes) · restart required</span>
