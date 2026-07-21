@@ -76,6 +76,69 @@ const worktrees = [];
   check("(unit) a slot is released even when fn rejects", after === "released");
 }
 
+// ── Pure unit check: priority-aware queue ordering (card 24642c3d — a low-priority worker run_gate
+//    self-check must not head-of-line-block a higher-priority merge/deploy gate queued behind it) ────
+{
+  const sem = new GateSemaphore();
+  const order = [];
+  let active = 0, maxActive = 0;
+  const task = (label, ms) => async () => {
+    order.push(label); active++; maxActive = Math.max(maxActive, active);
+    await sleep(ms);
+    active--;
+    return label;
+  };
+
+  // cap 1: "holder" grabs the only slot immediately. While it holds, queue TWO low-priority waiters,
+  // THEN a high-priority one (arrives LAST). A plain FIFO queue would run low1, low2, high in arrival
+  // order — the priority queue must run high BEFORE the already-queued low2 (low1 is unaffected: it
+  // queued before the holder even released, so nothing could have jumped ahead of it — the guarantee is
+  // ONLY that high jumps LOW waiters queued ahead of it, not that it jumps EVERYTHING).
+  const holder = sem.runExclusive(1, task("holder", 150));
+  await sleep(20); // ensure "holder" has genuinely acquired the slot before anything else queues
+  const low1 = sem.runExclusive(1, task("low1", 20), "low");
+  await sleep(10);
+  const low2 = sem.runExclusive(1, task("low2", 20), "low");
+  await sleep(10);
+  const high = sem.runExclusive(1, task("high", 20), "high");
+
+  await Promise.all([holder, low1, low2, high]);
+  check("(priority) all four ran", order.length === 4);
+  check("(priority) cap 1 held throughout — priority reorders the QUEUE, never lets more than 1 run at once", maxActive === 1);
+  check("(priority) the holder (already running before anything queued) ran first", order[0] === "holder");
+  check("(priority) the HIGH-priority waiter (queued LAST) is serviced BEFORE the already-queued low2 — no head-of-line blocking",
+    order.indexOf("high") < order.indexOf("low2"));
+  check("(priority) low1 (queued before low2) still keeps its place ahead of low2 — same-tier FIFO preserved",
+    order.indexOf("low1") < order.indexOf("low2"));
+
+  // Same-priority-only queue stays strict FIFO (regression check, no "high" tier involved at all).
+  const semFifo = new GateSemaphore();
+  const fifoOrder = [];
+  const fifoTask = (label) => async () => { fifoOrder.push(label); await sleep(20); return label; };
+  const fh = semFifo.runExclusive(1, fifoTask("h"), "low");
+  await sleep(10);
+  const f1 = semFifo.runExclusive(1, fifoTask("f1"), "low");
+  const f2 = semFifo.runExclusive(1, fifoTask("f2"), "low");
+  const f3 = semFifo.runExclusive(1, fifoTask("f3"), "low");
+  await Promise.all([fh, f1, f2, f3]);
+  check("(priority) same-tier queue stays strict FIFO", JSON.stringify(fifoOrder) === JSON.stringify(["h", "f1", "f2", "f3"]));
+
+  // Omitting priority entirely defaults to "high" — an untouched call site behaves exactly as before
+  // this card (every caller was implicitly equal-priority FIFO, i.e. all "high"). Proved by showing the
+  // omitted-priority call still jumps an already-queued "low" waiter, not by absence-of-throw alone.
+  const semDefault = new GateSemaphore();
+  const defaultOrder = [];
+  const dTask = (label, ms = 20) => async () => { defaultOrder.push(label); await sleep(ms); return label; };
+  const dHolder = semDefault.runExclusive(1, dTask("dholder", 150)); // holds well past both queue-ins below, avoiding a release/push race
+  await sleep(10);
+  const dLow = semDefault.runExclusive(1, dTask("dlow"), "low");
+  await sleep(10);
+  const dNoArg = semDefault.runExclusive(1, dTask("dnoarg")); // priority omitted
+  await Promise.all([dHolder, dLow, dNoArg]);
+  check("(priority) an omitted-priority call defaults to high and jumps an already-queued low waiter",
+    defaultOrder.indexOf("dnoarg") < defaultOrder.indexOf("dlow"));
+}
+
 function makeRepo(repo) {
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# gs\n");

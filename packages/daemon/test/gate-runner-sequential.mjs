@@ -49,6 +49,20 @@ const errRed = await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5
 check("(spawn error) a runner-reported spawn error fails the gate closed",
   errRed.passed === false && errRed.failedStep === "pnpm test");
 
+// --- allowExtend (card 24642c3d) is forwarded to EVERY step's own runStep call, trailing after
+// envOverride, so a caller can disable the one-time auto-extend for a whole gate run (e.g. the merge
+// gate's own retry-after-timeout call) without touching any other argument ---
+const extendCalls = [];
+const extendRecordingRunner = (command, cwd, timeoutMs, envOverride, allowExtend) => {
+  extendCalls.push({ command, allowExtend });
+  return { status: 0 };
+};
+await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, extendRecordingRunner, undefined, false);
+check("(allowExtend) explicit false is forwarded to every step", extendCalls.every((c) => c.allowExtend === false));
+extendCalls.length = 0;
+await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, extendRecordingRunner);
+check("(allowExtend) omitted defaults to undefined (runStep's own default of true then applies)", extendCalls.every((c) => c.allowExtend === undefined));
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — a `&&`-chained gate runs as separate sequential processes (memory frees between steps) and still fails closed on the first non-zero/errored step."
   : `\n❌ ${failures} FAILURE(S).`);

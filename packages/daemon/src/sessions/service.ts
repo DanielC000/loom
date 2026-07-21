@@ -508,7 +508,7 @@ export class SessionService {
    * real spawn on every OS this daemon runs on).
    */
   private readonly runGate:
-    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>)
+    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean) => Promise<GateSequentialResult>)
     | undefined;
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
@@ -1965,9 +1965,10 @@ export class SessionService {
 
     const runGateSeq = this.runGate ?? runGateSequential;
     // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
-    // rather than running alongside it unbounded. See GateSemaphore's class doc.
+    // rather than running alongside it unbounded. See GateSemaphore's class doc. "high" priority (card
+    // 24642c3d) — a deploy is a deliberate human-triggered action, not a worker self-check retry.
     const result = await this.gateSemaphore.runExclusive(
-      orchestration.maxConcurrentGates, () => runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs),
+      orchestration.maxConcurrentGates, () => runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs), "high",
     );
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
@@ -6710,9 +6711,11 @@ export class SessionService {
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
-      // actual gate spawn (and its retry below), not the surrounding git/notify bookkeeping.
+      // actual gate spawn (and its retry below), not the surrounding git/notify bookkeeping. "high"
+      // priority (card 24642c3d) — a merge gate must not be head-of-line-blocked by queued low-priority
+      // worker `run_gate` self-check retries.
       const gateCap = orchestration.maxConcurrentGates;
-      let gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs));
+      let gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs), "high");
       evt("build_gate", { passed: gateResult.passed });
       if (gateResult.failedTimedOut) {
         // POST-TIMEOUT SWEEP (card 3564fd1e): gate-runner's own tree-kill already reaps everything still
@@ -6736,7 +6739,13 @@ export class SessionService {
         gateRetried = true;
         evt("build_gate_retry_attempt", { priorClass: classifyGateFailure(gateResult) });
         await new Promise((resolve) => setTimeout(resolve, GATE_RETRY_SETTLE_MS));
-        gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs));
+        // allowExtend:false (card 24642c3d) — the FIRST attempt above already got one auto-extend chance;
+        // letting this retry ALSO auto-extend would stack two "one more chance" mechanisms into an
+        // excessive worst-case wall-clock (up to 4x gateTimeoutMs instead of ~3x) before the circuit
+        // breaker's streak-count even starts moving toward its trip threshold.
+        gateResult = await this.gateSemaphore.runExclusive(
+          gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false), "high",
+        );
         evt("build_gate_retry", { passed: gateResult.passed });
         if (gateResult.failedTimedOut) {
           try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
@@ -7124,8 +7133,12 @@ export class SessionService {
         });
         let gateResult: GateSequentialResult;
         try {
+          // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
+          // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
+          // one-time auto-extend since it has no outer retry-on-timeout of its own ("the worker can just
+          // re-call run_gate itself" — see the comment on GATE_RETRY_ENABLED's merge-only usage above).
           gateResult = await this.gateSemaphore.runExclusive(
-            gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE),
+            gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE), "low",
           );
         } catch (err) {
           // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,

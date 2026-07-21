@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { performance } from "node:perf_hooks";
 
 /**
  * Split a `gateCommand` on its TOP-LEVEL `&&` joins (outside single/double quotes) into independent
@@ -39,6 +40,21 @@ export function splitGateSteps(gate: string): string[] {
  *  a bounded ring, never the full log. Mirrors python/venv.ts's `OUTPUT_TAIL_BYTES`. */
 const OUTPUT_TAIL_BYTES = 4096;
 
+/** Idle-liveness threshold for the ONE-TIME auto-extend (card 24642c3d, see {@link runGateStep}): if the
+ *  child has produced any stdout/stderr byte within this many ms of the timeout firing, it's still
+ *  actively working, not stalled — worth one more full `timeoutMs` window instead of an immediate kill.
+ *  The default sits comfortably below BOTH a genuinely hung individual test's own inner self-timeout
+ *  (Loom's `test:daemon` bounds each of its 130+ hermetic files at 120s and reports a hang as its own
+ *  `FAIL` line well before this threshold could even matter) AND the typical gap between consecutive
+ *  PASS/FAIL lines in a healthy-but-slow full run under heavy fleet contention — so the common "just
+ *  needs more wall-clock" case reliably reads as live and gets the extension, while a truly silent/wedged
+ *  process does not. Env-overridable for a test to drive it near-zero instead of waiting out real minutes. */
+export const GATE_EXTEND_IDLE_MS = Number(process.env.LOOM_GATE_EXTEND_IDLE_MS) || 60_000;
+
+/** Master on/off for the auto-extend-once behavior. Default ON; env-overridable so a test/op can force
+ *  deterministic immediate-kill-at-first-deadline behavior, mirroring {@link GATE_RETRY_ENABLED}. */
+export const GATE_TIMEOUT_EXTEND_ENABLED = process.env.LOOM_GATE_TIMEOUT_EXTEND_ENABLED !== "0";
+
 /** One gate step's outcome: exit code, spawn error (if any), the signal that killed it (if any — e.g. an
  *  OOM SIGKILL, or our own timeout-kill), whether OUR timeout bound was what killed it, and the bounded
  *  combined stdout+stderr tail. `signal`/`timedOut` are captured (not yet acted on) so a later change
@@ -57,7 +73,7 @@ export interface GateStepResult {
  *  bounded ring so a rejection can surface the REAL failure instead of an opaque "gate failed". Injectable
  *  so a hermetic test can prove step-by-step + short-circuit behavior without spawning real processes. */
 export interface GateStepRunner {
-  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv): Promise<GateStepResult>;
+  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean): Promise<GateStepResult>;
 }
 
 /**
@@ -70,15 +86,22 @@ export interface GateStepRunner {
  * other work (and let the sync-wait budget's timer actually fire) while the OS process runs in the
  * background.
  */
-export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride) => new Promise((resolve) => {
+export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true) => new Promise((resolve) => {
   // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front
   // as newer ones arrive. The final tail() slices to exactly the cap. Same shape as python/venv.ts's
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
   const chunks: Buffer[] = [];
   let bytes = 0;
+  // Liveness stamp for the auto-extend decision below — updated on EVERY chunk regardless of the ring's
+  // own eviction, so it stays accurate even once the ring has dropped early output. MONOTONIC
+  // (performance.now(), not Date.now()/wall clock) to match the deadlines it's compared against
+  // (setTimeout, also monotonic) — a backward wall-clock step (NTP) mid-gate can't flip the extend
+  // decision (mirrors Loom's existing monotonic-clock preference for timing logic).
+  let lastOutputAt = performance.now();
   const capture = (b: Buffer): void => {
     chunks.push(b);
     bytes += b.length;
+    lastOutputAt = performance.now();
     while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
   };
   const tail = (): string => {
@@ -100,24 +123,48 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
   let settled = false;
+  let extended = false;
+  let timer: ReturnType<typeof setTimeout> | undefined;
   const done = (result: Omit<GateStepResult, "outputTail">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
     resolve({ ...result, outputTail: tail() });
   };
-  const timer = timeoutMs > 0
-    ? setTimeout(() => {
-        // Claim resolution IMMEDIATELY, synchronously — BEFORE the async tree-kill below — so the
-        // child's own `close` event (which the forced kill is about to trigger) can never race past this
-        // and misreport `timedOut:false`. Every later close/error is a no-op once `settled` is true.
-        if (settled) return;
-        settled = true;
-        void killGateProcessTree(child).finally(() => {
-          resolve({ status: null, error: new Error(`gate step exceeded ${timeoutMs}ms`), signal: "SIGKILL", timedOut: true, outputTail: tail() });
-        });
-      }, timeoutMs)
-    : undefined;
+  // ONE-TIME AUTO-EXTEND (card 24642c3d — the false-fail-under-fleet-load fix): fires when `timeoutMs` is
+  // hit. If the child has been idle (no stdout/stderr byte) for less than GATE_EXTEND_IDLE_MS, it's still
+  // actively working, not stalled — give it ONE more full `timeoutMs` window instead of killing it right
+  // as a healthy-but-slow run (e.g. a 130+-file suite under heavy fleet contention) might be about to
+  // finish. This is SAFE regardless of what the output actually SAYS: extension never manufactures a
+  // pass — the eventual `passed:true` still requires the child's own real exit code 0 via the `close`
+  // handler below, same as always. Worst case on a truly wedged-but-still-writing process is one extra
+  // bounded `timeoutMs` before it's still correctly killed and reported `timedOut:true` — never a false
+  // pass, never a missed genuine failure. A silent/stalled process (idle beyond the threshold) gets no
+  // extension and is killed exactly as before. `allowExtend:false` (used by the merge gate's own existing
+  // retry-once-on-timeout, so the two "one more chance" mechanisms don't compound into an excessive
+  // worst-case wall-clock) and `GATE_TIMEOUT_EXTEND_ENABLED=0` both skip straight to the kill, byte-
+  // identical to pre-24642c3d behavior.
+  const onTimeout = () => {
+    // Claim resolution IMMEDIATELY, synchronously — BEFORE the async tree-kill below — so the child's own
+    // `close` event (which the forced kill is about to trigger) can never race past this and misreport
+    // `timedOut:false`. Every later close/error is a no-op once `settled` is true.
+    if (settled) return;
+    const idleMs = performance.now() - lastOutputAt;
+    if (allowExtend && GATE_TIMEOUT_EXTEND_ENABLED && !extended && idleMs < GATE_EXTEND_IDLE_MS) {
+      extended = true;
+      timer = setTimeout(onTimeout, timeoutMs);
+      return;
+    }
+    settled = true;
+    void killGateProcessTree(child).finally(() => {
+      resolve({
+        status: null,
+        error: new Error(`gate step exceeded ${timeoutMs}ms${extended ? " (after one auto-extend)" : ""}`),
+        signal: "SIGKILL", timedOut: true, outputTail: tail(),
+      });
+    });
+  };
+  timer = timeoutMs > 0 ? setTimeout(onTimeout, timeoutMs) : undefined;
   child.on("error", (e) => done({ status: null, error: e, signal: null, timedOut: false }));
   child.on("close", (code, signal) => done({ status: code, error: undefined, signal, timedOut: false }));
 });
@@ -177,13 +224,17 @@ export interface GateSequentialResult {
  * `gateTimeoutMs` budget (not a divided share) — a heavy step (e.g. a build) needs its own full window.
  * `envOverride` (card 7f96aa09) is forwarded to every step's own `runStep` call, additive to whatever env
  * that runner already sets (see `runGateStep`'s own doc) — trailing so existing 4-arg callers (incl. the
- * `gate-runner-sequential.mjs` unit test, which injects its own `runStep`) are unaffected.
+ * `gate-runner-sequential.mjs` unit test, which injects its own `runStep`) are unaffected. `allowExtend`
+ * (card 24642c3d, default `true` when omitted — matches `runGateStep`'s own default) is forwarded the
+ * same way, trailing again so existing 5-arg callers are unaffected; pass `false` to disable the
+ * one-time auto-extend for this whole run (e.g. the merge gate's own retry-after-timeout call).
  */
 export async function runGateSequential(
   gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
+  allowExtend?: boolean,
 ): Promise<GateSequentialResult> {
   for (const step of splitGateSteps(gate)) {
-    const res = await runStep(step, cwd, timeoutMs, envOverride);
+    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend);
     const passed = res.status === 0 && !res.error;
     if (!passed) {
       return {

@@ -291,6 +291,62 @@ try {
     check("(I) it carries the outputTail too", typeof failEvent?.detail?.outputTail === "string" && failEvent.detail.outputTail.includes("FAIL some-test.mjs"));
   }
 
+  // ── (J) PRIORITY WIRING (card 24642c3d): confirmWorkerMerge ("high") is NOT head-of-line-blocked by
+  //        ALREADY-QUEUED runWorkerGate ("low") calls — the exact starvation pattern this card fixes.
+  //        Cap 1 (default): gate1 grabs the only slot and holds it; gate2 (a SECOND, independent gate-
+  //        only worker — runWorkerGate single-flights per workerSessionId via PendingOpRegistry, so two
+  //        concurrent calls for the SAME worker would attach to one in-flight op instead of each taking
+  //        their own semaphore turn) queues behind it; the merge fires LAST but, being high-priority, is
+  //        serviced BEFORE gate2's already-queued call once gate1 releases the slot. ───────────────────
+  {
+    const sfx = `j-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-j-${sfx}`);
+    const { db, mgrId, mergeWorkerId, gateWorkerId: gateWorkerId1 } = await seedWorkers(sfx, reposDir);
+    // Platform config is GLOBAL and persists across test blocks sharing this file's one LOOM_HOME db (test
+    // (B) above raises it to 2) — pin it back to the default 1 explicitly so this test's cap=1 assumption
+    // (needed to force gate2 to actually queue) doesn't depend on block ordering.
+    db.setPlatformConfig({ maxConcurrentGates: 1 });
+    const gateWorktreePath1 = path.join(reposDir, "gate-worker-wt"); // matches seedWorkers' own construction
+
+    const gateProjId2 = `wg-proj-gate2-${sfx}`, gateWorkerId2 = `wg-wkr-gate2-${sfx}`;
+    const gateRepo2 = path.join(reposDir, "gate-worker-2");
+    const gateWorktreePath2 = path.join(reposDir, "gate-worker-2-wt");
+    db.insertProject({ id: gateProjId2, name: "WG-GATE-2", repoPath: gateRepo2, vaultPath: gateRepo2, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `wg-agent-gate2-${sfx}`, projectId: gateProjId2, name: "t", startupPrompt: "", position: 0 });
+    db.insertSession({ id: gateWorkerId2, projectId: gateProjId2, agentId: `wg-agent-gate2-${sfx}`, engineSessionId: null, title: null, cwd: gateWorktreePath2, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: null, worktreePath: gateWorktreePath2, branch: "loom/gate-only-2" });
+
+    const startOrder = [];
+    let active = 0, maxActive = 0;
+    const fakeGate = async (_gate, worktreePath) => {
+      const label = worktreePath === gateWorktreePath1 ? "gate1" : worktreePath === gateWorktreePath2 ? "gate2" : "merge";
+      startOrder.push(label);
+      active++; maxActive = Math.max(maxActive, active);
+      await sleep(label === "gate1" ? 2500 : 50);
+      active--;
+      return { passed: true };
+    };
+    const { stub } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
+
+    // gate1 holds the only slot for 2500ms — long enough to comfortably outlast confirmWorkerMerge's own
+    // real git prep (stranded-check + union-merge, ~1.1s per (A)'s comment above) that runs BEFORE it
+    // ever reaches the semaphore, so the merge's actual "high" enqueue still lands well before gate1
+    // releases, giving it something to jump ahead of.
+    const p1 = sessions.runWorkerGate(gateWorkerId1);
+    await sleep(150); // gate1 has genuinely acquired the only slot before anything else queues
+    const p2 = sessions.runWorkerGate(gateWorkerId2); // queues ("low") behind gate1 — no git prep, near-instant
+    await sleep(150);
+    const p3 = sessions.confirmWorkerMerge(mgrId, mergeWorkerId); // queues ("high") — LAST to fire (but its own git prep runs concurrently with gate1 still holding)
+
+    const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
+    check("(J) all three eventually ran", startOrder.length === 3);
+    check("(J) cap 1 held throughout — never more than 1 concurrent (the ordering below isn't an artifact of a leaked higher cap)", maxActive === 1);
+    check("(J) gate1 (already running before anything queued) ran first", startOrder[0] === "gate1");
+    check("(J) the HIGH-priority merge (queued LAST) is serviced BEFORE the already-queued LOW-priority gate2 — no head-of-line blocking",
+      startOrder.indexOf("merge") < startOrder.indexOf("gate2"));
+    check("(J) all three calls still completed successfully", r1.ok === true && r2.ok === true && r3.merged === true);
+  }
+
   // ── (H) role gate: a non-worker session cannot call runWorkerGate ──────────────────────────────────
   {
     const sfx = `h-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
