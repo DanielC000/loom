@@ -201,7 +201,10 @@ export class SetupMcpRouter {
         const boot = await bootstrapProjectDir({ name, dirName, git: isGit });
         if (!boot.ok) return ok({ error: boot.error });
         const project: Project = {
-          id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
+          // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the
+          // vault auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir
+          // IS the vault.
+          id: randomUUID(), name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // a setup-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],

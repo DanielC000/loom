@@ -3029,7 +3029,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
     if (!boot.ok) return reply.code(400).send({ error: boot.error });
     const project: Project = {
-      id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath: boot.dir,
+      // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the vault
+      // auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir IS the vault.
+      id: randomUUID(), name: b.name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
       reserved: false, // a wizard-created project is never a reserved/system one (boot-seed only)
       referenceRepos,

@@ -76,11 +76,11 @@ try {
   check(`platform surface includes the P1–P4 tools incl. the P3 elevated ones (missing: ${mustHave.filter((t) => !tools.includes(t)).join(",") || "none"})`,
     mustHave.every((t) => tools.includes(t)));
 
-  // 2) project_create with a REAL git repo → created + visible via the API. vaultPath omitted → defaults to repoPath.
+  // 2) project_create with a REAL git repo → created + visible via the API. vaultPath omitted → no vault bound.
   const before = (await get("/api/projects")).length;
   const created = await call(PL, "project_create", { name: "Created", repoPath: gitRepo });
   check("project_create: returns a project with an id", !!created.id && !created.error);
-  check("project_create: vaultPath defaults to repoPath", created.vaultPath === gitRepo);
+  check("project_create: vaultPath omitted ⇒ no vault bound (NOT defaulted to repoPath)", created.vaultPath === "");
   const list = await get("/api/projects");
   check("project_create: the project appears via GET /api/projects", list.some((p) => p.id === created.id) && list.length === before + 1);
 

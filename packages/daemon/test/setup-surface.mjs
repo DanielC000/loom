@@ -519,7 +519,7 @@ try {
   check("(j) project_init(git): returns a project with an id", !!initGit.id && !initGit.error);
   check("(j) project_init(git): repoPath is CONFINED strictly under WORKSPACE_ROOT",
     path.resolve(initGit.repoPath).startsWith(wsRootNorm + path.sep) && path.resolve(initGit.repoPath) !== wsRootNorm);
-  check("(j) project_init(git): vaultPath binds to the same created dir", initGit.vaultPath === initGit.repoPath);
+  check("(j) project_init(git): vaultPath is empty (no vault bound, never defaulted to the code repo)", initGit.vaultPath === "");
   check("(j) project_init(git): the dir exists and was `git init`ed (.git present)",
     fs.existsSync(initGit.repoPath) && fs.existsSync(path.join(initGit.repoPath, ".git")));
   check("(j) project_init(git): persisted as a NON-reserved project", db.getProject(initGit.id)?.reserved === false);
@@ -531,6 +531,7 @@ try {
     !!initVault.id && path.resolve(initVault.repoPath).startsWith(wsRootNorm + path.sep) && !initVault.error);
   check("(j) project_init(vault): the dir exists but is NOT a git repo (no .git)",
     fs.existsSync(initVault.repoPath) && !fs.existsSync(path.join(initVault.repoPath, ".git")));
+  check("(j) project_init(vault): vaultPath === repoPath (the created dir IS the vault)", initVault.vaultPath === initVault.repoPath);
 
   // An explicit dirName is honored (and still confined).
   const initNamed = await call("project_init", { name: "Anything", kind: "vault", dirName: "explicit-dir" });

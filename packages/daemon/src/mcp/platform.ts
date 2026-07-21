@@ -711,7 +711,7 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_create",
       {
-        description: "Create a Loom project bound to an existing git repo. repoPath MUST exist and be a git repository (rejected otherwise). vaultPath defaults to repoPath. Optional config is validated against the RESTRICTED agent project-config validator — orchestration.gateCommand and alertWebhook (and unknown keys) are REJECTED on create; set those via the elevated project_configure path instead.",
+        description: "Create a Loom project bound to an existing git repo. repoPath MUST exist and be a git repository (rejected otherwise). vaultPath is OPTIONAL — omit it for a project with no vault bound (never defaulted to repoPath, which would make the auto-committer watch the code repo itself). Optional config is validated against the RESTRICTED agent project-config validator — orchestration.gateCommand and alertWebhook (and unknown keys) are REJECTED on create; set those via the elevated project_configure path instead.",
         inputSchema: {
           name: z.string(),
           repoPath: z.string(),
@@ -726,12 +726,11 @@ export class PlatformMcpRouter {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
-        const vault = vaultPath ?? repoPath;
-        // Scaffold a vaultPath that differs from repoPath (repoPath is already a real, existing git
-        // repo, so this is a no-op in the default case) so the project's vault is writable immediately
-        // — without this, a fresh vaultPath with no directory yet on disk misdirects vault_write's
-        // traversal guard (see vault/writer.ts resolveInVault) into looking like a path escape.
-        ensureVaultRoot(vault);
+        const vault = vaultPath ?? "";
+        // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated root
+        // otherwise looks like a path escape) — only when a real vaultPath was actually given (mirrors
+        // the setup.ts project_create fix, card a247ab11).
+        if (vault) ensureVaultRoot(vault);
         const project: Project = {
           id: randomUUID(), name, repoPath, vaultPath: vault,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
@@ -764,10 +763,14 @@ export class PlatformMcpRouter {
       async ({ name, kind, dirName, config }) => {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
-        const boot = await bootstrapProjectDir({ name, dirName, git: (kind ?? "git") === "git" });
+        const isGit = (kind ?? "git") === "git";
+        const boot = await bootstrapProjectDir({ name, dirName, git: isGit });
         if (!boot.ok) return ok({ error: boot.error });
         const project: Project = {
-          id: randomUUID(), name, repoPath: boot.dir, vaultPath: boot.dir,
+          // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the
+          // vault auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir
+          // IS the vault.
+          id: randomUUID(), name, repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir,
           config: v.value, createdAt: new Date().toISOString(), archivedAt: null,
           reserved: false, // an agent-created project is NEVER a reserved/system one (boot-seed only)
           referenceRepos: [],

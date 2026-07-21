@@ -7,8 +7,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // so it must exhibit the identical guarantees. Proves:
 //   (1) POST with just a name → 201, a REAL directory is created STRICTLY under the sanctioned
 //       WORKSPACE_ROOT (confined to LOOM_HOME/workspaces), `git init`ed (kind defaults to "git"), and the
-//       project is registered (repoPath === vaultPath === the created dir, reserved:false);
-//   (2) kind:"vault" creates the dir WITHOUT git init;
+//       project is registered (repoPath === the created dir, vaultPath === "" — no vault bound, never
+//       defaulted to the fresh code repo, reserved:false);
+//   (2) kind:"vault" creates the dir WITHOUT git init, and vaultPath === repoPath (the created dir IS the vault);
 //   (3) an explicit dirName lands under the sanctioned base as that exact leaf;
 //   (4) missing name → 400, nothing written;
 //   (5) TRAVERSAL/ESCAPE dirName ('../…' or absolute) → 400, REJECTED, nothing written outside the base,
@@ -54,7 +55,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
     check("(1) returns a project with an id", !!body.id && !body.error);
     check("(1) repoPath is CONFINED strictly under WORKSPACE_ROOT",
       body.repoPath.startsWith(path.resolve(WORKSPACE_ROOT) + path.sep));
-    check("(1) vaultPath binds to the same created dir", body.vaultPath === body.repoPath);
+    check("(1) vaultPath is empty (no vault bound, never defaulted to the code repo)", body.vaultPath === "");
     check("(1) the dir exists and was `git init`ed (.git present)", fs.existsSync(path.join(body.repoPath, ".git")));
     check("(1) the created repo passes a real isGitRepo check", await isGitRepoReal(body.repoPath));
     check("(1) persisted as a NON-reserved project", db.getProject(body.id)?.reserved === false);
@@ -76,6 +77,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
     check("(2) confined under WORKSPACE_ROOT", body.repoPath.startsWith(path.resolve(WORKSPACE_ROOT) + path.sep));
     check("(2) the dir exists but is NOT a git repo (no .git)",
       fs.existsSync(body.repoPath) && !fs.existsSync(path.join(body.repoPath, ".git")));
+    check("(2) vaultPath === repoPath (the created dir IS the vault)", body.vaultPath === body.repoPath);
   } finally {
     try { await app.close(); } catch { /* ignore */ }
     db.close();
