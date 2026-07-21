@@ -2038,6 +2038,28 @@ export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
  * A worktree that already contains `mainSha` (the common case for a freshly-cut, not-yet-drifted branch)
  * short-circuits to a no-op success (`merged:false`) without spawning a merge child at all.
  */
+/** Generic, non-personal identity used ONLY when the host has no git identity configured at all —
+ *  same rationale + mechanism as vault/versioner.ts's own fallback (duplicated, not shared: each
+ *  commit-creating path in this codebase decides its own identity policy — git/writer.ts deliberately
+ *  commits with NO override, versioner.ts falls back for its unattended vault auto-committer). This
+ *  merge ALSO runs unattended (the card-5150fdc2 stale-base auto-forward), so it needs the same
+ *  fallback: a CI runner or a fresh end-user host may have no configured git identity, which would
+ *  otherwise make `git merge --no-edit` (a real merge commit) fail on the commit step. */
+const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
+
+/** Whether `git`'s cwd has BOTH `user.name` and `user.email` resolvable (any scope). Mirrors
+ *  versioner.ts's `hasConfiguredGitIdentity` verbatim (narrowed to `raw` — the only method the
+ *  `gitFactory` seam of {@link BoundedGitDeps} guarantees). */
+async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<boolean> {
+  try {
+    const name = (await git.raw(["config", "user.name"])).trim();
+    const email = (await git.raw(["config", "user.email"])).trim();
+    return !!name && !!email;
+  } catch {
+    return false;
+  }
+}
+
 export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: boolean; conflict?: boolean; reason?: string; merged?: boolean }> {
@@ -2061,9 +2083,18 @@ export async function mergeMainIntoWorktree(
     if (mergeBase === mainSha) return { ok: true, merged: false };
   } catch { /* fall through to attempt the merge */ }
 
+  // `git merge --no-edit` creates a real commit — on a host with no configured git identity (e.g. a CI
+  // runner) that commit step fails even though the merge itself is clean. Scoped `-c` args (never
+  // `.env()` — simple-git's `blockUnsafeOperationsPlugin` rejects an explicit `GIT_CONFIG_GLOBAL`/
+  // `SYSTEM` override) fall back to a generic identity ONLY when none is resolvable; a host with its own
+  // identity configured is unaffected.
+  const identityArgs = (await hasConfiguredGitIdentity(wtGit))
+    ? []
+    : ["-c", `user.name=${FALLBACK_GIT_IDENTITY.name}`, "-c", `user.email=${FALLBACK_GIT_IDENTITY.email}`];
+
   let mergeThrew = false;
   try {
-    await withTimeout(wtGit.raw(["merge", "--no-edit", mainSha]), timeoutMs, "git merge main into worktree");
+    await withTimeout(wtGit.raw([...identityArgs, "merge", "--no-edit", mainSha]), timeoutMs, "git merge main into worktree");
   } catch {
     mergeThrew = true; // a conflict OR a real failure — the explicit checks below decide which
   }

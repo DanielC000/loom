@@ -99,6 +99,7 @@ function runOne(name, lane) {
         name,
         ok,
         status: timedOut ? "timeout" : status,
+        stdout, stderr,
         tail: ok ? undefined : (stdout.split("\n").filter(Boolean).slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0]),
       });
     });
@@ -138,7 +139,14 @@ const failed = results.filter((r) => !r.ok);
 console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed. (pool size ${POOL_SIZE})`);
 if (failed.length) {
   console.log("FAILURES:");
-  for (const f of failed) console.log(`  - ${f.name} (exit ${f.status}): ${f.tail ?? ""}`);
+  // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
+  // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
+  // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
+  for (const f of failed) {
+    console.log(`  - ${f.name} (exit ${f.status}): ${f.tail ?? ""}`);
+    if (f.stdout?.trim()) console.log(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+    if (f.stderr?.trim()) console.log(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+  }
   process.exit(1);
 }
 console.log("✅ hermetic daemon suite green — never touched prod.");

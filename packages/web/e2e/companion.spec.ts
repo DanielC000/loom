@@ -77,7 +77,11 @@ test("Manage tab surfaces config (masked), memory, reminders, persona, and proac
   await expect(page.getByText("Ada", { exact: true }).first()).toBeVisible(); // the companion's name
 
   // ── Memory: the seeded entry is listed. ──────────────────────────────────────────────────────────────
-  await expect(page.getByText("Memory", { exact: true })).toBeVisible();
+  // Scoped to the Manage tabpanel: the sidebar rail ALSO renders an exact "Memory" nav label (the
+  // separate project-memory page, nav.tsx) on every page including this one — an unscoped match hits
+  // both and violates Playwright's strict mode. The two are legitimately distinct features (the rail's
+  // is project-wide memory; this one is the companion's own self-authored memory store).
+  await expect(page.locator("#companion-panel-manage").getByText("Memory", { exact: true })).toBeVisible();
   await expect(page.locator("code").filter({ hasText: companion.memoryName })).toBeVisible();
 
   // ── Reminders: the seeded reminder is listed by its label. ───────────────────────────────────────────
