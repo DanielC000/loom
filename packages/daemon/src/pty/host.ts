@@ -63,8 +63,11 @@ const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
  * worker reports and pastes arriving cut off in the receiving session. Split big writes into
  * paced chunks so the console host drains between them. Keystroke-sized writes take one chunk.
  */
-const PTY_WRITE_CHUNK_BYTES = 1024;
-const PTY_WRITE_CHUNK_DELAY_MS = 8;
+// Env-overridable (test-only seam, mirrors STARTUP_PROMPT_GRACE_MS et al. below): a hermetic test can
+// shrink the chunk size / widen the delay to make a multi-chunk writeChunked() chain span a wide,
+// deterministic window instead of relying on production-sized timing — see pty-restart-nudge-atomicity.mjs.
+const PTY_WRITE_CHUNK_BYTES = Number(process.env.LOOM_PTY_WRITE_CHUNK_BYTES) || 1024;
+const PTY_WRITE_CHUNK_DELAY_MS = Number(process.env.LOOM_PTY_WRITE_CHUNK_DELAY_MS) || 8;
 
 /**
  * Bracketed-paste delimiters. Programmatic turns (worker reports, queued messages, /input) are
@@ -1117,12 +1120,63 @@ export type QueuedMessageKind = "warning" | "agent";
  */
 export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null };
 /**
- * Distinguishes `enqueueStdin`'s two `delivered:false` outcomes, which otherwise read identically at a
+ * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
  * `"held"` = queued FIFO on a live-but-busy/not-ready session — it WILL deliver at the next turn
- * boundary. A caller that only checked `delivered:false` could conflate "dropped" with "queued".
+ * boundary. Card 78a16dc5's shape guard (see `sanitizeLoneSurrogates`/`isUntaggedSystemNudge`)
+ * DELIBERATELY never drops a "warning"-kind entry — see those doc comments for why a hard drop was
+ * rejected (a Code Reviewer catch: it could silently swallow a real `run_gate` failure nudge, stranding a
+ * worker parked on it with no durable pending-op left to recover from) — so there is no "malformed"
+ * member here; every `kind:"warning"` entry is either sanitized or logged, never dropped on shape alone.
+ * A caller that only checked `delivered:false` could conflate "dropped" with "queued".
  */
 export type EnqueueDeliveryReason = "session-dead" | "held";
+/**
+ * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
+ * idle/context/busy-stuck watchdogs, restart/boot continuation notes, rate-limit/usage nudges,
+ * memory-recall injection — see `QueuedMessageKind`). An `"agent"`-kind entry (a worker report, a
+ * manager's direction, a human composer turn, a replayed kickoff) is legitimately free-form text, so
+ * NEITHER check below is ever applied there — not sanitized, not logged, delivered byte-identical.
+ *
+ * Both tiers SANITIZE-OR-LOG, they NEVER DROP. An earlier version of this guard DROPPED a "warning"
+ * entry with a lone surrogate — a Code Reviewer catch on this same card found that a drop there is a
+ * real stall hazard, not just defense-in-depth: the async `run_gate` FAILURE nudge (sessions/service.ts,
+ * kind:"warning") embeds `gateDetail.stderrTail`, a raw CODE-UNIT slice of captured gate stdout/stderr
+ * (gate-runner.ts). If that stderr contains a non-BMP character (an emoji in a test name/assertion/diff)
+ * split exactly at the slice boundary, the tail begins with a lone surrogate — and `clearPendingGateOp`
+ * runs immediately BEFORE this enqueue, so a dropped nudge here would leave NO durable pending-op for
+ * `reconcileOrphanedGateOps` to recover: a worker parked on its gate-completion nudge would stall
+ * indefinitely with no path back. That is the exact silent-stall class the `/worker` doctrine warns
+ * about, in the very machinery this card exists to harden — so dropping is never an acceptable outcome
+ * for this guard, however corrupted the shape. Sanitizing removes the hazard entirely while still fixing
+ * the byte-level corruption (the delivered message is always well-formed).
+ *
+ * `sanitizeLoneSurrogates` — replaces any LONE (unpaired) UTF-16 surrogate (`LONE_SURROGATE_RE`) with
+ * U+FFFD (the replacement character): exactly the string-level signature of BYTES that were split mid
+ * multi-byte UTF-8 sequence and then decoded/concatenated anyway — the actual corruption this card was
+ * filed over (two genuinely different source texts spliced together mid-word). Logs the anomaly (with a
+ * short excerpt) and returns the SANITIZED (now well-formed) text; a caller with nothing to sanitize gets
+ * the identical string back (cheap to check via `!==`). Equivalent in spirit to the ES2024
+ * `String.prototype.isWellFormed()`/`toWellFormed()`, hand-rolled via regex so this doesn't require
+ * bumping the repo's shared `lib` target off ES2023 for one call site.
+ *
+ * `isUntaggedSystemNudge` — LOG-ONLY, never drops or modifies the text. Missing the `[loom:` prefix every
+ * REAL call site (resume-nudge.ts, the idle/context watchers, …) happens to use today is NOT itself
+ * corruption — it was initially treated as a hard DROP condition, but that turned out to be an invariant
+ * the codebase does not actually hold everywhere (a "warning"-kind sender with legitimate untagged text —
+ * e.g. the companion persona-reinject path before it was tagged — surfaced immediately once the guard
+ * shipped, and a static audit could not prove no OTHER untagged sender exists uncaught). So a missing tag
+ * is logged as an anomaly (for someone to go tag the sender properly) but the message is delivered as-is.
+ */
+const LONE_SURROGATE_RE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
+function sanitizeLoneSurrogates(text: string, kind: QueuedMessageKind): { text: string; sanitized: boolean } {
+  if (kind !== "warning") return { text, sanitized: false };
+  const cleaned = text.replace(LONE_SURROGATE_RE, "�"); // U+FFFD REPLACEMENT CHARACTER
+  return { text: cleaned, sanitized: cleaned !== text };
+}
+function isUntaggedSystemNudge(text: string, kind: QueuedMessageKind): boolean {
+  return kind === "warning" && !text.startsWith("[loom:");
+}
 
 interface Live {
   pty: IPty;
@@ -2817,6 +2871,23 @@ export class PtyHost {
   enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
     const live = this.live.get(sessionId);
     if (!live?.alive) return { delivered: false, reason: "session-dead" };
+    // Shape guard (card 78a16dc5) — see the doc comments on both checks for why NEITHER tier drops: a
+    // dropped "warning"-kind entry is a real stall hazard (the async run_gate failure nudge can legitimately
+    // contain a lone surrogate — see sanitizeLoneSurrogates' doc comment), so this only ever sanitizes or
+    // logs, never withholds delivery on shape alone.
+    const { text: sanitizedText, sanitized } = sanitizeLoneSurrogates(text, kind);
+    if (sanitized) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${sessionId} sanitized an invalid (not well-formed UTF-16) system nudge — delivering the cleaned text: ${JSON.stringify(sanitizedText.slice(0, 200))}`);
+    }
+    text = sanitizedText;
+    // LOG-ONLY: missing the [loom:* ] tag is an anomaly worth flagging, NOT proof of corruption — a
+    // "warning"-kind sender that legitimately omits the tag (an unaudited call site) must still be
+    // DELIVERED, not silently dropped. Falls through to the normal enqueue/deliver path below.
+    if (isUntaggedSystemNudge(text, kind)) {
+      // eslint-disable-next-line no-console
+      console.warn(`[pty] ${sessionId} a "warning"-kind system nudge is missing its [loom:*] tag (delivering anyway — this sender should be tagged): ${JSON.stringify(text.slice(0, 200))}`);
+    }
     this.healIfStuck(live, sessionId);
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
@@ -3872,6 +3943,45 @@ export class PtyHost {
     setTimeout(() => {
       const l = this.live.get(sessionId);
       if (!l?.alive || l.firstTurnStarted) return; // the CLI's own auto-submit landed in time — no-op
+      // Card 78a16dc5 (mirrors resumeAfterRateLimit's card-81f9c887 fix): `firstTurnStarted` is set ONLY
+      // by the UserPromptSubmit hook, which CAN be lost (see the Stop/StopFailure handler's own comment) —
+      // so this can fire while a turn genuinely already ran and its Stop's own drainPending() just started
+      // writing a QUEUED message. A direct submit() here would race THAT in-flight writeChunked chain —
+      // its own staggered pty.write()s would interleave with this one's, splicing two different messages
+      // together mid-word (the observed corruption).
+      //
+      // `busy` alone is NOT the right signal for "a write is genuinely in flight": it is ALSO true from
+      // spawn()'s own OPTIMISTIC set (the common, intended case this guarantee exists for — a spawn whose
+      // CLI-arg turn never even attempted to start) with NO submit() ever having run — deferring on bare
+      // `busy` would wrongly hold the kickoff in `pending` FOREVER in exactly that case, since nothing will
+      // ever fire a Stop to drain it (worker-kickoff-guarantee.mjs's H1a/H1e/H1f pinned this regression).
+      // The precise signal is `submitGeneration > 0 && !enterConfirmed`: `submitGeneration` only advances
+      // inside submit() itself (never by the spawn-time optimistic setBusy), so `0` means "no submit() has
+      // EVER run for this pty" (direct-write is unconditionally safe — nothing to race); `enterConfirmed`
+      // is reset false at the TOP of every submit() and only flips true once that turn's Enter is verified
+      // (UserPromptSubmit/Stop/StopFailure) — so `>0 && !confirmed` means "the most recent submit's
+      // writeChunked chain may still be stepping, or is at least not yet verified done" — the actual
+      // interleave hazard. `stopping`/`drainHeld`/`rateLimited` are separate, orthogonal reasons a direct
+      // write is unsafe (a dying/held/parked pty) that submit() itself does not check.
+      //
+      // Either way, route through the SAME serialized primitive every other write uses when a direct write
+      // isn't safe RIGHT NOW: enqueueStdin still GUARANTEES delivery (held FIFO, drained atomically at the
+      // next safe boundary — never dropped), it just never races an in-flight write. kind:"agent" — this is
+      // substantive directed content (the kickoff itself), not a bracket-tagged Loom nudge, so it drains
+      // alone (not coalesced) and is exempt from the [loom:*] shape guard below (scoped to "warning" only).
+      // Tolerated rare duplicate (CR-noted): if `rateLimited` is what makes this branch unsafe, resumeAfterRateLimit
+      // will INDEPENDENTLY replay `lastPrompt` once unparked — and lastPrompt is USUALLY still this exact
+      // kickoff (nothing else has submitted yet). That means the kickoff can be delivered TWICE (the
+      // enqueued copy below, plus resumeAfterRateLimit's own replay) rather than lost — strictly better
+      // than pre-fix (which could interleave/corrupt it), and rare enough (needs a lost UserPromptSubmit
+      // hook AND a rate-limit park on the SAME never-confirmed turn) not to special-case further here.
+      const submitOutstanding = l.submitGeneration > 0 && !l.enterConfirmed;
+      if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited) {
+        // eslint-disable-next-line no-console
+        console.log(`[pty] ${sessionId} startup-prompt grace elapsed with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
+        this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
+        return;
+      }
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} startup-prompt grace elapsed with no turn started — force-submitting the kickoff`);
       this.submit(sessionId, kickoff);

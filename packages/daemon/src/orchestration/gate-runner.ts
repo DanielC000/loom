@@ -107,7 +107,16 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   };
   const tail = (): string => {
     const s = Buffer.concat(chunks).toString("utf-8").trim();
-    return s.length > OUTPUT_TAIL_BYTES ? s.slice(-OUTPUT_TAIL_BYTES) : s;
+    if (s.length <= OUTPUT_TAIL_BYTES) return s;
+    let start = s.length - OUTPUT_TAIL_BYTES;
+    // Card 78a16dc5: a plain UTF-16 code-unit slice can split a surrogate pair (a non-BMP character, e.g.
+    // an emoji in a test name/assertion/diff) exactly at the boundary, leaving a LONE low surrogate at the
+    // very start of the tail — the downstream `[loom:*]` gate-failure nudge (kind:"warning") sanitizes that
+    // away, but it's cheap and more correct to never produce it here in the first place. Nudge the start
+    // forward by one code unit when it would land mid-pair.
+    const atBoundary = s.charCodeAt(start);
+    if (atBoundary >= 0xdc00 && atBoundary <= 0xdfff) start += 1;
+    return s.slice(start);
   };
   // GIT_TERMINAL_PROMPT=0 — a gateCommand/deployCommand step may run `git push` (or any git op); without
   // this, an uncached-credential push blocks on an interactive prompt until the timeout SIGKILL instead

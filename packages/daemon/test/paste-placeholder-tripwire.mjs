@@ -171,7 +171,11 @@ const fake = fakes[0];
 // the turn's user-role entry, fire a clean Stop, and return how many NEW warnings this Stop produced.
 async function runTurn(submittedText, recordedUserText) {
   const before = warnLog.length;
-  const rp = host.enqueueStdin(SID, submittedText);
+  // Card 78a16dc5: enqueueStdin's default kind is "warning", which now logs (console.warn) an anomaly for
+  // any untagged text — tag it here so that log doesn't pollute this test's own warnLog-delta assertions;
+  // the length/line-count `submittedText` shape (what the collapse-guard cares about) is unaffected by a
+  // short fixed prefix.
+  const rp = host.enqueueStdin(SID, `[loom:test] ${submittedText}`);
   if (!rp.delivered) throw new Error(`test setup: turn did not submit immediately (${JSON.stringify(rp)})`);
   await sleep(120);
   writeTranscript([

@@ -590,7 +590,11 @@ async function main(): Promise<void> {
     // prompt was actually composed+enqueued, so "/new" and "/refresh" can both report an accurate outcome.
     reinjectPersona: (sid) => {
       const prompt = sessions.composeCompanionReinjectPrompt(sid);
-      if (prompt) pty.enqueueStdin(sid, prompt, "system");
+      // Card 78a16dc5: `kind` defaults "warning", and enqueueStdin's shape guard now requires a
+      // "warning"-kind entry to start with its own `[loom:*]` tag — the composed prompt itself starts
+      // with the persona brief text, not a tag, so it must be prefixed here or the guard would drop
+      // every real reinject as malformed.
+      if (prompt) pty.enqueueStdin(sid, `[loom:persona-reinject] ${prompt}`, "system");
       return !!prompt;
     },
     // CONVERSATION-PRESERVING respawn (Companion Capability & Permission-Lever Framework §6): re-resolve +
