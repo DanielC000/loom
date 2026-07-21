@@ -3,7 +3,7 @@ import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { resolveConfig } from "@loom/shared";
-import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, isCodescapeEnabled, codescapeGraphPath } from "./paths.js";
+import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, isCodescapeEnabled, codescapeGraphPath, isUsagePollerSuppressed } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
 import { Db } from "./db.js";
@@ -898,8 +898,16 @@ async function main(): Promise<void> {
 
   // Account-wide plan-usage poller — start it now that the server is up (skips itself if there's no
   // credentials file). Read-only god-eye data for Mission Control; failures degrade to unavailable.
-  usageStatus.start();
-  console.log("[boot] plan-usage poller on (GET /api/usage/limits)");
+  // LOOM_SUPPRESS_USAGE_POLLER=1 (paths.ts isUsagePollerSuppressed) skips start() entirely for a
+  // throwaway/e2e/demo daemon — start() is the ONLY caller of pollOnce() anywhere in the daemon, so
+  // skipping it leaves the poller's cache at its constructor default (available:false), which
+  // GET /api/usage/limits already serves unmodified. No real Claude credentials are ever read.
+  if (isUsagePollerSuppressed()) {
+    console.log("[boot] plan-usage poller suppressed (LOOM_SUPPRESS_USAGE_POLLER=1)");
+  } else {
+    usageStatus.start();
+    console.log("[boot] plan-usage poller on (GET /api/usage/limits)");
+  }
 
   // Update-availability watcher — periodic, best-effort npm dist-tags check (packaged installs only;
   // a source daemon short-circuits with no network). Read-only via GET /api/update-status.

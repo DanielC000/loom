@@ -12,8 +12,9 @@
 //   3. Boot `packages/daemon/dist/index.js` with a scratch LOOM_HOME, `LOOM_PORT=0` (an OS-assigned
 //      free port — collision-proof even across concurrent `playwright test` invocations, not just
 //      concurrent workers within one run), LOOM_WEB_DIST pointed at the built web app, LOOM_DEV=0,
-//      LOOM_SCHEDULER_ENABLED=0, LOOM_PYTHON_NO_PROVISION=1. The daemon's own listen line is parsed
-//      for the real bound URL — never assume the port bound.
+//      LOOM_SCHEDULER_ENABLED=0, LOOM_PYTHON_NO_PROVISION=1, LOOM_SUPPRESS_USAGE_POLLER=1 (so this
+//      throwaway daemon never reads or serves the host's real Claude plan-usage). The daemon's own
+//      listen line is parsed for the real bound URL — never assume the port bound.
 //   4. Assert the boot log carries the listen line and NEVER `[pty] spawn` / `first-run: auto-launched`
 //      — fail the fixture loudly if a real claude would have spawned, rather than let a spec run
 //      against a compromised boot.
@@ -422,6 +423,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         LOOM_DEV: "0",
         LOOM_SCHEDULER_ENABLED: "0",
         LOOM_PYTHON_NO_PROVISION: "1",
+        LOOM_SUPPRESS_USAGE_POLLER: "1",
         LOOM_TEST: "1",
       },
       stdio: ["ignore", "pipe", "pipe"],

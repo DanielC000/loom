@@ -239,6 +239,18 @@ export function isFirstRunLaunchSuppressed(): boolean {
 }
 
 /**
+ * Test/ops escape hatch (`LOOM_SUPPRESS_USAGE_POLLER=1`, default OFF), same family as
+ * {@link isFirstRunLaunchSuppressed}. The account-wide plan-usage poller (orchestration/usage-status.ts)
+ * reads the HOST's real Claude OAuth credentials and serves the owner's real 5h/7d utilization over
+ * GET /api/usage/limits — a throwaway/isolated daemon (e2e, demo, a verification worker eyeballing the
+ * UI) has no business reading or exposing that. Read at CALL time so a single test process can exercise
+ * both states.
+ */
+export function isUsagePollerSuppressed(): boolean {
+  return process.env.LOOM_SUPPRESS_USAGE_POLLER === "1";
+}
+
+/**
  * Card C1 (Codescape fleet-daemon wiring epic `369dde3c`, LOOM_DEV-gated): the ONE shared working
  * directory BOTH `codescape ingest` and `codescape serve` must be spawned from — both commands resolve
  * their `.codescape` state dir relative to `process.cwd()`, so ingest and serve sharing this exact cwd is

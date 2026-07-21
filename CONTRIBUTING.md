@@ -59,7 +59,7 @@ The runner (`packages/daemon/scripts/test-daemon.mjs`) DISCOVERS tests by glob o
 
 A few tests are **not** in the hermetic runner because they need a human-started isolated daemon and/or a real `claude` login (e.g. `integration-e2e`, `orchestration-e2e`, `manager-live`) — they're excluded via the small `NOT_HERMETIC` denylist in `scripts/test-daemon.mjs`. Run those manually per the header comment in each file.
 
-Booting your own throwaway daemon against a fresh `LOOM_HOME` (e.g. to eyeball the web UI)? Set `LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1` — otherwise the daemon's first-run auto-launch spawns a real `claude` process (the Setup/Platform operator) before you get a chance to stamp the marker yourself. The daemon still boots normally and the marker is still written; only that one auto-spawn is skipped.
+Booting your own throwaway daemon against a fresh `LOOM_HOME` (e.g. to eyeball the web UI, or to seed a clean demo for a screenshot)? Set `LOOM_SUPPRESS_FIRST_RUN_LAUNCH=1` — otherwise the daemon's first-run auto-launch spawns a real `claude` process (the Setup/Platform operator) before you get a chance to stamp the marker yourself. The daemon still boots normally and the marker is still written; only that one auto-spawn is skipped. Also set `LOOM_SUPPRESS_USAGE_POLLER=1` — otherwise the plan-usage poller reads and serves *your real account's* Claude usage (5h/7d utilization) over `GET /api/usage/limits`, even on a throwaway daemon with an empty seeded DB.
 
 ## Conventions
 
