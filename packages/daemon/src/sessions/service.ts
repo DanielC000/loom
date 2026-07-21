@@ -12,7 +12,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, getWorktreeLatestNonMergeSha, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -40,7 +40,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_RETRY_ENABLED, GATE_RETRY_SETTLE_MS, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
 import { GateSemaphore } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -84,6 +84,10 @@ type GateRejectionDetail = {
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
   timedOut?: boolean;
+  /** Set when this rejection is the gate-timeout circuit breaker (card 3564fd1e) short-circuiting BEFORE
+   *  spawning another gate at all — distinct from an ordinary `timedOut:true` rejection, which reports a
+   *  gate that actually ran and timed out. See SessionService's `checkGateTimeoutBreaker`. */
+  circuitBroken?: boolean;
 };
 
 type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string };
@@ -469,6 +473,25 @@ export class SessionService {
    * pid from the kill set — see the pre-gate call site's doc comment.
    */
   private readonly reapWorktreeProcesses: ((worktreePath: string, opts?: { excludePids?: number[] }) => Promise<{ killedPids: number[] }>) | undefined;
+  /**
+   * Per-branch consecutive-gate-TIMEOUT streak — the circuit breaker for card 3564fd1e (the fleet-wide
+   * gate-timeout death spiral): a genuinely hanging test can never pass no matter how many times the gate
+   * re-runs it, and each re-run risks leaking another process-tree survivor even with the tree-kill fix in
+   * gate-runner.ts. After {@link GATE_TIMEOUT_BREAKER_THRESHOLD} CONSECUTIVE `timedOut` results on the same
+   * branch AT THE SAME commit, `confirmWorkerMerge`/`runWorkerGate` stop spawning the gate for it (see
+   * {@link checkGateTimeoutBreaker}) and report a distinct "likely hanging test" failure instead.
+   *
+   * In-memory only, daemon-uptime-scoped: it only needs to survive long enough to break a LIVE spiral. A
+   * restart resetting it is an acceptable cold-start cost, not a correctness gap (worst case: one extra
+   * timeout before it re-trips) — not worth a DB table for a transient host-load guard.
+   *
+   * Keyed by branch, not workerSessionId: the failure is a property of the branch's CODE, so a worker
+   * resume/recycle on the same branch inherits the trip rather than getting a fresh budget for free.
+   * `sha` records the worktree HEAD the streak was last observed against; {@link checkGateTimeoutBreaker}
+   * clears the whole entry once that HEAD advances — a new commit is the plausible fix, so the breaker
+   * must give it a clean slate rather than locking the branch out for the rest of the daemon's uptime.
+   */
+  private readonly gateTimeoutStreak = new Map<string, { count: number; sha: string | null }>();
   /**
    * Test-only seam for {@link findNestedGitRepos} (card b6d41db1's follow-up — the shared-chokepoint
    * fix). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real scan. Lets a test
@@ -3610,6 +3633,7 @@ export class SessionService {
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "stop_worker",
     });
+    this.sweepWorktreeStrays(worker);
   }
 
   /**
@@ -3620,7 +3644,7 @@ export class SessionService {
    */
   killAllWorkers(): number {
     const live = this.db.listAllSessions().filter((s) => s.role === "worker" && s.processState === "live");
-    for (const w of live) this.pty.stop(w.id, "hard");
+    for (const w of live) { this.pty.stop(w.id, "hard"); this.sweepWorktreeStrays(w); }
     this.control.pause("global");
     return live.length;
   }
@@ -6384,6 +6408,80 @@ export class SessionService {
   }
 
   /**
+   * Gate-timeout circuit breaker (card 3564fd1e) — read side. Checked BEFORE spawning a gate for `branch`,
+   * so a branch already tripped gets ZERO more gate processes, not one more before the distinct message
+   * appears. Cheap in the common (untripped) case: no git call unless `branch` already has a streak at or
+   * past {@link GATE_TIMEOUT_BREAKER_THRESHOLD}. When it does, re-reads the worktree's latest commit the
+   * WORKER itself authored via {@link getWorktreeLatestNonMergeSha} — NOT the raw worktree HEAD, which on
+   * the confirmWorkerMerge path is a union-merge commit that changes every time main advances even with no
+   * worker fix (see that function's doc for the full defeat this closes). If it has advanced past the sha
+   * the trip was recorded against, a real new commit landed (the plausible fix), so the entry is cleared
+   * and this returns `false` — gating resumes on the very next call, no daemon restart needed. An
+   * unreadable signal (git error/timeout) is treated as "can't tell" and stays tripped — the safe
+   * direction, since spawning more gates against an unreadable worktree is the exact hazard this breaker
+   * exists to prevent.
+   *
+   * SELF-HEAL (Code Review finding on card 3564fd1e): a null `entry.sha` — left behind if the sha read at
+   * trip-recording time failed — used to permanently lock the branch out, since `currentSha && entry.sha`
+   * can never both be truthy again. When `currentSha` reads successfully but `entry.sha` is null, adopt it
+   * as the new baseline (without clearing the trip) so the very next genuine advance is detectable again,
+   * instead of every future call being stuck comparing against `null` forever.
+   */
+  private async checkGateTimeoutBreaker(branch: string, worktreePath: string): Promise<boolean> {
+    const entry = this.gateTimeoutStreak.get(branch);
+    if (!entry || entry.count < GATE_TIMEOUT_BREAKER_THRESHOLD) return false;
+    const currentSha = await getWorktreeLatestNonMergeSha(worktreePath, { timeoutMs: this.gitOpMs });
+    if (currentSha && entry.sha && currentSha !== entry.sha) {
+      this.gateTimeoutStreak.delete(branch); // a new commit landed since the trip — give it a clean slate
+      return false;
+    }
+    if (currentSha && !entry.sha) entry.sha = currentSha; // self-heal a null baseline so it can advance again
+    return true;
+  }
+
+  /**
+   * Gate-timeout circuit breaker (card 3564fd1e) — write side. Call after EVERY real (non-short-circuited)
+   * gate invocation, merge-gate retry included. A `timedOut` result increments `branch`'s streak (recording
+   * the worktree's latest worker-authored commit sha via {@link getWorktreeLatestNonMergeSha} — NOT the raw
+   * worktree HEAD, for the same union-merge-invariance reason {@link checkGateTimeoutBreaker} reads it that
+   * way — so a later check call can tell whether a new commit has landed since); ANY other result — a pass,
+   * or a genuine non-zero exit — clears the streak outright, since either is proof the gate can still run
+   * to completion on this branch right now.
+   */
+  private async recordGateTimeoutOutcome(branch: string, worktreePath: string, timedOut: boolean): Promise<void> {
+    if (!timedOut) {
+      if (this.gateTimeoutStreak.has(branch)) this.gateTimeoutStreak.delete(branch);
+      return;
+    }
+    const currentSha = await getWorktreeLatestNonMergeSha(worktreePath, { timeoutMs: this.gitOpMs });
+    const entry = this.gateTimeoutStreak.get(branch) ?? { count: 0, sha: currentSha };
+    entry.count += 1;
+    entry.sha = currentSha ?? entry.sha;
+    this.gateTimeoutStreak.set(branch, entry);
+  }
+
+  /**
+   * Best-effort worktree-path-scoped process sweep for a worker being stopped (card 3564fd1e — the reap
+   * gap: `stopWorker`/`killAllWorkers` used to do nothing beyond `pty.stop()`, which only kills the
+   * worker's own pty tree — Job Object on Windows / node-pty's own containment on POSIX — plus, on exit,
+   * `reapOrphanedDescendants`'s PID-tree walk, which only catches a survivor still parented under that
+   * tree. Anything that already detached/re-parented away from it entirely (the same gap
+   * `reapProcessesRootedInWorktree` exists to close for worktree removal and the pre-gate sweep) was never
+   * swept on a plain stop — it lingered, un-reaped, until whatever later removed the worktree or ran a
+   * gate. Excludes the worker's own live pty pid (mirrors the pre-gate sweep in confirmWorkerMerge): the
+   * worktree-path reap is meant to catch OTHER strays, not race `pty.stop()`'s own kill of the worker
+   * itself (which owns that job, including honoring a "graceful" stop's shutdown window). Fire-and-forget:
+   * this must never make `stopWorker`/`killAllWorkers` async or throw.
+   */
+  private sweepWorktreeStrays(worker: Session): void {
+    const worktreePath = worker.worktreePath ?? worker.cwd;
+    if (!worktreePath) return;
+    const workerPid = this.pty.getPid?.(worker.id);
+    const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
+    void reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }).catch(() => { /* best-effort */ });
+  }
+
+  /**
    * Step 2: run the build/DoD gate, and ONLY if green merge the branch as ONE squash commit, remove the
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).
@@ -6590,6 +6688,23 @@ export class SessionService {
         }
       }
 
+      // CIRCUIT BREAKER (card 3564fd1e): a branch that has already timed out GATE_TIMEOUT_BREAKER_THRESHOLD
+      // times in a row AT THIS COMMIT is not going to pass by trying again — a genuinely hanging test can
+      // never pass no matter how many times it's re-run, and every retry risks leaking another process-tree
+      // survivor even with gate-runner.ts's own tree-kill. Checked (and possibly cleared, if a new commit
+      // landed since the trip) BEFORE spawning anything, so a broken branch gets ZERO more gate processes,
+      // not one more before the distinct message appears.
+      if (await this.checkGateTimeoutBreaker(branch, worktreePath)) {
+        const msg = `gate repeatedly times out on this branch (${GATE_TIMEOUT_BREAKER_THRESHOLD} consecutive timeouts at this commit) — likely a hanging test, not retrying; push a new commit to re-enable gating`;
+        const suppressed = await rejectNotify("gate_timeout_circuit_broken", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${msg}; canonical repo untouched, worktree retained.`);
+        evt("merge_rejected", { reason: "gate_timeout_circuit_broken", ...(suppressed ? { suppressed: true } : {}) });
+        return {
+          merged: false, reason: msg,
+          gateDetail: { timedOut: true, circuitBroken: true },
+          notified: !suppressed, opId: thisOpId,
+        };
+      }
+
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
@@ -6597,6 +6712,15 @@ export class SessionService {
       const gateCap = orchestration.maxConcurrentGates;
       let gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs));
       evt("build_gate", { passed: gateResult.passed });
+      if (gateResult.failedTimedOut) {
+        // POST-TIMEOUT SWEEP (card 3564fd1e): gate-runner's own tree-kill already reaps everything still
+        // parented under the killed shell — this is the SAME worktree-path-scoped backstop the pre-gate
+        // sweep above uses, for whatever already detached/re-parented before that kill landed. Excludes the
+        // worker's own live pty pid for the identical reason the pre-gate sweep does (see its doc above) —
+        // this must never race gate-runner.ts's own precise tree-kill by ALSO killing the confirming worker.
+        try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+      }
+      await this.recordGateTimeoutOutcome(branch, worktreePath, !!gateResult.failedTimedOut);
       // TRANSIENT-KILL AUTO-RETRY (card bcba83a1 — the gate "lies" under memory pressure): an OOM/SIGKILL
       // (or our OWN gateTimeoutMs bound) killing a step used to surface identically to a genuine test/build
       // failure as the flat "build gate failed" — managers learned not to trust it under load and hand-
@@ -6612,6 +6736,10 @@ export class SessionService {
         await new Promise((resolve) => setTimeout(resolve, GATE_RETRY_SETTLE_MS));
         gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs));
         evt("build_gate_retry", { passed: gateResult.passed });
+        if (gateResult.failedTimedOut) {
+          try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+        }
+        await this.recordGateTimeoutOutcome(branch, worktreePath, !!gateResult.failedTimedOut);
       }
       if (!gateResult.passed) {
         // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
@@ -6974,6 +7102,17 @@ export class SessionService {
     const gateCap = orchestration.maxConcurrentGates;
     const runGateSeq = this.runGate ?? runGateSequential;
     const key = `gate:${workerSessionId}`;
+    // CIRCUIT BREAKER (card 3564fd1e): the SAME per-branch breaker confirmWorkerMerge checks — a worker
+    // repeatedly re-calling run_gate against a genuinely hanging test hits the identical wall, so a spiral
+    // can't form via either path independently. Short-circuits BEFORE ever touching PendingOpRegistry/the
+    // semaphore, so a tripped branch costs nothing beyond one cheap breaker check per call.
+    if (worker.branch && await this.checkGateTimeoutBreaker(worker.branch, worktreePath)) {
+      const reason = `gate repeatedly times out on this branch (${GATE_TIMEOUT_BREAKER_THRESHOLD} consecutive timeouts at this commit) — likely a hanging test, not retrying; push a new commit to re-enable gating`;
+      return {
+        settled: true, ok: true,
+        value: { ran: true, passed: false, reason, gateDetail: { timedOut: true, circuitBroken: true } },
+      };
+    }
     return this.pendingOps.attach<WorkerGateResult>(
       key, "gate", workerSessionId, SYNC_ATTACH_BUDGET_MS,
       async (opId) => {
@@ -6994,6 +7133,18 @@ export class SessionService {
           // this audit write adds a durable record, it does not change that error-handling behavior.
           evt({ passed: false, error: err instanceof Error ? err.message : String(err) });
           throw err;
+        }
+        if (worker.branch) {
+          if (gateResult.failedTimedOut) {
+            // POST-TIMEOUT SWEEP (card 3564fd1e): same worktree-path-scoped backstop confirmWorkerMerge's
+            // gate section uses, for anything that detached before gate-runner.ts's own tree-kill landed.
+            // Excludes the calling worker's own live pty pid — this sweep must never kill the very worker
+            // whose gate just timed out.
+            const workerPid = this.pty.getPid?.(workerSessionId);
+            const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
+            try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+          }
+          await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
         }
         if (gateResult.passed) {
           evt({ passed: true });
@@ -7189,7 +7340,19 @@ export class SessionService {
     repoPath: string,
     worktreePath: string,
     codescapeCtx?: { projectId: string; worktreeId: string | null },
-    opts?: { forceRemoveWorktree?: boolean },
+    opts?: {
+      forceRemoveWorktree?: boolean;
+      /**
+       * The branch this worktree was assigned to (card 3564fd1e Minor follow-up — unbounded
+       * `gateTimeoutStreak` growth): passed by callers that have it so an ACTUAL removal purges any
+       * leftover breaker streak entry for the branch. Without this, a branch that tripped the breaker
+       * ≥1 time and was then abandoned (cancelled/stopped rather than fixed-and-merged) leaked its entry
+       * in the map forever — cosmetic (bounded only by daemon uptime, cleared on restart), but a genuine
+       * leak on a long-lived daemon. Best-effort/optional: the wedge-retry sweep has no branch on hand
+       * (`WedgedWorktreeEntry` is advisory metadata only, repoPath+worktreePath) and simply omits it.
+       */
+      branch?: string;
+    },
   ): Promise<GcOutcomeResult> {
     if (this.db.getWedgedWorktree(worktreePath)?.needsHuman) return { outcome: "needs-human-skip" };
     if (!opts?.forceRemoveWorktree) {
@@ -7226,6 +7389,9 @@ export class SessionService {
     const { removed, wedged } = await removeWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs, removeDir: this.removeDirOverride });
     if (removed) {
       this.db.clearWedgedWorktree(worktreePath);
+      // Purge any leftover gate-timeout breaker streak for this branch (see opts.branch's doc) — the
+      // worktree it was tracking is gone, so an abandoned-while-tripped branch can't leak the entry forever.
+      if (opts?.branch) this.gateTimeoutStreak.delete(opts.branch);
       // Codescape C3: this worktree is GENUINELY gone (never fired for recycleWorker reuse — that path
       // never calls gcWorktreeDir at all) — deregister it. Fire-and-forget, best-effort.
       this.fireCodescapeDrop(codescapeCtx);
@@ -7341,7 +7507,7 @@ export class SessionService {
       const result = await this.gcWorktreeDir(args.repoPath, args.worktreePath, {
         projectId: args.projectId,
         worktreeId: codescapeWorktreeId(args.taskId),
-      }, { forceRemoveWorktree: args.forceRemoveWorktree });
+      }, { forceRemoveWorktree: args.forceRemoveWorktree, branch: args.branch });
       if (result.outcome === "nested-repo-blocked") {
         nestedRepoBlock = { paths: result.nestedRepoPaths ?? [], truncated: !!result.scanTruncated };
         // eslint-disable-next-line no-console
@@ -7553,7 +7719,7 @@ export class SessionService {
         const { outcome } = await this.gcWorktreeDir(project.repoPath, worktreePath, {
           projectId: project.id,
           worktreeId: codescapeWorktreeId(s.taskId),
-        }).catch(() => ({ outcome: "left-on-disk" as const }));
+        }, { branch: s.branch ?? undefined }).catch(() => ({ outcome: "left-on-disk" as const }));
         // Only an ACTUAL removal counts as pruned — "wedged"/"left-on-disk"/"nested-repo-blocked" is a
         // retry-pending (or human-recoverable) attempt, not a completed prune, and double-counting it
         // here overstated the aggregate.
@@ -7575,7 +7741,7 @@ export class SessionService {
       const { outcome } = await this.gcWorktreeDir(project.repoPath, worktreePath, {
         projectId: project.id,
         worktreeId: codescapeWorktreeId(s.taskId),
-      }).catch(() => ({ outcome: "left-on-disk" as const }));
+      }, { branch: s.branch ?? undefined }).catch(() => ({ outcome: "left-on-disk" as const }));
       // Only an ACTUAL removal counts as pruned — see the identical comment on the dead-leftover branch above.
       if (outcome === "needs-human-skip") worktreesNeedsHuman++;
       else if (outcome === "removed") worktreesPruned++;

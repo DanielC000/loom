@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 
 /**
  * Split a `gateCommand` on its TOP-LEVEL `&&` joins (outside single/double quotes) into independent
@@ -93,7 +93,10 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // count, so the host-load budget is `maxConcurrentGates × 2` — the SAME bound the merge gate already
   // implies, not a new one — applied AFTER the base env so an override always wins.
   const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", ...envOverride };
-  const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], env });
+  // `detached` on POSIX makes `child.pid` the process GROUP id (the shell calls setsid) — killGateProcessTree
+  // below needs that to reach the whole tree, not just this one shell. Harmless on win32 (its tree-kill goes
+  // through `taskkill /T`, which doesn't care about this flag).
+  const child = spawn(command, { cwd, shell: true, stdio: ["ignore", "pipe", "pipe"], env, detached: process.platform !== "win32" });
   child.stdout?.on("data", capture);
   child.stderr?.on("data", capture);
   let settled = false;
@@ -105,13 +108,53 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   };
   const timer = timeoutMs > 0
     ? setTimeout(() => {
-        try { child.kill("SIGKILL"); } catch { /* already gone */ }
-        done({ status: null, error: new Error(`gate step exceeded ${timeoutMs}ms`), signal: "SIGKILL", timedOut: true });
+        // Claim resolution IMMEDIATELY, synchronously — BEFORE the async tree-kill below — so the
+        // child's own `close` event (which the forced kill is about to trigger) can never race past this
+        // and misreport `timedOut:false`. Every later close/error is a no-op once `settled` is true.
+        if (settled) return;
+        settled = true;
+        void killGateProcessTree(child).finally(() => {
+          resolve({ status: null, error: new Error(`gate step exceeded ${timeoutMs}ms`), signal: "SIGKILL", timedOut: true, outputTail: tail() });
+        });
       }, timeoutMs)
     : undefined;
   child.on("error", (e) => done({ status: null, error: e, signal: null, timedOut: false }));
   child.on("close", (code, signal) => done({ status: code, error: undefined, signal, timedOut: false }));
 });
+
+/**
+ * Force-kill a gate step's process TREE, not just the shell `spawn` returned as `child`. Root cause of
+ * card 3564fd1e (the 2026-07-21 fleet-wide gate death spiral): `shell:true` makes `child` a `cmd.exe`
+ * (win32) or `sh`/`bash` (posix) whose DESCENDANTS — e.g. `pnpm` → `vitest` → a forked test-worker pool —
+ * a plain `child.kill()` never reaches. A gate timeout used to kill only that shell, leaving its
+ * grandchildren running immortally; repeated timeouts/retries against the same hanging test each leaked
+ * another survivor, and by the time enough had accumulated the host itself saturated, starving every
+ * OTHER project's gate into timing out too.
+ *  - win32: `taskkill /pid <child.pid> /T /F` kills the whole subtree rooted at the shell.
+ *  - posix: the step is spawned with `detached:true` above, making `child.pid` the process GROUP id —
+ *    `process.kill(-pid, "SIGKILL")` signals the whole group, not just the shell. A plain
+ *    `process.kill(pid, "SIGKILL")` here would reproduce the SAME leak on posix. This is a DELIBERATE
+ *    choice, not the accidental gap `killProcessById` (pty/host.ts) has on ITS posix branch — that
+ *    function is fine for its own use (a worktree-path reap), where a survivor left behind is caught by
+ *    the NEXT sweep regardless of which single pid was targeted; a gate timeout has no such backstop
+ *    inside this file — only the caller's own worktree-path sweep (see sessions/service.ts) does, and
+ *    only as a belt-and-suspenders catch for whatever already detached before THIS kill lands.
+ * Resolves once the kill has been ISSUED (awaits the win32 `taskkill` helper's own exit, so a caller can
+ * treat the tree as gone once this settles) — best-effort: an already-exited pid is a silent no-op.
+ */
+function killGateProcessTree(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => {
+    if (child.pid == null) { resolve(); return; }
+    if (process.platform === "win32") {
+      const tk = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+      tk.on("close", () => resolve());
+      tk.on("error", () => resolve());
+      return;
+    }
+    try { process.kill(-child.pid, "SIGKILL"); } catch { /* already gone */ }
+    resolve();
+  });
+}
 
 /** What {@link runGateSequential} resolves. On a rejection, carries enough to make the failure
  *  diagnosable instead of opaque: which step failed, its exit code/signal/timeout, and its bounded
@@ -162,6 +205,15 @@ export const GATE_RETRY_ENABLED = process.env.LOOM_GATE_RETRY_ENABLED !== "0";
  *  before re-running the same gate. Env-overridable so a test can drive it near-zero instead of waiting
  *  out a real multi-second delay. */
 export const GATE_RETRY_SETTLE_MS = Number(process.env.LOOM_GATE_RETRY_SETTLE_MS) || 5_000;
+
+/** After this many CONSECUTIVE `timedOut` gate results on the SAME branch AT THE SAME commit, the service
+ *  layer (SessionService's `gateTimeoutStreak`) stops auto-spawning the gate for that branch and reports a
+ *  distinct "likely hanging test" failure instead of retrying forever — part of card 3564fd1e's fix (a
+ *  genuinely wedged test can never pass no matter how many times it's re-run, and every re-run risks
+ *  leaking another process-tree survivor even with {@link runGateStep}'s tree-kill above). Env-overridable
+ *  for a test, mirroring {@link GATE_RETRY_ENABLED}. The breaker clears itself once the branch's worktree
+ *  HEAD advances past the commit it tripped on — see SessionService's `checkGateTimeoutBreaker`. */
+export const GATE_TIMEOUT_BREAKER_THRESHOLD = Number(process.env.LOOM_GATE_TIMEOUT_BREAKER_THRESHOLD) || 3;
 
 /** {@link classifyGateFailure}'s three buckets. "kill" and "timeout" are both retry-ELIGIBLE (the merge
  *  gate auto-retries once); "genuine" never is. */

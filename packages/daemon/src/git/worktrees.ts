@@ -1108,6 +1108,64 @@ export async function detectStrandedWork(
   }
 }
 
+/**
+ * The worktree's current HEAD commit sha — the gate-timeout circuit breaker's (card 3564fd1e) "did the
+ * branch move" signal: a breaker trip must clear once a NEW commit lands (the plausible fix for a hanging
+ * test), not lock the branch out of gating for the rest of the daemon's uptime. Bounded + fail-safe,
+ * mirroring {@link detectStrandedWork}'s posture: any error/timeout returns `null` rather than throwing —
+ * a check failure here must never block a legitimate gate run; the caller treats `null` as "can't tell,
+ * don't reset" (stays conservatively tripped rather than risking a spurious reset).
+ */
+export async function getWorktreeHeadSha(worktreePath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  try {
+    // Constructing the bounded git instance is INSIDE the try, not just the `raw()` call below —
+    // simpleGit's constructor validates `worktreePath` and can throw SYNCHRONOUSLY (not a rejection) when
+    // it doesn't exist/isn't a directory, which a non-existent or not-yet-created worktree path genuinely
+    // can be (the circuit breaker calls this speculatively; fail-safe applies just as much to that case).
+    const { git, timeoutMs } = boundedGit(worktreePath, deps);
+    return (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (worktree)")).trim();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The worktree's latest commit that the WORKER itself authored — the gate-timeout circuit breaker's
+ * (card 3564fd1e) "did a real fix land" signal, INVARIANT to `mergeMainIntoWorktree`'s union-merge.
+ *
+ * THE BUG THIS CLOSES: `confirmWorkerMerge` runs the union-merge (a real `git merge --no-edit mainSha`,
+ * FIRST-parent = the worktree's prior HEAD, second-parent = main's tip) BEFORE the breaker check/record —
+ * so whenever main has advanced since the branch was cut, plain {@link getWorktreeHeadSha} returns the
+ * NEW merge commit's sha every single confirm attempt, indistinguishable from the worker having pushed a
+ * genuine fix. The breaker's clear-on-HEAD-advance was defeated: it cleared the streak on every confirm
+ * and could never trip on the merge path — exactly the "hanging test while main keeps moving" case it
+ * exists to catch.
+ *
+ * `git rev-list --first-parent --no-merges HEAD --max-count=1` walks the FIRST-parent chain from HEAD
+ * (which — because `mergeMainIntoWorktree` always merges main INTO the worktree, never the reverse — is
+ * always the worker's OWN branch history, not main's) and skips any merge commit in that chain, returning
+ * the latest commit the worker actually authored. A union-merge only ever ADDS a merge commit on top; it
+ * can't change this value. A genuine worker commit (fixing the hang) DOES change it. On the run_gate path
+ * (no union-merge, so HEAD is never a merge commit to begin with) this returns the exact same sha
+ * {@link getWorktreeHeadSha} would — fully backward-compatible there.
+ *
+ * Fail-safe like its sibling: any error/timeout (including a HEAD with no non-merge ancestor, e.g. an
+ * all-merge-commits worktree, which `rev-list` simply returns empty for) returns `null` — the breaker
+ * caller treats that as "can't tell, don't reset."
+ */
+export async function getWorktreeLatestNonMergeSha(worktreePath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  try {
+    const { git, timeoutMs } = boundedGit(worktreePath, deps);
+    const out = (await withTimeout(
+      git.raw(["rev-list", "--first-parent", "--no-merges", "HEAD", "--max-count=1"]),
+      timeoutMs, "git rev-list --first-parent --no-merges HEAD (worktree)",
+    )).trim();
+    return out || null;
+  } catch {
+    return null;
+  }
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 /** One row of a diffstat — a changed file with its insertion/deletion counts (0/0 for binary). */
 export interface DiffstatFile {
