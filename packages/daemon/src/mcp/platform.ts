@@ -13,6 +13,7 @@ import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQue
 import { resolveAlias } from "./arg-alias.js";
 import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
+import { expandTilde } from "../paths.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
@@ -287,13 +288,21 @@ function formatZodIssues(error: z.ZodError): string {
  */
 export const CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(projectConfigOverrideSchema.shape);
 
-/** REST/human path validator: the full schema (gateCommand allowed). */
+/**
+ * REST/human path validator: the full schema (gateCommand allowed). `obsidian.path` and
+ * `python.interpreterPath` are HUMAN-only host paths a user may type with a leading `~` (same as
+ * repoPath/vaultPath) — expand it here, post-parse (both fields are already confirmed strings by the
+ * schema above), so the stored config carries the expanded absolute path.
+ */
 export function validateProjectConfigOverride(
   raw: unknown,
 ): { ok: true; value: ProjectConfigOverride } | { ok: false; error: string } {
   const r = projectConfigOverrideSchema.safeParse(raw ?? {});
   if (!r.success) return { ok: false, error: formatZodIssues(r.error) };
-  return { ok: true, value: r.data as ProjectConfigOverride };
+  const value = r.data as ProjectConfigOverride;
+  if (value.obsidian?.path !== undefined) value.obsidian.path = expandTilde(value.obsidian.path);
+  if (value.python?.interpreterPath !== undefined) value.python.interpreterPath = expandTilde(value.python.interpreterPath);
+  return { ok: true, value };
 }
 
 /**

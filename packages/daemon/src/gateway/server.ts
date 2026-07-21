@@ -8,7 +8,7 @@ import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
-import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
+import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
 import type { UpdateStatus } from "../update/check.js";
 import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
@@ -3488,8 +3488,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {
     const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown };
-    const repoPath = b.repoPath?.trim() || undefined;
-    const vaultPath = b.vaultPath?.trim() || undefined;
+    // Both locals are expandTilde-expanded right here (guarded — expandTilde throws on undefined), a
+    // leading `~` being a shell expansion Node never sees, so every check below sees the expanded path.
+    const repoPath = b.repoPath?.trim() ? expandTilde(b.repoPath.trim()) : undefined;
+    const vaultPath = b.vaultPath?.trim() ? expandTilde(b.vaultPath.trim()) : undefined;
     // The Obsidian vault is OPTIONAL (card cdc3792d) — mirrors the setup operator's project_create rule:
     // require a name + at least one of {repoPath, vaultPath}. A vault-less CODE project stores
     // vaultPath as "" (never defaulted to repoPath — that would make the auto-committer watch + commit
@@ -3565,7 +3567,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "repoPath must be a non-empty string" });
     // repoPath REBIND (human-only): the SHARED guard (isGitRepo + live-worktree refusal), identical to
     // the elevated platform MCP project_update. A non-repo or a live worktree session blocks the write.
-    const repoPath = b.repoPath === undefined ? undefined : (b.repoPath as string).trim();
+    // expandTilde runs right after trim, before the isGitRepo check, so the STORED repoPath is expanded.
+    const repoPath = b.repoPath === undefined ? undefined : expandTilde((b.repoPath as string).trim());
     if (repoPath !== undefined) {
       // A repoPath REBIND repoints the project's git — more than metadata; REFUSE it on the reserved
       // Platform home (mirroring the DELETE/archive reserved refusals below). Benign metadata edits
@@ -3588,7 +3591,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "noGateByDesign must be a boolean" });
     deps.db.updateProject(id, {
       name: b.name === undefined ? undefined : (b.name as string).trim(),
-      vaultPath: b.vaultPath === undefined ? undefined : (b.vaultPath as string).trim(),
+      vaultPath: b.vaultPath === undefined ? undefined : expandTilde((b.vaultPath as string).trim()),
       repoPath,
       referenceRepos,
       noGateByDesign: b.noGateByDesign as boolean | undefined,

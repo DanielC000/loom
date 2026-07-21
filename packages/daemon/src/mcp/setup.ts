@@ -8,6 +8,7 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { isGitRepo, checkCommitIdentity } from "../git/reader.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
+import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
@@ -128,6 +129,10 @@ export class SetupMcpRouter {
       async ({ name, repoPath, vaultPath, config }) => {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
+        // Expand a leading `~` (shell expansion Node never sees) BEFORE isGitRepo/isExistingDir, so the
+        // STORED path is already the expanded absolute one.
+        if (repoPath !== undefined) repoPath = expandTilde(repoPath);
+        if (vaultPath !== undefined) vaultPath = expandTilde(vaultPath);
         let repo: string;
         let vault: string;
         let isCodeRepo = false;
@@ -284,6 +289,7 @@ export class SetupMcpRouter {
           const wrote = setProjectConfigSafe(db, projectId, merged);
           if (!wrote.ok) return ok({ error: wrote.error });
         }
+        if (vaultPath !== undefined) vaultPath = expandTilde(vaultPath);
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(db.getProject(projectId));
       },

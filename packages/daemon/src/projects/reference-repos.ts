@@ -1,5 +1,6 @@
 import path from "node:path";
 import { isGitRepo } from "../git/reader.js";
+import { expandTilde } from "../paths.js";
 
 /** Result of {@link validateReferenceRepos}. `ok:false` names the FIRST offending entry. */
 export type ReferenceReposCheck =
@@ -18,12 +19,17 @@ export type ReferenceReposCheck =
  *  (2) an EXISTING git repository (`isGitRepo`, mirroring the repoPath / checkRepoRebind guard).
  *
  * Rejects the WHOLE array on the first bad entry (naming it), never a partial accept.
+ *
+ * Each entry is {@link expandTilde}-expanded FIRST (a leading `~`/`~/` is a shell expansion Node never
+ * sees), so `~/other-repo` resolves to the home dir before the absolute-path check below — the stored
+ * `value` is the expanded form.
  */
 export async function validateReferenceRepos(input: unknown): Promise<ReferenceReposCheck> {
   if (!Array.isArray(input) || !input.every((p) => typeof p === "string")) {
     return { ok: false, error: "referenceRepos must be an array of strings" };
   }
-  for (const p of input) {
+  const expanded = input.map(expandTilde);
+  for (const p of expanded) {
     if (!path.isAbsolute(p)) {
       return { ok: false, error: `referenceRepos entries must be absolute paths: ${p}` };
     }
@@ -31,5 +37,5 @@ export async function validateReferenceRepos(input: unknown): Promise<ReferenceR
       return { ok: false, error: `referenceRepos entry is not an existing git repository: ${p}` };
     }
   }
-  return { ok: true, value: input };
+  return { ok: true, value: expanded };
 }

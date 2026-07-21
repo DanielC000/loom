@@ -6,6 +6,26 @@ import { resolveExecutable } from "./pty/resolve-bin.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Expand a leading `~` in a USER-SUPPLIED host path (repoPath/vaultPath/referenceRepos entries,
+ * obsidian.path, python.interpreterPath) to the current user's home directory — `~` is a SHELL
+ * expansion, so it never reaches Node; a path typed into a form field or passed to an MCP tool arrives
+ * literally, and `fs`/`isGitRepo` don't expand it either. Apply this at the input boundary, before any
+ * existence/isGitRepo check, so the STORED path is already the expanded absolute one.
+ *   - `"~"` alone → `os.homedir()`.
+ *   - `"~/…"` or `"~\\…"` → `os.homedir()` joined with the rest.
+ *   - `"~otheruser/…"` (another user's home) → left UNCHANGED — Node has no portable way to resolve an
+ *     arbitrary user's home directory, unlike a shell.
+ *   - anything else (no leading `~`) → left UNCHANGED.
+ * Cross-platform: `os.homedir()` resolves on Windows too (harmless there — a Git-Bash user may still
+ * type `~`), and `path.join` normalizes the separator for the current platform either way.
+ */
+export function expandTilde(p: string): string {
+  if (p === "~") return os.homedir();
+  if (p.startsWith("~/") || p.startsWith("~\\")) return path.join(os.homedir(), p.slice(2));
+  return p;
+}
+
 /** All daemon-owned state lives under ~/.loom (overridable via LOOM_HOME). */
 export const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 export const DB_PATH = path.join(LOOM_HOME, "loom.db");
