@@ -140,6 +140,14 @@ const orchestrationOverride = z.object({
   // would deadlock all spawning), with a generous safety ceiling so a fat-fingered value can't
   // authorize a fleet-bomb.
   maxConcurrentWorkers: z.number().int().min(1).max(100).optional(),
+  // Card 52ab5d45: KEPT here (accepted, not rejected) for backward compat with an already-persisted
+  // per-project value, but it is now INERT — the cron Scheduler reads only the daemon-global
+  // `PlatformConfigOverride.maxConcurrentManagers` below (resolveConfig's merge no longer consults this
+  // per-project field). Unlike schedulerEnabled/maxConcurrentGates below, this key is deliberately NOT
+  // removed from this `.strict()` shape: those two were rejected outright because no persisted project
+  // had ever set them per-project-effectively, whereas an existing project may already have a stored
+  // maxConcurrentManagers value — rejecting it here would 400 that project's very next unrelated config
+  // save. See config.ts's OrchestrationConfig.maxConcurrentManagers doc.
   maxConcurrentManagers: z.number().int().min(1).max(100).optional(),
   // NOTE: no `schedulerEnabled` here — it's daemon-GLOBAL (see PlatformConfigOverride.schedulerEnabled),
   // not per-project, so it lives on platformConfigOverrideSchema below instead. Omitting it here (a
@@ -479,6 +487,11 @@ const platformConfigOverrideSchema = z.object({
   // (a cap of 0 would deadlock every gate); generous ceiling so a fat-fingered value can't authorize an
   // unbounded pile-up.
   maxConcurrentGates: z.number().int().min(1).max(50).optional(),
+  // Fleet-wide scheduler cap (card 52ab5d45): caps concurrently-LIVE, SCHEDULER-SPAWNED manager sessions
+  // across the whole daemon (see PlatformConfigOverride.maxConcurrentManagers). Daemon-wide, same
+  // reasoning as maxConcurrentGates above. Floor 1 (a cap of 0 would deadlock the Scheduler); ceiling
+  // matches the (now-inert) per-project field's existing bound above.
+  maxConcurrentManagers: z.number().int().min(1).max(100).optional(),
 }).strict();
 
 /**
@@ -517,10 +530,10 @@ const timeoutsPatchOverride = z.object(nullableShape(timeoutsOverride.shape)).st
 
 /**
  * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75):
- * field-for-field identical to `platformConfigOverrideSchema` above, except the 7 top-level keys the
+ * field-for-field identical to `platformConfigOverrideSchema` above, except the 8 top-level keys the
  * Settings global-config form can blank back to "inherit" — `rateLimit`/`watchers`/`timeouts` (the
  * ms-keyed field grid) and `schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
- * `maxConcurrentGates` (the tri-state toggles + the gate-cap input) — additionally accept an explicit
+ * `maxConcurrentGates`/`maxConcurrentManagers` (the tri-state toggles + the two cap inputs) — additionally accept an explicit
  * `null`. Whole-group `null` means "delete this whole group from the persisted override" (revert every
  * field in it to the resolved default). Within a submitted group object, EACH FIELD is also individually
  * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride` above) — a per-field
@@ -545,6 +558,7 @@ const platformConfigPatchSchema = z.object({
   remoteAccess: remoteAccessOverride.optional(),
   schedulerEnabled: z.boolean().nullable().optional(),
   maxConcurrentGates: z.number().int().min(1).max(50).nullable().optional(),
+  maxConcurrentManagers: z.number().int().min(1).max(100).nullable().optional(),
 }).strict();
 
 /**

@@ -40,7 +40,8 @@ export interface SchedulerDeps {
   /**
    * §19a hardening (narrowed by card 53edd8d5): hard cap on concurrently-LIVE, SCHEDULER-SPAWNED
    * managers (`countLiveScheduledManagers` — excludes the standing human/Lead-spawned fleet entirely).
-   * Wired from `orchestration.maxConcurrentManagers` in index.ts; defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
+   * Wired from `orchestration.maxConcurrentManagers` in index.ts (fleet-wide since card 52ab5d45 — see
+   * `PlatformConfigOverride.maxConcurrentManagers`); defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
    */
   maxConcurrentManagers?: number;
   /**

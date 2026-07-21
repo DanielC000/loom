@@ -827,7 +827,12 @@ async function main(): Promise<void> {
   // BOOT-BOUND cadence from the resolved platform config (LOOM_SCHEDULER_INTERVAL_MS env read +
   // floor-clamped inside resolveConfig; default 60s).
   const intervalMs = watchers.schedulerMs;
-  const maxConcurrentManagers = resolved.orchestration.maxConcurrentManagers;
+  // card 52ab5d45: sourced from the daemon-global PlatformConfigOverride (`platformOverride`), not a
+  // per-project override — the Scheduler is one daemon-wide service. `resolved.orchestration.
+  // maxConcurrentManagers` already folds `platformOverride?.maxConcurrentManagers` in via resolveConfig's
+  // merge (config.ts); the explicit `platformOverride?.maxConcurrentManagers ??` here is belt-and-suspenders
+  // at the actual construction site, matching how `maxConcurrentManagers` is read at every other call site.
+  const maxConcurrentManagers = platformOverride?.maxConcurrentManagers ?? resolved.orchestration.maxConcurrentManagers;
   // card 53edd8d5: `{scheduled:true}` is what pins Session.scheduledSpawn on the spawned row, so ONLY
   // the Scheduler's own manager spawns count against `maxConcurrentManagers` (Db.countLiveScheduledManagers)
   // — every other startManager caller (REST, generic dispatch) omits it and stays unaffected.

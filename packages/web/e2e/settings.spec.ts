@@ -190,6 +190,72 @@ test("editing maxConcurrentGates: blank inherits, a set value persists, blank-AF
   await expect.poll(readGatesOverride).toBeNull();
 });
 
+test("editing maxConcurrentManagers (card 52ab5d45): blank inherits, a set value persists, blank-AFTER-set clears, a bad value 400s", async ({ page, loomDaemon }) => {
+  // The fleet-wide scheduler-manager cap, mirroring the maxConcurrentGates test above end to end — this
+  // field is the fix for the bug where the cron Scheduler's cap was always deaf to any override (no
+  // PlatformConfigOverride key existed for it) and the per-project "Max managers" field was actively
+  // misleading (the Scheduler never read it). Same shared-daemon caveat as the gates test: assertions read
+  // the override + effective hint directly rather than assuming a pristine start.
+  const project = await loomDaemon.createProject(`settings-managers-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const label = "Max concurrent scheduler-spawned managers · restart required";
+  const managers = field(page, label);
+  await expect(managers).toBeVisible();
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const managersLabel = page.locator(`label:has(> span:text-is(${JSON.stringify(label)}))`);
+
+  const readManagersOverride = async (): Promise<number | null> => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+    const body = (await res.json()) as { override?: { maxConcurrentManagers?: number } };
+    return body?.override?.maxConcurrentManagers ?? null;
+  };
+
+  // BLANK = INHERIT: the platform default is 3 (ZERO behavior change from today's PLATFORM_DEFAULTS).
+  await managers.fill("");
+  await expect(managersLabel.getByText(/effective: 3/)).toBeVisible();
+  await expect(managers).toHaveAttribute("placeholder", "inherit (default 3)");
+
+  // SET: 7 is a valid in-bounds, non-default value so the read-back is unambiguous.
+  await managers.fill("7");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readManagersOverride).toBe(7);
+  // A reload re-seeds the field from the persisted override — not just optimistic client state.
+  await page.reload();
+  await expect(field(page, label)).toHaveValue("7");
+
+  // CLEAR: blanking this NOW-SET field and saving again must actually DELETE the persisted key (revert to
+  // inherit), not merely omit it while the stale 7 survives underneath (the fd55ac8a-class bug).
+  const managersAfterSet = field(page, label);
+  await managersAfterSet.fill("");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readManagersOverride).toBeNull();
+  await expect(managersLabel.getByText(/effective: 3/)).toBeVisible();
+  await page.reload();
+  await expect(field(page, label)).toHaveValue("");
+
+  // BAD VALUE: 999 is outside the control's advertised 1–100 bound — the strict-zod PATCH 400s readably
+  // (field-named reason) and the persisted (now-cleared) value stays unchanged.
+  const managersAfterReload = field(page, label);
+  await managersAfterReload.fill("999");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/maxConcurrentManagers/).first()).toBeVisible();
+  await expect.poll(readManagersOverride).toBeNull();
+
+  // NON-NUMERIC is likewise rejected — routed through as the literal string, so it 400s distinctly from a
+  // real clear rather than silently colliding with the null sentinel.
+  await managersAfterReload.fill("abc");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/maxConcurrentManagers/).first()).toBeVisible();
+  await expect.poll(readManagersOverride).toBeNull();
+});
+
 test("editing a message-delivery toggle (coalesceAgentMessages): set persists, clearing back to inherit CLEARS the override (card fd55ac8a)", async ({ page, loomDaemon }) => {
   // The tri-state toggles (coalesceAgentMessages/operatorEnabled/schedulerEnabled) share the same
   // clear-to-inherit fix as maxConcurrentGates above — selecting "— inherit" and saving must actually

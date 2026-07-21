@@ -333,7 +333,7 @@ function ConfigEditor({ project }: { project: Project }) {
         <SectionLabel>Orchestration Caps</SectionLabel>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12 }}>
           <NumField label="Max workers / manager" value={maxWorkers} set={setMaxWorkers} effective={resolved.orchestration.maxConcurrentWorkers} def={defaults.orchestration.maxConcurrentWorkers} />
-          <NumField label="Max managers" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} />
+          <NumField label="Max managers (no scheduler effect)" value={maxManagers} set={setMaxManagers} effective={resolved.orchestration.maxConcurrentManagers} def={defaults.orchestration.maxConcurrentManagers} note="The cron Scheduler is one fleet-wide service; its manager cap is set under Settings → Global → Scheduler, not per-project here." />
           <NumField label="Recycle @ ctx ratio" value={recycle} set={setRecycle} effective={resolved.orchestration.recycleAtContextRatio} def={defaults.orchestration.recycleAtContextRatio} />
           <NumField label="Idle nudge (min)" value={idleNudge} set={setIdleNudge} effective={resolved.orchestration.idleNudgeMinutes} def={defaults.orchestration.idleNudgeMinutes} />
           <NumField label="Worker stuck (min)" value={stuckWorker} set={setStuckWorker} effective={resolved.orchestration.stuckWorkerMinutes} def={defaults.orchestration.stuckWorkerMinutes} note="0 disables the stuck-worker watchdog" />
@@ -458,6 +458,13 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // gate semaphore actually reads (it re-reads `cap` on every gate run, so no restart is involved).
   const gatesDefault = resolveConfig(undefined).orchestration.maxConcurrentGates;
   const gatesResolved = resolveConfig(undefined, override).orchestration.maxConcurrentGates;
+  // maxConcurrentManagers (card 52ab5d45) is likewise a top-level PlatformConfigOverride key surfaced on
+  // ResolvedConfig.orchestration — same resolution shape as maxConcurrentGates above. UNLIKE
+  // maxConcurrentGates (re-read live on every gate run), the cron Scheduler is constructed ONCE at boot
+  // (index.ts), so a saved change here needs a daemon restart before it actually changes the Scheduler's
+  // budget — this hint shows what WILL take effect on the next restart, not a live-reread value.
+  const managersDefault = resolveConfig(undefined).orchestration.maxConcurrentManagers;
+  const managersResolved = resolveConfig(undefined, override).orchestration.maxConcurrentManagers;
 
   // One flat string dict keyed by field key (unique across groups). "" = inherit. Seeded from the loaded
   // override, each value displayed in its human unit (canonical ms ÷ the unit).
@@ -480,6 +487,9 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // ms-keyed GLOBAL_FIELDS grid). Blank = inherit the default. A non-numeric entry sends NaN → the
   // strict-zod PATCH 400s with a readable reason (same demonstrable invalid path as the other fields).
   const [maxConcurrentGates, setMaxConcurrentGates] = useState(numStr(override.maxConcurrentGates));
+  // Fleet-wide scheduler manager cap (card 52ab5d45) — same blank-to-inherit tri-state-adjacent pattern
+  // as maxConcurrentGates above, its own control (not the ms-keyed GLOBAL_FIELDS grid).
+  const [maxConcurrentManagers, setMaxConcurrentManagers] = useState(numStr(override.maxConcurrentManagers));
   // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
   const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
@@ -529,6 +539,14 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     } else {
       const n = Number(gatesTrim);
       (o as Record<string, unknown>).maxConcurrentGates = Number.isFinite(n) ? n : gatesTrim;
+    }
+    // Same blank/non-finite handling as maxConcurrentGates above (card 52ab5d45).
+    const managersTrim = maxConcurrentManagers.trim();
+    if (managersTrim === "") {
+      o.maxConcurrentManagers = null;
+    } else {
+      const n = Number(managersTrim);
+      (o as Record<string, unknown>).maxConcurrentManagers = Number.isFinite(n) ? n : managersTrim;
     }
     // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
     // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
@@ -629,6 +647,20 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             When on, the daemon starts the cron Scheduler so due schedules auto-spawn a manager session.
             Daemon-wide (one shared daemon), not per-project. Boot-time-gated: a flip here takes effect on
             the next daemon restart, same as the watcher cadences above.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Max concurrent scheduler-spawned managers · restart required</span>
+          <Input value={maxConcurrentManagers} onChange={(e) => setMaxConcurrentManagers(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${managersDefault})`} />
+          <Hint>{effHint(managersResolved)} (takes effect after a daemon restart)</Hint>
+          <Hint>
+            Caps how many managers the cron Scheduler itself may have live at once — only its OWN spawns
+            count; a standing human/Lead-spawned fleet never competes for this budget, however large it
+            grows. Fleet-wide, not per-project. Boot-time-gated: unlike the gate cap below (re-read on
+            every gate run), the Scheduler reads this ONCE at construction, so a saved change here needs
+            the next daemon restart to actually change its budget — same as the toggle above. Whole
+            number, 1–100.
           </Hint>
         </label>
       </Panel>

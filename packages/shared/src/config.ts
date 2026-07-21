@@ -256,6 +256,13 @@ export interface OrchestrationConfig {
    * defers the remaining due schedules to the next tick (next_fire_at untouched; the deferral is
    * recorded on the schedule row + a `schedule_fire_deferred` event — see Schedule.lastDeferredAt).
    * Default 3.
+   *
+   * **Fleet-wide since card 52ab5d45**: the Scheduler is ONE daemon-wide service (never scoped to a
+   * project), so the value that actually reaches it comes only from the daemon-global
+   * `PlatformConfigOverride.maxConcurrentManagers` (see the merge below, which mirrors
+   * `maxConcurrentGates`'s daemon-global resolution) — a per-project override of THIS field is still
+   * accepted by the per-project schema for backward compat, but is NOT read by the merge and has no
+   * effect on the Scheduler.
    */
   maxConcurrentManagers: number;
   /**
@@ -737,6 +744,15 @@ export interface PlatformConfigOverride {
   /** See OrchestrationConfig.maxConcurrentGates. Daemon-GLOBAL host-load guard (card 301d8c01), like
    *  schedulerEnabled — NOT a per-project setting. */
   maxConcurrentGates?: number;
+  /**
+   * See OrchestrationConfig.maxConcurrentManagers. Daemon-GLOBAL fleet-wide cap on the cron
+   * Scheduler's OWN concurrent manager spawns (card 52ab5d45), mirroring maxConcurrentGates's shape —
+   * NOT a per-project setting. UNLIKE maxConcurrentGates (re-read live on every gate run), the
+   * Scheduler is constructed ONCE at boot (index.ts) and never re-reads this afterward, so a change
+   * here needs a daemon restart to take effect. Default 3 (ZERO behavior change from today's
+   * PLATFORM_DEFAULTS value).
+   */
+  maxConcurrentManagers?: number;
 }
 
 /** Every field of `T` individually nullable — the per-field clear sentinel a `PlatformConfigPatch`
@@ -747,9 +763,9 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
 /**
  * The wire body for `PATCH /api/platform/config` (card fd55ac8a, widened by card ba9ccd75): identical to
  * `PlatformConfigOverride` except the top-level keys the Settings global-config form can blank back to
- * "inherit" — the 4 scalar toggles (`schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
- * `maxConcurrentGates`) and the 3 ms-keyed sub-groups its field grid writes to (`rateLimit`/`watchers`/
- * `timeouts`) — also accept an explicit `null`. Whole-group `null` is the CLEAR sentinel: "delete this
+ * "inherit" — the 5 scalar toggles (`schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
+ * `maxConcurrentGates`/`maxConcurrentManagers`) and the 3 ms-keyed sub-groups its field grid writes to
+ * (`rateLimit`/`watchers`/`timeouts`) — also accept an explicit `null`. Whole-group `null` is the CLEAR sentinel: "delete this
  * key from the stored override, revert to the resolved default". Within a submitted group object, each
  * field is ALSO individually nullable (card ba9ccd75): a per-field `null` clears just that field, while
  * an OMITTED field (whether at the top level or nested inside a submitted group) means "not being
@@ -760,7 +776,7 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates"
+  "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
@@ -769,6 +785,7 @@ export type PlatformConfigPatch = Omit<
   operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
   maxConcurrentGates?: number | null;
+  maxConcurrentManagers?: number | null;
 };
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -1134,6 +1151,16 @@ export function resolveConfig(
     // schedulerEnabled is daemon-GLOBAL (like backup/platform below), so it's read off the platform
     // override even on this no-(project)-override fast path.
     base.orchestration.schedulerEnabled = platformOverride?.schedulerEnabled ?? d.orchestration.schedulerEnabled;
+    // maxConcurrentGates/maxConcurrentManagers are likewise daemon-GLOBAL — same reasoning as
+    // schedulerEnabled above. FIX (found while wiring card 52ab5d45): this fast path used to return the
+    // structuredClone(d) value for BOTH untouched, so `resolveConfig(undefined, po)` silently ignored a
+    // set `po.maxConcurrentGates`/`po.maxConcurrentManagers` — the exact call the Settings global-config
+    // form's "effective:" hints make (`resolveConfig(undefined, override)`), so both hints were stale
+    // (always showing the default) regardless of what was actually persisted. Real spawn/gate call sites
+    // were unaffected (they resolve with a real project override, hitting the full merge below, which
+    // already read `platformOverride` correctly for both fields) — this only reaches the fast path.
+    base.orchestration.maxConcurrentGates = platformOverride?.maxConcurrentGates ?? d.orchestration.maxConcurrentGates;
+    base.orchestration.maxConcurrentManagers = platformOverride?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers;
     // obsidian defaults OFF on this fast path → obsidianSessionEnv({autoStart:false}) is {} → base.sessionEnv
     // stays byte-identical to today (no injection). Nothing to do; left explicit for the next reader.
     // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
@@ -1185,7 +1212,10 @@ export function resolveConfig(
       // Per-project timeout pairing alertWebhook (no env layer). `??` so an explicit value survives.
       alertWebhookTimeoutMs: override.orchestration?.alertWebhookTimeoutMs ?? d.orchestration.alertWebhookTimeoutMs,
       maxConcurrentWorkers: override.orchestration?.maxConcurrentWorkers ?? d.orchestration.maxConcurrentWorkers,
-      maxConcurrentManagers: override.orchestration?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
+      // Fleet-wide scheduler cap (card 52ab5d45): daemon-GLOBAL like maxConcurrentGates below — a
+      // per-project override is intentionally ignored here, not read (the cron Scheduler is ONE
+      // daemon-wide service, never scoped to a specific project — see the field's own doc).
+      maxConcurrentManagers: platformOverride?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
       // Daemon-GLOBAL (no per-project layer, like backup/platform below): the platform override (2nd
       // arg) wins over the default. A stale per-project `orchestration.schedulerEnabled` (accepted
       // before this field moved to PlatformConfigOverride) is intentionally ignored here, not read.
