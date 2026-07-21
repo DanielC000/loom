@@ -83,7 +83,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      shell, runs it, so it never blocks your turn. A `pending` result, or the call queueing behind another
      in-flight gate on a busy fleet, is EXPECTED — not a hang. Parking on its completion nudge IS safe:
      that nudge is a real Loom-pushed message that drives a new turn, unlike a backgrounded shell
-     command's own notification (see below), which is not.
+     command's own notification (see below), which is not. **While parked on that nudge, `worker_report
+     progress` with `awaiting: "background"`** — from Loom's view you've gone idle, and without that flag
+     the idle watchdog defaults to nudging your manager that you may be done-but-unreported or stalled, a
+     wasted round-trip to discover you're just healthy-parked on your own gate.
    - **If it reports your project has no gate command configured**, only then fall back to running your
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report
