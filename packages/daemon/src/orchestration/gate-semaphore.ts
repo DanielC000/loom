@@ -1,22 +1,41 @@
 /**
  * Daemon-global, in-memory concurrency limiter for HEAVY, daemon-EXECUTED gate runs — the
- * merge-confirm gate (`confirmWorkerMerge`) and the scoped-deploy gate (`deployOwnProject`), both of
- * which invoke `runGateSequential` with an arbitrary human-set build/test command. Bounds how many can
- * run AT ONCE across every project, so N concurrent `worker_merge_confirm`/`deploy` calls can't pile up
- * heavy build/test processes and starve a live sibling service on a self-hosting host (card 301d8c01) —
- * today that's enforced only by manager discipline (sequencing merges by hand), not code.
+ * merge-confirm gate (`confirmWorkerMerge`), the scoped-deploy gate (`deployOwnProject`), and the worker
+ * DoD self-check (`runWorkerGate` / the `run_gate` tool), all of which invoke `runGateSequential` with an
+ * arbitrary human-set build/test command. Bounds how many can run AT ONCE across every project, so N
+ * concurrent gate calls can't pile up heavy build/test processes and starve a live sibling service on a
+ * self-hosting host (card 301d8c01) — today that's enforced only by manager discipline (sequencing merges
+ * by hand), not code.
  *
  * A caller that can't acquire a slot QUEUES (awaits) rather than being rejected — merge correctness is
  * unaffected, it just may wait behind another in-flight gate. This composes cleanly with the existing
  * client-timeout resilience (card fb8df559): `PendingOpRegistry.attach` already wraps the WHOLE
- * `confirmWorkerMerge`/`deploy` call and degrades to a pending handle once it runs past its sync-wait
- * budget, so a gate that sits queued for a while is handled exactly like a gate that just runs long —
- * no separate handling needed here.
+ * `confirmWorkerMerge`/`deploy`/`run_gate` call and degrades to a pending handle once it runs past its
+ * sync-wait budget, so a gate that sits queued for a while is handled exactly like a gate that just runs
+ * long — no separate handling needed here.
  *
  * Mirrors `CapQueueRegistry`'s simplicity: daemon-local, in-memory, no persistence. Resetting on a
  * daemon restart is fine — a queued waiter only ever exists inside a live, in-flight call; there is
  * nothing durable to lose.
+ *
+ * PRIORITY QUEUE (card 24642c3d): queued callers wait on TWO tiers — `highWaiters` (merge/deploy) drain
+ * fully before `lowWaiters` (a worker's own `run_gate` self-check), FIFO within each tier. This stops a
+ * low-priority worker's timing-out `run_gate` retries from head-of-line-blocking a higher-priority merge
+ * that arrives later. It reorders the QUEUE only — there is no preemption of an already-RUNNING gate.
+ *
+ * LIVE REGISTRY (card a1c86452, the Gates page): alongside the counting/blocking machinery, every
+ * in-flight run also records a small metadata `RegistryEntry` so the daemon can enumerate what is
+ * currently RUNNING and QUEUED (the Gates page's active lane-hero reads this via
+ * `SessionService.snapshotGates`). The registry is PURE ADDITIVE METADATA: it never influences admission
+ * — `active`/`highWaiters`/`lowWaiters` and the acquire/release logic are byte-identical to the
+ * pre-registry version. Each `runExclusive` REQUIRES a {@link GateDescriptor} (a required param, so the
+ * compiler forces every call site to supply one — no silent gaps), and the registry entry is added before
+ * acquisition and removed in a `finally` that fires on EVERY exit path (admission-then-settle, a `fn`
+ * that throws, a `fn` that times out), so a leaked "phantom active gate" can never accumulate.
  */
+
+import type { GateType } from "@loom/shared";
+
 /** Queue priority for {@link GateSemaphore.runExclusive} (card 24642c3d): `"high"` for a merge/deploy
  *  gate, `"low"` for a worker's own `run_gate` DoD self-check. Governs QUEUE ORDER only — there is no
  *  preemption of an already-RUNNING gate (killing a healthy in-flight gate to make room would waste the
@@ -26,21 +45,77 @@
  *  the exact starvation pattern this card was filed against. */
 export type GatePriority = "high" | "low";
 
+/**
+ * The identity of one gate run, supplied at `runExclusive` time. REQUIRED (not optional) so a missing
+ * descriptor is a compile error at the call site rather than a silent registry gap. `sessionId` is the
+ * SUBJECT session: the worker for a merge/worker gate (its branch is what's being gated), the manager for
+ * a deploy. `taskId`/`branch` are carried when they exist (a deploy has neither).
+ */
+export interface GateDescriptor {
+  gateType: GateType;
+  projectId: string;
+  sessionId: string;
+  taskId?: string | null;
+  branch?: string | null;
+}
+
+/** One live gate run in the snapshot — a `GateDescriptor` enriched with its lane phase + timing. */
+export interface GateSnapshotEntry {
+  id: string;
+  gateType: GateType;
+  projectId: string;
+  sessionId: string;
+  taskId: string | null;
+  branch: string | null;
+  /** "running" once it holds a lane; "queued" while it's still waiting for one. */
+  phase: "running" | "queued";
+  /** Epoch-ms anchor for the UI's live elapsed clock: startedAt (running) or enqueuedAt (queued). */
+  since: number;
+  /** 1-based position in the ACTUAL admission order (all high waiters before low, FIFO within a tier —
+   *  mirrors `release()`); null for a running entry. */
+  queuePosition: number | null;
+}
+
+/** The whole live picture: the counter/queue depth plus a detail entry per in-flight run. */
+export interface GateSnapshot {
+  active: number;
+  queued: number;
+  entries: GateSnapshotEntry[];
+}
+
+/** Internal registry row: `startedAt` is null while queued, stamped at admission. `priority` is retained
+ *  so {@link GateSemaphore.snapshot} can order queued entries in the real high-then-low admission order. */
+interface RegistryEntry {
+  id: string;
+  descriptor: GateDescriptor;
+  priority: GatePriority;
+  enqueuedAt: number;
+  startedAt: number | null;
+}
+
 export class GateSemaphore {
   private active = 0;
   private readonly highWaiters: (() => void)[] = [];
   private readonly lowWaiters: (() => void)[] = [];
+  // Live metadata registry, keyed by a per-run id. Iteration order is enqueue order; the snapshot re-orders
+  // queued entries by (priority, enqueuedAt) to match the real admission order below.
+  private readonly registry = new Map<string, RegistryEntry>();
+  private seq = 0;
 
   /** Acquire a slot under `cap`, queueing (awaiting) if it's already saturated — onto the `"high"` or
-   *  `"low"` tier per `priority`. */
-  private acquire(cap: number, priority: GatePriority): Promise<void> {
+   *  `"low"` tier per `priority`. On admission stamps the entry's `startedAt` so the registry can
+   *  distinguish running from queued (and expose the run's start for a `durationMs` measurement). The
+   *  `active`/tier mutation is unchanged from the pre-registry version — the only addition is the stamp. */
+  private acquire(cap: number, priority: GatePriority, entry: RegistryEntry): Promise<void> {
     if (this.active < cap) {
       this.active++;
+      entry.startedAt = Date.now();
       return Promise.resolve();
     }
     return new Promise((resolve) => {
       const waiter = () => {
         this.active++;
+        entry.startedAt = Date.now();
         resolve();
       };
       (priority === "high" ? this.highWaiters : this.lowWaiters).push(waiter);
@@ -56,18 +131,66 @@ export class GateSemaphore {
     if (next) next();
   }
 
-  /** Run `fn` holding one of `cap` concurrent slots — awaits a slot first (queueing past `cap`, ordered
-   *  by `priority`), then releases it once `fn` settles, whether it resolves or rejects. `cap` is read
-   *  fresh on every call (mirrors the "RESOLVE-LIVE" config reads at each call site), so a human PATCH to
-   *  `orchestration.maxConcurrentGates` takes effect on the very next gate run with no daemon restart.
-   *  `priority` defaults to `"high"` so an untouched/future call site behaves exactly as before this
-   *  card (every caller was implicitly equal-priority FIFO). */
-  async runExclusive<T>(cap: number, fn: () => Promise<T>, priority: GatePriority = "high"): Promise<T> {
-    await this.acquire(cap, priority);
+  /**
+   * Run `fn` holding one of `cap` concurrent slots — awaits a slot first (queueing past `cap`, ordered
+   * by `priority`), then releases it once `fn` settles, whether it resolves or rejects. `cap` is read
+   * fresh on every call (mirrors the "RESOLVE-LIVE" config reads at each call site), so a human PATCH to
+   * `orchestration.maxConcurrentGates` takes effect on the very next gate run with no daemon restart.
+   * `priority` defaults to `"high"` so an untouched/future call site behaves exactly as before card
+   * 24642c3d (every caller was implicitly equal-priority FIFO).
+   *
+   * `fn` receives the entry's admission timestamp (`startedAt`) so the caller can compute a `durationMs`
+   * for its audit event that reflects the actual RUN time (settle − admission), excluding queue wait.
+   *
+   * The registry entry is added up front and deleted in `finally` — which runs on admission-then-settle,
+   * a throwing `fn`, and a timing-out `fn` alike — so no in-flight metadata ever leaks. `release()` is
+   * gated on `acquired` so a slot is only ever released if one was actually taken (defensive: `acquire`
+   * doesn't reject today, but this keeps the counter correct if that ever changes).
+   */
+  async runExclusive<T>(
+    cap: number, descriptor: GateDescriptor, fn: (startedAt: number) => Promise<T>, priority: GatePriority = "high",
+  ): Promise<T> {
+    const entry: RegistryEntry = { id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null };
+    this.registry.set(entry.id, entry);
+    let acquired = false;
     try {
-      return await fn();
+      await this.acquire(cap, priority, entry);
+      acquired = true;
+      return await fn(entry.startedAt!);
     } finally {
-      this.release();
+      this.registry.delete(entry.id);
+      if (acquired) this.release();
     }
+  }
+
+  /** A point-in-time snapshot of every in-flight gate run — the source for the Gates page's active
+   *  lane-hero. Read-only: derives phase/queue-position from the registry without touching admission.
+   *  Queued entries are ordered by the REAL admission order (all high before low, FIFO within a tier),
+   *  so the UI's queue positions match what `release()` will actually admit next. */
+  snapshot(): GateSnapshot {
+    const running: RegistryEntry[] = [];
+    const queued: RegistryEntry[] = [];
+    for (const e of this.registry.values()) (e.startedAt != null ? running : queued).push(e);
+    queued.sort((a, b) => {
+      const pa = a.priority === "high" ? 0 : 1;
+      const pb = b.priority === "high" ? 0 : 1;
+      return pa !== pb ? pa - pb : a.enqueuedAt - b.enqueuedAt;
+    });
+    const toEntry = (e: RegistryEntry, phase: "running" | "queued", queuePosition: number | null): GateSnapshotEntry => ({
+      id: e.id,
+      gateType: e.descriptor.gateType,
+      projectId: e.descriptor.projectId,
+      sessionId: e.descriptor.sessionId,
+      taskId: e.descriptor.taskId ?? null,
+      branch: e.descriptor.branch ?? null,
+      phase,
+      since: phase === "running" ? e.startedAt! : e.enqueuedAt,
+      queuePosition,
+    });
+    const entries: GateSnapshotEntry[] = [
+      ...running.map((e) => toEntry(e, "running", null)),
+      ...queued.map((e, i) => toEntry(e, "queued", i + 1)),
+    ];
+    return { active: this.active, queued: this.highWaiters.length + this.lowWaiters.length, entries };
   }
 }

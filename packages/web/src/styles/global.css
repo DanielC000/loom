@@ -856,6 +856,13 @@ body {
     left: 100%;
   }
 }
+/* Gates page (card a1c86452): a hairline row-hover for the settled-gate history table. */
+.loom-gate-row {
+  transition: background 80ms;
+}
+.loom-gate-row:hover {
+  background: var(--loom-panel-2);
+}
 /* Settled: a solid full-width fill (color set inline — phosphor merged / red failed). */
 .loom-merge-fill {
   position: absolute;
@@ -878,7 +885,8 @@ body {
   .loom-rail-lbl,
   .loom-rail-revealonly,
   .loom-rail-item,
-  .loom-rail-statrow {
+  .loom-rail-statrow,
+  .loom-gate-row {
     transition: none;
   }
   .loom-mic-pulse {

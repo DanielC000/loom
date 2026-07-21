@@ -8,6 +8,7 @@ import RequestsPage from "./pages/RequestsPage";
 import Board from "./pages/Board";
 import Memory from "./pages/Memory";
 import Runs from "./pages/Runs";
+import Gates from "./pages/Gates";
 import Repository from "./pages/Repository";
 import Actors from "./pages/Actors";
 import Companion from "./pages/Companion";
@@ -87,6 +88,11 @@ export const NAV_PAGES: NavPage[] = [
   // type/project" view + the consumed-history tab.
   { label: "Requests", to: "/inbox", element: <RequestsPage />, group: "operate" },
   { label: "Runs", to: "/runs", element: <Runs />, group: "operate", scoped: true },
+  // Gates — the god-eye view of Loom's daemon-executed gates (merge, worker run_gate, deploy) across every
+  // project, all serialized through one GateSemaphore. Active lane-hero (running + queued) on top, settled
+  // history below, with its OWN per-project filter (default ALL) — so it's a cross-project god-eye view like
+  // Mission Control / Runs, deliberately NOT `scoped` to the header picker.
+  { label: "Gates", to: "/gates", element: <Gates />, group: "operate" },
   { label: "Archive", to: "/archive", element: <Archive />, group: "operate", scoped: true },
   // ── Project group (cont.) ────────────────────────────────────────────────────
   // Repository — the consolidated Vault + Git surface (IA merge #3). One destination with a Files | Git

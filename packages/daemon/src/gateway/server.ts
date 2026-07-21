@@ -748,6 +748,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return managerId ? deps.db.listEvents(managerId) : [];
   });
 
+  // --- GATES page (card a1c86452): a god-eye view of Loom's daemon-executed gates (merge, worker
+  // run_gate, deploy) across all projects, all admitted through ONE daemon-global GateSemaphore. Two
+  // READ-ONLY, HUMAN-only loopback readers (same trust posture as /api/orchestration/events above — NEVER
+  // an agent MCP tool). ACTIVE = the live semaphore registry snapshot; HISTORY = the settled gate-run
+  // events, paginated. ---
+  app.get("/api/gates/active", async () => deps.sessions.snapshotGates());
+  app.get("/api/gates/history", async (req) => {
+    const q = req.query as { projectId?: string; limit?: string; offset?: string };
+    const limit = q.limit ? Number(q.limit) : 100;
+    const offset = q.offset ? Number(q.offset) : 0;
+    return deps.db.listGateEvents({
+      projectId: q.projectId || null,
+      limit: Number.isFinite(limit) ? limit : 100,
+      offset: Number.isFinite(offset) ? offset : 0,
+    });
+  });
+
   // --- Session/run AUDIT LOG: a replayable, ordered event timeline + a diff primitive, served over Loom's
   // EXISTING durable record (the `orchestration_events` table + `sessions` metadata — no new capture). These
   // are READ-ONLY, HUMAN-only loopback readers (same trust posture as /api/orchestration/events and the run

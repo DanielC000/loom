@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
+import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -548,6 +548,17 @@ export const api = {
   // --- phase-2 orchestration (#18b view) ---
   orchestrationEvents: (managerId: string) =>
     get<OrchestrationEvent[]>(`/api/orchestration/events?managerId=${encodeURIComponent(managerId)}`),
+
+  // --- Gates page (card a1c86452): god-eye view of daemon-executed gates across all projects. Both are
+  // read-only, human-only. `gatesActive` = the live GateSemaphore registry snapshot (running + queued),
+  // polled for the live lane-hero. `gatesHistory` = the paginated settled gate-run events; `projectId`
+  // scopes it server-side (undefined = ALL). PAGINATED `{items,total,limit}` (mirrors archivedSessions):
+  // a "load more" consumer accumulates by offset and reads the effective `limit` back to detect a cap. ---
+  gatesActive: () => get<GatesActive>("/api/gates/active"),
+  gatesHistory: (opts?: { projectId?: string; limit?: number; offset?: number }) =>
+    get<GateHistoryPage>(
+      `/api/gates/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.projectId ? `&projectId=${encodeURIComponent(opts.projectId)}` : ""}`,
+    ),
   workerDiff: (sessionId: string) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`),
   // Human-initiated merge of a worker's branch — runs the daemon's fail-closed build gate then
   // merges (manager derived from the worker's parentSessionId server-side).

@@ -40,6 +40,7 @@ import type {
   UsageSample, SessionUsageTotals, SessionUsageProject, SessionUsageAgent, SessionUsageDay, SessionUsageSession,
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
+  GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio } from "@loom/shared";
@@ -1128,6 +1129,17 @@ const MAX_SCHEDULE_HISTORY_PAGE = 500;
  *  records NO event, so there is deliberately no `skipped` outcome). Kept as a frozen tuple so the SQL
  *  `IN (...)` clause and any consumer stay in lockstep. */
 const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedule_fire_failed"] as const;
+
+/** Clamp for a bounded gate-history page (listGateEvents, card a1c86452) — same posture as
+ *  MAX_ARCHIVED_PAGE: a caller's `limit` is clamped into [1, MAX_GATE_HISTORY_PAGE] so a huge value can't
+ *  return an unbounded event set. A "load more" client reads the effective `limit` back to detect capping. */
+const MAX_GATE_HISTORY_PAGE = 200;
+
+/** The gate-run orchestration_event kinds that constitute Gates-page HISTORY — one row per daemon-executed
+ *  lane run: a worker self-check (`worker_gate`), a merge gate + its transient-kill retry (`build_gate` /
+ *  `build_gate_retry`, both gateType "merge"), and a scoped deploy (`deploy`). The marker-only
+ *  `build_gate_retry_attempt` carries no outcome, so it is deliberately excluded. */
+const GATE_HISTORY_KINDS = ["worker_gate", "build_gate", "build_gate_retry", "deploy"] as const;
 
 /**
  * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
@@ -4417,6 +4429,49 @@ export class Db {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")
       .all(managerSessionId) as Row[]).map(toOrchestrationEvent);
   }
+
+  /**
+   * Card a1c86452 — the HISTORY half of the Gates page: a bounded, newest-first page of settled gate
+   * RUNS across every project (or one, when `projectId` is set), reconstructed from the gate-run
+   * orchestration_events (see {@link GATE_HISTORY_KINDS}).
+   *
+   * ENRICHMENT IS A JOIN, NOT AN N+1 LOOP: orchestration_events is session-keyed with no project_id, so
+   * the project name, agent name, worker branch, and task title are resolved in ONE query by joining the
+   * SUBJECT session — `COALESCE(worker_session_id, manager_session_id)` (a merge/worker gate keys the
+   * worker; a deploy keys only the manager) — out to sessions → projects/agents and the task. A per-row
+   * lookup loop on the synchronous in-process SQLite would block the event loop; this stays a single
+   * SELECT + a single COUNT, both paginated. LEFT JOINs so a gate whose session/task was since-removed
+   * still lists (with null enrichment) rather than vanishing.
+   *
+   * `limit` is clamped into [1, MAX_GATE_HISTORY_PAGE] and returned as the EFFECTIVE page size so a
+   * "load more" client can detect a server cap (mirrors the archived-sessions pagination contract).
+   * Ordered by `seq DESC` (the never-reused monotonic sequence) so recency is stable across same-ts ties.
+   */
+  listGateEvents(opts: { projectId?: string | null; limit: number; offset: number }): GateHistoryPage {
+    const limit = Math.max(1, Math.min(opts.limit, MAX_GATE_HISTORY_PAGE));
+    const offset = Math.max(0, opts.offset);
+    const kindPlaceholders = GATE_HISTORY_KINDS.map(() => "?").join(",");
+    const projFilter = opts.projectId ? " AND s.project_id = ?" : "";
+    const from =
+      `FROM orchestration_events oe
+       LEFT JOIN sessions s ON s.id = COALESCE(oe.worker_session_id, oe.manager_session_id)
+       LEFT JOIN projects p ON p.id = s.project_id
+       LEFT JOIN agents a ON a.id = s.agent_id
+       LEFT JOIN tasks t ON t.id = oe.task_id
+       WHERE oe.kind IN (${kindPlaceholders})${projFilter}`;
+    const filterParams: unknown[] = opts.projectId ? [...GATE_HISTORY_KINDS, opts.projectId] : [...GATE_HISTORY_KINDS];
+    const total = (this.db.prepare(`SELECT COUNT(*) AS c ${from}`).get(...filterParams) as { c: number }).c;
+    const rows = this.db.prepare(
+      `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
+              COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
+              s.project_id AS projectId, p.name AS projectName, a.name AS agentName,
+              s.branch AS branch, t.title AS taskTitle
+       ${from}
+       ORDER BY oe.seq DESC
+       LIMIT ? OFFSET ?`,
+    ).all(...filterParams, limit, offset) as GateEventJoinRow[];
+    return { items: rows.map(toGateHistoryRow), total, limit };
+  }
   /**
    * Every `platform_escalate` event whose `detail.originProjectId` matches the given project — the
    * manager-facing `escalation_status` read's SERVER-SIDE scoped set (mcp/orchestration.ts). Scoped by
@@ -5963,6 +6018,74 @@ function toScheduleHistoryEntry(r0: unknown): ScheduleHistoryEntry {
     error: (detail.error as string | undefined) ?? null,
   };
 }
+/** The JOINed row shape {@link Db.listGateEvents} selects — the raw event columns plus the enrichment
+ *  the LEFT JOINs resolve. `agentName`/`taskTitle` compose the worker label; `detailJson` is parsed for
+ *  outcome/duration/failingTest. */
+interface GateEventJoinRow {
+  id: string;
+  ts: string;
+  kind: string;
+  detailJson: string | null;
+  taskId: string | null;
+  sessionId: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  agentName: string | null;
+  branch: string | null;
+  taskTitle: string | null;
+}
+
+/** Map a gate-run event kind to the page's three gate types (`build_gate`/`build_gate_retry` → merge). */
+function gateTypeForKind(kind: string): GateType {
+  if (kind === "worker_gate") return "worker";
+  if (kind === "deploy") return "deploy";
+  return "merge"; // build_gate | build_gate_retry
+}
+
+/** Derive the settled outcome from a gate event's detail. Truthy `passed` (worker/build gates) or `ok`
+ *  (deploy) is a pass; otherwise a timed-out run is `timeout`, a signal-killed run is `kill`, and anything
+ *  else (a genuine non-zero exit / error) is `reject`. Merge (`build_gate`) detail only carries `passed`,
+ *  so a failed merge gate reads as `reject` — its kill/timeout nuance lives on the sibling merge_rejected
+ *  event, not surfaced here. */
+function gateOutcomeFromDetail(detail: Record<string, unknown>): GateOutcome {
+  if (detail.passed === true || detail.ok === true) return "pass";
+  if (detail.timedOut === true) return "timeout";
+  if (typeof detail.signal === "string" && detail.signal.length > 0) return "kill";
+  return "reject";
+}
+
+/** Compose the Gates worker label ("<agent> · <short task title>"). Mirrors the daemon-side
+ *  `gateWorkerLabel` (sessions/service.ts) so the active snapshot and this history row render identically. */
+function gateHistoryWorkerLabel(agentName: string | null, taskTitle: string | null): string | null {
+  const title = taskTitle ? (taskTitle.length > 48 ? `${taskTitle.slice(0, 47)}…` : taskTitle) : undefined;
+  if (agentName && title) return `${agentName} · ${title}`;
+  return agentName ?? title ?? null;
+}
+
+/** Map one JOINed gate event to a {@link GateHistoryRow}. */
+function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
+  let detail: Record<string, unknown> = {};
+  if (r.detailJson) {
+    try { detail = JSON.parse(r.detailJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
+  }
+  const durationMs = typeof detail.durationMs === "number" ? detail.durationMs : null;
+  const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : null;
+  return {
+    id: r.id,
+    gateType: gateTypeForKind(r.kind),
+    outcome: gateOutcomeFromDetail(detail),
+    projectId: r.projectId,
+    projectName: r.projectName,
+    sessionId: r.sessionId,
+    taskId: r.taskId,
+    branch: r.branch,
+    workerLabel: gateHistoryWorkerLabel(r.agentName, r.taskTitle),
+    durationMs,
+    endedAt: r.ts,
+    failingTest,
+  };
+}
+
 function toTask(r0: unknown): Task {
   const r = r0 as Row;
   return {

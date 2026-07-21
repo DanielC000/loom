@@ -1063,6 +1063,74 @@ export interface ScheduleHistoryPage {
   limit: number;
 }
 
+/**
+ * The Gates page (card a1c86452) — a god-eye view of Loom's daemon-executed gates across all projects.
+ * Three kinds share ONE daemon-global GateSemaphore (`orchestration.maxConcurrentGates`): a `merge`
+ * gate (`confirmWorkerMerge`), a `deploy` gate (`deployOwnProject`), and a `worker` self-check (the
+ * `run_gate` tool). These types back the two read-only endpoints the page consumes.
+ */
+export type GateType = "merge" | "deploy" | "worker";
+
+/** One in-flight gate run in the ACTIVE snapshot — either holding a lane (`running`) or waiting for one
+ *  (`queued`). Enriched (server-side) from the live GateSemaphore registry with project/worker/priority. */
+export interface GateRun {
+  id: string;
+  gateType: GateType;
+  phase: "running" | "queued";
+  projectId: string;
+  projectName: string;
+  /** The SUBJECT session: the worker for a merge/worker gate, the manager for a deploy. */
+  sessionId: string;
+  taskId: string | null;
+  branch: string | null;
+  /** Human label — "<agent> · <short task title>" when resolvable, else null. */
+  workerLabel: string | null;
+  priority: TaskPriority | null;
+  /** ISO anchor for the UI's live elapsed clock: admission time (running) or enqueue time (queued). */
+  since: string;
+  /** 1-based queue position (running entries: null). */
+  queuePosition: number | null;
+}
+
+/** The active-gates payload: the semaphore's live occupancy + the per-run detail. `cap` is the resolved
+ *  daemon-global `maxConcurrentGates` (default 1) — the number of lanes. */
+export interface GatesActive {
+  cap: number;
+  activeCount: number;
+  queuedCount: number;
+  gates: GateRun[];
+}
+
+/** How a settled gate run ended, derived from its orchestration_event detail. */
+export type GateOutcome = "pass" | "reject" | "timeout" | "kill";
+
+/** One settled gate run in the HISTORY table — reconstructed from a gate-related orchestration_event
+ *  (`worker_gate` / `build_gate` / `deploy`), enriched via a JOIN to the keyed session's project/task. */
+export interface GateHistoryRow {
+  id: string;
+  gateType: GateType;
+  outcome: GateOutcome;
+  projectId: string | null;
+  projectName: string | null;
+  sessionId: string | null;
+  taskId: string | null;
+  branch: string | null;
+  workerLabel: string | null;
+  /** Real run time (settle − admission) — null for rows recorded before durationMs was stamped. */
+  durationMs: number | null;
+  /** ISO timestamp the run settled. */
+  endedAt: string;
+  failingTest: string | null;
+}
+
+/** A bounded page of gate history (mirrors {@link ArchivedSessionsPage}'s {items,total,limit} contract so
+ *  a "load more" UI can size itself + tell when its requested limit was server-clamped). */
+export interface GateHistoryPage {
+  items: GateHistoryRow[];
+  total: number;
+  limit: number;
+}
+
 /** A read-only vault file-tree entry. */
 export interface VaultEntry {
   path: string; // relative to the project's vault folder, forward slashes

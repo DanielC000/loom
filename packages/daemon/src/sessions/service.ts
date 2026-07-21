@@ -7,6 +7,7 @@ import {
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
+  type GatesActive, type GateRun,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
@@ -41,7 +42,7 @@ import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudg
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
-import { GateSemaphore } from "../orchestration/gate-semaphore.js";
+import { GateSemaphore, type GateDescriptor } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
@@ -55,6 +56,16 @@ import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js
 /** Floor (1s) for any threaded git-op timeout — a sub-second misconfig must never make every git op
  *  fail-fast (mirrors GitWriter's GIT_TIMEOUT_FLOOR_MS). Applied where the resolved value is threaded. */
 const GIT_TIMEOUT_FLOOR_MS = 1_000;
+
+/** Compose the Gates-page worker label ("<agent> · <short task title>") from an optional agent name +
+ *  task title, truncating a long title so it doesn't blow out the lane card. Returns null when neither
+ *  is known (a deploy gate with no task on a session whose agent didn't resolve). Shared by the active
+ *  snapshot and the history query so both render an identical label. */
+function gateWorkerLabel(agentName?: string, taskTitle?: string): string | null {
+  const title = taskTitle ? (taskTitle.length > 48 ? `${taskTitle.slice(0, 47)}…` : taskTitle) : undefined;
+  if (agentName && title) return `${agentName} · ${title}`;
+  return agentName ?? title ?? null;
+}
 
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
  *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type.
@@ -1966,14 +1977,20 @@ export class SessionService {
     const runGateSeq = this.runGate ?? runGateSequential;
     // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
     // rather than running alongside it unbounded. See GateSemaphore's class doc. "high" priority (card
-    // 24642c3d) — a deploy is a deliberate human-triggered action, not a worker self-check retry.
+    // 24642c3d) — a deploy is a deliberate human-triggered action, not a worker self-check retry. The
+    // descriptor (card a1c86452) makes it visible on the Gates page's active lane while it holds/queues for
+    // a slot; `startedAt` (admission time) drives the audit event's real run-time `durationMs` (excl. queue wait).
+    const deployDescriptor: GateDescriptor = { gateType: "deploy", projectId: project.id, sessionId: managerSessionId };
+    let deployStartedAt = 0;
     const result = await this.gateSemaphore.runExclusive(
-      orchestration.maxConcurrentGates, () => runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs), "high",
+      orchestration.maxConcurrentGates, deployDescriptor,
+      (startedAt) => { deployStartedAt = startedAt; return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs); },
+      "high",
     );
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
-        reason, ok: result.passed,
+        reason, ok: result.passed, durationMs: Date.now() - deployStartedAt,
         ...(result.passed ? {} : {
           exitCode: result.failedStatus ?? null,
           signal: result.failedSignal ?? null,
@@ -1985,6 +2002,42 @@ export class SessionService {
     return result.passed
       ? { deployed: true }
       : { deployed: false, reason: "deploy command failed", exitCode: result.failedStatus ?? null, outputTail: result.outputTail };
+  }
+
+  /**
+   * Card a1c86452 — the ACTIVE half of the Gates page. Reads the live {@link GateSemaphore} registry and
+   * enriches each in-flight run with its project name, a human worker label ("<agent> · <short task
+   * title>"), and the task's priority. Bounded by the number of concurrent + queued gates (single digits
+   * at any realistic `maxConcurrentGates`), so the per-entry point lookups here are NOT the N+1 /
+   * event-loop concern that governs the paginated HISTORY query — this is a handful of synchronous
+   * in-process SQLite reads. `cap` is the resolved daemon-global `maxConcurrentGates` (default 1) — it has
+   * NO per-project layer, so it's resolved with an EMPTY project override (`{}`) which takes resolveConfig's
+   * full path and reads the platform value, rather than `undefined` which would return the fast-path default.
+   */
+  snapshotGates(): GatesActive {
+    const snap = this.gateSemaphore.snapshot();
+    const cap = resolveConfig({}, this.db.getPlatformConfig()).orchestration.maxConcurrentGates;
+    const gates: GateRun[] = snap.entries.map((e) => {
+      const project = this.db.getProject(e.projectId);
+      const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
+      const session = this.db.getSession(e.sessionId);
+      const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
+      return {
+        id: e.id,
+        gateType: e.gateType,
+        phase: e.phase,
+        projectId: e.projectId,
+        projectName: project?.name ?? e.projectId,
+        sessionId: e.sessionId,
+        taskId: e.taskId,
+        branch: e.branch,
+        workerLabel: gateWorkerLabel(agent?.name, task?.title),
+        priority: task?.priority ?? null,
+        since: new Date(e.since).toISOString(),
+        queuePosition: e.queuePosition,
+      };
+    });
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, gates };
   }
 
   /**
@@ -6715,8 +6768,13 @@ export class SessionService {
       // priority (card 24642c3d) — a merge gate must not be head-of-line-blocked by queued low-priority
       // worker `run_gate` self-check retries.
       const gateCap = orchestration.maxConcurrentGates;
-      let gateResult = await this.gateSemaphore.runExclusive(gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs), "high");
-      evt("build_gate", { passed: gateResult.passed });
+      // Card a1c86452: the descriptor surfaces this merge gate on the Gates page's active lane; `startedAt`
+      // (admission) drives the `build_gate` event's real run-time `durationMs`, excluding queue wait. "high"
+      // priority (card 24642c3d) — see the host-load-guard doc above.
+      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch };
+      let gateStartedAt = 0;
+      let gateResult = await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs); }, "high");
+      evt("build_gate", { passed: gateResult.passed, durationMs: Date.now() - gateStartedAt });
       if (gateResult.failedTimedOut) {
         // POST-TIMEOUT SWEEP (card 3564fd1e): gate-runner's own tree-kill already reaps everything still
         // parented under the killed shell — this is the SAME worktree-path-scoped backstop the pre-gate
@@ -6742,11 +6800,15 @@ export class SessionService {
         // allowExtend:false (card 24642c3d) — the FIRST attempt above already got one auto-extend chance;
         // letting this retry ALSO auto-extend would stack two "one more chance" mechanisms into an
         // excessive worst-case wall-clock (up to 4x gateTimeoutMs instead of ~3x) before the circuit
-        // breaker's streak-count even starts moving toward its trip threshold.
+        // breaker's streak-count even starts moving toward its trip threshold. `startedAt` (card a1c86452)
+        // drives the `build_gate_retry` event's real run-time `durationMs`, excluding queue wait.
+        let retryStartedAt = 0;
         gateResult = await this.gateSemaphore.runExclusive(
-          gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false), "high",
+          gateCap, gateDescriptor,
+          (startedAt) => { retryStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false); },
+          "high",
         );
-        evt("build_gate_retry", { passed: gateResult.passed });
+        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt });
         if (gateResult.failedTimedOut) {
           try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
         }
@@ -7132,6 +7194,11 @@ export class SessionService {
           taskId: worker.taskId ?? null, kind: "worker_gate", detail,
         });
         let gateResult: GateSequentialResult;
+        // Card a1c86452: the descriptor surfaces this worker self-check on the Gates page's active lane;
+        // `startedAt` (admission) drives the `worker_gate` event's real run-time `durationMs`, excluding
+        // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
+        const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null };
+        let gateStartedAt = 0;
         try {
           // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
           // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
@@ -7139,7 +7206,9 @@ export class SessionService {
           // re-call run_gate itself" — see the `orchestration.gateRetry`-gated retry in confirmWorkerMerge
           // above, which this function deliberately does not share).
           gateResult = await this.gateSemaphore.runExclusive(
-            gateCap, () => runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE), "low",
+            gateCap, gateDescriptor,
+            (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE); },
+            "low",
           );
         } catch (err) {
           // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
@@ -7147,7 +7216,7 @@ export class SessionService {
           // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
           // caller (PendingOpRegistry.attach) already turns a rejection into a normal {ok:false} outcome —
           // this audit write adds a durable record, it does not change that error-handling behavior.
-          evt({ passed: false, error: err instanceof Error ? err.message : String(err) });
+          evt({ passed: false, error: err instanceof Error ? err.message : String(err), ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
           throw err;
         }
         if (worker.branch) {
@@ -7163,7 +7232,7 @@ export class SessionService {
           await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
         }
         if (gateResult.passed) {
-          evt({ passed: true });
+          evt({ passed: true, durationMs: Date.now() - gateStartedAt });
           return { ran: true, passed: true, opId };
         }
         const finalClass = classifyGateFailure(gateResult);
@@ -7184,6 +7253,7 @@ export class SessionService {
         evt({
           passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
           exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
+          durationMs: Date.now() - gateStartedAt,
           ...(outputTail ? { outputTail } : {}),
         });
         return {

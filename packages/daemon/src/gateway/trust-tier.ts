@@ -50,6 +50,10 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/agents/:id/sessions" },
   { method: "GET", pattern: "/api/sessions/:id/queue" },
   { method: "GET", pattern: "/api/sessions/:id/wakes" },
+  // Gates page reads (card a1c86452): the live active-gate snapshot + paginated gate history. Read-only,
+  // human-only, cross-project god-eye — same posture as the audit/orchestration-events reads below.
+  { method: "GET", pattern: "/api/gates/active" },
+  { method: "GET", pattern: "/api/gates/history" },
   // Audit / usage reads
   { method: "GET", pattern: "/api/audit/session/:id" },
   { method: "GET", pattern: "/api/audit/wave/:managerId" },

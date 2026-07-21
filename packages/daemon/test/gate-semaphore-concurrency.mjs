@@ -42,9 +42,14 @@ const now = new Date().toISOString();
 const dbs = [];
 const worktrees = [];
 
-// ── Pure unit check: GateSemaphore.runExclusive in isolation ──────────────────────────────────────
+// ── Pure unit check: GateSemaphore.runExclusive + its live registry in isolation ───────────────────
+// runExclusive now takes a REQUIRED descriptor (card a1c86452) so the Gates page can enumerate live
+// runs; these checks prove the counting/blocking path is unchanged AND that the registry entry is
+// added/removed across every exit path — success, throw (a reject/timeout looks identical to the
+// semaphore), and a queued entry's admission — so a leaked "phantom active gate" can never accumulate.
 {
   const sem = new GateSemaphore();
+  const desc = (id, gateType = "worker") => ({ gateType, projectId: `proj-${id}`, sessionId: `sess-${id}` });
   let active = 0, maxActive = 0;
   const task = async () => {
     active++;
@@ -54,32 +59,77 @@ const worktrees = [];
     return "ok";
   };
   const results = await Promise.all([
-    sem.runExclusive(1, task),
-    sem.runExclusive(1, task),
-    sem.runExclusive(1, task),
+    sem.runExclusive(1, desc(1), task),
+    sem.runExclusive(1, desc(2), task),
+    sem.runExclusive(1, desc(3), task),
   ]);
   check("(unit, cap 1) three tasks all resolve", results.every((r) => r === "ok"));
   check("(unit, cap 1) never more than 1 concurrent", maxActive === 1);
+  check("(unit, registry) EMPTY after all runs settle (no leaked holder)",
+    sem.snapshot().active === 0 && sem.snapshot().queued === 0 && sem.snapshot().entries.length === 0);
 
   active = 0; maxActive = 0;
   const results2 = await Promise.all([
-    sem.runExclusive(2, task),
-    sem.runExclusive(2, task),
+    sem.runExclusive(2, desc(4), task),
+    sem.runExclusive(2, desc(5), task),
   ]);
   check("(unit, cap 2) both resolve", results2.every((r) => r === "ok"));
   check("(unit, cap 2) reaches 2 concurrent (cap isn't a silent hardcoded 1)", maxActive === 2);
 
-  // a thrown fn still releases its slot (no permanent deadlock on an error)
-  active = 0;
-  await sem.runExclusive(1, async () => { throw new Error("boom"); }).catch(() => {});
-  const after = await sem.runExclusive(1, async () => "released");
-  check("(unit) a slot is released even when fn rejects", after === "released");
+  // Snapshot mid-flight: one RUNNING (holding the lane) + one QUEUED (waiting), with descriptor + phase.
+  {
+    const sem2 = new GateSemaphore();
+    let releaseHolder;
+    const holder = () => new Promise((res) => { releaseHolder = res; }); // holds the single lane until released
+    const pRun = sem2.runExclusive(1, { gateType: "merge", projectId: "P", sessionId: "s1", taskId: "t1", branch: "loom/aaa" }, () => holder());
+    const pQueued = sem2.runExclusive(1, { gateType: "worker", projectId: "Q", sessionId: "s2", taskId: "t2", branch: "loom/bbb" }, async () => "second");
+    await sleep(20); // let pRun acquire the lane + pQueued queue behind it
+    const snap = sem2.snapshot();
+    const runningEntry = snap.entries.find((e) => e.phase === "running");
+    const queuedEntry = snap.entries.find((e) => e.phase === "queued");
+    check("(unit, snapshot) reports exactly 1 active + 1 queued", snap.active === 1 && snap.queued === 1 && snap.entries.length === 2);
+    check("(unit, snapshot) running entry carries its full descriptor",
+      !!runningEntry && runningEntry.gateType === "merge" && runningEntry.projectId === "P" && runningEntry.branch === "loom/aaa" && typeof runningEntry.since === "number");
+    check("(unit, snapshot) queued entry is phase=queued with queuePosition 1",
+      !!queuedEntry && queuedEntry.phase === "queued" && queuedEntry.queuePosition === 1 && queuedEntry.gateType === "worker");
+    releaseHolder("first");
+    await Promise.all([pRun, pQueued]);
+    check("(unit, snapshot) registry EMPTY after both settle (queued admitted then removed — no leak)",
+      sem2.snapshot().active === 0 && sem2.snapshot().queued === 0 && sem2.snapshot().entries.length === 0);
+  }
+
+  // Throw path: a rejecting fn (a real runner exception / kill / timeout all look the same here) must
+  // remove its registry entry AND release its slot — no phantom active gate, no deadlock.
+  {
+    const sem3 = new GateSemaphore();
+    await sem3.runExclusive(1, desc("boom"), async () => { throw new Error("boom"); }).catch(() => {});
+    check("(unit, throw) registry empty after a throwing fn (no leaked holder)",
+      sem3.snapshot().active === 0 && sem3.snapshot().entries.length === 0);
+    const after = await sem3.runExclusive(1, desc("after"), async () => "released");
+    check("(unit, throw) a slot is released even when fn rejects", after === "released");
+  }
+
+  // A queued gate behind a THROWING holder still gets admitted — the holder's throw must free the lane in
+  // its finally, exactly as a clean settle would (covers the reject/timeout-then-drain path end to end).
+  {
+    const sem4 = new GateSemaphore();
+    const pThrow = sem4.runExclusive(1, desc("hold"), async () => { await sleep(30); throw new Error("timeout"); }).catch(() => "threw");
+    const pWait = sem4.runExclusive(1, desc("wait"), async () => "admitted-after-throw");
+    const [a, b] = await Promise.all([pThrow, pWait]);
+    check("(unit, throw) a queued gate is admitted after the holder throws (lane freed in finally)",
+      a === "threw" && b === "admitted-after-throw");
+    check("(unit, throw) registry empty after the throw + queued both settle", sem4.snapshot().entries.length === 0);
+  }
 }
 
 // ── Pure unit check: priority-aware queue ordering (card 24642c3d — a low-priority worker run_gate
 //    self-check must not head-of-line-block a higher-priority merge/deploy gate queued behind it) ────
 {
   const sem = new GateSemaphore();
+  // A shared descriptor — this block exercises QUEUE ORDERING, not the registry, so one read-only
+  // descriptor for every run is fine (each runExclusive wraps it in its own entry). runExclusive's new
+  // signature is (cap, descriptor, fn, priority) — the `task(...)` fn ignores the startedAt it's handed.
+  const d = { gateType: "worker", projectId: "p", sessionId: "s" };
   const order = [];
   let active = 0, maxActive = 0;
   const task = (label, ms) => async () => {
@@ -94,13 +144,13 @@ const worktrees = [];
   // order — the priority queue must run high BEFORE the already-queued low2 (low1 is unaffected: it
   // queued before the holder even released, so nothing could have jumped ahead of it — the guarantee is
   // ONLY that high jumps LOW waiters queued ahead of it, not that it jumps EVERYTHING).
-  const holder = sem.runExclusive(1, task("holder", 150));
+  const holder = sem.runExclusive(1, d, task("holder", 150));
   await sleep(20); // ensure "holder" has genuinely acquired the slot before anything else queues
-  const low1 = sem.runExclusive(1, task("low1", 20), "low");
+  const low1 = sem.runExclusive(1, d, task("low1", 20), "low");
   await sleep(10);
-  const low2 = sem.runExclusive(1, task("low2", 20), "low");
+  const low2 = sem.runExclusive(1, d, task("low2", 20), "low");
   await sleep(10);
-  const high = sem.runExclusive(1, task("high", 20), "high");
+  const high = sem.runExclusive(1, d, task("high", 20), "high");
 
   await Promise.all([holder, low1, low2, high]);
   check("(priority) all four ran", order.length === 4);
@@ -115,11 +165,11 @@ const worktrees = [];
   const semFifo = new GateSemaphore();
   const fifoOrder = [];
   const fifoTask = (label) => async () => { fifoOrder.push(label); await sleep(20); return label; };
-  const fh = semFifo.runExclusive(1, fifoTask("h"), "low");
+  const fh = semFifo.runExclusive(1, d, fifoTask("h"), "low");
   await sleep(10);
-  const f1 = semFifo.runExclusive(1, fifoTask("f1"), "low");
-  const f2 = semFifo.runExclusive(1, fifoTask("f2"), "low");
-  const f3 = semFifo.runExclusive(1, fifoTask("f3"), "low");
+  const f1 = semFifo.runExclusive(1, d, fifoTask("f1"), "low");
+  const f2 = semFifo.runExclusive(1, d, fifoTask("f2"), "low");
+  const f3 = semFifo.runExclusive(1, d, fifoTask("f3"), "low");
   await Promise.all([fh, f1, f2, f3]);
   check("(priority) same-tier queue stays strict FIFO", JSON.stringify(fifoOrder) === JSON.stringify(["h", "f1", "f2", "f3"]));
 
@@ -129,11 +179,11 @@ const worktrees = [];
   const semDefault = new GateSemaphore();
   const defaultOrder = [];
   const dTask = (label, ms = 20) => async () => { defaultOrder.push(label); await sleep(ms); return label; };
-  const dHolder = semDefault.runExclusive(1, dTask("dholder", 150)); // holds well past both queue-ins below, avoiding a release/push race
+  const dHolder = semDefault.runExclusive(1, d, dTask("dholder", 150)); // holds well past both queue-ins below, avoiding a release/push race
   await sleep(10);
-  const dLow = semDefault.runExclusive(1, dTask("dlow"), "low");
+  const dLow = semDefault.runExclusive(1, d, dTask("dlow"), "low");
   await sleep(10);
-  const dNoArg = semDefault.runExclusive(1, dTask("dnoarg")); // priority omitted
+  const dNoArg = semDefault.runExclusive(1, d, dTask("dnoarg")); // priority omitted
   await Promise.all([dHolder, dLow, dNoArg]);
   check("(priority) an omitted-priority call defaults to high and jumps an already-queued low waiter",
     defaultOrder.indexOf("dnoarg") < defaultOrder.indexOf("dlow"));
