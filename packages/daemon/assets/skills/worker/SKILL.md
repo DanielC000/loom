@@ -251,10 +251,10 @@ log`) so it can never page into `less` and block on `q`; and never start a foreg
 doesn't exit on its own. (Your spawn env also sets `GIT_PAGER=cat`/`PAGER=cat`/`GIT_TERMINAL_PROMPT=0`
 as a backstop, but write `--no-pager` anyway.)
 
-**A Bash `cd` leaks into later relative-path resolution.** If a Bash call changes directory, that cwd
-change also applies to any Grep/Glob you run afterward with a relative path — a later relative lookup
-can then fail against the wrong base. Prefer **absolute paths** in Grep/Glob (or a tool's own
-`path`/`cwd` parameter) instead of relying on a shell cwd carried over from an earlier command.
+**A Bash `cd` leaks into every later call — never rely on it.** Any Bash call whose behavior depends on
+cwd must make cwd explicit in that same call: use an absolute path, or prefix with `cd "$LOOM_WORKTREE"
+&& …` (your worktree root, always set in your env) — a leaked cwd breaks a later relative-path Grep/Glob
+too, so prefer absolute paths there as well.
 
 ## Report protocol
 

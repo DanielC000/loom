@@ -1680,10 +1680,20 @@ export function buildSpawnArgs(o: {
  * The three are set BEFORE the sessionEnv merge, so a project that deliberately overrides any of them via
  * config.sessionEnv still wins (no capability regression). Every other byte of the env is identical to
  * before. Exported so the hermetic spawn-env test asserts the vars, the scrub, and the override.
+ *
+ * Also carries `LOOM_WORKTREE=spawnCwd` — a stable anchor an agent's OWN Bash calls can reference (e.g.
+ * `cd "$LOOM_WORKTREE" && …`) to make a cwd-dependent command deterministic regardless of what an
+ * earlier call's `cd` left behind. Loom cannot reset the Bash tool's cwd itself (that shell state is
+ * internal to the upstream Claude Code CLI process, invisible past its pty), so this is the strongest
+ * reachable mitigation: a known-good absolute anchor, not a reset. Uniform across every session kind —
+ * for a worker `spawnCwd` is the worktree root; for a manager/companion/plain session it's just that
+ * session's own cwd (repo/project root). Set before the sessionEnv merge, like the git-safety vars, so a
+ * deliberate override still wins.
  */
 export function buildSpawnEnv(
   processEnv: Record<string, string | undefined>,
   sessionEnv: Record<string, string>,
+  spawnCwd: string,
 ): Record<string, string> {
   const env: Record<string, string> = {};
   for (const [k, v] of Object.entries(processEnv)) {
@@ -1695,6 +1705,7 @@ export function buildSpawnEnv(
   env.GIT_PAGER = "cat";
   env.PAGER = "cat";
   env.GIT_TERMINAL_PROMPT = "0";
+  env.LOOM_WORKTREE = spawnCwd;
   Object.assign(env, sessionEnv);
   return env;
 }
@@ -2582,8 +2593,9 @@ export class PtyHost {
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools, sessionName });
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
-    // keep an unattended worker pty from wedging on a pager / credential prompt. See buildSpawnEnv.
-    const env = buildSpawnEnv(process.env, opts.sessionEnv);
+    // keep an unattended worker pty from wedging on a pager / credential prompt, plus LOOM_WORKTREE (the
+    // cwd anchor an agent's own Bash calls can reference). See buildSpawnEnv.
+    const env = buildSpawnEnv(process.env, opts.sessionEnv, opts.cwd);
     // Obsidian auto-start: when the resolved config turned it on (LOOM_OBSIDIAN_AUTOSTART rode in via
     // sessionEnv → obsidianSessionEnv), hand the vault preflight helper its ABSOLUTE path so a vault skill
     // can `node "$LOOM_OBSIDIAN_PREFLIGHT"`. The asset path is daemon-side (not knowable in browser-pure

@@ -33,8 +33,9 @@ const sessionEnv = {
   CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN: "1",
   CLAUDE_CODE_ALT_SCREEN_FULL_REPAINT: "1",
 };
+const spawnCwd = "/home/worker/worktrees/loom-600bca4c";
 
-const env = buildSpawnEnv(processEnv, sessionEnv);
+const env = buildSpawnEnv(processEnv, sessionEnv, spawnCwd);
 
 // --- the three git-safety vars (the headline fix) ---
 check("GIT_PAGER === 'cat' (git never launches a pager)", env.GIT_PAGER === "cat");
@@ -66,7 +67,15 @@ check("a sessionEnv GIT_TERMINAL_PROMPT override STILL wins", overridden.GIT_TER
 // (a var NOT overridden by sessionEnv keeps the safety default)
 check("a git var NOT overridden by sessionEnv keeps its safety default (GIT_PAGER=cat)", overridden.GIT_PAGER === "cat");
 
+// --- LOOM_WORKTREE (card 600bca4c): the cwd anchor an agent's own Bash calls can reference, since Loom
+// cannot reset the Bash tool's cwd itself (that shell state is internal to the upstream CLI process). ---
+check("LOOM_WORKTREE is set to the spawn cwd", env.LOOM_WORKTREE === spawnCwd);
+const anotherCwd = "/home/worker/worktrees/loom-other-task";
+check("LOOM_WORKTREE tracks a DIFFERENT spawn cwd (not hardcoded)", buildSpawnEnv(processEnv, sessionEnv, anotherCwd).LOOM_WORKTREE === anotherCwd);
+// a deliberate sessionEnv override still wins, exactly like the git-safety vars.
+check("a sessionEnv LOOM_WORKTREE override STILL wins", buildSpawnEnv(processEnv, { ...sessionEnv, LOOM_WORKTREE: "/overridden" }, spawnCwd).LOOM_WORKTREE === "/overridden");
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnEnv carries GIT_PAGER/PAGER=cat + GIT_TERMINAL_PROMPT=0 (closes the git-wedges-the-worker-pty class), preserves the CLAUDE_*/CLAUDECODE scrub + undefined-skip, and a project sessionEnv override still wins (no capability regression)."
+  ? "\n✅ ALL PASS — buildSpawnEnv carries GIT_PAGER/PAGER=cat + GIT_TERMINAL_PROMPT=0 (closes the git-wedges-the-worker-pty class) + LOOM_WORKTREE=spawnCwd (card 600bca4c's cwd-anchor mitigation), preserves the CLAUDE_*/CLAUDECODE scrub + undefined-skip, and a project sessionEnv override still wins for all of them (no capability regression)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
