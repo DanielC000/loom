@@ -29,7 +29,7 @@ const GROUPS: { key: NavGroup; label: string }[] = [
   { key: "system", label: "System" },
 ];
 
-// A scope marker on nav items that respond to the active-project picker (Overview / Board / Lore /
+// A scope marker on nav items that respond to the active-project picker (Overview / Board / Memory /
 // Runs / Repository / Settings). Hidden while the rail is collapsed (there's no room beside the icon).
 function ScopeDot() {
   return <span className="loom-rail-scopedot" title="scoped to the active project" />;

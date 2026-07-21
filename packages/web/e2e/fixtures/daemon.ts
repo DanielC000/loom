@@ -152,8 +152,8 @@ export interface LoomDaemon {
     task: { title: string; body?: string; columnKey?: string; priority?: "p0" | "p1" | "p2" | "p3" },
   ) => Promise<SeededTask>;
   /**
-   * Seed project_memory (Lore) rows via the test-only POST /internal/test/seed (card 7ea6ce71) — the ONLY
-   * way an e2e spec can put data on the /lore page, since project_memory has NO REST/agent write path (it's
+   * Seed project_memory (Memory) rows via the test-only POST /internal/test/seed (card 7ea6ce71) — the ONLY
+   * way an e2e spec can put data on the /memory page, since project_memory has NO REST/agent write path (it's
    * written only by the memory MCP). Upserted via db.upsertProjectMemory (the memory_write path); each
    * entry's optional `retrievalCount` is applied as that many real retrieval-bumps so the recall badge +
    * magnitude meter render a non-zero usage signal. Returns the inserted row ids.

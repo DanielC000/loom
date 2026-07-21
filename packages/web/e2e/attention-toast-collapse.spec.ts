@@ -73,8 +73,8 @@ test.describe("attention toast collapse (card 0d27f20c)", () => {
     await expect(pill).toBeVisible();
     await pill.getByRole("button", { name: "dismiss" }).click();
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
-    await page.getByRole("link", { name: /Lore/ }).click();
-    await expect(page).toHaveURL(/\/lore$/);
+    await page.getByRole("link", { name: /Memory/ }).click();
+    await expect(page).toHaveURL(/\/memory$/);
     await expect(page.getByTestId("request-count-pill")).toHaveCount(0);
 
     // (5) A fresh load resets the in-memory dismiss; clicking the pill body jumps to /inbox.

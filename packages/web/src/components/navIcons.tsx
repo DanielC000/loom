@@ -22,7 +22,7 @@ const ICONS: Record<string, ReactElement> = {
   "/platform": <G><path d="M12 3.4 3.4 8l8.6 4.6L20.6 8 12 3.4Z" /><path d="M3.4 12.4 12 17l8.6-4.6" /><path d="M3.4 16.4 12 21l8.6-4.6" /></G>,
   "/terminals": <G sw={1.7}><rect x="3" y="4.5" width="18" height="15" rx="2.2" /><path d="M7 10l3 2.5-3 2.5M12.5 15.5H17" /></G>,
   "/board": <G sw={1.7}><rect x="3.5" y="4" width="4.6" height="16" rx="1.2" /><rect x="9.7" y="4" width="4.6" height="11" rx="1.2" /><rect x="15.9" y="4" width="4.6" height="13" rx="1.2" /></G>,
-  "/lore": <G><path d="M6 3.6h10a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5.6a2 2 0 0 1 2-2Z" /><path d="M4 16.6h13M8 8h5" /></G>,
+  "/memory": <G><path d="M6 3.6h10a1 1 0 0 1 1 1V19a1 1 0 0 1-1 1H6a2 2 0 0 1-2-2V5.6a2 2 0 0 1 2-2Z" /><path d="M4 16.6h13M8 8h5" /></G>,
   "/inbox": <G><path d="M3.6 13.5 6 5.6a2 2 0 0 1 1.9-1.4h8.2A2 2 0 0 1 18 5.6l2.4 7.9" /><path d="M3.6 13.5V18a1.6 1.6 0 0 0 1.6 1.6h13.6A1.6 1.6 0 0 0 20.4 18v-4.5h-5a3 3 0 0 1-6 0H3.6Z" /></G>,
   "/runs": <G><circle cx="12" cy="12" r="8.5" /><path d="M10 8.5l5 3.5-5 3.5V8.5Z" /></G>,
   "/archive": <G><rect x="3.5" y="4.5" width="17" height="4.2" rx="1.2" /><path d="M5 8.7V19a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8.7" /><path d="M10 12.4h4" /></G>,

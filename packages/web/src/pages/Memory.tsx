@@ -6,7 +6,7 @@ import { useActiveProject } from "../lib/activeProject";
 import { SectionLabel, Segmented, Meter, Chip, Badge } from "../components/ui";
 import { color, font, radius, tone, type Tone } from "../theme";
 
-// Lore — the read-only, per-project window into project_memory: the durable knowledge the fleet writes
+// Memory — the read-only, per-project window into project_memory: the durable knowledge the fleet writes
 // and recalls via the `memory` MCP (memory_write/read/list/forget). Wired to the real read surface
 // (GET /api/projects/:id/memory → api.projectMemory). Pinned "always in context" entries surface as
 // cards up top; every entry lists with a recall badge + magnitude Meter (the usage signal) and sorts by
@@ -115,7 +115,7 @@ function Markdown({ src }: { src: string }) {
 function PinCard({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; max: number; selected: boolean; onOpen: () => void }) {
   const title = entry.title || entry.key;
   return (
-    <div onClick={onOpen} className="lore-pincard" title={title}
+    <div onClick={onOpen} className="memory-pincard" title={title}
       style={{
         background: color.panel, border: `1px solid ${selected ? color.phosphor : color.border}`,
         borderRadius: radius.base, padding: "11px 12px 10px", display: "flex", flexDirection: "column", gap: 8,
@@ -143,7 +143,7 @@ const ROW_COLS = "16px minmax(0, 1fr) 128px 78px 18px";
 function NoteRow({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; max: number; selected: boolean; onOpen: () => void }) {
   const title = entry.title || entry.key;
   return (
-    <div onClick={onOpen} className="lore-row" role="button" tabIndex={0}
+    <div onClick={onOpen} className="memory-row" role="button" tabIndex={0}
       onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onOpen(); } }}
       style={{
         display: "grid", gridTemplateColumns: ROW_COLS, alignItems: "center", gap: 12,
@@ -156,12 +156,12 @@ function NoteRow({ entry, max, selected, onOpen }: { entry: ProjectMemoryEntry; 
         <span style={{ fontFamily: font.head, fontWeight: 500, fontSize: 13, color: color.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title}</span>
         <span style={{ fontSize: 11, color: color.cyan, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.key}</span>
       </span>
-      <span className="lore-row-recall" style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
+      <span className="memory-row-recall" style={{ display: "flex", alignItems: "center", gap: 8, justifyContent: "flex-end" }}>
         <RecallBadge count={entry.retrievalCount} max={max} />
-        <span className="lore-meter"><Meter value={entry.retrievalCount} max={max} tone={magTone(entry.retrievalCount, max)} width={56} /></span>
+        <span className="memory-meter"><Meter value={entry.retrievalCount} max={max} tone={magTone(entry.retrievalCount, max)} width={56} /></span>
       </span>
       <span style={{ fontSize: 11, color: color.textMuted, textAlign: "right", whiteSpace: "nowrap" }} title={fmtDateFull(entry.updatedAt)}>{fmtDate(entry.updatedAt)}</span>
-      <span className="lore-caret" aria-hidden style={{ color: selected ? color.phosphor : color.textMuted, fontSize: 12, textAlign: "center" }}>▸</span>
+      <span className="memory-caret" aria-hidden style={{ color: selected ? color.phosphor : color.textMuted, fontSize: 12, textAlign: "center" }}>▸</span>
     </div>
   );
 }
@@ -204,22 +204,22 @@ function NoteDetail({ entry, max, onClose }: { entry: ProjectMemoryEntry; max: n
 // narrow viewport collapse to one column, stack pinned cards, and hand the row's width to the entry title
 // by dropping the magnitude meter + caret. Mirrors the mockup's hover + mobile states. Kept as a class
 // block (like .loom-board-grid) so the rules live with the component.
-const LORE_CSS = `
-.lore-row { transition: background 80ms linear; }
-.lore-row:hover { background: var(--loom-panel-2); }
-.lore-row:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
-.lore-pincard { transition: border-color 90ms linear, background 90ms linear; }
-.lore-pincard:hover { border-color: var(--loom-border-strong); background: #12161a; }
+const MEMORY_CSS = `
+.memory-row { transition: background 80ms linear; }
+.memory-row:hover { background: var(--loom-panel-2); }
+.memory-row:focus-visible { outline: 2px solid var(--loom-phosphor); outline-offset: -2px; }
+.memory-pincard { transition: border-color 90ms linear, background 90ms linear; }
+.memory-pincard:hover { border-color: var(--loom-border-strong); background: #12161a; }
 @media (max-width: 640px) {
-  .lore-body-grid { grid-template-columns: 1fr !important; }
-  .lore-pinned-row { grid-template-columns: 1fr !important; }
+  .memory-body-grid { grid-template-columns: 1fr !important; }
+  .memory-pinned-row { grid-template-columns: 1fr !important; }
 }
 @media (max-width: 560px) {
-  .lore-meter { display: none; }
-  .lore-caret { display: none; }
+  .memory-meter { display: none; }
+  .memory-caret { display: none; }
 }`;
 
-export default function Lore() {
+export default function Memory() {
   const { projectId, projects } = useActiveProject();
   const q = useQuery({ queryKey: ["projectMemory", projectId], queryFn: () => api.projectMemory(projectId), enabled: !!projectId });
   const [search, setSearch] = useState("");
@@ -253,7 +253,7 @@ export default function Lore() {
     <div style={{ display: "flex", alignItems: "flex-end", gap: 20, marginBottom: 20, flexWrap: "wrap" }}>
       <div style={{ display: "flex", flexDirection: "column", gap: 5, minWidth: 0 }}>
         <h1 style={{ fontFamily: font.head, fontWeight: 700, fontSize: 22, letterSpacing: "0.02em", color: color.text, margin: 0, display: "inline-flex", alignItems: "center", gap: 10 }}>
-          <span aria-hidden style={{ color: color.phosphor, fontSize: 18 }}>◈</span> Lore
+          <span aria-hidden style={{ color: color.phosphor, fontSize: 18 }}>◈</span> Memory
         </h1>
         <span style={{ color: color.textDim, fontSize: 12.5, maxWidth: "62ch" }}>
           The durable knowledge your fleet writes and recalls — <b style={{ color: color.text, fontWeight: 500 }}>{entries.length}</b>{" "}
@@ -265,7 +265,7 @@ export default function Lore() {
         <div style={{ position: "relative", display: "inline-flex", alignItems: "center" }}>
           <span aria-hidden style={{ position: "absolute", left: 10, color: color.textMuted, fontSize: 13, pointerEvents: "none" }}>⌕</span>
           <input value={search} onChange={(e) => setSearch(e.target.value)} className="loom-field"
-            placeholder="Search titles & content…" aria-label="Search Lore"
+            placeholder="Search titles & content…" aria-label="Search Memory"
             style={{ background: color.panel2, color: color.text, border: `1px solid ${color.borderStrong}`, borderRadius: radius.base, padding: "7px 10px 7px 30px", fontFamily: font.mono, fontSize: 13, width: 260 }} />
         </div>
       )}
@@ -274,7 +274,7 @@ export default function Lore() {
 
   const footStrip = (
     <div style={{ marginTop: 26, paddingTop: 12, borderTop: `1px solid ${color.border}`, color: color.textMuted, fontSize: 11, display: "flex", gap: 18, flexWrap: "wrap" }}>
-      <span><b style={{ color: color.textDim, fontWeight: 500 }}>◈ Lore</b> · per-project shared memory</span>
+      <span><b style={{ color: color.textDim, fontWeight: 500 }}>◈ Memory</b> · per-project shared memory</span>
       <span><b style={{ color: color.textDim, fontWeight: 500 }}>{entries.length}</b> entries · <b style={{ color: color.textDim, fontWeight: 500 }}>{pinnedCount}</b> pinned</span>
       <span>Recall = how often the fleet pulls an entry into context</span>
     </div>
@@ -282,17 +282,17 @@ export default function Lore() {
 
   let bodyContent: ReactNode;
   if (!projectId) {
-    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: 12.5 }}>Select a project to view its Lore.</div>;
+    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: 12.5 }}>Select a project to view its Memory.</div>;
   } else if (q.isLoading) {
     bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.textMuted, fontSize: 12.5 }}>Loading…</div>;
   } else if (q.isError) {
-    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.red, fontSize: 12.5 }}>Couldn&apos;t load this project&apos;s Lore.</div>;
+    bodyContent = <div style={{ padding: "48px 10px", textAlign: "center", color: color.red, fontSize: 12.5 }}>Couldn&apos;t load this project&apos;s Memory.</div>;
   } else if (entries.length === 0) {
     // Empty state — a project whose fleet hasn't written any memory yet.
     bodyContent = (
       <div style={{ border: `1px dashed ${color.borderStrong}`, borderRadius: radius.base, padding: "54px 32px", textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 14, marginTop: 8 }}>
         <span aria-hidden style={{ fontSize: 32, color: color.textMuted }}>◈</span>
-        <h2 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 16, color: color.text, margin: 0 }}>No Lore yet</h2>
+        <h2 style={{ fontFamily: font.head, fontWeight: 600, fontSize: 16, color: color.text, margin: 0 }}>No Memory yet</h2>
         <p style={{ color: color.textDim, fontSize: 12.5, maxWidth: "52ch", margin: 0, lineHeight: 1.6 }}>
           This project&apos;s fleet hasn&apos;t written any memory. As agents work, they capture durable facts, decisions, and hard-won gotchas with <code style={{ ...codeStyle, color: color.cyan }}>memory_write</code> — and those entries are recalled back into future agents&apos; context automatically.
         </p>
@@ -311,7 +311,7 @@ export default function Lore() {
                 <span style={{ fontFamily: font.mono, fontWeight: 400, letterSpacing: "0.02em", textTransform: "none", color: color.textMuted, fontSize: 11 }}>always in agent context</span>
               </SectionLabel>
             </div>
-            <div className="lore-pinned-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10, marginBottom: 26 }}>
+            <div className="memory-pinned-row" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(230px, 1fr))", gap: 10, marginBottom: 26 }}>
               {pinned.map((e) => (
                 <PinCard key={e.key} entry={e} max={maxRecall} selected={selected?.key === e.key} onOpen={() => setOpenKey(e.key)} />
               ))}
@@ -333,7 +333,7 @@ export default function Lore() {
         {sorted.length > 0 ? (
           <>
             <div style={{ display: "grid", gridTemplateColumns: ROW_COLS, gap: 12, padding: "0 10px 7px", color: color.textMuted, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.07em" }}>
-              <span /><span>Entry</span><span style={{ textAlign: "right" }}>Recall</span><span style={{ textAlign: "right" }}>Updated</span><span className="lore-caret" style={{ textAlign: "center" }} aria-hidden>▸</span>
+              <span /><span>Entry</span><span style={{ textAlign: "right" }}>Recall</span><span style={{ textAlign: "right" }}>Updated</span><span className="memory-caret" style={{ textAlign: "center" }} aria-hidden>▸</span>
             </div>
             <div style={{ borderTop: `1px solid ${color.border}` }}>
               {sorted.map((e) => (
@@ -348,7 +348,7 @@ export default function Lore() {
     );
 
     bodyContent = (
-      <div className="lore-body-grid" style={{ display: "grid", gridTemplateColumns: selected ? "minmax(0, 1.35fr) minmax(0, 1fr)" : "1fr", gap: 26, alignItems: "start" }}>
+      <div className="memory-body-grid" style={{ display: "grid", gridTemplateColumns: selected ? "minmax(0, 1.35fr) minmax(0, 1fr)" : "1fr", gap: 26, alignItems: "start" }}>
         {listBody}
         {selected && <NoteDetail entry={selected} max={maxRecall} onClose={() => setOpenKey(null)} />}
       </div>
@@ -357,7 +357,7 @@ export default function Lore() {
 
   return (
     <div style={{ maxWidth: 1180, margin: "0 auto" }}>
-      <style>{LORE_CSS}</style>
+      <style>{MEMORY_CSS}</style>
       {header}
       {bodyContent}
       {projectId && !q.isLoading && !q.isError && footStrip}

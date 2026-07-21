@@ -6,7 +6,7 @@ import Archive from "./pages/Archive";
 import Terminals from "./pages/Terminals";
 import RequestsPage from "./pages/RequestsPage";
 import Board from "./pages/Board";
-import Lore from "./pages/Lore";
+import Memory from "./pages/Memory";
 import Runs from "./pages/Runs";
 import Repository from "./pages/Repository";
 import Actors from "./pages/Actors";
@@ -48,7 +48,7 @@ export type NavPage = {
 //
 // `scoped` was determined from `git grep -l useActiveProject packages/web/src/pages` and then
 // VERIFIED per page (does switching the active project actually rescope it?): Overview, Board,
-// Lore (its project_memory read is enabled:!!projectId), Runs, Archive (its archived-sessions query
+// Memory (its project_memory read is enabled:!!projectId), Runs, Archive (its archived-sessions query
 // is keyed on + enabled:!!projectId — it lists ONLY the active project's stopped sessions), Repository
 // (both its Files/Git panes rescope), Settings (edits the active project's config override). Projects
 // has its OWN project rail (which writes the active project) so it is intentionally NOT scoped.
@@ -74,11 +74,11 @@ export const NAV_PAGES: NavPage[] = [
   { label: "Platform", to: "/platform", element: <Platform />, group: "system" },
   { label: "Terminals", to: "/terminals", element: <Terminals />, group: "operate" },
   { label: "Board", to: "/board", element: <Board />, group: "project", scoped: true },
-  // Lore — the read-only, per-project window into project_memory (the durable knowledge the fleet writes
+  // Memory — the read-only, per-project window into project_memory (the durable knowledge the fleet writes
   // + recalls via the `memory` MCP). A flagship, project-scoped surface in the Project group (alongside
   // Overview + Board). `scoped: true`: it rescopes on the active-project picker (its one read,
   // api.projectMemory, is `enabled: !!projectId`).
-  { label: "Lore", to: "/lore", element: <Lore />, group: "project", scoped: true },
+  { label: "Memory", to: "/memory", element: <Memory />, group: "project", scoped: true },
   // ── Operate group (cont.) ────────────────────────────────────────────────────
   // The GLOBAL manager→human Requests inbox (card 695ebab0, generalizing the decision inbox 8701bdbb) — a
   // cross-project "waiting on me" queue of typed requests (decision · input · permission · credential), a

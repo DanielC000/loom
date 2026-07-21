@@ -1,13 +1,13 @@
-// Lore spec (card 7ea6ce71) — proves the read-only, per-project memory explorer page (/lore) renders real
-// project_memory data and its interactions are observable. Coverage:
+// Memory spec (card 7ea6ce71) — proves the read-only, per-project memory explorer page (/memory) renders
+// real project_memory data and its interactions are observable. Coverage:
 //   1. Pinned "always in context" entries render as cards up top; the all-entries list + recall/sort tabs render.
 //   2. Search filters the list to matching entries (observable before/after — the row count narrows, the
 //      pinned section is suppressed, and the "N of M" header count updates).
 //   3. The sort Segmented reorders the list (observable — the first row changes between Recall and Title).
 //   4. Clicking an entry opens the note-detail panel (observable — the read-only footer + the entry's key
 //      chip + its rendered markdown/[[wikilink]] appear where they weren't before).
-//   5. Empty state — a project whose fleet has written no memory shows "No Lore yet".
-//   6. Lore is a primary header tab (the owner-approved placement).
+//   5. Empty state — a project whose fleet has written no memory shows "No Memory yet".
+//   6. Memory is a primary header tab (the owner-approved placement).
 //
 // Builds on the shared `loomDaemon` fixture (card c3fd1d68). project_memory has NO REST/agent write path
 // (writing stays the memory MCP's job), so each test seeds via the fixture's `seedProjectMemory` (the
@@ -18,11 +18,11 @@ import type { Page } from "@playwright/test";
 
 async function pinActiveProject(page: Page, projectId: string) {
   // The FirstRunWelcome overlay is dismissed globally by the fixture; this only pins the active project so
-  // the scoped /lore read resolves to the project we seeded.
+  // the scoped /memory read resolves to the project we seeded.
   await page.addInitScript((id) => localStorage.setItem("loom.projectId", id), projectId);
 }
 
-// A realistic Lore corpus: two pinned "always in context" entries + two unpinned. Recall counts + titles
+// A realistic Memory corpus: two pinned "always in context" entries + two unpinned. Recall counts + titles
 // are chosen so Recall-order and Title-order have DIFFERENT first rows (Zephyr@30 vs Alpha alphabetically),
 // and "junction" appears in exactly one entry's body so a content search narrows to one.
 const ENTRIES = [
@@ -40,11 +40,11 @@ async function seedAndOpen(page: Page, loomDaemon: { baseURL: string; createProj
   const project = await loomDaemon.createProject();
   await loomDaemon.seedProjectMemory(project.id, ENTRIES);
   await pinActiveProject(page, project.id);
-  await page.goto(`${loomDaemon.baseURL}/lore`);
+  await page.goto(`${loomDaemon.baseURL}/memory`);
   return project;
 }
 
-test.describe("lore (per-project memory explorer)", () => {
+test.describe("memory (per-project memory explorer)", () => {
   test("renders pinned cards, the all-entries list, and the sort tabs", async ({ page, loomDaemon }) => {
     await seedAndOpen(page, loomDaemon);
 
@@ -59,23 +59,23 @@ test.describe("lore (per-project memory explorer)", () => {
     await expect(page.getByRole("tab", { name: "Title" })).toBeVisible();
 
     // One row per entry (four seeded).
-    await expect(page.locator(".lore-row")).toHaveCount(4);
+    await expect(page.locator(".memory-row")).toHaveCount(4);
   });
 
   test("search filters the list to matching entries (observable before/after)", async ({ page, loomDaemon }) => {
     await seedAndOpen(page, loomDaemon);
 
     // BEFORE: all four rows, and the pinned section is present.
-    await expect(page.locator(".lore-row")).toHaveCount(4);
+    await expect(page.locator(".memory-row")).toHaveCount(4);
     await expect(page.getByText("always in agent context")).toBeVisible();
 
     // ACT: search a word that appears in ONLY one entry's body.
-    await page.getByLabel("Search Lore").fill("junction");
+    await page.getByLabel("Search Memory").fill("junction");
 
     // AFTER: exactly one row (the matching entry), the header count reads "1 of 4", and the pinned section
     // is suppressed while filtering.
-    await expect(page.locator(".lore-row")).toHaveCount(1);
-    await expect(page.locator(".lore-row").first()).toContainText("Alpha Convention");
+    await expect(page.locator(".memory-row")).toHaveCount(1);
+    await expect(page.locator(".memory-row").first()).toContainText("Alpha Convention");
     await expect(page.getByText("1 of 4")).toBeVisible();
     await expect(page.getByText("always in agent context")).toHaveCount(0);
   });
@@ -85,13 +85,13 @@ test.describe("lore (per-project memory explorer)", () => {
 
     // Default sort = Recall → the highest-recall entry (Zephyr Gate @ 30) leads.
     await expect(page.getByRole("tab", { name: "Recall" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator(".lore-row").first()).toContainText("Zephyr Gate");
+    await expect(page.locator(".memory-row").first()).toContainText("Zephyr Gate");
 
     // ACT: switch to Title → alphabetical, so "Alpha Convention" now leads.
     await page.getByRole("tab", { name: "Title" }).click();
 
     await expect(page.getByRole("tab", { name: "Title" })).toHaveAttribute("aria-selected", "true");
-    await expect(page.locator(".lore-row").first()).toContainText("Alpha Convention");
+    await expect(page.locator(".memory-row").first()).toContainText("Alpha Convention");
   });
 
   test("clicking an entry opens the read-only note-detail with rendered markdown + wikilinks", async ({ page, loomDaemon }) => {
@@ -103,7 +103,7 @@ test.describe("lore (per-project memory explorer)", () => {
     await expect(page.getByText("conventional-commits")).toHaveCount(0);
 
     // ACT: open the pinned "Commit Identity" entry from the list.
-    await page.locator(".lore-row").filter({ hasText: "Commit Identity" }).click();
+    await page.locator(".memory-row").filter({ hasText: "Commit Identity" }).click();
 
     // AFTER: the detail panel mounts — the read-only footer, the injection-state chip, and the rendered
     // [[wikilink]] label (proving the markdown renderer ran, not raw source) all appear.
@@ -112,17 +112,17 @@ test.describe("lore (per-project memory explorer)", () => {
     await expect(page.getByText("conventional-commits")).toBeVisible();
   });
 
-  test("empty state — a project with no Lore shows the 'No Lore yet' prompt", async ({ page, loomDaemon }) => {
+  test("empty state — a project with no Memory shows the 'No Memory yet' prompt", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject();
     await pinActiveProject(page, project.id);
-    await page.goto(`${loomDaemon.baseURL}/lore`);
+    await page.goto(`${loomDaemon.baseURL}/memory`);
 
-    await expect(page.getByRole("heading", { name: "No Lore yet" })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "No Memory yet" })).toBeVisible();
     await expect(page.getByText(/hasn.t written any memory/)).toBeVisible();
   });
 
-  test("Lore is a primary header tab", async ({ page, loomDaemon }) => {
+  test("Memory is a primary header tab", async ({ page, loomDaemon }) => {
     await page.goto(`${loomDaemon.baseURL}/`);
-    await expect(page.getByRole("link", { name: /Lore/ })).toBeVisible();
+    await expect(page.getByRole("link", { name: /Memory/ })).toBeVisible();
   });
 });

@@ -44,7 +44,7 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/projects/:id/board" },
   { method: "GET", pattern: "/api/projects/:id/tasks" },
   { method: "GET", pattern: "/api/projects/:id/agents" },
-  // Lore = the per-project project_memory read (backs the /lore explorer page). Read-only, human-only,
+  // Memory = the per-project project_memory read (backs the /memory explorer page). Read-only, human-only,
   // project-scoped — same posture as the sibling board/tasks/vault project reads above.
   { method: "GET", pattern: "/api/projects/:id/memory" },
   { method: "GET", pattern: "/api/agents/:id/sessions" },

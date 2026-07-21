@@ -2569,11 +2569,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           // defaults answeredAt.
           cancelledReason?: string | null; cancelledBy?: "agent" | "human";
         }[];
-        // Project memory (Lore) rows — the ONLY way an e2e spec can seed project_memory for the /lore page
-        // (there is no REST/agent write path — writing stays the memory MCP's job). Upserted via the SAME
-        // db.upsertProjectMemory the memory_write MCP tool uses; `retrievalCount` (optional) is applied by
-        // touching the row that many times (the real retrieval-bump path), so the /lore recall badge + meter
-        // render a non-zero usage signal.
+        // Project memory (Memory) rows — the ONLY way an e2e spec can seed project_memory for the /memory
+        // page (there is no REST/agent write path — writing stays the memory MCP's job). Upserted via the
+        // SAME db.upsertProjectMemory the memory_write MCP tool uses; `retrievalCount` (optional) is applied
+        // by touching the row that many times (the real retrieval-bump path), so the /memory recall badge +
+        // meter render a non-zero usage signal.
         projectMemory?: { projectId: string; key: string; text: string; title?: string; pinned?: boolean; retrievalCount?: number }[];
         // A schedule's deferred state (card 53edd8d5: the Schedules-UI deferred badge e2e) — the ONLY way
         // an e2e spec can drive it, since the real path is a budget-gated Scheduler tick and the e2e daemon
@@ -2823,9 +2823,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         });
         questionIds.push(id);
       }
-      // Project memory (Lore) rows — upserted via db.upsertProjectMemory (the memory_write path), then
+      // Project memory (Memory) rows — upserted via db.upsertProjectMemory (the memory_write path), then
       // retrieval-bumped `retrievalCount` times (touchProjectMemoryRetrieved, the real usage-count path) so
-      // the /lore page renders a genuine recall signal. No agent/REST write surface exists, so this seed is
+      // the /memory page renders a genuine recall signal. No agent/REST write surface exists, so this seed is
       // the only way an e2e can populate the read.
       const projectMemoryIds: string[] = [];
       for (const m of b.projectMemory ?? []) {
@@ -3214,7 +3214,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!t) return reply.code(404).send({ error: "task not found" });
     return t;
   });
-  // Lore — the read-only, per-project window into project_memory (the durable knowledge the fleet
+  // Memory — the read-only, per-project window into project_memory (the durable knowledge the fleet
   // writes + recalls via the `memory` MCP: memory_write/read/list/forget). PROJECT-SCOPED: the db
   // query filters by projectId (WHERE project_id = ?), so this ONLY ever returns THIS project's own
   // memory — never another project's. REUSES db.listProjectMemory (the same method backing the

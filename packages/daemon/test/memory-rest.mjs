@@ -1,20 +1,20 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Lore read surface — GET /api/projects/:id/memory (card 7ea6ce71). HERMETIC + CLAUDE-FREE +
+// Memory read surface — GET /api/projects/:id/memory (card 7ea6ce71). HERMETIC + CLAUDE-FREE +
 // NETWORK-FREE: Db + buildServer via app.inject against two projects seeded with project_memory rows.
-// Modeled on vault-raw.mjs (inject) + project-memory.mjs (db seeding). Proves the contract the /lore
+// Modeled on vault-raw.mjs (inject) + project-memory.mjs (db seeding). Proves the contract the /memory
 // page reads:
 //   (1) PROJECT-SCOPING — a project's memory read returns THIS project's entries ONLY, never another
 //       project's (the one correctness thing the reviewer checks hard);
 //   (2) SHAPE — each row carries pinned (bool) / retrievalCount (num) / updatedAt (str) / key/title/text;
 //   (3) ORDER — pinned first, then most-recently-updated (db.listProjectMemory ordering);
 //   (4) 404 on an unknown project; read-only (no write/forget counterpart on this path).
-// Run after build: node test/lore-memory-rest.mjs
+// Run after build: node test/memory-rest.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-lore-rest-"));
+const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-memory-rest-"));
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45361";
 const sandboxHome = path.join(TMP, "home");
@@ -65,7 +65,7 @@ try {
   check("(1) B returns ONLY its own single entry", b.statusCode === 200 && bRows.length === 1 && bRows[0].key === "b-secret-note");
   check("(1) PROJECT-SCOPING: B NEVER leaks any of A's entries", !bRows.some((r) => aKeys.includes(r.key)));
 
-  // (2) shape — the fields the /lore page reads
+  // (2) shape — the fields the /memory page reads
   const hot = aRows.find((r) => r.key === "a-hot");
   check("(2) SHAPE: pinned is a boolean", typeof hot.pinned === "boolean" && hot.pinned === false);
   check("(2) SHAPE: retrievalCount is a number and reflects the 3 touches", typeof hot.retrievalCount === "number" && hot.retrievalCount === 3);

@@ -368,7 +368,7 @@ export const api = {
   updateAgent: (id: string, patch: { name?: string; startupPrompt?: string; profileId?: string | null; endpoint?: boolean }) =>
     post<Agent>(`/api/agents/${id}`, patch),
   tasks: (projectId: string) => get<Task[]>(`/api/projects/${projectId}/tasks`),
-  // Lore — the read-only per-project project_memory list (pinned first, then most-recently-updated).
+  // Memory — the read-only per-project project_memory list (pinned first, then most-recently-updated).
   // Full entries incl. the note `text`, so client-side search (title+key+content) + the note-detail
   // body render off this one read. Human-only; there is deliberately no write/forget counterpart.
   projectMemory: (projectId: string) => get<ProjectMemoryEntry[]>(`/api/projects/${projectId}/memory`),
