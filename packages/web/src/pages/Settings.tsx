@@ -467,7 +467,7 @@ function ConfigEditor({ project }: { project: Project }) {
 // to a human display unit. Keys are unique ACROSS groups, so the form holds one flat string dict. Units
 // follow the epic: rate-limit backoff/deadlines/windows in h/m, buffers + cadences + timeouts in s.
 type Grp = "rateLimit" | "watchers" | "timeouts";
-interface GlobalFieldDesc { grp: Grp; key: string; label: string; unit: Unit; }
+interface GlobalFieldDesc { grp: Grp; key: string; label: string; unit: Unit; note?: string; }
 const GLOBAL_FIELDS: GlobalFieldDesc[] = [
   // Rate Limits
   { grp: "rateLimit", key: "defaultBackoffMs", label: "Default backoff (h)", unit: "h" },
@@ -479,12 +479,13 @@ const GLOBAL_FIELDS: GlobalFieldDesc[] = [
   { grp: "watchers", key: "contextWatchMs", label: "Context watch (s)", unit: "s" },
   { grp: "watchers", key: "idleWatchMs", label: "Idle watch (s)", unit: "s" },
   { grp: "watchers", key: "rateLimitWatchMs", label: "Rate-limit watch (s)", unit: "s" },
-  { grp: "watchers", key: "usagePollMs", label: "Usage poll (s)", unit: "s" },
+  { grp: "watchers", key: "usagePollMs", label: "Usage poll (s)", unit: "s", note: "Claude-usage sampler cadence — not the poll-job tick below." },
   { grp: "watchers", key: "wakeMs", label: "Wake tick (s)", unit: "s" },
   { grp: "watchers", key: "schedulerMs", label: "Scheduler tick (s)", unit: "s" },
   { grp: "watchers", key: "reconcileMs", label: "Reconcile (s)", unit: "s" },
   { grp: "watchers", key: "snapshotMs", label: "Transcript snapshot (s)", unit: "s" },
   { grp: "watchers", key: "crashRecoveryWatchMs", label: "Crash-recovery watch (s)", unit: "s" },
+  { grp: "watchers", key: "pollMs", label: "Poll-job service tick (s)", unit: "s", note: "PollService's own tick — local poll-job triggers, not the usage sampler above." },
   // Timeouts
   { grp: "timeouts", key: "gitOpMs", label: "Git remote op (s)", unit: "s" },
   { grp: "timeouts", key: "gitLocalMs", label: "Git local op (s)", unit: "s" },
@@ -815,7 +816,7 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     <MsField key={f.key} label={f.label} value={vals[f.key] ?? ""}
       set={(v) => setVals((s) => ({ ...s, [f.key]: v }))}
       effectiveMs={msOf(resolved[f.grp], f.key)}
-      defMs={msOf(defaults[f.grp], f.key)} unit={f.unit} />
+      defMs={msOf(defaults[f.grp], f.key)} unit={f.unit} note={f.note} />
   );
 
   return (
@@ -2263,14 +2264,15 @@ function NumField({ label, value, set, effective, def, note }:
 // Unit-aware sibling of NumField for a CANONICAL-MS value. The form shows a human unit (s/m/h); the
 // stored value is always ms. `effectiveMs`/`defMs` are ms and rendered in `unit` (÷ the unit's ms).
 // Blank → inherit (the field is omitted from the override → falls back to the platform default).
-function MsField({ label, value, set, effectiveMs, defMs, unit }:
-  { label: string; value: string; set: (v: string) => void; effectiveMs: number; defMs: number; unit: Unit }) {
+function MsField({ label, value, set, effectiveMs, defMs, unit, note }:
+  { label: string; value: string; set: (v: string) => void; effectiveMs: number; defMs: number; unit: Unit; note?: string }) {
   const div = UNIT_MS[unit];
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={fieldLabel}>{label}</span>
       <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${defMs / div}${unit})`} />
       <Hint>{effHint(`${effectiveMs / div}${unit}`)}</Hint>
+      {note && <Hint>{note}</Hint>}
     </label>
   );
 }

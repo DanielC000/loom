@@ -97,11 +97,14 @@ clearWatcherEnvs();
 {
   const c = resolveConfig(undefined, {
     rateLimit: { defaultBackoffMs: 90000, recencyWindowMs: 7200000 },
-    watchers: { contextWatchMs: 30000 },
+    watchers: { contextWatchMs: 30000, pollMs: 15000 },
     timeouts: { gitPushMs: 60000, busyStaleMs: 600000 },
   });
   check("(3) global rateLimit override applies", c.platform.rateLimit.defaultBackoffMs === 90000 && c.platform.rateLimit.recencyWindowMs === 7200000);
   check("(3) global watcher override applies", c.platform.watchers.contextWatchMs === 30000);
+  // pollMs (PollService's own tick, distinct from usagePollMs) — card aaaf4866: prove it's schema-settable
+  // end-to-end, not just resolver-wired (the resolver already read it before this card; the gap was zod).
+  check("(3) global watcher override applies (pollMs)", c.platform.watchers.pollMs === 15000);
   check("(3) global timeout override applies", c.platform.timeouts.gitPushMs === 60000 && c.platform.timeouts.busyStaleMs === 600000);
   // (7) deep-partial: untouched siblings inherit their default.
   check("(7) untouched rateLimit sibling inherits default", c.platform.rateLimit.resetBufferMs === 10000);
@@ -155,6 +158,8 @@ clearWatcherEnvs();
   check("(8) {} accepted", validatePlatformConfigOverride({}).ok === true);
   const dp = validatePlatformConfigOverride({ watchers: { wakeMs: 120000 } });
   check("(8) deep-partial (one watcher field) accepted + round-trips", dp.ok && dp.value.watchers?.wakeMs === 120000);
+  const dpPoll = validatePlatformConfigOverride({ watchers: { pollMs: 120000 } });
+  check("(8) deep-partial (pollMs) accepted + round-trips", dpPoll.ok && dpPoll.value.watchers?.pollMs === 120000);
   const full = validatePlatformConfigOverride({
     rateLimit: { defaultBackoffMs: 3600000, resetBufferMs: 0, recencyWindowMs: 86400000 },
     watchers: { contextWatchMs: 5000, reconcileMs: 3600000 },
@@ -777,6 +782,11 @@ const dbFile = path.join(TMP, "loom.db");
     validatePlatformConfigPatch({ watchers: { contextWatchMs: 5000 } }).ok === true);
   check("(17) PATCH watchers.contextWatchMs:3600001 (>1h ceiling) rejected",
     validatePlatformConfigPatch({ watchers: { contextWatchMs: 3600001 } }).ok === false);
+  // pollMs round-trips through the derived per-field-nullable PATCH schema too (card aaaf4866).
+  check("(17) PATCH watchers.pollMs:5000 (5s floor) accepted",
+    validatePlatformConfigPatch({ watchers: { pollMs: 5000 } }).ok === true);
+  check("(17) PATCH watchers.pollMs:4999 (<5s floor) rejected",
+    validatePlatformConfigPatch({ watchers: { pollMs: 4999 } }).ok === false);
 
   // timeouts.runMs: 30000(30s)–3600000(1h).
   check("(17) PATCH timeouts.runMs:29999 (<30s floor) rejected",

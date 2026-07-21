@@ -398,6 +398,9 @@ const watchersOverride = z.object({
   reconcileMs: watcherMs,
   snapshotMs: watcherMs,
   crashRecoveryWatchMs: watcherMs,
+  // PollService's own tick cadence (local poll-job triggers, agent-tooling epic P3) — distinct from
+  // usagePollMs (the Claude-usage sampler above); see index.ts's `pollIntervalMs = watchers.pollMs`.
+  pollMs: watcherMs,
 }).strict();
 const timeoutsOverride = z.object({
   gitOpMs: z.number().int().min(1000).max(120000).optional(),
