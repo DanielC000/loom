@@ -142,8 +142,10 @@ export default function Schedules() {
                     {fmt(s.nextFireAt)}
                     {/* Deferral observability (card 53edd8d5): a due fire held back by a budget gate — the
                         row's own lastDeferredAt/lastDeferredReason (cleared on the next successful fire),
-                        so this self-clears without any extra polling. */}
-                    {s.lastDeferredAt && (
+                        so this self-clears without any extra polling. Also gated on s.enabled: a schedule
+                        disabled WHILE deferred stopped being "due" at all, so the badge would otherwise
+                        keep lying about a live episode after the operator paused it (CR a3715e68). */}
+                    {s.enabled && s.lastDeferredAt && (
                       <div style={{ marginTop: 4, whiteSpace: "normal" }} title={`Deferred since ${fmt(s.lastDeferredAt)}`}>
                         <Badge tone="amber">deferred: {s.lastDeferredReason ?? "budget reached"}</Badge>
                       </div>

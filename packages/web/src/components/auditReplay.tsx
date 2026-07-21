@@ -26,7 +26,8 @@ function eventTone(e: AuditEvent): Tone {
   if (k === "merge_rejected" || k === "worker_report_rejected" || k === "idle_escalated" ||
       k === "context_escalated" || k === "session_recovery_abandoned" || k === "session_died" ||
       k === "schedule_fire_failed" || k === "worker_report_undelivered") return "red";
-  if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker") return "amber";
+  if (k === "merge_request" || k === "worker_stuck" || k === "idle_report" || k === "redirect_worker" ||
+      k === "schedule_fire_deferred") return "amber";
   if (k === "merge_done" || k === "recycle_complete" || k === "session_recovered") return "phosphor";
   if (k === "build_gate_retry_attempt" || k === "build_gate_retry") return "cyan";
   if (k === "deploy") return (e.detail as { ok?: boolean } | null)?.ok ? "phosphor" : "red";

@@ -211,4 +211,45 @@ test.describe("schedules UI (Direction B)", () => {
     expect(after?.lastDeferredReason).toBe(reason);
     expect(after?.lastDeferredAt).toBeTruthy();
   });
+
+  // Fast-follow fix (card d027577b, CR a3715e68): the badge used to gate ONLY on lastDeferredAt, so a
+  // schedule PAUSED mid-deferral still showed "deferred: <reason>" even though it's no longer due at all —
+  // an operator who disables a starved schedule shouldn't keep seeing an in-flight-looking amber badge.
+  // The render now also gates on s.enabled.
+  test("disabling a deferred schedule hides its 'deferred' badge", async ({ page, loomDaemon }) => {
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`sched-defdis-${stamp}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, `Agent ${stamp}`);
+    await pinActiveProject(page, project.id);
+
+    const name = `Deferred then disabled ${stamp}`;
+    const seeded = await fetch(`${loomDaemon.baseURL}/api/schedules`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, agentId: agent.id, cron: "0 0 1 1 *" }),
+    }).then((r) => r.json()) as { id: string };
+
+    await loomDaemon.seedScheduleDeferral({ scheduleId: seeded.id, reason: "auditor budget (2) reached" });
+
+    await page.goto(`${loomDaemon.baseURL}/automation`);
+    const row = page.locator("tr", { hasText: name });
+    await expect(row).toBeVisible();
+
+    // BEFORE: still enabled + deferred → the badge shows.
+    await expect(row.getByText(/deferred:/i)).toBeVisible();
+
+    // ACT: pause it via the table's own On/Off toggle (stopPropagation keeps the row editor from opening).
+    await row.getByRole("button", { name: /^on$/i }).click();
+
+    // AFTER (UI): the toggle reads Off AND the deferred badge is gone — same page, no reload needed (the
+    // toggle mutation already refetches the schedule list).
+    await expect(row.getByRole("button", { name: /^off$/i })).toBeVisible();
+    await expect(row.getByText(/deferred:/i)).toHaveCount(0);
+
+    // AFTER (REST): the underlying deferral fields are UNTOUCHED by disabling (disable doesn't clear
+    // them — only a real fire or a reconcile-advance does) — the fix is purely a RENDER gate.
+    const rows = await listSchedules(loomDaemon.baseURL);
+    const after = rows.find((s) => s.id === seeded.id) as { enabled: boolean; lastDeferredReason?: string | null } | undefined;
+    expect(after?.enabled).toBe(false);
+    expect(after?.lastDeferredReason).toBe("auditor budget (2) reached");
+  });
 });

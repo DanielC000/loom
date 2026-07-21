@@ -4726,7 +4726,7 @@ export class Db {
     return r ? toSchedule(r) : undefined;
   }
   /** Partial edit (REST): any provided field is written; omitted fields are left as-is. */
-  updateSchedule(id: string, patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null }): void {
+  updateSchedule(id: string, patch: { name?: string; cron?: string; enabled?: boolean; nextFireAt?: string; lastFiredAt?: string | null; kind?: "manager" | "auditor" | "workspace-auditor"; prompt?: string | null; lastDeferredAt?: string | null; lastDeferredReason?: string | null }): void {
     const cols: Record<string, unknown> = {
       // A blank rename normalizes to undefined (omit) — never blanks an existing name (the create/rename
       // surfaces already reject a blank name, so this is the belt-and-suspenders guard).
@@ -4737,6 +4737,12 @@ export class Db {
       last_fired_at: patch.lastFiredAt,
       kind: patch.kind,
       prompt: normalizeSchedulePrompt(patch.prompt),
+      // Explicit null (not undefined) clears the deferral columns — the caller (Scheduler.start()'s
+      // reconcile path) passes null when it advances a stale next_fire_at, so the badge doesn't linger
+      // past an episode that ended without a real fire. Omitted (undefined) leaves them untouched, so
+      // every other updateSchedule caller (REST enable/disable/rename) stays byte-identical.
+      last_deferred_at: patch.lastDeferredAt,
+      last_deferred_reason: patch.lastDeferredReason,
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;

@@ -197,12 +197,18 @@ export class Scheduler {
    * Start ticking. First reconciles MISSED fires: any schedule whose next_fire_at is in the past
    * (the daemon was down across its slot) recomputes forward to the next future boundary — so a
    * restart never floods with catch-up fires (run-once-forward, not run-N-times).
+   *
+   * This reconcile advance is NOT a fire — it never goes through markFired, so without an explicit
+   * clear here a schedule that was mid-deferral when the daemon went down would keep showing the
+   * amber "deferred" badge indefinitely after restart, even though its episode ended (the schedule
+   * moved on to a fresh future slot, not a resolved fire). Clear last_deferred_at/last_deferred_reason
+   * alongside the advance so the badge doesn't lie about current state (CR a3715e68 on 53edd8d5).
    */
   start(now: Date = new Date()): void {
     for (const s of this.deps.db.listSchedules()) {
       if (new Date(s.nextFireAt).getTime() <= now.getTime()) {
         try {
-          this.deps.db.updateSchedule(s.id, { nextFireAt: nextFireAt(s.cron, now) });
+          this.deps.db.updateSchedule(s.id, { nextFireAt: nextFireAt(s.cron, now), lastDeferredAt: null, lastDeferredReason: null });
         } catch (e) {
           // eslint-disable-next-line no-console
           console.error(`[scheduler] could not recompute schedule ${s.id} (${s.cron}):`, (e as Error).message);
