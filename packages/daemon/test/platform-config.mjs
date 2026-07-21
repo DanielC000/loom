@@ -37,6 +37,7 @@ const { Db } = await import("../dist/db.js");
 const { validatePlatformConfigOverride, validatePlatformConfigPatch, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { detectIntegrations } = await import("../dist/integrations/detect.js");
+const { resolveBackupConfig } = await import("../dist/orchestration/db-backup.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -945,10 +946,231 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (20) backup: daemon-global auto-backup tuning (sweep G4) ============================
+// `backup` is a DEEP-PARTIAL group (like rateLimit/watchers/timeouts), NOT a scalar — resolveConfig must
+// fold the platform override into `.backup` on BOTH paths, the PATCH validator needs per-field bounds +
+// a per-field-nullable PATCH variant, and server.ts's DEEP_MERGE_GROUPS must include it or a PATCH
+// touching one field silently wipes its siblings (the exact ba9ccd75 regression class, one group later).
+clearWatcherEnvs();
+{
+  delete process.env.LOOM_BACKUP_INTERVAL_MINUTES;
+  // --- resolveConfig: defaults + platform override reaches resolved.backup on BOTH paths ---
+  check("(20) default backup is {intervalMinutes:60, keep:48, enabled:true}",
+    resolveConfig(undefined).backup.intervalMinutes === 60 && resolveConfig(undefined).backup.keep === 48 && resolveConfig(undefined).backup.enabled === true);
+  check("(20) platform override reaches resolved.backup (no-project-override fast path) — deep-partial: only `keep` changes",
+    resolveConfig(undefined, { backup: { keep: 100 } }).backup.keep === 100 &&
+    resolveConfig(undefined, { backup: { keep: 100 } }).backup.intervalMinutes === 60 &&
+    resolveConfig(undefined, { backup: { keep: 100 } }).backup.enabled === true);
+  check("(20) platform override reaches resolved.backup (WITH a project override present, full-merge path)",
+    resolveConfig({ docLint: false }, { backup: { keep: 100 } }).backup.keep === 100);
+  check("(20) platform override can set every field at once (fast path)",
+    JSON.stringify(resolveConfig(undefined, { backup: { intervalMinutes: 15, keep: 5, enabled: false } }).backup) ===
+    JSON.stringify({ intervalMinutes: 15, keep: 5, enabled: false }));
+  check("(20) platform override can set every field at once (full-merge path)",
+    JSON.stringify(resolveConfig({ docLint: false }, { backup: { intervalMinutes: 15, keep: 5, enabled: false } }).backup) ===
+    JSON.stringify({ intervalMinutes: 15, keep: 5, enabled: false }));
+
+  // --- precedence: platform override > env > default (intervalMinutes only — keep/enabled have no env layer) ---
+  process.env.LOOM_BACKUP_INTERVAL_MINUTES = "30";
+  check("(20) env beats default (fast path)", resolveConfig(undefined).backup.intervalMinutes === 30);
+  check("(20) env beats default (full-merge path)", resolveConfig({ docLint: false }).backup.intervalMinutes === 30);
+  check("(20) platform override beats env (fast path)",
+    resolveConfig(undefined, { backup: { intervalMinutes: 90 } }).backup.intervalMinutes === 90);
+  check("(20) platform override beats env (full-merge path)",
+    resolveConfig({ docLint: false }, { backup: { intervalMinutes: 90 } }).backup.intervalMinutes === 90);
+  delete process.env.LOOM_BACKUP_INTERVAL_MINUTES;
+
+  // --- resolveBackupConfig (db-backup.ts): the exact function index.ts/sessions/service.ts call ---
+  check("(20) resolveBackupConfig() with no arg (the pre-migration boot call site) — env/default only",
+    resolveBackupConfig().intervalMinutes === 60 && resolveBackupConfig().keep === 48);
+  check("(20) resolveBackupConfig(platformOverride) — the post-Db-open call sites now consult it",
+    resolveBackupConfig({ backup: { keep: 200 } }).keep === 200);
+
+  // --- validatePlatformConfigOverride: intervalMinutes 0-1440, keep 1-500, enabled bool ---
+  check("(20) accepts backup:{} (empty, deep-partial)", validatePlatformConfigOverride({ backup: {} }).ok === true);
+  check("(20) accepts intervalMinutes:0 (floor — disables ONLY the periodic ticker)",
+    validatePlatformConfigOverride({ backup: { intervalMinutes: 0 } }).ok === true);
+  check("(20) accepts intervalMinutes:1440 (ceiling)", validatePlatformConfigOverride({ backup: { intervalMinutes: 1440 } }).ok === true);
+  check("(20) rejects intervalMinutes:-1", validatePlatformConfigOverride({ backup: { intervalMinutes: -1 } }).ok === false);
+  check("(20) rejects intervalMinutes:1441 (>ceiling)", validatePlatformConfigOverride({ backup: { intervalMinutes: 1441 } }).ok === false);
+  check("(20) accepts keep:1 (floor)", validatePlatformConfigOverride({ backup: { keep: 1 } }).ok === true);
+  check("(20) accepts keep:500 (ceiling)", validatePlatformConfigOverride({ backup: { keep: 500 } }).ok === true);
+  check("(20) rejects keep:0", validatePlatformConfigOverride({ backup: { keep: 0 } }).ok === false);
+  check("(20) rejects keep:501 (>ceiling)", validatePlatformConfigOverride({ backup: { keep: 501 } }).ok === false);
+  check("(20) rejects non-integer keep", validatePlatformConfigOverride({ backup: { keep: 1.5 } }).ok === false);
+  check("(20) rejects an unknown key nested inside backup (.strict())", validatePlatformConfigOverride({ backup: { bogus: 1 } }).ok === false);
+
+  // --- validatePlatformConfigPatch: whole-group null + per-field null ---
+  check("(20) PATCH accepts backup:null (whole-group clear)", validatePlatformConfigPatch({ backup: null }).ok === true);
+  check("(20) PATCH accepts a per-field null nested inside backup", validatePlatformConfigPatch({ backup: { keep: null } }).ok === true);
+  check("(20) PATCH still bounds a nested field", validatePlatformConfigPatch({ backup: { keep: 0 } }).ok === false);
+
+  // --- REST round-trip + deep-merge (does NOT wipe siblings) + whole-group clear ---
+  const dbFile = path.join(TMP, "backup-g4.db");
+  const db = new Db(dbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    const set = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { backup: { intervalMinutes: 30, keep: 20, enabled: false } } });
+    check("(20) PATCH backup:{...} → 200", set.statusCode === 200);
+    check("(20) persisted to the DB", JSON.stringify(db.getPlatformConfig().backup) === JSON.stringify({ intervalMinutes: 30, keep: 20, enabled: false }));
+    check("(20) reflected via resolveConfig", resolveConfig(undefined, db.getPlatformConfig()).backup.keep === 20);
+
+    // Deep-merge: PATCHing ONE field must not silently wipe the siblings just persisted above.
+    const patchOneField = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { backup: { keep: 40 } } });
+    check("(20) PATCH a single backup field → 200", patchOneField.statusCode === 200);
+    const afterOneField = db.getPlatformConfig();
+    check("(20) the submitted field applies", afterOneField.backup?.keep === 40);
+    check("(20) OMITTED sibling #1 (intervalMinutes) survives — NOT silently wiped", afterOneField.backup?.intervalMinutes === 30);
+    check("(20) OMITTED sibling #2 (enabled) survives — NOT silently wiped", afterOneField.backup?.enabled === false);
+
+    // Whole-group null clears every field, unchanged from the deep-merge behavior.
+    const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { backup: null } });
+    check("(20) whole-group null → 200", clear.statusCode === 200);
+    check("(20) cleared: no longer stale in the store", db.getPlatformConfig().backup === undefined);
+    check("(20) resolveConfig reverts to platform default once cleared", resolveConfig(undefined, db.getPlatformConfig()).backup.keep === 48);
+
+    // A non-numeric nested field still 400s (not treated as a clear) — mirrors the ms-keyed groups' guard.
+    db.setPlatformConfig({ backup: { keep: 7 } });
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { backup: { keep: "not-a-number" } } });
+    check("(20) a non-numeric backup.keep string still 400s (not treated as a clear)", bad.statusCode === 400);
+    check("(20) the rejected invalid PATCH did not clobber the persisted value", db.getPlatformConfig().backup?.keep === 7);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ============================ (21) usageSampleIntervalMs / usageSampleRetentionDays (sweep G5) ============================
+// The doc/code mismatch this sweep fixes: resolveConfig (config.ts ~1235-1236 on pre-fix main) set these
+// straight from the platform DEFAULT and NEVER consulted `platformOverride`, despite the fields' own doc
+// comments already claiming they did. This section is the resolveConfig test proving it's now actually
+// wired, on BOTH resolveConfig paths (the exact two-path symmetry the maxConcurrentManagers/
+// maxConcurrentAuditors fields already established).
+clearWatcherEnvs();
+{
+  // --- resolveConfig: defaults ---
+  check("(21) default usageSampleIntervalMs is 300000 (no override at all)",
+    resolveConfig(undefined).usageSampleIntervalMs === 300000);
+  check("(21) default usageSampleRetentionDays is 90 (no override at all)",
+    resolveConfig(undefined).usageSampleRetentionDays === 90);
+
+  // --- THE FIX: platform override reaches both resolved fields on BOTH resolveConfig paths ---
+  check("(21) platform override reaches resolved.usageSampleIntervalMs (no-project-override fast path)",
+    resolveConfig(undefined, { usageSampleIntervalMs: 120000 }).usageSampleIntervalMs === 120000);
+  check("(21) platform override reaches resolved.usageSampleIntervalMs (WITH a project override present, full-merge path)",
+    resolveConfig({ docLint: false }, { usageSampleIntervalMs: 120000 }).usageSampleIntervalMs === 120000);
+  check("(21) platform override reaches resolved.usageSampleRetentionDays (fast path)",
+    resolveConfig(undefined, { usageSampleRetentionDays: 30 }).usageSampleRetentionDays === 30);
+  check("(21) platform override reaches resolved.usageSampleRetentionDays (full-merge path)",
+    resolveConfig({ docLint: false }, { usageSampleRetentionDays: 30 }).usageSampleRetentionDays === 30);
+
+  // --- validatePlatformConfigOverride: interval 60000-3600000, retention 1-3650 ---
+  check("(21) accepts usageSampleIntervalMs:60000 (floor)", validatePlatformConfigOverride({ usageSampleIntervalMs: 60000 }).ok === true);
+  check("(21) accepts usageSampleIntervalMs:3600000 (ceiling)", validatePlatformConfigOverride({ usageSampleIntervalMs: 3600000 }).ok === true);
+  check("(21) rejects usageSampleIntervalMs:59999 (<floor)", validatePlatformConfigOverride({ usageSampleIntervalMs: 59999 }).ok === false);
+  check("(21) rejects usageSampleIntervalMs:3600001 (>ceiling)", validatePlatformConfigOverride({ usageSampleIntervalMs: 3600001 }).ok === false);
+  check("(21) accepts usageSampleRetentionDays:1 (floor)", validatePlatformConfigOverride({ usageSampleRetentionDays: 1 }).ok === true);
+  check("(21) accepts usageSampleRetentionDays:3650 (ceiling)", validatePlatformConfigOverride({ usageSampleRetentionDays: 3650 }).ok === true);
+  check("(21) rejects usageSampleRetentionDays:0", validatePlatformConfigOverride({ usageSampleRetentionDays: 0 }).ok === false);
+  check("(21) rejects usageSampleRetentionDays:3651 (>ceiling)", validatePlatformConfigOverride({ usageSampleRetentionDays: 3651 }).ok === false);
+  check("(21) rejects non-integer usageSampleIntervalMs", validatePlatformConfigOverride({ usageSampleIntervalMs: 1.5 }).ok === false);
+
+  check("(21) PATCH accepts usageSampleIntervalMs:null", validatePlatformConfigPatch({ usageSampleIntervalMs: null }).ok === true);
+  check("(21) PATCH accepts usageSampleRetentionDays:null", validatePlatformConfigPatch({ usageSampleRetentionDays: null }).ok === true);
+
+  // --- REST round-trip ---
+  const dbFile = path.join(TMP, "usage-g5.db");
+  const db = new Db(dbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    const set = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { usageSampleIntervalMs: 90000, usageSampleRetentionDays: 45 } });
+    check("(21) PATCH → 200", set.statusCode === 200);
+    check("(21) persisted to the DB", db.getPlatformConfig().usageSampleIntervalMs === 90000 && db.getPlatformConfig().usageSampleRetentionDays === 45);
+    check("(21) reflected via resolveConfig",
+      resolveConfig(undefined, db.getPlatformConfig()).usageSampleIntervalMs === 90000 &&
+      resolveConfig(undefined, db.getPlatformConfig()).usageSampleRetentionDays === 45);
+
+    const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { usageSampleIntervalMs: null } });
+    check("(21) cleared: no longer stale in the store", clear.statusCode === 200 && db.getPlatformConfig().usageSampleIntervalMs === undefined);
+    check("(21) sibling usageSampleRetentionDays untouched by the clear", db.getPlatformConfig().usageSampleRetentionDays === 45);
+    check("(21) resolveConfig reverts to platform default once cleared", resolveConfig(undefined, db.getPlatformConfig()).usageSampleIntervalMs === 300000);
+
+    db.setPlatformConfig({ usageSampleIntervalMs: 90000 });
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { usageSampleIntervalMs: "not-a-number" } });
+    check("(21) a non-numeric string still 400s (not treated as a clear)", bad.statusCode === 400);
+    check("(21) the rejected invalid PATCH did not clobber the persisted value", db.getPlatformConfig().usageSampleIntervalMs === 90000);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
+// ============================ (22) updateCheckIntervalMs (sweep G6) ============================
+// Mirrors backup.intervalMinutes's precedence shape: platform override ?? LOOM_UPDATE_CHECK_INTERVAL_MS
+// env ?? hardcoded 6h default. Two-path symmetry (fast path + full merge), same as G4/G5 above.
+clearWatcherEnvs();
+{
+  delete process.env.LOOM_UPDATE_CHECK_INTERVAL_MS;
+  check("(22) default updateCheckIntervalMs is 21600000 (6h, no override at all)",
+    resolveConfig(undefined).updateCheckIntervalMs === 21600000);
+  check("(22) platform override reaches resolved.updateCheckIntervalMs (no-project-override fast path)",
+    resolveConfig(undefined, { updateCheckIntervalMs: 3600000 }).updateCheckIntervalMs === 3600000);
+  check("(22) platform override reaches resolved.updateCheckIntervalMs (WITH a project override present, full-merge path)",
+    resolveConfig({ docLint: false }, { updateCheckIntervalMs: 3600000 }).updateCheckIntervalMs === 3600000);
+
+  // --- precedence: platform override > env > default ---
+  process.env.LOOM_UPDATE_CHECK_INTERVAL_MS = "7200000";
+  check("(22) env beats default (fast path)", resolveConfig(undefined).updateCheckIntervalMs === 7200000);
+  check("(22) env beats default (full-merge path)", resolveConfig({ docLint: false }).updateCheckIntervalMs === 7200000);
+  check("(22) platform override beats env (fast path)",
+    resolveConfig(undefined, { updateCheckIntervalMs: 10800000 }).updateCheckIntervalMs === 10800000);
+  check("(22) platform override beats env (full-merge path)",
+    resolveConfig({ docLint: false }, { updateCheckIntervalMs: 10800000 }).updateCheckIntervalMs === 10800000);
+  // a non-positive env value is treated as unset (mirrors the pre-existing `Number(env) || undefined`
+  // behavior at the index.ts call site this replaces).
+  process.env.LOOM_UPDATE_CHECK_INTERVAL_MS = "0";
+  check("(22) env 0 treated as unset → default", resolveConfig(undefined).updateCheckIntervalMs === 21600000);
+  delete process.env.LOOM_UPDATE_CHECK_INTERVAL_MS;
+
+  // --- validatePlatformConfigOverride: 3600000(1h)-86400000(24h) ---
+  check("(22) accepts updateCheckIntervalMs:3600000 (1h floor)", validatePlatformConfigOverride({ updateCheckIntervalMs: 3600000 }).ok === true);
+  check("(22) accepts updateCheckIntervalMs:86400000 (24h ceiling)", validatePlatformConfigOverride({ updateCheckIntervalMs: 86400000 }).ok === true);
+  check("(22) rejects updateCheckIntervalMs:3599999 (<1h floor)", validatePlatformConfigOverride({ updateCheckIntervalMs: 3599999 }).ok === false);
+  check("(22) rejects updateCheckIntervalMs:86400001 (>24h ceiling)", validatePlatformConfigOverride({ updateCheckIntervalMs: 86400001 }).ok === false);
+  check("(22) rejects non-integer updateCheckIntervalMs", validatePlatformConfigOverride({ updateCheckIntervalMs: 1.5 }).ok === false);
+  check("(22) PATCH accepts updateCheckIntervalMs:null", validatePlatformConfigPatch({ updateCheckIntervalMs: null }).ok === true);
+
+  // --- REST round-trip ---
+  const dbFile = path.join(TMP, "update-check-g6.db");
+  const db = new Db(dbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    const set = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { updateCheckIntervalMs: 43200000 } });
+    check("(22) PATCH updateCheckIntervalMs:43200000 → 200", set.statusCode === 200);
+    check("(22) persisted to the DB", db.getPlatformConfig().updateCheckIntervalMs === 43200000);
+    check("(22) reflected via resolveConfig", resolveConfig(undefined, db.getPlatformConfig()).updateCheckIntervalMs === 43200000);
+
+    const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { updateCheckIntervalMs: null } });
+    check("(22) cleared: no longer stale in the store", clear.statusCode === 200 && db.getPlatformConfig().updateCheckIntervalMs === undefined);
+    check("(22) resolveConfig reverts to platform default once cleared", resolveConfig(undefined, db.getPlatformConfig()).updateCheckIntervalMs === 21600000);
+
+    db.setPlatformConfig({ updateCheckIntervalMs: 43200000 });
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { updateCheckIntervalMs: "not-a-number" } });
+    check("(22) a non-numeric string still 400s (not treated as a clear)", bad.statusCode === 400);
+    check("(22) the rejected invalid PATCH did not clobber the persisted value", db.getPlatformConfig().updateCheckIntervalMs === 43200000);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field; and (sweep G4/G5/G6) `backup` is now a 4th deep-partial group in DEEP_MERGE_GROUPS (mirroring rateLimit/watchers/timeouts end-to-end: resolveConfig fast-path + full-merge two-path symmetry, intervalMinutes' env-then-default fallback, validator bounds 0-1440/1-500, PATCH whole-group + per-field null, deep-merge-not-wipe on a single-field PATCH) and resolveBackupConfig(platformOverride) — the exact function index.ts/sessions/service.ts call — now actually threads a passed override through, fixing the pre-migration-boot-vs-post-Db-open split (the boot snapshot call site structurally can't consult it; every other call site now does; `usageSampleIntervalMs`/`usageSampleRetentionDays` are proven to now ACTUALLY consult `platformOverride` on both resolveConfig paths — the exact doc/code mismatch this sweep fixes (their own field docs already claimed this before the fix; resolveConfig silently never read it) — with validator bounds 60000-3600000 / 1-3650 and full PATCH round-trip coverage; and `updateCheckIntervalMs` is a NEW daemon-global scalar mirroring backup.intervalMinutes's override-then-env-then-default precedence (incl. env-0-treated-as-unset), validator bounds 1h-24h, and full PATCH round-trip coverage."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -704,6 +704,14 @@ export interface ResolvedConfig {
    * HUMAN-only, exactly like `usageSampleIntervalMs`. Default 90.
    */
   usageSampleRetentionDays: number;
+  /**
+   * Sweep G6: poll cadence (ms) for the daemon's periodic npm-registry "update available" check
+   * (`UpdateCheckWatcher`, update/check.ts). DAEMON-GLOBAL + HUMAN-only, like `usageSampleIntervalMs`
+   * above (not in ProjectConfigOverride). Precedence: platform override ?? LOOM_UPDATE_CHECK_INTERVAL_MS
+   * env ?? hardcoded default. Default 21600000 (6h). Boot-bound: UpdateCheckWatcher is constructed ONCE
+   * at boot, so a change needs a daemon restart to take effect.
+   */
+  updateCheckIntervalMs: number;
 }
 
 /** Per-project overrides. Deep-partial of ResolvedConfig; anything omitted inherits the default. */
@@ -736,6 +744,17 @@ export interface PlatformConfigOverride {
   rateLimit?: Partial<RateLimitConfig>;
   watchers?: Partial<WatcherConfig>;
   timeouts?: Partial<TimeoutConfig>;
+  /**
+   * Sweep G4: daemon-global auto-backup tuning (see ResolvedConfig.backup / BackupConfig) — deep-partial,
+   * same shape as rateLimit/watchers/timeouts above, so tuning one field (e.g. `keep`) inherits the rest.
+   * `intervalMinutes` also has an env layer (LOOM_BACKUP_INTERVAL_MINUTES); precedence is this override ??
+   * the env var ?? the hardcoded default (mirrors the watcher cadences). `keep`/`enabled` have no env
+   * layer. Boot-bound: DbBackupWatcher (the periodic ticker) is constructed ONCE at boot, so a change here
+   * needs a daemon restart to take effect on the ticker — but see the `resolveBackupConfig` doc for the
+   * ONE call site (the pre-migration boot snapshot) that structurally CANNOT consult this override at all
+   * (it fires before the Db that stores it is even open).
+   */
+  backup?: Partial<BackupConfig>;
   /** See PlatformConfig.connections. */
   connections?: Partial<ConnectionsGuardConfig>;
   /** See PlatformConfig.integrations. Deep-partial: setting one tool's path leaves the other untouched. */
@@ -776,6 +795,23 @@ export interface PlatformConfigOverride {
    * DEFAULT_MAX_CONCURRENT_AUDITORS constant).
    */
   maxConcurrentAuditors?: number;
+  /**
+   * Sweep G5 (fixes a doc/code mismatch): see ResolvedConfig.usageSampleIntervalMs. Daemon-GLOBAL, no
+   * per-project layer — the field's own doc already claimed this override was consulted; `resolveConfig`
+   * previously never actually read it (always the hardcoded default). Boot-bound: the UsageSampler is
+   * constructed ONCE at boot, so a change here needs a daemon restart to take effect.
+   */
+  usageSampleIntervalMs?: number;
+  /** Sweep G5 (fixes a doc/code mismatch): see ResolvedConfig.usageSampleRetentionDays. Same daemon-
+   *  global, boot-bound, previously-unconsulted-despite-its-doc shape as usageSampleIntervalMs above. */
+  usageSampleRetentionDays?: number;
+  /**
+   * Sweep G6: see UpdateCheckWatcher / update/check.ts's DEFAULT_INTERVAL_MS. Daemon-GLOBAL poll cadence
+   * for the npm-registry "update available" check, no per-project layer. Also has an env layer
+   * (LOOM_UPDATE_CHECK_INTERVAL_MS); precedence is this override ?? the env var ?? the hardcoded default
+   * (mirrors backup.intervalMinutes above). Boot-bound: UpdateCheckWatcher is constructed ONCE at boot.
+   */
+  updateCheckIntervalMs?: number;
 }
 
 /** Every field of `T` individually nullable — the per-field clear sentinel a `PlatformConfigPatch`
@@ -799,17 +835,21 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors"
+  "rateLimit" | "watchers" | "timeouts" | "backup" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors" | "usageSampleIntervalMs" | "usageSampleRetentionDays" | "updateCheckIntervalMs"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
   timeouts?: NullableFields<TimeoutConfig> | null;
+  backup?: NullableFields<BackupConfig> | null;
   coalesceAgentMessages?: boolean | null;
   operatorEnabled?: boolean | null;
   schedulerEnabled?: boolean | null;
   maxConcurrentGates?: number | null;
   maxConcurrentManagers?: number | null;
   maxConcurrentAuditors?: number | null;
+  usageSampleIntervalMs?: number | null;
+  usageSampleRetentionDays?: number | null;
+  updateCheckIntervalMs?: number | null;
 };
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -891,6 +931,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   // Session-usage telemetry (epic c9924bcd): daemon-global sampler cadence (5m) + sample retention (90d).
   usageSampleIntervalMs: 300000,
   usageSampleRetentionDays: 90,
+  updateCheckIntervalMs: 21600000, // 6h — matches update/check.ts's DEFAULT_INTERVAL_MS (zero behavior change)
 };
 
 /**
@@ -1062,6 +1103,21 @@ function envBackupIntervalMinutes(): number | undefined {
 }
 
 /**
+ * Sweep G6: read the LOOM_UPDATE_CHECK_INTERVAL_MS env override for the update-check poll cadence.
+ * Returned at the platform-default layer of resolveConfig (a platform override still wins). UNLIKE
+ * envIdleNudgeMinutes/envBackupIntervalMinutes, a non-positive value (0 or negative) is treated as unset
+ * (returns undefined) rather than honored — this preserves the pre-existing `Number(env) || undefined`
+ * behavior at the index.ts call site this replaces (0 was never a meaningful interval here; it would
+ * hand `setInterval` a 0ms tick).
+ */
+function envUpdateCheckIntervalMs(): number | undefined {
+  const raw = typeof process !== "undefined" ? process.env?.LOOM_UPDATE_CHECK_INTERVAL_MS : undefined;
+  if (raw == null || raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+/**
  * §bounds watcher floor (ms): the minimum any watcher cadence may resolve to. The global override is
  * range-checked on the human path (task B's validator); but the LOOM_*_INTERVAL_MS ENV reads are not
  * validated anywhere, so we floor-clamp them HERE — a stray `LOOM_CONTEXT_WATCH_INTERVAL_MS=0` would
@@ -1186,6 +1242,24 @@ export function resolveConfig(
     base.orchestration.maxConcurrentGates = platformOverride?.maxConcurrentGates ?? d.orchestration.maxConcurrentGates;
     base.orchestration.maxConcurrentManagers = platformOverride?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers;
     base.orchestration.maxConcurrentAuditors = platformOverride?.maxConcurrentAuditors ?? d.orchestration.maxConcurrentAuditors;
+    // Sweep G4: backup is likewise daemon-GLOBAL — same fast-path fix as maxConcurrentGates/
+    // maxConcurrentManagers above (this branch used to return the structuredClone(d) value untouched by
+    // platformOverride?.backup, so resolveConfig(undefined, po) silently ignored a set po.backup, same
+    // stale-hint bug the maxConcurrentManagers fix note above describes). intervalMinutes keeps its env
+    // layer (envBackup, read above); keep/enabled have no env layer.
+    base.backup = {
+      intervalMinutes: platformOverride?.backup?.intervalMinutes ?? envBackup ?? d.backup.intervalMinutes,
+      keep: platformOverride?.backup?.keep ?? d.backup.keep,
+      enabled: platformOverride?.backup?.enabled ?? d.backup.enabled,
+    };
+    // Sweep G5 (fixes the doc/code mismatch): usageSampleIntervalMs/usageSampleRetentionDays are
+    // daemon-GLOBAL and previously NEVER consulted platformOverride on either resolveConfig path despite
+    // their own field docs claiming they did — same class of bug as the maxConcurrentGates/
+    // maxConcurrentManagers fast-path fix above.
+    base.usageSampleIntervalMs = platformOverride?.usageSampleIntervalMs ?? d.usageSampleIntervalMs;
+    base.usageSampleRetentionDays = platformOverride?.usageSampleRetentionDays ?? d.usageSampleRetentionDays;
+    // Sweep G6: update-check poll cadence, daemon-GLOBAL with an env layer (mirrors backup.intervalMinutes).
+    base.updateCheckIntervalMs = platformOverride?.updateCheckIntervalMs ?? envUpdateCheckIntervalMs() ?? d.updateCheckIntervalMs;
     // obsidian defaults OFF on this fast path → obsidianSessionEnv({autoStart:false}) is {} → base.sessionEnv
     // stays byte-identical to today (no injection). Nothing to do; left explicit for the next reader.
     // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
@@ -1272,12 +1346,13 @@ export function resolveConfig(
       // treated as "unset" by the resolver (resolveResumeDocPath), not by this merge.
       resumeDocFilename: override.orchestration?.resumeDocFilename ?? d.orchestration.resumeDocFilename,
     },
-    // Daemon-global (no per-project override): platform default, with the env applying to the cadence
-    // at this layer. `??` (not `||`) so an explicit env 0 is preserved (0 disables the periodic ticker).
+    // Daemon-global (no per-project override): platform override (2nd arg) ?? env ?? default, mirroring
+    // resolvePlatform's watcher-cadence precedence. `??` (not `||`) so an explicit 0 is preserved (0
+    // disables the periodic ticker / retains everything, whichever field is meaningfully 0).
     backup: {
-      intervalMinutes: envBackup ?? d.backup.intervalMinutes,
-      keep: d.backup.keep,
-      enabled: d.backup.enabled,
+      intervalMinutes: platformOverride?.backup?.intervalMinutes ?? envBackup ?? d.backup.intervalMinutes,
+      keep: platformOverride?.backup?.keep ?? d.backup.keep,
+      enabled: platformOverride?.backup?.enabled ?? d.backup.enabled,
     },
     // Daemon-global (no per-project layer): global override (2nd arg) ?? LOOM_* watcher env ?? default.
     platform: resolvePlatform(platformOverride),
@@ -1294,9 +1369,15 @@ export function resolveConfig(
       topK: Math.min(override.memory?.topK ?? d.memory.topK, MEMORY_CONFIG_MAX.topK),
       maxNotes: Math.min(override.memory?.maxNotes ?? d.memory.maxNotes, MEMORY_CONFIG_MAX.maxNotes),
     },
-    // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Always the
-    // platform default (HUMAN-only; not in ProjectConfigOverride, so an agent override can't reach them).
-    usageSampleIntervalMs: d.usageSampleIntervalMs,
-    usageSampleRetentionDays: d.usageSampleRetentionDays,
+    // Daemon-global (no per-project layer): the session-usage sampler cadence + retention. Sweep G5 fixes
+    // the doc/code mismatch — these previously fell straight to the platform default here, never actually
+    // consulting `platformOverride` despite the field's own doc claiming they did. HUMAN-only; not in
+    // ProjectConfigOverride, so an agent override can't reach them.
+    usageSampleIntervalMs: platformOverride?.usageSampleIntervalMs ?? d.usageSampleIntervalMs,
+    usageSampleRetentionDays: platformOverride?.usageSampleRetentionDays ?? d.usageSampleRetentionDays,
+    // Sweep G6: update-check poll cadence, daemon-global with an env layer (mirrors backup.intervalMinutes
+    // above). `??` so an explicit 0 from the override would be preserved, though the validator's 1h floor
+    // makes that unreachable via the human PATCH path in practice.
+    updateCheckIntervalMs: platformOverride?.updateCheckIntervalMs ?? envUpdateCheckIntervalMs() ?? d.updateCheckIntervalMs,
   };
 }

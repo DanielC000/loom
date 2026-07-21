@@ -1,7 +1,7 @@
 import path from "node:path";
 import fs from "node:fs";
 import Database from "better-sqlite3";
-import { resolveConfig, type BackupConfig } from "@loom/shared";
+import { resolveConfig, type BackupConfig, type PlatformConfigOverride } from "@loom/shared";
 import { DB_PATH, AUTO_BACKUP_DIR } from "../paths.js";
 
 /**
@@ -22,9 +22,19 @@ import { DB_PATH, AUTO_BACKUP_DIR } from "../paths.js";
  * online-backup use case.
  */
 
-/** Resolve the effective daemon-global backup config (platform default + LOOM_BACKUP_INTERVAL_MINUTES). */
-export function resolveBackupConfig(): BackupConfig {
-  return resolveConfig(undefined).backup;
+/**
+ * Resolve the effective daemon-global backup config: `platformOverride?.backup` (sweep G4) ??
+ * LOOM_BACKUP_INTERVAL_MINUTES (intervalMinutes only) ?? the hardcoded default.
+ *
+ * `platformOverride` is OPTIONAL and must be OMITTED at the one boot call site that fires BEFORE `Db` is
+ * opened (the pre-migration snapshot in index.ts) — that override lives IN the very DB this call is meant
+ * to protect, so it structurally cannot be read yet at that point; the pre-migration snapshot always uses
+ * env-or-default. Every OTHER call site (the periodic DbBackupWatcher constructed after `Db` opens, the
+ * pre-restart snapshot in sessions/service.ts) has a live `Db` and should pass `db.getPlatformConfig()`
+ * so a configured `keep`/`enabled`/`intervalMinutes` actually takes effect.
+ */
+export function resolveBackupConfig(platformOverride?: PlatformConfigOverride): BackupConfig {
+  return resolveConfig(undefined, platformOverride).backup;
 }
 
 /** Windows-safe snapshot filename from an ISO timestamp (":" is illegal in Windows filenames). */

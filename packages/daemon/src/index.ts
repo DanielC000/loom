@@ -74,9 +74,11 @@ async function main(): Promise<void> {
   // constructor) and before boot-reconcile, so a bad migration/reconcile is recoverable to the pre-boot
   // state. Best-effort — takeBackup never throws and skips a fresh install (no DB yet); awaited so the
   // snapshot completes before the migrating connection opens. Gated on `enabled` (interval-0 only mutes
-  // the periodic ticker).
-  const backupCfg = resolveBackupConfig();
-  if (backupCfg.enabled) await takeBackup({ reason: "boot", keep: backupCfg.keep });
+  // the periodic ticker). NO platform override here by construction: `Db` (which stores it) isn't open
+  // yet — env-or-default only (see resolveBackupConfig's doc). The periodic ticker below, constructed
+  // AFTER `db`/`platformOverride` are available, uses the fully-resolved `resolved.backup` instead.
+  const bootBackupCfg = resolveBackupConfig();
+  if (bootBackupCfg.enabled) await takeBackup({ reason: "boot", keep: bootBackupCfg.keep });
   const db = new Db();
   // Seed Loom's bundled Profiles (platform-level rig) into the profiles table, seed-if-absent
   // like the skills seed — additive, idempotent, preserves user edits. The two Platform-layer profiles
@@ -660,9 +662,12 @@ async function main(): Promise<void> {
   // from-source daemon reports packaged:false and never hits the network); the gateway serves its cached
   // status read-only via GET /api/update-status. beginSelfUpdate is the loopback POST /internal/update
   // target: it spawns the DETACHED `loom update` (E2c-1) which runs the end-user stop→install→start cycle.
+  // Sweep G6: `resolved.updateCheckIntervalMs` already folds in the platform override ??
+  // LOOM_UPDATE_CHECK_INTERVAL_MS env ?? the hardcoded 6h default (config.ts), so it's always a defined
+  // number here — no `|| undefined` fallback needed at this call site anymore.
   const updateCheck = new UpdateCheckWatcher({
     loomHome: LOOM_HOME,
-    intervalMs: Number(process.env.LOOM_UPDATE_CHECK_INTERVAL_MS) || undefined,
+    intervalMs: resolved.updateCheckIntervalMs,
   });
   // Spawn the detached updater. Packaged-gated by the route, double-checked here (a sensitive op): resolve
   // the CLI bin via the umbrella package walk-up (works in the packaged form), spawn it fully detached with
@@ -1010,17 +1015,19 @@ async function main(): Promise<void> {
   // Automatic DB-backup ticker — periodic online snapshots of loom.db into ~/.loom/backups/auto/,
   // rotated to the newest `keep`. Best-effort; never blocks/crashes. Disabled when backups are off or
   // the interval is 0. LOOM_BACKUP_INTERVAL_MS overrides the tick cadence for tests (otherwise minutes).
+  // Sweep G4: unlike the pre-migration `bootBackupCfg` above, `resolved.backup` here DOES consult the
+  // platform override — `db` (and so `platformOverride`) is already open/loaded by this point in boot.
   const dbBackupWatcher = new DbBackupWatcher({
-    enabled: backupCfg.enabled,
-    intervalMinutes: backupCfg.intervalMinutes,
-    keep: backupCfg.keep,
+    enabled: resolved.backup.enabled,
+    intervalMinutes: resolved.backup.intervalMinutes,
+    keep: resolved.backup.keep,
     intervalMs: Number(process.env.LOOM_BACKUP_INTERVAL_MS) || undefined,
   });
   dbBackupWatcher.start();
   console.log(
-    backupCfg.enabled && backupCfg.intervalMinutes > 0
-      ? `[boot] db-backup ticker on (every ${backupCfg.intervalMinutes}m, keep ${backupCfg.keep})`
-      : `[boot] db-backup ticker off (${backupCfg.enabled ? "interval 0" : "disabled"})`,
+    resolved.backup.enabled && resolved.backup.intervalMinutes > 0
+      ? `[boot] db-backup ticker on (every ${resolved.backup.intervalMinutes}m, keep ${resolved.backup.keep})`
+      : `[boot] db-backup ticker off (${resolved.backup.enabled ? "interval 0" : "disabled"})`,
   );
 
   // Vault auto-committer — start ONE VaultVersioner per UNIQUE governing repo root so agent doc rewrites

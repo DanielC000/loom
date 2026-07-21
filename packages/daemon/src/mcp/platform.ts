@@ -407,6 +407,15 @@ const timeoutsOverride = z.object({
   busyStaleMs: z.number().int().min(30000).max(1800000).optional(),
   runMs: z.number().int().min(30000).max(3600000).optional(), // Agent Runs hard run-timeout: 30s..1h
 }).strict();
+// Sweep G4: daemon-global auto-backup tuning (see PlatformConfigOverride.backup / @loom/shared's
+// BackupConfig), the 4th deep-partial group alongside rateLimit/watchers/timeouts above. intervalMinutes
+// 0-1440 (0 disables ONLY the periodic ticker; boot/pre-restart snapshots still fire while `enabled`),
+// keep 1-500 (retained snapshot count), enabled a plain master switch.
+const backupOverride = z.object({
+  intervalMinutes: z.number().int().min(0).max(1440).optional(),
+  keep: z.number().int().min(1).max(500).optional(),
+  enabled: z.boolean().optional(),
+}).strict();
 // P2 authenticated-request bounds + per-connection rate guard. HUMAN-only, exactly like the other
 // `platform` sub-groups (no agent variant — see the platformConfigOverrideSchema note above).
 const connectionsOverride = z.object({
@@ -474,6 +483,7 @@ const platformConfigOverrideSchema = z.object({
   rateLimit: rateLimitOverride.optional(),
   watchers: watchersOverride.optional(),
   timeouts: timeoutsOverride.optional(),
+  backup: backupOverride.optional(),
   connections: connectionsOverride.optional(),
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().optional(),
@@ -501,6 +511,18 @@ const platformConfigOverrideSchema = z.object({
   // of 0 would deadlock scheduled auditor spawns); ceiling 50 — auditors are read-mostly/lightweight, so
   // a much smaller generous ceiling than the manager/worker caps above is appropriate.
   maxConcurrentAuditors: z.number().int().min(1).max(50).optional(),
+  // Sweep G5 (fixes a doc/code mismatch — see PlatformConfigOverride.usageSampleIntervalMs's own doc):
+  // session-usage telemetry sampler cadence. Floor 60000 (1m — a busy-loop guard, same reasoning as the
+  // watcher 5s floor scaled to this sampler's own realistic range); ceiling 3600000 (1h — a stale-enough
+  // cadence still worth calling "sampled" telemetry).
+  usageSampleIntervalMs: z.number().int().min(60000).max(3600000).optional(),
+  // Sweep G5: retention window (days) for session_usage_samples rows. Floor 1 (at least a day of
+  // history); ceiling 3650 (10y — generous, bounds against a fat-fingered unbounded-growth value).
+  usageSampleRetentionDays: z.number().int().min(1).max(3650).optional(),
+  // Sweep G6: update-check poll cadence (see PlatformConfigOverride.updateCheckIntervalMs). Floor
+  // 3600000 (1h — the registry rarely changes; anything tighter is needless polling); ceiling 86400000
+  // (24h — still checks at least daily).
+  updateCheckIntervalMs: z.number().int().min(3600000).max(86400000).optional(),
 }).strict();
 
 /**
@@ -536,17 +558,22 @@ function nullableShape<Shape extends z.ZodRawShape>(
 const rateLimitPatchOverride = z.object(nullableShape(rateLimitOverride.shape)).strict();
 const watchersPatchOverride = z.object(nullableShape(watchersOverride.shape)).strict();
 const timeoutsPatchOverride = z.object(nullableShape(timeoutsOverride.shape)).strict();
+// Sweep G4: backup joins rateLimit/watchers/timeouts as the 4th deep-partial group with a per-field-
+// nullable PATCH variant (see server.ts's DEEP_MERGE_GROUPS for the merge side of this).
+const backupPatchOverride = z.object(nullableShape(backupOverride.shape)).strict();
 
 /**
  * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75, sweep
- * G2): field-for-field identical to `platformConfigOverrideSchema` above, except the 9 top-level keys the
- * Settings global-config form can blank back to "inherit" — `rateLimit`/`watchers`/`timeouts` (the
- * ms-keyed field grid) and `schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
- * `maxConcurrentGates`/`maxConcurrentManagers`/`maxConcurrentAuditors` (the tri-state toggles + the three
- * cap inputs) — additionally accept an explicit
+ * G2, sweep G4/G5/G6): field-for-field identical to `platformConfigOverrideSchema` above, except the
+ * top-level keys the Settings global-config form can blank back to "inherit" — `rateLimit`/`watchers`/
+ * `timeouts`/`backup` (the deep-partial groups) and `schedulerEnabled`/`operatorEnabled`/
+ * `coalesceAgentMessages`/`maxConcurrentGates`/`maxConcurrentManagers`/`maxConcurrentAuditors`/
+ * `usageSampleIntervalMs`/`usageSampleRetentionDays`/`updateCheckIntervalMs` (the tri-state toggles + the
+ * scalar cap/cadence inputs) — additionally accept an explicit
  * `null`. Whole-group `null` means "delete this whole group from the persisted override" (revert every
  * field in it to the resolved default). Within a submitted group object, EACH FIELD is also individually
- * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride` above) — a per-field
+ * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride`/
+ * `backupPatchOverride` above) — a per-field
  * `null` means "delete just this field"; an OMITTED field — whether at the top level or nested inside a
  * submitted group — means "not being edited, leave whatever is already persisted alone". The PATCH
  * handler in server.ts is what turns a `null` (whole-group or per-field) into an actual delete via a
@@ -560,6 +587,7 @@ const platformConfigPatchSchema = z.object({
   rateLimit: rateLimitPatchOverride.nullable().optional(),
   watchers: watchersPatchOverride.nullable().optional(),
   timeouts: timeoutsPatchOverride.nullable().optional(),
+  backup: backupPatchOverride.nullable().optional(),
   connections: connectionsOverride.optional(),
   integrations: integrationsOverride.optional(),
   coalesceAgentMessages: z.boolean().nullable().optional(),
@@ -570,6 +598,9 @@ const platformConfigPatchSchema = z.object({
   maxConcurrentGates: z.number().int().min(1).max(50).nullable().optional(),
   maxConcurrentManagers: z.number().int().min(1).max(100).nullable().optional(),
   maxConcurrentAuditors: z.number().int().min(1).max(50).nullable().optional(),
+  usageSampleIntervalMs: z.number().int().min(60000).max(3600000).nullable().optional(),
+  usageSampleRetentionDays: z.number().int().min(1).max(3650).nullable().optional(),
+  updateCheckIntervalMs: z.number().int().min(3600000).max(86400000).nullable().optional(),
 }).strict();
 
 /**

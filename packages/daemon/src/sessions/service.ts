@@ -1855,8 +1855,10 @@ export class SessionService {
     const supervisorChanged = await supervisorScriptChangedSince(bootTime);
     // A restart is the riskiest moment (a bad merge that just built clean can still wedge boot) — snapshot
     // the DB before we exit, after the green build. Best-effort: takeBackup never throws, so a backup
-    // failure can NEVER block the restart.
-    const backupCfg = resolveBackupConfig();
+    // failure can NEVER block the restart. `this.db` is live here (unlike index.ts's pre-migration boot
+    // snapshot), so pass the persisted platform override (sweep G4) — a configured keep/enabled actually
+    // applies to this trigger, not just the hardcoded default.
+    const backupCfg = resolveBackupConfig(this.db.getPlatformConfig());
     if (backupCfg.enabled) await takeBackup({ reason: "pre-restart", keep: backupCfg.keep });
     // Capture the WHOLE live fleet — the daemon is ONE process for ALL projects, so this restart tears
     // down every project's sessions, not just the requester's. Resuming only the requester (the old

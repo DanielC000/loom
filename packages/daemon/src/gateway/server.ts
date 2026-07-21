@@ -3609,15 +3609,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // sentinel a blanked Settings toggle sends) DELETES the key instead, reverting it to inherit the
     // resolved default.
     //
-    // The 3 ms-keyed groups (card ba9ccd75) get a DEEP merge instead of the shallow whole-key replace
-    // every other key uses: a submitted `rateLimit`/`watchers`/`timeouts` object merges FIELD BY FIELD
+    // The deep-partial groups (card ba9ccd75; `backup` added sweep G4) get a DEEP merge instead of the
+    // shallow whole-key replace every other key uses: a submitted `rateLimit`/`watchers`/`timeouts`/
+    // `backup` object merges FIELD BY FIELD
     // onto the persisted group rather than replacing it wholesale, so "omitted = leave alone" holds
     // uniformly at both levels (top-level key AND a field nested inside a submitted group) — before this,
     // `{"rateLimit":{"exhaustedThresholdPct":90}}` silently wiped every other persisted rateLimit field,
     // since the shallow path below `merged[key] = val` replaces the entire group with just what was sent.
     // A per-field `null` inside the group (accepted by platformConfigPatchSchema's nullable field
     // variants) deletes just that field; whole-group `null` still deletes the whole group unchanged.
-    const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts"]);
+    const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts", "backup"]);
     const merged: Record<string, unknown> = { ...deps.db.getPlatformConfig() };
     for (const [key, val] of Object.entries(v.value)) {
       if (val === null) {

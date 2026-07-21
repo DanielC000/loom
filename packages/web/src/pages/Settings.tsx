@@ -470,6 +470,19 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Scheduler reads this once at construction (index.ts), so a saved change needs a daemon restart.
   const auditorsDefault = resolveConfig(undefined).orchestration.maxConcurrentAuditors;
   const auditorsResolved = resolveConfig(undefined, override).orchestration.maxConcurrentAuditors;
+  // Sweep G4/G5/G6: backup / usage-sample telemetry / update-check cadence all live on ResolvedConfig's
+  // TOP LEVEL (like backup itself always has), not the `platform` sub-group `resolved`/`defaults` above
+  // hold — so their default/effective hints are resolved separately, same pattern as
+  // gatesDefault/managersDefault/auditorsDefault above. All three are boot-bound (their watcher/sampler
+  // is constructed ONCE at boot), so a saved change needs a daemon restart, like the Scheduler caps above.
+  const backupDefault = resolveConfig(undefined).backup;
+  const backupResolved = resolveConfig(undefined, override).backup;
+  const usageIntervalDefault = resolveConfig(undefined).usageSampleIntervalMs;
+  const usageIntervalResolved = resolveConfig(undefined, override).usageSampleIntervalMs;
+  const usageRetentionDefault = resolveConfig(undefined).usageSampleRetentionDays;
+  const usageRetentionResolved = resolveConfig(undefined, override).usageSampleRetentionDays;
+  const updateCheckDefault = resolveConfig(undefined).updateCheckIntervalMs;
+  const updateCheckResolved = resolveConfig(undefined, override).updateCheckIntervalMs;
 
   // One flat string dict keyed by field key (unique across groups). "" = inherit. Seeded from the loaded
   // override, each value displayed in its human unit (canonical ms ÷ the unit).
@@ -497,6 +510,18 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   const [maxConcurrentManagers, setMaxConcurrentManagers] = useState(numStr(override.maxConcurrentManagers));
   // Sweep G2 — its own blank-to-inherit control, same pattern as maxConcurrentManagers above.
   const [maxConcurrentAuditors, setMaxConcurrentAuditors] = useState(numStr(override.maxConcurrentAuditors));
+  // Sweep G4 — the `backup` deep-partial group (like rateLimit/watchers/timeouts, but mixed int/bool
+  // fields so it gets its own 3-field block rather than joining the ms-keyed GLOBAL_FIELDS grid).
+  const [backupEnabled, setBackupEnabled] = useState(triStr(override.backup?.enabled));
+  const [backupIntervalMinutes, setBackupIntervalMinutes] = useState(numStr(override.backup?.intervalMinutes));
+  const [backupKeep, setBackupKeep] = useState(numStr(override.backup?.keep));
+  // Sweep G5 (fixes a doc/code mismatch) — session-usage telemetry cadence/retention, top-level scalar
+  // keys mirroring maxConcurrentManagers's own-control pattern. Cadence is stored/displayed in minutes
+  // (MsField's human-unit convention); retention is a plain day count.
+  const [usageSampleIntervalMinutes, setUsageSampleIntervalMinutes] = useState(msStr(override.usageSampleIntervalMs, "m"));
+  const [usageSampleRetentionDays, setUsageSampleRetentionDays] = useState(numStr(override.usageSampleRetentionDays));
+  // Sweep G6 — update-check poll cadence, top-level scalar, displayed in hours.
+  const [updateCheckHours, setUpdateCheckHours] = useState(msStr(override.updateCheckIntervalMs, "h"));
   // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
   const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
@@ -562,6 +587,49 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     } else {
       const n = Number(auditorsTrim);
       (o as Record<string, unknown>).maxConcurrentAuditors = Number.isFinite(n) ? n : auditorsTrim;
+    }
+    // Sweep G4: `backup` is a deep-partial group (like rateLimit/watchers/timeouts) but mixes an int
+    // (intervalMinutes), an int (keep), and a bool (enabled) — built as its own per-field-nullable entry
+    // object rather than joining the pure-ms GLOBAL_FIELDS loop above. Same blank→null / non-finite→
+    // original-string discipline as every other field on this form.
+    {
+      const entries: Record<string, number | boolean | string | null> = {};
+      const ivTrim = backupIntervalMinutes.trim();
+      if (ivTrim === "") { entries.intervalMinutes = null; } else {
+        const n = Number(ivTrim);
+        entries.intervalMinutes = Number.isFinite(n) ? n : ivTrim;
+      }
+      const keepTrim = backupKeep.trim();
+      if (keepTrim === "") { entries.keep = null; } else {
+        const n = Number(keepTrim);
+        entries.keep = Number.isFinite(n) ? n : keepTrim;
+      }
+      entries.enabled = backupEnabled === "inherit" ? null : backupEnabled === "true";
+      (o as Record<string, unknown>).backup = entries;
+    }
+    // Sweep G5 — usage-sample cadence (stored/displayed in minutes, converted to canonical ms) + retention
+    // (plain days). Same blank/non-finite handling as every other field on this form.
+    const usiTrim = usageSampleIntervalMinutes.trim();
+    if (usiTrim === "") {
+      o.usageSampleIntervalMs = null;
+    } else {
+      const n = Number(usiTrim) * UNIT_MS.m;
+      (o as Record<string, unknown>).usageSampleIntervalMs = Number.isFinite(n) ? n : usiTrim;
+    }
+    const usrTrim = usageSampleRetentionDays.trim();
+    if (usrTrim === "") {
+      o.usageSampleRetentionDays = null;
+    } else {
+      const n = Number(usrTrim);
+      (o as Record<string, unknown>).usageSampleRetentionDays = Number.isFinite(n) ? n : usrTrim;
+    }
+    // Sweep G6 — update-check cadence (stored/displayed in hours, converted to canonical ms).
+    const ucTrim = updateCheckHours.trim();
+    if (ucTrim === "") {
+      o.updateCheckIntervalMs = null;
+    } else {
+      const n = Number(ucTrim) * UNIT_MS.h;
+      (o as Record<string, unknown>).updateCheckIntervalMs = Number.isFinite(n) ? n : ucTrim;
     }
     // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
     // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
@@ -704,6 +772,68 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
           <Hint>
             Caps how many heavy merge/deploy gate runs execute at once across the whole host. Default 1
             (fully serialized). Takes effect on the next gate run, no daemon restart. Whole number, 1–50.
+          </Hint>
+        </label>
+      </Panel>
+
+      <Panel>
+        <SectionLabel>Backups &amp; Telemetry</SectionLabel>
+        <Hint>
+          Daemon-wide (one shared daemon/DB), not per-project. Every field here is boot-bound — its
+          watcher/sampler is constructed once at daemon start, so a saved change takes effect on the next
+          daemon restart, not live.
+        </Hint>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Auto-backup enabled · restart required</span>
+          <TriSelect value={backupEnabled} set={setBackupEnabled} def={backupDefault.enabled} />
+          <Hint>{effHint(backupResolved.enabled)} (takes effect after a daemon restart)</Hint>
+          <Hint>
+            Master switch for automatic loom.db snapshots (boot + periodic + before a self-host restart).
+            Off disables all three triggers.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Backup interval (minutes) · restart required</span>
+          <Input value={backupIntervalMinutes} onChange={(e) => setBackupIntervalMinutes(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${backupDefault.intervalMinutes})`} />
+          <Hint>{effHint(backupResolved.intervalMinutes)} (takes effect after a daemon restart)</Hint>
+          <Hint>
+            Minutes between periodic auto-snapshots. 0 disables only the periodic ticker — boot and
+            pre-restart snapshots still fire while enabled above. Whole number, 0–1440.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Backups to keep · restart required</span>
+          <Input value={backupKeep} onChange={(e) => setBackupKeep(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${backupDefault.keep})`} />
+          <Hint>{effHint(backupResolved.keep)} (takes effect after a daemon restart)</Hint>
+          <Hint>How many newest auto snapshots to retain (older pruned by mtime). Whole number, 1–500.</Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Usage-sample cadence (minutes) · restart required</span>
+          <Input value={usageSampleIntervalMinutes} onChange={(e) => setUsageSampleIntervalMinutes(e.target.value)}
+            inputMode="decimal" placeholder={`inherit (default ${usageIntervalDefault / UNIT_MS.m}m)`} />
+          <Hint>{effHint(`${usageIntervalResolved / UNIT_MS.m}m`)} (takes effect after a daemon restart)</Hint>
+          <Hint>
+            How often the background sampler reads each live session&apos;s transcript and records a usage
+            delta. 1–60 minutes.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Usage-sample retention (days) · restart required</span>
+          <Input value={usageSampleRetentionDays} onChange={(e) => setUsageSampleRetentionDays(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${usageRetentionDefault})`} />
+          <Hint>{effHint(usageRetentionResolved)} (takes effect after a daemon restart)</Hint>
+          <Hint>Samples older than this are pruned so the usage-telemetry table stays bounded. Whole number, 1–3650.</Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Update-check cadence (hours) · restart required</span>
+          <Input value={updateCheckHours} onChange={(e) => setUpdateCheckHours(e.target.value)}
+            inputMode="decimal" placeholder={`inherit (default ${updateCheckDefault / UNIT_MS.h}h)`} />
+          <Hint>{effHint(`${updateCheckResolved / UNIT_MS.h}h`)} (takes effect after a daemon restart)</Hint>
+          <Hint>
+            How often the daemon polls the npm registry for a newer loomctl release (packaged installs
+            only). 1–24 hours.
           </Hint>
         </label>
       </Panel>
