@@ -9,7 +9,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // client sends and rejects a mismatch, so this is a genuine protocol round-trip, not just a shape check.
 // Part 2 drives `performAuthenticatedRequest` directly (mirrors authenticated-request.mjs's Part 1 style)
 // via its own `fetchImpl`/`now` test seams to cover the full token lifecycle: fresh-token use, lazy
-// refresh-on-use, concurrent-refresh dedupe, and clean failure (needs-reauth) on a revoked refresh token.
+// refresh-on-use, concurrent-refresh dedupe, clean failure (needs-reauth) on a revoked refresh token
+// (unrecoverable, a 4xx/invalid_grant-shaped response), and clean failure WITHOUT needs-reauth on a
+// transient refresh failure (a network error or a token-endpoint 5xx) — card 48564ab4.
 //
 // Covers the card's DoD:
 //   - a full authorization-code+PKCE round-trip against a mock provider: initiate -> callback -> code
@@ -359,6 +361,47 @@ try {
       check("2d revoked refresh token: the error never contains any token/secret material", !JSON.stringify(r).includes(CLIENT_SECRET) && !JSON.stringify(r).includes("rt-3") && !JSON.stringify(r).includes("at-3"));
     }
 
+    // --- 2d2. TRANSIENT refresh failure (network error): needsReauth is left untouched, no false alarm ---
+    {
+      __resetConnectionsRateLimitState();
+      __resetOAuthRefreshState();
+      const metaBefore = getConnectionMetadata(db, conn.id);
+      check("2d2 setup: needsReauth is currently true (set by 2d)", metaBefore.needsReauth === true);
+      let resourceCalled = false;
+      const fetchImpl = async (url) => {
+        const u = String(url);
+        if (u === TOKEN_URL) throw new Error("ECONNRESET");
+        if (u === RESOURCE_URL) { resourceCalled = true; return new Response("ok", { status: 200 }); }
+        throw new Error(`unexpected fetch: ${u}`);
+      };
+      const nowPastExpiry4 = T0 + 3600_000 + 1000 + 3600_000 + 1000 + 3600_000 + 1000 + 3600_000 + 1000; // past at-3's expiry
+      const r = await performAuthenticatedRequest({ db, fetchImpl, now: () => nowPastExpiry4 }, [conn.id], GUARD, { connection: conn.id, path: "/widgets" });
+      check("2d2 network error: request fails cleanly (not a throw)", r.ok === false);
+      check("2d2 network error: error names it as a temporary failure, not re-auth", /temporar/i.test(r.error ?? "") && !/re-?auth/i.test(r.error ?? ""));
+      check("2d2 network error: the resource endpoint was NEVER called", resourceCalled === false);
+      check("2d2 network error: needsReauth is UNCHANGED (still whatever it was — no new false alarm)", getConnectionMetadata(db, conn.id).needsReauth === metaBefore.needsReauth);
+    }
+
+    // --- 2d3. TRANSIENT refresh failure (token endpoint 5xx): needsReauth is left untouched ---
+    {
+      __resetConnectionsRateLimitState();
+      __resetOAuthRefreshState();
+      const metaBefore = getConnectionMetadata(db, conn.id);
+      let resourceCalled = false;
+      const fetchImpl = async (url) => {
+        const u = String(url);
+        if (u === TOKEN_URL) return new Response("internal server error", { status: 503 });
+        if (u === RESOURCE_URL) { resourceCalled = true; return new Response("ok", { status: 200 }); }
+        throw new Error(`unexpected fetch: ${u}`);
+      };
+      const nowPastExpiry5 = T0 + 3600_000 * 5 + 5000; // comfortably past every prior expiry
+      const r = await performAuthenticatedRequest({ db, fetchImpl, now: () => nowPastExpiry5 }, [conn.id], GUARD, { connection: conn.id, path: "/widgets" });
+      check("2d3 5xx: request fails cleanly (not a throw)", r.ok === false);
+      check("2d3 5xx: error names it as a temporary failure, not re-auth", /temporar/i.test(r.error ?? "") && !/re-?auth/i.test(r.error ?? ""));
+      check("2d3 5xx: the resource endpoint was NEVER called", resourceCalled === false);
+      check("2d3 5xx: needsReauth is UNCHANGED", getConnectionMetadata(db, conn.id).needsReauth === metaBefore.needsReauth);
+    }
+
     // --- 2e. a non-oauth2 connection is unaffected by any of the above (byte-identical legacy path) ---
     {
       const { createConnection } = await import("../dist/connections/store.js");
@@ -376,7 +419,7 @@ try {
   }
 
   console.log(failures === 0
-    ? "\n✅ ALL PASS — oauth2 connections: REST registration + PKCE consent-initiate + loopback callback exercised end-to-end against a mock token endpoint (independent PKCE S256 re-derivation, one-shot state, clean rejection of a bad code/replayed state/denied consent), no secret ever leaks into a REST response body, no MCP tool (setup/orchestration/platform) exposes any oauth surface, and the token lifecycle (fresh-token use -> lazy refresh-on-use -> concurrent-refresh dedupe -> clean needs-reauth failure on a revoked refresh token) all route through the SAME performAuthenticatedRequest seam the agent tool and PollService share, with the legacy api-key/bearer path untouched."
+    ? "\n✅ ALL PASS — oauth2 connections: REST registration + PKCE consent-initiate + loopback callback exercised end-to-end against a mock token endpoint (independent PKCE S256 re-derivation, one-shot state, clean rejection of a bad code/replayed state/denied consent), no secret ever leaks into a REST response body, no MCP tool (setup/orchestration/platform) exposes any oauth surface, and the token lifecycle (fresh-token use -> lazy refresh-on-use -> concurrent-refresh dedupe -> unrecoverable-failure needs-reauth on a revoked refresh token -> transient-failure (network error / 5xx) leaves needs-reauth untouched) all route through the SAME performAuthenticatedRequest seam the agent tool and PollService share, with the legacy api-key/bearer path untouched."
     : `\n❌ ${failures} FAILURE(S).`);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }

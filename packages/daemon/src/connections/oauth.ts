@@ -74,7 +74,12 @@ export interface OAuthTokenResponse {
   expires_in?: number;
   token_type?: string;
 }
-export type OAuthTokenResult = { ok: true; tokens: OAuthTokenResponse } | { ok: false; error: string };
+// `recoverable: true` means the failure is transient (a network blip, or a 5xx from the token
+// endpoint) — retrying later with the SAME refresh token may well succeed, so callers must not treat
+// it as proof the grant was rejected. `recoverable: false` means the token endpoint itself rejected
+// the request in a way a retry can't fix (a 4xx status — invalid_grant/invalid_client-shaped —
+// meaning the refresh token is revoked/expired/wrong).
+export type OAuthTokenResult = { ok: true; tokens: OAuthTokenResponse } | { ok: false; error: string; recoverable: boolean };
 
 async function postTokenRequest(fetchImpl: typeof fetch, tokenUrl: string, params: Record<string, string>): Promise<OAuthTokenResult> {
   let response: Response;
@@ -85,21 +90,26 @@ async function postTokenRequest(fetchImpl: typeof fetch, tokenUrl: string, param
       body: new URLSearchParams(params).toString(),
     });
   } catch (err) {
-    return { ok: false, error: `token request failed: ${(err as Error).message}` };
+    // A network-level failure (DNS, TCP, TLS, timeout) says nothing about the refresh token itself.
+    return { ok: false, error: `token request failed: ${(err as Error).message}`, recoverable: true };
   }
   const text = await response.text();
   if (!response.ok) {
-    return { ok: false, error: `token endpoint returned ${response.status}: ${text.slice(0, 500)}` };
+    // 4xx is the shape a provider uses for invalid_grant/invalid_client (revoked/expired/wrong token)
+    // — not retry-fixable. 5xx (and any other non-2xx) is the provider's own failure, not the token's.
+    const recoverable = !(response.status >= 400 && response.status < 500);
+    return { ok: false, error: `token endpoint returned ${response.status}: ${text.slice(0, 500)}`, recoverable };
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    return { ok: false, error: `token endpoint returned non-JSON response: ${text.slice(0, 200)}` };
+    // A 2xx status with an unparseable body is the provider misbehaving, not evidence of a bad token.
+    return { ok: false, error: `token endpoint returned non-JSON response: ${text.slice(0, 200)}`, recoverable: true };
   }
   const tokens = parsed as OAuthTokenResponse;
   if (typeof tokens?.access_token !== "string" || !tokens.access_token) {
-    return { ok: false, error: "token endpoint response is missing access_token" };
+    return { ok: false, error: "token endpoint response is missing access_token", recoverable: true };
   }
   // expires_in comes from an UNTRUSTED response — a non-finite value (a hostile/nonconforming endpoint
   // sending e.g. "abc" or Infinity) would otherwise reach `new Date(now + expires_in * 1000)` downstream
@@ -172,7 +182,9 @@ export interface EnsureFreshTokenDeps {
  * fired — both the `authenticated_request` MCP tool AND the PollService poller reach it transparently via
  * `connections/request.ts`'s `performAuthenticatedRequest`. On an unrecoverable refresh failure (revoked /
  * invalid_grant / no refresh token on file) the connection is marked `needsReauth` and this returns a
- * clean `{ok:false}` — never a stale token, never a throw.
+ * clean `{ok:false}` — never a stale token, never a throw. A TRANSIENT refresh failure (a network error,
+ * or a 5xx from the token endpoint) returns the same clean `{ok:false}` but leaves `needsReauth`
+ * untouched — a blip shouldn't raise a "needs re-auth" banner the human has to act on for nothing.
  */
 export async function ensureFreshOAuthToken(deps: EnsureFreshTokenDeps, connectionId: string): Promise<EnsureFreshResult> {
   const row = deps.db.getConnection(connectionId);
@@ -207,8 +219,11 @@ export async function ensureFreshOAuthToken(deps: EnsureFreshTokenDeps, connecti
     try {
       const result = await refreshOAuthToken(fetchImpl, row.tokenUrl!, { clientId: row.clientId!, clientSecret, refreshToken });
       if (!result.ok) {
-        markConnectionNeedsReauth(deps.db, connectionId);
-        return { ok: false, error: `connection needs re-authentication (refresh failed: ${result.error})` };
+        if (!result.recoverable) {
+          markConnectionNeedsReauth(deps.db, connectionId);
+          return { ok: false, error: `connection needs re-authentication (refresh failed: ${result.error})` };
+        }
+        return { ok: false, error: `token refresh temporarily failed, will retry later: ${result.error}` };
       }
       const newExpiresAt = result.tokens.expires_in ? new Date(now + result.tokens.expires_in * 1000).toISOString() : null;
       const newBundle: OAuthTokenBundle = {
