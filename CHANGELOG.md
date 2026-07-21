@@ -4,8 +4,39 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.24.0] — 2026-07-21
+
+**A configurability, companion-reach, and onboarding release.** A sweep makes hardcoded operational limits **user-adjustable** end-to-end (schema → Settings UI); the Companion gains an owner-granted **git commit+push lever** and an all-project **lead mode**; a new **Gates** page and **schedule run-history** add fleet observability; and two **onboarding blockers** are fixed — a project can now be created **without a vault**, and user-supplied paths **expand a leading `~`**.
+
+### Added
+- **User-adjustable operational knobs.** A daemon audit made a class of hardcoded operational limits configurable end-to-end (config schema → Settings UI) with min/max bounds and defaults equal to the prior constants (zero change for existing installs): fleet-wide `maxConcurrentManagers` (platform-level, fixing the misleading per-project field), `maxConcurrentAuditors`, merge-gate retry policy (promoted from boot-bound to live-resolvable), daemon-global backup / usage-telemetry / update-check cadences, and `platform.watchers.pollMs`, plus a Settings form-completeness pass adding rows for schema-complete keys that had no UI.
+- **Companion git commit+push lever.** An owner-granted, scoped, step-up-gated ACT lever lets a Companion `git_commit` (Tier A) / `git_push` (Tier X, always confirms) on the owner's behalf, targeting either the project's vault repo or its code repo — daemon-resolved target, never an agent-supplied path.
+- **Companion lead mode.** An opt-in, full-capability, all-project control mode for a Companion (an alternative to per-capability grants), with an enable toggle + a blast-radius advisory + shadowed-grant display in the UI.
+- **Gates page.** A god-eye view of the live GateSemaphore registry combined with the priority queue and a history table, filterable per project.
+- **Schedule run-history.** A `GET /api/schedules/history` read + a lazy run-history section on the Schedules page.
+- **Cap-queue auto-drain.** A `worker_spawn` deferred at the concurrency cap now auto-fires when a slot frees — on a worker exit/retire/merge, and when a manager's usage-limit clears.
+- **Onboarding + memory quality-of-life.** Project-memory recall is injected on recycle/fork spawns; an owner chat reply can resolve a pending Request as answered; a card's merged/ship state is surfaced on task reads; a "no build gate by design" project flag suppresses the per-merge unverified-gate warning; pasted / multi-line Companion chat content expands into the turn body (with a tripwire on a bare pasted-text placeholder).
+
+### Changed
+- **Project-memory is now "Memory"** (the "Lore" branding was removed).
+- **Workers default to `auto` permission mode** so an unattended worker doesn't wedge on a routine confirmation.
+- **The daemon-resolved manager resume-doc path is the single source of truth** (injected path + mid-session watchdog can no longer diverge).
+- **Bundled skills renamed to avoid colliding with a user's same-named personal skills** (`doc-hygiene`, `session-end`, `task-start`, `pickup`); orphaned store dirs from the rename are retired.
+- **`list_all_*` reads return a cap/pagination envelope** across the setup + platform surfaces (`list_all_tasks`/`_agents`/`_sessions`); a companion board read can opt out of git ship-state enrichment for speed.
+- **README + landing-page copy refreshed**, with a clean marketing hero + screenshots captured from a seeded demo daemon (no private-workspace exposure).
+- Overview / Mission Control / sidebar cleanups: archived-fleet accordion cap, collapsed empty sections, wave-replay collapsed by default with project attribution, sidebar nav dedupe.
+
+### Fixed
+- **Onboarding — vault path is genuinely optional.** Project creation (`POST /api/projects` + both UI creators) no longer forces a vault; a project may bind a repo with no vault (or be vault-only), and vault-backed features degrade gracefully when none is bound.
+- **Onboarding — a leading `~` in a user-supplied path expands to the home directory** (repo / vault / reference-repo paths + `obsidian.path` / `python.interpreterPath`), so a Linux/macOS user's `~/…` resolves instead of failing validation.
+- **Gate reliability under fleet load.** A gate timeout-SIGKILL no longer leaks the spawned process **tree** (grandchild test runners that used to survive, accumulate, and saturate the host into a fleet-wide gate death spiral), backed by a circuit breaker; the 2-lane daemon gate no longer false-fails an all-PASS run that exceeds the timeout under load; a stale worktree base reused by `worker_spawn` is surfaced + auto-forwarded (with a merge-side backstop).
+- **Scheduling.** A scheduled fire no longer defers invisibly and indefinitely when the standing fleet fills `maxConcurrentManagers`; a `schedule_update` cron change recomputes `next_fire_at` from now (not the stale previous fire), so earlier occurrences aren't silently skipped.
+- **Linux/CI robustness.** The stale-base auto-forward merge now falls back to a generic Loom git identity when the host has none configured (a CI runner / fresh host), and the daemon test runner echoes a failed test's captured output so a Linux-only failure is debuggable from the CI log; `findLandedSquashCommit` guards a synchronous throw on a nonexistent repo path.
+- **Web.** The attention-toast stack no longer covers page content; Playwright screenshot allowed-roots align with the harness scratchpad; several shared-daemon e2e flakes stabilized.
+
 ### Internal
 - `serve-static.mjs` gains a tracked-pid `start`/`stop` lifecycle (mirroring `dev-server.mjs`), so a manager eyeballing a static artifact no longer has to hand-hunt `netstat`/`taskkill` for the listener PID.
+- Bundled platform-audit doctrine sweep; worker-doctrine `awaiting:"background"` idle-nudge suppression when parked on a daemon-backgrounded `run_gate`.
 
 ## [0.23.0] — 2026-07-20
 
