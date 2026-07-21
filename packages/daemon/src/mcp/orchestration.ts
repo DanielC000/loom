@@ -8,7 +8,7 @@ import { z } from "zod";
 import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
-import { resolveAlias } from "./arg-alias.js";
+import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -1002,14 +1002,16 @@ export class OrchestrationMcpRouter {
           "but is ALSO bounded to the same page char budget, so a large `lastN` may return fewer than N " +
           "turns (always the MOST RECENT ones). A long offset->nextOffset walk is capped in aggregate " +
           "too: past ~10 pages, a page comes back with nextOffset:null and truncated:true even though " +
-          "more remains — switch to a targeted turnRange read instead of continuing to loop.",
-        inputSchema: {
+          "more remains — switch to a targeted turnRange read instead of continuing to loop. An unknown " +
+          "param name (e.g. a guessed `tailLines`) is REJECTED naming the bad key + the real ones above, " +
+          "instead of being silently ignored.",
+        inputSchema: strictShape({
           workerSessionId: z.string(),
           lastN: z.number().optional(),
           offset: z.number().int().nonnegative().optional(),
           limit: z.number().int().positive().optional(),
           turnRange: z.tuple([z.number().int().nonnegative(), z.number().int().nonnegative()]).optional(),
-        },
+        }),
       },
       async ({ workerSessionId, lastN, offset, limit, turnRange }) => {
         const w = ensureWorkerLinked(workerSessionId, "worker_transcript");

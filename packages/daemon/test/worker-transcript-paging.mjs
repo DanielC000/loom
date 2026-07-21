@@ -18,6 +18,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // an unbounded amount; (b) sequential offset->nextOffset paging had no bound on the AGGREGATE across
 // many chained calls — each page was capped, but nothing stopped walking the whole transcript page by
 // page. Both are now bounded (lastNTurns / applyAggregateWalkCap in sessions/transcript.ts).
+//
+// Also guards card 6f8742f8: a manager called worker_transcript({tailLines:"40"}) — `tailLines` isn't a
+// real param (the real one is `lastN`) — and the SDK silently stripped the unknown key, returning the
+// offset-0 default page as if no arg had been given at all. worker_transcript's inputSchema is now a
+// strictShape() (mcp/arg-alias.ts), so an unknown/mistyped param is hard-rejected naming the bad key +
+// the real params, instead of vanishing.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -193,12 +199,30 @@ const smallPaged = await call("worker_transcript", { workerSessionId: "W-SMALL",
 check("worker_transcript(W-SMALL, offset:0) explicit paging arg -> envelope even though it fits one page",
   !Array.isArray(smallPaged) && smallPaged.totalTurns === 3 && smallPaged.nextOffset === null);
 
+// ============================ (5) card 6f8742f8: a mistyped/unknown param (e.g. the real incident's
+// `tailLines`, guessed instead of the real `lastN`) is HARD-REJECTED naming the bad key + the real
+// params, instead of being silently stripped by the SDK and defaulting to the offset-0 page as if no
+// arg had been given at all ============================
+const mistyped = await client.callTool({ name: "worker_transcript", arguments: { workerSessionId: "W-SMALL", tailLines: "40" } });
+check("worker_transcript(W-SMALL, tailLines:\"40\") is rejected (isError), not silently defaulted",
+  mistyped.isError === true);
+check("rejection names the bad param `tailLines`",
+  typeof mistyped.content?.[0]?.text === "string" && mistyped.content[0].text.includes("tailLines"));
+check("rejection also names the real params (workerSessionId, lastN, offset, limit, turnRange)",
+  typeof mistyped.content?.[0]?.text === "string" &&
+  ["workerSessionId", "lastN", "offset", "limit", "turnRange"].every((p) => mistyped.content[0].text.includes(p)));
+
+// A genuine lastN call is unaffected by the strict schema.
+const last2Again = await call("worker_transcript", { workerSessionId: "W-BIG", lastN: 2 });
+check("worker_transcript(W-BIG, lastN:2) still works under the strict schema",
+  Array.isArray(last2Again) && last2Again.length === 2 && last2Again[1].text.startsWith("turn-9-"));
+
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_transcript pages a large transcript in bounded envelopes (no overflow), offset paging covers the whole transcript with no gaps/overlaps, a small transcript stays backward-compatible, lastN still works and takes precedence (and is itself budget-bounded), and a sequential offset-walk of a huge transcript is capped in aggregate instead of re-ingesting it whole."
+  ? "\n✅ ALL PASS — worker_transcript pages a large transcript in bounded envelopes (no overflow), offset paging covers the whole transcript with no gaps/overlaps, a small transcript stays backward-compatible, lastN still works and takes precedence (and is itself budget-bounded), a sequential offset-walk of a huge transcript is capped in aggregate instead of re-ingesting it whole, and a mistyped/unknown param is hard-rejected naming the bad key + the real params instead of silently defaulting."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
