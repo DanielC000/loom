@@ -37,11 +37,27 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       NOT also push a generic `[loom:merge-done]` echo for the SAME op (the exact double-fire this card
 //       closes: both used to fire for one logical completion). Exactly ONE terminal signal lands, and it
 //       carries the worker id, task id, AND the `opId` correlation stamp.
+//   (6) TIMEOUT, async (card edc1ec12 — Platform-Audit finding 7afa6ea9): a gate step killed by OUR OWN
+//       `gateCommandTimeoutMs` bound (a REAL SIGKILL via runGateStep's own timeout, not a plain non-zero
+//       exit) still settles the pending merge op and fires the rich `[loom:merge-rejected]` with timeout
+//       wording — proving the onSettledAfterPending wiring (already verified by (1)/(2)/(4)/(5) above)
+//       also holds for the specific failure mode the audit finding describes as silent.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-confirm-completion-nudge.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+
+// Both read LIVE (per-call, via resolveConfig) — not module-load-time constants — so setting them here
+// affects every scenario in this file uniformly; harmless for (1)-(5), which never reach a timeout-kill
+// or a retry-eligible classification. Disables runGateStep's one-time auto-extend (card 24642c3d) so
+// scenario (6)'s silent hanging command is killed at the FIRST deadline instead of getting an extra
+// extension (idleMs at the deadline reads as "recently active" against the 60s default threshold for a
+// command that has never produced output). Disables the merge-gate's own transient-kill auto-retry so
+// scenario (6) doesn't pay a SECOND full gateCommandTimeoutMs wait for a retry that would just time out
+// again against the same hanging command.
+process.env.LOOM_GATE_TIMEOUT_EXTEND_ENABLED = "0";
+process.env.LOOM_GATE_RETRY_ENABLED = "0";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -110,8 +126,9 @@ function makeRepo() {
   execSync(`git init -q && git config user.email mcn@loom && git config user.name mcn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   return repo;
 }
-function seedProject(projId, repo, gateCommand) {
-  db.insertProject({ id: projId, name: "MCN", repoPath: repo, vaultPath: repo, config: gateCommand ? { orchestration: { gateCommand } } : {}, createdAt: now, archivedAt: null });
+function seedProject(projId, repo, gateCommand, orchestrationExtra) {
+  const orchestration = gateCommand ? { gateCommand, ...orchestrationExtra } : undefined;
+  db.insertProject({ id: projId, name: "MCN", repoPath: repo, vaultPath: repo, config: orchestration ? { orchestration } : {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `${projId}-mgr`, projectId: projId, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
   db.insertAgent({ id: `${projId}-dev`, projectId: projId, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
   db.insertSession({ id: `${projId}-mgr1`, projectId: projId, agentId: `${projId}-mgr`, engineSessionId: null, title: null, cwd: repo, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
@@ -289,6 +306,38 @@ try {
     check("(5) worktree removed (idempotent cleanup)", !fs.existsSync(worktreePath));
     worktrees.push([repo, undefined]); // already merged/removed — no worktree left to clean up
   }
+
+  // ============ (6) TIMEOUT, async: rich [loom:merge-rejected] fires with timeout wording (edc1ec12) ============
+  {
+    const P = "mcn-timeout", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "t6");
+    fs.writeFileSync(path.join(worktreePath, "feat6.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat6`, { cwd: worktreePath });
+    // A gate that NEVER exits and produces NO output — killed by our own gateCommandTimeoutMs (13s),
+    // deliberately > SYNC_ATTACH_BUDGET_MS (12s) so this degrades to pending FIRST, then the timeout-kill
+    // happens a moment later — the ASYNC settle path (gate-timeout-tree-kill.mjs's confirmWorkerMerge case
+    // already covers the fast/sync-budget timeout; this proves the same for a genuinely slow one).
+    seedProject(P, repo, `node -e "setInterval(()=>{},1000)"`, { gateCommandTimeoutMs: 13_000 });
+    const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
+    db.insertTask({ id: "t6", projectId: P, title: "t6", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: "t6", worktreePath, branch });
+
+    const first = await svc.confirmWorkerMergeTracked(mgrId, workerId);
+    check("(6) degrades to pending past the sync-wait budget", first.settled === false);
+    const pendingOpId6 = first.op.opId;
+
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-rejected\]/.test(c.text)), 20_000);
+    await sleep(500); // grace window for a (should-NOT-happen) trailing generic echo, mirroring scenario (2)
+    const rejectedNudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-rejected\]/.test(c.text));
+    const failedNudges = host.enqueueCalls.filter((c) => c.sessionId === mgrId && /\[loom:merge-failed\]/.test(c.text));
+    check("(6) exactly ONE rich merge-rejected nudge fired", rejectedNudges.length === 1);
+    check("(6) it names the worker + TIMEOUT wording (not a plain 'build gate failed')", rejectedNudges[0] && rejectedNudges[0].text.includes(workerId) && /gate timed out/.test(rejectedNudges[0].text));
+    check("(6) pushed with kind:\"agent\"", rejectedNudges[0] && rejectedNudges[0].kind === "agent");
+    check("(6) carries the task id AND the SAME opId the pending response returned", rejectedNudges[0] && rejectedNudges[0].text.includes("task t6") && rejectedNudges[0].text.includes(pendingOpId6));
+    check("(6) NO generic [loom:merge-failed] echo for the SAME event", failedNudges.length === 0);
+    check("(6) fail-closed: worktree retained (gate timed out, nothing merged)", fs.existsSync(worktreePath));
+    worktrees.push([repo, worktreePath]);
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
@@ -296,6 +345,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — confirmWorkerMergeTracked pushes exactly ONE terminal signal into the asking manager's session per async op, always stamped with a correlation opId: [loom:merge-done] on a plain green merge, the rich [loom:merge-rejected] alone on a genuine rejection (card 9eea3901 — the generic [loom:merge-failed] echo is suppressed), [loom:merge-failed] as the sole signal when the rich notify was itself reconciled away, [loom:already-merged] alone on an ALREADY_MERGED completion (card 187f5b76 — the generic [loom:merge-done] echo that used to ALSO fire is now suppressed), and NO nudge at all on the already-fast synchronous path."
+  ? "\n✅ ALL PASS — confirmWorkerMergeTracked pushes exactly ONE terminal signal into the asking manager's session per async op, always stamped with a correlation opId: [loom:merge-done] on a plain green merge, the rich [loom:merge-rejected] alone on a genuine rejection (card 9eea3901 — the generic [loom:merge-failed] echo is suppressed) — including a REAL SIGKILL timeout, not just a plain non-zero exit (card edc1ec12) — [loom:merge-failed] as the sole signal when the rich notify was itself reconciled away, [loom:already-merged] alone on an ALREADY_MERGED completion (card 187f5b76 — the generic [loom:merge-done] echo that used to ALSO fire is now suppressed), and NO nudge at all on the already-fast synchronous path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

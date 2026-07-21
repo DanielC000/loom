@@ -43,6 +43,40 @@ import { GitWriter } from "../git/writer.js";
 // Same envelope as the task MCP server (mcp/server.ts).
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
+/**
+ * `gate_status(opId)` (card edc1ec12, Platform-Audit finding 7afa6ea9) — a read-only LIVE-state lookup.
+ * MANAGER-ONLY (see the comment at its call site in `buildServer` below for why the worker role does NOT
+ * get this tool — its tested depth-1 MCP surface stays exactly `{my_context, run_gate, worker_report}`).
+ * Deliberately has NO terminal-outcome path of its own — it only ever answers "still queued / still
+ * running / not found" from the live GateSemaphore registry (see SessionService.gateStatus's doc for why
+ * `not_found` covers both "already settled" and "never existed", and why there's no live output tail).
+ */
+function registerGateStatus(server: McpServer, sessions: SessionService): void {
+  server.registerTool(
+    "gate_status",
+    {
+      description:
+        "Read-only LIVE status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
+        "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
+        "daemon's gate concurrency cap or actually executing, and for how long, WITHOUT waiting for the " +
+        "eventual completion nudge. Returns {state:\"queued\"|\"running\"|\"not_found\", gateType, elapsedMs}. " +
+        "`not_found` covers BOTH \"already settled\" (rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
+        "`[loom:merge-failed]` nudge for the actual outcome) and \"never existed\" — this tool never reports a " +
+        "terminal result itself, only live run state. Use this when a merge has been pending for a long time " +
+        "and you want to confirm it's genuinely still working (a large elapsedMs alone doesn't mean it's stuck " +
+        "— check it against how long the project's gate normally takes) rather than concluding it's wedged.",
+      inputSchema: { opId: z.string() },
+    },
+    async ({ opId }) => {
+      try {
+        return ok(sessions.gateStatus(opId));
+      } catch (e) {
+        return ok({ error: (e as Error).message });
+      }
+    },
+  );
+}
+
 // ColumnRole (shared) mirror for the board_column_* tools below — kept in lockstep with the ColumnRole
 // union in shared/src/config.ts, same as mcp/platform.ts's own `columnRole` mirror.
 const columnRole = z.enum([
@@ -712,6 +746,12 @@ export class OrchestrationMcpRouter {
           }
         },
       );
+      // gate_status is NOT registered here (card edc1ec12 scoping): the worker's own MCP surface is a
+      // tested depth-1 invariant, held to EXACTLY { my_context, run_gate, worker_report } (my-context-gate.mjs,
+      // idle-report.mjs, inbox-pull.mjs all anchor this) — and a worker has no independent use for it anyway,
+      // since its own `run_gate` is already idempotent-retryable ("just re-call run_gate" IS its own status
+      // check). A manager, by contrast, genuinely needs this: it holds an opId from its OWN
+      // `worker_merge_confirm` pending response with no other way to check on it mid-flight.
       return server;
     }
 
@@ -1495,6 +1535,7 @@ export class OrchestrationMcpRouter {
         }
       },
     );
+    registerGateStatus(server, sessions);
 
     server.registerTool(
       "daemon_restart",

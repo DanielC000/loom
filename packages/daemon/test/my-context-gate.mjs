@@ -11,7 +11,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        - the unmeasured-context branch (ctxInputTokens null) ALSO carries gateCommand
 //   (S) SURFACE — my_context stays READ-ONLY: NO set/propose/confirm gate tool is registered on the
 //       manager or worker surface (the trust boundary is untouched), and the worker surface is still
-//       exactly { my_context, worker_report }.
+//       exactly { my_context, run_gate, worker_report }.
 //   (W) Pre-first-turn contextWindow/model reflect the session's CONFIGURED profile model (not the
 //       misleading DEFAULT_CONTEXT_WINDOW/null), with an explicit measured:false marker either way.
 import fs from "node:fs";
@@ -206,11 +206,12 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const workerTools = toolNames("worker");
 
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
-  // `run_gate` (card 7f96aa09) is a DELIBERATE, reviewed exception to the /gate/i sweep below: it only
-  // EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the GateSemaphore) — it never
-  // sets/configures gateCommand itself, so the trust boundary this check protects (no agent-writable
-  // gateCommand surface) is untouched.
-  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate");
+  // `run_gate` (card 7f96aa09) and `gate_status` (card edc1ec12, manager-only) are DELIBERATE, reviewed
+  // exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand
+  // (daemon-mediated, through the GateSemaphore), and `gate_status` only READS the live GateSemaphore
+  // registry by opId — neither ever sets/configures gateCommand, so the trust boundary this check
+  // protects (no agent-writable gateCommand surface) is untouched by either.
+  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",

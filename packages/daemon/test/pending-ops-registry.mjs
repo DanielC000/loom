@@ -158,6 +158,56 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("(nudge retry) only the ORIGINAL (entry-creating) call's callback ever fires", calls1.length === 1 && calls2.length === 0);
 }
 
+// --- onSurfacedPending (card edc1ec12 — the durable-marker ORDERING guarantee): fires SYNCHRONOUSLY,
+// strictly before ANY possible settle for the SAME op (see attach()'s own doc). A caller pairing "write a
+// durable marker here, clear it in onSettledAfterPending" (SessionService's runWorkerGate/
+// confirmWorkerMergeTracked, for the restart-orphan-signaling fix) can never observe the clear running
+// before the write — even when the op settles as immediately as possible after being told "pending", the
+// exact race the manager flagged as the failure mode to guard against, not just the happy "op survives a
+// long time before settling" case. A manually-resolved deferred `run()` (no timer) gives exact control
+// over when settle happens relative to attach() returning, mirroring the CLOBBER GUARD technique below. ---
+{
+  const reg = new PendingOpRegistry();
+  const order = [];
+  let resolveOp;
+  const deferred = () => new Promise((resolve) => { resolveOp = resolve; });
+  const pending = await reg.attach(
+    "surf1", "gate", "mgr1", 5, deferred,
+    () => order.push("settled"),
+    { onSurfacedPending: () => order.push("surfaced") },
+  );
+  check("(onSurfacedPending) fires before attach() even returns the 'pending' result", pending.settled === false && order.length === 1 && order[0] === "surfaced");
+  // Resolve as soon as possible after being told "pending" — the tightest gap a real caller could ever
+  // produce between its own durable-marker write and the op's eventual settle.
+  resolveOp({ ok: true });
+  await sleep(10); // let the settle .then() microtask actually run
+  check("(onSurfacedPending) the settled callback fires AFTER surfaced, never before — order holds even under the tightest possible race", order.length === 2 && order[0] === "surfaced" && order[1] === "settled");
+}
+
+// onSurfacedPending fires on EVERY call that observes "still pending" (idempotent by design — a
+// durable-marker upsert keyed by opId is a harmless no-op on a repeat) — unlike onSettledAfterPending,
+// it is NOT gated to only the entry-creating call.
+{
+  const reg = new PendingOpRegistry();
+  let surfacedCount = 0;
+  const slow = async () => { await sleep(80); return { ok: true }; };
+  const p1 = reg.attach("surf2", "gate", "mgr1", 10, slow, undefined, { onSurfacedPending: () => surfacedCount++ });
+  await sleep(20);
+  const p2 = reg.attach("surf2", "gate", "mgr1", 10, slow, undefined, { onSurfacedPending: () => surfacedCount++ }); // re-attach, still running
+  await Promise.all([p1, p2]);
+  check("(onSurfacedPending repeat) fires once per call that observes 'still pending' — idempotent-upsert-friendly", surfacedCount === 2);
+}
+
+// onSurfacedPending does NOT fire on the fast path — the op already has an inline outcome, so there is
+// nothing durable to mark as pending.
+{
+  const reg = new PendingOpRegistry();
+  let surfaced = false;
+  const r = await reg.attach("surf3", "gate", "mgr1", 200, async () => ({ ok: true }), undefined, { onSurfacedPending: () => { surfaced = true; } });
+  check("(onSurfacedPending fast) settles within budget as usual", r.settled === true);
+  check("(onSurfacedPending fast) never fires on the fast path — nothing to mark durably pending", surfaced === false);
+}
+
 // --- CLOBBER GUARD (card 27ea069e Code Review finding): evictDeadOwner() lets a fresh attach() start a
 // NEW op under a key whose PRIOR op is still orphaned/in-flight in the background (unreachable, but not
 // cancellable — see evictDeadOwner's doc). That prior op's EVENTUAL settle must not clobber the successor
@@ -357,6 +407,6 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, and opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, and opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

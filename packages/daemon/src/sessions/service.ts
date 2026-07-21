@@ -7,7 +7,7 @@ import {
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
-  type GatesActive, type GateRun,
+  type GatesActive, type GateRun, type GateType,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
@@ -2047,6 +2047,27 @@ export class SessionService {
   }
 
   /**
+   * Read-only LIVE-state lookup for ONE gate/merge run by its PendingOpRegistry `opId` (card edc1ec12's
+   * `gate_status` tool — Platform-Audit finding 7afa6ea9). A caller holding the `opId` a
+   * `run_gate`/`worker_merge_confirm` `{status:"pending"}` response returned can use this to find out
+   * whether that run is still queued behind the `GateSemaphore`'s cap or actually executing, and for how
+   * long — WITHOUT waiting for the eventual terminal nudge. This is exactly the visibility gap the audit
+   * finding names: "stuck 20 minutes inside vitest" would have instantly falsified the "gate is
+   * wedged/flaky" theory that led to an unsafe manual squash-merge past a gate that had never reported a
+   * terminal signal. `state:"not_found"` covers BOTH "already settled" (rely on the `[loom:gate-*]`/
+   * `[loom:merge-*]` nudge for the actual outcome) and "never existed" — this tool intentionally never
+   * surfaces a terminal result itself, only live run state, so it can't ever race or duplicate that nudge.
+   * Deliberately does NOT include a live output tail (see the card's scoping note): that would need new
+   * plumbing to expose `runGateStep`'s in-progress capture ring, a materially bigger change than this
+   * read-only status lookup; elapsed time alone already answers "is this actually stuck".
+   */
+  gateStatus(opId: string): { state: "queued" | "running" | "not_found"; gateType: GateType | null; elapsedMs: number | null } {
+    const entry = this.gateSemaphore.findByOpId(opId);
+    if (!entry) return { state: "not_found", gateType: null, elapsedMs: null };
+    return { state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since };
+  }
+
+  /**
    * Snapshot every LIVE session across ALL projects into a restart resume set (the capture half of P1
    * 17df54c5). `listAllSessions` is already cross-project and excludes archived rows; we keep only the
    * live ones (a parked/rate-limited session is still `live` — its pty isn't killed on a cap — so it is
@@ -3592,7 +3613,48 @@ export class SessionService {
       if (this.pendingOps.evictDeadOwner(op.key)) {
         cleared++;
         console.warn(`[orchestration] merge op ${op.opId} (${op.key}) had a dead owner (manager ${op.managerSessionId.slice(0, 8)}) — evicted so a fresh worker_merge_confirm can proceed`);
+        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12) — see the identical note at
+        // confirmWorkerMergeTracked's own eviction call site: an evicted entry's eventual settle never
+        // reaches onSettledAfterPending, so its durable pending_gate_ops row would otherwise survive until
+        // the NEXT boot and fire a FALSE [loom:merge-failed] at the (possibly-resumed-live) manager.
+        this.db.clearPendingGateOp(op.opId);
       }
+    }
+    return cleared;
+  }
+
+  /**
+   * Boot-time sweep for RESTART-ORPHANED gate/merge ops (card edc1ec12, Platform-Audit finding 7afa6ea9) —
+   * the durable complement to {@link reconcileDeadOwnerMergeOps} above. That sweep reconciles the
+   * IN-MEMORY PendingOpRegistry against a dead manager while the daemon PROCESS itself stays up; it is a
+   * no-op the instant an actual process restart/crash happens, because that wipes the registry entirely
+   * with NOTHING left to reconcile. This sweep instead reads the DURABLE `pending_gate_ops` table (see its
+   * schema doc in db.ts) — a row survives there ONLY when a "gate"/"merge" op was surfaced pending to a
+   * caller (runWorkerGate/confirmWorkerMergeTracked's `onSurfacedPending`) and the process died before that
+   * op's own settle callback ever got a chance to clear it. For each surviving row, push a synthetic
+   * terminal nudge to its owning session (the worker for "gate", the manager for "merge") — the exact
+   * `[loom:gate-failed]`/`[loom:merge-failed]` vocabulary those callbacks use on an ordinary failure, so a
+   * waiting session reacts to this exactly like any other terminal signal instead of needing special-case
+   * handling — then clear the row. Best-effort per row (one push failure must never block the rest) +
+   * never throws; returns the count reconciled for a boot-log line. Runs AFTER the fleet-resume passes
+   * (mirrors reconcileDeadOwnerMergeOps's own placement) so a resumed owning session is live to receive the
+   * push rather than queuing into a session that isn't there yet.
+   */
+  reconcileOrphanedGateOps(): number {
+    let cleared = 0;
+    for (const row of this.db.listPendingGateOps()) {
+      const isMerge = row.kind === "merge";
+      const tag = isMerge ? "[loom:merge-failed]" : "[loom:gate-failed]";
+      const verb = isMerge ? "re-run `worker_merge_confirm`" : "re-run `run_gate`";
+      const msg = `${tag} op ${row.opId} — daemon restart killed this run before it could finish (reason: restart) — ${verb}.`;
+      try {
+        this.pty.enqueueStdin(row.ownerSessionId, msg, "system", undefined, undefined, "warning");
+      } catch {
+        /* owning session not live — best-effort, mirrors every other completion nudge */
+      }
+      this.db.clearPendingGateOp(row.opId);
+      cleared++;
+      console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was orphaned by a daemon restart — resurfaced ${tag} to session ${row.ownerSessionId.slice(0, 8)}`);
     }
     return cleared;
   }
@@ -6791,7 +6853,7 @@ export class SessionService {
       // Card a1c86452: the descriptor surfaces this merge gate on the Gates page's active lane; `startedAt`
       // (admission) drives the `build_gate` event's real run-time `durationMs`, excluding queue wait. "high"
       // priority (card 24642c3d) — see the host-load-guard doc above.
-      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch };
+      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId };
       let gateStartedAt = 0;
       let gateResult = await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs); }, "high");
       evt("build_gate", { passed: gateResult.passed, durationMs: Date.now() - gateStartedAt });
@@ -7091,6 +7153,14 @@ export class SessionService {
       // dedupe-hits the cache instead — a correct outcome, but a misleading operator-facing log line.
       if (this.pendingOps.evictDeadOwner(key)) {
         console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
+        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12): an evicted entry's eventual settle skips
+        // onSettledAfterPending entirely (its identity guard fails — see pending-ops.ts's class doc), so
+        // the durable row `onSurfacedPending` wrote for it would otherwise survive until the NEXT boot,
+        // where reconcileOrphanedGateOps would push a FALSE `[loom:merge-failed]` to this now-evicted op's
+        // (original, possibly-resumed-live) manager — the exact inverse of the signal this card exists to
+        // get right. Clear it here instead, at the moment the entry itself is force-removed, so the
+        // marker's lifecycle matches the entry's.
+        this.db.clearPendingGateOp(existing.opId);
       }
     }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
@@ -7099,6 +7169,11 @@ export class SessionService {
       key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree),
       (outcome, opId) => {
+        // DURABLE-MARKER CLEANUP (card edc1ec12): this op settled normally (the daemon process is still
+        // alive to run this callback at all) — clear the durable "surfaced pending" row `onSurfacedPending`
+        // below wrote, so ONLY a genuine process death (which skips this callback entirely) ever leaves a
+        // row for reconcileOrphanedGateOps to find at the next boot.
+        this.db.clearPendingGateOp(opId);
         // DOUBLE-NOTIFY FIX (card 9eea3901, widened by 187f5b76 to cover the ALREADY_MERGED success path
         // too): a branch that already sent its own rich/direct push (`outcome.value.notified` — the
         // `[loom:merge-rejected]` rejection path OR the `[loom:already-merged]` success path) needs no
@@ -7134,6 +7209,17 @@ export class SessionService {
         // that the flag was silently ignored. `forceRemoveWorktree` is an explicit one-shot escalation from
         // the caller — it must never be served from a cache built by an earlier, non-forced call.
         bypassRetained: forceRemoveWorktree === true,
+        // DURABLE MARKER (card edc1ec12): fires synchronously, strictly before any possible settle for
+        // this op (see PendingOpRegistry.attach's onSurfacedPending doc) — records that managerSessionId is
+        // now owed an async [loom:merge-*] nudge, so a real process death before this op settles can still
+        // be reconciled at the next boot (SessionService.reconcileOrphanedGateOps) instead of leaving the
+        // manager waiting on a nudge that can now never come.
+        onSurfacedPending: (op, opId) => {
+          this.db.recordPendingGateOp({
+            opId, kind: "merge", key, ownerSessionId: managerSessionId, taskId,
+            branch: this.db.getSession(workerSessionId)?.branch ?? null, startedAt: op.startedAt,
+          });
+        },
       },
     );
   }
@@ -7217,7 +7303,7 @@ export class SessionService {
         // Card a1c86452: the descriptor surfaces this worker self-check on the Gates page's active lane;
         // `startedAt` (admission) drives the `worker_gate` event's real run-time `durationMs`, excluding
         // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
-        const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null };
+        const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId };
         let gateStartedAt = 0;
         try {
           // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
@@ -7285,12 +7371,30 @@ export class SessionService {
         };
       },
       (outcome, opId) => {
+        // DURABLE-MARKER CLEANUP (card edc1ec12): this op settled normally (the daemon process is still
+        // alive to run this callback at all) — clear the durable "surfaced pending" row `onSurfacedPending`
+        // below wrote, so ONLY a genuine process death (which skips this callback entirely) ever leaves a
+        // row for reconcileOrphanedGateOps to find at the next boot.
+        this.db.clearPendingGateOp(opId);
         const msg = outcome.ok
           ? (outcome.value.passed
             ? `[loom:gate-done] op ${opId} — gate passed.`
             : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${outcome.value.gateDetail?.stderrTail ? `\n--- gate output tail ---\n${outcome.value.gateDetail.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         try { this.pty.enqueueStdin(workerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
+      },
+      {
+        // DURABLE MARKER (card edc1ec12): fires synchronously, strictly before any possible settle for
+        // this op (see PendingOpRegistry.attach's onSurfacedPending doc) — records that workerSessionId is
+        // now owed an async [loom:gate-*] nudge, so a real process death before this op settles can still
+        // be reconciled at the next boot (SessionService.reconcileOrphanedGateOps) instead of leaving the
+        // worker waiting on a nudge that can now never come.
+        onSurfacedPending: (op, opId) => {
+          this.db.recordPendingGateOp({
+            opId, kind: "gate", key, ownerSessionId: workerSessionId,
+            taskId: worker.taskId ?? null, branch: worker.branch ?? null, startedAt: op.startedAt,
+          });
+        },
       },
     );
   }

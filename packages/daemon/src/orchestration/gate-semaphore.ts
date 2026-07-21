@@ -57,6 +57,12 @@ export interface GateDescriptor {
   sessionId: string;
   taskId?: string | null;
   branch?: string | null;
+  /** The PendingOpRegistry opId this gate run belongs to (card edc1ec12's `gate_status(opId)` read tool) —
+   *  a caller holding the opId a `run_gate`/`worker_merge_confirm` pending response returned can look this
+   *  run up in {@link GateSemaphore.snapshot}'s entries without needing the semaphore's own internal `id`.
+   *  Optional: a call site with no correlating op (there are none today — every `runExclusive` caller has
+   *  one) simply omits it and that entry is un-lookup-able by opId, exactly as before this field existed. */
+  opId?: string;
 }
 
 /** One live gate run in the snapshot — a `GateDescriptor` enriched with its lane phase + timing. */
@@ -74,6 +80,8 @@ export interface GateSnapshotEntry {
   /** 1-based position in the ACTUAL admission order (all high waiters before low, FIFO within a tier —
    *  mirrors `release()`); null for a running entry. */
   queuePosition: number | null;
+  /** Echoed from {@link GateDescriptor.opId} — see its doc; null when the run's descriptor didn't carry one. */
+  opId: string | null;
 }
 
 /** The whole live picture: the counter/queue depth plus a detail entry per in-flight run. */
@@ -186,11 +194,23 @@ export class GateSemaphore {
       phase,
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,
       queuePosition,
+      opId: e.descriptor.opId ?? null,
     });
     const entries: GateSnapshotEntry[] = [
       ...running.map((e) => toEntry(e, "running", null)),
       ...queued.map((e, i) => toEntry(e, "queued", i + 1)),
     ];
     return { active: this.active, queued: this.highWaiters.length + this.lowWaiters.length, entries };
+  }
+
+  /** Look up ONE live (running or queued) gate run by its {@link GateDescriptor.opId} — the read path for
+   *  `gate_status(opId)` (card edc1ec12): a caller holding a `run_gate`/`worker_merge_confirm` pending
+   *  response's `opId` can find out whether it's still queued or actually running, and for how long,
+   *  without needing this semaphore's own internal per-run `id`. Returns `undefined` when no live run
+   *  carries this opId — either it already settled (the caller should instead rely on the eventual
+   *  `[loom:gate-*]`/`[loom:merge-*]` nudge) or it never existed. O(n) over the live registry, which is
+   *  bounded by `maxConcurrentGates` + queue depth — never large enough to matter. */
+  findByOpId(opId: string): GateSnapshotEntry | undefined {
+    return this.snapshot().entries.find((e) => e.opId === opId);
   }
 }

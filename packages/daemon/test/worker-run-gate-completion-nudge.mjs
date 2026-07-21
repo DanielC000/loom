@@ -22,11 +22,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the same opId.
 //   (3) FAST path (an instant gate): NO completion nudge fires at all — the synchronous caller already
 //       has the outcome inline; a push here would double-notify.
+//   (4) TIMEOUT, async (card edc1ec12 — Platform-Audit finding 7afa6ea9): a gate step killed by OUR OWN
+//       `gateCommandTimeoutMs` bound (not a plain non-zero exit — a REAL SIGKILL via runGateStep's own
+//       timeout) still settles the pending op and fires `[loom:gate-failed]` with timeout wording. This is
+//       the exact failure mode the audit finding describes as silent ("each run_gate re-call minted a new
+//       pending opId, no [loom:gate-failed] ever arrived") — proving the generic onSettledAfterPending
+//       wiring (verified by (1)/(2) above) also holds for THIS specific cause, not just a clean non-zero exit.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/worker-run-gate-completion-nudge.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+
+// Disables runGateStep's one-time auto-extend (card 24642c3d) for the WHOLE file — a module-load-time
+// constant, so this must be set before gate-runner.js is ever imported (transitively, via service.js
+// below). Harmless for scenarios (1)-(3): none of them ever reach the timeout-kill branch, only (4) does.
+// Without this, a silent (zero-output) hanging command would still get ONE extension (idleMs at the
+// deadline is measured from process start, which reads as "recently active" against the 60s default
+// threshold) — doubling scenario (4)'s wall-clock for no test value.
+process.env.LOOM_GATE_TIMEOUT_EXTEND_ENABLED = "0";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -92,8 +106,9 @@ function makeRepo() {
   execSync(`git init -q && git config user.email wgn@loom && git config user.name wgn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   return repo;
 }
-function seedWorker(projId, repo, gateCommand, worktreePath, branch) {
-  db.insertProject({ id: projId, name: "WGN", repoPath: repo, vaultPath: repo, config: gateCommand ? { orchestration: { gateCommand } } : {}, createdAt: now, archivedAt: null });
+function seedWorker(projId, repo, gateCommand, worktreePath, branch, orchestrationExtra) {
+  const orchestration = gateCommand ? { gateCommand, ...orchestrationExtra } : undefined;
+  db.insertProject({ id: projId, name: "WGN", repoPath: repo, vaultPath: repo, config: orchestration ? { orchestration } : {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `${projId}-mgr`, projectId: projId, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
   db.insertAgent({ id: `${projId}-dev`, projectId: projId, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
   const mgrId = `${projId}-mgr1`, workerId = `${projId}-wkr`;
@@ -162,6 +177,31 @@ try {
     check("(3) the fast path stays byte-identical — NO completion nudge ever fires for it", !host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)));
     worktrees.push([repo, worktreePath]);
   }
+
+  // ================ (4) TIMEOUT, async: [loom:gate-failed] fires with timeout wording (edc1ec12) ================
+  {
+    const P = "wgn-timeout", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "t4");
+    // A gate that NEVER exits and produces NO output — killed by our own gateCommandTimeoutMs (13s), which
+    // is deliberately > SYNC_ATTACH_BUDGET_MS (12s) so this call degrades to pending FIRST, then the
+    // timeout-kill happens a moment later, exercising the ASYNC settle path (not the fast/sync one
+    // gate-timeout-tree-kill.mjs already covers).
+    const { workerId } = seedWorker(P, repo, `node -e "setInterval(()=>{},1000)"`, worktreePath, branch, { gateCommandTimeoutMs: 13_000 });
+
+    const first = await svc.runWorkerGate(workerId);
+    check("(4) degrades to pending past the sync-wait budget", first.settled === false);
+    const pendingOpId4 = first.op.opId;
+
+    // Let the 13s timeout actually fire + the terminal callback push — poll rather than a fixed sleep.
+    await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)), 20_000);
+    const nudges = host.enqueueCalls.filter((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text));
+    check("(4) exactly ONE completion nudge landed", nudges.length === 1);
+    check("(4) it's the FAILURE nudge, naming gate-failed + timeout wording (not a plain 'build gate failed')", nudges[0] && /\[loom:gate-failed\]/.test(nudges[0].text) && /gate timed out/.test(nudges[0].text));
+    check("(4) pushed with kind:\"warning\"", nudges[0] && nudges[0].kind === "warning");
+    check("(4) delivered to the WORKER's OWN session (not any manager)", nudges[0] && nudges[0].sessionId === workerId);
+    check("(4) carries the SAME opId the pending response returned", nudges[0] && nudges[0].text.includes(pendingOpId4));
+    worktrees.push([repo, worktreePath]);
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
@@ -169,6 +209,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — runWorkerGate's REAL onSettledAfterPending closure formats + delivers exactly one [loom:gate-done]/[loom:gate-failed] completion nudge into the calling WORKER's own session, kind:\"warning\", stamped with the correlation opId, on a genuinely async (>SYNC_ATTACH_BUDGET_MS) gate — and pushes nothing at all on the already-fast synchronous path."
+  ? "\n✅ ALL PASS — runWorkerGate's REAL onSettledAfterPending closure formats + delivers exactly one [loom:gate-done]/[loom:gate-failed] completion nudge into the calling WORKER's own session, kind:\"warning\", stamped with the correlation opId, on a genuinely async (>SYNC_ATTACH_BUDGET_MS) gate — including a REAL SIGKILL timeout, not just a plain non-zero exit — and pushes nothing at all on the already-fast synchronous path."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

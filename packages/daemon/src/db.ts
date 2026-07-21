@@ -481,6 +481,25 @@ CREATE TABLE IF NOT EXISTS wakes (
   -- default (fires via plain enqueueStdin, exactly as before this column existed).
   route TEXT
 );
+-- Durable marker for a gate/merge PendingOpRegistry op that has been surfaced "pending" to a caller (card
+-- edc1ec12, Platform-Audit finding 7afa6ea9): PendingOpRegistry itself is purely in-memory and is wiped by
+-- an actual daemon process death (a crash or the daemon_restart exit-75 self-restart), so a session already
+-- told {settled:false, opId} and waiting on the async [loom:gate-done|failed]/[loom:merge-*] completion
+-- nudge would otherwise wait FOREVER — nothing durable ever recorded that it was owed one. A row is written
+-- (upserted) the moment a "gate"/"merge" op is first surfaced pending, and deleted the moment it settles
+-- normally (see SessionService.runWorkerGate/confirmWorkerMergeTracked) — so a row here ONLY ever survives
+-- a genuine process death. Boot (SessionService.reconcileOrphanedGateOps) reads every surviving row, pushes
+-- a synthetic terminal nudge to owner_session_id, and clears it. Brand-new table => this CREATE TABLE IF
+-- NOT EXISTS is itself the additive migration (no ALTER needed), exactly like wakes/poll_jobs above.
+CREATE TABLE IF NOT EXISTS pending_gate_ops (
+  op_id TEXT PRIMARY KEY,
+  kind TEXT NOT NULL,             -- "gate" | "merge"
+  key TEXT NOT NULL,               -- the PendingOpRegistry key ("gate:<workerSessionId>" / "merge:<workerSessionId>")
+  owner_session_id TEXT NOT NULL,  -- who gets the synthetic nudge: the worker for "gate", the manager for "merge"
+  task_id TEXT,
+  branch TEXT,
+  started_at TEXT NOT NULL
+);
 -- Local poll-job triggers (agent-tooling epic P3): the daemon PollService periodically fetches 'path' on
 -- 'connection_id' (through the SAME server-side P2 authenticated_request path — never a second outbound-
 -- HTTP path) and, on a new item vs the previous poll, wakes session_id or spawns a fresh session in
@@ -1500,6 +1519,27 @@ export interface ContextNudgeState {
   policy: ContextNudgePolicy;
   lastContextNudgeAt: string | null;
   unanswered: number;
+}
+
+/** A durable "surfaced pending" marker for a gate/merge PendingOpRegistry op — see the `pending_gate_ops`
+ *  schema doc and SessionService.reconcileOrphanedGateOps (card edc1ec12). */
+export interface PendingGateOp {
+  opId: string;
+  kind: "gate" | "merge";
+  key: string;
+  ownerSessionId: string;
+  taskId: string | null;
+  branch: string | null;
+  startedAt: string;
+}
+interface PendingGateOpRow {
+  op_id: string;
+  kind: "gate" | "merge";
+  key: string;
+  owner_session_id: string;
+  task_id: string | null;
+  branch: string | null;
+  started_at: string;
 }
 
 export class Db {
@@ -4989,6 +5029,30 @@ export class Db {
   }
   countPendingWakes(sessionId: string): number {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM wakes WHERE session_id = ?").get(sessionId) as { c: number }).c;
+  }
+
+  // --- pending gate/merge ops (durable "surfaced pending" marker — card edc1ec12, see the schema doc) ---
+  /** Upsert: a re-attach() to a still-running op re-writes the SAME row (same op_id) harmlessly. */
+  recordPendingGateOp(op: PendingGateOp): void {
+    this.db.prepare(
+      `INSERT INTO pending_gate_ops (op_id,kind,key,owner_session_id,task_id,branch,started_at)
+       VALUES (@opId,@kind,@key,@ownerSessionId,@taskId,@branch,@startedAt)
+       ON CONFLICT(op_id) DO UPDATE SET kind=excluded.kind, key=excluded.key,
+         owner_session_id=excluded.owner_session_id, task_id=excluded.task_id,
+         branch=excluded.branch, started_at=excluded.started_at`,
+    ).run(op);
+  }
+  /** Called from the op's own settle callback (normal completion) — a row only survives this if the
+   *  process died before that callback ever ran. */
+  clearPendingGateOp(opId: string): void {
+    this.db.prepare("DELETE FROM pending_gate_ops WHERE op_id = ?").run(opId);
+  }
+  /** Boot-time read of every surviving row — see SessionService.reconcileOrphanedGateOps. */
+  listPendingGateOps(): PendingGateOp[] {
+    return (this.db.prepare("SELECT * FROM pending_gate_ops").all() as PendingGateOpRow[]).map((r) => ({
+      opId: r.op_id, kind: r.kind, key: r.key, ownerSessionId: r.owner_session_id,
+      taskId: r.task_id, branch: r.branch, startedAt: r.started_at,
+    }));
   }
 
   // --- poll jobs (local poll-job triggers, agent-tooling epic P3) ---

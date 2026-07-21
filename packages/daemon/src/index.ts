@@ -1134,6 +1134,21 @@ async function main(): Promise<void> {
     console.warn(`[boot] dead-owner merge-op sweep failed (continuing boot): ${(err as Error).message}`);
   }
 
+  // Orphaned gate/merge-op sweep (card edc1ec12, Platform-Audit finding 7afa6ea9): the DURABLE complement
+  // to the in-memory sweep just above — reads the `pending_gate_ops` table, which is exactly what
+  // survives a real process death that wipes the in-memory PendingOpRegistry (the case the sweep above
+  // admits it can't cover). A surviving row means some worker/manager was told "pending" and is waiting on
+  // an async [loom:gate-*]/[loom:merge-*] nudge that can now never arrive via the normal settle path — this
+  // resurfaces a synthetic terminal nudge for each one and clears the row. Runs AFTER the fleet-resume
+  // passes above (same ordering reason as the sweep above: a resumed owning session must be live to
+  // receive the push). Never gates boot.
+  try {
+    const cleared = sessions.reconcileOrphanedGateOps();
+    if (cleared > 0) console.log(`[boot] orphaned gate/merge-op sweep: resurfaced ${cleared} restart-killed op(s) to their owning session(s)`);
+  } catch (err) {
+    console.warn(`[boot] orphaned gate/merge-op sweep failed (continuing boot): ${(err as Error).message}`);
+  }
+
   // Setup Assistant E1-6: FIRST-RUN auto-launch. On a brand-new/empty install (no ordinary projects + the
   // one-time app_meta marker unset) greet the user by auto-spawning the Setup Assistant ONCE; the marker
   // is stamped at launch so it never re-fires — not after a daemon_restart, not after the user later

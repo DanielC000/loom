@@ -320,6 +320,19 @@ export class PendingOpRegistry {
    * a fresh invocation carrying its own (forceful) args. The cache is still WRITTEN on this call's own
    * settle (ungated by this flag), so a later NON-forced re-confirm within ITS window correctly dedupes
    * against the fresh (forced) outcome, not the stale pre-force one.
+   *
+   * `opts.onSurfacedPending` (card edc1ec12 — the restart-orphan signaling gap): fired SYNCHRONOUSLY, from
+   * inside THIS call's own `if (e.state === "running")` branch below, the instant this call is about to
+   * return `{settled:false}` — i.e. exactly (and only) when a caller is actually told "pending". A caller
+   * durably persisting that fact (so a real process death before the eventual settle can still be
+   * reconciled at boot — see SessionService.reconcileOrphanedGateOps) needs this write to be strictly
+   * ORDERED before any possible settle: because this hook runs inside the same synchronous branch that
+   * requires `e.state === "running"`, and settling is exactly what flips `e.state` away from "running"
+   * (inside the `.then`/`.catch` below), JS's run-to-completion semantics make it IMPOSSIBLE for the settle
+   * callback to fire in between this check and this hook's call — so a caller's "write a durable marker
+   * here, clear it in `onSettledAfterPending`" pairing can never observe the clear running before the
+   * write. Fires on EVERY call that observes "still pending" (not just the entry-creating one, unlike
+   * `onSettledAfterPending` below) — harmless for an idempotent upsert keyed by `opId`.
    */
   async attach<T>(
     key: string, kind: PendingOpKind, managerSessionId: string, waitMs: number, run: (opId: string) => Promise<T>,
@@ -328,6 +341,7 @@ export class PendingOpRegistry {
       retainMs?: number;
       classifyOutcome?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => PendingOpOutcome;
       bypassRetained?: boolean;
+      onSurfacedPending?: (op: PendingOpView, opId: string) => void;
     },
   ): Promise<AttachResult<T>> {
     let e = this.entries.get(key) as Entry<T> | undefined;
@@ -391,7 +405,12 @@ export class PendingOpRegistry {
       e = fresh;
     }
     if (e.state === "running") await Promise.race([e.settle, sleep(waitMs)]);
-    if (e.state === "running") { e.surfacedPending = true; return { settled: false, op: projectView(e) }; }
+    if (e.state === "running") {
+      e.surfacedPending = true;
+      const view = projectView(e);
+      opts?.onSurfacedPending?.(view, e.opId);
+      return { settled: false, op: view };
+    }
     return e.state === "done"
       ? { settled: true, ok: true, value: e.result as T }
       : { settled: true, ok: false, error: e.error };

@@ -89,6 +89,13 @@ try {
   check("(precondition) pendingMerge shows the zombie op as still 'running'", pre?.state === "running");
   check("(precondition) pendingMerge's managerSessionId is the DEAD predecessor manager", pre?.managerSessionId === deadMgrId);
 
+  // DURABLE-MARKER LEAK GUARD (CR follow-up, card edc1ec12): mirror what a REAL confirmWorkerMergeTracked
+  // call's onSurfacedPending would have written for this zombie BEFORE its owning manager died — a
+  // pending_gate_ops row keyed by this op's opId. If the dead-owner eviction below doesn't ALSO clear this
+  // row, it would leak until the next boot and fire a FALSE [loom:merge-failed] at the (now-live) manager.
+  db.recordPendingGateOp({ opId: pre.opId, kind: "merge", key, ownerSessionId: deadMgrId, taskId, branch: null, startedAt: now });
+  check("(precondition) the durable pending_gate_ops row for the zombie exists", db.listPendingGateOps().some((r) => r.opId === pre.opId));
+
   // ── (2) a LIVE manager's confirm evicts the dead-owner zombie and completes a REAL merge ────────────
   const headBefore = git(repo, "rev-parse HEAD");
   const result = await sessions.confirmWorkerMergeTracked(liveMgrId, workerId);
@@ -103,15 +110,20 @@ try {
   // matters (not stuck "running" forever on the zombie) still holds; assert the terminal shape directly.
   const afterRecovery = sessions.peekPendingMerge(workerId);
   check("(recovery) pendingMerge is a RETAINED terminal 'merged' view post-settle — not stuck 'running'", afterRecovery?.state === "done" && afterRecovery?.outcome === "merged");
+  check("(recovery) the ZOMBIE's durable row was cleared on eviction — no leaked marker for a later boot to misfire on", !db.listPendingGateOps().some((r) => r.opId === pre.opId));
 
   // ── (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op directly ─────
   const key2 = `merge:${workerId}-b`;
   void sessions.pendingOps.attach(key2, "merge", deadMgrId, 10, () => new Promise(() => {}));
   await sleep(30);
-  check("(boot-sweep precondition) a second zombie op is tracked as running", sessions.pendingOps.peek(key2)?.state === "running");
+  const zombie2 = sessions.pendingOps.peek(key2);
+  check("(boot-sweep precondition) a second zombie op is tracked as running", zombie2?.state === "running");
+  db.recordPendingGateOp({ opId: zombie2.opId, kind: "merge", key: key2, ownerSessionId: deadMgrId, taskId, branch: null, startedAt: now });
+  check("(boot-sweep precondition) its durable pending_gate_ops row exists too", db.listPendingGateOps().some((r) => r.opId === zombie2.opId));
   const cleared = sessions.reconcileDeadOwnerMergeOps();
   check("(boot-sweep) reports exactly the one dead-owner op it cleared", cleared === 1);
   check("(boot-sweep) the zombie is gone from the registry", sessions.pendingOps.peek(key2) === undefined);
+  check("(boot-sweep) its durable row was ALSO cleared — no leak until the next boot", !db.listPendingGateOps().some((r) => r.opId === zombie2.opId));
 
   // ── (4) SURGICAL: a running op owned by a LIVE manager is untouched by either recovery path ────────
   const key3 = `merge:${workerId}-c`;
@@ -128,6 +140,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, and a live-owner op is left completely untouched by both paths."
+  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, and (card edc1ec12 CR follow-up) an evicted dead-owner op's durable pending_gate_ops row is cleared right along with its registry entry — never left to leak until the next boot and fire a false [loom:merge-failed] at the now-live manager."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

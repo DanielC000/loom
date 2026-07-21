@@ -399,6 +399,10 @@ mid-report — before sending anything.
      several merges are pending at once you can tell which one just settled. Re-calling `worker_merge_confirm`
      with the same `workerSessionId` (or reading `worker_list`'s `pendingMerge` field) is a safe fallback if
      you need the answer sooner, but don't fall back to `git log` guesswork while waiting.
+   - **A gate that never resolves is a defect to diagnose, never a license to merge around it.** Silence
+     alone is not evidence the gate is "wedged" or "flaky, not your code" — check the elapsed time (or a
+     `gate_status` read tool, if your platform exposes one) before concluding that, and never hand-roll a
+     squash-merge past a gate that hasn't reported a terminal signal.
    - **Know the `[loom:*]` nudge vocabulary Loom pushes at you.** Besides the merge trio
      (`[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]`), you'll see `[loom:worker-idle]`
      (a worker went idle — pick up its report / next step), `[loom:already-merged]` (the branch was
