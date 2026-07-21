@@ -4205,7 +4205,7 @@ export class SessionService {
     sessionId: string, text: string, senderSessionId?: string,
   ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; routedTo?: string; duplicate?: boolean } {
     const normalizedText = SessionService.stripLeadingPlatformTag(text);
-    const dedupeKey = createHash("sha256").update(sessionId).update(" ").update(normalizedText).digest("hex");
+    const dedupeKey = createHash("sha256").update(sessionId).update("\0").update(normalizedText).digest("hex");
     const now = Date.now();
     this.prunePlatformMessageDedupe(now);
     const prior = this.platformMessageDedupe.get(dedupeKey);
