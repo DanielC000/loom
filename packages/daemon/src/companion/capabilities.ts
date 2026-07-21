@@ -2438,13 +2438,14 @@ const SESSION_SPAWN: CompanionCapability = {
 // Scoped, owner-granted, OFF by default: commit (Tier A) + push (Tier X) to a project's OWN daemon-
 // resolved repo — never an agent-supplied path/remote. Reuses `GitWriter` (git/writer.ts) verbatim, the
 // SAME bounded/non-interactive class the Platform Lead's own `git_commit`/`git_push` tools use.
-// INCREMENT 1 ships the "vault" target ONLY (`GIT_PUSH_TARGETS` below) — the project's Obsidian vault
-// repo, resolved to its GOVERNING repo root (never the raw `vaultPath`; see `resolveVaultGitTarget`'s own
-// doc for why). Increment 2 widens `GIT_PUSH_TARGETS` to add `"repo"` (the project's own `repoPath`).
+// INCREMENT 1 shipped the "vault" target — the project's Obsidian vault repo, resolved to its GOVERNING
+// repo root (never the raw `vaultPath`; see `resolveVaultGitTarget`'s own doc for why). INCREMENT 2 (card
+// 550d2add) adds `"repo"` — the project's own `repoPath`, resolved verbatim like `mcp/platform.ts`'s
+// `git_commit`/`git_push` (`gitWriterFor(p.repoPath)`).
 
 /** `target` vocabulary for `git_commit`/`git_push` — shared by the tools' own zod inputSchema and the
  *  REST grant config validator (gateway/server.ts), so both stay in lockstep with exactly one vocabulary. */
-export const GIT_PUSH_TARGETS = ["vault"] as const;
+export const GIT_PUSH_TARGETS = ["vault", "repo"] as const;
 export type GitPushTarget = (typeof GIT_PUSH_TARGETS)[number];
 
 const GIT_PUSH_SLUG = "git-push";
@@ -2465,11 +2466,17 @@ function pendingGitWriteKey(sessionId: string, route: CompanionRoute | null): st
 }
 
 /** Resolve `target`'s actual git working-tree path for `project`, server-side only (the agent supplies
- *  ONLY the closed-vocabulary `target` enum — never a path). INCREMENT 1: `"vault"` is the only value
- *  `GIT_PUSH_TARGETS` admits, so this only ever resolves the vault's governing repo (never raw
- *  `vaultPath` — see `resolveVaultGitTarget`'s own doc); Increment 2 adds a `"repo"` branch resolving to
- *  `project.repoPath` directly (mirrors `mcp/platform.ts`'s `git_commit`/`git_push`, verbatim reuse). */
-async function resolveGitPushTarget(project: Pick<Project, "vaultPath">, _target: GitPushTarget): Promise<{ ok: true; repoPath: string } | { ok: false; error: string }> {
+ *  ONLY the closed-vocabulary `target` enum — never a path). `"vault"` resolves to the vault's GOVERNING
+ *  repo root (never raw `vaultPath` — see `resolveVaultGitTarget`'s own doc). `"repo"` resolves to
+ *  `project.repoPath` directly — the SAME verbatim path `mcp/platform.ts`'s `git_commit`/`git_push`
+ *  (`gitWriterFor(p.repoPath)`) already trust; an unset path is a structured error here (mirroring
+ *  `mcp/operator.ts`'s own `!p.repoPath` check), and an actually-INVALID one (no repo there) surfaces as
+ *  `GitWriter`'s own structured git error the first time it's touched — never a throw. */
+async function resolveGitPushTarget(project: Pick<Project, "vaultPath" | "repoPath">, target: GitPushTarget): Promise<{ ok: true; repoPath: string } | { ok: false; error: string }> {
+  if (target === "repo") {
+    if (!project.repoPath?.trim()) return { ok: false, error: "this project has no repo path configured" };
+    return { ok: true, repoPath: project.repoPath };
+  }
   const r = await resolveVaultGitTarget(project.vaultPath);
   if (r.ok) return { ok: true, repoPath: r.repoPath };
   const messages: Record<typeof r.reason, string> = {
@@ -2528,8 +2535,9 @@ const GIT_PUSH: CompanionCapability = {
       {
         description:
           "Commit ALL pending changes in one of your granted projects' git repos, on behalf of the " +
-          "owner. `target` selects WHICH repo — INCREMENT 1 supports \"vault\" only (the project's " +
-          "Obsidian vault repo; Loom resolves its ACTUAL git root itself — never a path you supply). By " +
+          "owner. `target` selects WHICH repo — \"vault\" (the project's Obsidian vault repo; Loom " +
+          "resolves its ACTUAL git root itself — never a path you supply) or \"repo\" (the project's own " +
+          "code repository). Only the target(s) this project's grant allows may be used. By " +
           "default `message` MUST be a verbatim quote of words the owner actually said (Primitive B) — " +
           "if the owner just says \"commit my vault\" without dictating exact wording, this is REJECTED " +
           "unless the project's grant has `authoredContent` enabled, in which case you may write a real " +

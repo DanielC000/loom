@@ -1,27 +1,29 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Companion Capability & Permission-Lever Framework — `git-push`, the deferred "Option C" git commit+push
-// lever (card a3c3ade8, INCREMENT 1: vault target only). Two tools sharing ONE capability slug/pending-map
-// namespace: `git_commit` (Tier A — flows inside a warm session-trust window, cold ⇒ one step-up, message
-// defaults to requiring Primitive B unless the project's grant sets authoredContent:true) and `git_push`
-// (Tier X — ALWAYS steps up, even inside an otherwise-warm window, mirroring board_relocate/session_spawn's
-// dead-branch-guarded shape). The repo path is ALWAYS daemon-resolved from `project`+`target` — the agent
-// never supplies a path. `target:"vault"` resolves to the vault's GOVERNING repo root (never the raw
-// vaultPath — a vault may be a subfolder of a larger repo), refusing (never auto-initing) when the vault
-// has no repo yet or is Obsidian-Git-managed.
+// lever (card a3c3ade8 Increment 1 / card 550d2add Increment 2, which added the "repo" target below). Two
+// tools sharing ONE capability slug/pending-map namespace: `git_commit` (Tier A — flows inside a warm
+// session-trust window, cold ⇒ one step-up, message defaults to requiring Primitive B unless the project's
+// grant sets authoredContent:true) and `git_push` (Tier X — ALWAYS steps up, even inside an otherwise-warm
+// window, mirroring board_relocate/session_spawn's dead-branch-guarded shape). The repo path is ALWAYS
+// daemon-resolved from `project`+`target` — the agent never supplies a path. `target:"vault"` resolves to
+// the vault's GOVERNING repo root (never the raw vaultPath — a vault may be a subfolder of a larger repo),
+// refusing (never auto-initing) when the vault has no repo yet or is Obsidian-Git-managed. `target:"repo"`
+// resolves to `project.repoPath` directly (mirrors mcp/platform.ts's `gitWriterFor(p.repoPath)` verbatim).
 //
 // UNLIKE companion-session-spawn.mjs/companion-board-relocate.mjs, this lever's backing op is REAL git —
-// GitWriter is NOT mocked. Every vaultPath here is a REAL temp git repo, so this test exercises real git
-// commit/push end-to-end (mirrors test/git-writer.mjs's own real-git style), driven through a FAKE pty
-// (getActiveTurnOwnerText/getActiveTurnOrigin/getActiveTurnSenderId) and a FAKE companion (deliverReply).
-// NO network (the "remote" is a local bare repo), NO real claude, NO daemon.
+// GitWriter is NOT mocked. Every vaultPath/repoPath here is a REAL temp git repo, so this test exercises
+// real git commit/push end-to-end (mirrors test/git-writer.mjs's own real-git style), driven through a
+// FAKE pty (getActiveTurnOwnerText/getActiveTurnOrigin/getActiveTurnSenderId) and a FAKE companion
+// (deliverReply). NO network (the "remote" is a local bare repo), NO real claude, NO daemon.
 //
 // Covers the card's DoD:
 //   - no grant / read-only grant ⇒ both tools absent (act-only + hasActGrant)
 //   - targets allowlist: act grant with NO targets configured ⇒ tools present but target rejected;
-//     targets:["vault"] ⇒ target accepted
+//     targets:["vault"] ⇒ vault target accepted, repo target rejected; targets:["repo"] ⇒ the reverse
 //   - resolution: vault IS the repo root; vault is a SUBFOLDER of a larger repo (commits at the governing
 //     ROOT, never a nested repo); Obsidian-Git-managed (refused, never committed); no repo yet (refused,
 //     never auto-inited)
+//   - repo target: commits/pushes to project.repoPath end-to-end; an unset repoPath is a structured error
 //   - content guard: git_commit's message defaults to requiring Primitive B (verbatim owner quote);
 //     authoredContent:true relaxes it
 //   - Tier A: a cold window steps up once; the step-up ARMS the window; a later git_commit within TTL
@@ -33,6 +35,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   - Primitive A (no owner text) ⇒ rejected; no reply-to route ⇒ rejected
 //   - a clean tree (nothing to commit) surfaces GitWriter's own structured error, never a throw
 //   - additive: byte-identical companion surface with no git-push grant
+//   - grant/revoke: a live per-request row-read gates BOTH directions — granting registers both tools,
+//     and DELETING the grant removes both on the very next buildServer/request (not just the grant path)
 // Run: 1) build (turbo builds shared first), 2) node test/companion-git-push.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -102,8 +106,8 @@ function extractToken(deliveredText) {
 }
 
 const now = new Date().toISOString();
-function seedProject(db, id, name, vaultPath) {
-  db.insertProject({ id, name, repoPath: id, vaultPath, config: {}, createdAt: now, archivedAt: null });
+function seedProject(db, id, name, vaultPath, repoPath = id) {
+  db.insertProject({ id, name, repoPath, vaultPath, config: {}, createdAt: now, archivedAt: null });
 }
 function seedSession(db, id, projectId, role) {
   const agentId = `a-${id}`;
@@ -548,6 +552,129 @@ try {
     db.close();
   }
 
+  // ============ repo target: end-to-end commit + push against project.repoPath ============
+  {
+    const db = tmpDb();
+    const repo = initRepo(path.join(fixturesRoot, "repo-target-repo"));
+    const remote = addRemote(repo);
+    const proj = "proj-repotarget";
+    seedProject(db, proj, "Repo target", "/does/not/matter/vault", repo);
+    const companionSess = "companion-repotarget";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["repo"], authoredContent: true } });
+    const pty = makeFakePty("the owner said: commit and push the repo");
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    fs.writeFileSync(path.join(repo, "code.txt"), "change\n");
+    const proposed = await call(client, "git_commit", { project: proj, target: "repo", message: "repo target commit" });
+    check("repo target: propose succeeds (cold window)", proposed.status === "proposed");
+    const token = extractToken(companion.delivered[0].text);
+    pty.setOwnerText(`CONFIRM ${token}`);
+    const committed = await call(client, "git_commit", { project: proj, target: "repo", message: "repo target commit" });
+    check("repo target: confirm commits with a real hash", committed.status === "committed" && typeof committed.hash === "string");
+    check("repo target: commit landed in the PROJECT'S repo (repoPath), not any vault", git(repo, "log", "--pretty=%s").includes("repo target commit"));
+
+    pty.setOwnerText("the owner said: now push it");
+    const pushProposed = await call(client, "git_push", { project: proj, target: "repo" });
+    check("repo target: git_push proposes (Tier X, even after the commit's own step-up)", pushProposed.status === "proposed");
+    const pushPromptText = companion.delivered.at(-1).text;
+    check("repo target: push confirm text names the target", pushPromptText.includes("repo"));
+    const pushToken = extractToken(pushPromptText);
+    pty.setOwnerText(`CONFIRM ${pushToken}`);
+    const pushed = await call(client, "git_push", { project: proj, target: "repo" });
+    check("repo target: push confirm returns status:'pushed'", pushed.status === "pushed");
+    const remoteLog = execFileSync("git", ["--git-dir", remote, "log", "main", "--pretty=%s"], { stdio: ["ignore", "pipe", "pipe"] }).toString();
+    check("repo target: the commit actually reached the remote", remoteLog.includes("repo target commit"));
+
+    await client.close();
+    db.close();
+  }
+
+  // ============ targets allowlist is PER-TARGET: vault-only grant rejects "repo", repo-only rejects "vault" ============
+  {
+    const db = tmpDb();
+    const vault = initRepo(path.join(fixturesRoot, "crosscheck-vault"));
+    const repo = initRepo(path.join(fixturesRoot, "crosscheck-repo"));
+    const proj = "proj-crosscheck";
+    seedProject(db, proj, "Cross-check", vault, repo);
+    const companionSess = "companion-crosscheck";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["vault"] } });
+    const pty = makeFakePty('the owner said: commit with message "cross-check"');
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const repoRes = await call(client, "git_commit", { project: proj, target: "repo", message: "cross-check" });
+    check("vault-only grant: target:\"repo\" is rejected", typeof repoRes.error === "string" && repoRes.status === undefined);
+    const vaultRes = await call(client, "git_commit", { project: proj, target: "vault", message: "cross-check" });
+    check("vault-only grant: target:\"vault\" is still accepted (proposes)", vaultRes.status === "proposed");
+    await client.close();
+    db.close();
+
+    const db2 = tmpDb();
+    seedProject(db2, proj, "Cross-check 2", vault, repo);
+    seedSession(db2, companionSess, proj, "assistant");
+    db2.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["repo"] } });
+    const pty2 = makeFakePty('the owner said: commit with message "cross-check 2"');
+    const companion2 = makeFakeCompanion();
+    const orch2 = new OrchestrationMcpRouter(db2, {}, companion2, pty2);
+    const client2 = await connect(orch2.buildServer(companionSess, "assistant"));
+    const vaultRes2 = await call(client2, "git_commit", { project: proj, target: "vault", message: "cross-check 2" });
+    check("repo-only grant: target:\"vault\" is rejected", typeof vaultRes2.error === "string" && vaultRes2.status === undefined);
+    const repoRes2 = await call(client2, "git_commit", { project: proj, target: "repo", message: "cross-check 2" });
+    check("repo-only grant: target:\"repo\" is still accepted (proposes)", repoRes2.status === "proposed");
+    await client2.close();
+    db2.close();
+  }
+
+  // ============ repo target: an unset repoPath is a structured error, never a throw ============
+  {
+    const db = tmpDb();
+    const proj = "proj-norepopath";
+    db.insertProject({ id: proj, name: "No repo path", repoPath: "", vaultPath: "", config: {}, createdAt: now, archivedAt: null });
+    const companionSess = "companion-norepopath";
+    seedSession(db, companionSess, proj, "assistant");
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["repo"] } });
+    const pty = makeFakePty('the owner said: commit with message "x"');
+    const companion = makeFakeCompanion();
+    const orch = new OrchestrationMcpRouter(db, {}, companion, pty);
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const res = await call(client, "git_commit", { project: proj, target: "repo", message: "x" });
+    check("no repo path: rejected with an {error}", typeof res.error === "string" && res.status === undefined);
+    check("no repo path: error names the missing repo path", /repo path/i.test(res.error));
+    check("no repo path: nothing delivered to the owner", companion.delivered.length === 0);
+    await client.close();
+    db.close();
+  }
+
+  // ============ grant/revoke: a live per-request row-read gates BOTH directions ============
+  {
+    const db = tmpDb();
+    const vault = initRepo(path.join(fixturesRoot, "revoke-vault"));
+    const proj = "proj-revoke";
+    seedProject(db, proj, "Revoke", vault);
+    const companionSess = "companion-revoke";
+    seedSession(db, companionSess, proj, "assistant");
+    const orch = new OrchestrationMcpRouter(db, {}, {}, makeFakePty(null));
+
+    const beforeGrant = await listOf(orch.buildServer(companionSess, "assistant"));
+    check("revoke setup: no grant yet ⇒ both tools absent", !beforeGrant.includes("git_commit") && !beforeGrant.includes("git_push"));
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "git-push", projectId: proj, mode: "act", config: { targets: ["vault"] } });
+    const afterGrant = await listOf(orch.buildServer(companionSess, "assistant"));
+    check("grant present: git_commit IS registered on the next buildServer", afterGrant.includes("git_commit"));
+    check("grant present: git_push IS registered on the next buildServer", afterGrant.includes("git_push"));
+
+    db.deleteCompanionCapabilityGrant(companionSess, "git-push", proj);
+    const afterRevoke = await listOf(orch.buildServer(companionSess, "assistant"));
+    check("grant DELETED: git_commit is absent on the VERY NEXT buildServer/request", !afterRevoke.includes("git_commit"));
+    check("grant DELETED: git_push is absent on the VERY NEXT buildServer/request", !afterRevoke.includes("git_push"));
+
+    db.close();
+  }
+
   // ============ additive: byte-identical companion surface with NO git-push grant ============
   {
     const db = tmpDb();
@@ -571,6 +698,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — git-push (git_commit Tier A / git_push Tier X) is registered only under an act-mode grant; a configured targets allowlist gates which repo a call may touch; the vault target resolves to the GOVERNING repo root (never a raw subfolder path, never Obsidian-Git-managed, never auto-inited); git_commit's message defaults to requiring a verbatim owner quote (relaxed only by an explicit per-project authoredContent:true); a cold Tier-A window steps up once and ARMS itself so a later commit applies directly, while git_push's Tier X ALWAYS proposes first (even inside that same warm window) with a bounded ahead-count+latest-subject confirm disclosure and never arms/extends the window on commit; token-mismatch is retryable and a propose→confirm payload mismatch is rejected without committing; a clean tree surfaces GitWriter's own structured error; Primitive A / no-route / failed-delivery all fail closed; and the surface is fully additive with no grant."
+  ? "\n✅ ALL PASS — git-push (git_commit Tier A / git_push Tier X) is registered only under an act-mode grant; a configured targets allowlist gates which repo a call may touch, per-target (a vault-only grant rejects \"repo\" and vice versa); the vault target resolves to the GOVERNING repo root (never a raw subfolder path, never Obsidian-Git-managed, never auto-inited); the repo target resolves directly to project.repoPath (an unset repoPath is a structured error) and commits/pushes end-to-end for real; git_commit's message defaults to requiring a verbatim owner quote (relaxed only by an explicit per-project authoredContent:true); a cold Tier-A window steps up once and ARMS itself so a later commit applies directly, while git_push's Tier X ALWAYS proposes first (even inside that same warm window) with a bounded ahead-count+latest-subject confirm disclosure and never arms/extends the window on commit; token-mismatch is retryable and a propose→confirm payload mismatch is rejected without committing; a clean tree surfaces GitWriter's own structured error; Primitive A / no-route / failed-delivery all fail closed; a live per-request row-read gates BOTH grant AND revoke (deleting the grant removes both tools on the very next buildServer/request); and the surface is fully additive with no grant."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

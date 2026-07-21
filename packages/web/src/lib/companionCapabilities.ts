@@ -72,9 +72,9 @@ export const ATTENTION_ALERT_CLASSES = [
 ] as const;
 
 // Mirrors GIT_PUSH_TARGETS (daemon companion/capabilities.ts) — which repo(s) the git-push lever may
-// commit/push. INCREMENT 1 ships "vault" only; a later increment widens this to add "repo". Same
-// source-of-truth caveat as DECISION_CLASSES/ATTENTION_ALERT_CLASSES.
-export const GIT_PUSH_TARGETS = ["vault"] as const;
+// commit/push: the project's Obsidian vault repo, or its own code repo. Same source-of-truth caveat as
+// DECISION_CLASSES/ATTENTION_ALERT_CLASSES.
+export const GIT_PUSH_TARGETS = ["vault", "repo"] as const;
 
 // The panel's lever order: the owner's immediate need first (fleet status + decisions relay), then the
 // other read/informational levers, with the ELEVATED act-only levers grouped LAST so the sensitive
@@ -158,12 +158,12 @@ export const COMPANION_LEVERS: readonly LeverMeta[] = [
   {
     slug: "git-push",
     name: "Git commit & push",
-    summary: "Commit and push a granted project's vault git repo on your behalf. Push ALWAYS asks for a fresh confirmation, even right after another confirmed action; a plain commit may apply directly once you've recently confirmed something in this chat.",
+    summary: "Commit and push a granted project's vault and/or code repo on your behalf. Push ALWAYS asks for a fresh confirmation, even right after another confirmed action; a plain commit may apply directly once you've recently confirmed something in this chat.",
     modes: ["act"],
     tier: "elevated",
     configKind: "gitPushTargets",
     appliesLive: false,
-    elevatedAction: "commit and push your vault's git repo on your behalf",
+    elevatedAction: "commit and push your vault and/or code repo on your behalf",
   },
   {
     slug: "session-spawn",

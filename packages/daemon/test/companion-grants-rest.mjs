@@ -180,27 +180,29 @@ try {
     const cleanupBoardReach = await app.inject({ method: "DELETE", url: `/api/companion/${companionSessId}/grants?capability=board-reach` });
     check("DELETE: cleanup the board-reach validation grant (test isolation)", cleanupBoardReach.statusCode === 200);
 
-    // git-push's own config shape (card a3c3ade8: {targets:("vault"|"repo")[], authoredContent:boolean})
-    // — checked ON TOP of the generic floor, mirroring media-out's roots + board-reach's authoredContent
-    // checks above. Fail-closed default: absent targets is a VALID config (nothing committable until the
-    // owner explicitly allows a target), only an unknown target value or a non-boolean authoredContent
-    // is rejected. INCREMENT 1: "repo" is a well-formed STRING but not (yet) in GIT_PUSH_TARGETS, so it
-    // must be rejected exactly like a genuinely unknown value — proving the validator checks membership,
-    // not just element type.
+    // git-push's own config shape (card a3c3ade8 Increment 1 / card 550d2add Increment 2:
+    // {targets:("vault"|"repo")[], authoredContent:boolean}) — checked ON TOP of the generic floor,
+    // mirroring media-out's roots + board-reach's authoredContent checks above. Fail-closed default:
+    // absent targets is a VALID config (nothing committable until the owner explicitly allows a target),
+    // only an unknown target value or a non-boolean authoredContent is rejected. "bogus" proves the
+    // validator checks membership, not just element type; "repo" is now a WELL-FORMED, ADMITTED target
+    // (Increment 2 widened GIT_PUSH_TARGETS) — the sibling case to Increment 1's own "vault" acceptance.
     const badGitPushTargetsType = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: "not-an-array" } } });
     check("POST: git-push config.targets not an array → 400", badGitPushTargetsType.statusCode === 400);
 
     const badGitPushTargetsUnknown = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["vault", "bogus"] } } });
     check("POST: git-push config.targets with an unknown element → 400", badGitPushTargetsUnknown.statusCode === 400);
 
-    const badGitPushTargetsRepoIncrement1 = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["repo"] } } });
-    check("POST: git-push config.targets:['repo'] → 400 (INCREMENT 1 only admits \"vault\")", badGitPushTargetsRepoIncrement1.statusCode === 400);
+    const goodGitPushTargetsRepo = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["repo"] } } });
+    check("POST: git-push config.targets:['repo'] → 201 (Increment 2 widened the target set)", goodGitPushTargetsRepo.statusCode === 201);
 
     const badGitPushAuthoredContentType = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { authoredContent: "true" } } });
     check("POST: git-push config.authoredContent as a string (not boolean) → 400", badGitPushAuthoredContentType.statusCode === 400);
 
-    const goodGitPushConfig = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["vault"], authoredContent: true } } });
-    check("POST: a well-formed git-push config → 201", goodGitPushConfig.statusCode === 201);
+    // Updates the SAME (capability, projectId) row the targets:['repo'] POST above just created — 200
+    // (existed already), not 201. Also proves BOTH targets can be granted together.
+    const goodGitPushConfig = await app.inject({ method: "POST", url: `/api/companion/${companionSessId}/grants`, payload: { capability: "git-push", config: { targets: ["vault", "repo"], authoredContent: true } } });
+    check("POST: a well-formed git-push config with both targets → 200 (updates the existing row)", goodGitPushConfig.statusCode === 200);
 
     // Absent targets/authoredContent is still a VALID config (fail-closed default: nothing committable,
     // verbatim required — mirrors media-out's absent-roots / board-reach's absent-authoredContent default).
