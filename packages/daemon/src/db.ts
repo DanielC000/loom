@@ -433,6 +433,14 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- by worker_spawn). Added to existing DBs via migrateTasks(); the NOT NULL + constant DEFAULT 0
   -- backfills every legacy task row to "not deferred" in place.
   deferred INTEGER NOT NULL DEFAULT 0,
+  -- Provenance of the CURRENT held value (card 9b0373c0, Platform-Audit bb23d15a): 'human' | 'agent' |
+  -- NULL (never set / held is currently false). Stamped SERVER-SIDE only -- never a client-suppliable
+  -- field on any agent MCP tool -- so an agent can never forge 'human' to escape the clear-refusal guard
+  -- in updateProjectTask (mcp/tasks.ts). NULLable (no NOT NULL/DEFAULT): a legacy row predates this
+  -- column entirely; migrateTasks()'s ALTER TABLE ADD COLUMN backfills every pre-existing held=1 row to
+  -- 'human' in place (held has always been documented owner-gated -- see Task.held's own doc), so a
+  -- pre-migration hold isn't newly agent-clearable the moment this ships.
+  held_by TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -1341,6 +1349,9 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // Manager-settable DEFERRED flag. NOT NULL + constant DEFAULT 0 backfills every legacy row to
   // "not deferred" in place — byte-identical to a fresh CREATE TABLE default.
   deferred: "INTEGER NOT NULL DEFAULT 0",
+  // held-clear provenance (card 9b0373c0). Nullable, no DEFAULT — see the CREATE TABLE doc above.
+  // migrateTasks() backfills existing held=1 rows to 'human' right after adding this column (below).
+  held_by: "TEXT",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -1637,14 +1648,22 @@ export class Db {
    * Idempotent additive migration for `tasks` — ADD COLUMN any post-phase-1 column missing from an
    * existing DB (fresh installs already have them via CREATE TABLE). Mirrors migrateProfiles; the
    * NOT NULL + constant DEFAULT 'p2' backfills every legacy task row to Normal priority in place,
-   * leaving its other fields untouched.
+   * leaving its other fields untouched. `held_by` gets its own one-shot backfill immediately after
+   * being added (card 9b0373c0): every PRE-EXISTING held=1 row is stamped 'human' right here, in the
+   * SAME branch that adds the column (so it only ever runs once, on the actual add — a second boot finds
+   * the column already present and skips both the ALTER and the backfill) — held has always been
+   * documented owner-gated, so a hold that predates provenance tracking must not become freely
+   * agent-clearable the moment this ships.
    */
   private migrateTasks(): void {
     const have = new Set(
       (this.db.prepare("PRAGMA table_info(tasks)").all() as { name: string }[]).map((c) => c.name),
     );
     for (const [name, type] of Object.entries(TASK_ADDED_COLUMNS)) {
-      if (!have.has(name)) this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+      if (!have.has(name)) {
+        this.db.exec(`ALTER TABLE tasks ADD COLUMN ${name} ${type}`);
+        if (name === "held_by") this.db.exec("UPDATE tasks SET held_by = 'human' WHERE held = 1");
+      }
     }
   }
 
@@ -3862,7 +3881,10 @@ export class Db {
   backfillHeldFromTitlesOnce(): number {
     if (this.getMeta(HELD_BACKFILL_KEY) !== undefined) return 0; // guard: already run (one-shot)
     const rows = this.db.prepare("SELECT id, title FROM tasks WHERE held = 0").all() as Row[];
-    const flag = this.db.prepare("UPDATE tasks SET held = 1 WHERE id = ?");
+    // held_by='human' (card 9b0373c0): every card this backfill flags was parked via the LEGACY
+    // owner-only title convention — provenance for the flag it's newly seeding must read the same as a
+    // fresh owner-set hold, not fall back to NULL (which reads as agent-clearable).
+    const flag = this.db.prepare("UPDATE tasks SET held = 1, held_by = 'human' WHERE id = ?");
     let changed = 0;
     const run = this.db.transaction((toFlag: string[]) => { for (const id of toFlag) { flag.run(id); changed++; } });
     run(rows.filter((r) => isOwnerHeldTaskTitle(r.title as string)).map((r) => r.id as string));
@@ -4606,18 +4628,22 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,created_at,updated_at)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@createdAt,@updatedAt)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0 }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null }); // defaults when an (untyped) caller omits them
   }
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>): void {
+  // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
+  // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
+  // (updateProjectTask, mcp/tasks.ts) plus the separate human-only REST route (gateway/server.ts), which
+  // compute the correct heldBy server-side and pass it in the patch — this method just writes what it's given.
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, updated_at=@updatedAt WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0 });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null });
   }
   /** Reassign a card to a DIFFERENT project's board — the one write `updateTask` never performs (it has
    *  no `projectId` in its patch type). Single atomic transaction: the task's project_id + column_key +
@@ -6130,6 +6156,7 @@ function toTask(r0: unknown): Task {
     priority: (r.priority as Task["priority"]) ?? "p2",
     held: (r.held as number) === 1,
     deferred: (r.deferred as number) === 1,
+    heldBy: (r.held_by as Task["heldBy"]) ?? null,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }

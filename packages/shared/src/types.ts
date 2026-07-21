@@ -956,6 +956,15 @@ export type OrchestrationEventKind =
   // without re-deriving it from `listOpenQuestions`. Filed under the ASKING MANAGER (managerSessionId);
   // `detail` carries { questionId, title }.
   | "question_asked"
+  // A `held` card was CLEARED (card 9b0373c0, Platform-Audit bb23d15a) — the un-brake audit trail. Emitted
+  // from the ONE agent-facing choke point (`updateProjectTask`, mcp/tasks.ts — shared by `tasks_update` AND
+  // the Lead's cross-project `project_task_update`) on an agent clearing its OWN agent-set hold (a
+  // human-set hold is refused there, never reaches this event), and from the separate human-only REST route
+  // (`POST /api/tasks/:id`) on a human clear via the UI. `detail` carries { clearedBy: "human" | "agent",
+  // previousHeldBy: "human" | "agent" | null }. Filed under the ACTING session (managerSessionId = its id,
+  // whatever role) when one exists, else "" (mirrors `schedule_fire_deferred`'s "no session was spawned"
+  // convention) — the human REST route has no session at all.
+  | "task_held_cleared"
   // A session's usage-limit PARK was just stamped (index.ts's `onRateLimited` hook, alongside the existing
   // `db.setRateLimitedUntil`/`armRateLimitDeadline` writes) — the event-emit twin of the rate-limit park,
   // for the same tail-poll reason as `question_asked` above (a global `rateLimitedUntil` column change has
@@ -1160,9 +1169,22 @@ export interface Task {
    * this up — it's parked on a product decision") yet is NOT in the `blocked` brake lane. The idle
    * watchdog DISCOUNTS a held card from its "actionable" count so it never nags a manager to pick up a
    * card it's forbidden to touch. Additive + default false; distinct from `blocked` (the owner's brake
-   * lane) — `held` is the "parked-in-todo, owner-gated, don't nag" signal. Owner-settable only.
+   * lane) — `held` is the "parked-in-todo, owner-gated, don't nag" signal.
+   *
+   * SET is freely agent-callable (setting a brake is always safe); CLEARING is the dangerous direction —
+   * see {@link heldBy}. A human hold (`heldBy:"human"`) can ONLY be cleared via the human-only REST/UI
+   * path, never via an agent MCP tool (card 9b0373c0, Platform-Audit bb23d15a) — enforced at
+   * `updateProjectTask` (daemon `mcp/tasks.ts`), the one choke point both agent-facing task-update
+   * surfaces (`tasks_update` and the Lead's cross-project `project_task_update`) share.
    */
   held?: boolean;
+  /**
+   * Provenance of the CURRENT `held` value: `"human"` (set via REST/UI), `"agent"` (set via an agent MCP
+   * tool), or `null`/absent (never set, or held is currently false). Stamped SERVER-SIDE only — never a
+   * client-suppliable field on any agent tool's input schema, so an agent can never forge `"human"` to
+   * dodge the clear-refusal above. Meaningful only while `held` is true; a clear resets it to `null`.
+   */
+  heldBy?: "human" | "agent" | null;
   /**
    * Manager-settable DEFERRED flag: a card the MANAGER is intentionally sequencing behind other work —
    * its own dependency-gating/ordering marker, orthogonal to `held` (the owner's SOLE brake). The idle

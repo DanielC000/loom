@@ -1577,13 +1577,16 @@ export class PlatformMcpRouter {
           "move/edit/re-prioritize (PATCH: only the keys you pass are applied). title?, body?, columnKey? (a " +
           "MOVE — validated to be an EXISTING column on that project's board, rejected otherwise so a move can " +
           "never orphan the card), position?, priority? (p0|p1|p2|p3), held? (the owner-gated 'don't nag' flag " +
-          "the idle watchdog discounts — this is the sanctioned cross-project path to set/clear it on a card " +
-          "that isn't on the Lead's own home board; omit to leave it untouched), deferred? (a manager's own " +
+          "the idle watchdog discounts — this is the sanctioned cross-project path to SET it on a card that " +
+          "isn't on the Lead's own home board; omit to leave it untouched). held:false CLEARS it, but only if " +
+          "held wasn't set by the owner — clearing an owner-set hold is REFUSED here (returns {error}, nothing " +
+          "written, not even other fields in the same patch), same as the in-project tasks_update: only the " +
+          "owner can release their own hold, via the board UI. deferred? (a manager's own " +
           "sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but " +
           "unlike held it never blocks worker_spawn; omit to leave it untouched). Reuses the SAME backing path + " +
           "column validation as the in-project loom-tasks tasks_update — INCLUDING its trimmed-ack behavior: a " +
           "patch that doesn't touch body returns a small ack ({id,title,columnKey,priority,position,held," +
-          "deferred,updatedAt,changed}, no body) instead of the full card; pass body to intentionally edit it " +
+          "heldBy,deferred,updatedAt,changed}, no body) instead of the full card; pass body to intentionally edit it " +
           "and get the full updated Task row back. A taskId not on the named project " +
           "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
           "project_get). Error if the project is unknown or an ambiguous prefix " +
@@ -1605,7 +1608,10 @@ export class PlatformMcpRouter {
       async ({ projectId, taskId, ...patch }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok(updateProjectTask(db, project.id, taskId, patch));
+        // held-clear guard (card 9b0373c0): updateProjectTask enforces this identically here — the Lead
+        // gets NO exemption (owner decision) even though it's the human-driven cross-project operator; a
+        // human-set hold is refused just like it is via tasks_update, only the human REST/UI path clears it.
+        return ok(updateProjectTask(db, project.id, taskId, patch, callerSessionId ? { sessionId: callerSessionId } : undefined));
       },
     );
 

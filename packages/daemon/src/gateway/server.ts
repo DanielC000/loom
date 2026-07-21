@@ -4186,7 +4186,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP task tools read/write, so UI and agent never diverge).
   app.post("/api/tasks/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>;
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy">>;
+    // heldBy is NEVER client-suppliable — that's this whole fix's central invariant (card 9b0373c0). Unlike
+    // priority/held/deferred, this raw REST body is NOT schema-validated the way the MCP tools' zod input is,
+    // so a bare `{heldBy:"agent"}` POST (no `held` key) would otherwise flow straight through to
+    // db.updateTask below and silently downgrade a human-held card's provenance — reopening it to the agent
+    // choke point's held:false refusal (Code Reviewer catch). Strip whatever the client sent BEFORE any other
+    // use; the only heldBy this route ever writes is the one it derives itself, below, from `held`.
+    delete b.heldBy;
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     if (b.held !== undefined && typeof b.held !== "boolean") return reply.code(400).send({ error: "held must be a boolean" });
     if (b.deferred !== undefined && typeof b.deferred !== "boolean") return reply.code(400).send({ error: "deferred must be a boolean" });
@@ -4196,7 +4203,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       const cols = resolveConfig(deps.db.getProject(deps.db.getTask(id)?.projectId ?? "")?.config).kanbanColumns;
       if (!cols.some((c) => c.key === b.columnKey)) b.columnKey = columnKeyForRole(cols, "defaultLanding") ?? "backlog";
     }
+    // held-clear provenance (card 9b0373c0, Platform-Audit bb23d15a): this loopback REST route is the
+    // ONLY human-authoritative write path — it's always allowed to set OR clear `held`, unlike the agent
+    // MCP surfaces (updateProjectTask, mcp/tasks.ts), which refuse clearing a human-set hold outright.
+    // Stamp provenance server-side (never client-suppliable further than this trusted boundary) so a
+    // later agent clear attempt on a human-set hold has something to check against.
+    const prev = b.held !== undefined ? deps.db.getTask(id) : undefined;
+    if (b.held !== undefined) b.heldBy = b.held ? "human" : null;
     deps.db.updateTask(id, b);
+    // Audit trail twin of the agent-side clear event (mcp/tasks.ts `updateProjectTask`) — a human clear
+    // is always allowed, but still worth a durable record alongside an agent clear.
+    if (b.held === false && prev?.held === true) {
+      deps.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: "", taskId: id, kind: "task_held_cleared",
+        detail: { clearedBy: "human", previousHeldBy: prev.heldBy ?? null },
+      });
+    }
     return { ok: true };
   });
 

@@ -139,7 +139,10 @@ export function migrateHumanHoldToHeld(db: Db): { projectsMigrated: number; card
     let actioned = false;
     if (cardsOnKey.length && targetKey) {
       for (const t of cardsOnKey) {
-        db.updateTask(t.id, { held: true, columnKey: targetKey });
+        // heldBy:"human" (card 9b0373c0) — a card sitting on a dedicated humanHold-role column was
+        // parked there by the owner's OWN board layout; its promoted `held` flag must carry the same
+        // provenance a fresh owner-set hold would, not fall back to agent-clearable.
+        db.updateTask(t.id, { held: true, heldBy: "human", columnKey: targetKey });
         cardsMigrated++;
       }
       actioned = true;

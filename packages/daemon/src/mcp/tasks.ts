@@ -323,13 +323,26 @@ export function createProjectTask(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy"> & {
   changed: string[];
 };
+
+/**
+ * The calling agent session's identity, threaded through {@link updateProjectTask} ONLY to stamp the
+ * `task_held_cleared` audit event's `managerSessionId` (card 9b0373c0) — never used for authorization
+ * (this function is reachable ONLY from agent MCP surfaces; see its doc below, and the human-only REST
+ * route never calls it at all). Omitted (e.g. an existing test calling this directly) falls back to ""
+ * — `orchestration_events.manager_session_id` is NOT NULL, and "" mirrors the established "no session
+ * was spawned" convention already used by `schedule_fire_deferred`/`schedule_fire_failed`.
+ */
+export interface TaskUpdateActor {
+  sessionId: string;
+}
 
 export function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>,
+  actor?: TaskUpdateActor,
 ): Task | TaskUpdateAck | { error: string } {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
@@ -346,14 +359,51 @@ export function updateProjectTask(
       return { error: `unknown column "${patch.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
     }
   }
-  db.updateTask(owned.id, patch);
-  const updated = { ...owned, ...patch, updatedAt: new Date().toISOString() };
+  // held-clear guard (card 9b0373c0, Platform-Audit bb23d15a): this function is the ONE choke point both
+  // agent-facing task-update surfaces share — the in-project `tasks_update` AND the Lead's cross-project
+  // `project_task_update` (mcp/platform.ts) — reachable ONLY from an agent MCP session; the human-only
+  // REST route (POST /api/tasks/:id) writes via db.updateTask directly and never reaches this guard. A
+  // HUMAN-set hold (heldBy:"human") can be cleared ONLY via that REST/UI path: an agent session clearing
+  // held:false here is refused outright (whole-patch reject — nothing is written, INCLUDING any other
+  // fields in the same patch) whenever the card is currently human-held. An agent clearing its OWN (or
+  // any other agent's) agent-set hold is unaffected — `held` stays a freely agent-settable discount
+  // signal; only clearing the owner's brake is restricted. The Platform Lead gets NO exemption here
+  // (owner decision, card 9b0373c0) — it's a standing, potentially prompt-injectable agent session like
+  // any other, so it shares this exact guard rather than a privileged carve-out.
+  let heldByPatch: Task["heldBy"] | undefined;
+  if (patch.held !== undefined) {
+    if (patch.held === false) {
+      if (owned.held === true && owned.heldBy === "human") {
+        return { error: "held was set by the owner — an agent session cannot clear it; ask the owner to clear it via the board UI" };
+      }
+      heldByPatch = null; // clearing always resets provenance, whatever it was
+    } else {
+      // Setting held:true never DOWNGRADES an existing human hold's provenance — otherwise an agent
+      // could "refresh" held:true on an already-human-held card to silently reclassify it as
+      // agent-held, then clear it on the very next call. Every OTHER held:true here is agent-initiated
+      // (this function is agent-only), so it always stamps "agent".
+      heldByPatch = owned.held === true && owned.heldBy === "human" ? "human" : "agent";
+    }
+  }
+  const dbPatch = heldByPatch !== undefined ? { ...patch, heldBy: heldByPatch } : patch;
+  db.updateTask(owned.id, dbPatch);
+  // Audit trail: a real clear just went through. Only reachable here for an AGENT-set hold — a
+  // human-set hold already returned above, so this fires on the DoD's "agent-set-then-agent-clear"
+  // path, never on a refused clear.
+  if (patch.held === false && owned.held === true) {
+    db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId: actor?.sessionId ?? "", taskId: owned.id, kind: "task_held_cleared",
+      detail: { clearedBy: "agent", previousHeldBy: owned.heldBy ?? null },
+    });
+  }
+  const updated = { ...owned, ...dbPatch, updatedAt: new Date().toISOString() };
   // A patch that doesn't touch `body` doesn't need it echoed back — trim to the small fields. A patch
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, updatedAt } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, updatedAt, changed: Object.keys(patch) };
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, updatedAt } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, heldBy, updatedAt, changed: Object.keys(patch) };
   }
   return updated;
 }
