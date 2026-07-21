@@ -60,6 +60,9 @@ try {
   fs.writeFileSync(path.join(repo, "new.txt"), "added on feature/x\n");
   const cm = await w.commit("add new.txt");
   check("commit returns ok + hash", cm.ok === true && /^[0-9a-f]{7,40}$/.test(cm.hash ?? ""));
+  // The advisory vault-pause lease (card 614dfbef) is held only for the DURATION of the op — it must
+  // never linger afterward (would wrongly pause a real VaultVersioner watching this same repo root).
+  check("commit does not leave the advisory pause lease held afterward", !fs.existsSync(path.join(repo, ".git", "loom-vault-pause.json")));
   check("commit landed in history", git("log", "--pretty=%s").includes("add new.txt"));
   check("commit used the repo identity (no override/trailer)", git("log", "-1", "--pretty=%an <%ae>").trim() === "loom-test <loom-test@example.com>");
   check("commit body has NO Co-Authored-By trailer", !git("log", "-1", "--pretty=%B").includes("Co-Authored-By"));

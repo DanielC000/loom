@@ -1,4 +1,5 @@
 import { simpleGit, type SimpleGit } from "simple-git";
+import { recordGitPushOutcome, pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -175,31 +176,53 @@ export class GitWriter {
     return simpleGit(this.repoPath, { timeout: { block: blockMs } }).env(nonInteractiveEnv());
   }
 
+  /**
+   * Hold the vault auto-committer's advisory pause lease (card 614dfbef) for the duration of one
+   * git-surgery op on `this.repoPath`, so a checkout/commit/push issued through THIS writer can never
+   * race a `VaultVersioner` background auto-commit mid-sequence — the exact race the origin finding
+   * (4ae8a3c9) hit by hand. Harmless when `repoPath` isn't a watched vault root: the lease is just an
+   * unused file under its own `.git/` that nothing reads. Always resumes in `finally`, so a lease is
+   * never left held past this call even if `fn` throws (its own timeout ceiling is a self-healing
+   * backstop regardless).
+   */
+  private async withVaultPauseLease<T>(fn: () => Promise<T>): Promise<T> {
+    pauseVaultAutoCommit(this.repoPath);
+    try {
+      return await fn();
+    } finally {
+      resumeVaultAutoCommit(this.repoPath);
+    }
+  }
+
   /** Switch to an EXISTING local branch. Fails (structured) on an unknown branch or a dirty tree that
    *  would be overwritten — git's own message is surfaced for the UI. */
   async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
-    try {
-      const git = this.git(this.localMs);
-      await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
-      const current = (await git.branchLocal()).current;
-      return { ok: true, branch: current };
-    } catch (e) {
-      return { ok: false, error: gitError(e) };
-    }
+    return this.withVaultPauseLease(async () => {
+      try {
+        const git = this.git(this.localMs);
+        await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
+        const current = (await git.branchLocal()).current;
+        return { ok: true, branch: current };
+      } catch (e) {
+        return { ok: false, error: gitError(e) };
+      }
+    });
   }
 
   /** Create a NEW local branch off the current HEAD and switch to it (`checkout -b`). Fails (structured)
    *  if the branch already exists or the name is invalid. Does NOT touch any remote. */
   async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
-    try {
-      const git = this.git(this.localMs);
-      await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
-      return { ok: true, branch: name.trim() };
-    } catch (e) {
-      return { ok: false, error: gitError(e) };
-    }
+    return this.withVaultPauseLease(async () => {
+      try {
+        const git = this.git(this.localMs);
+        await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
+        return { ok: true, branch: name.trim() };
+      } catch (e) {
+        return { ok: false, error: gitError(e) };
+      }
+    });
   }
 
   /** Stage ALL changes (`add -A`) and commit with the UI-supplied message. Returns the new commit hash.
@@ -207,18 +230,20 @@ export class GitWriter {
    *  the repo's configured user (no overrides, no trailer). */
   async commit(message: string): Promise<GitWriteResult<{ hash: string }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
-    try {
-      const git = this.git(this.localMs);
-      // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
-      const status = await withTimeout(git.status(), this.localMs, "git status");
-      if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
-      await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
-      const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
-      const hash = res.commit || (await git.revparse(["HEAD"])).trim();
-      return { ok: true, hash };
-    } catch (e) {
-      return { ok: false, error: gitError(e) };
-    }
+    return this.withVaultPauseLease(async () => {
+      try {
+        const git = this.git(this.localMs);
+        // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
+        const status = await withTimeout(git.status(), this.localMs, "git status");
+        if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
+        await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
+        const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
+        const hash = res.commit || (await git.revparse(["HEAD"])).trim();
+        return { ok: true, hash };
+      } catch (e) {
+        return { ok: false, error: gitError(e) };
+      }
+    });
   }
 
   /**
@@ -234,26 +259,38 @@ export class GitWriter {
    * On success we ALSO surface a non-blocking {@link identityWarning} (commit-identity vs. remote-host
    * mismatch) so the human who just published sees if their email is wrong for this remote. It never
    * blocks the push and a detection failure is silently swallowed — see {@link identityWarning}.
+   *
+   * **Durably records the outcome** (card 614dfbef, origin finding 4ae8a3c9) via
+   * `vault/versioner.ts`'s `recordGitPushOutcome` — the ONE chokepoint every real pusher (this class,
+   * reached from the REST git-write surface, the Platform MCP, and the companion `git-push` capability)
+   * routes through, so a rejecting remote (e.g. GitHub's >100MB blob hard-limit) is durably known instead
+   * of only discoverable by an agent doing forensics after the fact. A vault's periodic push-status log
+   * (`logVaultPushStatus`/`VaultPushStatusWatcher`) surfaces a recorded failure the next time it ticks.
    */
   async push(): Promise<GitWriteResult<{ branch: string; warning?: string }>> {
-    try {
-      const git = this.git(this.pushMs);
-      const branch = (await git.branchLocal()).current;
+    return this.withVaultPauseLease(async () => {
       try {
-        await withTimeout(git.raw(["push"]), this.pushMs, "git push");
+        const git = this.git(this.pushMs);
+        const branch = (await git.branchLocal()).current;
+        try {
+          await withTimeout(git.raw(["push"]), this.pushMs, "git push");
+        } catch (e) {
+          if (!isNoUpstreamError(e)) throw e;
+          await withTimeout(
+            git.raw(["push", "-u", "origin", branch]),
+            this.pushMs,
+            "git push -u origin",
+          );
+        }
+        recordGitPushOutcome(this.repoPath, { ok: true });
+        const warning = await this.identityWarning(git);
+        return warning ? { ok: true, branch, warning } : { ok: true, branch };
       } catch (e) {
-        if (!isNoUpstreamError(e)) throw e;
-        await withTimeout(
-          git.raw(["push", "-u", "origin", branch]),
-          this.pushMs,
-          "git push -u origin",
-        );
+        const error = gitError(e);
+        recordGitPushOutcome(this.repoPath, { ok: false, error });
+        return { ok: false, error };
       }
-      const warning = await this.identityWarning(git);
-      return warning ? { ok: true, branch, warning } : { ok: true, branch };
-    } catch (e) {
-      return { ok: false, error: gitError(e) };
-    }
+    });
   }
 
   /**

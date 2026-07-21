@@ -10,6 +10,72 @@ import { LOOM_HOME } from "../paths.js";
 const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const;
 
 /**
+ * Default oversized-file threshold for auto-commit (card 614dfbef, origin finding 4ae8a3c9): a vault was
+ * observed committing >100MB blobs (two ~2.7GB) via `loom: auto-commit`, permanently wedging the vault's
+ * GitHub backup (GitHub hard-rejects any push containing a >100MB object). 95MB leaves headroom below
+ * that hard limit for git's own object-format overhead. Overridable via `commitVault`'s `opts.maxFileBytes`
+ * (tests use a tiny value — writing a real 95MB fixture file per test run would be slow and wasteful).
+ */
+const DEFAULT_MAX_VAULT_FILE_BYTES = 95 * 1024 * 1024;
+
+function humanBytes(n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}GB`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)}MB`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${n}B`;
+}
+
+/**
+ * Paths we've already warned about for a given repo root — suppresses re-warning on every debounced
+ * commit tick while a stuck oversized file just sits there untouched (chokidar re-triggers `commit()` on
+ * ANY change under the watched root, which restages every untracked file, including this one, every
+ * time). Module-scope + add-only: a daemon restart re-warns once, which is fine; there is no need to
+ * evict an entry once the file stops being oversized (it just never gets re-added to this set).
+ */
+const warnedOversizedFiles = new Set<string>();
+
+/**
+ * Unstage any staged file whose on-disk size exceeds `maxFileBytes` (deletions are skipped — nothing to
+ * stat, and a deletion can never re-introduce a giant blob), console.warn a `.gitignore` suggestion once
+ * per path, and return the list of paths actually unstaged (possibly empty). `git reset -- <path>` is
+ * used rather than `git reset HEAD -- <path>` so this also works on a brand-new repo's very first commit
+ * (verified: `reset -- <path>` unstages cleanly even with no HEAD yet; `reset HEAD -- <path>` would fail
+ * there). Swallows a reset failure per-file (leaves that one file staged) rather than aborting the whole
+ * commit — refusing to commit ANYTHING because one file couldn't be unstaged would be a worse outcome
+ * than the rare case of a stray oversized commit slipping through, and the failure itself is still logged.
+ */
+async function unstageOversizedFiles(
+  git: SimpleGit,
+  root: string,
+  files: Array<{ path: string; working_dir: string; index: string }>,
+  maxFileBytes: number,
+): Promise<string[]> {
+  const skipped: string[] = [];
+  for (const f of files) {
+    if (f.working_dir === "D" || f.index === "D") continue; // deletion — nothing to stat, nothing to skip
+    let size: number;
+    try { size = fs.statSync(path.join(root, f.path)).size; } catch { continue; } // gone/unreadable — let the normal flow handle it
+    if (size <= maxFileBytes) continue;
+    try {
+      await git.raw(["reset", "--", f.path]);
+      skipped.push(f.path);
+      const key = `${root}::${f.path}`;
+      if (!warnedOversizedFiles.has(key)) {
+        warnedOversizedFiles.add(key);
+        const rel = f.path.replace(/\\/g, "/");
+        console.warn(
+          `[vault-versioner] ${rel} is ${humanBytes(size)} (> ${humanBytes(maxFileBytes)}) — skipped from ` +
+          `auto-commit. Add "${rel}" to .gitignore to silence this warning.`,
+        );
+      }
+    } catch (err) {
+      console.warn(`[vault-versioner] failed to unstage oversized file ${f.path}: ${(err as Error).message}`);
+    }
+  }
+  return skipped;
+}
+
+/**
  * Whether the repo at `git`'s cwd has BOTH `user.name` and `user.email` resolvable (global/system/local
  * config, in git's own precedence order). `git config user.<key>` exits non-zero when unset, which
  * simple-git surfaces as a rejection — caught here and treated as "unresolved", never thrown.
@@ -46,8 +112,18 @@ async function hasConfiguredGitIdentity(git: SimpleGit): Promise<boolean> {
  * against) — a call we'd otherwise make by spreading `process.env` to preserve PATH/HOME for the
  * child process. Scoped `-c` args sidestep that entirely (git itself only applies them to this one
  * invocation) and `user.name`/`user.email` are not among simple-git's blocklisted config keys.
+ *
+ * **Oversized-file guard** (card 614dfbef): before committing, any staged file above `opts.maxFileBytes`
+ * (default `DEFAULT_MAX_VAULT_FILE_BYTES`, ~95MB) is unstaged and warned about instead of committed — see
+ * {@link unstageOversizedFiles}. Applies to every caller of this shared path (the auto-committer below AND
+ * `vault/writer.ts`'s UI writes), so a giant file can never enter vault history through either route.
  */
-export async function commitVault(vaultPath: string, message: string): Promise<boolean> {
+export async function commitVault(
+  vaultPath: string,
+  message: string,
+  opts?: { maxFileBytes?: number },
+): Promise<boolean> {
+  const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
   const git = simpleGit(vaultPath);
   const isRepo = await git.checkIsRepo().catch(() => false);
   if (isRepo) {
@@ -60,6 +136,11 @@ export async function commitVault(vaultPath: string, message: string): Promise<b
   await git.add(".");
   const status = await git.status();
   if (status.files.length === 0) return false;
+  const skipped = await unstageOversizedFiles(git, vaultPath, status.files, maxFileBytes);
+  // NOTE: an unstaged file does NOT disappear from `git status` (it just reverts to untracked/modified),
+  // so re-querying status here would still see it and wrongly think there's something left to commit.
+  // Comparing counts against the ORIGINAL staged set is the correct "anything real left?" check.
+  if (skipped.length >= status.files.length) return false; // everything staged was oversized — nothing left to commit
   if (await hasConfiguredGitIdentity(git)) {
     await git.commit(message);
   } else {
@@ -131,6 +212,55 @@ export async function resolveVaultGitTarget(vaultPath: string): Promise<VaultGit
   return { ok: true, repoPath: ctx.commitPath };
 }
 
+/** Default advisory pause duration (10 min) — enough for a typical git-surgery sequence (untrack files,
+ *  rewrite `.gitignore`, verify) without leaving a forgotten lease active indefinitely. */
+const DEFAULT_VAULT_PAUSE_MS = 10 * 60_000;
+/** Hard ceiling on any requested pause — the lease is meant to be SHORT-LIVED (card 614dfbef); clamping a
+ *  mistaken huge duration keeps a caller from silencing auto-commit for good. */
+const MAX_VAULT_PAUSE_MS = 30 * 60_000;
+
+const PAUSE_LEASE_FILENAME = "loom-vault-pause.json";
+
+/** Lease path for a governing repo root — inside `.git/`, so (a) chokidar's own ignore pattern
+ *  (`(^|[/\\])\.git([/\\]|$)`, see `start()` below) means writing/removing it never itself triggers a
+ *  spurious auto-commit cycle, and (b) it is never git-tracked (can't land in vault history). */
+function pauseLeasePath(commitPath: string): string {
+  return path.join(commitPath, ".git", PAUSE_LEASE_FILENAME);
+}
+
+/**
+ * Advisory pause (card 614dfbef, origin finding 4ae8a3c9): create a short-lived lease telling this repo
+ * root's `VaultVersioner` to skip its commits — for an agent doing SANCTIONED git surgery on a vault repo
+ * (untracking files, rewriting `.gitignore`, mid-sequence state) that would otherwise race the background
+ * auto-committer. Purely advisory: a plain file the versioner checks before it commits, not an OS-level
+ * lock — nothing else is blocked from touching the repo. `durationMs` is clamped to
+ * `[0, MAX_VAULT_PAUSE_MS]`. Best-effort: never throws (a failed write just means "not paused").
+ */
+export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VAULT_PAUSE_MS): void {
+  const clamped = Math.max(0, Math.min(durationMs, MAX_VAULT_PAUSE_MS));
+  try {
+    const p = pauseLeasePath(commitPath);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify({ until: Date.now() + clamped }));
+  } catch { /* best-effort — never throws into the caller's git-surgery flow */ }
+}
+
+/** End an advisory pause early (the surgery finished before the lease would have expired anyway). A
+ *  no-op if no lease exists. Best-effort: never throws. */
+export function resumeVaultAutoCommit(commitPath: string): void {
+  try { fs.rmSync(pauseLeasePath(commitPath)); } catch { /* no lease to remove — fine */ }
+}
+
+/** Whether an unexpired pause lease exists for `commitPath`. A missing, unreadable, malformed, or expired
+ *  lease all read as "not paused" — fail-open toward committing rather than getting silently stuck paused
+ *  forever on a corrupt lease file. */
+function isVaultAutoCommitPaused(commitPath: string): boolean {
+  try {
+    const raw = JSON.parse(fs.readFileSync(pauseLeasePath(commitPath), "utf8"));
+    return typeof raw?.until === "number" && Date.now() < raw.until;
+  } catch { return false; }
+}
+
 /**
  * Auto-commits a project's vault so doc rewrites are never truly lost (§7). Debounces writes and commits
  * at idle. Resolves the vault to its GOVERNING repo root (see `resolveVaultRepoContext`) and watches +
@@ -191,6 +321,10 @@ export class VaultVersioner {
   }
 
   private async commit(): Promise<void> {
+    // An agent doing sanctioned git surgery holds an advisory pause lease — sit this tick out rather than
+    // race its staged changes (card 614dfbef). The debounce timer already fired; we simply skip the
+    // commit itself. A future filesystem event (or the next `schedule()`) will retry once the lease lifts.
+    if (isVaultAutoCommitPaused(this.commitPath)) return;
     // Route through the shared commit path (at the resolved repo root) so UI writes and auto-commits
     // stay consistent. commitVault re-confirms root === commitPath, so it commits (not backs off) here.
     try { await commitVault(this.commitPath, `loom: auto-commit ${new Date().toISOString()}`); }
@@ -210,10 +344,12 @@ export class VaultVersioner {
    * commit lands BEFORE the process exits. Honors the cached `externallyManaged` backoff (skip — an
    * Obsidian-Git-managed repo owns its own history) and is a no-op when nothing is staged. Best-effort:
    * never throws. Returns true iff it committed. Mirrors the shared `commitVault` semantics, but
-   * synchronous by necessity.
+   * synchronous by necessity. Also honors the advisory pause lease (card 614dfbef) — a shutdown mid
+   * sanctioned git surgery must not force a commit the lease was meant to prevent.
    */
   flushSync(): boolean {
     if (this.externallyManaged) return false;
+    if (isVaultAutoCommitPaused(this.commitPath)) return false;
     if (this.timer) { clearTimeout(this.timer); this.timer = undefined; }
     try {
       const opts = { cwd: this.commitPath, stdio: "pipe" as const };
@@ -228,6 +364,51 @@ export class VaultVersioner {
   }
 }
 
+const PUSH_OUTCOME_FILENAME = "loom-push-outcome.json";
+
+/** Outcome-record path for a repo root — inside `.git/`, same storage convention as the pause lease
+ *  above (chokidar-ignored, never git-tracked). Generic over ANY repo `GitWriter` writes to, not just a
+ *  vault's governing root — see `recordGitPushOutcome`'s doc for why. */
+function pushOutcomePath(repoPath: string): string {
+  return path.join(repoPath, ".git", PUSH_OUTCOME_FILENAME);
+}
+
+/**
+ * Durably record the outcome of an ACTUAL push attempt against `repoPath` (card 614dfbef, origin finding
+ * 4ae8a3c9 — "today only an agent doing forensics finds out the remote is rejecting"). The versioner
+ * itself never pushes (see the `VaultVersioner` doc above), so this is called from the ONE real
+ * chokepoint that does: `GitWriter.push()` (git/writer.ts), reached from the human REST git-write
+ * surface, the Platform MCP, and the companion `git-push` capability alike — a single added call there
+ * covers every pusher. `repoPath` may be a vault's governing root OR an ordinary project code repo
+ * (`GitWriter` doesn't know which); recording is harmless either way — only `checkVaultPushStatus` below
+ * ever reads it back, and only for repo roots it already watches. Survives a daemon restart (a plain file
+ * under `.git/`). Always overwrites with the LATEST outcome only (no history) so a subsequent successful
+ * push cleanly clears a prior failure. Best-effort: never throws into the pusher's own flow.
+ */
+export function recordGitPushOutcome(repoPath: string, outcome: { ok: true } | { ok: false; error: string }): void {
+  try {
+    const rec = outcome.ok
+      ? { ok: true, at: new Date().toISOString() }
+      : { ok: false, at: new Date().toISOString(), error: outcome.error };
+    const p = pushOutcomePath(repoPath);
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(rec));
+  } catch { /* best-effort — never throws into the pusher's own flow */ }
+}
+
+/** The most recently recorded push outcome for `repoPath`, iff it was a FAILURE. `null` when the last
+ *  recorded outcome was a success, or nothing was ever recorded (fresh install, or every push against this
+ *  repo happened outside `GitWriter` — e.g. a manual `git push` at the shell). */
+function getGitPushFailure(repoPath: string): { at: string; error: string } | null {
+  try {
+    const rec = JSON.parse(fs.readFileSync(pushOutcomePath(repoPath), "utf8"));
+    if (rec && rec.ok === false && typeof rec.error === "string" && typeof rec.at === "string") {
+      return { at: rec.at, error: rec.error };
+    }
+    return null;
+  } catch { return null; }
+}
+
 /** One vault's governing repo sitting some number of commits ahead of its configured upstream. */
 export interface VaultPushStatus {
   /** The resolved governing repo root (same value as `VaultVersioner.commitRoot`). */
@@ -236,6 +417,10 @@ export interface VaultPushStatus {
   upstream: string;
   /** Commits reachable from HEAD but not from `upstream` — i.e. commits the vault has never pushed. */
   ahead: number;
+  /** The most recent recorded push FAILURE for this repo (via `GitWriter.push()` → `recordGitPushOutcome`),
+   *  present iff the last recorded outcome was a rejection rather than a success. Lets a reader tell
+   *  "N ahead, never tried" apart from "N ahead because the remote is actively rejecting". */
+  lastFailure?: { at: string; error: string };
 }
 
 /**
@@ -261,26 +446,35 @@ export async function checkVaultPushStatus(commitPath: string): Promise<VaultPus
     if (!upstream) return null;
     const ahead = parseInt((await git.raw(["rev-list", "--count", `${upstream}..HEAD`])).trim(), 10);
     if (!Number.isFinite(ahead)) return null; // malformed count — fail safe to "nothing to report"
-    return { commitPath, upstream, ahead };
+    const lastFailure = getGitPushFailure(commitPath);
+    return lastFailure ? { commitPath, upstream, ahead, lastFailure } : { commitPath, upstream, ahead };
   } catch {
     return null; // no upstream configured (fatal: no upstream for branch) — or any other git error
   }
 }
 
 /**
- * Check every given vault repo root and log ONE line per vault that has unpushed commits — the actual
- * "N commits un-pushed" visibility surface. A vault with no upstream, or with an upstream but nothing
- * ahead, is silent (no noise). Returns the unpushed statuses so a caller (boot log, the watcher below,
- * or a test) can assert on them without scraping console output.
+ * Check every given vault repo root and log ONE line per vault that has unpushed commits OR a recorded
+ * push failure — the actual "N commits un-pushed" / "push is being rejected" visibility surface. A vault
+ * with no upstream, or with an upstream, nothing ahead, and no recorded failure, is silent (no noise).
+ * Returns the flagged statuses so a caller (boot log, the watcher below, or a test) can assert on them
+ * without scraping console output.
  */
 export async function logVaultPushStatus(commitPaths: string[]): Promise<VaultPushStatus[]> {
   const statuses = await Promise.all(commitPaths.map((p) => checkVaultPushStatus(p)));
-  const unpushed = statuses.filter((s): s is VaultPushStatus => s !== null && s.ahead > 0);
+  const unpushed = statuses.filter((s): s is VaultPushStatus => s !== null && (s.ahead > 0 || !!s.lastFailure));
   for (const s of unpushed) {
-    console.log(
-      `[vault-push] ${s.commitPath} is ${s.ahead} commit(s) ahead of ${s.upstream} ` +
-      `(auto-commit is local-only by design — push manually when ready)`,
-    );
+    if (s.lastFailure) {
+      console.log(
+        `[vault-push] ${s.commitPath} push REJECTED at ${s.lastFailure.at} (${s.lastFailure.error}) — ` +
+        `${s.ahead} commit(s) still unpushed against ${s.upstream}. Fix the remote issue and push manually.`,
+      );
+    } else {
+      console.log(
+        `[vault-push] ${s.commitPath} is ${s.ahead} commit(s) ahead of ${s.upstream} ` +
+        `(auto-commit is local-only by design — push manually when ready)`,
+      );
+    }
   }
   return unpushed;
 }

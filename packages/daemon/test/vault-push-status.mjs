@@ -1,12 +1,15 @@
+import "./_guard.mjs"; // FIRST: strips GIT_PAGER/PAGER before GitWriter's simple-git is exercised (§7 below).
 // Unit test for the vault push-status VISIBILITY fix (task f48ee77d): the auto-committer is commit-only
 // by design (never pushes — see versioner.ts's VaultVersioner doc); this proves the read-only "N commits
-// un-pushed" signal added alongside it. Claude-free, no network: the "remote" is a local bare repo.
+// un-pushed" signal added alongside it, PLUS (card 614dfbef) the durable push-FAILURE recording that
+// folds into it via GitWriter.push(). Claude-free, no network: the "remote" is a local bare repo.
 // Run after build: node test/vault-push-status.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { checkVaultPushStatus, logVaultPushStatus, VaultPushStatusWatcher } from "../dist/vault/versioner.js";
+import { GitWriter } from "../dist/git/writer.js";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -83,6 +86,49 @@ try {
   const watcher = new VaultPushStatusWatcher({ getCommitPaths: () => [withUpstream, noUpstream, bogus] });
   const tickResult = await watcher.tick();
   check("watcher.tick() surfaces the unpushed vault and never throws on a bogus path", tickResult.length === 1 && tickResult[0].ahead === 1);
+
+  // 7. Push-FAILURE surfacing (card 614dfbef, origin finding 4ae8a3c9): the ONE real pusher, GitWriter.push(),
+  // durably records its outcome; checkVaultPushStatus must distinguish "N ahead, never tried" (above) from
+  // "N ahead because the remote is actively rejecting". First establish real upstream tracking via a
+  // successful push, then break the remote's reachability WITHOUT touching the local tracking ref (mirrors
+  // the real incident: a remote that starts rejecting while local git state is otherwise intact).
+  const pushRecordRoot = path.join(root, "vaultPushRecord");
+  fs.mkdirSync(pushRecordRoot);
+  git(pushRecordRoot, "init");
+  git(pushRecordRoot, "checkout", "-b", "main");
+  git(pushRecordRoot, "config", "user.email", "loom-test@example.com");
+  git(pushRecordRoot, "config", "user.name", "loom-test");
+  fs.writeFileSync(path.join(pushRecordRoot, "doc.md"), "# pr base\n");
+  git(pushRecordRoot, "add", ".");
+  git(pushRecordRoot, "commit", "-m", "base");
+  const pushRecordBare = path.join(root, "pushRecordBare.git");
+  fs.mkdirSync(pushRecordBare);
+  git(pushRecordBare, "init", "--bare");
+  git(pushRecordRoot, "remote", "add", "origin", pushRecordBare);
+
+  const writer = new GitWriter(pushRecordRoot);
+  const firstPush = await writer.push(); // no upstream yet -> writer retries with push -u -> succeeds
+  check("setup: first push establishes upstream tracking", firstPush.ok === true);
+  const statusClean = await checkVaultPushStatus(pushRecordRoot);
+  check("setup: clean right after the first push (0 ahead, no failure)", statusClean !== null && statusClean.ahead === 0 && statusClean.lastFailure === undefined);
+
+  fs.writeFileSync(path.join(pushRecordRoot, "doc2.md"), "# unpushed change\n");
+  git(pushRecordRoot, "add", ".");
+  git(pushRecordRoot, "commit", "-m", "ahead by one");
+  git(pushRecordRoot, "remote", "set-url", "origin", path.join(root, "no-such-remote.git")); // remote now unreachable; local tracking ref untouched
+  const failedPush = await writer.push();
+  check("push against a now-unreachable remote fails (structured)", failedPush.ok === false && typeof failedPush.error === "string");
+  const statusAfterFail = await checkVaultPushStatus(pushRecordRoot);
+  check("checkVaultPushStatus surfaces the recorded failure", statusAfterFail !== null && statusAfterFail.ahead === 1 && statusAfterFail.lastFailure !== undefined);
+  check("recorded failure carries a non-empty error + timestamp", typeof statusAfterFail.lastFailure.error === "string" && statusAfterFail.lastFailure.error.length > 0 && typeof statusAfterFail.lastFailure.at === "string");
+  const loggedFailure = await logVaultPushStatus([pushRecordRoot]);
+  check("logVaultPushStatus surfaces the failing repo even though ahead>0 alone would already qualify", loggedFailure.length === 1 && loggedFailure[0].lastFailure !== undefined);
+
+  git(pushRecordRoot, "remote", "set-url", "origin", pushRecordBare); // remote reachable again
+  const okPush = await writer.push();
+  check("a subsequent successful push clears the failure", okPush.ok === true);
+  const statusAfterSuccess = await checkVaultPushStatus(pushRecordRoot);
+  check("checkVaultPushStatus no longer reports a failure after the successful push", statusAfterSuccess !== null && statusAfterSuccess.ahead === 0 && statusAfterSuccess.lastFailure === undefined);
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 }
