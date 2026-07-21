@@ -23,9 +23,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       write.
 // Plus: per-capability config synthesis (decisions-relay gets all 3 DECISION_CLASSES; media-out gets
 // {roots:[vaultPath]} bounded to the project's own vault, {} when the project has none; attention-push's
-// "*" wildcard sentinel expands to the FULL alert-class set via a real AttentionPushWatcher tick); every
-// hasActGrant-gated lever registers (all 17 companion tools) with zero grant rows; a minimal test-double
-// `db` (no listAllProjects) degrades to "no grant" rather than throwing.
+// "*" wildcard sentinel expands, via a real AttentionPushWatcher tick, to every class EXCEPT
+// FLEET_OPS_ALERT_CLASSES — owner ruling 2026-07-21 (request d024eda7): routine fleet-ops noise
+// (merge-gate/worker-blocked/worker-crashed/manager-idle) is excluded from the lead-mode PUSH feed by
+// default, owner-signal classes still push, and the exclusion is wildcard-only — an explicit,
+// non-lead-mode grant naming a fleet-ops class is never filtered); every hasActGrant-gated lever registers
+// (all 17 companion tools) with zero grant rows; a minimal test-double `db` (no listAllProjects) degrades
+// to "no grant" rather than throwing.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-lead-mode.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -53,7 +57,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { resolveCompanionGrant, isCompanionLeadModeEnabled, DECISION_CLASSES, COMPANION_CAPABILITY_SLUGS } = await import("../dist/companion/capabilities.js");
-const { AttentionPushWatcher, ATTENTION_ALERT_CLASSES } = await import("../dist/companion/attention-push.js");
+const { AttentionPushWatcher, ATTENTION_ALERT_CLASSES, FLEET_OPS_ALERT_CLASSES } = await import("../dist/companion/attention-push.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
@@ -289,7 +293,9 @@ try {
     check("...and degrades to null (no grant), exactly like the pre-existing listCompanionCapabilityGrantsForSession tolerance", result === null);
   }
 
-  // ============ attention-push wildcard: "*" expands to the FULL ATTENTION_ALERT_CLASSES set ============
+  // ============ attention-push wildcard: "*" expands to OWNER-SIGNAL classes only (owner ruling 2026-07-21,
+  //     request d024eda7) — FLEET_OPS_ALERT_CLASSES (merge-gate/worker-blocked/worker-crashed/manager-idle)
+  //     are EXCLUDED from the lead-mode PUSH feed by default; the remaining owner-signal classes still push. ============
   {
     const db = tmpDb();
     const projA = `pa-${randomUUID()}`, projB = `pb-${randomUUID()}`;
@@ -309,20 +315,59 @@ try {
     const watcher = new AttentionPushWatcher({ db, pty, sessionId: sess });
     watcher.start(); watcher.stop(); // seed watermark past any backlog
 
+    const ownerSignalClasses = ATTENTION_ALERT_CLASSES.filter((c) => !FLEET_OPS_ALERT_CLASSES.has(c));
+    check("sanity: FLEET_OPS_ALERT_CLASSES is the expected 4-class denylist",
+      [...FLEET_OPS_ALERT_CLASSES].sort().join(",") === ["manager-idle", "merge-gate", "worker-blocked", "worker-crashed"].sort().join(","));
+    check("sanity: the remaining owner-signal classes are the other 4",
+      ownerSignalClasses.sort().join(",") === ["context-overflow", "decision-pending", "escalation", "usage-limit"].sort().join(","));
+
     // One event per alert class, across BOTH projects (proving cross-project reach too), each mapped via
     // attention-push.ts's own classify() so this test never hand-derives the class↔kind mapping itself.
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "merge_rejected", detail: {} }); // merge-gate
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "worker_stuck", detail: {} }); // worker-blocked
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "worker_exited_without_report", detail: {} }); // worker-crashed
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "question_asked", detail: { title: "t" } }); // decision-pending
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "idle_escalated", detail: {} }); // manager-idle
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "context_escalated", detail: {} }); // context-overflow
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "platform_escalate", detail: { title: "t" } }); // escalation
-    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "session_rate_limited", detail: {} }); // usage-limit
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "merge_rejected", detail: {} }); // merge-gate (fleet-ops)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "worker_stuck", detail: {} }); // worker-blocked (fleet-ops)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "worker_exited_without_report", detail: {} }); // worker-crashed (fleet-ops)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "question_asked", detail: { title: "t" } }); // decision-pending (owner-signal)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "idle_escalated", detail: {} }); // manager-idle (fleet-ops)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "context_escalated", detail: {} }); // context-overflow (owner-signal)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrA, kind: "platform_escalate", detail: { title: "t" } }); // escalation (owner-signal)
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgrB, kind: "session_rate_limited", detail: {} }); // usage-limit (owner-signal)
 
     watcher.tick(new Date());
-    check(`attention-push wildcard: all ${ATTENTION_ALERT_CLASSES.length} classes pushed (one event each, both projects in scope)`,
-      enqueued.length === ATTENTION_ALERT_CLASSES.length);
+    check(`attention-push wildcard: only the ${ownerSignalClasses.length} owner-signal classes pushed (fleet-ops excluded by default)`,
+      enqueued.length === ownerSignalClasses.length);
+    const pushedText = enqueued.map((e) => e.text).join("\n");
+    check("attention-push wildcard: none of the 3 rendered fleet-ops lines leaked through",
+      !/merge rejected|worker stuck|worker exited without report/.test(pushedText));
+    check("attention-push wildcard: manager-idle (idle_escalated) also excluded — 'manager asleep' never rendered",
+      !/manager asleep/.test(pushedText));
+    check("attention-push wildcard: the owner-signal lines DID render (decision needed / context overflow / escalated to platform / usage limit)",
+      /decision needed/.test(pushedText) && /context overflow/.test(pushedText) && /escalated to platform/.test(pushedText) && /usage limit/.test(pushedText));
+
+    db.close();
+  }
+
+  // ============ the fleet-ops exclusion is WILDCARD-ONLY — an explicit (non-lead-mode) alertClasses config
+  //     that NAMES a fleet-ops class still gets it pushed; the owner's own deliberate config is never
+  //     touched by the lead-mode-only denylist. ============
+  {
+    const db = tmpDb();
+    const proj = `pe-${randomUUID()}`;
+    seedProject(db, proj, "Explicit");
+    const sess = `cs-explicit-${randomUUID()}`;
+    seedSession(db, sess, proj, "assistant");
+    const mgr = `mgr-explicit-${randomUUID()}`; seedSession(db, mgr, proj, "manager");
+    // NO lead mode here — an ordinary, human-written grant explicitly naming a fleet-ops class.
+    db.upsertCompanionCapabilityGrant({ sessionId: sess, capability: "attention-push", projectId: proj, mode: "read", config: { alertClasses: ["merge-gate"] } });
+
+    const enqueued = [];
+    const pty = { isAlive: () => true, enqueueStdin: (id, text) => { enqueued.push({ id, text }); return { delivered: true }; }, getPending: () => [] };
+    const watcher = new AttentionPushWatcher({ db, pty, sessionId: sess });
+    watcher.start(); watcher.stop();
+
+    db.appendEvent({ id: randomUUID(), ts: new Date().toISOString(), managerSessionId: mgr, kind: "merge_rejected", detail: {} }); // merge-gate
+    watcher.tick(new Date());
+    check("explicit (non-wildcard) config naming a fleet-ops class is NEVER filtered — the denylist is wildcard-only",
+      enqueued.length === 1 && /merge rejected/.test(enqueued[0].text));
 
     db.close();
   }

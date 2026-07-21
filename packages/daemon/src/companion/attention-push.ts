@@ -46,6 +46,23 @@ export const ATTENTION_ALERT_CLASSES = [
 ] as const;
 export type AttentionAlertClass = (typeof ATTENTION_ALERT_CLASSES)[number];
 
+/**
+ * FLEET-OPS classes — routine day-to-day fleet operations a manager handles autonomously; the owner
+ * doesn't need a phone/chat push for each one. Distinct from the remaining OWNER-SIGNAL classes
+ * (decision-pending/context-overflow/escalation/usage-limit), which genuinely need the owner's attention.
+ *
+ * Owner ruling (2026-07-21, escalated via request d024eda7): Companion "lead mode"'s `"*"` wildcard PUSH
+ * subscription (synthesizeLeadModeScope, capabilities.ts) excludes these by default — see the `"*"` branch
+ * in `resolveConfig` below, the ONE place this list is consulted. Fleet-ops stays fully visible IN-APP:
+ * nothing here touches the underlying `orchestration_events` log, board reads, or any other surface — this
+ * ONLY narrows what lead mode's wildcard pushes to chat/phone. Deliberately scoped to the WILDCARD
+ * expansion alone — an owner (or a non-lead-mode grant) who explicitly enumerates a fleet-ops class in
+ * their OWN `alertClasses` config still gets it pushed; only the no-guardrails wildcard flood is trimmed.
+ * (A future owner opt-back-in toggle would hook right where this set is consulted below — not built here,
+ * per owner direction: "no toggle now.")
+ */
+export const FLEET_OPS_ALERT_CLASSES: ReadonlySet<AttentionAlertClass> = new Set(["merge-gate", "worker-blocked", "worker-crashed", "manager-idle"]);
+
 /** Bounds one tick's tail-scan — a long-idle watermark reads at most this many rows per tick rather than
  *  an unbounded backlog (the injection-exposed-adjacent posture this repo applies to every scan surface). */
 const EVENT_TAIL_LIMIT = 200;
@@ -170,7 +187,14 @@ export function alertLine(e: OrchestrationEvent, alertClass: AttentionAlertClass
       break;
     case "platform_escalate": {
       const title = typeof detail.title === "string" ? truncateText(detail.title, ALERT_TITLE_MAX_CHARS) : "untitled";
-      line = `${projectName}: escalated to platform — "${title}" (${m8})`;
+      // CR fold-in (companion re-delivery card): the FULL taskId (not the 8-char `task8` slice every other
+      // case uses for human display) — a board-reach-granted companion (e.g. lead mode, which grants
+      // board-reach act-mode on every project incl. the reserved Platform home) needs the EXACT id to
+      // board_get(project:<platformProjectId>, taskId:<this>) the full escalation body; a truncated slice
+      // can't resolve. Placed BEFORE the (unbounded) title so a long title's truncation (ALERT_LINE_MAX_CHARS)
+      // trims the title's tail, never this id.
+      const taskRef = e.taskId ? ` (task:${e.taskId})` : "";
+      line = `${projectName}: escalated to platform${taskRef} — "${title}" (${m8})`;
       break;
     }
     case "session_rate_limited":
@@ -206,8 +230,30 @@ export class AttentionPushWatcher {
   /** Defer-once-per-streak tracking (mirrors the heartbeat's deferredSinceLastFire — see its doc for the
    *  bounded-log-growth rationale). Cleared on any real push (immediate or digest flush). */
   private deferredSinceLastPush = false;
+  /** Per-recipient "escalation" re-delivery suppression (companion re-delivery card, defense-in-depth
+   *  alongside the server-side platformEscalate() title-dedup, sessions/service.ts): taskId → the
+   *  {@link escalationSignature} last pushed to THIS session for that task. `orchestration_events` rows are
+   *  immutable once written (never mutated after insert — same premise `decisionSurfaceSignature`'s doc
+   *  relies on for questions), so a repeat "escalation"-class event carrying a taskId+signature already in
+   *  this map is, by construction, an UNCHANGED re-delivery of something this recipient already saw — never
+   *  a genuine update (a real change would carry a different title/severity and therefore a different
+   *  signature, and is never suppressed). Seeded on start() from this session's own durable
+   *  `companion_alert_pushed` history (seedWatermark) — never cross-recipient (each companion's own watcher
+   *  instance holds its own map), so two companions granted attention-push on the same project each still
+   *  get their own first alert. */
+  private escalationSurfaced = new Map<string, string>();
 
   constructor(private deps: AttentionPushWatcherDeps) {}
+
+  /** Deterministic "as of this event" fingerprint for an escalation (mirrors decisionSurfaceSignature's
+   *  doc): title+severity are set once at `platform_escalate` filing time and never mutated afterward, so
+   *  this can only change across a GENUINELY new/re-escalated occurrence, never a re-read of the same one. */
+  private escalationSignature(detail: Record<string, unknown> | undefined): string {
+    const d = detail ?? {};
+    const title = typeof d.title === "string" ? d.title : "";
+    const severity = typeof d.severity === "string" ? d.severity : "";
+    return `${title}|${severity}`;
+  }
 
   /**
    * One trigger pass. Conservative order: grant → live → session exists → not parked → not stacking →
@@ -252,6 +298,14 @@ export class AttentionPushWatcher {
       if (!cls || !alertClasses.has(cls)) continue;
       const projectId = db.getSession(e.managerSessionId)?.projectId;
       if (!projectId || !scope.projectIds.has(projectId)) continue; // out of this grant's scope
+      // Escalation re-delivery suppression (defense-in-depth alongside the server-side title-dedup) — see
+      // `escalationSurfaced`'s doc. Checked here (classification time), STAMPED only at actual push time
+      // (tickImmediate/tickDigest's emit calls) — never here — so a digest's "not yet due" re-scan of the
+      // SAME not-yet-flushed row (tickDigest keeps it visible until the flush) isn't wrongly self-suppressed
+      // before it's ever actually delivered.
+      if (cls === "escalation" && e.taskId && this.escalationSurfaced.get(e.taskId) === this.escalationSignature(e.detail)) {
+        continue;
+      }
       const projectName = db.getProject(projectId)?.name ?? "?";
       qualifying.push({ e, cls, projectName });
     }
@@ -290,11 +344,16 @@ export class AttentionPushWatcher {
       if (Array.isArray(cfg.alertClasses)) {
         // Companion "lead mode" wildcard (companion/capabilities.ts's synthesizeLeadModeScope) — "*" is
         // reachable ONLY through that internal synthesis path (the REST grant-config validator only ever
-        // accepts a literal class name), and expands to every currently-known class here rather than
-        // being duplicated as a literal list in capabilities.ts (which would drift if a class is ever
-        // added/renamed here without a matching edit there).
+        // accepts a literal class name), and expands here rather than being duplicated as a literal list in
+        // capabilities.ts (which would drift if a class is ever added/renamed here without a matching edit
+        // there). Owner ruling (2026-07-21, request d024eda7): the wildcard expansion excludes
+        // FLEET_OPS_ALERT_CLASSES (see its doc) — lead mode still gets every OWNER-SIGNAL class, but not
+        // the routine fleet-ops noise. This is the ONE place that exclusion applies; an explicitly-named
+        // class in the `else` branch below is NEVER filtered, wildcard or not.
         if (cfg.alertClasses.includes("*")) {
-          for (const c of ATTENTION_ALERT_CLASSES) alertClasses.add(c);
+          for (const c of ATTENTION_ALERT_CLASSES) {
+            if (!FLEET_OPS_ALERT_CLASSES.has(c)) alertClasses.add(c);
+          }
         } else {
           for (const c of cfg.alertClasses) {
             if (typeof c === "string" && (ATTENTION_ALERT_CLASSES as readonly string[]).includes(c)) {
@@ -339,7 +398,7 @@ export class AttentionPushWatcher {
       this.deps.pty.enqueueStdin(this.deps.sessionId, framedDigest(lines), "system", undefined, home, "agent", undefined, undefined, true);
       this.deferredSinceLastPush = false;
       for (const { e, cls } of qualifying) {
-        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
+        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
       }
     } else if (qualifying.length > 0) {
       // Same in-app fallback as the digest branch above.
@@ -349,7 +408,7 @@ export class AttentionPushWatcher {
         // proactive:true — see the digest branch above.
         this.deps.pty.enqueueStdin(this.deps.sessionId, framedAlert(alertLine(e, cls, projectName)), "system", undefined, home, "agent", undefined, undefined, true);
         this.deferredSinceLastPush = false;
-        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
+        this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
       }
     }
     this.watermark = scanned[scanned.length - 1]!.seq; // consume the WHOLE scanned window — see doc above.
@@ -388,9 +447,21 @@ export class AttentionPushWatcher {
     this.lastDigestFlushAt = now.getTime();
     this.deferredSinceLastPush = false;
     for (const { e, cls } of qualifying) {
-      this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind });
+      this.emit(now, "companion_alert_pushed", { sourceSeq: e.seq, alertClass: cls, sourceKind: e.kind, ...this.stampEscalation(e, cls) });
     }
     this.watermark = scanned[scanned.length - 1]!.seq;
+  }
+
+  /** Stamps `escalationSurfaced` at the moment an "escalation"-class event is ACTUALLY pushed (never at
+   *  classification time — see the suppression check in `tick()`), and returns the extra
+   *  `companion_alert_pushed` detail fields (`escalationTaskId`/`escalationSignature`) that let a restart's
+   *  `seedWatermark` reconstruct the map from the durable log alone, with no new table/column. A no-op
+   *  (returns `{}`) for every other class or a taskId-less event. */
+  private stampEscalation(e: EventWithSeq, cls: AttentionAlertClass): { escalationTaskId?: string; escalationSignature?: string } {
+    if (cls !== "escalation" || !e.taskId) return {};
+    const signature = this.escalationSignature(e.detail);
+    this.escalationSurfaced.set(e.taskId, signature);
+    return { escalationTaskId: e.taskId, escalationSignature: signature };
   }
 
   /**
@@ -401,13 +472,23 @@ export class AttentionPushWatcher {
    * per Code Review — a companion that has NEVER pushed AND is re-armed after a restart re-seeds to
    * whatever the CURRENT max is at that moment, not the max at its original start() — a narrow, rare window
    * mirroring the reminder/heartbeat watchers' own conservative-restart posture; not fixed here.)
+   *
+   * Also reconstructs `escalationSurfaced` from the SAME scan (no second read, no new table): each
+   * `companion_alert_pushed` row's `escalationTaskId`/`escalationSignature` (stamped by `stampEscalation` at
+   * push time) is replayed in chronological order (listEvents' own ORDER BY), so the map ends up holding
+   * each taskId's LATEST pushed signature — correct even in the (currently unreachable, but not assumed
+   * impossible) case of two distinct pushes for the same taskId.
    */
   private seedWatermark(): void {
     let max = 0;
     for (const e of this.deps.db.listEvents(this.deps.sessionId)) {
       if (e.kind !== "companion_alert_pushed") continue;
-      const seq = (e.detail as { sourceSeq?: number } | undefined)?.sourceSeq;
+      const detail = e.detail as { sourceSeq?: number; escalationTaskId?: string; escalationSignature?: string } | undefined;
+      const seq = detail?.sourceSeq;
       if (typeof seq === "number" && seq > max) max = seq;
+      if (typeof detail?.escalationTaskId === "string" && typeof detail?.escalationSignature === "string") {
+        this.escalationSurfaced.set(detail.escalationTaskId, detail.escalationSignature);
+      }
     }
     this.watermark = max > 0 ? max : this.deps.db.getMaxEventSeq();
   }

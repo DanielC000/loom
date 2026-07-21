@@ -4274,24 +4274,29 @@ export class SessionService {
     const home = this.db.getReservedProjectByName(PLATFORM_PROJECT_NAME);
     if (!home) throw new Error("no reserved Loom Platform project exists — cannot escalate");
 
-    // SERVER-SIDE DEDUPE: a manager re-escalating the SAME issue every cycle while nobody has picked it up
-    // yet floods the Companion's attention-push alert (companion/attention-push.ts) with zero new
-    // owner-facing value — each re-file is a fresh orchestration_event, so attention-push's watermark
-    // treats it as genuinely new and re-pushes "escalated to platform" every time, whether or not a Lead
-    // is live to act on it. If THIS origin project already has a still-PENDING escalation (never picked up
-    // — still sitting in the Platform board's landing lane) with the same normalized title, reuse it
-    // instead of filing a duplicate task/event: no new orchestration_event ⇒ no new attention-push alert,
-    // and no redundant live-nudge either. Once the Lead moves/resolves it (status advances past pending), a
-    // repeat with the same title is treated as a genuinely new occurrence and files fresh — mirrors
-    // auditFileFinding's title-normalized dedupe, but scoped to "still unclaimed" rather than "ever filed"
-    // (an escalation, unlike an audit finding, can legitimately recur after resolution).
+    // SERVER-SIDE DEDUPE: a manager re-escalating the SAME issue every cycle while it's still being worked
+    // floods the Companion's attention-push alert (companion/attention-push.ts) with zero new owner-facing
+    // value — each re-file is a fresh orchestration_event, so attention-push's watermark treats it as
+    // genuinely new and re-pushes "escalated to platform" every time, whether or not a Lead is live to act
+    // on it. If THIS origin project already has a still-UNRESOLVED escalation (`pending` — never picked up,
+    // still sitting in the Platform board's landing lane — OR `in_progress` — the Lead already moved it off
+    // the landing lane but hasn't resolved it) with the same normalized title, reuse it instead of filing a
+    // duplicate task/event: no new orchestration_event ⇒ no new attention-push alert, and no redundant
+    // live-nudge either. (Companion re-delivery card: widened from the original `pending`-only condition,
+    // which stopped deduping the instant a Lead so much as moved the card off the landing lane — a manager
+    // re-escalating the SAME still-open issue on a retry/idle-watchdog cycle kept re-firing a fresh
+    // "escalated to platform" alert for something already being worked, exactly the observed re-delivery
+    // symptom.) Only once the Lead RESOLVES it (moves it to the terminal column) does a repeat with the same
+    // title get treated as a genuinely new occurrence and file fresh — mirrors auditFileFinding's
+    // title-normalized dedupe, but scoped to "still open" rather than "ever filed" (an escalation, unlike an
+    // audit finding, can legitimately recur after resolution).
     const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
     const key = norm(input.title);
     for (const e of this.db.listEscalationsForProject(caller.projectId)) {
       const filedTitle = (e.detail?.title as string | undefined) ?? "";
       if (!e.taskId || norm(filedTitle) !== key) continue;
       const existingTask = this.db.getTask(e.taskId);
-      if (existingTask && this.classifyEscalationStatus(home.id, existingTask.columnKey) === "pending") {
+      if (existingTask && this.classifyEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
         return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true };
       }
     }

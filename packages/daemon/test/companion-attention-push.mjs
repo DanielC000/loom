@@ -416,6 +416,12 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   // A missing/malformed title degrades to a labeled placeholder rather than throwing or going blank.
   const lineNoTitle = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", kind: "platform_escalate", detail: {} }, "escalation", "Proj A");
   check("platform_escalate alert line: a missing title degrades to 'untitled', never blank", lineNoTitle.includes("untitled") && lineNoTitle.length > 0);
+  // Companion re-delivery card: the FULL taskId (not an 8-char slice) so a board-reach-granted companion
+  // can board_get the exact card for the full body — symptom (c), title-only leaks.
+  const lineWithTask = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", taskId: "task-full-uuid-1234", kind: "platform_escalate", detail }, "escalation", "Proj A");
+  check("platform_escalate alert line: carries the FULL taskId for board_get, not a truncated slice", lineWithTask.includes("task:task-full-uuid-1234"));
+  const lineNoTask = alertLine({ id: "x", ts: new Date().toISOString(), managerSessionId: "mgr-abcdef01", kind: "platform_escalate", detail }, "escalation", "Proj A");
+  check("platform_escalate alert line: a missing taskId omits the ref rather than throwing", !lineNoTask.includes("task:") && lineNoTask.length > 0);
 }
 
 // --- 19. END-TO-END: a real platform_escalate event ticks through the watcher and pushes a turn whose
@@ -428,6 +434,50 @@ function fire(e, kind, managerSessionId, detail = {}, extra = {}) {
   check("platform_escalate e2e: enqueues ONE turn", e.enqueued.length === 1);
   check("platform_escalate e2e: framed [loom:alert]", e.enqueued[0].text.startsWith(ALERT_TAG));
   check("platform_escalate e2e: the pushed turn carries the escalation's title", e.enqueued[0].text.includes("worker_merge gate hangs on a slow build"));
+  check("platform_escalate e2e: the pushed turn carries the taskId for board_get", e.enqueued[0].text.includes("task:task-xyz"));
+  cleanupEnv(e);
+}
+
+// --- 20. ESCALATION RE-DELIVERY SUPPRESSION (companion re-delivery card, defense-in-depth): a SECOND
+//     platform_escalate event for the SAME taskId with an UNCHANGED title+severity is suppressed (never
+//     pushed again to this recipient) — but a genuinely changed one (different title/severity) for the
+//     SAME taskId still pushes, and it's per-recipient (survives a restart via the durable log). ---
+{
+  const e = makeEnv({ configA: { alertClasses: ["escalation"] } });
+  e.watcher.start(); e.watcher.stop();
+  const detail = { originProjectId: e.projA, severity: "high", platformProjectId: "pHome", title: "same issue, still open" };
+  fire(e, "platform_escalate", e.mgrA, detail, { taskId: "task-dup-1" });
+  e.watcher.tick(new Date());
+  check("escalation-dedup: first occurrence pushes", e.enqueued.length === 1);
+  e.clearPending();
+
+  // A second, genuinely distinct orchestration_event for the SAME taskId with the SAME title+severity
+  // (simulates whatever future/edge path might re-fire for an already-open escalation) — must be suppressed.
+  fire(e, "platform_escalate", e.mgrA, detail, { taskId: "task-dup-1" });
+  e.watcher.tick(new Date());
+  check("escalation-dedup: an unchanged repeat for the SAME taskId is suppressed, not re-pushed", e.enqueued.length === 1);
+  check("escalation-dedup: no companion_alert_pushed row for the suppressed repeat", events(e, "companion_alert_pushed").length === 1);
+
+  // A genuinely CHANGED escalation for the SAME taskId (different severity) is NOT suppressed.
+  fire(e, "platform_escalate", e.mgrA, { ...detail, severity: "critical" }, { taskId: "task-dup-1" });
+  e.watcher.tick(new Date());
+  check("escalation-dedup: a genuinely changed escalation (severity bump) for the same taskId still pushes", e.enqueued.length === 2);
+  e.clearPending();
+
+  // Restart-safety: a FRESH watcher instance (re-seeded from the durable log) still suppresses the
+  // now-unchanged (critical severity) repeat — the per-recipient map survives a restart via
+  // companion_alert_pushed's escalationTaskId/escalationSignature, mirroring the watermark's own reseed.
+  const fresh = e.freshWatcher();
+  fresh.start(); fresh.stop();
+  fire(e, "platform_escalate", e.mgrA, { ...detail, severity: "critical" }, { taskId: "task-dup-1" });
+  fresh.tick(new Date());
+  check("escalation-dedup: a fresh (restarted) watcher still suppresses an unchanged repeat via the durable log", e.enqueued.length === 2);
+
+  // A DIFFERENT taskId with the exact same title/severity is its OWN escalation — never suppressed by
+  // another task's signature (the map is keyed by taskId, not by title/severity alone).
+  fire(e, "platform_escalate", e.mgrA, { ...detail, severity: "critical" }, { taskId: "task-dup-2" });
+  fresh.tick(new Date());
+  check("escalation-dedup: a different taskId with the same content is NOT suppressed", e.enqueued.length === 3);
   cleanupEnv(e);
 }
 

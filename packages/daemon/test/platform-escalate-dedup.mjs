@@ -12,9 +12,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       `platform_escalate` orchestration_event — so attention-push (which tail-polls that event log) has
 //       nothing new to alert on.
 //   (b) a DIFFERENT title from the same project is NOT deduped — a genuinely distinct issue still files.
-//   (c) once the Lead picks up the first escalation (moves it off the landing lane), a 3rd call with the
-//       SAME original title is no longer deduped — it's treated as a fresh occurrence, matching
-//       escalation_status's own pending → in_progress semantics.
+//   (c) companion re-delivery card (widened from the original `pending`-only condition): once the Lead
+//       picks up the first escalation (moves it OFF the landing lane but has NOT resolved it — e.g. into
+//       "review", still `in_progress`), the SAME title STILL dedupes — a manager re-escalating an
+//       already-being-worked issue on a retry/idle-watchdog cycle must not re-fire a fresh attention-push
+//       alert for something already claimed. Only once the Lead RESOLVES it (moves it to the terminal
+//       column) does the SAME title re-file fresh, matching escalation_status's own in_progress → resolved
+//       semantics.
 //   (d) a dedup does not fire a redundant live-Lead nudge (only the genuinely-new-event live-nudge path is
 //       exercised — platform-escalate-parked-wake.mjs already covers that live-nudge wiring itself).
 //
@@ -97,17 +101,25 @@ try {
   check("(b) a different title files a genuinely new task", !!escOther.taskId && escOther.taskId !== esc1.taskId && !escOther.deduped);
   check("(b) a new platform_escalate event WAS appended for the distinct issue", platformEscalateEvents().length === eventsAfter1 + 1);
 
-  // ===================== (c) once picked up (moved off the landing lane), the SAME title re-files fresh ====
-  db.updateTask(esc1.taskId, { columnKey: "review" }); // the Lead claims it
-  const esc5 = svc.platformEscalate("MGR", { title: TITLE, detail: "recurred after being picked up", severity: "high" });
-  check("(c) after the original is claimed (no longer pending), the SAME title is treated as a fresh occurrence",
-    !!esc5.taskId && esc5.taskId !== esc1.taskId && !esc5.deduped);
+  // ===================== (c) claimed-but-unresolved (moved off the landing lane) STILL dedupes ==========
+  db.updateTask(esc1.taskId, { columnKey: "review" }); // the Lead claims it, still working it (not resolved)
+  const esc5 = svc.platformEscalate("MGR", { title: TITLE, detail: "recurred while still being worked", severity: "high" });
+  check("(c) claimed-but-unresolved (in_progress) — the SAME title STILL dedupes (widened condition)",
+    esc5.taskId === esc1.taskId && esc5.deduped === true);
+  // +1 accounts for (b)'s genuinely distinct escalation event above — no ADDITIONAL task/event beyond that.
+  check("(c) still no new task/event once claimed-but-unresolved", db.listTasks("pHome").length === tasksAfter1 + 1 && platformEscalateEvents().length === eventsAfter1 + 1);
+
+  // ===================== (d) once RESOLVED (moved to the terminal column), the SAME title re-files fresh ==
+  db.updateTask(esc1.taskId, { columnKey: "done" }); // the Lead resolves it
+  const esc6 = svc.platformEscalate("MGR", { title: TITLE, detail: "recurred after being resolved", severity: "high" });
+  check("(d) after the original is RESOLVED, the SAME title is treated as a fresh occurrence",
+    !!esc6.taskId && esc6.taskId !== esc1.taskId && !esc6.deduped);
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — platform_escalate dedupes an identical, still-unclaimed re-escalation (same normalized title, no new task, no new orchestration_event ⇒ attention-push has nothing new to loop on), leaves a genuinely distinct title unaffected, and lets the same title re-file fresh once the Lead has claimed the original."
+  ? "\n✅ ALL PASS — platform_escalate dedupes an identical re-escalation while the original is STILL OPEN (pending OR claimed-but-unresolved — same normalized title, no new task, no new orchestration_event ⇒ attention-push has nothing new to loop on), leaves a genuinely distinct title unaffected, and lets the same title re-file fresh only once the Lead has actually RESOLVED the original."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

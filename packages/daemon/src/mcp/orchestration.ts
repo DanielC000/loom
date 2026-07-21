@@ -352,8 +352,14 @@ export class OrchestrationMcpRouter {
         description:
           "Reply to the user talking to you over the Loom Companion chat channel (e.g. Telegram). Pass " +
           "the reply `text`; it is delivered VERBATIM back to the chat you're bound to. This is your ONLY " +
-          "way to reach that user — the incoming chat message was injected as this turn, and calling " +
-          "chat_reply is how your answer gets OUT (it does NOT loop back in as a new turn). Mirrors " +
+          "way to reach that user — on an ordinary turn, the incoming chat message was injected as this " +
+          "turn, and calling chat_reply is how your answer gets OUT (it does NOT loop back in as a new " +
+          "turn). IT ALSO WORKS on a PROACTIVE turn you did NOT receive an incoming message for (a " +
+          "heartbeat, a reminder, or an `[loom:alert]` push) — the daemon resolves the SAME bound channel " +
+          "for that turn too, so there is nothing to wait for: if something in a proactive turn is worth " +
+          "surfacing, call chat_reply with it directly instead of holding it back for the user to message " +
+          "first. A `{delivered:false}` result (e.g. `no-target`) means there genuinely is no channel to " +
+          "reach right now — that's the only case to hold back and wait. Mirrors " +
           "worker_report: emit one clean, final reply. Optional `voice:true` asks to SPEAK this reply " +
           "instead of texting it — it only has effect when the user's voice-reply setting is 'auto' (their " +
           "own on/off choice always wins otherwise); omit it (or pass false) to send plain text.",
@@ -2020,8 +2026,9 @@ export class OrchestrationMcpRouter {
           "`deliveryStatus` (delivered-live | queued | boarded | dropped): `boarded` means no Lead session " +
           "was live but the board task is durably filed (the normal, safe case) — a live Lead is nudged " +
           "immediately (even one that's currently parked waiting on exactly this); only `dropped` warrants " +
-          "concern. DEDUPED: re-escalating the SAME title while your prior escalation is still pending " +
-          "(unclaimed on the board) reuses that task instead of filing a duplicate — the response carries " +
+          "concern. DEDUPED: re-escalating the SAME title while your prior escalation is still UNRESOLVED " +
+          "(pending, unclaimed on the board — OR already being worked, moved off the landing lane but not " +
+          "yet resolved) reuses that task instead of filing a duplicate — the response carries " +
           "`deduped: true` and no fresh Lead nudge is sent; check escalation_status instead of re-escalating " +
           "on a timer. Use it for platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
           "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +

@@ -206,6 +206,14 @@ try {
       ]));
     const res = await client.callTool({ name: "chat_reply", arguments: { text: "hi from the companion" } });
     check("(e) chat_reply routes to deliverReply", JSON.parse(res.content[0].text).delivered === true && delivered.length === 1 && delivered[0].sid === "asst-sess");
+    // Companion re-delivery card: chat_reply's OWN description must tell the agent it also works on a
+    // PROACTIVE turn (heartbeat/reminder/attention-push) it received no inbound message for — the mechanism
+    // already resolves the SAME pinned per-turn route either way, but an agent reading a description that
+    // only ever mentions "the incoming chat message" has no reason to believe it applies to a system-
+    // initiated turn, and self-censors instead of relaying (the observed "no reply route — holding" symptom).
+    const chatReplyTool = (await client.listTools()).tools.find((t) => t.name === "chat_reply");
+    check("(e) chat_reply's description explicitly covers a proactive/heartbeat/reminder/alert turn",
+      /proactive/i.test(chatReplyTool?.description ?? "") && /heartbeat/i.test(chatReplyTool?.description ?? ""));
     await close();
   }
   // An assistant session that is NOT the bound companion: my_context only, chat_reply ABSENT (gated).

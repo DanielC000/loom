@@ -244,11 +244,15 @@ export function isCompanionLeadModeEnabled(db: Db, sessionId: string): boolean {
  *     decision still ALWAYS steps up via Tier X; lead mode only widens which classes are ELIGIBLE, never
  *     the friction tier a resolve runs through).
  *   - `attention-push` → `{alertClasses: ["*"]}` — a wildcard sentinel `attention-push.ts`'s own
- *     `resolveConfig` expands to its FULL `ATTENTION_ALERT_CLASSES` set, rather than importing that array
- *     here (attention-push.ts already imports `resolveCompanionGrant` FROM this file — importing back
- *     would be a module cycle). The REST grant-config validator only ever accepts a literal class name
- *     (gateway/server.ts), so `"*"` can never be written by a human grant — it is reachable ONLY through
- *     this synthesis path.
+ *     `resolveConfig` expands, rather than importing that array here (attention-push.ts already imports
+ *     `resolveCompanionGrant` FROM this file — importing back would be a module cycle). The REST
+ *     grant-config validator only ever accepts a literal class name (gateway/server.ts), so `"*"` can never
+ *     be written by a human grant — it is reachable ONLY through this synthesis path. As of the owner's
+ *     2026-07-21 ruling (request d024eda7), that expansion is EVERY class EXCEPT attention-push.ts's own
+ *     `FLEET_OPS_ALERT_CLASSES` (merge-gate/worker-blocked/worker-crashed/manager-idle) — routine fleet-ops
+ *     noise stays out of the lead-mode PUSH feed by default (still fully visible in-app/via other reads);
+ *     this file only ever emits the `"*"` sentinel, so the exclusion lives entirely in `resolveConfig`, not
+ *     here.
  *   - `media-out` → `{roots: [project.vaultPath]}` when that project has one, else `{}` — the one lever
  *     with no safe host-wide wildcard (arbitrary host FS, no closed vocabulary), so lead mode's default is
  *     bounded to each project's OWN vault content rather than granting nothing or every path on the host.
@@ -679,10 +683,17 @@ const DECISIONS_RELAY: CompanionCapability = {
           "`alreadySurfaced`: true means you already read this EXACT decision (same state, same answer) on " +
           "a prior call — do NOT re-narrate it to the owner again on its own; only mention it if the owner " +
           "asks or something else prompts it. false means it's new or its state/answer changed since you " +
-          "last saw it (e.g. it was just answered) — that's genuinely worth surfacing.",
-        inputSchema: { project: z.string().optional() },
+          "last saw it (e.g. it was just answered) — that's genuinely worth surfacing. Optional `since` — " +
+          "pass back the `asOf` timestamp this tool returned on your LAST call (e.g. from a prior heartbeat) " +
+          "— SLIMS the response: an entry that is BOTH unchanged (`alreadySurfaced:true`) AND already " +
+          "existed at `since` comes back as just `{questionId, projectId, projectName, title, state, " +
+          "alreadySurfaced:true, slimmed:true}` (no `body`/`options`/`recommendation`) instead of its full, " +
+          "multi-KB payload — cutting the cost of a repeat poll that finds nothing new. A genuinely new or " +
+          "changed entry ALWAYS returns in full regardless of `since`. Omit `since` to always get every " +
+          "field for every entry (today's default behavior).",
+        inputSchema: { project: z.string().optional(), since: z.string().optional() },
       },
-      async ({ project }) => {
+      async ({ project, since }) => {
         // Belt-and-suspenders re-check (Framework §2): a `project` selector must be one of THIS grant's
         // scoped projects — it can only ever NAME a project already granted, never widen scope.
         if (project !== undefined && !ctx.scope.projectIds.has(project)) {
@@ -705,6 +716,16 @@ const DECISIONS_RELAY: CompanionCapability = {
           const signature = decisionSurfaceSignature(q);
           const alreadySurfaced = surfaced.get(q.id) === signature;
           try { db.markQuestionSurfaced(q.id, signature, now); } catch { /* best-effort bookkeeping only */ }
+          // Companion re-delivery card (since/delta mode): only SLIM an entry that is unchanged AND already
+          // existed at the caller's cursor — a genuinely new one (created after `since`) always returns in
+          // full even if it happens to already read alreadySurfaced:true (e.g. two calls in the same tick).
+          // ISO-8601 UTC strings compare lexically in chronological order, so a plain `<=` is correct here.
+          if (since !== undefined && alreadySurfaced && q.createdAt <= since) {
+            return {
+              questionId: q.id, projectId: q.projectId, projectName: q.projectName,
+              title: q.title, state: q.state, alreadySurfaced, slimmed: true,
+            };
+          }
           return {
             questionId: q.id, projectId: q.projectId, projectName: q.projectName,
             sessionId: q.sessionId, title: q.title, body: q.body, options: q.options,
@@ -712,7 +733,7 @@ const DECISIONS_RELAY: CompanionCapability = {
             alreadySurfaced,
           };
         });
-        return ok({ decisions });
+        return ok({ decisions, asOf: now });
       },
     );
 

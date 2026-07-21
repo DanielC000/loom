@@ -20,6 +20,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       first-ever read, true on a repeat read with an unchanged state, reset to false the instant its
 //       state genuinely changes (answered) or a brand-new decision shows up; and a surfaced-marker
 //       read/write failure never breaks the decisions_list READ it backs (degrades to false).
+//   (g) since/delta mode (companion re-delivery card): an optional `since` cursor (the prior call's
+//       `asOf`) SLIMS an entry only when it's BOTH alreadySurfaced AND already existed at `since` — a
+//       genuinely new or changed decision, or one created after the cursor, always returns in full.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-decisions-relay.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -284,11 +287,67 @@ try {
     await client.close();
     db.close();
   }
+  // ============ since/delta mode (companion re-delivery card): unchanged + pre-cursor entries slim ============
+  {
+    const db = tmpDb();
+    const proj = "proj-since";
+    seedProject(db, proj, "Since");
+    const companionSess = "companion-since";
+    seedSession(db, companionSess, proj, "assistant");
+    const asker = "asker-since";
+    seedSession(db, asker, proj, "manager");
+    seedQuestion(db, "q-since-1", asker, proj, { title: "Ship it?", options: ["yes", "no"] });
+
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "decisions-relay", projectId: proj });
+
+    const orch = new OrchestrationMcpRouter(db, {});
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+
+    // A plain call with no `since` always returns full fields (today's default, unchanged).
+    const first = await call(client, "decisions_list", {});
+    check("since: a call with no `since` returns full body", first.decisions.find((d) => d.questionId === "q-since-1")?.body !== undefined);
+    check("since: the response carries an `asOf` cursor", typeof first.asOf === "string" && first.asOf.length > 0);
+
+    // Repeat WITH `since` = the prior asOf, on an UNCHANGED, already-existing decision ⇒ slimmed.
+    const second = await call(client, "decisions_list", { since: first.asOf });
+    const slimRow = second.decisions.find((d) => d.questionId === "q-since-1");
+    check("since: an unchanged, pre-cursor decision comes back slimmed:true", slimRow?.slimmed === true);
+    check("since: a slimmed entry omits body/options/recommendation", slimRow?.body === undefined && slimRow?.options === undefined && slimRow?.recommendation === undefined);
+    check("since: a slimmed entry still carries questionId/title/state/alreadySurfaced", slimRow?.questionId === "q-since-1" && slimRow?.title === "Ship it?" && slimRow?.state === "pending" && slimRow?.alreadySurfaced === true);
+
+    // A brand-new decision created AFTER the cursor always returns in full on its first read (never yet
+    // surfaced, so the alreadySurfaced gate alone keeps it full regardless of `since`). `createdAt` is
+    // pinned explicitly (rather than the file's stale module-load-time `now` default) to a moment strictly
+    // AFTER `earlyCursor` — needed for the createdAt-gate check right below, which depends on this ordering.
+    const earlyCursor = first.asOf;
+    const afterCursor = new Date(new Date(earlyCursor).getTime() + 1000).toISOString();
+    seedQuestion(db, "q-since-2", asker, proj, { title: "New one", createdAt: afterCursor });
+    const third_ = await call(client, "decisions_list", { since: earlyCursor });
+    const newRow = third_.decisions.find((d) => d.questionId === "q-since-2");
+    check("since: a genuinely NEW decision (created after the cursor) always returns in full", newRow?.slimmed === undefined && newRow?.body !== undefined);
+
+    // The createdAt gate itself (distinct from alreadySurfaced): q-since-2 is now alreadySurfaced:true (the
+    // call above stamped its signature) but was created AFTER `earlyCursor` — a caller passing that STALE
+    // cursor again must still get it in FULL (it may not actually have seen this decision at `earlyCursor`'s
+    // time), proving the slim path needs BOTH alreadySurfaced AND createdAt <= since, not alreadySurfaced alone.
+    const fifthSince = await call(client, "decisions_list", { since: earlyCursor });
+    const stillFullRow = fifthSince.decisions.find((d) => d.questionId === "q-since-2");
+    check("since: alreadySurfaced alone is NOT enough to slim — a decision created after `since` stays full even once surfaced", stillFullRow?.alreadySurfaced === true && stillFullRow?.slimmed === undefined && stillFullRow?.body !== undefined);
+
+    // A genuine state change (answered) ALWAYS returns in full regardless of `since` — never silently hidden.
+    db.answerQuestion("q-since-1", { chosenOption: "yes", note: null, answeredAt: new Date().toISOString() });
+    const fourth = await call(client, "decisions_list", { since: first.asOf });
+    const changedRow = fourth.decisions.find((d) => d.questionId === "q-since-1");
+    check("since: a genuinely CHANGED decision (answered) always returns in full, never slimmed", changedRow?.slimmed === undefined && changedRow?.body !== undefined);
+
+    await client.close();
+    db.close();
+  }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical). Decisions-relay dedup (card 0c1365d0): a decision's `alreadySurfaced` flag is false on first read, true on an unchanged repeat read, and resets to false the moment its state genuinely changes (answered) or a brand-new decision appears — and a surfaced-marker read/write failure never breaks the read itself (degrades to false, never wrongly suppresses)."
+  ? "\n✅ ALL PASS — decisions_list registers ONLY behind a decisions-relay grant and reports ONLY that grant's PENDING (pending+answered, never consumed) decisions scoped to the granted project(s); a project selector can never widen scope; an ungranted/non-assistant session gets nothing; decision_resolve is registered ONLY under a mode:'act' grant and stays absent under 'read' (byte-identical). Decisions-relay dedup (card 0c1365d0): a decision's `alreadySurfaced` flag is false on first read, true on an unchanged repeat read, and resets to false the moment its state genuinely changes (answered) or a brand-new decision appears — and a surfaced-marker read/write failure never breaks the read itself (degrades to false, never wrongly suppresses). since/delta mode: an unchanged, pre-cursor decision returns slimmed (no body/options/recommendation); a new, changed, or created-after-cursor one always returns in full."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
