@@ -377,7 +377,11 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- Opt-in Companion "lead mode" (Option B, no guardrails): read LIVE by resolveCompanionGrant on every
   -- call (mirrors vault_write, NOT browser_testing — no respawn needed for a toggle to take effect).
   -- HUMAN-only REST write (PUT /api/companion/:sessionId/lead-mode); legacy rows backfill to 0 (off).
-  companion_lead_mode INTEGER NOT NULL DEFAULT 0
+  companion_lead_mode INTEGER NOT NULL DEFAULT 0,
+  -- Spawn-origin marker (card 53edd8d5): 1 iff this manager was booted BY THE CRON SCHEDULER. Read by
+  -- countLiveScheduledManagers — the Scheduler's OWN manager-cap budget, separate from the standing
+  -- human/Lead-spawned fleet. Legacy rows backfill to 0 (never scheduler-spawned, correct for history).
+  scheduled_spawn INTEGER NOT NULL DEFAULT 0
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 -- seq (attention-push watcher fix, CR-caught): the sqlite rowid is NOT a safe tail-poll cursor for this
@@ -441,7 +445,12 @@ CREATE TABLE IF NOT EXISTS schedules (
   -- read-and-file-only Platform Auditor, spawned via startAuditor), or 'workspace-auditor' (the
   -- end-user Workspace Auditor, spawned via startWorkspaceAuditor; B6). Plain TEXT — a new kind value
   -- needs no migration. Legacy rows backfill to 'manager'.
-  kind TEXT NOT NULL DEFAULT 'manager'
+  kind TEXT NOT NULL DEFAULT 'manager',
+  -- Deferral observability (card 53edd8d5): the instant this schedule most recently transitioned INTO a
+  -- deferred (budget-gated) state, + the human reason. Both NULL = not currently deferred. Set by
+  -- markDeferred ONLY on a transition (never every tick); cleared by markFired on the next successful fire.
+  last_deferred_at TEXT,
+  last_deferred_reason TEXT
 );
 -- One-shot self-scheduled wake-ups (the agent wake_me primitive): the daemon WakeService
 -- re-nudges session_id with its note when wake_at passes, then deletes the row (one-shot).
@@ -1182,6 +1191,8 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   archived_at: "TEXT",
   // Opt-in Companion "lead mode" (read LIVE by resolveCompanionGrant); legacy rows backfill to 0 (off).
   companion_lead_mode: "INTEGER NOT NULL DEFAULT 0",
+  // Spawn-origin marker (card 53edd8d5): 1 iff booted by the cron Scheduler. Legacy rows backfill to 0.
+  scheduled_spawn: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -1237,6 +1248,9 @@ const SCHEDULE_ADDED_COLUMNS: Record<string, string> = {
   // given a meaningful constant default in SQL, so it backfills to NULL and reads a derived default
   // (describeCron(cron)) at toSchedule — new creations require a non-empty name at the create surface.
   name: "TEXT",
+  // Deferral observability (card 53edd8d5). Nullable; legacy rows backfill to NULL = not deferred.
+  last_deferred_at: "TEXT",
+  last_deferred_reason: "TEXT",
 };
 
 /**
@@ -3841,12 +3855,12 @@ export class Db {
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
          role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
-         ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline)
+         ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
          @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
-         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline)`,
+         @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn)`,
     ).run({
       ...s,
       busy: s.busy ? 1 : 0,
@@ -3858,6 +3872,7 @@ export class Db {
       vaultWrite: s.vaultWrite ? 1 : 0, // off (0) on every plain session literal
       restrictedTools: s.restrictedTools ? 1 : 0, // off (0) on every plain session literal
       noCommit: s.noCommit ? 1 : 0, // off (0) on every plain session literal
+      scheduledSpawn: s.scheduledSpawn ? 1 : 0, // off (0) on every non-scheduler session literal
       // skill subset → JSON text; null/absent ⇒ NULL = deliver all (today's behavior). An empty array is
       // also stored as NULL ("no subset ⇒ all") so the read side never has to special-case [].
       skills: s.skills && s.skills.length ? JSON.stringify(s.skills) : null,
@@ -4321,9 +4336,17 @@ export class Db {
     const r = this.db.prepare("SELECT * FROM sessions WHERE recycled_from = ? LIMIT 1").get(sessionId) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
-  /** Count of currently-LIVE manager sessions — the Scheduler's manager-cap gate (§19a hardening). */
-  countLiveManagers(): number {
-    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role = 'manager' AND process_state = 'live'")
+  /**
+   * Count of currently-LIVE SCHEDULER-SPAWNED manager sessions — the Scheduler's OWN manager-cap gate
+   * (§19a hardening; narrowed to scheduler-only spawns by card 53edd8d5). Deliberately excludes standing
+   * human/Lead-spawned managers (`scheduled_spawn = 0`) — those share `role='manager'` but were never
+   * booted by `Scheduler.tick()`, so counting them here would let a standing fleet permanently starve
+   * every cadence (the bug this narrowing fixes). Mirrors `countLiveAuditors`'s own budget split, one
+   * level down: auditors split by ROLE; managers split by this spawn-origin flag, since role alone can't
+   * tell a Lead-spawned manager apart from a scheduler-spawned one.
+   */
+  countLiveScheduledManagers(): number {
+    return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role = 'manager' AND scheduled_spawn = 1 AND process_state = 'live'")
       .get() as { c: number }).c;
   }
   /**
@@ -4728,9 +4751,23 @@ export class Db {
     return (this.db.prepare("SELECT * FROM schedules WHERE enabled = 1 AND next_fire_at <= ? ORDER BY next_fire_at")
       .all(nowIso) as Row[]).map(toSchedule);
   }
-  /** Record a fire: stamp last_fired_at and advance next_fire_at (computed by the caller). */
+  /**
+   * Record a fire: stamp last_fired_at and advance next_fire_at (computed by the caller). Also CLEARS
+   * any in-progress deferral (last_deferred_at/reason → NULL) — a successful fire means the schedule is
+   * no longer blocked, so the Schedules-UI badge self-clears without a separate "resolved" event.
+   */
   markFired(id: string, lastIso: string, nextIso: string): void {
-    this.db.prepare("UPDATE schedules SET last_fired_at = ?, next_fire_at = ? WHERE id = ?").run(lastIso, nextIso, id);
+    this.db.prepare("UPDATE schedules SET last_fired_at = ?, next_fire_at = ?, last_deferred_at = NULL, last_deferred_reason = NULL WHERE id = ?")
+      .run(lastIso, nextIso, id);
+  }
+  /**
+   * Record a deferral TRANSITION (card 53edd8d5): the caller (Scheduler.tick()) calls this only when the
+   * schedule is newly blocked or the block's reason changed since last tick — never once per tick for a
+   * still-deferred-same-reason schedule, so `last_deferred_at` reads as "deferred since the start of the
+   * current episode" rather than churning every 60s. Cleared by markFired on the next successful fire.
+   */
+  markDeferred(id: string, atIso: string, reason: string): void {
+    this.db.prepare("UPDATE schedules SET last_deferred_at = ?, last_deferred_reason = ? WHERE id = ?").run(atIso, reason, id);
   }
 
   // --- wakes (one-shot self-scheduled wake-ups; the `wake_me` primitive) ---
@@ -5813,6 +5850,8 @@ function toSession(r0: unknown): Session {
     vaultWrite: (r.vault_write as number) === 1,
     // Companion "lead mode"; read LIVE by resolveCompanionGrant on every call (mirrors vaultWrite).
     companionLeadMode: (r.companion_lead_mode as number) === 1,
+    // Spawn-origin marker (card 53edd8d5) — see countLiveScheduledManagers.
+    scheduledSpawn: (r.scheduled_spawn as number) === 1,
     // pinned registry-capability grants (agent-tooling P4); malformed/absent degrades to [] = none.
     capabilities: (() => { try { return JSON.parse((r.capabilities as string) || "[]") as CapabilityGrant[]; } catch { return []; } })(),
     parentSessionId: (r.parent_session_id as string) ?? null,
@@ -6026,6 +6065,8 @@ function toSchedule(r0: unknown): Schedule {
     createdAt: r.created_at as string,
     kind: (r.kind as Schedule["kind"]) ?? "manager", // legacy rows (pre-P5) → manager
     prompt: (r.prompt as string | null) ?? null,
+    lastDeferredAt: (r.last_deferred_at as string) ?? null,
+    lastDeferredReason: (r.last_deferred_reason as string) ?? null,
   };
 }
 function toWake(r0: unknown): Wake {

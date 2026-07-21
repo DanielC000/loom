@@ -59,11 +59,21 @@ function makeEnv(opts = {}) {
   const scheduler = new Scheduler({ db, control, startManager, startAuditor, startWorkspaceAuditor, maxConcurrentManagers: opts.cap, maxConcurrentAuditors: opts.auditorCap });
   return { dbFile, db, projId, agentId, control, calls, scheduler };
 }
-// Seed a live MANAGER session row directly (for the manager-cap DB-count axis).
+// Seed a live MANAGER session row directly — NOT scheduler-spawned (scheduledSpawn defaults false), the
+// shape a standing human/Lead-spawned manager takes. Card 53edd8d5: this must NOT count against the
+// scheduler's own manager-cap budget (see the rewritten "Manager-cap (DB count axis)" test below).
 const seedLiveManager = (e, id) => e.db.insertSession({
   id, projectId: e.projId, agentId: e.agentId, engineSessionId: null, title: null, cwd: e.projId,
   processState: "live", resumability: "unknown", busy: false,
   createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role: "manager",
+});
+// Seed a live SCHEDULER-SPAWNED manager session row directly (scheduledSpawn: true) — the shape a real
+// `Scheduler.tick()` spawn produces. THIS is what should count against the scheduler's manager-cap budget.
+const seedLiveScheduledManager = (e, id) => e.db.insertSession({
+  id, projectId: e.projId, agentId: e.agentId, engineSessionId: null, title: null, cwd: e.projId,
+  processState: "live", resumability: "unknown", busy: false,
+  createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role: "manager",
+  scheduledSpawn: true,
 });
 // Seed a live AUDITOR session row directly (for the auditor-budget DB-count axis).
 const seedLiveAuditor = (e, id, role = "auditor") => e.db.insertSession({
@@ -230,27 +240,101 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   cleanupEnv(e);
 }
 
-// Finding 3b — manager cap (DB count axis): pre-existing LIVE managers count toward the cap, so a
-// due schedule does NOT fire while the account already has `cap` live managers.
+// Finding 3b — manager cap (DB count axis), REWRITTEN for card 53edd8d5: standing (non-scheduler-spawned)
+// live managers do NOT count toward the scheduler's OWN budget — this is the manager-cap-starvation
+// regression fix itself. Before this card, this exact scenario (a standing fleet at "the cap") would
+// permanently starve every schedule; the due schedule must now fire.
 {
   const e = makeEnv({ cap: 2 });
-  seedLiveManager(e, "mgr-existing-1");
-  seedLiveManager(e, "mgr-existing-2"); // already at the cap of 2
-  seedSchedule(e, "sch-capped");
+  seedLiveManager(e, "mgr-existing-1"); // standing, NOT scheduler-spawned
+  seedLiveManager(e, "mgr-existing-2"); // ditto — "at the cap" only under the OLD (all-managers) count
+  seedSchedule(e, "sch-not-starved");
   await e.scheduler.tick(new Date());
-  check("Manager-cap (DB count): at the cap from existing live managers → a due schedule does NOT fire", e.calls.length === 0);
+  check("Manager-cap (DB count): standing NON-scheduler managers at the old cap do NOT block a due schedule",
+    e.calls.length === 1 && e.calls[0].via === "manager");
+  check("Manager-cap (DB count): the schedule fired (next_fire_at advanced, lastFiredAt stamped)",
+    e.db.getSchedule("sch-not-starved").lastFiredAt !== null);
+  cleanupEnv(e);
+}
+
+// Finding 3b, positive case: pre-existing SCHEDULER-SPAWNED live managers DO count toward the budget, so
+// a due schedule does NOT fire while the scheduler's own spawns already hold `cap` slots. Also proves the
+// deferral is recorded: lastDeferredAt/lastDeferredReason populate on the schedule row, and a durable
+// `schedule_fire_deferred` event is filed (session-less like schedule_fire_failed, so read via the raw
+// sqlite handle — mirrors the existing FK-off "deleted agent" test's own trick).
+{
+  const e = makeEnv({ cap: 2 });
+  seedLiveScheduledManager(e, "mgr-sched-1");
+  seedLiveScheduledManager(e, "mgr-sched-2"); // already at the cap of 2, both scheduler-spawned
+  seedSchedule(e, "sch-starved");
+  const now = new Date();
+  await e.scheduler.tick(now);
+  check("Manager-cap (DB count): scheduler-spawned managers AT the cap → a due schedule does NOT fire", e.calls.length === 0);
+  const after = e.db.getSchedule("sch-starved");
   check("Manager-cap (DB count): the deferred schedule is left due (not advanced, not disabled)",
-    e.db.getSchedule("sch-capped").lastFiredAt === null && e.db.getSchedule("sch-capped").enabled === true);
+    after.lastFiredAt === null && after.enabled === true);
+  check("Manager-cap (DB count): lastDeferredAt/lastDeferredReason populate with the cap reason",
+    !!after.lastDeferredAt && after.lastDeferredReason === "manager cap (2) reached");
+  const raw = new Database(e.dbFile);
+  const evs = raw.prepare("SELECT * FROM orchestration_events WHERE kind = 'schedule_fire_deferred'").all();
+  raw.close();
+  check("Manager-cap (DB count): a schedule_fire_deferred event is filed (session-less, detail carries scheduleId+reason)",
+    evs.length === 1 && evs[0].manager_session_id === "" &&
+    JSON.parse(evs[0].detail_json).scheduleId === "sch-starved" &&
+    JSON.parse(evs[0].detail_json).reason === "manager cap (2) reached");
+  cleanupEnv(e);
+}
+
+// Deferral TRANSITION-ONLY recording: a SECOND tick with the SAME still-blocked reason writes NOTHING new
+// (no fresh lastDeferredAt, no second event) — proves the anti-flood guard (a schedule starved for hours
+// must not write a near-identical row/event every 60s tick).
+{
+  const e = makeEnv({ cap: 1 });
+  seedLiveScheduledManager(e, "mgr-still-full");
+  seedSchedule(e, "sch-repeat-defer");
+  await e.scheduler.tick(new Date());
+  const firstDeferredAt = e.db.getSchedule("sch-repeat-defer").lastDeferredAt;
+  check("Transition-only: first tick records a deferral", !!firstDeferredAt);
+  // A second tick, same reason (cap still 1, still exactly at it) — must NOT rewrite lastDeferredAt.
+  await new Promise((r) => setTimeout(r, 5));
+  await e.scheduler.tick(new Date());
+  check("Transition-only: a second same-reason tick leaves lastDeferredAt UNCHANGED",
+    e.db.getSchedule("sch-repeat-defer").lastDeferredAt === firstDeferredAt);
+  const raw = new Database(e.dbFile);
+  const evCount = raw.prepare("SELECT COUNT(*) AS c FROM orchestration_events WHERE kind = 'schedule_fire_deferred'").get().c;
+  raw.close();
+  check("Transition-only: still only ONE schedule_fire_deferred event after two same-reason ticks", evCount === 1);
+  cleanupEnv(e);
+}
+
+// Deferral self-clears on the next successful fire: once the budget frees up (the scheduler-spawned
+// manager exits — simulated here by re-making the scheduler with a higher cap), a later successful fire
+// clears lastDeferredAt/lastDeferredReason back to null (markFired's own clear).
+{
+  const e = makeEnv({ cap: 1 });
+  seedLiveScheduledManager(e, "mgr-blocking");
+  seedSchedule(e, "sch-clears");
+  await e.scheduler.tick(new Date());
+  check("Clear-on-fire: deferred after the first (capped) tick", !!e.db.getSchedule("sch-clears").lastDeferredAt);
+  // Raise the cap in place (mirrors the blocking manager exiting / the operator raising the config) — TS
+  // `private` erases to a plain property at runtime (no `#` field), so this is a legitimate test seam, not
+  // a hack around real privacy.
+  e.scheduler.deps.maxConcurrentManagers = 5;
+  await e.scheduler.tick(new Date());
+  const after = e.db.getSchedule("sch-clears");
+  check("Clear-on-fire: the schedule fired once the budget freed up", after.lastFiredAt !== null);
+  check("Clear-on-fire: lastDeferredAt/lastDeferredReason cleared back to null", after.lastDeferredAt === null && after.lastDeferredReason === null);
   cleanupEnv(e);
 }
 
 // === Auditor budget — auditors are LIFTED OUT of the manager cap (their own small budget) ===
 
-// Auditor NOT blocked by a full manager cap: with manager cap 1 AND a live manager already at the cap, an
-// "auditor"-kind schedule STILL fires (it draws from the separate auditor budget, not the manager slot).
+// Auditor NOT blocked by a full manager cap: with manager cap 1 AND a scheduler-spawned manager already at
+// the cap, an "auditor"-kind schedule STILL fires (it draws from the separate auditor budget, not the
+// manager slot).
 {
   const e = makeEnv({ cap: 1, auditorCap: 2 });
-  seedLiveManager(e, "mgr-at-cap"); // managers already at cap 1
+  seedLiveScheduledManager(e, "mgr-at-cap"); // managers already at cap 1 (scheduler-spawned, so it counts)
   seedSchedule(e, "sch-aud", { kind: "auditor" });
   await e.scheduler.tick(new Date());
   check("Auditor budget: an auditor schedule fires even though the MANAGER cap is full",
@@ -286,7 +370,7 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
 // due list still fires (the bug the continue-vs-break change fixes).
 {
   const e = makeEnv({ cap: 1, auditorCap: 2 });
-  seedLiveManager(e, "mgr-full"); // manager cap (1) already full
+  seedLiveScheduledManager(e, "mgr-full"); // manager cap (1) already full (scheduler-spawned, so it counts)
   // Order the due list (ORDER BY next_fire_at) so the over-cap MANAGER is processed FIRST — proving the
   // loop `continue`s past it instead of `break`ing (which would have starved the later auditor).
   seedSchedule(e, "sch-mgr-deferred", { nextFireAt: new Date(Date.now() - 120_000).toISOString() }); // earlier → first

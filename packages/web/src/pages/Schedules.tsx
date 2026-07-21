@@ -138,7 +138,17 @@ export default function Schedules() {
                   <td style={{ padding: "10px 12px", color: color.textDim, maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{agentLabel(s.agentId)}</td>
                   <td style={{ padding: "10px 12px", color: color.text, whiteSpace: "nowrap" }}>{describeCron(s.cron)}</td>
                   <td style={{ padding: "10px 12px", whiteSpace: "nowrap" }}><span style={{ color: color.cyan }}>{s.cron}</span></td>
-                  <td style={{ padding: "10px 12px", color: color.textDim, whiteSpace: "nowrap" }}>{fmt(s.nextFireAt)}</td>
+                  <td style={{ padding: "10px 12px", color: color.textDim, whiteSpace: "nowrap" }}>
+                    {fmt(s.nextFireAt)}
+                    {/* Deferral observability (card 53edd8d5): a due fire held back by a budget gate — the
+                        row's own lastDeferredAt/lastDeferredReason (cleared on the next successful fire),
+                        so this self-clears without any extra polling. */}
+                    {s.lastDeferredAt && (
+                      <div style={{ marginTop: 4, whiteSpace: "normal" }} title={`Deferred since ${fmt(s.lastDeferredAt)}`}>
+                        <Badge tone="amber">deferred: {s.lastDeferredReason ?? "budget reached"}</Badge>
+                      </div>
+                    )}
+                  </td>
                   <td style={{ padding: "10px 12px", textAlign: "right" }}>
                     {/* Inline enable/disable — the most common action; row-click (the cell stops propagation) opens the editor. */}
                     <button

@@ -828,7 +828,10 @@ async function main(): Promise<void> {
   // floor-clamped inside resolveConfig; default 60s).
   const intervalMs = watchers.schedulerMs;
   const maxConcurrentManagers = resolved.orchestration.maxConcurrentManagers;
-  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt) => sessions.startManager(agentId, prompt), startAuditor: (agentId, prompt) => sessions.startAuditor(agentId, prompt), startWorkspaceAuditor: (agentId, prompt) => sessions.startWorkspaceAuditor(agentId, prompt), intervalMs, maxConcurrentManagers });
+  // card 53edd8d5: `{scheduled:true}` is what pins Session.scheduledSpawn on the spawned row, so ONLY
+  // the Scheduler's own manager spawns count against `maxConcurrentManagers` (Db.countLiveScheduledManagers)
+  // — every other startManager caller (REST, generic dispatch) omits it and stays unaffected.
+  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt) => sessions.startManager(agentId, prompt, { scheduled: true }), startAuditor: (agentId, prompt) => sessions.startAuditor(agentId, prompt), startWorkspaceAuditor: (agentId, prompt) => sessions.startWorkspaceAuditor(agentId, prompt), intervalMs, maxConcurrentManagers });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);

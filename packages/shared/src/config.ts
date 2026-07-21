@@ -246,10 +246,16 @@ export interface OrchestrationConfig {
    */
   maxConcurrentWorkers: number;
   /**
-   * Safety rail (§19a hardening): hard cap on concurrently-LIVE manager sessions the cron Scheduler
-   * will spawn. maxConcurrentWorkers caps workers PER manager; this caps the managers themselves, so
-   * a burst of simultaneously-due schedules can't launch an unbounded fleet in one tick. At the cap
-   * the Scheduler defers the remaining due schedules to the next tick (next_fire_at untouched). Default 3.
+   * Safety rail (§19a hardening, narrowed by card 53edd8d5): hard cap on concurrently-LIVE manager
+   * sessions the cron Scheduler ITSELF has spawned — counted via `Db.countLiveScheduledManagers`
+   * (`Session.scheduledSpawn`), NOT the daemon-wide live-manager count. Standing human/Lead-spawned
+   * managers do NOT count against this cap and can never block a cadence, however large the standing
+   * fleet grows — only OTHER scheduler-spawned managers compete for this budget. maxConcurrentWorkers
+   * caps workers PER manager; this caps the Scheduler's OWN concurrent manager spawns, so a burst of
+   * simultaneously-due schedules can't launch an unbounded fleet in one tick. At the cap the Scheduler
+   * defers the remaining due schedules to the next tick (next_fire_at untouched; the deferral is
+   * recorded on the schedule row + a `schedule_fire_deferred` event — see Schedule.lastDeferredAt).
+   * Default 3.
    */
   maxConcurrentManagers: number;
   /**

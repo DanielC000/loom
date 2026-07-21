@@ -691,6 +691,19 @@ export interface Session {
    * bottom-edge sweep/fill meter + live timer.
    */
   pendingMerge?: PendingMerge | null;
+  /**
+   * Spawn-origin marker, PINNED at spawn: true iff this manager was booted BY THE CRON SCHEDULER
+   * (`Scheduler.tick()` → `startManager(agentId, prompt, {scheduled:true})`), false/absent for every
+   * other manager spawn (REST "start manager", a profile-derived generic spawn, the Platform Lead's
+   * `session_spawn`). Exists so the Scheduler's own manager-cap budget (`Db.countLiveScheduledManagers`)
+   * counts ONLY scheduler-spawned managers, never the standing human/Lead-spawned fleet — mirrors the
+   * auditor budget's role-based split, but managers can't be split by role alone (a Lead-spawned manager
+   * and a scheduler-spawned one share `role:"manager"`), so this flag is the manager-side equivalent.
+   * Carried forward by `recycleManager` (`old.scheduledSpawn ?? false`) so a scheduler-spawned manager
+   * can't dodge its own budget by self-recycling. Absent/false on every existing session ⇒ byte-identical
+   * spawn (only the Scheduler's own wiring ever sets it true).
+   */
+  scheduledSpawn?: boolean;
 }
 
 /**
@@ -733,6 +746,16 @@ export type OrchestrationEventKind =
   // (claim-before-spawn), so this never re-fires; the schedule stays enabled (a transient spawn failure
   // must not permanently disable a cadence — only the deleted-agent case disables).
   | "schedule_fire_failed"
+  // A due fire was HELD BACK by a budget gate (manager cap / auditor budget) rather than fired (board
+  // card 53edd8d5 — the manager-cap starvation fix). Filed under the SCHEDULE id like
+  // `schedule_fire_failed` (managerSessionId = "", no session was spawned); `detail` carries {scheduleId,
+  // cron, kind, reason}. Emitted ONLY on a TRANSITION into deferred (first defer, or the reason changing)
+  // — never once per tick for a schedule that stays blocked for the SAME reason, which would flood the
+  // event log for a schedule starved for hours. The schedule row's own `lastDeferredAt`/
+  // `lastDeferredReason` (Db.markDeferred) are the queryable CURRENT-state mirror of this event; both
+  // clear on the schedule's next successful fire (Db.markFired). The slot is NOT claimed (unlike a
+  // failed spawn) — a deferred schedule stays due and is retried next tick like the pause/usage-limit gates.
+  | "schedule_fire_deferred"
   // worker_report(done) PRE-CHECK refusal (board cards 907b9f50, dcb25bd9, 50162e6b): a worker reported
   // done but was refused at the source — `detail.reason` discriminates: "uncommitted" (UNCOMMITTED work
   // in its worktree, + the named files) or "pending-direction" (UNRESOLVED manager direction still
@@ -1557,6 +1580,20 @@ export interface Schedule {
    * (schedule_create/update MCP tools). Unset ⇒ composition is byte-identical to today.
    */
   prompt?: string | null;
+  /**
+   * Deferral observability (board card 53edd8d5): the instant this schedule most recently TRANSITIONED
+   * into a deferred state — a due fire held back by a budget gate (manager cap / auditor budget) rather
+   * than fired. Set (with `lastDeferredReason`) by `Db.markDeferred` ONLY on a transition — first defer,
+   * or the reason changing — never on every tick a still-deferred schedule remains blocked for the SAME
+   * reason (that would flood the event log every 60s tick; see `schedule_fire_deferred` below). So this
+   * reads as "deferred since <the start of the current episode>", not "last tick checked". Cleared to
+   * null by `Db.markFired` on the schedule's next successful fire — the badge self-clears once unblocked.
+   * null = not currently deferred (never blocked, or the block has since resolved).
+   */
+  lastDeferredAt?: string | null;
+  /** The human-readable reason for the current deferral (e.g. "manager cap (3) reached"), paired with
+   *  `lastDeferredAt`. null exactly when `lastDeferredAt` is null. */
+  lastDeferredReason?: string | null;
 }
 
 /**

@@ -266,6 +266,14 @@ export interface LoomDaemon {
     workerSessionId?: string; taskId?: string; detail?: Record<string, unknown>;
   }) => Promise<string>;
   /**
+   * Seed a schedule's DEFERRED state (card 53edd8d5: the Schedules-UI "deferred: <reason>" badge) via
+   * POST /internal/test/seed — the ONLY way an e2e spec can drive it, since the real path is a
+   * budget-gated Scheduler tick and the e2e daemon boots with LOOM_SCHEDULER_ENABLED=0 (no real tick ever
+   * runs). Calls the SAME `db.markDeferred` the Scheduler itself uses, so the seeded schedule round-trips
+   * through GET /api/schedules exactly as a real deferral would. Returns the scheduleId (echoed back).
+   */
+  seedScheduleDeferral: (d: { scheduleId: string; reason?: string; at?: string }) => Promise<string>;
+  /**
    * Seed a manager→human DECISION INBOX question (card 8701bdbb, child B e2e) via POST /internal/test/seed —
    * the ONLY way an e2e spec can drive the decision surfaces (the attention item, the /question/:id answer
    * page, the global inbox, the fleet affordance). Inserted straight through deps.db.insertQuestion (the
@@ -563,6 +571,13 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       return res.orchestrationEventIds[0];
     };
 
+    const seedScheduleDeferral: LoomDaemon["seedScheduleDeferral"] = async (d) => {
+      const res = await apiPost<{ scheduleDeferralIds: string[] }>(baseURL, "/internal/test/seed", {
+        scheduleDeferrals: [d],
+      });
+      return res.scheduleDeferralIds[0];
+    };
+
     const seedQuestion: LoomDaemon["seedQuestion"] = async (q) => {
       const res = await apiPost<{ questionIds: string[] }>(baseURL, "/internal/test/seed", { questions: [q] });
       const id = res.questionIds[0];
@@ -624,7 +639,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

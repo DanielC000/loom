@@ -966,8 +966,14 @@ export class SessionService {
    * schedule's own `prompt` here) — appended via `appendScheduledPrompt` AFTER the composed manager
    * prompt (identity/doctrine + "Where things live" block). Undefined/null (every non-scheduled caller,
    * and every schedule with no prompt set) ⇒ byte-identical to today.
+   *
+   * `opts.scheduled` (card 53edd8d5) — true ONLY when index.ts's Scheduler wiring calls this; every
+   * other caller (REST "start manager", the generic profile-derived dispatch) omits `opts`, so the
+   * session's `scheduledSpawn` pins false and this is byte-identical to before the flag existed. Read
+   * back by `Db.countLiveScheduledManagers` — the Scheduler's OWN manager-cap budget, separate from the
+   * standing human/Lead-spawned fleet.
    */
-  startManager(agentId: string, prompt?: string | null): Session {
+  startManager(agentId: string, prompt?: string | null, opts?: { scheduled?: boolean }): Session {
     const agent = this.db.getAgent(agentId);
     if (!agent) throw new Error("agent not found");
     const project = this.db.getProject(agent.projectId);
@@ -1000,6 +1006,7 @@ export class SessionService {
       skills, // profile-pinned skill subset, pinned on the row (null ⇒ deliver all — today's behavior)
       connections, // profile-pinned authenticated-egress allowlist, pinned on the row ([] ⇒ no access)
       vaultWrite, // profile-pinned confined vault-write grant, pinned on the row (false ⇒ no access)
+      scheduledSpawn: !!opts?.scheduled, // card 53edd8d5: true ONLY for the Scheduler's own spawn call
     };
     this.db.insertSession(session);
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit always wins.
@@ -5550,6 +5557,8 @@ export class SessionService {
       skills: old.skills ?? null, // carry the pinned skill subset forward (null ⇒ all)
       connections: old.connections ?? [], // carry the authenticated-egress allowlist forward
       vaultWrite: old.vaultWrite ?? false, // carry the confined vault-write grant forward
+      scheduledSpawn: old.scheduledSpawn ?? false, // card 53edd8d5: a scheduler-spawned manager can't
+      // dodge its own manager-cap budget by self-recycling — the successor still counts against it.
       gen: newGen,
       recycledFrom: old.id,
     };

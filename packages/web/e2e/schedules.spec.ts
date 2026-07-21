@@ -171,4 +171,44 @@ test.describe("schedules UI (Direction B)", () => {
     // AFTER (REST): the row's enabled flag flipped to false.
     await expect.poll(async () => (await listSchedules(loomDaemon.baseURL)).find((s) => s.id === seeded.id)?.enabled).toBe(false);
   });
+
+  // Deferral observability (card 53edd8d5): a due fire held back by the scheduler's manager-cap budget
+  // surfaces as an amber "deferred: <reason>" badge on the row. The e2e daemon boots with the scheduler
+  // ticker OFF, so a real deferral can never happen here — seedScheduleDeferral drives the SAME
+  // db.markDeferred write path a real tick uses (see the fixture's own doc), proving the UI reads the
+  // schedule row's lastDeferredAt/lastDeferredReason correctly.
+  test("a budget-deferred schedule shows a 'deferred: <reason>' badge", async ({ page, loomDaemon }) => {
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`sched-deferred-${stamp}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, `Agent ${stamp}`);
+    await pinActiveProject(page, project.id);
+
+    const name = `Deferred me ${stamp}`;
+    const seeded = await fetch(`${loomDaemon.baseURL}/api/schedules`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, agentId: agent.id, cron: "0 0 1 1 *" }),
+    }).then((r) => r.json()) as { id: string };
+
+    await page.goto(`${loomDaemon.baseURL}/automation`);
+    const row = page.locator("tr", { hasText: name });
+    await expect(row).toBeVisible();
+
+    // BEFORE: no deferred badge on a fresh, never-deferred schedule.
+    await expect(row.getByText(/deferred:/i)).toHaveCount(0);
+
+    // ACT: seed a deferral (mirrors what Scheduler.tick() writes on a budget-gated transition).
+    const reason = "manager cap (3) reached";
+    await loomDaemon.seedScheduleDeferral({ scheduleId: seeded.id, reason });
+
+    // AFTER (UI): the badge renders the reason text after a refetch.
+    await page.reload();
+    const deferredRow = page.locator("tr", { hasText: name });
+    await expect(deferredRow.getByText(`deferred: ${reason}`)).toBeVisible();
+
+    // AFTER (REST): the schedule row itself carries the deferred fields (what the badge reads from).
+    const rows = await listSchedules(loomDaemon.baseURL);
+    const after = rows.find((s) => s.id === seeded.id) as { lastDeferredAt?: string | null; lastDeferredReason?: string | null } | undefined;
+    expect(after?.lastDeferredReason).toBe(reason);
+    expect(after?.lastDeferredAt).toBeTruthy();
+  });
 });

@@ -2575,6 +2575,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // touching the row that many times (the real retrieval-bump path), so the /lore recall badge + meter
         // render a non-zero usage signal.
         projectMemory?: { projectId: string; key: string; text: string; title?: string; pinned?: boolean; retrievalCount?: number }[];
+        // A schedule's deferred state (card 53edd8d5: the Schedules-UI deferred badge e2e) — the ONLY way
+        // an e2e spec can drive it, since the real path is a budget-gated Scheduler tick and the e2e daemon
+        // boots with the ticker OFF (LOOM_SCHEDULER_ENABLED=0). Calls the SAME db.markDeferred the Scheduler
+        // itself uses, so the row round-trips through GET /api/schedules exactly as a real deferral would.
+        scheduleDeferrals?: { scheduleId: string; reason?: string; at?: string }[];
       };
       const usageSampleIds: string[] = [];
       for (const s of b.usageSamples ?? []) {
@@ -2835,12 +2840,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         if (bumps > 0) deps.db.touchProjectMemoryRetrieved(Array.from({ length: bumps }, () => row.id));
         projectMemoryIds.push(row.id);
       }
+      const scheduleDeferralIds: string[] = [];
+      for (const d of b.scheduleDeferrals ?? []) {
+        if (typeof d.scheduleId !== "string") {
+          return reply.code(400).send({ error: "scheduleDeferrals[].scheduleId is a required string" });
+        }
+        if (!deps.db.getSchedule(d.scheduleId)) return reply.code(400).send({ error: `scheduleDeferrals[]: no schedule ${d.scheduleId}` });
+        deps.db.markDeferred(d.scheduleId, d.at ?? new Date().toISOString(), d.reason ?? "manager cap (3) reached");
+        scheduleDeferralIds.push(d.scheduleId);
+      }
       return reply.code(201).send({
         ok: true, usageSampleIds, runIds,
         companionSessionIds, companionConfigSessionIds, companionMemoryNames, companionReminderIds,
         companionMessageIds,
         liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
-        projectMemoryIds,
+        projectMemoryIds, scheduleDeferralIds,
       });
     });
   }

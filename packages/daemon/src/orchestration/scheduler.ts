@@ -38,8 +38,9 @@ export interface SchedulerDeps {
    */
   isUsageLimited?: (now: Date, recencyWindowMs?: number) => boolean;
   /**
-   * §19a hardening: hard cap on concurrently-LIVE managers the Scheduler will spawn. Wired from
-   * `orchestration.maxConcurrentManagers` in index.ts; defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
+   * §19a hardening (narrowed by card 53edd8d5): hard cap on concurrently-LIVE, SCHEDULER-SPAWNED
+   * managers (`countLiveScheduledManagers` — excludes the standing human/Lead-spawned fleet entirely).
+   * Wired from `orchestration.maxConcurrentManagers` in index.ts; defaults to DEFAULT_MAX_CONCURRENT_MANAGERS.
    */
   maxConcurrentManagers?: number;
   /**
@@ -77,12 +78,23 @@ export class Scheduler {
    *    it (it has no agent-delete cascade to clean it up) so it stops re-trying every tick.
    *  - CLAIM-BEFORE-SPAWN (finding 2): advance next_fire_at BEFORE the spawn/event side effects, so
    *    if startManager or appendEvent throws the slot is already consumed → no double-spawn next tick.
-   *  - MANAGER CAP (finding 3): stop once `maxConcurrentManagers` live managers exist; the remaining
-   *    due schedules are deferred to the next tick (next_fire_at untouched) — like the pause gate.
+   *  - MANAGER CAP (finding 3, NARROWED by card 53edd8d5): stop once `maxConcurrentManagers` live
+   *    SCHEDULER-SPAWNED managers exist (`countLiveScheduledManagers`) — NOT the daemon-wide live-manager
+   *    count. A standing human/Lead-spawned fleet never counts against this budget, however large it
+   *    grows, so it can never permanently starve a cadence (the bug this narrowing fixes: the cap used
+   *    to count every live manager, so an account with ≥cap standing managers could never fire a
+   *    schedule again). The remaining due schedules are deferred to the next tick (next_fire_at
+   *    untouched) — like the pause gate — and the deferral is recorded (see DEFERRAL OBSERVABILITY below).
    *  - AUDITOR BUDGET: auditor-kind schedules ('auditor' / 'workspace-auditor') draw from a SEPARATE small
    *    budget, NOT the manager cap — a read-mostly audit run never burns a manager slot and is never blocked
    *    by a full manager cap (and vice versa). An over-budget auditor is `continue`-skipped (left due),
    *    NOT a `break`, so a manager later in the due list can still fire (and vice versa).
+   *  - DEFERRAL OBSERVABILITY (card 53edd8d5): a budget-deferred schedule stamps `lastDeferredAt`/
+   *    `lastDeferredReason` (Db.markDeferred) and emits a `schedule_fire_deferred` event — but ONLY on a
+   *    TRANSITION into deferred (first defer, or the reason changing since last tick), never once per
+   *    tick for a schedule that stays blocked for the SAME reason. A schedule starved for hours would
+   *    otherwise write a near-identical event every 60s tick, flooding the event log. Both are cleared by
+   *    `markFired` on the schedule's next successful fire.
    */
   async tick(now: Date = new Date()): Promise<void> {
     const due = this.deps.db.listDueSchedules(now.toISOString());
@@ -98,7 +110,8 @@ export class Scheduler {
 
     const cap = this.deps.maxConcurrentManagers ?? DEFAULT_MAX_CONCURRENT_MANAGERS;
     const auditorCap = this.deps.maxConcurrentAuditors ?? DEFAULT_MAX_CONCURRENT_AUDITORS;
-    let liveManagers = this.deps.db.countLiveManagers(); // managers persisting from prior ticks
+    // Scheduler-spawned managers ONLY (card 53edd8d5) — a standing human/Lead-spawned fleet is excluded.
+    let liveManagers = this.deps.db.countLiveScheduledManagers();
     let liveAuditors = this.deps.db.countLiveAuditors(); // auditors (both kinds) — their OWN budget
 
     for (const s of due) {
@@ -108,8 +121,24 @@ export class Scheduler {
       // a deferred schedule keeps its past next_fire_at → it comes back due next tick. DB count + in-tick
       // increments cover both axes (pre-existing live + already-fired-this-tick).
       if (isAuditor ? liveAuditors >= auditorCap : liveManagers >= cap) {
+        const reason = isAuditor ? `auditor budget (${auditorCap}) reached` : `manager cap (${cap}) reached`;
         // eslint-disable-next-line no-console
-        console.error(`[scheduler] ${isAuditor ? `auditor budget (${auditorCap})` : `manager cap (${cap})`} reached — deferring schedule ${s.id} to the next tick`);
+        console.error(`[scheduler] ${reason} — deferring schedule ${s.id} to the next tick`);
+        // Deferral observability: record ONLY on a TRANSITION (first defer, or the reason changed) — a
+        // still-deferred-same-reason schedule writes NOTHING on this tick, so a schedule starved for
+        // hours doesn't flood the row/event log with a near-identical write every 60s. Best-effort: a
+        // failing durable-record write must never crash the per-schedule loop (mirrors the failure path
+        // below).
+        if (s.lastDeferredReason !== reason || !s.lastDeferredAt) {
+          try {
+            this.deps.db.markDeferred(s.id, now.toISOString(), reason);
+            this.deps.db.appendEvent({
+              id: randomUUID(), ts: now.toISOString(),
+              managerSessionId: "", kind: "schedule_fire_deferred",
+              detail: { scheduleId: s.id, cron: s.cron, kind: s.kind, reason },
+            });
+          } catch { /* never let the durable-record write itself crash the tick */ }
+        }
         continue;
       }
       // Finding 1 — deleted agent: never fireable → disable so it stops re-firing every tick.

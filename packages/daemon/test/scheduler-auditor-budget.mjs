@@ -53,16 +53,21 @@ const seedSchedule = (e, id, over = {}) => e.db.insertSchedule({
   id, agentId: e.agentId, cron: "*/5 * * * *", enabled: true,
   nextFireAt: new Date(Date.now() - 60_000).toISOString(), lastFiredAt: null, createdAt: new Date().toISOString(), ...over,
 });
-const seedLiveSession = (e, id, role) => e.db.insertSession({
+// Card 53edd8d5: a live 'manager' row only counts toward the Scheduler's manager-cap budget when it's
+// SCHEDULER-SPAWNED (scheduledSpawn: true) — a standing manager never counts. Pass scheduledSpawn:true
+// for any manager-role seed meant to genuinely fill the cap (auditor-role seeds are unaffected either way,
+// since the auditor budget counts by role alone).
+const seedLiveSession = (e, id, role, { scheduledSpawn = false } = {}) => e.db.insertSession({
   id, projectId: e.projId, agentId: e.agentId, engineSessionId: null, title: null, cwd: e.projId,
   processState: "live", resumability: "unknown", busy: false,
   createdAt: new Date().toISOString(), lastActivity: new Date().toISOString(), lastError: null, role,
+  scheduledSpawn,
 });
 
 // (1) Auditor NOT blocked by a full manager cap.
 {
   const e = makeEnv({ cap: 1, auditorCap: 2 });
-  seedLiveSession(e, "mgr-at-cap", "manager"); // managers at cap 1
+  seedLiveSession(e, "mgr-at-cap", "manager", { scheduledSpawn: true }); // managers at cap 1
   seedSchedule(e, "sch-aud", { kind: "auditor" });
   await e.scheduler.tick(new Date());
   check("(1) auditor schedule FIRES even though the manager cap is full",
@@ -73,7 +78,7 @@ const seedLiveSession = (e, id, role) => e.db.insertSession({
 // (1b) The same holds for the END-USER workspace-auditor kind (both kinds share the auditor budget).
 {
   const e = makeEnv({ cap: 1, auditorCap: 2 });
-  seedLiveSession(e, "mgr-at-cap2", "manager");
+  seedLiveSession(e, "mgr-at-cap2", "manager", { scheduledSpawn: true });
   seedSchedule(e, "sch-wsa", { kind: "workspace-auditor" });
   await e.scheduler.tick(new Date());
   check("(1b) workspace-auditor schedule FIRES even though the manager cap is full",
@@ -118,7 +123,7 @@ const seedLiveSession = (e, id, role) => e.db.insertSession({
 // `break`ing the loop, so the later AUDITOR still fires. (The continue-vs-break regression guard.)
 {
   const e = makeEnv({ cap: 1, auditorCap: 2 });
-  seedLiveSession(e, "mgr-full", "manager"); // manager cap (1) full
+  seedLiveSession(e, "mgr-full", "manager", { scheduledSpawn: true }); // manager cap (1) full
   seedSchedule(e, "sch-mgr-first", { nextFireAt: new Date(Date.now() - 120_000).toISOString() }); // earlier → processed first
   seedSchedule(e, "sch-aud-second", { kind: "auditor", nextFireAt: new Date(Date.now() - 60_000).toISOString() }); // later
   await e.scheduler.tick(new Date());
