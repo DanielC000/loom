@@ -13,7 +13,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, getWorktreeLatestNonMergeSha, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -3188,7 +3188,7 @@ export class SessionService {
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
     internal?: { skipCapQueueRecord?: boolean },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -3402,7 +3402,7 @@ export class SessionService {
       // guaranteeing its own ISOLATED worktree/branch that can never collide with a task's worktree or
       // with another taskless spawn's (this is also how a read-only reviewer avoids ever sharing the
       // author's worktree — see the guard note above).
-      const { worktreePath, branch, reusedDirtyWorktree } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
+      const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
       // Codescape C3: ensure the project's graph.json exists yet (lazily, on first worker spawn) —
       // fire-and-forget, NEVER blocks the spawn (isCodescapeEnabled folds in isLoomDev(), so a non-dev/
       // disabled daemon fires nothing; a graph that already exists is a no-op — see
@@ -3461,7 +3461,7 @@ export class SessionService {
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
         // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
         startupPrompt: appendMemoryRecallToStartupPrompt(
-          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree),
+          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase),
           workerProjectMemoryFramed,
         ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
@@ -3498,7 +3498,7 @@ export class SessionService {
       // worker_list placeholder doesn't linger alongside the now-real worker row.
       if (taskId) this.capQueue.clearForTask(taskId);
       else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
-      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree };
+      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, staleBase };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -3530,10 +3530,10 @@ export class SessionService {
   async spawnWorkerTracked(
     managerSessionId: string,
     opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }>> {
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo }>(
       key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.spawnWorker(managerSessionId, opts),
     );
@@ -6333,6 +6333,7 @@ export class SessionService {
   ): Promise<{
     filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[];
     patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string; hint?: string;
+    behindMain?: number;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
@@ -6351,13 +6352,26 @@ export class SessionService {
     // AFFIRMATIVE stranded signal warns; a check failure fails safe to NOT stranded). The diff fields
     // are returned unchanged.
     const stranded = await detectStrandedWork(project.repoPath, worker.worktreePath ?? worker.cwd, worker.branch, { timeoutMs: this.gitOpMs });
-    const warning = stranded.stranded
+    const strandedWarning = stranded.stranded
       ? `STRANDED WORK: worker committed to '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} commit(s) ahead) instead of its assigned branch '${worker.branch}', which is empty. Confirming would merge nothing and LOSE that work. Re-point '${worker.branch}' to ${stranded.commit} (or cherry-pick it) before confirming.`
       : undefined;
+    // Card 5150fdc2 part 4 — the merge-side backstop: "cheap honesty" that this branch's base is behind
+    // current main, independent of whether the spawn-time detection/kickoff note (parts 1+2) ran for this
+    // worker at all (it may have been spawned before this fix, or fallen behind mid-session). FAILS SAFE
+    // to `undefined` on any git error — never blocks or alters the review.
+    const behindMain = await countCommitsBehind(project.repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
+    const staleWarning = behindMain && behindMain > 0
+      ? `STALE BASE: this branch is rooted ${behindMain} commit(s) behind current main. confirmWorkerMerge's own union-merge will attempt to forward it automatically before the gate runs, but review the diff with that in mind — a stale-based rebuild can silently overwrite or conflict with a change that landed on main after this branch was cut.`
+      : undefined;
+    const warning = [strandedWarning, staleWarning].filter((w): w is string => !!w).join(" ") || undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
-      detail: { branch: worker.branch, filesChanged: diff.filesChanged, ...(warning ? { stranded: stranded.branch } : {}) },
+      detail: {
+        branch: worker.branch, filesChanged: diff.filesChanged,
+        ...(stranded.stranded ? { stranded: stranded.branch } : {}),
+        ...(behindMain ? { behindMain } : {}),
+      },
     });
     // Bounded by default: diffstat (files + totals) only. The full patch is included ONLY when requested;
     // otherwise a `note` tells the manager how to pull it. A requested patch that's still too large to
@@ -6386,6 +6400,7 @@ export class SessionService {
         : { note: "Diffstat only — re-call worker_merge with fullDiff:true for the full unified patch." }),
       ...(warning ? { warning } : {}),
       ...(diff.hint ? { hint: diff.hint } : {}),
+      ...(behindMain ? { behindMain } : {}),
     };
   }
 

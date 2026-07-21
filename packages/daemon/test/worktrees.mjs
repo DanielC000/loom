@@ -442,12 +442,75 @@ try {
     await removeWorktree(repo, wtO);
     await deleteBranch(repo, brO);
   }
+
+  // (p) card 5150fdc2 — stale worktree BASE detection + optional auto-forward at spawn time. A recovery
+  //     branch (>0 ahead, so recutStaleReusedBranch's fail-safe correctly leaves it untouched) whose base
+  //     has since fallen behind main used to be silently re-spawned onto its ORIGINAL fork point forever
+  //     (the mockups-first incident this card fixes). createWorktree now detects this and attempts a
+  //     CLEAN auto-forward (merging main into the worktree — never rebasing, never past a conflict); only
+  //     a conflict/failure surfaces `staleBase`.
+  {
+    // (p0) a FRESH worktree (never reused) never sets staleBase (mirrors h0).
+    const tP0 = "stalebase-fresh-cccc3333";
+    const freshP0 = await createWorktree(repo, "projWT", tP0);
+    check("(p0) a freshly-created worktree never sets staleBase", freshP0.staleBase === undefined);
+    await removeWorktree(repo, freshP0.worktreePath);
+    await deleteBranch(repo, freshP0.branch);
+
+    // (p1) CLEAN AUTO-FORWARD: main advances with a change UNRELATED to the branch's own — the forward
+    //      merges clean, so staleBase is ABSENT (resolved transparently) and the worktree ends up caught
+    //      up to main with the branch's own work intact.
+    const tP1 = "stalebase-clean-aaaa1111";
+    const { worktreePath: wtP1, branch: brP1 } = await createWorktree(repo, "projWT", tP1);
+    commitInto(wtP1, "p1.txt", "p1\n", "p1 commit"); // >0 ahead ⇒ recut is a no-op (recovery branch)
+    commitInto(repo, "main-advance-p1.txt", "main moved forward\n", "main advance p1"); // unrelated main advance
+    const mainTipP1 = git(repo, "rev-parse HEAD");
+    const reuseP1 = await createWorktree(repo, "projWT", tP1); // reuse (dir still on disk) → detect + auto-forward
+    check("(p1) clean auto-forward → staleBase ABSENT (resolved transparently)", reuseP1.staleBase === undefined);
+    check("(p1) worktree branch now contains main's advance (merge-base == main tip)",
+      git(wtP1, `merge-base HEAD ${mainTipP1}`) === mainTipP1);
+    check("(p1) main's forwarded file is present in the worktree", fs.existsSync(path.join(wtP1, "main-advance-p1.txt")));
+    check("(p1) the branch's own file is still present", fs.existsSync(path.join(wtP1, "p1.txt")));
+    check("(p1) worktree is clean after the forward (no leftover residue)", git(wtP1, "status --porcelain") === "");
+    await removeWorktree(repo, wtP1);
+    await deleteBranch(repo, brP1);
+
+    // (p2) CONFLICTING ABORT: branch and main both edit README.md since divergence — the auto-forward
+    //      attempt must abort CLEANLY (no MERGE_HEAD, no partial index, branch content byte-identical to
+    //      before the attempt) and staleBase must be surfaced with the correct baseSha/behindBy/changedFiles.
+    const tP2 = "stalebase-conflict-bbbb2222";
+    const baseShaP2 = git(repo, "rev-parse HEAD"); // captured BEFORE the branch is cut — its true fork point
+    const { worktreePath: wtP2, branch: brP2 } = await createWorktree(repo, "projWT", tP2);
+    commitInto(wtP2, "README.md", "branch version p2\n", "p2 branch README"); // >0 ahead ⇒ recut is a no-op
+    commitInto(repo, "README.md", "main version p2\n", "p2 main README");
+    const branchTipP2Before = git(wtP2, "rev-parse HEAD");
+    const reuseP2 = await createWorktree(repo, "projWT", tP2); // reuse → detect + auto-forward attempt (conflict)
+    check("(p2) conflicting forward → staleBase SURFACED", reuseP2.staleBase !== undefined);
+    check("(p2) staleBase.baseSha is the true fork point", reuseP2.staleBase?.baseSha === baseShaP2);
+    check("(p2) staleBase.behindBy counts main's 1 commit since the fork", reuseP2.staleBase?.behindBy === 1);
+    check("(p2) staleBase.changedFiles names README.md", reuseP2.staleBase?.changedFiles.includes("README.md"));
+    check("(p2) staleBase.truncated is false (well under the cap)", reuseP2.staleBase?.truncated === false);
+    let mergeHeadPresentP2 = true;
+    try { execSync(`git rev-parse -q --verify MERGE_HEAD`, { cwd: wtP2 }); } catch { mergeHeadPresentP2 = false; }
+    check("(p2) the abort left NO leftover MERGE_HEAD", !mergeHeadPresentP2);
+    check("(p2) the worktree's own git status is clean (merge --abort actually ran)", git(wtP2, "status --porcelain") === "");
+    check("(p2) branch tip is BYTE-IDENTICAL to before the aborted attempt", git(wtP2, "rev-parse HEAD") === branchTipP2Before);
+    // Line-ending normalized: `merge --abort`'s reset-to-HEAD checkout can rewrite LF→CRLF on Windows
+    // (core.autocrlf) even though the branch content itself is untouched — irrelevant to what's proven here.
+    const normP2 = (s) => s.replace(/\r\n/g, "\n");
+    check("(p2) branch content is still the BRANCH version (nothing silently overwritten)",
+      normP2(fs.readFileSync(path.join(wtP2, "README.md"), "utf8")) === "branch version p2\n");
+    check("(p2) canonical main's README is still its own version (branch change did NOT land)",
+      normP2(fs.readFileSync(path.join(repo, "README.md"), "utf8")) === "main version p2\n");
+    await removeWorktree(repo, wtP2);
+    await deleteBranch(repo, brP2);
+  }
 } finally {
   fs.rmSync(repo, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, every boot-reconcile op (removeWorktree's git ops AND its filesystem backstop, isBranchMerged, deleteBranch) is BOUNDED — neither a hung git nor a stuck directory handle can wedge daemon boot anywhere in the reconcile path — and a title naming a param/type (`<id>`) lands in the squash commit subject unescaped."
+  ? "\n✅ ALL PASS — worktree-per-worker isolates, merges + deletes the branch on a clean merge, tolerates re-spawn on a retained (rejected) task, never collides on the first 8 chars of a task id, every boot-reconcile op (removeWorktree's git ops AND its filesystem backstop, isBranchMerged, deleteBranch) is BOUNDED — neither a hung git nor a stuck directory handle can wedge daemon boot anywhere in the reconcile path — a title naming a param/type (`<id>`) lands in the squash commit subject unescaped — and a recovery branch whose base fell behind main is either auto-forwarded cleanly (staleBase absent, main's advance present, branch work intact) or, on a real conflict, aborts with ZERO residue and surfaces staleBase with the correct fork point/behind-count/changed-files."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

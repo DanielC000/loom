@@ -22,6 +22,17 @@ export interface WorktreeInfo {
    * leftover edits; they may be a nearly-complete change worth finishing).
    */
   reusedDirtyWorktree?: ReusedDirtyWorktreeInfo;
+  /**
+   * Set ONLY for a REUSED/reattached branch (either reuse path of {@link createWorktree}) whose history
+   * is missing commits current main HEAD carries — a RECOVERY branch (>0 commits ahead of ITS OWN base,
+   * so {@link recutStaleReusedBranch}'s 0-ahead fail-safe correctly leaves it untouched) whose base has
+   * since fallen behind main (board card 5150fdc2 — the mockups-first systematic case: a build re-spawned
+   * onto this branch silently roots at the ORIGINAL fork point forever). Absent for a fresh `-b` branch
+   * (always forks current HEAD), a 0-ahead branch (already re-cut onto current main above), OR a stale
+   * branch that was successfully auto-forwarded (see {@link resolveStaleBase}) — only present when the
+   * staleness is STILL THERE for the manager/worker to see.
+   */
+  staleBase?: StaleBaseInfo;
 }
 
 /** {@link WorktreeInfo.reusedDirtyWorktree} — a bounded summary of a reused worktree's leftover uncommitted work. */
@@ -34,6 +45,22 @@ export interface ReusedDirtyWorktreeInfo {
    *  `statusSummary` when `truncated` is true. */
   fileCount: number;
   /** True when `statusSummary` was capped (by line count or byte length) and does not list every path. */
+  truncated: boolean;
+}
+
+/** {@link WorktreeInfo.staleBase} — card 5150fdc2: a reused/reattached branch's base is behind current
+ *  main, and no clean auto-forward was possible (see {@link resolveStaleBase}). */
+export interface StaleBaseInfo {
+  /** The branch's fork point off main — `git merge-base <branch> <mainSha>` — BEFORE any forward attempt. */
+  baseSha: string;
+  /** `git rev-list --count <branch>..<mainSha>` — how many commits current main carries that this
+   *  branch's history is missing. Always > 0 (an undefined/0 result is never surfaced as staleBase). */
+  behindBy: number;
+  /** Bounded (~30) list of files that changed on main between `baseSha` and current main HEAD — enough
+   *  for a worker kickoff note to see the scope of what it's rooted behind, without growing the spawn
+   *  result/prompt unboundedly. */
+  changedFiles: string[];
+  /** True when `changedFiles` was capped and does not list every changed path. */
   truncated: boolean;
 }
 
@@ -526,6 +553,77 @@ async function detectReusedDirtyWorktree(worktreePath: string): Promise<ReusedDi
   }
 }
 
+/** Cap on {@link StaleBaseInfo.changedFiles} — enough for a worker kickoff note to see the scope of
+ *  what changed without growing the spawn result/prompt unboundedly. */
+const STALE_BASE_FILES_MAX = 30;
+
+/**
+ * Card 5150fdc2 part 1 — for a REUSED/reattached branch (either reuse path of {@link createWorktree},
+ * called AFTER {@link recutStaleReusedBranch} has already had its say): is this branch's history missing
+ * commits current main HEAD carries? A 0-ahead branch was already re-cut onto `mainSha` above, so this
+ * only ever fires for a RECOVERY branch (>0 commits ahead of ITS OWN old base, correctly left untouched by
+ * the recut's fail-safe) whose base has since fallen behind — the systematic case a mockups-first branch
+ * hits: `recutStaleReusedBranch` never advances it (correctly — see {@link mayRecutOntoMain}), so a build
+ * that started at the old fork point silently stays rooted there across every re-spawn.
+ *
+ * Uses {@link countCommitsBehind} for the "how many" signal (fail-safe to `undefined`/not-stale on any
+ * error); only when that's genuinely > 0 do we pay for `merge-base` + a bounded `diff --name-only` to name
+ * the fork point and what changed since. Any error past the count read also reads as "not stale" — this is
+ * purely ADVISORY and must never block or alter a spawn.
+ */
+async function detectStaleBase(repoPath: string, branch: string, mainSha: string): Promise<StaleBaseInfo | undefined> {
+  const behindBy = await countCommitsBehind(repoPath, branch, mainSha);
+  if (!behindBy || behindBy <= 0) return undefined;
+  try {
+    const git = simpleGit(repoPath);
+    const baseSha = (await git.raw(["merge-base", branch, mainSha])).trim();
+    const filesRaw = await git.raw(["diff", "--name-only", baseSha, mainSha]);
+    const allFiles = filesRaw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean);
+    return {
+      baseSha, behindBy,
+      changedFiles: allFiles.slice(0, STALE_BASE_FILES_MAX),
+      truncated: allFiles.length > STALE_BASE_FILES_MAX,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Card 5150fdc2 part 3 — OPTIONAL auto-forward for a stale reused/reattached branch, attempted ONLY when
+ * {@link detectStaleBase} found real staleness. Reuses {@link mergeMainIntoWorktree} VERBATIM — the exact
+ * clean-merge-only, abort-on-conflict-or-failure primitive `confirmWorkerMerge`'s own union-merge already
+ * uses (card c0aeb5b2) — rather than reimplementing it. NEVER rebases (that would rewrite the retained
+ * history {@link mayRecutOntoMain}'s 0-ahead fail-safe exists to protect) and never forces past a conflict:
+ * `mergeMainIntoWorktree` itself aborts cleanly (no `MERGE_HEAD`, no partial index) on anything but a clean
+ * merge, leaving the worktree byte-identical to before this call.
+ *
+ * Returns `undefined` on a clean forward (branch now carries main's tip — merge-base == main HEAD — so
+ * there's nothing left to tell the worker/manager); returns the ORIGINAL `info` unchanged on a conflict or
+ * any other failure, so the caller still surfaces it (never silent either way).
+ */
+async function autoForwardStaleBase(
+  repoPath: string, worktreePath: string, info: StaleBaseInfo,
+): Promise<StaleBaseInfo | undefined> {
+  const forward = await mergeMainIntoWorktree(repoPath, worktreePath);
+  if (forward.ok) {
+    // eslint-disable-next-line no-console
+    console.log(`[worktree:stale-base] auto-forwarded ${worktreePath} — was ${info.behindBy} commit(s) behind (fork ${info.baseSha}), now caught up to main`);
+    return undefined;
+  }
+  return info;
+}
+
+/** Combines {@link detectStaleBase} + the optional {@link autoForwardStaleBase} for ONE reuse/reattach
+ *  path of {@link createWorktree} (card 5150fdc2, parts 1+3). */
+async function resolveStaleBase(
+  repoPath: string, worktreePath: string, branch: string, mainSha: string,
+): Promise<StaleBaseInfo | undefined> {
+  const info = await detectStaleBase(repoPath, branch, mainSha);
+  if (!info) return undefined;
+  return autoForwardStaleBase(repoPath, worktreePath, info);
+}
+
 /**
  * Create (or re-attach) an isolated git worktree for a worker (phase-2 §A5): a checkout under
  * ~/.loom/worktrees on branch `loom/<key>` off the repo's current HEAD. Worktrees share the repo's
@@ -558,7 +656,16 @@ export async function createWorktree(
     // Board card 2250836c: surface (never clean) any real leftover uncommitted work on this reused
     // worktree — read-only, runs after the recut above so it reports the ACTUAL post-recut state.
     const reusedDirtyWorktree = await detectReusedDirtyWorktree(worktreePath);
-    return reusedDirtyWorktree ? { worktreePath, branch, mainSha, reusedDirtyWorktree } : { worktreePath, branch, mainSha };
+    // Card 5150fdc2 parts 1+3: a recovery (>0-ahead) branch whose base has since fallen behind main is
+    // detected and, when possible, auto-forwarded — see resolveStaleBase. Runs AFTER the dirty-leftover
+    // read above so that read reflects the PRE-merge state (the leftover uncommitted work a manager/
+    // worker should see is whatever was there before Loom does anything else to the tree).
+    const staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha);
+    return {
+      worktreePath, branch, mainSha,
+      ...(reusedDirtyWorktree ? { reusedDirtyWorktree } : {}),
+      ...(staleBase ? { staleBase } : {}),
+    };
   }
 
   const git = simpleGit(repoPath);
@@ -568,16 +675,21 @@ export async function createWorktree(
   await git.raw(branchExists
     ? ["worktree", "add", worktreePath, branch]        // branch survived a worktree removal → re-attach
     : ["worktree", "add", worktreePath, "-b", branch]); // fresh task → new branch
+  let staleBase: StaleBaseInfo | undefined;
   if (branchExists) {
     // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
     // recovery branch (unmerged work) → untouched.
     await recutStaleReusedBranch(repoPath, worktreePath, branch);
+    // Card 5150fdc2 parts 1+3 — same detect+auto-forward as the dir-exists reuse path above, BEFORE
+    // provisionWorktreeDeps below so a package.json/lockfile change the forward brings in is what
+    // actually gets installed.
+    staleBase = await resolveStaleBase(repoPath, worktreePath, branch, mainSha);
   }
 
   // Populate node_modules so the worker is build-ready without paying a full `pnpm install` first.
   // Best-effort + bounded; on failure the worker just installs on its own (see provisionWorktreeDeps).
   await provisionWorktreeDeps(worktreePath, deps);
-  return { worktreePath, branch, mainSha };
+  return staleBase ? { worktreePath, branch, mainSha, staleBase } : { worktreePath, branch, mainSha };
 }
 
 /**
@@ -863,6 +975,27 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
     return (await withTimeout(git.raw(["branch", "--merged", base, "--list", branch]), timeoutMs, "git branch --merged")).trim() !== "";
   } catch {
     return false;
+  }
+}
+
+/**
+ * How many commits does `base` (default the repo's current HEAD) carry that `branch`'s history is
+ * missing — `git rev-list --count <branch>..<base>`. Card 5150fdc2: the ONE counting primitive shared by
+ * both the spawn-time stale-base detector ({@link detectStaleBase}, part 1) and the merge-review backstop
+ * (`reviewWorkerMerge`'s `worker_merge` step, part 4) — a manager reviewing a worker's branch sees this
+ * even independent of whether the spawn-time check already ran for it (a worker spawned before this fix,
+ * or one whose branch fell behind mid-session). BOUNDED (mirrors {@link isBranchMerged}'s hardening — this
+ * can run on the same review/merge hot path) and FAILS SAFE to `undefined` on any error/timeout/parse
+ * failure — advisory-only, so a check hiccup must never block or alter a spawn or a review.
+ */
+export async function countCommitsBehind(repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {}): Promise<number | undefined> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const raw = await withTimeout(git.raw(["rev-list", "--count", `${branch}..${base}`]), timeoutMs, "git rev-list --count (behind base)");
+    const n = parseInt(raw.trim(), 10);
+    return Number.isFinite(n) ? n : undefined;
+  } catch {
+    return undefined;
   }
 }
 

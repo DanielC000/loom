@@ -1,4 +1,4 @@
-import type { ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
+import type { ReusedDirtyWorktreeInfo, StaleBaseInfo } from "../git/worktrees.js";
 
 /**
  * Card af902717 — compose a WORKER session's opening from its agent BASE BRIEF + the dynamic part.
@@ -34,6 +34,13 @@ import type { ReusedDirtyWorktreeInfo } from "../git/worktrees.js";
  * still carries real leftover uncommitted work), a reconcile note is injected naming the leftover paths —
  * this is what removes the need for a manager to hand-instruct a `git status; reconcile` note on every
  * retry (the finding this card fixes).
+ *
+ * `staleBase` (board card 5150fdc2, part 2) is likewise OPTIONAL: `undefined` omits the block entirely
+ * (a fresh branch, a 0-ahead branch, or a stale branch that was auto-forwarded cleanly never sets it — see
+ * `createWorktree`'s `resolveStaleBase`). When present, a forward-merge note is injected naming how many
+ * commits behind main this branch's base is and what changed on main since — the fix for the incident
+ * this card exists to close: a re-spawn onto a commits-ahead branch used to silently keep building on its
+ * ORIGINAL fork point forever, with no signal to the worker that main had moved on.
  */
 export function composeWorkerStartupPrompt(
   brief: string | undefined,
@@ -41,6 +48,7 @@ export function composeWorkerStartupPrompt(
   cwd?: string,
   referenceRepos?: string[],
   reusedDirtyWorktree?: ReusedDirtyWorktreeInfo,
+  staleBase?: StaleBaseInfo,
 ): string {
   const base = brief?.trim();
   const body = base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
@@ -67,5 +75,17 @@ export function composeWorkerStartupPrompt(
       "\nFinish that work if it's good, or revert it (`git checkout .` / `git clean -fd`) before you make " +
       "any new edits — reconcile BEFORE building on top of an unreviewed leftover."
     : "";
-  return `${block}${refBlock}${dirtyBlock}\n\n${body}`;
+  const staleBlock = staleBase
+    ? "\n\n**⚠ Stale branch base — merge the mainline forward before building:** your branch's history is " +
+      `${staleBase.behindBy} commit(s) behind the project's current mainline tip (this branch forked at ` +
+      `\`${staleBase.baseSha}\`). Merge (or rebase) the mainline forward into your branch BEFORE you start ` +
+      "editing — building on a stale base risks silently reverting or conflicting with work that landed " +
+      "on the mainline after this branch was cut." +
+      (staleBase.changedFiles.length > 0
+        ? "\n\nFiles changed on the mainline since this branch's fork point:\n\n```\n" +
+          `${staleBase.changedFiles.join("\n")}\n\`\`\`\n` +
+          (staleBase.truncated ? `\n(showing the first ${staleBase.changedFiles.length} — more files changed)\n` : "")
+        : "")
+    : "";
+  return `${block}${refBlock}${dirtyBlock}${staleBlock}\n\n${body}`;
 }

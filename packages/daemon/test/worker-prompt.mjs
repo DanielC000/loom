@@ -128,6 +128,26 @@ try {
   const composedTruncated = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, truncatedInfo);
   check("(1f) pure: truncated summary surfaces the true total count", composedTruncated.includes("40"));
 
+  // ===================== (1g) card 5150fdc2: staleBase forward-merge-note block =====================
+  check("(1g) pure: no staleBase (undefined) ⇒ byte-identical to the pre-card composition", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, dirtyInfo) === composedDirty);
+  check("(1g) pure: no staleBase ⇒ no stale-base block", !composedCwd.includes("Stale branch base"));
+  const staleInfo = { baseSha: "abc123def456", behindBy: 3, changedFiles: ["src/a.ts", "src/b.ts"], truncated: false };
+  const composedStale = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, staleInfo);
+  check("(1g) pure: staleBase set ⇒ stale-base block present", composedStale.includes("Stale branch base"));
+  check("(1g) pure: block names the behind-by count", composedStale.includes("3 commit(s) behind"));
+  check("(1g) pure: block names the fork-point sha", composedStale.includes("abc123def456"));
+  check("(1g) pure: block names the changed files", composedStale.includes("src/a.ts") && composedStale.includes("src/b.ts"));
+  check("(1g) pure: block instructs merging/rebasing the mainline forward", /merge|rebase/i.test(composedStale));
+  check("(1g) pure: worktree location block + brief + dynamic still all present alongside the stale-base block", composedStale.includes("/wt/path") && composedStale.includes("BRIEF") && composedStale.includes("DYNAMIC"));
+  check("(1g) pure: no cwd ⇒ staleBase is ignored too, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, undefined, undefined, staleInfo) === "BRIEF\n\n---\n\nDYNAMIC");
+  const staleTruncatedInfo = { baseSha: "deadbeef0000", behindBy: 50, changedFiles: Array.from({ length: 30 }, (_, i) => `f${i}.ts`), truncated: true };
+  const composedStaleTruncated = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, staleTruncatedInfo);
+  check("(1g) pure: truncated changedFiles surfaces a 'more files changed' note", /more files changed/i.test(composedStaleTruncated));
+  // BOTH a dirty reuse note AND a stale-base note can co-exist (independent signals) — order: dirty then stale.
+  const composedBoth = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, dirtyInfo, staleInfo);
+  check("(1g) pure: dirtyBlock + staleBlock can co-exist", composedBoth.includes("Reused worktree") && composedBoth.includes("Stale branch base"));
+  check("(1g) pure: dirty block leads the stale-base block", order(composedBoth, "Reused worktree", "Stale branch base"));
+
   // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
   worktrees.push(wA.worktreePath);
@@ -223,6 +243,40 @@ try {
   check("(5) the reconcile note names the leftover file", (oWD2?.startupPrompt ?? "").includes("leftover.txt"));
   check("(5) the reconcile note still leads into the manager's kickoff", order(oWD2?.startupPrompt ?? "", "Reused worktree", "KICKOFF_D2"));
   check("(5) the leftover file is STILL ON DISK — spawning never cleaned it", fs.existsSync(path.join(wD2.worktreePath, "leftover.txt")));
+  db.setProcessState(wD2.id, "exited"); // free a concurrency-cap slot under mgr1 for section (6) below
+
+  // ===================== (6) card 5150fdc2: a re-spawn onto a commits-ahead branch whose base fell =====
+  // behind main (and can't be cleanly auto-forwarded — a real conflict) surfaces staleBase on the spawn
+  // result AND injects the forward-merge note into the new worker's OWN kickoff — end-to-end through the
+  // real spawnWorker/createWorktree path, same style as section (5).
+  const taskE = "55555555-5555-5555-8555-555555555555";
+  db.insertTask({ id: taskE, projectId: "pW", title: "E", body: "", columnKey: "todo", position: 4, createdAt: now, updatedAt: now });
+
+  const wE1 = await svc.spawnWorker("mgr1", { taskId: taskE, agentId: "agentDev", kickoffPrompt: "KICKOFF_E1" });
+  worktrees.push(wE1.worktreePath);
+  check("(6) fresh spawn never sets staleBase", wE1.staleBase === undefined);
+  // Worker commits on its branch (>0 ahead ⇒ recutStaleReusedBranch's fail-safe leaves it untouched later).
+  fs.writeFileSync(path.join(wE1.worktreePath, "README.md"), "branch version E\n");
+  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "E branch commit"`, { cwd: wE1.worktreePath });
+  // Main advances with a CONFLICTING edit to the SAME file — the auto-forward attempt can't merge clean.
+  fs.writeFileSync(path.join(repo, "README.md"), "main version E\n");
+  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "E main commit"`, { cwd: repo });
+  db.setProcessState(wE1.id, "exited"); // frees the one-live-worker-per-task guard for the re-spawn below
+
+  const wE2 = await svc.spawnWorker("mgr1", { taskId: taskE, agentId: "agentDev", kickoffPrompt: "KICKOFF_E2" });
+  check("(6) re-spawn reuses the SAME worktree path", wE2.worktreePath === wE1.worktreePath);
+  check("(6) re-spawn RESULT carries staleBase (auto-forward hit a real conflict)", wE2.staleBase !== undefined);
+  check("(6) staleBase.behindBy is 1 (main's one commit since the fork)", wE2.staleBase?.behindBy === 1);
+  check("(6) staleBase.changedFiles names README.md", wE2.staleBase?.changedFiles.includes("README.md"));
+
+  const oWE2 = optsFor(wE2.id);
+  check("(6) the NEW worker's OWN kickoff carries the stale-base note", (oWE2?.startupPrompt ?? "").includes("Stale branch base"));
+  check("(6) the stale-base note names the behind-by count", (oWE2?.startupPrompt ?? "").includes("1 commit(s) behind"));
+  check("(6) the stale-base note still leads into the manager's kickoff", order(oWE2?.startupPrompt ?? "", "Stale branch base", "KICKOFF_E2"));
+  // The conflicting auto-forward attempt aborted cleanly — the branch's own committed content survives.
+  const normE = (s) => s.replace(/\r\n/g, "\n");
+  check("(6) the branch's own committed content survived the aborted auto-forward attempt",
+    normE(fs.readFileSync(path.join(wE2.worktreePath, "README.md"), "utf8")) === "branch version E\n");
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
   if (repoR) { for (const wt of worktreesR) { try { await removeWorktree(repoR, wt); } catch { /* best-effort */ } } }

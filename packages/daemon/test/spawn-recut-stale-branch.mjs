@@ -12,6 +12,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) reused EMPTY branch (0 ahead) → worktree comes up at current main's HEAD (re-cut);
 //   (b) reused branch WITH an unmerged commit (>0 ahead) → that commit is PRESERVED (recovery untouched);
 //   (c) fresh task (no prior branch) → new branch cut off current main, unchanged behavior.
+//
+// Card 5150fdc2 UPDATE: scenarios (b)/(b2)'s setup (a recovery branch whose OLD base has since fallen
+// behind main) is now ALSO exactly what triggers the NEW stale-base auto-forward (createWorktree's
+// `resolveStaleBase`) — since main's advance in (b)/(b2) is UNRELATED to the recovery commit's own file,
+// the forward merges CLEAN. This is a DELIBERATE relaxation of this test's own invariant, so it's spelled
+// out precisely for review:
+//   - The invariant this file guards was ALWAYS "never DISCARD recovery work" — never "HEAD never moves".
+//     A clean auto-forward moves HEAD (via a merge commit) but keeps the recovery commit as a real
+//     ANCESTOR of the new HEAD — nothing is reset, rewritten, or lost, only forwarded. (b)/(b2) below now
+//     PROVE that with `git merge-base --is-ancestor` (real ancestry, not a byte-equality proxy) PLUS the
+//     recovery file's CONTENT (not just its existence) PLUS main's forwarded file's presence.
+//   - The OTHER half of "never discard": when the forward WOULD conflict, it must abort cleanly and
+//     leave the recovery branch untouched (byte-identical, this time — nothing to forward). NEW scenario
+//     (b3) below proves exactly that, so both halves of the auto-forward's safety are visible in this one
+//     file: recovery work survives a CLEAN forward (moved, not lost) and survives a CONFLICTING forward
+//     attempt (not moved at all, aborted cleanly, staleBase surfaced instead of silently resolved).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/spawn-recut-stale-branch.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -47,6 +63,16 @@ const commitInto = (dir, file, body, msg) => {
   fs.writeFileSync(path.join(dir, file), body);
   execSync(`git add . && git ${GIT_ID} commit -qm "${msg}"`, { cwd: dir });
 };
+// REAL ancestry proof (card 5150fdc2's (b)/(b2) relaxation) — `git merge-base --is-ancestor <a> <b>`
+// exits 0 iff `a` is an ancestor of (or equal to) `b`; non-zero otherwise. Used instead of a merge-base-
+// equality proxy so the "recovery work was never discarded" claim is checked the same way `git` itself
+// would answer it, not inferred from a derived SHA comparison.
+const isAncestor = (cwd, ancestorSha, ref) => {
+  try { execSync(`git merge-base --is-ancestor ${ancestorSha} ${ref}`, { cwd }); return true; } catch { return false; }
+};
+// Line-ending normalized read — Windows git (core.autocrlf) can rewrite LF→CRLF on a checkout/merge-abort
+// even when the content itself is untouched; irrelevant to what these checks prove.
+const readNorm = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 
 const repo = path.join(os.tmpdir(), `loom-recut-repo-${Date.now()}`);
 const PROJ = "projRecut";
@@ -90,11 +116,18 @@ try {
   commitInto(repo, "main-advance-b.txt", "C3\n", "advance main to C3");
   const c3 = head(repo);
   check("(b setup) recovery branch is 1 commit ahead of current main", git(repo, `rev-list --count ${c3}..${B.branch}`) === "1");
-  // Re-spawn: dir present → reuse path. A branch with unmerged work must be left EXACTLY as-is.
+  // Re-spawn: dir present → reuse path. A branch with unmerged work must never be RESET — but card
+  // 5150fdc2's auto-forward now fires here too (the branch is stale relative to c3): main's advance is
+  // unrelated to the recovery commit's file, so the forward merges CLEAN.
   const Breuse = await createWorktree(repo, PROJ, tB);
-  check("(b) DIR-PRESENT recovery branch PRESERVED → worktree HEAD == the recovery tip (not reset)", head(Breuse.worktreePath) === recoveryTip);
-  check("(b) the recovery commit's file is still present", fs.existsSync(path.join(Breuse.worktreePath, "recovery.txt")));
-  check("(b) recovery branch was NOT advanced to current main", git(repo, `rev-parse ${B.branch}`) !== c3);
+  check("(b) card 5150fdc2: clean auto-forward → staleBase ABSENT (resolved transparently)", Breuse.staleBase === undefined);
+  check("(b) DIR-PRESENT recovery work PROVABLY NOT DISCARDED — the recovery tip is a real ancestor of the new HEAD",
+    isAncestor(Breuse.worktreePath, recoveryTip, "HEAD"));
+  check("(b) the recovery commit's file is present with its ORIGINAL content (not clobbered)",
+    readNorm(path.join(Breuse.worktreePath, "recovery.txt")) === "real prior work\n");
+  check("(b) the worktree was ALSO forwarded to include main's advance (clean auto-forward moved HEAD)",
+    isAncestor(Breuse.worktreePath, c3, "HEAD") && readNorm(path.join(Breuse.worktreePath, "main-advance-b.txt")) === "C3\n");
+  check("(b) recovery branch pointer was NOT reset to bare current main (still its own history, now forwarded)", git(repo, `rev-parse ${B.branch}`) !== c3);
   // cleanup B
   execSync(`git worktree remove --force "${B.worktreePath}"`, { cwd: repo });
   execSync(`git ${GIT_ID} branch -D ${B.branch}`, { cwd: repo });
@@ -132,11 +165,49 @@ try {
   const c5 = head(repo);
   check("(b2 setup) surviving recovery branch is 1 commit ahead of current main", git(repo, `rev-list --count ${c5}..${D.branch}`) === "1");
   const Dreattach = await createWorktree(repo, PROJ, tD);
-  check("(b2) BRANCH-PRESENT recovery branch PRESERVED → worktree HEAD == the recovery tip (not reset)", head(Dreattach.worktreePath) === recovery2Tip);
-  check("(b2) the recovery commit's file is present in the re-attached tree", fs.existsSync(path.join(Dreattach.worktreePath, "recovery2.txt")));
-  check("(b2) recovery branch was NOT advanced to current main", git(repo, `rev-parse ${D.branch}`) !== c5);
+  check("(b2) card 5150fdc2: clean auto-forward → staleBase ABSENT (resolved transparently)", Dreattach.staleBase === undefined);
+  check("(b2) BRANCH-PRESENT recovery work PROVABLY NOT DISCARDED — the recovery tip is a real ancestor of the new HEAD",
+    isAncestor(Dreattach.worktreePath, recovery2Tip, "HEAD"));
+  check("(b2) the recovery commit's file is present in the re-attached tree with its ORIGINAL content",
+    readNorm(path.join(Dreattach.worktreePath, "recovery2.txt")) === "real prior work 2\n");
+  check("(b2) the worktree was ALSO forwarded to include main's advance (clean auto-forward moved HEAD)",
+    isAncestor(Dreattach.worktreePath, c5, "HEAD") && readNorm(path.join(Dreattach.worktreePath, "main-advance-d.txt")) === "C5\n");
+  check("(b2) recovery branch pointer was NOT reset to bare current main (still its own history, now forwarded)", git(repo, `rev-parse ${D.branch}`) !== c5);
   execSync(`git worktree remove --force "${Dreattach.worktreePath}"`, { cwd: repo });
   execSync(`git ${GIT_ID} branch -D ${D.branch}`, { cwd: repo });
+
+  // ============================================================================================
+  // (b3) card 5150fdc2 — CONFLICTING advance: the recovery branch's own edit conflicts with main's own
+  //      edit to the SAME file since the branch's fork. The auto-forward attempt must ABORT CLEANLY (no
+  //      MERGE_HEAD, no partial index, branch tip BYTE-IDENTICAL to before the attempt — nothing to
+  //      forward here, so nothing should move) and staleBase must be SURFACED rather than silently
+  //      resolved. This is the other half of "never discard recovery work": (b)/(b2) proved a clean
+  //      forward moves HEAD without losing anything; this proves a conflicting forward moves NOTHING.
+  // ============================================================================================
+  const tF = "recovery-conflict-ffff-6666";
+  const baseShaF = head(repo); // the branch's true fork point, captured BEFORE it diverges from either side
+  const F = await createWorktree(repo, PROJ, tF);
+  commitInto(F.worktreePath, "README.md", "branch version F\n", "F recovery commit"); // 1 commit ahead
+  const recoveryTipF = head(F.worktreePath);
+  commitInto(repo, "README.md", "main version F\n", "advance main to C6 (conflicting)");
+  const c6 = head(repo);
+  check("(b3 setup) recovery branch is 1 commit ahead; main advanced by a CONFLICTING edit to the same file",
+    git(repo, `rev-list --count ${c6}..${F.branch}`) === "1");
+  const Freuse = await createWorktree(repo, PROJ, tF);
+  check("(b3) conflicting forward → staleBase SURFACED (never silently resolved)", Freuse.staleBase !== undefined);
+  check("(b3) staleBase.baseSha is the true fork point", Freuse.staleBase?.baseSha === baseShaF);
+  check("(b3) staleBase.behindBy is 1 (main's one conflicting commit since the fork)", Freuse.staleBase?.behindBy === 1);
+  let mergeHeadPresentF = true;
+  try { execSync("git rev-parse -q --verify MERGE_HEAD", { cwd: Freuse.worktreePath }); } catch { mergeHeadPresentF = false; }
+  check("(b3) the aborted attempt left NO leftover MERGE_HEAD", !mergeHeadPresentF);
+  check("(b3) worktree is clean (merge --abort actually ran, no partial index)", git(Freuse.worktreePath, "status --porcelain") === "");
+  check("(b3) branch tip is BYTE-IDENTICAL to before the aborted attempt — nothing moved", head(Freuse.worktreePath) === recoveryTipF);
+  check("(b3) the recovery commit's content survived the aborted attempt, UNALTERED",
+    readNorm(path.join(Freuse.worktreePath, "README.md")) === "branch version F\n");
+  check("(b3) canonical main's own version is untouched (branch change did NOT land)",
+    readNorm(path.join(repo, "README.md")) === "main version F\n");
+  execSync(`git worktree remove --force "${Freuse.worktreePath}"`, { cwd: repo });
+  execSync(`git ${GIT_ID} branch -D ${F.branch}`, { cwd: repo });
 
   // ============================================================================================
   // (c) FRESH task (no prior branch/dir) → new branch cut off current main — unchanged behavior.
@@ -155,6 +226,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — createWorktree re-cuts an EMPTY/STALE reused branch (0 commits ahead) onto current main across BOTH reuse shapes (dir-present reuse AND branch-present/dir-gone re-attach), PRESERVES a recovery branch that carries real unmerged work, and leaves the fresh-task path cutting off current main unchanged."
+  ? "\n✅ ALL PASS — createWorktree re-cuts an EMPTY/STALE reused branch (0 commits ahead) onto current main across BOTH reuse shapes (dir-present reuse AND branch-present/dir-gone re-attach), PRESERVES a recovery branch that carries real unmerged work — never reset, and per card 5150fdc2 either cleanly auto-forwarded (recovery tip PROVABLY an ancestor of the new HEAD, both files' content intact) or, on a real conflict, aborted with the recovery tip byte-identical and staleBase surfaced instead — and leaves the fresh-task path cutting off current main unchanged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
