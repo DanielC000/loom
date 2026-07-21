@@ -85,6 +85,9 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/update-status" },
   { method: "GET", pattern: "/api/orchestration/status" },
   { method: "GET", pattern: "/api/orchestration/events" },
+  // Read-only schedule run-history (the schedule-fire events) — pure read, no lifecycle. The schedule
+  // WRITERS on /api/schedules stay Tier-0.
+  { method: "GET", pattern: "/api/schedules/history" },
   { method: "GET", pattern: "/api/projects/:id/git/log" },
   { method: "GET", pattern: "/api/projects/:id/git/branches" },
   { method: "GET", pattern: "/api/projects/:id/git/reference-repos/:index/log" },

@@ -32,7 +32,7 @@ function assertNotProdDbInTest(file: string): void {
 import type {
   Project, Agent, AgentListItem, Session, Task, ProjectConfigOverride, PlatformConfigOverride, Profile,
   ProcessState, Resumability, SessionListItem, SessionRole,
-  OrchestrationEvent, OrchestrationEventKind, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
+  OrchestrationEvent, OrchestrationEventKind, ScheduleHistoryPage, ScheduleHistoryEntry, Schedule, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, Question, QuestionInboxItem, QuestionState, QuestionType, PermissionScope, ProvisionTarget, PendingBinding, PresetPrompt, PresetPromptSuggestion,
   CompanionBinding, CompanionAllowedSender, CompanionVoicePref, CompanionMessage, CompanionConversationSummary, CompanionRoute,
   CompanionCapabilityGrant,
   ApiKey, ApiKeyStatus, ApiKeyCaps, GatewayToken, GatewayTokenStatus, AgentRun, RunStatus, RunEvent, RunEventKind, KanbanColumn,
@@ -1118,6 +1118,16 @@ const CONVERSATION_PREVIEW_MAX_CHARS = 120;
  * `limit` is clamped into [1, MAX_ARCHIVED_PAGE] so a stray huge value can't reintroduce the same payload.
  */
 const MAX_ARCHIVED_PAGE = 500;
+
+/** Clamp for a bounded schedule-fire history page (listScheduleHistory) — same bound + rationale as
+ *  MAX_ARCHIVED_PAGE: the history read is god-eye over every fire ever recorded, so a stray huge `limit`
+ *  can't be allowed to return the whole event log in one payload. */
+const MAX_SCHEDULE_HISTORY_PAGE = 500;
+
+/** The schedule-fire orchestration-event kinds backing the run-history view (a paused/usage-limited tick
+ *  records NO event, so there is deliberately no `skipped` outcome). Kept as a frozen tuple so the SQL
+ *  `IN (...)` clause and any consumer stay in lockstep. */
+const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedule_fire_failed"] as const;
 
 /**
  * One worktree dir whose killable removal was force-KILLED on timeout (genuinely wedged, not a clean
@@ -4359,6 +4369,49 @@ export class Db {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM sessions WHERE role IN ('auditor', 'workspace-auditor') AND process_state = 'live'")
       .get() as { c: number }).c;
   }
+  /**
+   * A BOUNDED, newest-first page of schedule-fire history (kinds `schedule_fired` /
+   * `schedule_fire_deferred` / `schedule_fire_failed`) plus the TOTAL count for the current filter —
+   * backing the Schedules page's lazy run-history section (`GET /api/schedules/history`). God-eye across
+   * ALL schedules (matching the god-eye schedules table); an optional `scheduleId` scopes it to one.
+   *
+   * Enrichment (schedule name + the target agent's "Project / Agent" label + the spawned session id) is a
+   * SINGLE query with LEFT JOINs (events → schedules → agents → projects) — NOT a per-row lookup: this DB
+   * is synchronous (better-sqlite3), so a 100-row page resolved with one query-per-row would be 100
+   * blocking round-trips that stall every other concurrent handler (the N+1 trap). The JOINs are LEFT so a
+   * fire whose schedule was later deleted still returns (its enrichment columns come back NULL — the
+   * durable event outlives the schedule row). `cron` falls back to the value carried in the event `detail`
+   * when the schedule row is gone. `limit` is clamped into [1, MAX_SCHEDULE_HISTORY_PAGE] and the EFFECTIVE
+   * value is returned (same "read it back so Load-more can't dead-end at the clamp" contract as the
+   * archived-sessions pages). Ordered by `ts DESC, seq DESC` — `seq` is the never-reused monotonic tiebreak
+   * for same-timestamp fires.
+   */
+  listScheduleHistory(opts: { scheduleId?: string; kind?: ScheduleHistoryEntry["kind"]; limit: number; offset?: number }): ScheduleHistoryPage {
+    const lim = Math.max(1, Math.min(opts.limit, MAX_SCHEDULE_HISTORY_PAGE));
+    const offset = opts.offset ?? 0;
+    // The kind set: all three by default, or exactly one when an outcome filter is applied. Filtering by
+    // kind SERVER-SIDE (not client-side over already-loaded pages) is what keeps "Load more" honest under
+    // a filter — a client-side filter would only ever see fired/deferred/failed rows within the pages it
+    // had already fetched, dead-ending short of the real filtered total (the archived-sessions paging trap).
+    const kinds: readonly string[] = opts.kind ? [opts.kind] : SCHEDULE_FIRE_KINDS;
+    const kindList = kinds.map((k) => `'${k}'`).join(",");
+    const filter = opts.scheduleId ? " AND json_extract(e.detail_json, '$.scheduleId') = @scheduleId" : "";
+    const params = opts.scheduleId ? { scheduleId: opts.scheduleId } : {};
+    const total = (this.db.prepare(
+      `SELECT COUNT(*) AS c FROM orchestration_events e WHERE e.kind IN (${kindList})${filter}`,
+    ).get(params) as { c: number }).c;
+    const rows = this.db.prepare(
+      `SELECT e.*, s.name AS schedule_name, s.cron AS schedule_cron,
+              a.name AS agent_name, p.name AS project_name
+       FROM orchestration_events e
+       LEFT JOIN schedules s ON json_extract(e.detail_json, '$.scheduleId') = s.id
+       LEFT JOIN agents a ON s.agent_id = a.id
+       LEFT JOIN projects p ON a.project_id = p.id
+       WHERE e.kind IN (${kindList})${filter}
+       ORDER BY e.ts DESC, e.seq DESC LIMIT @limit OFFSET @offset`,
+    ).all({ ...params, limit: lim, offset }) as Row[];
+    return { total, limit: lim, items: rows.map(toScheduleHistoryEntry) };
+  }
   /** A manager's audit trail in chronological order (rowid breaks same-timestamp ties). */
   listEvents(managerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE manager_session_id = ? ORDER BY ts, rowid")
@@ -5884,6 +5937,30 @@ function toOrchestrationEvent(r0: unknown): OrchestrationEvent {
     taskId: (r.task_id as string) ?? null,
     kind: r.kind as OrchestrationEventKind,
     detail: r.detail_json ? (JSON.parse(r.detail_json as string) as Record<string, unknown>) : undefined,
+  };
+}
+// Map a schedule-fire event row (LEFT-JOINed with its schedule/agent/project — see listScheduleHistory)
+// to the enriched, UI-ready ScheduleHistoryEntry. The join columns are NULL when the schedule (or its
+// agent) was deleted after the fire, so every enrichment field is null-safe; `cron` falls back to the
+// value the event captured in its own `detail` at fire time.
+function toScheduleHistoryEntry(r0: unknown): ScheduleHistoryEntry {
+  const r = r0 as Row;
+  const detail = r.detail_json ? (JSON.parse(r.detail_json as string) as Record<string, unknown>) : {};
+  const projectName = (r.project_name as string | null) ?? null;
+  const agentName = (r.agent_name as string | null) ?? null;
+  const mgr = (r.manager_session_id as string) || "";
+  return {
+    id: r.id as string,
+    ts: r.ts as string,
+    kind: r.kind as ScheduleHistoryEntry["kind"],
+    scheduleId: (detail.scheduleId as string | undefined) ?? "",
+    scheduleName: (r.schedule_name as string | null) ?? null,
+    cron: (r.schedule_cron as string | null) ?? (detail.cron as string | undefined) ?? "",
+    agentLabel: projectName && agentName ? `${projectName} / ${agentName}` : null,
+    // Only a `schedule_fired` event carries a spawned session (the deferred/failed events store "").
+    sessionId: r.kind === "schedule_fired" && mgr ? mgr : null,
+    reason: (detail.reason as string | undefined) ?? null,
+    error: (detail.error as string | undefined) ?? null,
   };
 }
 function toTask(r0: unknown): Task {

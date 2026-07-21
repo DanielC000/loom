@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT } from "../paths.js";
@@ -94,6 +94,14 @@ const parsePageParam = (v: string | undefined, fallback: number): number => {
   return v && Number.isFinite(n) && n >= 0 ? n : fallback;
 };
 
+/** Maps the run-history UI's outcome-filter value (`fired`/`deferred`/`failed`) to the matching
+ *  orchestration-event kind for the `?outcome=` param on GET /api/schedules/history. Any other value
+ *  (including "all" or a typo) resolves to `undefined` → no kind filter (all outcomes). */
+const SCHEDULE_OUTCOME_KIND: Record<string, "schedule_fired" | "schedule_fire_deferred" | "schedule_fire_failed" | undefined> = {
+  fired: "schedule_fired",
+  deferred: "schedule_fire_deferred",
+  failed: "schedule_fire_failed",
+};
 /** Whitelist guard for the human REST task surfaces — rejects any value outside the p0–p3 enum. */
 const isTaskPriority = (v: unknown): v is Task["priority"] => v === "p0" || v === "p1" || v === "p2" || v === "p3";
 // P5/B6: the valid Schedule.kind values a fire can route on — "manager" (default), the dev "auditor",
@@ -785,6 +793,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // --- Schedules (phase-2 Pillar B): cron triggers. next_fire_at is computed here on
   // create/update (the Scheduler advances it after each fire). ---
   app.get("/api/schedules", async () => deps.db.listSchedules());
+  // Run history: a bounded, newest-first page of previous schedule FIRES (the durable `schedule_fired` /
+  // `schedule_fire_deferred` / `schedule_fire_failed` orchestration events), god-eye across every schedule
+  // like the list above. Backs the Schedules page's collapsed-by-default, lazy-loaded run-history section.
+  // PAGINATED (?limit=&offset=, default DEFAULT_ARCHIVE_PAGE_LIMIT, clamp MAX_SCHEDULE_HISTORY_PAGE in
+  // db.ts) with an optional `?scheduleId=` filter — the client accumulates TRUE offset pages for its
+  // "Load more" (never a grown limit, which would silently truncate at the clamp). Enrichment (schedule
+  // name + "Project / Agent" label + spawned session id) is done in ONE JOINed query server-side, not a
+  // per-row lookup. Tier-1 read-only (registered in trust-tier.ts + the hand-maintained trust-tier.mjs
+  // ALL_ROUTES/EXPECTED_TIER_1 lists) — loopback/human, NOT an agent MCP tool.
+  app.get("/api/schedules/history", async (req): Promise<ScheduleHistoryPage> => {
+    const q = req.query as { limit?: string; offset?: string; scheduleId?: string; outcome?: string };
+    const limit = parsePageParam(q.limit, DEFAULT_ARCHIVE_PAGE_LIMIT);
+    const offset = parsePageParam(q.offset, 0);
+    const scheduleId = q.scheduleId && q.scheduleId.trim() ? q.scheduleId.trim() : undefined;
+    // Optional outcome filter → the one matching event kind (server-side, so a filtered "Load more" can't
+    // dead-end short of the real total). An unrecognized value is ignored (falls back to all outcomes).
+    const kind = SCHEDULE_OUTCOME_KIND[q.outcome ?? ""];
+    return deps.db.listScheduleHistory({ scheduleId, kind, limit, offset });
+  });
   // Preview a cron for the builder: the human-readable summary + the REAL next-N fires, computed with
   // the SAME cron-parser matcher the Scheduler fires on (nextFireTimes), so the builder can never
   // disagree with what actually runs. Compute-only (no DB write); returns { valid:false } on a bad cron

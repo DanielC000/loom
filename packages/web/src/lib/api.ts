@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
+import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -720,6 +720,13 @@ export const api = {
   // Preview a cron for the builder: the human summary + the REAL next-3 fires, computed server-side with
   // the SAME matcher the Scheduler fires on (so the preview can never drift from what actually runs).
   previewSchedule: (cron: string) => post<{ valid: boolean; summary: string; next: string[] }>("/api/schedules/preview", { cron }),
+  // Run history: a bounded, newest-first page of previous schedule FIRES (fired / deferred / failed
+  // events), enriched server-side with the schedule name + agent label + spawned session. God-eye across
+  // all schedules; optional `scheduleId` scopes to one. PAGINATED — the caller accumulates TRUE offset
+  // pages for "Load more" (`{items, total, limit}`, same contract as the archive lists). Lazy: the
+  // Schedules page only calls this once its collapsed history section is expanded.
+  scheduleHistory: (opts?: { scheduleId?: string; outcome?: "fired" | "deferred" | "failed"; limit?: number; offset?: number }) =>
+    get<ScheduleHistoryPage>(`/api/schedules/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.scheduleId ? `&scheduleId=${encodeURIComponent(opts.scheduleId)}` : ""}${opts?.outcome ? `&outcome=${opts.outcome}` : ""}`),
 
   // --- Event Triggers (Loom Event Triggers subsystem, card f5d07121): when an INTERNAL orchestration
   // event of kind `eventKind` fires (optionally scoped to `projectId` — null = every project), WAKE an

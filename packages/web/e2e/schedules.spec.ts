@@ -253,3 +253,100 @@ test.describe("schedules UI (Direction B)", () => {
     expect(after?.lastDeferredReason).toBe("auditor budget (2) reached");
   });
 });
+
+// Run history (card f624267a): a collapsed-by-default, lazy-loaded section below the schedules table
+// listing previous schedule FIRES (the durable schedule_fired / schedule_fire_deferred /
+// schedule_fire_failed orchestration events), enriched server-side and filterable by outcome + schedule.
+// The e2e daemon never runs a real tick, so seedOrchestrationEvent drives the SAME appendEvent writer a
+// real fire uses. The history read is god-eye, so each test scopes to its OWN schedule (unique per stamp)
+// for deterministic assertions on the shared daemon.
+test.describe("schedules run history (card f624267a)", () => {
+  async function seedSchedule(baseURL: string, agentId: string, name: string): Promise<{ id: string; cron: string }> {
+    const res = await fetch(`${baseURL}/api/schedules`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name, agentId, cron: "0 0 1 1 *" }),
+    });
+    if (!res.ok) throw new Error(`seed schedule -> ${res.status}: ${await res.text()}`);
+    return (await res.json()) as { id: string; cron: string };
+  }
+
+  test("history is collapsed + lazy on load, and reveals rows only after expand", async ({ page, loomDaemon }) => {
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`sched-hist-${stamp}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, `Agent ${stamp}`);
+    await pinActiveProject(page, project.id);
+
+    const schedName = `Hist sweep ${stamp}`;
+    const sched = await seedSchedule(loomDaemon.baseURL, agent.id, schedName);
+    // A durable fired event for this schedule (mirror of what Scheduler.tick() appends on a real fire).
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: `seed-mgr-${stamp}`, kind: "schedule_fired",
+      detail: { scheduleId: sched.id, cron: sched.cron, kind: "manager" },
+    });
+
+    // Track the LAZY fetch: the history endpoint must not be hit until the section is expanded.
+    const historyReqs: string[] = [];
+    page.on("request", (r) => { if (r.url().includes("/api/schedules/history")) historyReqs.push(r.url()); });
+
+    await page.goto(`${loomDaemon.baseURL}/automation`);
+
+    // BEFORE: the section header is present but COLLAPSED — the run-log table (its "Fired at" column
+    // header) isn't rendered, and no history request has fired.
+    const disclosure = page.getByRole("button", { name: /run history/i });
+    await expect(disclosure).toBeVisible();
+    await expect(page.getByText("Fired at")).toHaveCount(0);
+    // Give the page a beat to settle so a stray eager fetch would have shown up.
+    await page.waitForTimeout(300);
+    expect(historyReqs.length).toBe(0);
+
+    // ACT: expand.
+    await disclosure.click();
+
+    // AFTER: the run-log renders (lazy fetch fired), showing this schedule's fired run. Scope to the
+    // history table (the one with a "Fired at" column) — the schedule name also appears in the schedules
+    // table above, so an unscoped row locator is ambiguous.
+    await expect(page.getByText("Fired at")).toBeVisible();
+    const historyTable = page.locator("table", { has: page.getByText("Fired at", { exact: true }) });
+    const row = historyTable.locator("tr", { hasText: schedName });
+    await expect(row).toBeVisible();
+    await expect(row.getByText("fired", { exact: true })).toBeVisible();
+    expect(historyReqs.length).toBeGreaterThan(0);
+  });
+
+  test("the outcome + schedule filters scope the run log (server-side)", async ({ page, loomDaemon }) => {
+    const stamp = Date.now();
+    const project = await loomDaemon.createProject(`sched-filter-${stamp}`);
+    const agent = await seedAgent(loomDaemon.baseURL, project.id, `Agent ${stamp}`);
+    await pinActiveProject(page, project.id);
+
+    const schedName = `Filter sweep ${stamp}`;
+    const sched = await seedSchedule(loomDaemon.baseURL, agent.id, schedName);
+    // One fired + one failed event for the SAME schedule, so scoping to it gives a deterministic 1-of-each.
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: `seed-mgr-${stamp}`, kind: "schedule_fired",
+      detail: { scheduleId: sched.id, cron: sched.cron, kind: "manager" },
+    });
+    await loomDaemon.seedOrchestrationEvent({
+      managerSessionId: "", kind: "schedule_fire_failed",
+      detail: { scheduleId: sched.id, cron: sched.cron, kind: "manager", error: "spawn error: target agent was deleted" },
+    });
+
+    await page.goto(`${loomDaemon.baseURL}/automation`);
+    await page.getByRole("button", { name: /run history/i }).click();
+    await expect(page.getByText("Fired at")).toBeVisible();
+
+    // Scope the god-eye log to THIS schedule (the schedule-filter dropdown, Direction B).
+    await page.getByLabel("Filter runs by schedule").selectOption({ label: schedName });
+
+    // Both outcomes for this schedule are visible under the default "All" outcome tab.
+    await expect(page.getByText("fired", { exact: true })).toBeVisible();
+    await expect(page.getByText("failed", { exact: true })).toBeVisible();
+
+    // ACT: click the "Failed" outcome tab — a SERVER-SIDE refetch (outcome=failed) drops the fired row.
+    await page.getByRole("tab", { name: "Failed" }).click();
+    await expect(page.getByText("failed", { exact: true })).toBeVisible();
+    await expect(page.getByText("fired", { exact: true })).toHaveCount(0);
+    // The failure's reason text renders in the Result cell.
+    await expect(page.getByText(/target agent was deleted/i)).toBeVisible();
+  });
+});

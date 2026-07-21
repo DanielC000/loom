@@ -122,7 +122,7 @@ const ALL_ROUTES = [
   ["GET", "/api/questions"], ["GET", "/api/questions/:id"], ["POST", "/api/questions/:id/answer"],
   ["POST", "/api/questions/:id/dismiss"],
   ["POST", "/api/runs"], ["GET", "/api/runs/:id"], ["POST", "/api/runs/:id/cancel"],
-  ["GET", "/api/schedules"], ["POST", "/api/schedules"], ["DELETE", "/api/schedules/:id"],
+  ["GET", "/api/schedules"], ["GET", "/api/schedules/history"], ["POST", "/api/schedules"], ["DELETE", "/api/schedules/:id"],
   ["POST", "/api/schedules/:id"], ["POST", "/api/schedules/preview"],
   ["GET", "/api/sessions"], ["DELETE", "/api/sessions/:id/archive"], ["GET", "/api/sessions/:id/diff"],
   ["POST", "/api/sessions/:id/end"], ["POST", "/api/sessions/:id/fork"], ["POST", "/api/sessions/:id/input"],
@@ -176,6 +176,7 @@ const EXPECTED_TIER_1 = new Set([
   "GET /ws/term/:sessionId", "GET /ws/companion/:sessionId", "GET /ws/fleet",
   // Access-story Phase C (card 6bc02f50) follow-up on 77ade04c: reads a remote read-only UI needs.
   "GET /api/version", "GET /api/update-status", "GET /api/orchestration/status", "GET /api/orchestration/events",
+  "GET /api/schedules/history",
   "GET /api/projects/:id/git/log", "GET /api/projects/:id/git/branches",
   "GET /api/projects/:id/git/reference-repos/:index/log",
   "GET /api/profiles", "GET /api/profiles/:id", "GET /api/skills", "GET /api/skills/:name",

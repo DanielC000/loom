@@ -1033,6 +1033,36 @@ export interface ArchivedSessionsPage {
   limit: number;
 }
 
+/** One schedule-fire history entry — a durable `orchestration_events` row of kind `schedule_fired` /
+ *  `schedule_fire_deferred` / `schedule_fire_failed`, enriched server-side (a single LEFT JOIN over
+ *  schedules → agents → projects, NOT a per-row lookup) with the schedule's name and its target agent's
+ *  "Project / Agent" label. The enrichment fields are `null` when the schedule (or its agent) was deleted
+ *  after the fire — the durable event outlives the schedule row, so history stays truthful about what ran.
+ *  There is deliberately no `skipped` outcome and no duration: a paused/usage-limited tick records nothing,
+ *  and a fire persists only its start (no end is tracked). */
+export interface ScheduleHistoryEntry {
+  id: string; // orchestration_events.id
+  ts: string; // fired-at, ISO
+  kind: "schedule_fired" | "schedule_fire_deferred" | "schedule_fire_failed";
+  scheduleId: string;
+  scheduleName: string | null; // null if the schedule row was deleted after this fire
+  cron: string;
+  agentLabel: string | null; // "Project / Agent"; null if the schedule/agent was deleted
+  sessionId: string | null; // the spawned manager/auditor session (fired only) — links to /sessions/:id
+  reason: string | null; // deferral reason (deferred only), e.g. "manager cap (3) reached"
+  error: string | null; // spawn error message (failed only)
+}
+
+/** A bounded page of schedule-fire history + the TOTAL (for a "N of total / Load more" UI), newest fire
+ *  first. `limit` is the EFFECTIVE server-clamped page size actually used — read it back rather than
+ *  assume the requested limit held, or a "load more until done" loop can dead-end at the clamp forever
+ *  while `total` keeps claiming more rows exist (same contract as {@link ArchivedSessionsPage}). */
+export interface ScheduleHistoryPage {
+  items: ScheduleHistoryEntry[];
+  total: number;
+  limit: number;
+}
+
 /** A read-only vault file-tree entry. */
 export interface VaultEntry {
   path: string; // relative to the project's vault folder, forward slashes

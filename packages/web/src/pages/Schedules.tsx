@@ -1,11 +1,12 @@
 import { useMemo, useState, type CSSProperties } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import type { Schedule, CronBuilderState, CronFrequency } from "@loom/shared";
+import { Link } from "react-router-dom";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { Schedule, CronBuilderState, CronFrequency, ScheduleHistoryEntry } from "@loom/shared";
 import { cronFromBuilder, describeCron, parseCronToBuilder, defaultBuilderState } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgents } from "../lib/useAllAgents";
-import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StatusPill } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Segmented, Badge, Chip, StatusPill } from "../components/ui";
 import { color, font, radius } from "../theme";
 
 // A 5-field cron is the daemon's contract (Schedule.cron). Cheap client-side gate for the raw-cron
@@ -74,7 +75,8 @@ export default function Schedules() {
   const rows = schedules.data ?? [];
 
   return (
-    <Panel style={{ alignSelf: "start" }}>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16, alignSelf: "start" }}>
+    <Panel>
       <div style={{ display: "flex", alignItems: "baseline", gap: 12, flexWrap: "wrap" }}>
         <SectionLabel style={{ margin: 0 }}>Schedules</SectionLabel>
         {orch.data && (
@@ -188,6 +190,192 @@ export default function Schedules() {
         />
       )}
     </Panel>
+
+    {/* Run history — collapsed by default, lazy-loaded on first expand (card f624267a). */}
+    <ScheduleRunHistory schedules={rows} />
+    </div>
+  );
+}
+
+// ── Run history ────────────────────────────────────────────────────────────────────────────────────
+
+const OUTCOME_TABS: { key: "all" | "fired" | "deferred" | "failed"; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "fired", label: "Fired" },
+  { key: "deferred", label: "Deferred" },
+  { key: "failed", label: "Failed" },
+];
+
+// Visual identity per outcome — reuses the signal palette (phosphor = ran, amber = deferred by a budget
+// gate, red = failed to spawn). There is no "skipped" outcome: a paused/usage-limited tick records no
+// event at all, so only these three can occur.
+const OUTCOME_STYLE: Record<ScheduleHistoryEntry["kind"], { label: string; color: string; dot: string }> = {
+  schedule_fired: { label: "fired", color: color.phosphor, dot: color.phosphor },
+  schedule_fire_deferred: { label: "deferred", color: color.amber, dot: color.amber },
+  schedule_fire_failed: { label: "failed", color: color.red, dot: color.red },
+};
+
+const HISTORY_PAGE_SIZE = 50;
+
+// The run-history section: a flat, reverse-chronological log of previous schedule FIRES with an outcome
+// filter (All / Fired / Deferred / Failed) and a schedule-scope dropdown, backed by the god-eye
+// GET /api/schedules/history. COLLAPSED by default and LAZY — the query is `enabled` only once expanded,
+// so nothing is fetched until the human opens the section (card f624267a). "Load more" accumulates TRUE
+// offset pages (useInfiniteQuery) so every row past the server clamp stays reachable; filtering happens
+// SERVER-SIDE so a filtered "Load more" never dead-ends short of the real total.
+function ScheduleRunHistory({ schedules }: { schedules: Schedule[] }) {
+  const [open, setOpen] = useState(false);
+  const [outcome, setOutcome] = useState<"all" | "fired" | "deferred" | "failed">("all");
+  const [scheduleId, setScheduleId] = useState<string>(""); // "" = all schedules
+
+  const history = useInfiniteQuery({
+    queryKey: ["scheduleHistory", outcome, scheduleId],
+    queryFn: ({ pageParam }) =>
+      api.scheduleHistory({
+        limit: HISTORY_PAGE_SIZE,
+        offset: pageParam,
+        outcome: outcome === "all" ? undefined : outcome,
+        scheduleId: scheduleId || undefined,
+      }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      const loaded = allPages.reduce((n, p) => n + p.items.length, 0);
+      return loaded < lastPage.total ? loaded : undefined;
+    },
+    enabled: open, // lazy: no fetch until the section is expanded
+  });
+
+  const items = useMemo(() => history.data?.pages.flatMap((p) => p.items) ?? [], [history.data]);
+  const total = history.data?.pages[0]?.total ?? 0;
+  const firstLoad = history.isLoading && history.fetchStatus === "fetching";
+
+  const caretStyle: CSSProperties = { fontFamily: font.mono, fontSize: 12, width: 12, color: open ? color.phosphor : color.textDim };
+  const th: CSSProperties = {
+    textAlign: "left", color: color.textDim, fontFamily: font.head, fontSize: 10, fontWeight: 700,
+    textTransform: "uppercase", letterSpacing: "0.08em", padding: "0 12px 8px", borderBottom: `1px solid ${color.border}`, whiteSpace: "nowrap",
+  };
+  const td: CSSProperties = { padding: "9px 12px", borderBottom: `1px solid ${color.border}`, verticalAlign: "top" };
+
+  return (
+    <Panel>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        style={{
+          display: "flex", alignItems: "center", gap: 10, width: "100%", background: "none", border: "none",
+          padding: 0, margin: 0, cursor: "pointer", textAlign: "left", color: "inherit",
+        }}>
+        <span aria-hidden="true" style={caretStyle}>{open ? "▾" : "▸"}</span>
+        <SectionLabel style={{ margin: 0 }}>Run history</SectionLabel>
+        <span style={{ color: color.textMuted, fontSize: 11, fontFamily: font.mono, fontWeight: 400 }}>
+          {open && total > 0 ? `${total} previous ${total === 1 ? "fire" : "fires"}` : "Previous schedule fires"}
+        </span>
+      </button>
+
+      {open && (
+        <div style={{ marginTop: 14 }}>
+          {/* Filters: outcome tabs + a schedule-scope dropdown */}
+          <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+            <Segmented value={outcome} onChange={setOutcome} items={OUTCOME_TABS} ariaLabel="Filter runs by outcome" />
+            <Select
+              value={scheduleId}
+              onChange={(e) => setScheduleId(e.target.value)}
+              aria-label="Filter runs by schedule"
+              style={{ width: 220 }}>
+              <option value="">All schedules</option>
+              {schedules.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
+            </Select>
+          </div>
+
+          {firstLoad ? (
+            <HistorySkeleton />
+          ) : items.length === 0 ? (
+            <p style={{ color: color.textMuted, fontSize: 13, fontFamily: font.mono, padding: "20px 4px" }}>
+              No schedule fires recorded {outcome === "all" && !scheduleId ? "yet" : "for this filter"}.
+            </p>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 12 }}>
+                <thead>
+                  <tr>
+                    <th style={th}>Fired at</th>
+                    <th style={th}>Schedule</th>
+                    <th style={th}>Agent</th>
+                    <th style={th}>Outcome</th>
+                    <th style={th}>Result</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((e) => {
+                    const o = OUTCOME_STYLE[e.kind];
+                    return (
+                      <tr key={e.id}>
+                        <td style={{ ...td, color: color.textDim, whiteSpace: "nowrap" }}>{fmt(e.ts)}</td>
+                        <td style={{ ...td, color: color.text, fontWeight: 600 }}>
+                          {e.scheduleName ?? <span style={{ color: color.textMuted, fontWeight: 400 }}>{e.cron || "deleted schedule"}</span>}
+                        </td>
+                        <td style={{ ...td, color: color.textDim }}>{e.agentLabel ?? <span style={{ color: color.textMuted }}>—</span>}</td>
+                        <td style={td}>
+                          <span style={{ display: "inline-flex", alignItems: "center", gap: 6, color: o.color, textTransform: "uppercase", letterSpacing: "0.06em", fontSize: 11 }}>
+                            <span aria-hidden="true" style={{ width: 8, height: 8, borderRadius: 8, background: o.dot, display: "inline-block" }} />
+                            {o.label}
+                          </span>
+                        </td>
+                        <td style={{ ...td, color: color.textDim }}><ResultCell entry={e} /></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 12px 2px", color: color.textMuted, fontSize: 11, fontFamily: font.mono }}>
+                <span>Showing <strong style={{ color: color.textDim }}>{items.length}</strong> of {total}</span>
+                <span style={{ flex: 1 }} />
+                {history.hasNextPage && (
+                  <Button onClick={() => history.fetchNextPage()} disabled={history.isFetchingNextPage}>
+                    {history.isFetchingNextPage ? "Loading…" : "Load more"}
+                  </Button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+// The Result cell: a fired run links to the session it spawned; a deferred run shows its budget reason
+// (amber); a failed run shows the spawn error (red).
+function ResultCell({ entry }: { entry: ScheduleHistoryEntry }) {
+  if (entry.kind === "schedule_fire_deferred") {
+    return <span style={{ color: color.amber }}>{entry.reason ?? "deferred"}</span>;
+  }
+  if (entry.kind === "schedule_fire_failed") {
+    return <span style={{ color: color.red }}>{entry.error ?? "spawn failed"}</span>;
+  }
+  if (entry.sessionId) {
+    return (
+      <Link to={`/session/${entry.sessionId}`} style={{ color: color.cyan, textDecoration: "none" }}>
+        {entry.sessionId.slice(0, 8)} ›
+      </Link>
+    );
+  }
+  return <span style={{ color: color.textMuted }}>session ended</span>;
+}
+
+// First-expand loading state — a brief pulse of placeholder rows (skeletons beat a spinner).
+function HistorySkeleton() {
+  return (
+    <div>
+      <p style={{ color: color.textMuted, fontSize: 11.5, fontFamily: font.mono, padding: "2px 4px 8px" }}>Loading previous runs…</p>
+      {Array.from({ length: 6 }, (_, i) => (
+        <div key={i} style={{ display: "grid", gridTemplateColumns: "130px 1fr 1fr 120px 1fr", gap: 12, padding: "9px 12px", borderBottom: `1px solid ${color.border}` }}>
+          {Array.from({ length: 5 }, (_, j) => (
+            <span key={j} className="loom-skeleton" style={{ height: 11, borderRadius: radius.sm, background: color.border }} />
+          ))}
+        </div>
+      ))}
+    </div>
   );
 }
 
