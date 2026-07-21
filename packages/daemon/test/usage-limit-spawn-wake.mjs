@@ -117,7 +117,10 @@ try {
   const resumed = [];
   const pty = { isAlive: () => true, resumeAfterRateLimit: (id) => { resumed.push(id); return true; } };
   const stub = {};
-  const app = await buildServer({ db, pty, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  // sessions: svc (the REAL SessionService, not a bare stub) — card 902d089f: the clear-hold cascade now
+  // drains a resumed MANAGER's cap-queue (deps.sessions.maybeDrainCapQueue), and mgr1 here really is a
+  // manager, so this route needs a real maybeDrainCapQueue to call, not `{}`.
+  const app = await buildServer({ db, pty, sessions: svc, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
   try {
     const r = await app.inject({ method: "POST", url: "/api/usage/clear-hold" });
     check("(2) clear-hold 200 OK", r.statusCode === 200);

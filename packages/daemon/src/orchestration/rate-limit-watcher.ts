@@ -1,4 +1,5 @@
 import type { Db } from "../db.js";
+import type { Session } from "@loom/shared";
 import { clearClaudeRateLimit } from "./usage-awareness.js";
 
 /** The slice of PtyHost the watcher needs (injectable so the tick logic unit-tests with a stub). */
@@ -8,9 +9,24 @@ export interface RateLimitPty {
   resumeAfterRateLimit(sessionId: string): boolean;
 }
 
+/** The slice of SessionService the watcher needs (card 902d089f) — injectable so the tick logic
+ *  unit-tests claude-free without a real SessionService. */
+export interface RateLimitCapQueue {
+  /** Fire-and-forget, idempotent + suppression-aware (never throws) — see SessionService.maybeDrainCapQueue. */
+  maybeDrainCapQueue(managerSessionId: string): void;
+}
+
 export interface RateLimitWatcherDeps {
   db: Db;
   pty: RateLimitPty;
+  /**
+   * card 902d089f: once a resumed session's usage-limit park clears, drain ITS OWN cap-queue if it's a
+   * manager — closes the gap where an entry `maybeDrainCapQueue` requeued on a `UsageLimitError` (the
+   * manager parked on the SAME cap this watcher clears) would otherwise sit idle until an UNRELATED
+   * worker happened to exit. Optional so an existing stub-pty test that doesn't care about the
+   * cap-queue stays byte-identical.
+   */
+  capQueue?: RateLimitCapQueue;
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly. */
   intervalMs?: number;
 }
@@ -44,7 +60,7 @@ export class RateLimitWatcher {
       if (s.rateLimitedUntil != null) {
         // Parked: waiting for the reset.
         if (deadlinePassed) { this.bail(s.id, s.rateLimitDeadline!); continue; }
-        if (new Date(s.rateLimitedUntil).getTime() <= now.getTime()) this.resume(s.id);
+        if (new Date(s.rateLimitedUntil).getTime() <= now.getTime()) this.resume(s);
         // else: still before the reset — keep waiting.
       } else {
         // Recovering: we already re-submitted; awaiting the turn's outcome.
@@ -54,12 +70,17 @@ export class RateLimitWatcher {
     }
   }
 
-  private resume(id: string): void {
+  private resume(s: Session): void {
     // Clear the park but KEEP the deadline (the episode continues until success/bail). lastError is
     // cleared (we're actively resuming, not waiting). Relax global awareness so the queue proceeds.
-    this.deps.db.setRateLimitedUntil(id, null, null);
+    this.deps.db.setRateLimitedUntil(s.id, null, null);
     clearClaudeRateLimit();
-    this.deps.pty.resumeAfterRateLimit(id);
+    this.deps.pty.resumeAfterRateLimit(s.id);
+    // card 902d089f: this resume is a genuine limit-clear for s itself — if s is a MANAGER, its own
+    // cap-queue may hold an entry that maybeDrainCapQueue requeued on the very UsageLimitError this
+    // park came from (worker_spawn parks its own manager on the same usage-limit machinery this watcher
+    // resumes). Fire-and-forget + idempotent, exactly like every other maybeDrainCapQueue call site.
+    if (s.role === "manager") void this.deps.capQueue?.maybeDrainCapQueue(s.id);
   }
 
   private succeed(id: string): void {

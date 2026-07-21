@@ -662,7 +662,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     for (const s of deps.db.listRateLimited()) {
       deps.db.setRateLimitedUntil(s.id, null, null);
       deps.db.clearRateLimitDeadline(s.id);
-      if (s.processState === "live" && deps.pty.resumeAfterRateLimit(s.id)) resumed++;
+      if (s.processState === "live" && deps.pty.resumeAfterRateLimit(s.id)) {
+        resumed++;
+        // card 902d089f: a resumed MANAGER may have a cap-queue entry that maybeDrainCapQueue requeued
+        // on the very UsageLimitError this clear resolves — drain it now instead of waiting for an
+        // unrelated worker to exit. Fire-and-forget + idempotent, like every other drain call site.
+        if (s.role === "manager") void deps.sessions.maybeDrainCapQueue(s.id);
+      }
     }
     return { cleared: true, resumed };
   });
@@ -4297,11 +4303,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // detect path are untouched. Returns the updated session (404 if unknown).
   app.post("/api/sessions/:id/rate-limit/clear", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!deps.db.getSession(id)) return reply.code(404).send({ error: "session not found" });
+    const session = deps.db.getSession(id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
     deps.db.setRateLimitedUntil(id, null, null);
     deps.db.clearRateLimitDeadline(id);
     clearClaudeRateLimit();
-    deps.pty.resumeAfterRateLimit(id); // re-submits the held turn; false (no-op) if not live
+    const resumed = deps.pty.resumeAfterRateLimit(id); // re-submits the held turn; false (no-op) if not live
+    // card 902d089f: mirrors the /api/usage/clear-hold cascade above — drain a resumed manager's own
+    // cap-queue rather than leaving a usage-limit-requeued entry to wait for an unrelated worker exit.
+    if (resumed && session.role === "manager") void deps.sessions.maybeDrainCapQueue(id);
     return reply.send(deps.db.getSession(id));
   });
   // Send a turn to a session through the busy-gated queue, so a human composer and the

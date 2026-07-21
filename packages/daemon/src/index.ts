@@ -892,7 +892,7 @@ async function main(): Promise<void> {
   // can hit the cap too), so it runs regardless of schedulerEnabled. LOOM_RATE_LIMIT_WATCH_INTERVAL_MS
   // tunes the tick for tests (default 60s).
   const watchIntervalMs = watchers.rateLimitWatchMs;
-  const rateLimitWatcher = new RateLimitWatcher({ db, pty, intervalMs: watchIntervalMs });
+  const rateLimitWatcher = new RateLimitWatcher({ db, pty, capQueue: sessions, intervalMs: watchIntervalMs });
   rateLimitWatcher.start();
   console.log(`[boot] usage-limit resume watcher on (tick ${watchIntervalMs}ms)`);
 
