@@ -13,6 +13,7 @@ import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
+import { validateVaultPath } from "../projects/vault-path.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
@@ -133,6 +134,11 @@ export class SetupMcpRouter {
         // STORED path is already the expanded absolute one.
         if (repoPath !== undefined) repoPath = expandTilde(repoPath);
         if (vaultPath !== undefined) vaultPath = expandTilde(vaultPath);
+        if (vaultPath) {
+          const vaultCheck = validateVaultPath(vaultPath);
+          if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+          vaultPath = vaultCheck.value;
+        }
         let repo: string;
         let vault: string;
         let isCodeRepo = false;
@@ -293,6 +299,11 @@ export class SetupMcpRouter {
           if (!wrote.ok) return ok({ error: wrote.error });
         }
         if (vaultPath !== undefined) vaultPath = expandTilde(vaultPath);
+        if (vaultPath) {
+          const vaultCheck = validateVaultPath(vaultPath);
+          if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+          vaultPath = vaultCheck.value;
+        }
         if (name !== undefined || vaultPath !== undefined) db.updateProject(projectId, { name, vaultPath });
         return ok(db.getProject(projectId));
       },

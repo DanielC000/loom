@@ -53,6 +53,7 @@ import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
+import { validateVaultPath } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
@@ -3503,7 +3504,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Both locals are expandTilde-expanded right here (guarded — expandTilde throws on undefined), a
     // leading `~` being a shell expansion Node never sees, so every check below sees the expanded path.
     const repoPath = b.repoPath?.trim() ? expandTilde(b.repoPath.trim()) : undefined;
-    const vaultPath = b.vaultPath?.trim() ? expandTilde(b.vaultPath.trim()) : undefined;
+    let vaultPath = b.vaultPath?.trim() ? expandTilde(b.vaultPath.trim()) : undefined;
+    // vaultPath must be an ABSOLUTE path — mirrors validateReferenceRepos, which already enforces this
+    // for the structurally identical referenceRepos field (card 96c4b245: a relative value has no
+    // recoverable base to resolve against, so it's rejected here rather than stored and later rendered
+    // as a confidently-wrong path).
+    if (vaultPath) {
+      const vaultCheck = validateVaultPath(vaultPath);
+      if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
+      vaultPath = vaultCheck.value;
+    }
     // The Obsidian vault is OPTIONAL (card cdc3792d) — mirrors the setup operator's project_create rule:
     // require a name + at least one of {repoPath, vaultPath}. A vault-less CODE project stores
     // vaultPath as "" (never defaulted to repoPath — that would make the auto-committer watch + commit
@@ -3575,6 +3585,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && typeof b.vaultPath !== "string")
       return reply.code(400).send({ error: "vaultPath must be a string" });
+    // expandTilde runs right after trim, before any other check, so every check below (and the eventual
+    // write) sees the expanded value — mirrors the repoPath handling just below.
+    const vaultPath = b.vaultPath === undefined ? undefined : expandTilde((b.vaultPath as string).trim());
     // An explicit "" is an UNBIND (card 9fe578b3, completing cdc3792d's vault-optional story) — distinct
     // from `vaultPath` omitted (undefined), which leaves the stored value untouched below. Keep the
     // at-least-one-of-{repo,vault} invariant: refuse on a VAULT-ONLY project, whose repoPath was bound to
@@ -3583,8 +3596,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // LEGACY repo-bound project from before cdc3792d (when the default was vaultPath=repoPath) — that
     // project genuinely has a repo, so the isGitRepo check (card d867e478) distinguishes it from a real
     // vault-only bare folder before refusing.
-    if (b.vaultPath !== undefined && !(b.vaultPath as string).trim() && p.repoPath === p.vaultPath && !(await isGitRepo(p.repoPath))) {
+    if (vaultPath !== undefined && !vaultPath && p.repoPath === p.vaultPath && !(await isGitRepo(p.repoPath))) {
       return reply.code(400).send({ error: "cannot unbind the vault of a vault-only project (it has no separate repoPath) — archive it instead" });
+    }
+    // vaultPath must be an ABSOLUTE path when a real (non-empty) rebind is given — mirrors the REST
+    // create path + validateReferenceRepos (card 96c4b245); "" (unbind, handled above) is exempt.
+    if (vaultPath) {
+      const vaultCheck = validateVaultPath(vaultPath);
+      if (!vaultCheck.ok) return reply.code(400).send({ error: vaultCheck.error });
     }
     if (b.repoPath !== undefined && (typeof b.repoPath !== "string" || !b.repoPath.trim()))
       return reply.code(400).send({ error: "repoPath must be a non-empty string" });
@@ -3614,7 +3633,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       return reply.code(400).send({ error: "noGateByDesign must be a boolean" });
     deps.db.updateProject(id, {
       name: b.name === undefined ? undefined : (b.name as string).trim(),
-      vaultPath: b.vaultPath === undefined ? undefined : expandTilde((b.vaultPath as string).trim()),
+      vaultPath,
       repoPath,
       referenceRepos,
       noGateByDesign: b.noGateByDesign as boolean | undefined,

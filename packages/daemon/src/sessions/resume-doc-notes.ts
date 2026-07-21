@@ -60,8 +60,13 @@ export function resumeDocSizeWarning(absPath: string): string {
     return (
       `[loom:resume-doc-size] Your resume doc (\`${absPath}\`) is ~${kb}KB, nearing the harness ` +
       `Read caps (~256KB / ~25k tokens) — a successor's first Read of it could fail. Rotate it now per ` +
-      `your doctrine's size budget: move the current doc to \`<name>.archive/<YYYY-MM-DD>-NN.md\`, then ` +
-      `start a fresh active doc holding only current state.`
+      `your doctrine's size budget. **Do NOT Read this file first to rotate it** — a Read that gets ` +
+      `cap-truncated does not satisfy the Write tool's "read it first" guard, and you'll be stuck (don't ` +
+      `fall into a delete-then-rewrite or scratchpad-copy workaround to get around that). Instead: ` +
+      `(1) move the file AS-IS, unread — a plain shell \`mv\` (or PowerShell \`Move-Item\`) to ` +
+      `\`<name>.archive/<YYYY-MM-DD>-NN.md\` needs no Read of its content at all; (2) then Write a ` +
+      `fresh, small active doc at the now-vacant original path — a Write to a path that no longer ` +
+      `exists needs no prior Read either. Hold only current state in the fresh doc.`
     );
   } catch {
     return "";

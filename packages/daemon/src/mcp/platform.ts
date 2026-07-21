@@ -15,6 +15,7 @@ import { isGitRepo } from "../git/reader.js";
 import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
 import { checkRepoRebind } from "../projects/rebind.js";
+import { validateVaultPath } from "../projects/vault-path.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -727,7 +728,12 @@ export class PlatformMcpRouter {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
         if (!v.ok) return ok({ error: `invalid config: ${v.error}` });
         if (!(await isGitRepo(repoPath))) return ok({ error: `repoPath is not an existing git repository: ${repoPath}` });
-        const vault = vaultPath ?? "";
+        let vault = vaultPath ? expandTilde(vaultPath) : "";
+        if (vault) {
+          const vaultCheck = validateVaultPath(vault);
+          if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+          vault = vaultCheck.value;
+        }
         // Scaffold the vault root so it's writable immediately (a vault_write against an uncreated root
         // otherwise looks like a path escape) — only when a real vaultPath was actually given (mirrors
         // the setup.ts project_create fix, card a247ab11).
@@ -1436,6 +1442,15 @@ export class PlatformMcpRouter {
         if (repoPath !== undefined) {
           const check = await checkRepoRebind(db, projectId, repoPath);
           if (!check.ok) return ok({ error: check.error, ...(check.liveSessions ? { liveSessions: check.liveSessions } : {}) });
+        }
+        // vaultPath was previously never expandTilde'd or absolute-checked on THIS surface (unlike
+        // setup.ts's project_update) — fold in the same guard the other 5 write sites now share
+        // (card 96c4b245). Empty string ("") is the legitimate unbind case and stays unchecked.
+        if (vaultPath) {
+          vaultPath = expandTilde(vaultPath);
+          const vaultCheck = validateVaultPath(vaultPath);
+          if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
+          vaultPath = vaultCheck.value;
         }
         db.updateProject(projectId, { name, vaultPath, repoPath });
         return ok(db.getProject(projectId));

@@ -18,7 +18,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (3) the pure composeManagerStartupPrompt wraps/derives correctly (incl. the no-own-prompt case);
 //   (3e) card 809cc4b5: an oversized on-disk resume doc gets a [loom:resume-doc-size] note PREPENDED
 //        ahead of the "Where things live" block (mirrors the Platform Lead's own size-warning, now
-//        shared via resume-doc-notes.ts); a missing or small doc emits no note;
+//        shared via resume-doc-notes.ts); a missing or small doc emits no note; card 96c4b245: that note
+//        also teaches the NO-READ rotation recipe (a cap-truncated Read never satisfies Write's
+//        read-first guard — move the file unread, then Write fresh at the vacated path);
+//   (3i) card 96c4b245: a project with a NON-ABSOLUTE (relative) vaultPath — an already-stored legacy
+//        row from before the write-boundary absolute-path guard existed — gets a [loom:vault-path-invalid]
+//        note instead of a fabricated (confidently-wrong) absolute path; the vault-dir/resume-doc lines
+//        are omitted entirely rather than trusted;
 //   (4) the loom-pickup + orchestrate skill ASSETS instruct reading the resume doc by ABSOLUTE path.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/manager-context-block.mjs
@@ -157,6 +163,12 @@ try {
   check("(3e) the size-warning note names the doc's own absolute path", noteOversized.includes(sizeResumeDoc));
   check("(3e) the size-warning note precedes the 'Where things live' pointer block", noteOversized.indexOf("[loom:resume-doc-size]") < noteOversized.indexOf("Where things live"));
   check("(3e) the agent's own doctrine still rides along after everything", noteOversized.includes("BODY"));
+  // Card 96c4b245 (write-guard rotation trap): the size note must teach the NO-READ rotation recipe —
+  // a cap-truncated Read doesn't satisfy the Write tool's read-first guard, so the note must steer the
+  // agent to a plain unread file move + a fresh Write at the vacated path, not a Read-then-rewrite.
+  check("(3e) the size note tells the agent NOT to Read the file first to rotate it", /do not read this file first/i.test(noteOversized));
+  check("(3e) the size note names the plain move commands (mv / Move-Item)", noteOversized.includes("mv") && noteOversized.includes("Move-Item"));
+  check("(3e) the size note explains a Write to the vacated path needs no prior Read", /needs no prior read/i.test(noteOversized));
   try { fs.rmSync(sizeVault, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (3f) card c1f2f095: composeManagerStartupPrompt honors a per-project
@@ -188,6 +200,24 @@ try {
   check("(3h) no-vault: names the no-vault state explicitly instead", /no vault bound/i.test(noVaultComposed));
   check("(3h) no-vault: still carries the agent's own doctrine", noVaultComposed.includes("DOCTRINE_BODY"));
   check("(3h) resolveResumeDocPath('') returns \"\" rather than resolving against the daemon's cwd", resolveResumeDocPath("", undefined) === "");
+
+  // ===================== (3i) card 96c4b245: a project with a NON-ABSOLUTE (relative) vaultPath — an
+  // already-stored LEGACY row from before the write-boundary absolute-path guard existed — must NOT have
+  // composeManagerStartupPrompt fabricate a wrong absolute path (e.g. via path.resolve against the
+  // daemon's own cwd). It must instead surface a [loom:vault-path-invalid] note and OMIT the vault-dir/
+  // resume-doc lines, rather than print a path (right or wrong) for the agent to trust and Read from. =====
+  const relVaultPath = "Projects/Seismo"; // the exact shape observed in the origin finding
+  const invalidComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: relVaultPath, name: "InvalidVaultDemo" });
+  check("(3i) relative vaultPath: fires the [loom:vault-path-invalid] note", invalidComposed.includes("[loom:vault-path-invalid]"));
+  check("(3i) relative vaultPath: the note names the offending value", invalidComposed.includes(relVaultPath));
+  check("(3i) relative vaultPath: omits the 'Project vault dir' line — no fabricated path is ever shown as trustworthy", !invalidComposed.includes("Project vault dir"));
+  check("(3i) relative vaultPath: omits the 'Resume doc' line", !invalidComposed.includes("Resume doc"));
+  check("(3i) relative vaultPath: tells the agent this needs a HUMAN re-bind, not a guess", /human/i.test(invalidComposed) && /do not attempt to derive or guess/i.test(invalidComposed));
+  check("(3i) relative vaultPath: still carries the agent's own doctrine", invalidComposed.includes("DOCTRINE_BODY"));
+  check("(3i) relative vaultPath: still carries the repoPath", invalidComposed.includes("/abs/repo"));
+  // Control: a genuinely ABSOLUTE vaultPath (the common case) never fires the invalid note.
+  const validComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "ValidVaultDemo" });
+  check("(3i control) an absolute vaultPath never fires [loom:vault-path-invalid]", !validComposed.includes("[loom:vault-path-invalid]"));
 
   // ===================== (1e) card c1f2f095: an end-to-end manager spawn for a project whose config
   // sets orchestration.resumeDocFilename picks up the CUSTOM path, not the hardcoded default =====================

@@ -1,3 +1,4 @@
+import path from "node:path";
 import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.js";
 
 /**
@@ -41,20 +42,35 @@ export function composeManagerStartupPrompt(
   // resolve: omit both the vault-dir and resume-doc lines entirely rather than feed "" into
   // resolveResumeDocPath (which would resolve it against the DAEMON's own cwd, not fail cleanly).
   const hasVault = !!loc.vaultPath;
-  const resumeDoc = hasVault ? resolveResumeDocPath(loc.vaultPath, loc.resumeDocFilename) : "";
-  const sizeNote = hasVault ? resumeDocSizeWarning(resumeDoc) : "";
+  // Card 96c4b245: every write site now rejects a non-absolute vaultPath (projects/vault-path.ts), but
+  // an ALREADY-stored legacy row (bound before that guard existed) can still hold a relative value — and
+  // there is no recoverable "vault root" Loom could resolve it against (no such config exists anywhere),
+  // so guessing one at render time (e.g. `path.resolve` against the daemon's OWN cwd) would fabricate a
+  // confidently-wrong absolute path, worse than the relative value it "fixed". Surface the problem
+  // instead: skip the vault-dir/resume-doc lines and flag it for a human re-bind.
+  const vaultPathInvalid = hasVault && !path.isAbsolute(loc.vaultPath);
+  const resumeDoc = hasVault && !vaultPathInvalid ? resolveResumeDocPath(loc.vaultPath, loc.resumeDocFilename) : "";
+  const sizeNote = resumeDoc ? resumeDocSizeWarning(resumeDoc) : "";
+  const invalidNote = vaultPathInvalid
+    ? `[loom:vault-path-invalid] This project's configured vault path (\`${loc.vaultPath}\`) is not an ` +
+      `absolute path, so Loom cannot resolve a real vault dir or resume-doc location from it — neither is ` +
+      `shown below. This needs a HUMAN to re-bind the project's vault path (project settings) to a real, ` +
+      `absolute filesystem path; do not attempt to derive or guess the correct path yourself.`
+    : "";
   const block =
     "## Where things live (this project's absolute paths)\n" +
     `- **Repo root (your cwd):** \`${loc.repoPath}\`\n` +
-    (hasVault
+    (hasVault && !vaultPathInvalid
       ? `- **Project vault dir:** \`${loc.vaultPath}\`\n- **Resume doc:** \`${resumeDoc}\`\n\n`
       : "\n") +
     "Read project files by ABSOLUTE path from these roots — never Glob from your home directory " +
     "for them (a broad Glob hits the search timeout)." +
-    (hasVault
+    (hasVault && !vaultPathInvalid
       ? " Read your resume doc from the exact absolute path above, verbatim — do not reconstruct it."
+      : vaultPathInvalid
+      ? " This project's vault path is misconfigured (see the note above) — keep any handoff/progress notes on the board task instead until it's fixed."
       : " This project has no vault bound — there is no resume doc; keep any handoff/progress notes on the board task instead.");
-  const blockWithNote = sizeNote ? `${sizeNote}\n\n${block}` : block;
+  const blockWithNote = [invalidNote, sizeNote, block].filter(Boolean).join("\n\n");
   // Reference-repos epic Phase 3 ("Interpretation A"): additional repos this project's manager may
   // READ but never owns — no worktree/branch/gate exists for them, so they're never a cwd or a merge
   // target. Omitted entirely when the project sets none, so the additive guarantee holds.
