@@ -157,6 +157,10 @@ const orchestrationOverride = z.object({
   // NOTE: no `maxConcurrentGates` here either, same reasoning — it's the daemon-GLOBAL host-load guard
   // (card 301d8c01, see PlatformConfigOverride.maxConcurrentGates), not per-project; it lives on
   // platformConfigOverrideSchema below.
+  // NOTE: no `maxConcurrentAuditors` either (sweep G2) — UNLIKE maxConcurrentManagers above, this field
+  // never had a per-project predecessor to stay backward-compatible with, so it's rejected outright here
+  // (a `.strict()` unknown key) exactly like schedulerEnabled/maxConcurrentGates; it lives only on
+  // platformConfigOverrideSchema below. See config.ts's OrchestrationConfig.maxConcurrentAuditors doc.
   // Fraction of the model context window (0 disables); a ratio >1 or <0 is meaningless and would
   // corrupt the ContextWatcher's recycle trigger.
   recycleAtContextRatio: z.number().min(0).max(1).optional(),
@@ -492,6 +496,11 @@ const platformConfigOverrideSchema = z.object({
   // reasoning as maxConcurrentGates above. Floor 1 (a cap of 0 would deadlock the Scheduler); ceiling
   // matches the (now-inert) per-project field's existing bound above.
   maxConcurrentManagers: z.number().int().min(1).max(100).optional(),
+  // Sweep G2 (mirrors maxConcurrentManagers above): SEPARATE fleet-wide budget for concurrently-LIVE,
+  // SCHEDULER-SPAWNED auditor sessions (see PlatformConfigOverride.maxConcurrentAuditors). Floor 1 (a cap
+  // of 0 would deadlock scheduled auditor spawns); ceiling 50 — auditors are read-mostly/lightweight, so
+  // a much smaller generous ceiling than the manager/worker caps above is appropriate.
+  maxConcurrentAuditors: z.number().int().min(1).max(50).optional(),
 }).strict();
 
 /**
@@ -529,11 +538,12 @@ const watchersPatchOverride = z.object(nullableShape(watchersOverride.shape)).st
 const timeoutsPatchOverride = z.object(nullableShape(timeoutsOverride.shape)).strict();
 
 /**
- * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75):
- * field-for-field identical to `platformConfigOverrideSchema` above, except the 8 top-level keys the
+ * Clear-to-inherit sentinel schema for the PATCH body (card fd55ac8a, widened by card ba9ccd75, sweep
+ * G2): field-for-field identical to `platformConfigOverrideSchema` above, except the 9 top-level keys the
  * Settings global-config form can blank back to "inherit" — `rateLimit`/`watchers`/`timeouts` (the
  * ms-keyed field grid) and `schedulerEnabled`/`operatorEnabled`/`coalesceAgentMessages`/
- * `maxConcurrentGates`/`maxConcurrentManagers` (the tri-state toggles + the two cap inputs) — additionally accept an explicit
+ * `maxConcurrentGates`/`maxConcurrentManagers`/`maxConcurrentAuditors` (the tri-state toggles + the three
+ * cap inputs) — additionally accept an explicit
  * `null`. Whole-group `null` means "delete this whole group from the persisted override" (revert every
  * field in it to the resolved default). Within a submitted group object, EACH FIELD is also individually
  * nullable (`rateLimitPatchOverride`/`watchersPatchOverride`/`timeoutsPatchOverride` above) — a per-field
@@ -559,6 +569,7 @@ const platformConfigPatchSchema = z.object({
   schedulerEnabled: z.boolean().nullable().optional(),
   maxConcurrentGates: z.number().int().min(1).max(50).nullable().optional(),
   maxConcurrentManagers: z.number().int().min(1).max(100).nullable().optional(),
+  maxConcurrentAuditors: z.number().int().min(1).max(50).nullable().optional(),
 }).strict();
 
 /**

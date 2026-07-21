@@ -48,8 +48,9 @@ export interface SchedulerDeps {
    * SEPARATE small budget for concurrently-LIVE AUDITORS (the dev Platform Auditor + the end-user Workspace
    * Auditor). Auditors are read-mostly and lightweight, so they are LIFTED OUT of the manager cap: a fired
    * auditor never consumes a manager slot and is never blocked because the manager cap is full (and vice
-   * versa). Defaults to DEFAULT_MAX_CONCURRENT_AUDITORS — a constant default (not config-wired) keeps the
-   * surface small while still bounding scheduled audit spawns.
+   * versa). Wired from `orchestration.maxConcurrentAuditors` in index.ts (fleet-wide since sweep G2 — see
+   * `PlatformConfigOverride.maxConcurrentAuditors`, mirroring how maxConcurrentManagers above is wired);
+   * defaults to DEFAULT_MAX_CONCURRENT_AUDITORS.
    */
   maxConcurrentAuditors?: number;
 }

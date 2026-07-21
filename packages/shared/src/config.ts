@@ -266,6 +266,20 @@ export interface OrchestrationConfig {
    */
   maxConcurrentManagers: number;
   /**
+   * Sweep G2 (mirrors maxConcurrentManagers/card 52ab5d45 exactly): daemon-GLOBAL fleet-wide cap on
+   * concurrently-LIVE, SCHEDULER-SPAWNED auditor sessions (the dev Platform Auditor + the end-user
+   * Workspace Auditor — `Db.countLiveAuditors`), a SEPARATE small budget from `maxConcurrentManagers` so
+   * a fired auditor never consumes a manager slot and is never blocked by a full manager cap (and vice
+   * versa; see `orchestration/scheduler.ts`'s AUDITOR BUDGET doc). Unlike `maxConcurrentManagers`, this
+   * field never had a per-project predecessor, so the per-project schema does not accept it at all (like
+   * `schedulerEnabled`/`maxConcurrentGates`) — the value that reaches the Scheduler comes only from the
+   * daemon-global `PlatformConfigOverride.maxConcurrentAuditors`. Boot-bound like maxConcurrentManagers:
+   * the Scheduler is constructed ONCE at boot (index.ts) and never re-reads this afterward, so a change
+   * here needs a daemon restart to take effect. Default 2 (ZERO behavior change from today's
+   * DEFAULT_MAX_CONCURRENT_AUDITORS constant in scheduler.ts).
+   */
+  maxConcurrentAuditors: number;
+  /**
    * Host-load guard (card 301d8c01): hard cap on concurrently-RUNNING daemon-EXECUTED heavy gate runs
    * (the merge-confirm gate + the scoped-deploy gate — both spawn a human-set build/test command via
    * `runGateSequential`), across EVERY project on this daemon. A gate that can't acquire a slot QUEUES
@@ -753,6 +767,15 @@ export interface PlatformConfigOverride {
    * PLATFORM_DEFAULTS value).
    */
   maxConcurrentManagers?: number;
+  /**
+   * See OrchestrationConfig.maxConcurrentAuditors (sweep G2, mirrors maxConcurrentManagers/card
+   * 52ab5d45's shape). Daemon-GLOBAL SEPARATE budget for the cron Scheduler's own auditor spawns — NOT
+   * a per-project setting, and unlike maxConcurrentManagers there is no per-project predecessor to stay
+   * backward-compatible with. Boot-bound like maxConcurrentManagers: the Scheduler is constructed ONCE
+   * at boot and never re-reads this afterward. Default 2 (ZERO behavior change from today's
+   * DEFAULT_MAX_CONCURRENT_AUDITORS constant).
+   */
+  maxConcurrentAuditors?: number;
 }
 
 /** Every field of `T` individually nullable — the per-field clear sentinel a `PlatformConfigPatch`
@@ -776,7 +799,7 @@ type NullableFields<T> = { [K in keyof T]?: T[K] | null };
  */
 export type PlatformConfigPatch = Omit<
   PlatformConfigOverride,
-  "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers"
+  "rateLimit" | "watchers" | "timeouts" | "coalesceAgentMessages" | "operatorEnabled" | "schedulerEnabled" | "maxConcurrentGates" | "maxConcurrentManagers" | "maxConcurrentAuditors"
 > & {
   rateLimit?: NullableFields<RateLimitConfig> | null;
   watchers?: NullableFields<WatcherConfig> | null;
@@ -786,6 +809,7 @@ export type PlatformConfigPatch = Omit<
   schedulerEnabled?: boolean | null;
   maxConcurrentGates?: number | null;
   maxConcurrentManagers?: number | null;
+  maxConcurrentAuditors?: number | null;
 };
 
 export const PLATFORM_DEFAULTS: ResolvedConfig = {
@@ -823,7 +847,7 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
   },
   // no automated gate by default (the two-step review is the gate); cap concurrent workers at 3;
   // the cron Scheduler is OFF by default (opt-in via config or LOOM_SCHEDULER_ENABLED=1)
-  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentGates: 1, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md" },
+  orchestration: { gateCommand: "", gateCommandTimeoutMs: 120000, deployCommand: "", deployCommandTimeoutMs: 120000, alertWebhookTimeoutMs: 5000, maxConcurrentWorkers: 3, maxConcurrentManagers: 3, maxConcurrentAuditors: 2, maxConcurrentGates: 1, schedulerEnabled: false, recycleAtContextRatio: 0.80, recycleNudgeIntervalMinutes: 20, maxUnansweredRecycleNudges: 3, idleNudgeMinutes: 45, maxUnansweredNudges: 2, idleDefaultSnoozeMinutes: 30, idleWorkerMinutes: 45, stuckWorkerMinutes: 60, crashRecoveryMaxAttempts: 3, resumeDocFilename: "Orchestrator Log.md" },
   // auto-backup on by default: snapshot loom.db on boot + hourly + before a self-host restart, keep 48
   backup: { intervalMinutes: 60, keep: 48, enabled: true },
   // daemon-global platform tuning defaults (rate-limit numbers, watcher cadences, op timeouts). These
@@ -1161,6 +1185,7 @@ export function resolveConfig(
     // already read `platformOverride` correctly for both fields) — this only reaches the fast path.
     base.orchestration.maxConcurrentGates = platformOverride?.maxConcurrentGates ?? d.orchestration.maxConcurrentGates;
     base.orchestration.maxConcurrentManagers = platformOverride?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers;
+    base.orchestration.maxConcurrentAuditors = platformOverride?.maxConcurrentAuditors ?? d.orchestration.maxConcurrentAuditors;
     // obsidian defaults OFF on this fast path → obsidianSessionEnv({autoStart:false}) is {} → base.sessionEnv
     // stays byte-identical to today (no injection). Nothing to do; left explicit for the next reader.
     // Daemon-global tuning still applies on the no-(project)-override fast path: the global override
@@ -1216,6 +1241,9 @@ export function resolveConfig(
       // per-project override is intentionally ignored here, not read (the cron Scheduler is ONE
       // daemon-wide service, never scoped to a specific project — see the field's own doc).
       maxConcurrentManagers: platformOverride?.maxConcurrentManagers ?? d.orchestration.maxConcurrentManagers,
+      // Sweep G2: separate daemon-GLOBAL auditor budget, same resolution shape as maxConcurrentManagers
+      // above — no per-project layer to consult at all (see OrchestrationConfig.maxConcurrentAuditors).
+      maxConcurrentAuditors: platformOverride?.maxConcurrentAuditors ?? d.orchestration.maxConcurrentAuditors,
       // Daemon-GLOBAL (no per-project layer, like backup/platform below): the platform override (2nd
       // arg) wins over the default. A stale per-project `orchestration.schedulerEnabled` (accepted
       // before this field moved to PlatformConfigOverride) is intentionally ignored here, not read.

@@ -465,6 +465,11 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // budget — this hint shows what WILL take effect on the next restart, not a live-reread value.
   const managersDefault = resolveConfig(undefined).orchestration.maxConcurrentManagers;
   const managersResolved = resolveConfig(undefined, override).orchestration.maxConcurrentManagers;
+  // maxConcurrentAuditors (sweep G2, mirrors maxConcurrentManagers immediately above exactly) — its own
+  // SEPARATE fleet-wide budget for scheduler-spawned auditor sessions. Same boot-bound caveat: the
+  // Scheduler reads this once at construction (index.ts), so a saved change needs a daemon restart.
+  const auditorsDefault = resolveConfig(undefined).orchestration.maxConcurrentAuditors;
+  const auditorsResolved = resolveConfig(undefined, override).orchestration.maxConcurrentAuditors;
 
   // One flat string dict keyed by field key (unique across groups). "" = inherit. Seeded from the loaded
   // override, each value displayed in its human unit (canonical ms ÷ the unit).
@@ -490,6 +495,8 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
   // Fleet-wide scheduler manager cap (card 52ab5d45) — same blank-to-inherit tri-state-adjacent pattern
   // as maxConcurrentGates above, its own control (not the ms-keyed GLOBAL_FIELDS grid).
   const [maxConcurrentManagers, setMaxConcurrentManagers] = useState(numStr(override.maxConcurrentManagers));
+  // Sweep G2 — its own blank-to-inherit control, same pattern as maxConcurrentManagers above.
+  const [maxConcurrentAuditors, setMaxConcurrentAuditors] = useState(numStr(override.maxConcurrentAuditors));
   // Host-tool integration paths (card 8dc5ebb9) — one text field per tool, seeded from the loaded
   // override. Blank = no DB override (the resolver falls back to its own LOOM_*_BIN env var).
   const [codescapePath, setCodescapePath] = useState(override.integrations?.codescape?.path ?? "");
@@ -547,6 +554,14 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
     } else {
       const n = Number(managersTrim);
       (o as Record<string, unknown>).maxConcurrentManagers = Number.isFinite(n) ? n : managersTrim;
+    }
+    // Same blank/non-finite handling as maxConcurrentManagers above (sweep G2).
+    const auditorsTrim = maxConcurrentAuditors.trim();
+    if (auditorsTrim === "") {
+      o.maxConcurrentAuditors = null;
+    } else {
+      const n = Number(auditorsTrim);
+      (o as Record<string, unknown>).maxConcurrentAuditors = Number.isFinite(n) ? n : auditorsTrim;
     }
     // `integrations` is ALWAYS emitted (unlike the blank-omits-the-key GLOBAL_FIELDS above) — the PATCH
     // handler shallow-merges only at the TOP level, so a submitted `integrations` key REPLACES the
@@ -661,6 +676,20 @@ function GlobalConfigForm({ override, resolved }: { override: PlatformConfigOver
             every gate run), the Scheduler reads this ONCE at construction, so a saved change here needs
             the next daemon restart to actually change its budget — same as the toggle above. Whole
             number, 1–100.
+          </Hint>
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 4, maxWidth: 420, marginTop: 12 }}>
+          <span style={fieldLabel}>Max concurrent scheduler-spawned auditors · restart required</span>
+          <Input value={maxConcurrentAuditors} onChange={(e) => setMaxConcurrentAuditors(e.target.value)}
+            inputMode="numeric" placeholder={`inherit (default ${auditorsDefault})`} />
+          <Hint>{effHint(auditorsResolved)} (takes effect after a daemon restart)</Hint>
+          <Hint>
+            Caps how many auditor sessions (the dev Platform Auditor + the end-user Workspace Auditor) the
+            cron Scheduler itself may have live at once — a SEPARATE budget from the manager cap above, so
+            a fired auditor never consumes a manager slot and is never blocked by a full manager cap (and
+            vice versa). Fleet-wide, not per-project. Boot-time-gated: the Scheduler reads this ONCE at
+            construction, so a saved change here needs the next daemon restart to actually change its
+            budget. Whole number, 1–50.
           </Hint>
         </label>
       </Panel>

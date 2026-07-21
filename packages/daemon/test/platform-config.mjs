@@ -34,7 +34,7 @@ requireHermeticEnv();
 const { resolveConfig } = await import("@loom/shared");
 // dist imports happen AFTER LOOM_HOME is set (paths.ts reads it at module-eval time).
 const { Db } = await import("../dist/db.js");
-const { validatePlatformConfigOverride, validatePlatformConfigPatch } = await import("../dist/mcp/platform.js");
+const { validatePlatformConfigOverride, validatePlatformConfigPatch, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { detectIntegrations } = await import("../dist/integrations/detect.js");
 
@@ -870,10 +870,85 @@ const dbFile = path.join(TMP, "loom.db");
   }
 }
 
+// ============================ (19) maxConcurrentAuditors: daemon-global fleet-wide auditor budget (sweep G2) ============================
+// Mirrors maxConcurrentManagers (test 18) end-to-end: resolveConfig's merge folds the platform override
+// into resolved.orchestration.maxConcurrentAuditors, the validator accepts/rejects per its own 1-50
+// whole-number bounds, and the PATCH clear-to-inherit sentinel round-trips exactly like maxConcurrentGates
+// /maxConcurrentManagers. UNLIKE maxConcurrentManagers this field never had a per-project predecessor, so
+// there is no backward-compat per-project acceptance to test — a per-project orchestration.
+// maxConcurrentAuditors is a REJECTED unknown key (like schedulerEnabled/maxConcurrentGates).
+{
+  // --- resolveConfig: platform override reaches resolved.orchestration.maxConcurrentAuditors ---
+  check("(19) default maxConcurrentAuditors is 2 (no override at all)",
+    resolveConfig(undefined).orchestration.maxConcurrentAuditors === 2);
+  check("(19) platform override reaches resolved.orchestration.maxConcurrentAuditors (no-project-override fast path)",
+    resolveConfig(undefined, { maxConcurrentAuditors: 5 }).orchestration.maxConcurrentAuditors === 5);
+  check("(19) platform override reaches resolved.orchestration.maxConcurrentAuditors (WITH a project override present)",
+    resolveConfig({ docLint: false }, { maxConcurrentAuditors: 5 }).orchestration.maxConcurrentAuditors === 5);
+
+  // A per-project orchestration.maxConcurrentAuditors is a REJECTED unknown key (no backward-compat
+  // predecessor, unlike maxConcurrentManagers) — the per-project validator 400s it.
+  check("(19) per-project orchestration.maxConcurrentAuditors is a rejected unknown key",
+    validateProjectConfigOverride({ orchestration: { maxConcurrentAuditors: 5 } }).ok === false);
+
+  // --- validatePlatformConfigOverride: accept/reject bounds (1-50 whole number) ---
+  check("(19) platformConfigOverrideSchema accepts maxConcurrentAuditors:2 (default)",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: 2 }).ok === true);
+  check("(19) platformConfigOverrideSchema accepts maxConcurrentAuditors:1 (floor)",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: 1 }).ok === true);
+  check("(19) platformConfigOverrideSchema accepts maxConcurrentAuditors:50 (ceiling)",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: 50 }).ok === true);
+  check("(19) platformConfigOverrideSchema rejects maxConcurrentAuditors:0 (deadlocks scheduled auditor spawns)",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: 0 }).ok === false);
+  check("(19) platformConfigOverrideSchema rejects maxConcurrentAuditors:-1",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: -1 }).ok === false);
+  check("(19) platformConfigOverrideSchema rejects maxConcurrentAuditors:51 (>ceiling)",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: 51 }).ok === false);
+  check("(19) platformConfigOverrideSchema rejects non-integer maxConcurrentAuditors",
+    validatePlatformConfigOverride({ maxConcurrentAuditors: 1.5 }).ok === false);
+
+  // --- PATCH clear-to-inherit sentinel: null accepted, round-trips a real clear ---
+  check("(19) validatePlatformConfigPatch accepts maxConcurrentAuditors:null", validatePlatformConfigPatch({ maxConcurrentAuditors: null }).ok === true);
+
+  const audDbFile = path.join(TMP, "max-concurrent-auditors.db");
+  const db = new Db(audDbFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    // Set → persisted → resolveConfig picks it up.
+    const set = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentAuditors: 9 } });
+    check("(19) PATCH maxConcurrentAuditors:9 → 200", set.statusCode === 200 && set.json().override.maxConcurrentAuditors === 9);
+    check("(19) persisted to the DB", db.getPlatformConfig().maxConcurrentAuditors === 9);
+    check("(19) resolveConfig against the persisted override resolves the new cap",
+      resolveConfig(undefined, db.getPlatformConfig()).orchestration.maxConcurrentAuditors === 9);
+
+    // A sibling-field PATCH must leave it byte-identical (shallow-merge, test (12)'s guard).
+    const sibling = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { watchers: { wakeMs: 90000 } } });
+    check("(19) sibling-field PATCH → 200", sibling.statusCode === 200);
+    check("(19) sibling-field PATCH leaves maxConcurrentAuditors untouched", db.getPlatformConfig().maxConcurrentAuditors === 9);
+
+    // Clear → default.
+    const clear = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentAuditors: null } });
+    check("(19) clear PATCH → 200", clear.statusCode === 200);
+    check("(19) cleared: no longer stale in the store", db.getPlatformConfig().maxConcurrentAuditors === undefined);
+    check("(19) resolveConfig reverts to the default after the clear",
+      resolveConfig(undefined, db.getPlatformConfig()).orchestration.maxConcurrentAuditors === 2);
+
+    // A non-numeric client entry still 400s (not silently a clear) — mirrors maxConcurrentManagers's own guard above.
+    db.setPlatformConfig({ maxConcurrentAuditors: 4 });
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentAuditors: "not-a-number" } });
+    check("(19) a non-numeric maxConcurrentAuditors string still 400s (not treated as a clear)", bad.statusCode === 400);
+    check("(19) the rejected invalid PATCH did not clobber the persisted value", db.getPlatformConfig().maxConcurrentAuditors === 4);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (incl. a non-grid field with no Settings UI control, e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

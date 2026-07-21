@@ -256,6 +256,71 @@ test("editing maxConcurrentManagers (card 52ab5d45): blank inherits, a set value
   await expect.poll(readManagersOverride).toBeNull();
 });
 
+test("editing maxConcurrentAuditors (sweep G2): blank inherits, a set value persists, blank-AFTER-set clears, a bad value 400s", async ({ page, loomDaemon }) => {
+  // The fleet-wide scheduler-AUDITOR cap — mirrors the maxConcurrentManagers test above end to end (its
+  // near-exact sibling: a SEPARATE daemon-global budget for scheduler-spawned auditor sessions, same
+  // blank-to-inherit / restart-required shape, just its own 1-50 bound instead of 1-100).
+  const project = await loomDaemon.createProject(`settings-auditors-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  const label = "Max concurrent scheduler-spawned auditors · restart required";
+  const auditors = field(page, label);
+  await expect(auditors).toBeVisible();
+  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
+  const auditorsLabel = page.locator(`label:has(> span:text-is(${JSON.stringify(label)}))`);
+
+  const readAuditorsOverride = async (): Promise<number | null> => {
+    const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
+    const body = (await res.json()) as { override?: { maxConcurrentAuditors?: number } };
+    return body?.override?.maxConcurrentAuditors ?? null;
+  };
+
+  // BLANK = INHERIT: the platform default is 2 (ZERO behavior change from today's
+  // DEFAULT_MAX_CONCURRENT_AUDITORS constant).
+  await auditors.fill("");
+  await expect(auditorsLabel.getByText(/effective: 2/)).toBeVisible();
+  await expect(auditors).toHaveAttribute("placeholder", "inherit (default 2)");
+
+  // SET: 6 is a valid in-bounds, non-default value so the read-back is unambiguous.
+  await auditors.fill("6");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readAuditorsOverride).toBe(6);
+  // A reload re-seeds the field from the persisted override — not just optimistic client state.
+  await page.reload();
+  await expect(field(page, label)).toHaveValue("6");
+
+  // CLEAR: blanking this NOW-SET field and saving again must actually DELETE the persisted key (revert to
+  // inherit), not merely omit it while the stale 6 survives underneath (the fd55ac8a-class bug).
+  const auditorsAfterSet = field(page, label);
+  await auditorsAfterSet.fill("");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect.poll(readAuditorsOverride).toBeNull();
+  await expect(auditorsLabel.getByText(/effective: 2/)).toBeVisible();
+  await page.reload();
+  await expect(field(page, label)).toHaveValue("");
+
+  // BAD VALUE: 999 is outside the control's advertised 1–50 bound — the strict-zod PATCH 400s readably
+  // (field-named reason) and the persisted (now-cleared) value stays unchanged.
+  const auditorsAfterReload = field(page, label);
+  await auditorsAfterReload.fill("999");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/maxConcurrentAuditors/).first()).toBeVisible();
+  await expect.poll(readAuditorsOverride).toBeNull();
+
+  // NON-NUMERIC is likewise rejected — routed through as the literal string, so it 400s distinctly from a
+  // real clear rather than silently colliding with the null sentinel.
+  await auditorsAfterReload.fill("abc");
+  await expect(globalSave).toBeEnabled();
+  await globalSave.click();
+  await expect(page.getByText(/maxConcurrentAuditors/).first()).toBeVisible();
+  await expect.poll(readAuditorsOverride).toBeNull();
+});
+
 test("editing a message-delivery toggle (coalesceAgentMessages): set persists, clearing back to inherit CLEARS the override (card fd55ac8a)", async ({ page, loomDaemon }) => {
   // The tri-state toggles (coalesceAgentMessages/operatorEnabled/schedulerEnabled) share the same
   // clear-to-inherit fix as maxConcurrentGates above — selecting "— inherit" and saving must actually

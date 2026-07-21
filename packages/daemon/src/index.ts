@@ -833,10 +833,13 @@ async function main(): Promise<void> {
   // merge (config.ts); the explicit `platformOverride?.maxConcurrentManagers ??` here is belt-and-suspenders
   // at the actual construction site, matching how `maxConcurrentManagers` is read at every other call site.
   const maxConcurrentManagers = platformOverride?.maxConcurrentManagers ?? resolved.orchestration.maxConcurrentManagers;
+  // Sweep G2 (mirrors maxConcurrentManagers immediately above): SEPARATE daemon-global auditor budget,
+  // same belt-and-suspenders construction-site read.
+  const maxConcurrentAuditors = platformOverride?.maxConcurrentAuditors ?? resolved.orchestration.maxConcurrentAuditors;
   // card 53edd8d5: `{scheduled:true}` is what pins Session.scheduledSpawn on the spawned row, so ONLY
   // the Scheduler's own manager spawns count against `maxConcurrentManagers` (Db.countLiveScheduledManagers)
   // — every other startManager caller (REST, generic dispatch) omits it and stays unaffected.
-  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt) => sessions.startManager(agentId, prompt, { scheduled: true }), startAuditor: (agentId, prompt) => sessions.startAuditor(agentId, prompt), startWorkspaceAuditor: (agentId, prompt) => sessions.startWorkspaceAuditor(agentId, prompt), intervalMs, maxConcurrentManagers });
+  const scheduler = new Scheduler({ db, control, startManager: (agentId, prompt) => sessions.startManager(agentId, prompt, { scheduled: true }), startAuditor: (agentId, prompt) => sessions.startAuditor(agentId, prompt), startWorkspaceAuditor: (agentId, prompt) => sessions.startWorkspaceAuditor(agentId, prompt), intervalMs, maxConcurrentManagers, maxConcurrentAuditors });
   if (schedulerEnabled) {
     scheduler.start();
     console.log(`[boot] scheduler enabled (tick ${intervalMs}ms)`);
