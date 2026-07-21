@@ -32,6 +32,14 @@ const seedAgent = (baseURL: string, projectId: string, name: string) =>
   apiJson<{ id: string }>(`${baseURL}/api/projects/${projectId}/agents`, { method: "POST", body: JSON.stringify({ name }) });
 const assignProfile = (baseURL: string, agentId: string, profileId: string) =>
   apiJson<{ id: string }>(`${baseURL}/api/agents/${agentId}`, { method: "POST", body: JSON.stringify({ profileId }) });
+// Profiles and schedules are GLOBAL stores (not project-scoped), so a spec that seeds one over REST must
+// delete it afterward — a leftover row pollutes the shared worker daemon's global list for every later
+// spec (e.g. schedules.spec.ts's "no schedules yet" empty-state assertion). Best-effort: a torn-down
+// daemon at teardown must never fail the test.
+const deleteProfile = (baseURL: string, id: string) =>
+  fetch(`${baseURL}/api/profiles/${id}`, { method: "DELETE" }).catch(() => {});
+const deleteSchedule = (baseURL: string, id: string) =>
+  fetch(`${baseURL}/api/schedules/${id}`, { method: "DELETE" }).catch(() => {});
 
 // The vertical position of the first <main>-scoped element whose text matches — used to assert DOM order
 // (a lower `y` renders higher up the page) without depending on brittle sibling-index math.
@@ -149,12 +157,20 @@ test.describe("project Overview — Attention list caps + collapses (unbounded-g
 // agent still gets a card. The grid filter is on the agent's PROFILE role; the SESSION-derived "active
 // workers" header stat is a SEPARATE code path (session.role) and must still count live workers.
 test.describe("project Overview — Agents spawn grid excludes worker-role agents", () => {
+  // Profiles are a GLOBAL store (not project-scoped) that autoIsolation doesn't touch — clean up whatever
+  // this describe block seeds so it can't leak into a later spec's global profile list.
+  const seededProfileIds: string[] = [];
+  test.afterEach(async ({ loomDaemon }) => {
+    for (const id of seededProfileIds.splice(0)) await deleteProfile(loomDaemon.baseURL, id);
+  });
+
   test("a worker-profiled agent gets no spawn card, but a manager agent does and the 'active workers' stat still counts", async ({ page, loomDaemon }) => {
     const project = await loomDaemon.createProject(`ov-worker-exclude-${Date.now()}`);
 
     // A manager-role profile + a worker-role profile (the global profiles store), one agent bound to each.
     const mgrProfile = await seedProfile(loomDaemon.baseURL, { name: `OvMgrProfile ${Date.now()}`, role: "manager", icon: "🧭" });
     const wkrProfile = await seedProfile(loomDaemon.baseURL, { name: `OvWkrProfile ${Date.now()}`, role: "worker", icon: "🔧" });
+    seededProfileIds.push(mgrProfile.id, wkrProfile.id);
     const mgrName = `OvMgrAgent-${Date.now()}`;
     const wkrName = `OvWorkerRig-${Date.now()}`;
     const mgrAgent = await seedAgent(loomDaemon.baseURL, project.id, mgrName);
@@ -236,6 +252,13 @@ test.describe("project Overview — Fleet accordion caps the archived fold-in + 
 // pointer line — no heading, no Panel — with a clickable "add one on the Automation page →" that routes to
 // Automation. Seed a schedule and the FULL section returns (the cron row renders, the pointer is gone).
 test.describe("project Overview — empty Schedules collapses to a one-line pointer", () => {
+  // Schedules are a GLOBAL store (not project-scoped) that autoIsolation doesn't touch — a leftover row
+  // pollutes e.g. schedules.spec.ts's "no schedules yet" empty-state assertion on the shared worker daemon.
+  const seededScheduleIds: string[] = [];
+  test.afterEach(async ({ loomDaemon }) => {
+    for (const id of seededScheduleIds.splice(0)) await deleteSchedule(loomDaemon.baseURL, id);
+  });
+
   test("no schedules → single pointer line to Automation; a seeded schedule → the full section returns", async ({ page, loomDaemon }) => {
     const stamp = Date.now();
     const project = await loomDaemon.createProject(`ov-sched-${stamp}`);
@@ -261,6 +284,8 @@ test.describe("project Overview — empty Schedules collapses to a one-line poin
       body: JSON.stringify({ name: `OvSched ${stamp}`, agentId: agent.id, cron }),
     });
     expect(res.ok).toBeTruthy();
+    const created = (await res.json()) as { id: string };
+    seededScheduleIds.push(created.id);
 
     await page.goto(`${loomDaemon.baseURL}/overview`);
     await expect(page.locator("main").getByText(cron, { exact: true })).toBeVisible();
