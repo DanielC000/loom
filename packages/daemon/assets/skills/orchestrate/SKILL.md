@@ -46,7 +46,7 @@ so a first BARE call (`worker_spawn`, `inbox_pull`, `my_context`, `recycle_me`, 
 round-trip. **Preload the lifecycle set in ONE ToolSearch at orchestrator start** — include the
 orientation reads (`worker_list` is your standard first call) and the direction tools, so even your
 first bare call lands:
-`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__deploy,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask,mcp__loom-orchestration__question_cancel`
+`select:mcp__loom-orchestration__idle_report,mcp__loom-orchestration__inbox_pull,mcp__loom-orchestration__my_context,mcp__loom-orchestration__worker_spawn,mcp__loom-orchestration__worker_list,mcp__loom-orchestration__worker_status,mcp__loom-orchestration__worker_transcript,mcp__loom-orchestration__worker_message,mcp__loom-orchestration__worker_redirect,mcp__loom-orchestration__worker_merge,mcp__loom-orchestration__worker_merge_confirm,mcp__loom-orchestration__worker_recycle,mcp__loom-orchestration__worker_stop,mcp__loom-orchestration__recycle_me,mcp__loom-orchestration__platform_escalate,mcp__loom-orchestration__deploy,mcp__loom-orchestration__served_status,mcp__loom-orchestration__question_ask,mcp__loom-orchestration__question_cancel,mcp__loom-orchestration__question_resolve`
 (add `mcp__loom-tasks__tasks_list,mcp__loom-tasks__tasks_create,mcp__loom-tasks__tasks_update` for the board).
 
 ## Standing goal — never idle
@@ -153,9 +153,15 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   It's NON-BLOCKING: keep orchestrating your other tracks, but don't guess past *this* point —
   `question_pull` the answer (which consumes it; a credential returns only the ack, a permission returns
   `approved`) when you reach it, or when the push nudge says it's answered.
-- **A moot or superseded ask doesn't have to sit in the human's inbox forever** — if fresher information
-  means you're re-asking, or the situation resolved on its own, `question_cancel(questionId, reason?)`
-  withdraws your OWN still-pending ask (never another agent's — it's scoped to your own asks only) into a
+- **The owner answered a still-pending ask live in chat? That's an ANSWER, not a moot ask** — call
+  `question_resolve(questionId, chosenOption?)` in that same turn instead of `question_cancel`: the
+  history then records it **answered**, with the owner's own words captured verbatim as the note (the
+  note is always the server-captured owner reply — you never write or paraphrase it), rather than
+  cancelled with the owner's reasoning lost to chat scrollback.
+- **A genuinely moot or superseded ask — one nobody answered — doesn't have to sit in the human's
+  inbox forever** — if fresher information means you're re-asking, or the situation resolved on its
+  own, `question_cancel(questionId, reason?)` withdraws your OWN still-pending ask (never another
+  agent's — it's scoped to your own asks only) into a
   retained, never-hard-deleted history entry carrying your reason. It ONLY ever touches a still-`pending`
   ask — an already-answered one is refused outright (cancelling can never discard an answer the human
   already gave); `question_pull` that instead. **If you already know, at the moment you re-ask, exactly
