@@ -523,42 +523,66 @@ const dbFile = path.join(TMP, "loom.db");
   }
 
   // --- GET /api/integrations: the live detect/validate read, exercised via the REAL detectIntegrations()
-  // (never mocked) — proves the states without a real Codescape install. ---
+  // (never mocked) — proves the states without a real Codescape install. Codescape is a private product
+  // (card f3ce53f1) — `detectIntegrations()` now gates codescape out ENTIRELY unless `isLoomDev()`, so the
+  // detection-LOGIC assertions below (state/source resolution) run under a temporarily-forced LOOM_DEV=1;
+  // the gate itself (dev vs non-dev) is asserted separately right after, restored either way. ---
   {
-    // Nothing configured at all (neither DB nor env) ⇒ not-found, source none.
     const savedCsEnv = process.env.LOOM_CODESCAPE_BIN;
+    const savedLoomDev = process.env.LOOM_DEV;
     delete process.env.LOOM_CODESCAPE_BIN;
+    process.env.LOOM_DEV = "1"; // force dev-on so detection-logic assertions below aren't gated away
+
+    // Nothing configured at all (neither DB nor env) ⇒ not-found, source none.
     const none = await detectIntegrations({});
     const csNone = none.find((s) => s.slug === "codescape");
-    check("(14) detectIntegrations: nothing configured ⇒ codescape not-found, source none", csNone.state === "not-found" && csNone.source === "none" && csNone.path === null);
+    check("(14) detectIntegrations (dev): nothing configured ⇒ codescape not-found, source none", csNone.state === "not-found" && csNone.source === "none" && csNone.path === null);
 
     // A bogus configured path ⇒ not-found, source db (misconfigured, not merely absent).
     const bogus = await detectIntegrations({ integrations: { codescape: { path: path.join(TMP, "also-missing") } } });
-    check("(14) detectIntegrations: a bogus DB path ⇒ not-found, source db", bogus.find((s) => s.slug === "codescape").state === "not-found" && bogus.find((s) => s.slug === "codescape").source === "db");
+    check("(14) detectIntegrations (dev): a bogus DB path ⇒ not-found, source db", bogus.find((s) => s.slug === "codescape").state === "not-found" && bogus.find((s) => s.slug === "codescape").source === "db");
 
     // A real, existing bin (process.execPath stands in for a real compiled binary) is simply "detected".
     const csDetected = await detectIntegrations({ integrations: { codescape: { path: process.execPath } } });
     const cs = csDetected.find((s) => s.slug === "codescape");
-    check("(14) detectIntegrations: a real codescape bin ⇒ detected", cs.state === "detected" && cs.source === "db");
+    check("(14) detectIntegrations (dev): a real codescape bin ⇒ detected", cs.state === "detected" && cs.source === "db");
+
+    // --- The privacy gate itself (part 1 of f3ce53f1's own DoD, as a permanent assertion): a non-dev
+    // daemon must get NO codescape-named entry at all, even with a real configured+detected bin — the
+    // ENTRY IS NEVER CONSTRUCTED, not merely filtered. ---
+    delete process.env.LOOM_DEV;
+    const nonDev = await detectIntegrations({ integrations: { codescape: { path: process.execPath } } });
+    check("(14) detectIntegrations (non-dev): codescape entry entirely absent even when configured+detected", nonDev.length === 0);
 
     if (savedCsEnv === undefined) delete process.env.LOOM_CODESCAPE_BIN; else process.env.LOOM_CODESCAPE_BIN = savedCsEnv;
+    if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
   }
 
   // --- GET /api/integrations REST wiring smoke: the route actually calls detectIntegrations against the
-  // DB's live config (not a hardcoded/stubbed response). ---
+  // DB's live config (not a hardcoded/stubbed response). Asserts BOTH directions in one run — non-dev
+  // gated AND dev-mode present — so a broken endpoint that returns nothing at all (which would trivially
+  // satisfy an absence-only check) can't slip through: it must also still work for the owner's own dev path. ---
   {
+    const savedLoomDev = process.env.LOOM_DEV;
     const wireDbFile = path.join(TMP, "integrations-wire.db");
     const db = new Db(wireDbFile);
     db.setPlatformConfig({ integrations: { codescape: { path: process.execPath } } });
     const stub = {};
     const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
     try {
-      const r = await app.inject({ method: "GET", url: "/api/integrations" });
-      check("(14) GET /api/integrations → 200", r.statusCode === 200);
-      const body = r.json();
-      const cs = body.integrations?.find((s) => s.slug === "codescape");
-      check("(14) GET /api/integrations reflects the DB's persisted codescape path as detected", cs?.state === "detected" && cs?.path === process.execPath);
+      delete process.env.LOOM_DEV;
+      const rNonDev = await app.inject({ method: "GET", url: "/api/integrations" });
+      check("(14) GET /api/integrations (non-dev) → 200", rNonDev.statusCode === 200);
+      const bodyNonDev = rNonDev.json();
+      check("(14) GET /api/integrations (non-dev): no codescape-named field, despite a persisted+detected path", !bodyNonDev.integrations?.some((s) => s.slug === "codescape") && JSON.stringify(bodyNonDev).toLowerCase().indexOf("codescape") === -1);
+
+      process.env.LOOM_DEV = "1";
+      const rDev = await app.inject({ method: "GET", url: "/api/integrations" });
+      check("(14) GET /api/integrations (dev) → 200", rDev.statusCode === 200);
+      const cs = rDev.json().integrations?.find((s) => s.slug === "codescape");
+      check("(14) GET /api/integrations (dev): reflects the DB's persisted codescape path as detected", cs?.state === "detected" && cs?.path === process.execPath);
     } finally {
+      if (savedLoomDev === undefined) delete process.env.LOOM_DEV; else process.env.LOOM_DEV = savedLoomDev;
       try { await app.close(); } catch { /* ignore */ }
       db.close();
     }
