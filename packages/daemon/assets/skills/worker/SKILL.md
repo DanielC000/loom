@@ -89,7 +89,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      command's own notification (see below), which is not. **While parked on that nudge, `worker_report
      progress` with `awaiting: "background"`** — from Loom's view you've gone idle, and without that flag
      the idle watchdog defaults to nudging your manager that you may be done-but-unreported or stalled, a
-     wasted round-trip to discover you're just healthy-parked on your own gate.
+     wasted round-trip to discover you're just healthy-parked on your own gate. **If you also want a
+     belt-and-suspenders fallback wake for this park, prefer `wake_me` over any other scheduling
+     primitive you have available** — Loom can see a `wake_me` and auto-cancels it the instant the
+     awaited nudge actually lands, so a healthy park never leaves a stale wake to fire later; a wake
+     scheduled through some other mechanism is invisible to Loom and fires regardless, handing you a
+     pointless round-trip re-discovering work you already finished. Still cancel your own fallback wake
+     yourself the moment the nudge lands — don't rely solely on the auto-cancel. And the auto-cancel
+     sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something else while still
+     parked on this same gate may get reaped too — if you still need it once the nudge lands,
+     re-schedule it then.
    - **If it reports your project has no gate command configured**, only then fall back to running your
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report

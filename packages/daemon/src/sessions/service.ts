@@ -3783,6 +3783,69 @@ export class SessionService {
   }
 
   /**
+   * AUTO-CANCEL-ON-NUDGE (card 9d521792, finding 23d8864a): when one of the 5 settle-nudge push sites
+   * (runWorkerGate's onSettledAfterPending, confirmWorkerMergeTracked's generic echo, rejectNotify's
+   * `[loom:merge-rejected]`, finishAlreadyMerged's `[loom:already-merged]`, and the boot-time
+   * `reconcileOrphanedGateOps` sweep) delivers its TERMINAL `[loom:gate-*]`/`[loom:merge-*]` nudge, a
+   * fallback `wake_me` a parked session scheduled to cover this exact op is now pointless — left alone
+   * it fires anyway (sometimes after the session already reported done), burning a turn re-discovering
+   * "already handled". Scoped by TIME, not by touching every pending wake: only `target`'s wakes with
+   * `createdAt >= opStartedAt` are reaped — a wake created BEFORE this op started provably predates it
+   * and is left untouched no matter how many wakes are pending. `target` is always the LINEAGE-RESOLVED
+   * recipient ({@link resolveSettleNudgeTarget}) — recycleWorker/recycleManager/recyclePlatformLead
+   * already reparent a predecessor's pending wakes onto the live successor (`db.reparentWakes`) at
+   * recycle time, so a fallback wake scheduled before a mid-op recycle already lives under `target`'s
+   * own session id, with its ORIGINAL `createdAt` preserved, by the time this runs.
+   *
+   * ACCEPTED RESIDUAL RISK (documented in `/worker` doctrine too, not just here): a session that
+   * schedules a SECOND, unrelated `wake_me` strictly after this op started but before it settles is
+   * swept too — timestamps alone can't tell "fallback for this op" apart from "unrelated wake scheduled
+   * while parked". This matches the card's own DoD wording ("any wake scheduled while that op was
+   * pending"); the doctrine's cancel-your-own-wake-on-nudge instruction is the primary defense, this is
+   * the backstop for the common single-fallback-wake case the originating evidence actually showed.
+   *
+   * `opStartedAt` IS A CAPTURED VALUE, NEVER A SETTLE-TIME LOOKUP: every call site either closes over a
+   * local captured synchronously BEFORE `attach()` ever ran (runWorkerGate, confirmWorkerMergeTracked —
+   * mirroring `attach()`'s own internal stamp: an already-running entry for `key` keeps ITS start
+   * instant, no running entry means this call is about to mint a fresh one at the same synchronous
+   * instant), threads that SAME captured value down through `confirmWorkerMerge`'s `opStartedAt` param
+   * to `rejectNotify`/`finishAlreadyMerged`, or (`reconcileOrphanedGateOps`) reads `started_at` straight
+   * off the durable row. An EARLIER version of this helper instead re-derived `opStartedAt` via
+   * `pendingOps.peek(key)` AT SETTLE TIME — plausible-looking (the retained view IS written moments
+   * earlier, in the same synchronous settle callback), but it raced the registry's retain-then-notify
+   * ordering under CPU-contended concurrent test load (merge-gate op 473b8596: this test's own
+   * "fallback wake reaped" assertions failed under `LOOM_TEST_CONCURRENCY=2` while passing standalone)
+   * — closure capture removes that race entirely instead of chasing a more reliable read.
+   *
+   * FAIL-SAFE ON UNKNOWN START TIME (kept even though closure capture makes it effectively unreachable
+   * on the 4 tracked sites — see the class doc's fail-safe reasoning below): `opStartedAt` is undefined
+   * only for `confirmWorkerMerge`'s UNTRACKED caller (the human REST merge route, which bypasses
+   * PendingOpRegistry entirely and so has no start instant to capture in the first place). The two
+   * failure directions are NOT symmetric: cancelling nothing just leaves a stale wake to fire once more
+   * (today's bug, unchanged); cancelling broadly — or from epoch — could destroy a wake the session is
+   * genuinely relying on. So an unknown start time cancels NOTHING here — logged, never silent.
+   *
+   * VISIBILITY: every reaped row is logged INDIVIDUALLY (never just a count) — this feature destroys
+   * state a session deliberately created, and its one known imperfection is over-cancellation; if it
+   * ever reaps something it shouldn't, a per-row log line is the only way anyone can diagnose "a session
+   * mysteriously never woke up" after the fact. Deletes via the SAME `db.deleteWake` the `wake_cancel`
+   * MCP tool itself uses (WakeService.cancel) — no separate cancellation event or counter exists for a
+   * wake row, so this produces the identical observable end state as an explicit agent cancel.
+   */
+  private autoCancelSettleWakes(target: string, opStartedAt: string | undefined, opId: string): void {
+    if (!opStartedAt) {
+      console.warn(`[orchestration] auto-cancel-on-nudge skipped for session ${target.slice(0, 8)} (op ${opId}) — op start time unavailable, leaving every pending wake untouched`);
+      return;
+    }
+    for (const w of this.db.listWakesForSession(target)) {
+      if (w.createdAt >= opStartedAt) {
+        console.log(`[orchestration] auto-cancelling wake ${w.id} (due ${w.wakeAt}) on session ${target.slice(0, 8)} — its awaited op ${opId} just settled`);
+        this.db.deleteWake(w.id);
+      }
+    }
+  }
+
+  /**
    * Boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops (card 27ea069e — a daemon
    * restart mid-merge used to leave `worker_merge_confirm` dedup-attaching to a zombie op forever, keyed
    * `merge:${workerSessionId}`, because nothing ever reconciled/expired an entry whose owning manager
@@ -3845,8 +3908,14 @@ export class SessionService {
       const msg = `${tag} op ${row.opId} — daemon restart killed this run before it could finish (reason: restart) — ${verb}.` + this.settleNudgeAttribution(target, row.ownerSessionId);
       try {
         this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "warning");
+        // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — if the target isn't
+        // live, the fallback wake IS the session's real recovery path; reaping it here would strand the
+        // session exactly when it most needs waking, so a failed/undelivered push leaves every pending
+        // wake untouched (see autoCancelSettleWakes's doc). The durable row already carries the op's real
+        // start instant — no in-memory PendingOpRegistry lookup needed (it was wiped by the restart).
+        this.autoCancelSettleWakes(target, row.startedAt, row.opId);
       } catch {
-        /* owning session not live — best-effort, mirrors every other completion nudge */
+        /* owning session not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */
       }
       this.db.clearPendingGateOp(row.opId);
       cleared++;
@@ -6904,7 +6973,7 @@ export class SessionService {
    *                          recovers the commit. A 0-ahead branch with NO report stays the gentle soft retry.
    */
   async confirmWorkerMerge(
-    managerSessionId: string, workerSessionId: string, opId?: string, forceRemoveWorktree?: boolean,
+    managerSessionId: string, workerSessionId: string, opId?: string, forceRemoveWorktree?: boolean, opStartedAt?: string,
   ): Promise<ConfirmMergeResult> {
     // CORRELATION STAMP (card 369d8824): threaded from PendingOpRegistry.attach (the SAME opId a caller
     // routed through confirmWorkerMergeTracked was already handed in its own `{status:"pending",opId}`
@@ -6912,6 +6981,11 @@ export class SessionService {
     // produced it. A caller OUTSIDE that registry (the human REST merge route) passes none — mint one
     // fresh so its signals/return are stamped just as consistently, even though nothing else correlates to it.
     const thisOpId = opId ?? randomUUID();
+    // OP-START CAPTURE (card 9d521792): mirrors `thisOpId` above — threaded from confirmWorkerMergeTracked's
+    // own pre-attach() capture (the ONLY place this op's start instant is known unconditionally; see its
+    // doc). A caller OUTSIDE that registry (the human REST merge route) passes none — `autoCancelSettleWakes`
+    // treats `undefined` as "can't determine it" and cancels nothing (its fail-safe), which is correct here:
+    // an untracked call has no PendingOpRegistry entry to speak of anyway.
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
@@ -6971,7 +7045,7 @@ export class SessionService {
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
       const alreadyLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (alreadyLanded) {
-        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree });
+        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt });
       }
     }
 
@@ -6993,7 +7067,15 @@ export class SessionService {
         // successor gets nothing at all for a rejection, not even the generic failed echo. Route through the
         // SAME lineage resolution the generic echo uses.
         const target = this.resolveSettleNudgeTarget(managerSessionId);
-        try { this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+        try {
+          this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "agent");
+          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
+          // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
+          // untouched. `opStartedAt` is the CLOSED-OVER confirmWorkerMerge param (captured by
+          // confirmWorkerMergeTracked before attach() ever ran) — NOT a settle-time `peek()`, which raced
+          // the registry's retain-then-notify ordering under concurrent test load (op 473b8596).
+          this.autoCancelSettleWakes(target, opStartedAt, thisOpId);
+        } catch { /* manager not live; wakes deliberately left untouched */ }
       }
       return suppressed;
     };
@@ -7345,7 +7427,7 @@ export class SessionService {
   private async finishAlreadyMerged(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
-    forceRemoveWorktree?: boolean;
+    forceRemoveWorktree?: boolean; opStartedAt?: string;
   }): Promise<ConfirmMergeResult> {
     const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
     if (!alreadyFinalized) {
@@ -7354,7 +7436,18 @@ export class SessionService {
       // the current lineage owner, not the (possibly recycled) manager captured when the confirm started.
       const target = this.resolveSettleNudgeTarget(args.managerSessionId);
       const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId);
-      try { this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+      try {
+        this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "agent");
+        // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — a failed/undelivered
+        // push leaves every pending wake untouched, since the fallback wake is then the session's own
+        // real recovery path (see autoCancelSettleWakes's doc). `args.opStartedAt` is CAPTURED (not
+        // peeked from the registry here) — threaded all the way from confirmWorkerMergeTracked's own
+        // pre-attach() capture, the only place this op's start instant is known unconditionally; a
+        // settle-time `peek()` raced the registry's retain-then-notify ordering under concurrent test
+        // load (op 473b8596) even though both happen in one synchronous callback — closure capture
+        // removes that race entirely instead of chasing it.
+        this.autoCancelSettleWakes(target, args.opStartedAt, args.opId);
+      } catch { /* manager not live; wakes deliberately left untouched */ }
     }
     this.pty.stop(args.workerSessionId, "hard");
     for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
@@ -7442,9 +7535,20 @@ export class SessionService {
     }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
     const who = (opId: string) => `worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${opId}]`;
+    // OP-START CAPTURE (card 9d521792 CR follow-up): captured HERE, synchronously right before attach(),
+    // rather than re-derived via `pendingOps.peek()` inside the settle callback below — a settle-time
+    // peek raced the registry's own retain-then-notify ordering under CPU-contended concurrent test runs
+    // (op 473b8596) even though both happen inside one synchronous callback; closing over a value
+    // captured at the ONLY moment it's known unconditionally removes that race instead of chasing it.
+    // Mirrors attach()'s OWN internal stamp: an existing RUNNING entry for `key` (this call is merely
+    // attaching to an already-in-flight op) keeps ITS start instant; no running entry means THIS call is
+    // about to mint a fresh one, whose `startedAt` attach() sets to `new Date().toISOString()` within the
+    // same synchronous tick as this capture — the two timestamps are never separated by an await.
+    const inFlight = this.pendingOps.peek(key);
+    const opStartedAt = inFlight?.state === "running" ? inFlight.startedAt : new Date().toISOString();
     return this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
-      (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree),
+      (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt),
       (outcome, opId) => {
         // DURABLE-MARKER CLEANUP (card edc1ec12): this op settled normally (the daemon process is still
         // alive to run this callback at all) — clear the durable "surfaced pending" row `onSurfacedPending`
@@ -7472,7 +7576,15 @@ export class SessionService {
         // the predecessor when routed, so a manager juggling several concurrent merges across a recycle can
         // tell this nudge apart from one of its own.
         const target = this.resolveSettleNudgeTarget(managerSessionId);
-        try { this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "warning"); } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+        try {
+          this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "warning");
+          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
+          // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
+          // untouched. `opStartedAt` is the CLOSED-OVER value captured right before `attach()` above —
+          // NOT a settle-time `peek(key)`, which raced the registry's retain-then-notify ordering under
+          // concurrent test load (op 473b8596) even though both happen in one synchronous callback.
+          this.autoCancelSettleWakes(target, opStartedAt, opId);
+        } catch { /* manager not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ }
       },
       {
         // RETAIN + CLASSIFY (card d1aee5f1 follow-up): keep the settled op briefly `peek()`-able (see
@@ -7620,7 +7732,14 @@ export class SessionService {
     }
     // MID-FLIGHT DETECTION (card 50c1e0d0): captured BEFORE this call's own attach() — a running entry
     // found here was started by an EARLIER call (this one is merely attaching), never by this call itself.
-    const attachedToInFlight = this.pendingOps.peek(key)?.state === "running";
+    const preAttachPeek = this.pendingOps.peek(key);
+    const attachedToInFlight = preAttachPeek?.state === "running";
+    // OP-START CAPTURE (card 9d521792 CR follow-up): reuses the SAME pre-attach peek above — captured
+    // synchronously before attach(), instead of re-derived via a settle-time `peek()` (which raced the
+    // registry's own retain-then-notify ordering under CPU-contended concurrent test runs, op 473b8596,
+    // even though both happen inside one synchronous callback). See confirmWorkerMergeTracked's
+    // identical capture for the full reasoning; closed over by the settle callback below.
+    const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : new Date().toISOString();
     const result = await this.pendingOps.attach<WorkerGateResult>(
       key, "gate", workerSessionId, SYNC_ATTACH_BUDGET_MS,
       async (opId) => {
@@ -7727,7 +7846,16 @@ export class SessionService {
         // successor can hold its OWN run_gate under its OWN key AND receive this predecessor nudge on the
         // same turn — without attribution it could misread the predecessor's op as its own gate passing.
         const target = this.resolveSettleNudgeTarget(workerSessionId);
-        try { this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, workerSessionId), "system", undefined, undefined, "warning"); } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
+        try {
+          this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, workerSessionId), "system", undefined, undefined, "warning");
+          // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
+          // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
+          // untouched. `opStartedAt` is the CLOSED-OVER value captured (alongside `attachedToInFlight`)
+          // right before `attach()` above — NOT a settle-time `peek(key)`, which raced the registry's
+          // retain-then-notify ordering under concurrent test load (op 473b8596) even though both happen
+          // in one synchronous callback.
+          this.autoCancelSettleWakes(target, opStartedAt, opId);
+        } catch { /* worker not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */ }
       },
       {
         // SETTLE-GRACE WINDOW (card 50c1e0d0): see the "RESULT-CONSUMPTION FIX" doc above — a re-call
