@@ -146,15 +146,15 @@ export class TaskMcpRouter {
       server.registerTool(
         "tasks_create",
         {
-          description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2.",
-          inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional() },
+          description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2. Optional repoKey (multi-repo epic) targets one of this project's registered `repos` — omit (or pass \"primary\") for the project's primary repo; an unknown key is rejected with {error}.",
+          inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional(), repoKey: z.string().nullable().optional() },
         },
         async (args) => ok(createProjectTask(db, projectId, args)),
       );
       server.registerTool(
         "tasks_update",
         {
-          description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool — tasks_get/task_requests_list/task_request_get — uses) — pass either one (if both, id wins). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about — you MAY set this yourself. held=false CLEARS it, but only if held wasn't set by the owner: clearing an owner-set hold is REFUSED here (returns {error}, nothing written) — only the owner can release their own hold, via the board UI. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. A column/priority/deferred/held-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,heldBy,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
+          description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool — tasks_get/task_requests_list/task_request_get — uses) — pass either one (if both, id wins). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about — you MAY set this yourself. held=false CLEARS it, but only if held wasn't set by the owner: clearing an owner-set hold is REFUSED here (returns {error}, nothing written) — only the owner can release their own hold, via the board UI. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. repoKey (multi-repo epic) re-targets the card to a different entry in this project's `repos` registry, or null/\"primary\" to reset it to the project's primary repo — an unknown key is REFUSED (whole patch rejected, nothing written), same convention as an unknown columnKey. A column/priority/deferred/held/repoKey-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,heldBy,repoKey,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
           inputSchema: {
             id: z.string().optional(),
             taskId: z.string().optional(),
@@ -165,12 +165,16 @@ export class TaskMcpRouter {
             priority: prioritySchema.optional(),
             held: z.boolean().optional(),
             deferred: z.boolean().optional(),
+            repoKey: z.string().nullable().optional(),
           },
         },
         async ({ id, taskId, ...patch }) => {
           const resolvedId = resolveAlias(id, taskId);
           if (resolvedId === undefined) return ok({ error: "id (or taskId) is required" });
-          return ok(updateProjectTask(db, projectId, resolvedId, patch, { sessionId }));
+          // role threaded for the repoKey authority guard (code-review ruling): a worker on this SAME
+          // router can reach tasks_update, but must not be able to set repoKey (a dispatch decision) —
+          // see updateProjectTask's own doc.
+          return ok(updateProjectTask(db, projectId, resolvedId, patch, { sessionId, role: session?.role }));
         },
       );
     }

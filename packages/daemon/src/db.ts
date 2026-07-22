@@ -41,6 +41,7 @@ import type {
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
+  RepoRegistryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio } from "@loom/shared";
@@ -173,7 +174,12 @@ CREATE TABLE IF NOT EXISTS projects (
   -- block) when worker_merge's branch diff ADDS a file under one. Added to existing DBs via the
   -- idempotent migration below; NOT NULL + constant DEFAULT backfills legacy rows to the same
   -- mockups/-catching default new projects get (unlike reference_repos, this default is non-empty).
-  deny_globs TEXT NOT NULL DEFAULT '["mockups/**"]'
+  deny_globs TEXT NOT NULL DEFAULT '["mockups/**"]',
+  -- Multi-repo epic (49136451) phase 1: WRITABLE repo registry (JSON array of {key,path,gateCommand?}),
+  -- distinct from reference_repos (read-only). repo_path stays the one PRIMARY repo. Added to existing
+  -- DBs via the idempotent migration below; NOT NULL + constant DEFAULT '[]' backfills legacy rows to []
+  -- (mirrors reference_repos exactly).
+  repos TEXT NOT NULL DEFAULT '[]'
 );
 -- Profiles (platform-level rig: role + model + permission-delta + skill-subset + icon). NO project
 -- FK — a profile is cross-project, reused by agents across projects. allow_delta/skills are JSON text.
@@ -1276,6 +1282,9 @@ const PROJECT_ADDED_COLUMNS: Record<string, string> = {
   // default, same as a freshly created project (SQLite ALTER TABLE ADD COLUMN allows a constant
   // string-literal default just like reference_repos's '[]').
   deny_globs: "TEXT NOT NULL DEFAULT '[\"mockups/**\"]'",
+  // Multi-repo epic (49136451) phase 1: WRITABLE repo registry; legacy rows backfill to '[]' (no
+  // registered repos — behaves byte-identically to today, every task resolves to the primary repo).
+  repos: "TEXT NOT NULL DEFAULT '[]'",
 };
 
 /** Columns added to `agents` after phase-1; applied to existing DBs by migrateAgents(). */
@@ -1380,6 +1389,10 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // held-clear provenance (card 9b0373c0). Nullable, no DEFAULT — see the CREATE TABLE doc above.
   // migrateTasks() backfills existing held=1 rows to 'human' right after adding this column (below).
   held_by: "TEXT",
+  // Multi-repo epic (49136451) phase 1: which project.repos entry this card targets. Nullable, no
+  // DEFAULT (mirrors held_by) — NULL means "primary repo", so every legacy row backfills to the exact
+  // behavior it already had (resolveRepo treats a null/absent repoKey as the primary repo).
+  repo_key: "TEXT",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -2057,8 +2070,8 @@ export class Db {
   }
   insertProject(p: Project): void {
     this.db.prepare(
-      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos,no_gate_by_design,deny_globs)
-       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos,@noGateByDesign,@denyGlobs)`,
+      `INSERT INTO projects (id,name,repo_path,vault_path,config_json,created_at,archived_at,reserved,reference_repos,no_gate_by_design,deny_globs,repos)
+       VALUES (@id,@name,@repoPath,@vaultPath,@config,@createdAt,@archivedAt,@reserved,@referenceRepos,@noGateByDesign,@denyGlobs,@repos)`,
     ).run({
       ...p,
       config: JSON.stringify(p.config),
@@ -2067,6 +2080,7 @@ export class Db {
       referenceRepos: JSON.stringify(p.referenceRepos ?? []),
       noGateByDesign: p.noGateByDesign ? 1 : 0,
       denyGlobs: JSON.stringify(p.denyGlobs ?? ["mockups/**"]),
+      repos: JSON.stringify(p.repos ?? []),
     });
   }
   /**
@@ -2084,13 +2098,17 @@ export class Db {
    * `denyGlobs` (card d5d3bdc9) is editable ONLY via the HUMAN-only REST create/update paths — same
    * trust posture as the fields above: it controls a merge-review warning, so no agent MCP tool ever
    * declares this key.
+   * `repos` (multi-repo epic 49136451) is editable ONLY via the HUMAN-only REST create/update paths —
+   * same trust posture as the fields above: each entry carries its own `gateCommand` (host-RCE), so no
+   * agent MCP tool (setup or the elevated Platform Lead) ever declares this key.
    */
-  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; noGateByDesign?: boolean; denyGlobs?: string[] }): void {
+  updateProject(id: string, patch: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; noGateByDesign?: boolean; denyGlobs?: string[]; repos?: RepoRegistryEntry[] }): void {
     const cols: Record<string, unknown> = {
       name: patch.name, vault_path: patch.vaultPath, repo_path: patch.repoPath,
       reference_repos: patch.referenceRepos === undefined ? undefined : JSON.stringify(patch.referenceRepos),
       no_gate_by_design: patch.noGateByDesign === undefined ? undefined : (patch.noGateByDesign ? 1 : 0),
       deny_globs: patch.denyGlobs === undefined ? undefined : JSON.stringify(patch.denyGlobs),
+      repos: patch.repos === undefined ? undefined : JSON.stringify(patch.repos),
     };
     const names = Object.keys(cols).filter((k) => cols[k] !== undefined);
     if (names.length === 0) return;
@@ -4682,22 +4700,24 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null }); // defaults when an (untyped) caller omits them
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
   // (updateProjectTask, mcp/tasks.ts) plus the separate human-only REST route (gateway/server.ts), which
   // compute the correct heldBy server-side and pass it in the patch — this method just writes what it's given.
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy">>): void {
+  // `repoKey` (multi-repo epic 49136451) is likewise a plain persist — the registry-membership CHECK
+  // (unknown key = explicit error) lives at the same agent-facing choke point / REST route, not here.
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null });
   }
   /** Reassign a card to a DIFFERENT project's board — the one write `updateTask` never performs (it has
    *  no `projectId` in its patch type). Single atomic transaction: the task's project_id + column_key +
@@ -4708,11 +4728,15 @@ export class Db {
    *  legacy 8-char id-prefix `task_id` linkage `listQuestionsForTask` tolerates (see its doc), so a
    *  question created before commit a3f1319f re-homes right alongside a full-id one. `board_relocate`'s
    *  backing op (`relocateProjectTask`, mcp/tasks.ts) is the only caller — it resolves the destination
-   *  column + fresh position before calling this. */
+   *  column + fresh position before calling this. Also RESETS `repo_key` to NULL (multi-repo epic
+   *  49136451): a registry key is scoped to ONE project's `repos`, so carrying it across a relocate would
+   *  either dangle (no such key in the destination) or, worse, silently coincide with a DIFFERENT repo
+   *  that happens to share the same key on the destination board — a relocated card always lands back on
+   *  its new project's primary repo instead. */
   relocateTask(id: string, patch: { projectId: string; columnKey: string; position: number }): void {
     this.db.transaction(() => {
       this.db.prepare(
-        "UPDATE tasks SET project_id=@projectId, column_key=@columnKey, position=@position, updated_at=@updatedAt WHERE id=@id",
+        "UPDATE tasks SET project_id=@projectId, column_key=@columnKey, position=@position, updated_at=@updatedAt, repo_key=NULL WHERE id=@id",
       ).run({ id, projectId: patch.projectId, columnKey: patch.columnKey, position: patch.position, updatedAt: new Date().toISOString() });
       this.db.prepare(
         "UPDATE questions SET project_id=? WHERE task_id = ? OR (length(task_id) = 8 AND ? LIKE task_id || '-%')",
@@ -5971,6 +5995,7 @@ function toProject(r0: unknown): Project {
     referenceRepos: JSON.parse((r.reference_repos as string) || "[]") as string[],
     noGateByDesign: (r.no_gate_by_design as number) === 1,
     denyGlobs: JSON.parse((r.deny_globs as string) || "[\"mockups/**\"]") as string[],
+    repos: JSON.parse((r.repos as string) || "[]") as RepoRegistryEntry[],
   };
 }
 function toAgent(r0: unknown): Agent {
@@ -6236,6 +6261,7 @@ function toTask(r0: unknown): Task {
     held: (r.held as number) === 1,
     deferred: (r.deferred as number) === 1,
     heldBy: (r.held_by as Task["heldBy"]) ?? null,
+    repoKey: (r.repo_key as string | null) ?? null,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }

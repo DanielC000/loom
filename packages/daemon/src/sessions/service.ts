@@ -15,6 +15,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
+import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
@@ -3662,7 +3663,21 @@ export class SessionService {
       // Wasted-dispatch advisory (card 7b5944fc): runs AFTER pty.spawn so it never delays the worker's
       // actual start — only the point at which this call's result resolves. Tasked spawns only; taskless
       // has no card title to check against.
-      const shippedMatch = taskId && taskTitle ? await findShippedCardMatch(project.repoPath, taskTitle) : null;
+      // Multi-repo epic (49136451) phase 1: check the shipped-card advisory against the task's TARGET
+      // repo (resolveRepo), not always project.repoPath. A stale repoKey (registry entry removed after
+      // the task was written) must not blow up an advisory-only check that runs AFTER the worker is
+      // already live — degrade to the primary repo, same posture as the ship-state read path in
+      // mcp/tasks.ts resolveMergedInfo.
+      let shippedMatchRepoPath = project.repoPath;
+      if (taskId) {
+        try {
+          shippedMatchRepoPath = resolveRepo(project, this.db.getTask(taskId)).path;
+        } catch (e) {
+          if (!(e instanceof UnknownRepoKeyError)) throw e;
+          console.warn(`[sessions/service] task ${taskId} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — falling back to the primary repo for the shipped-card advisory`);
+        }
+      }
+      const shippedMatch = taskId && taskTitle ? await findShippedCardMatch(shippedMatchRepoPath, taskTitle) : null;
       // The "I re-drove it" signal: a successful spawn clears any cap-queued marker for
       // the same taskId (tasked) or the same agentId (taskless, no stable per-call key) so the
       // worker_list placeholder doesn't linger alongside the now-real worker row.

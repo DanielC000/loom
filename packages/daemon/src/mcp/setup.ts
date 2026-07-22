@@ -169,6 +169,7 @@ export class SetupMcpRouter {
           referenceRepos: [],
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, see project_update
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, see project_update
+          repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
         };
         db.insertProject(project);
         // Bind-time commit-identity assert (CODE repos only — a vault-only notes folder takes no commits):
@@ -217,6 +218,7 @@ export class SetupMcpRouter {
           referenceRepos: [],
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, see project_update
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, see project_update
+          repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, see project_update
         };
         db.insertProject(project);
         // Same bind-time identity assert as project_create, for the git kind (a vault folder takes no
@@ -275,7 +277,7 @@ export class SetupMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). repoPath, referenceRepos, and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. 404 if the project is unknown. Returns the updated project.",
+        description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). repoPath, referenceRepos, repos (the writable multi-repo registry), and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. 404 if the project is unknown. Returns the updated project.",
         inputSchema: {
           projectId: z.string(),
           name: z.string().optional(),

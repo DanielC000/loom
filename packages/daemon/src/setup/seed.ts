@@ -141,6 +141,7 @@ export function seedSetupHome(db: Db): string[] {
     referenceRepos: [],
     noGateByDesign: false,
     denyGlobs: [], // reserved system home, not a normal worker_merge flow — opt out of the mockups/ warning
+    repos: [],
   };
   db.insertProject(project);
 

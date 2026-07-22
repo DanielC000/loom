@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
 import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
-import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage } from "@loom/shared";
+import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
 import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
@@ -54,6 +54,7 @@ import { getWorkerDiffCached } from "../git/worktrees.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
+import { validateRepoRegistry, resolveRepoKeyOrError } from "../projects/repos.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
@@ -3013,7 +3014,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // plain notes folder. Same trust posture as the other setup REST writers — loopback, human-only, NO MCP
   // router (orchestration/platform/setup/audit) exposes this path.
   app.post("/api/setup/project-init", async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown };
+    const b = (req.body ?? {}) as { name?: string; kind?: "git" | "vault"; dirName?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown; repos?: unknown };
     if (!b.name || !b.name.trim()) return reply.code(400).send({ error: "name required" });
     // referenceRepos: HUMAN-only on this REST create path, same validation + trust class as POST
     // /api/projects — each entry MUST be an absolute path to an existing git repo (validateReferenceRepos).
@@ -3038,6 +3039,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const isGit = (b.kind ?? "git") === "git";
     const boot = await bootstrapProjectDir({ name: b.name, dirName: b.dirName, git: isGit });
     if (!boot.ok) return reply.code(400).send({ error: boot.error });
+    // repos (multi-repo epic 49136451): HUMAN-only on this REST create path, same trust class as above —
+    // validated AFTER bootstrapping since it needs the final repoPath/vaultPath to check path-aliasing.
+    let repos: RepoRegistryEntry[] = [];
+    if (b.repos !== undefined) {
+      const check = await validateRepoRegistry(b.repos, { repoPath: boot.dir, vaultPath: isGit ? "" : boot.dir });
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      repos = check.value;
+    }
     const project: Project = {
       // kind "git": no vault bound (never defaulted to the fresh code repo — that would make the vault
       // auto-committer watch + auto-commit it, card a247ab11). kind "vault": the created dir IS the vault.
@@ -3047,6 +3056,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       referenceRepos,
       noGateByDesign,
       denyGlobs,
+      repos,
     };
     deps.db.insertProject(project);
     // Same bind-time commit-identity advisory as project_init: never blocks the create (already persisted).
@@ -3510,7 +3520,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   // --- REST: create / bind ---
   app.post("/api/projects", async (req, reply) => {
-    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown };
+    const b = (req.body ?? {}) as { name?: string; repoPath?: string; vaultPath?: string; config?: ProjectConfigOverride; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown; repos?: unknown };
     // Both locals are expandTilde-expanded right here (guarded — expandTilde throws on undefined), a
     // leading `~` being a shell expansion Node never sees, so every check below sees the expanded path.
     const repoPath = b.repoPath?.trim() ? expandTilde(b.repoPath.trim()) : undefined;
@@ -3570,6 +3580,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: check.error });
       denyGlobs = check.value;
     }
+    // repos (multi-repo epic 49136451): HUMAN-only on this REST create path, same trust class as above —
+    // each entry carries its own gateCommand (host-RCE), validated by validateRepoRegistry (unique key,
+    // reserved "primary", absolute + isGitRepo path, no aliasing repoPath/vaultPath/another entry).
+    let repos: RepoRegistryEntry[] = [];
+    if (b.repos !== undefined) {
+      const check = await validateRepoRegistry(b.repos, { repoPath: finalRepoPath, vaultPath: finalVaultPath });
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      repos = check.value;
+    }
     const project: Project = {
       id: randomUUID(), name: b.name, repoPath: finalRepoPath, vaultPath: finalVaultPath,
       config: b.config ?? {}, createdAt: new Date().toISOString(), archivedAt: null,
@@ -3577,6 +3596,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       referenceRepos,
       noGateByDesign,
       denyGlobs,
+      repos,
     };
     deps.db.insertProject(project);
     return reply.code(201).send(project);
@@ -3599,7 +3619,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const p = deps.db.getProject(id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown };
+    const b = (req.body ?? {}) as { name?: unknown; vaultPath?: unknown; repoPath?: unknown; referenceRepos?: unknown; noGateByDesign?: unknown; denyGlobs?: unknown; repos?: unknown };
     if (b.name !== undefined && (typeof b.name !== "string" || !b.name.trim()))
       return reply.code(400).send({ error: "name must be a non-empty string" });
     if (b.vaultPath !== undefined && typeof b.vaultPath !== "string")
@@ -3658,6 +3678,31 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: check.error });
       denyGlobs = check.value;
     }
+    // repos (multi-repo epic 49136451): HUMAN-only on this REST PATCH path — same trust posture as
+    // referenceRepos/repoPath above. `undefined` leaves the stored registry untouched. Validated against
+    // the EFFECTIVE post-patch repoPath/vaultPath (a same-call repoPath/vaultPath rebind must be checked
+    // against, not the pre-patch value) so a registry entry can never alias whatever this same PATCH ends
+    // up binding as primary.
+    let repos: RepoRegistryEntry[] | undefined;
+    if (b.repos !== undefined) {
+      const check = await validateRepoRegistry(b.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      repos = check.value;
+    } else if ((repoPath !== undefined || vaultPath !== undefined) && p.repos.length > 0) {
+      // repos OMITTED, but repoPath and/or vaultPath IS changing on this SAME PATCH (code-review Major 1):
+      // the anti-alias invariant validateRepoRegistry enforces at write time must be RE-CHECKED against
+      // the NEW primary too, or a repoPath/vaultPath rebind alone (which skips this block entirely when
+      // repos is omitted) can silently create the exact alias this validator exists to block — a registry
+      // entry that now points at the SAME git dir as the new primary, exactly the state phase 2's
+      // worktree/branch-keying repo axis cannot tolerate (two worktrees racing on one dir + branch
+      // namespace). Re-run the SAME shared validator against the project's UNCHANGED registry data +
+      // the effective new repoPath/vaultPath; reject the whole PATCH on conflict. On success, refresh the
+      // stored registry to the re-canonicalized result (cheap, and keeps it byte-consistent with a fresh
+      // write rather than leaving stale un-canonicalized entries from before this fix).
+      const check = await validateRepoRegistry(p.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
+      if (!check.ok) return reply.code(400).send({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
+      repos = check.value;
+    }
     deps.db.updateProject(id, {
       name: b.name === undefined ? undefined : (b.name as string).trim(),
       vaultPath,
@@ -3665,6 +3710,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       referenceRepos,
       noGateByDesign: b.noGateByDesign as boolean | undefined,
       denyGlobs,
+      repos,
     });
     return deps.db.getProject(id);
   });
@@ -4219,24 +4265,34 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
 
   app.post("/api/projects/:id/tasks", async (req, reply) => {
     const projectId = (req.params as { id: string }).id;
-    if (!deps.db.getProject(projectId)) return reply.code(404).send({ error: "project not found" });
-    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string; priority?: string };
+    const project = deps.db.getProject(projectId);
+    if (!project) return reply.code(404).send({ error: "project not found" });
+    const b = (req.body ?? {}) as { title?: string; body?: string; columnKey?: string; priority?: string; repoKey?: string | null };
     if (!b.title) return reply.code(400).send({ error: "title required" });
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     const now = new Date().toISOString();
     // Role-resolved default landing (not the hardcoded "backlog" key) so a renamed lane still receives
     // new cards; "backlog" is a defensive backstop only.
-    const cols = resolveConfig(deps.db.getProject(projectId)?.config).kanbanColumns;
+    const cols = resolveConfig(project.config).kanbanColumns;
     const landing = columnKeyForRole(cols, "defaultLanding") ?? "backlog";
     // Validate an EXPLICIT columnKey against the resolved board; an unknown key falls back to the landing
     // lane (same as omitting it) so a bogus key can never strand the card on a phantom lane — invisible in
     // the board GET grouping and bypassing the orphan-safe re-keying setProjectConfigSafe/updateBoardColumns
     // provide. (The agent-facing MCP create/update hard-error instead; this REST path is human/UI-facing.)
     const columnKey = b.columnKey !== undefined && cols.some((c) => c.key === b.columnKey) ? b.columnKey : landing;
+    // repoKey (multi-repo epic 49136451): an EXPLICIT repoKey must name an entry in this project's `repos`
+    // registry (or the reserved "primary") — unlike columnKey above, an unknown key is a HARD error (not a
+    // silent fallback), same convention + shared validator as the agent-facing tasks_create.
+    let repoKey: string | null = null;
+    if (b.repoKey !== undefined) {
+      const check = resolveRepoKeyOrError(project.repos, b.repoKey);
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      repoKey = check.value;
+    }
     const task: Task = {
       id: randomUUID(), projectId, title: b.title, body: b.body ?? "",
       columnKey, position: Date.now(),
-      priority: b.priority ?? "p2", createdAt: now, updatedAt: now,
+      priority: b.priority ?? "p2", repoKey, createdAt: now, updatedAt: now,
     };
     deps.db.insertTask(task);
     return reply.code(201).send(task);
@@ -4246,7 +4302,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // MCP task tools read/write, so UI and agent never diverge).
   app.post("/api/tasks/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy">>;
+    const b = (req.body ?? {}) as Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey">>;
     // heldBy is NEVER client-suppliable — that's this whole fix's central invariant (card 9b0373c0). Unlike
     // priority/held/deferred, this raw REST body is NOT schema-validated the way the MCP tools' zod input is,
     // so a bare `{heldBy:"agent"}` POST (no `held` key) would otherwise flow straight through to
@@ -4257,11 +4313,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.priority !== undefined && !isTaskPriority(b.priority)) return reply.code(400).send({ error: "priority must be one of p0|p1|p2|p3" });
     if (b.held !== undefined && typeof b.held !== "boolean") return reply.code(400).send({ error: "held must be a boolean" });
     if (b.deferred !== undefined && typeof b.deferred !== "boolean") return reply.code(400).send({ error: "deferred must be a boolean" });
+    // Resolve the task ONCE, up front — a bogus id must 404, not silently validate repoKey against an
+    // empty "no project" registry and return a misleading "no registered repos" error (code-review catch:
+    // the OLD `getProject(getTask(id)?.projectId ?? "")` ran with no existence check at all).
+    const existingTask = deps.db.getTask(id);
+    if (!existingTask) return reply.code(404).send({ error: "task not found" });
+    const project = deps.db.getProject(existingTask.projectId);
     // Validate a columnKey MOVE against the task's project board; an unknown key falls back to the landing
     // lane instead of writing blind → no card stranded on a phantom lane (invisible to the board GET).
     if (b.columnKey !== undefined) {
-      const cols = resolveConfig(deps.db.getProject(deps.db.getTask(id)?.projectId ?? "")?.config).kanbanColumns;
+      const cols = resolveConfig(project?.config).kanbanColumns;
       if (!cols.some((c) => c.key === b.columnKey)) b.columnKey = columnKeyForRole(cols, "defaultLanding") ?? "backlog";
+    }
+    // repoKey (multi-repo epic 49136451): an EXPLICIT repoKey must name an entry in the task's project's
+    // `repos` registry (or the reserved "primary"/null) — a HARD error on an unknown key (never a silent
+    // fallback), same shared validator as the agent-facing tasks_update.
+    if (b.repoKey !== undefined) {
+      const check = resolveRepoKeyOrError(project?.repos ?? [], b.repoKey);
+      if (!check.ok) return reply.code(400).send({ error: check.error });
+      b.repoKey = check.value;
     }
     // held-clear provenance (card 9b0373c0, Platform-Audit bb23d15a): this loopback REST route is the
     // ONLY human-authoritative write path — it's always allowed to set OR clear `held`, unlike the agent

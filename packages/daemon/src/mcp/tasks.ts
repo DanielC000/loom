@@ -5,6 +5,8 @@ import type { Db } from "../db.js";
 import { resolveIdPrefix } from "../id-prefix.js";
 import { taskRequestGetItem } from "./questionTool.js";
 import { getTaskMergedInfo, type MergedCommitInfo } from "../git/worktrees.js";
+import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
+import { resolveRepoKeyOrError } from "../projects/repos.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -17,19 +19,42 @@ import { getTaskMergedInfo, type MergedCommitInfo } from "../git/worktrees.js";
  */
 export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
 
-/** The lightweight task row tasks_list returns by default — no body (the unbounded field). */
-export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged">;
+/** The lightweight task row tasks_list returns by default — no body (the unbounded field). Carries
+ *  `repoKey` (multi-repo epic 49136451) so a manager triaging the board can see which cards target a
+ *  non-primary repo WITHOUT a per-card tasks_get — the same "summary hides a dispatch-relevant flag"
+ *  gotcha already burned an orchestrator on `held`/`deferred`, and matters more here once repoKey drives
+ *  worktree creation (phase 2). */
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey">;
 
 /**
  * Resolve a project's git-derived merged state for one task, or null with no git call for a
  * vault-only project (no repoPath) OR when `includeMerged` is false (card f6753002) — the latter
  * lets a latency-sensitive, non-surfacing caller (the companion board) skip the enrichment
  * entirely rather than pay for a field it discards.
+ *
+ * Multi-repo epic (49136451) phase 1: resolves the task's TARGET repo via {@link resolveRepo} (its
+ * `repoKey`, or the project's primary) instead of always reading `project.repoPath` directly. This is a
+ * READ path every `tasks_get`/`tasks_list` call goes through, so a STALE `repoKey` (the registry entry
+ * was removed after the task was written) must never break the read — `resolveRepo` throwing
+ * {@link UnknownRepoKeyError} here is caught and degraded to the project's primary repo (logged, not
+ * silent) rather than propagated, so one stale card can never take down a whole board read.
  */
-async function resolveMergedInfo(db: Db, projectId: string, taskId: string, includeMerged = true): Promise<MergedCommitInfo | null> {
+async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Task, "id" | "repoKey">, includeMerged = true): Promise<MergedCommitInfo | null> {
   if (!includeMerged) return null;
-  const repoPath = db.getProject(projectId)?.repoPath;
-  return repoPath ? getTaskMergedInfo(repoPath, taskId) : null;
+  const project = db.getProject(projectId);
+  if (!project || !project.repoPath) return null;
+  let repoPath: string;
+  try {
+    repoPath = resolveRepo(project, task).path;
+  } catch (e) {
+    if (e instanceof UnknownRepoKeyError) {
+      console.warn(`[mcp/tasks] task ${task.id} has a stale repoKey (${e.repoKey}) not in project ${projectId}'s registry — falling back to the primary repo for ship-state`);
+      repoPath = project.repoPath;
+    } else {
+      throw e;
+    }
+  }
+  return getTaskMergedInfo(repoPath, task.id);
 }
 
 /**
@@ -77,7 +102,7 @@ export interface ListTasksOptions {
 
 /** Project ONE (already merged-enriched) Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
 export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
-  id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged,
+  id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
 });
 
 /**
@@ -149,7 +174,7 @@ export async function listProjectTasks(
   // task's O(1) map lookup here — see getTaskMergedInfo — so this stays cheap regardless of board size.
   // Skipped entirely when includeMerged is false (card f6753002).
   const withMerged: TaskWithMerged[] = await Promise.all(
-    tasks.map(async (t) => ({ ...t, merged: await resolveMergedInfo(db, projectId, t.id, includeMerged) })),
+    tasks.map(async (t) => ({ ...t, merged: await resolveMergedInfo(db, projectId, t, includeMerged) })),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
 }
@@ -238,7 +263,7 @@ export async function getProjectTask(
 ): Promise<TaskWithRequests | { error: string }> {
   const found = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in found) return found;
-  const merged = await resolveMergedInfo(db, projectId, found.id, opts.includeMerged ?? true);
+  const merged = await resolveMergedInfo(db, projectId, found, opts.includeMerged ?? true);
   return { ...found, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
 }
 
@@ -287,16 +312,27 @@ export function getProjectTaskRequest(
 
 export function createProjectTask(
   db: Db, projectId: string,
-  input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority },
+  input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority; repoKey?: string | null },
 ): Task | { error: string } {
   const now = new Date().toISOString();
-  const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
+  const project = db.getProject(projectId);
+  const cols = resolveConfig(project?.config).kanbanColumns;
   // Column guard (the create-side mirror of updateProjectTask's move guard): an EXPLICIT columnKey must name
   // a column that EXISTS on this project's board, so a typo'd key can never store a card OFF-BOARD — apparent
   // success but an invisible card (Board.tsx filters strictly). Applied in the SHARED backing function, so the
   // in-project tasks_create and the cross-project project_task_create reject an unknown key identically.
   if (input.columnKey !== undefined && !cols.some((c) => c.key === input.columnKey)) {
     return { error: `unknown column "${input.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
+  }
+  // repoKey guard (multi-repo epic 49136451, phase 1): an EXPLICIT repoKey must name an entry in this
+  // project's `repos` registry (or the reserved "primary") — a typo'd key must never store a card
+  // silently pointed at nothing. Shares the ONE validator `resolveRepoKeyOrError` with updateProjectTask
+  // and the REST task routes, so "unknown key" reads identically everywhere a task can be written.
+  let repoKey: string | null = null;
+  if (input.repoKey !== undefined) {
+    const check = resolveRepoKeyOrError(project?.repos ?? [], input.repoKey);
+    if (!check.ok) return { error: check.error };
+    repoKey = check.value;
   }
   // New cards land in the project's `defaultLanding` column (role-resolved, not the hardcoded key) so a
   // renamed/reordered landing lane still receives them; "backlog" is a defensive backstop only.
@@ -309,6 +345,7 @@ export function createProjectTask(
     columnKey: input.columnKey ?? landing,
     position: Date.now(),
     priority: input.priority ?? DEFAULT_TASK_PRIORITY,
+    repoKey,
     createdAt: now,
     updatedAt: now,
   };
@@ -323,25 +360,31 @@ export function createProjectTask(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey"> & {
   changed: string[];
 };
 
 /**
- * The calling agent session's identity, threaded through {@link updateProjectTask} ONLY to stamp the
- * `task_held_cleared` audit event's `managerSessionId` (card 9b0373c0) — never used for authorization
- * (this function is reachable ONLY from agent MCP surfaces; see its doc below, and the human-only REST
- * route never calls it at all). Omitted (e.g. an existing test calling this directly) falls back to ""
- * — `orchestration_events.manager_session_id` is NOT NULL, and "" mirrors the established "no session
- * was spawned" convention already used by `schedule_fire_deferred`/`schedule_fire_failed`.
+ * The calling agent session's identity, threaded through {@link updateProjectTask} to (a) stamp the
+ * `task_held_cleared` audit event's `managerSessionId` (card 9b0373c0), and (b) — since the repoKey
+ * authority fix below — gate a `repoKey` write to a manager/platform actor. `role` was NOT used for
+ * authorization before that fix (the doc here used to say so explicitly); it now is, for repoKey ONLY —
+ * every other field this function writes stays open to any agent-facing caller, unchanged. This function
+ * is reachable ONLY from agent MCP surfaces (see its doc below); the human-only REST route (POST
+ * /api/tasks/:id) writes via db.updateTask directly and never reaches this guard (human is the top
+ * authority, same posture as the held-clear guard). Omitted (e.g. an existing test calling this directly)
+ * falls back to `sessionId: ""` / `role: undefined` — "" mirrors the established "no session was spawned"
+ * convention already used by `schedule_fire_deferred`/`schedule_fire_failed`; an undefined role is treated
+ * as NOT manager/platform, so a caller that skips this param can never accidentally gain repoKey authority.
  */
 export interface TaskUpdateActor {
   sessionId: string;
+  role?: string | null;
 }
 
 export function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>,
   actor?: TaskUpdateActor,
 ): Task | TaskUpdateAck | { error: string } {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
@@ -349,15 +392,32 @@ export function updateProjectTask(
   // an exact id, so a prefix must never be written straight through.
   const owned = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in owned) return owned;
+  const project = db.getProject(projectId);
   // Column-move guard: a move must target a column that EXISTS on this project's board, so a move can never
   // orphan a card onto a non-existent key (the HARD INVARIANT board-column lifecycle code upholds). Applied
   // in the SHARED backing function, so the in-project tasks_update and the cross-project project_task_update
   // honor it identically. Resolved columns (override merged over defaults), so a custom/renamed column works.
   if (patch.columnKey !== undefined) {
-    const cols = resolveConfig(db.getProject(projectId)?.config).kanbanColumns;
+    const cols = resolveConfig(project?.config).kanbanColumns;
     if (!cols.some((c) => c.key === patch.columnKey)) {
       return { error: `unknown column "${patch.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
     }
+  }
+  // repoKey guard (multi-repo epic 49136451, phase 1). Two checks, both whole-patch-reject (nothing
+  // written, not even other fields in the same patch — same convention as the held-clear guard below):
+  //  (a) AUTHORITY (code-review ruling): from phase 2 on, repoKey decides which repo a worktree is cut
+  //      from and which gateCommand runs — a DISPATCH decision, and dispatch is the manager's job
+  //      everywhere else in Loom (a worker can't spawn, merge, or redirect). Restrict the WRITE to a
+  //      manager/platform actor; `tasks_create`'s repoKey is deliberately NOT gated here — a worker filing
+  //      a follow-up card on the repo it's already working in is legitimate, this guard is update-only.
+  //  (b) the unknown-key check (shared validator, same as create).
+  if (patch.repoKey !== undefined) {
+    if (actor?.role !== "manager" && actor?.role !== "platform") {
+      return { error: "repoKey is a dispatch decision — only a manager or the Platform Lead may set it, not a worker" };
+    }
+    const check = resolveRepoKeyOrError(project?.repos ?? [], patch.repoKey);
+    if (!check.ok) return { error: check.error };
+    patch = { ...patch, repoKey: check.value };
   }
   // held-clear guard (card 9b0373c0, Platform-Audit bb23d15a): this function is the ONE choke point both
   // agent-facing task-update surfaces share — the in-project `tasks_update` AND the Lead's cross-project
@@ -402,8 +462,8 @@ export function updateProjectTask(
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, heldBy, updatedAt } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, heldBy, updatedAt, changed: Object.keys(patch) };
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, updatedAt } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, updatedAt, changed: Object.keys(patch) };
   }
   return updated;
 }

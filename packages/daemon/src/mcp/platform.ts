@@ -4,7 +4,7 @@ import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry } from "@loom/shared";
 import { MEMORY_CONFIG_MAX } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
@@ -16,6 +16,7 @@ import { bootstrapProjectDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { validateVaultPath } from "../projects/vault-path.js";
+import { validateRepoRegistry } from "../projects/repos.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -745,6 +746,7 @@ export class PlatformMcpRouter {
           referenceRepos: [],
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, even on this elevated surface
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, even on this elevated surface
+          repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
         };
         db.insertProject(project);
         return ok(project);
@@ -784,6 +786,7 @@ export class PlatformMcpRouter {
           referenceRepos: [],
           noGateByDesign: false, // human-only flag (card 58b0bb60); never agent-settable, even on this elevated surface
           denyGlobs: ["mockups/**"], // human-only flag (card d5d3bdc9); never agent-settable, even on this elevated surface
+          repos: [], // human-only registry (multi-repo epic 49136451); never agent-settable, even on this elevated surface
         };
         db.insertProject(project);
         return ok(project);
@@ -1476,11 +1479,12 @@ export class PlatformMcpRouter {
     server.registerTool(
       "project_update",
       {
-        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos is NOT settable even here — it is REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project.",
+        description: "Structural edit of any project by id — name, vaultPath, and/or repoPath (omitted fields left as-is). Config changes go through project_configure. repoPath REBINDS the project to a different repo: it MUST exist and be a git repository (rejected otherwise, exactly like project_create), and the rebind is REFUSED while the project has any live session occupying a worktree (those would be stranded — the offending sessions are named). This elevated/human-only surface is the ONLY place repoPath is editable. referenceRepos and repos (the writable multi-repo registry) are NOT settable even here — both are REST/UI-only (human), same exfil-adjacent trust class as repoPath/gateCommand. 404 if the project is unknown. Returns the updated project.",
         inputSchema: { projectId: z.string(), name: z.string().optional(), vaultPath: z.string().optional(), repoPath: z.string().optional() },
       },
       async ({ projectId, name, vaultPath, repoPath }) => {
-        if (!db.getProject(projectId)) return ok({ error: "project not found" });
+        const project = db.getProject(projectId);
+        if (!project) return ok({ error: "project not found" });
         // repoPath REBIND (elevated/human-only): fronted by the SHARED guard (isGitRepo + live-worktree
         // refusal), identical to the human REST PATCH path. Non-repo or a live worktree → reject, no write.
         if (repoPath !== undefined) {
@@ -1496,7 +1500,20 @@ export class PlatformMcpRouter {
           if (!vaultCheck.ok) return ok({ error: vaultCheck.error });
           vaultPath = vaultCheck.value;
         }
-        db.updateProject(projectId, { name, vaultPath, repoPath });
+        // repos re-check (code-review Major 1): this surface never accepts a `repos` value itself (see the
+        // tool description — repos is REST/UI-only), but a repoPath and/or vaultPath REBIND here still
+        // changes what the project's EXISTING registry is compared against. Without this, this elevated
+        // surface could silently create the exact alias validateRepoRegistry blocks at write time (a
+        // registry entry now pointing at the SAME git dir as the newly-rebound primary) — same failure mode
+        // as the REST PATCH path, same fix: re-run the shared validator against the project's UNCHANGED
+        // registry data + the effective new repoPath/vaultPath, reject the whole call on conflict.
+        let repos: RepoRegistryEntry[] | undefined;
+        if ((repoPath !== undefined || vaultPath !== undefined) && project.repos.length > 0) {
+          const check = await validateRepoRegistry(project.repos, { repoPath: repoPath ?? project.repoPath, vaultPath: vaultPath ?? project.vaultPath });
+          if (!check.ok) return ok({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
+          repos = check.value;
+        }
+        db.updateProject(projectId, { name, vaultPath, repoPath, repos });
         return ok(db.getProject(projectId));
       },
     );
@@ -1588,7 +1605,9 @@ export class PlatformMcpRouter {
           "Board a card DIRECTLY onto ANOTHER project's board by explicit projectId (the Lead's cross-project " +
           "task-create — boards a finding on the destination board instead of spawning a session to narrate it). " +
           "title (required), body?, priority? (p0|p1|p2|p3, low number = higher priority, default p2), and an " +
-          "optional columnKey (omit to land in the project's role-resolved defaultLanding column). Reuses the " +
+          "optional columnKey (omit to land in the project's role-resolved defaultLanding column). Optional " +
+          "repoKey (multi-repo epic) targets one of the destination project's registered `repos` — omit (or " +
+          "pass \"primary\") for its primary repo; an unknown key is rejected with {error}. Reuses the " +
           "SAME create path the in-project loom-tasks tasks_create uses, so columns/priorities behave identically. " +
           "projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Error if the " +
           "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.",
@@ -1598,12 +1617,13 @@ export class PlatformMcpRouter {
           body: z.string().optional(),
           priority: prioritySchema.optional(),
           columnKey: z.string().optional(),
+          repoKey: z.string().nullable().optional(),
         },
       },
-      async ({ projectId, title, body, priority, columnKey }) => {
+      async ({ projectId, title, body, priority, columnKey, repoKey }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok(createProjectTask(db, project.id, { title, body, priority, columnKey }));
+        return ok(createProjectTask(db, project.id, { title, body, priority, columnKey, repoKey }));
       },
     );
 
@@ -1643,10 +1663,13 @@ export class PlatformMcpRouter {
           "written, not even other fields in the same patch), same as the in-project tasks_update: only the " +
           "owner can release their own hold, via the board UI. deferred? (a manager's own " +
           "sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but " +
-          "unlike held it never blocks worker_spawn; omit to leave it untouched). Reuses the SAME backing path + " +
+          "unlike held it never blocks worker_spawn; omit to leave it untouched). repoKey? (multi-repo epic) " +
+          "re-targets the card to a different entry in the destination project's `repos` registry, or " +
+          "null/\"primary\" to reset it to that project's primary repo — an unknown key is REFUSED (whole patch " +
+          "rejected, nothing written), same convention as an unknown columnKey. Reuses the SAME backing path + " +
           "column validation as the in-project loom-tasks tasks_update — INCLUDING its trimmed-ack behavior: a " +
           "patch that doesn't touch body returns a small ack ({id,title,columnKey,priority,position,held," +
-          "heldBy,deferred,updatedAt,changed}, no body) instead of the full card; pass body to intentionally edit it " +
+          "heldBy,deferred,repoKey,updatedAt,changed}, no body) instead of the full card; pass body to intentionally edit it " +
           "and get the full updated Task row back. A taskId not on the named project " +
           "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
           "project_get). Error if the project is unknown or an ambiguous prefix " +
@@ -1661,6 +1684,7 @@ export class PlatformMcpRouter {
           priority: prioritySchema.optional(),
           held: z.boolean().optional(),
           deferred: z.boolean().optional(),
+          repoKey: z.string().nullable().optional(),
         },
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
@@ -1671,7 +1695,10 @@ export class PlatformMcpRouter {
         // held-clear guard (card 9b0373c0): updateProjectTask enforces this identically here — the Lead
         // gets NO exemption (owner decision) even though it's the human-driven cross-project operator; a
         // human-set hold is refused just like it is via tasks_update, only the human REST/UI path clears it.
-        return ok(updateProjectTask(db, project.id, taskId, patch, callerSessionId ? { sessionId: callerSessionId } : undefined));
+        // role: "platform" literal — this whole router is gated to role==="platform" (resolveRole above),
+        // so a caller that reaches this handler at all is ALWAYS a platform session; this satisfies
+        // updateProjectTask's repoKey authority guard (manager/platform only) the same way question_ask does.
+        return ok(updateProjectTask(db, project.id, taskId, patch, callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined));
       },
     );
 

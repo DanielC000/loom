@@ -10,6 +10,24 @@ export type ProfileId = string;
 export type ApiKeyId = string;
 export type RunId = string;
 
+/**
+ * One WRITABLE repo in a project's multi-repo registry (multi-repo epic 49136451, phase 1) — the
+ * writable counterpart to `referenceRepos` (which stays read-only). `key` is a stable, human-chosen
+ * slug a `Task.repoKey` targets; `"primary"` is RESERVED (it always means `repoPath`, never a
+ * registry entry). `path` is an absolute, existing-git-repo host path, validated by
+ * `projects/repos.ts`'s `validateRepoRegistry` — same trust class as `repoPath`. `gateCommand` is
+ * this repo's OWN build/test gate — deliberately NOT inherited from the project-level
+ * `orchestration.gateCommand` (a Python repo and a Next.js repo need different toolchains); omitted
+ * means this repo has no configured gate, which `resolveRepo` surfaces as `gateCommand: undefined`
+ * so the SAME "unverified: no gateCommand" merge warning a gateless project gets today applies to a
+ * gateless registry repo too, rather than silently inheriting an unrelated project-level command.
+ */
+export interface RepoRegistryEntry {
+  key: string;
+  path: string;
+  gateCommand?: string;
+}
+
 /** A project's two bindings + its config override blob. */
 export interface Project {
   id: ProjectId;
@@ -19,9 +37,22 @@ export interface Project {
   /**
    * Additional repos a manager + its workers may READ but never own — never a cwd, worktree base,
    * or gate target (repoPath stays the one primary repo for all of that). Absolute host paths.
-   * Additive; legacy rows backfill to []. Nothing reads this yet — data model only.
+   * Additive; legacy rows backfill to []. Read by prompt injection (worker-prompt.ts/manager-prompt.ts)
+   * and the REST reference-repo git-log view (gateway/server.ts) — NOT "data model only" (that claim
+   * was stale from before those phases landed).
    */
   referenceRepos: string[];
+  /**
+   * N additional WRITABLE repos (multi-repo epic 49136451, phase 1) — `repoPath` stays the ONE
+   * primary repo (default target, manager cwd, skills source); a `Task.repoKey` optionally targets
+   * one of these instead. See {@link RepoRegistryEntry}. Additive; legacy rows backfill to [].
+   * HUMAN-ONLY trust boundary — same class as `repoPath`/`gateCommand` (each entry carries its own
+   * `gateCommand`, i.e. host-RCE): settable via the REST create/PATCH `/api/projects` paths and
+   * `project_init` ONLY. Every agent-facing write surface (loom-setup, the elevated loom-platform
+   * Lead surface) must never declare this key — an agent-passed value is stripped, exactly like
+   * `referenceRepos`/`noGateByDesign`/`denyGlobs`.
+   */
+  repos: RepoRegistryEntry[];
   /** Per-project config overrides; merged over platform defaults. */
   config: ProjectConfigOverride;
   createdAt: string;
@@ -1204,6 +1235,19 @@ export interface Task {
    * false; manager-settable (NOT owner-gated, unlike `held`) via `tasks_update`.
    */
   deferred?: boolean;
+  /**
+   * Multi-repo epic 49136451, phase 1: which of the project's registry repos this card targets —
+   * a key into `Project.repos`, or `null`/absent (the default) meaning the project's PRIMARY repo
+   * (`repoPath`). One task = one repo (cross-repo atomic tasks are deliberately deferred — see the
+   * epic). Validated against the project's registry at write time (`mcp/tasks.ts`
+   * `createProjectTask`/`updateProjectTask`, the REST task routes) — an unknown key is rejected, so a
+   * stored `repoKey` always names a registry entry that existed at write time. It can still go STALE
+   * if the registry is later edited to remove that entry; `resolveRepo` treats that as an explicit
+   * error, but read paths (`tasks_get`/`tasks_list`) degrade it to the primary repo rather than
+   * failing the whole read — see `mcp/tasks.ts` `resolveMergedInfo`. Resolve via `resolveRepo`
+   * (`projects/resolve-repo.ts`), never by reading this field directly.
+   */
+  repoKey?: string | null;
   createdAt: string;
   updatedAt: string;
 }
