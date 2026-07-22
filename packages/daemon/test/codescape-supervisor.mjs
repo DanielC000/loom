@@ -208,30 +208,65 @@ check("(c) no further serve call is recorded after stop() (restart-on-death is d
 // child.on("exit",...) to the identical handler (see spawnServe's own doc), so this still proves the give-up
 // bound genuinely fires and stays down; only the specific "spawn never even started" flavor of death is
 // no longer independently triggerable from outside the class.
+//
+// Card 5dd77ba5 fix: the rewrite above (a real-kill loop) gated its kills on blind sleep(80) +
+// getPort()!==null polling — but getPort()===null is AMBIGUOUS: it reads identically whether the
+// supervisor has genuinely given up (this.port cleared, no timer pending — permanent) or is merely
+// transiently down BETWEEN a kill and its already-SCHEDULED restart (this.alive false for the ~50ms
+// backoff delay — temporary). Instrumented measurement: that transient window runs 50-74ms against the
+// old 80ms budget — as little as 6ms of margin — so on a slower/loaded host the outer loop can sample
+// mid-transient, conclude "gave up" after too FEW kills to actually exhaust the schedule, and then have
+// the trailing sleep(300) catch the still-pending LEGITIMATE restart firing: a real restart misread as a
+// "stray" one. Fix: never infer state from getPort() timing — gate every kill on the calls-file record
+// (the SAME technique section (b) above already uses to detect a real restart), so each kill always lands
+// on the actually-running child and the loop always performs EXACTLY 1 initial + restartBackoffMs.length
+// restart kills — no more, no less — deterministically exhausting the schedule regardless of host speed.
+// The final "stays down" check is then a genuinely non-racy NEGATIVE assertion: scheduleRestart's give-up
+// branch (supervisor.ts) returns before ever reaching its `setTimeout` — so once give-up is reached there
+// is structurally no pending timer left that could revive it; the trailing wait only needs to be long
+// enough to notice a regression, not to out-race a real one.
+const badBinHomeDir = path.join(tmpHome, "bad-bin-home");
+const badBinCallsFile = path.join(badBinHomeDir, "fake-codescape-calls.jsonl");
+const readBadBinCalls = () => fs.existsSync(badBinCallsFile)
+  ? fs.readFileSync(badBinCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+  : [];
+const badBinBackoffMs = [50, 50, 50]; // fast + few — prove the give-up bound without a long wait
 const badBinSup = new CodescapeSupervisor({
-  homeDir: path.join(tmpHome, "bad-bin-home"),
-  restartBackoffMs: [50, 50, 50], // fast + few — prove the give-up bound without a long wait
+  homeDir: badBinHomeDir,
+  restartBackoffMs: badBinBackoffMs,
   healthyRunMs: 60_000, // never long enough to count a kill-right-after-spawn as "healthy"
 });
 await badBinSup.start(); // the fixture CLI is enabled (LOOM_CODESCAPE_BIN still fixtureCli) — spawns for real
 
-// Repeatedly kill the live child immediately after each (re)spawn — never letting a run last long enough
-// to be "healthy" — until the bounded backoff schedule is exhausted and the supervisor gives up for good.
-for (let i = 0; i < 10 && badBinSup.getPort() !== null; i++) {
+// Kill exactly 1 (initial) + badBinBackoffMs.length (restarts) times — the precise count that exhausts the
+// bounded schedule — gating each kill on the calls-file record actually appearing (never a blind sleep),
+// so the pid killed is always the currently-live child and the number of kills always lands exactly on
+// the schedule's boundary, regardless of host speed.
+const expectedSpawns = 1 + badBinBackoffMs.length;
+for (let expected = 1; expected <= expectedSpawns; expected++) {
+  for (let i = 0; i < 100 && readBadBinCalls().length < expected; i++) await sleep(50);
+  check(`(bad-bin) spawn #${expected} recorded before killing it`, readBadBinCalls().length >= expected);
   const pid = badBinSup.getPid();
   if (pid != null) { try { process.kill(pid); } catch { /* already gone */ } }
-  await sleep(80);
 }
-// Poll a bit longer in case the last restart is still settling.
-for (let i = 0; i < 50 && badBinSup.getPort() !== null; i++) await sleep(50);
+
+// The last kill above is the one that exhausts restartAttempts — scheduleRestart's give-up branch runs
+// SYNCHRONOUSLY off that death's exit event and never reaches a setTimeout, so this settles quickly and,
+// once null, stays null (no pending timer could ever flip it back).
+for (let i = 0; i < 100 && badBinSup.getPort() !== null; i++) await sleep(50);
 
 check("(bad-bin) after exhausting the bounded restart schedule, getPort() is null (gave up, NOT phantom-alive)",
   badBinSup.getPort() === null);
 check("(bad-bin) getPid() is null too (no live child left dangling)", badBinSup.getPid() === null);
-// Give any straggler restart timer a moment to fire (it shouldn't — the schedule is exhausted) and
-// re-confirm it STAYS down rather than a stray extra attempt reviving it.
+check(`(bad-bin) exactly ${expectedSpawns} calls recorded (1 initial + ${badBinBackoffMs.length} restarts) — the schedule was exhausted, not cut short`,
+  readBadBinCalls().length === expectedSpawns);
+
+// Give any straggler restart timer a moment to fire (it structurally shouldn't — give-up never schedules
+// one) and re-confirm both signals stay put: no new call recorded, port stays null.
+const callsAtGiveUp = readBadBinCalls().length;
 await sleep(300);
-check("(bad-bin) stays down (no stray restart revives it after giving up)", badBinSup.getPort() === null);
+check("(bad-bin) stays down (no stray restart revives it after giving up)",
+  badBinSup.getPort() === null && readBadBinCalls().length === callsAtGiveUp);
 
 // ===================== (d) control-plane client: bounded, never throws =====================
 const requests = [];
