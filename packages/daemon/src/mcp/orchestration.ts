@@ -49,8 +49,11 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
  * MANAGER-ONLY (see the comment at its call site in `buildServer` below for why the worker role does NOT
  * get this tool — its tested depth-1 MCP surface stays exactly `{my_context, run_gate, worker_report}`).
  * Deliberately has NO terminal-outcome path of its own — it only ever answers "still queued / still
- * running / not found" from the live GateSemaphore registry (see SessionService.gateStatus's doc for why
- * `not_found` covers both "already settled" and "never existed", and why there's no live output tail).
+ * running / not found / ambiguous prefix" from the live GateSemaphore registry (see SessionService
+ * .gateStatus's doc for why `not_found` covers both "already settled" and "never existed", and why there's
+ * no live output tail). `opId` accepts a full id or an unambiguous 8-char prefix (card 225bc7bd — the
+ * exact-match-only lookup this replaced silently reported a live op as `not_found` for a valid prefix,
+ * indistinguishable from a genuinely settled/nonexistent op).
  */
 function registerGateStatus(server: McpServer, sessions: SessionService): void {
   server.registerTool(
@@ -60,12 +63,17 @@ function registerGateStatus(server: McpServer, sessions: SessionService): void {
         "Read-only LIVE status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
         "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
         "daemon's gate concurrency cap or actually executing, and for how long, WITHOUT waiting for the " +
-        "eventual completion nudge. Returns {state:\"queued\"|\"running\"|\"not_found\", gateType, elapsedMs}. " +
-        "`not_found` covers BOTH \"already settled\" (rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
+        "eventual completion nudge. `opId` accepts the FULL id OR an unambiguous 8-char id-prefix (the short " +
+        "id Loom displays everywhere else — same resolution as `tasks_get`/`worker_spawn`/`escalation_status`). " +
+        "Returns {state:\"queued\"|\"running\"|\"not_found\"|\"ambiguous\", gateType, elapsedMs, error?}. " +
+        "`not_found` covers ONLY \"already settled\" (rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
         "`[loom:merge-failed]` nudge for the actual outcome) and \"never existed\" — this tool never reports a " +
-        "terminal result itself, only live run state. Use this when a merge has been pending for a long time " +
-        "and you want to confirm it's genuinely still working (a large elapsedMs alone doesn't mean it's stuck " +
-        "— check it against how long the project's gate normally takes) rather than concluding it's wedged.",
+        "terminal result itself, only live run state. `ambiguous` (with `error` naming the matching opIds) " +
+        "means your prefix matches more than one LIVE op — pass more characters or the full id; it is a " +
+        "DISTINCT outcome from `not_found`, never fold the two together. Use this when a merge has been " +
+        "pending for a long time and you want to confirm it's genuinely still working (a large elapsedMs " +
+        "alone doesn't mean it's stuck — check it against how long the project's gate normally takes) rather " +
+        "than concluding it's wedged.",
       inputSchema: { opId: z.string() },
     },
     async ({ opId }) => {

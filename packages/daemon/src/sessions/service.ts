@@ -2105,17 +2105,36 @@ export class SessionService {
    * long — WITHOUT waiting for the eventual terminal nudge. This is exactly the visibility gap the audit
    * finding names: "stuck 20 minutes inside vitest" would have instantly falsified the "gate is
    * wedged/flaky" theory that led to an unsafe manual squash-merge past a gate that had never reported a
-   * terminal signal. `state:"not_found"` covers BOTH "already settled" (rely on the `[loom:gate-*]`/
-   * `[loom:merge-*]` nudge for the actual outcome) and "never existed" — this tool intentionally never
-   * surfaces a terminal result itself, only live run state, so it can't ever race or duplicate that nudge.
-   * Deliberately does NOT include a live output tail (see the card's scoping note): that would need new
-   * plumbing to expose `runGateStep`'s in-progress capture ring, a materially bigger change than this
-   * read-only status lookup; elapsed time alone already answers "is this actually stuck".
+   * terminal signal. Deliberately does NOT include a live output tail (see the card's scoping note): that
+   * would need new plumbing to expose `runGateStep`'s in-progress capture ring, a materially bigger change
+   * than this read-only status lookup; elapsed time alone already answers "is this actually stuck".
+   *
+   * PREFIX SUPPORT (card 225bc7bd — fixes a real false-negative bug): `opId` accepts EITHER the full id OR
+   * an unambiguous 8-char id-prefix, mirroring every sibling tool (`tasks_get`, `worker_spawn`'s `taskId`,
+   * `escalation_status`, `agent_get`) — `gate_status` used to be the one outlier doing an EXACT-match-only
+   * lookup, so pasting the short id Loom displays everywhere else silently missed a genuinely live op and
+   * reported `state:"not_found"`, a value documented to mean "settled or never existed" — the OPPOSITE of
+   * the truth. `state:"not_found"` now means ONLY its two documented senses (already settled — rely on the
+   * `[loom:gate-*]`/`[loom:merge-*]` nudge for the actual outcome — or never existed; this lookup genuinely
+   * cannot tell those two apart, see `GateSemaphore.findByOpId`'s doc for why splitting them isn't
+   * available here, card fc243a43 tracks it). An AMBIGUOUS prefix (matches more than one live op) is a
+   * THIRD, distinguishable outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must
+   * never collapse into `"not_found"`, which is exactly the bug being fixed: a miss that can't resolve is a
+   * different answer than a miss that means "gone", and neither may impersonate the other.
    */
-  gateStatus(opId: string): { state: "queued" | "running" | "not_found"; gateType: GateType | null; elapsedMs: number | null } {
-    const entry = this.gateSemaphore.findByOpId(opId);
-    if (!entry) return { state: "not_found", gateType: null, elapsedMs: null };
-    return { state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since };
+  gateStatus(opId: string): { state: "queued" | "running" | "not_found" | "ambiguous"; gateType: GateType | null; elapsedMs: number | null; error?: string } {
+    const r = this.gateSemaphore.findByOpId(opId);
+    if (r.kind === "found") {
+      const entry = r.record;
+      return { state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since };
+    }
+    if (r.kind === "ambiguous") {
+      return {
+        state: "ambiguous", gateType: null, elapsedMs: null,
+        error: `ambiguous opId prefix '${opId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id`,
+      };
+    }
+    return { state: "not_found", gateType: null, elapsedMs: null };
   }
 
   /**

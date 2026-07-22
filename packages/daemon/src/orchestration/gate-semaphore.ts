@@ -35,6 +35,7 @@
  */
 
 import type { GateType } from "@loom/shared";
+import { resolveIdPrefix, type IdPrefixResult } from "../id-prefix.js";
 
 /** Queue priority for {@link GateSemaphore.runExclusive} (card 24642c3d): `"high"` for a merge/deploy
  *  gate, `"low"` for a worker's own `run_gate` DoD self-check. Governs QUEUE ORDER only — there is no
@@ -204,13 +205,25 @@ export class GateSemaphore {
   }
 
   /** Look up ONE live (running or queued) gate run by its {@link GateDescriptor.opId} — the read path for
-   *  `gate_status(opId)` (card edc1ec12): a caller holding a `run_gate`/`worker_merge_confirm` pending
-   *  response's `opId` can find out whether it's still queued or actually running, and for how long,
-   *  without needing this semaphore's own internal per-run `id`. Returns `undefined` when no live run
-   *  carries this opId — either it already settled (the caller should instead rely on the eventual
-   *  `[loom:gate-*]`/`[loom:merge-*]` nudge) or it never existed. O(n) over the live registry, which is
-   *  bounded by `maxConcurrentGates` + queue depth — never large enough to matter. */
-  findByOpId(opId: string): GateSnapshotEntry | undefined {
-    return this.snapshot().entries.find((e) => e.opId === opId);
+   *  `gate_status(opId)` (card edc1ec12; prefix support added by card 225bc7bd). Accepts EITHER a full
+   *  opId OR an unambiguous id-PREFIX (the 8-char short id Loom displays everywhere else — the same
+   *  `resolveIdPrefix` resolution `agent_get`/`worker_spawn` already use), so a caller pasting the short id
+   *  it was shown gets a real answer instead of a spurious miss. `kind:"found"` on a unique match;
+   *  `kind:"ambiguous"` (with the matching opIds) when the prefix matches more than one LIVE entry —
+   *  callers must surface this distinctly, never fold it into "not found"; `kind:"none"` when nothing
+   *  matches at all — either the op already settled (the caller should instead rely on the eventual
+   *  `[loom:gate-*]`/`[loom:merge-*]` nudge) or it never existed; this lookup genuinely cannot tell those
+   *  two apart, but BOTH are a real "no live run", unlike the ambiguous case. Entries with no `opId` (a run
+   *  whose descriptor never carried a correlating one) are excluded from the candidate set entirely, so
+   *  they can never spuriously satisfy a prefix match. O(n) over the live registry, which is bounded by
+   *  `maxConcurrentGates` + queue depth — never large enough to matter. */
+  findByOpId(opId: string): IdPrefixResult<GateSnapshotEntry> {
+    const candidates = this.snapshot().entries
+      .filter((e): e is GateSnapshotEntry & { opId: string } => e.opId != null)
+      .map((e) => ({ id: e.opId, entry: e }));
+    const r = resolveIdPrefix(candidates, opId);
+    if (r.kind === "found") return { kind: "found", record: r.record.entry };
+    if (r.kind === "ambiguous") return { kind: "ambiguous", ids: r.ids };
+    return { kind: "none" };
   }
 }

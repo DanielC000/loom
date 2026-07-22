@@ -5,14 +5,25 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // still queued, actually running (and for how long), or already gone (settled/never existed) — WITHOUT
 // waiting for the eventual completion nudge.
 //
+// card 225bc7bd: `gate_status` used to do an EXACT-match-only lookup, so pasting the 8-char short id Loom
+// displays everywhere else (the paste-able id every sibling tool — tasks_get/worker_spawn/
+// escalation_status/agent_get — accepts) silently missed a genuinely LIVE op and reported "not_found", a
+// value documented to mean "settled or never existed" — the opposite of the truth. Fixed by resolving
+// `opId` as EITHER a full id OR an unambiguous prefix (mirroring the shared `resolveIdPrefix` sibling
+// tools already use), with an ambiguous prefix returning a distinct, NEVER "not_found", outcome.
+//
 // Proves:
-//   (unit) GateSemaphore.findByOpId locates a RUNNING entry and a QUEUED entry by the opId carried on
-//          their GateDescriptor, and returns undefined for an opId with no live entry (never existed, or
-//          already settled) — the exact lookup gate_status is built on.
+//   (unit) GateSemaphore.findByOpId locates a RUNNING entry and a QUEUED entry by the FULL opId carried on
+//          their GateDescriptor; resolves an unambiguous 8-char PREFIX of a live opId to that SAME entry
+//          (the exact false-negative this card fixes); returns kind:"ambiguous" (naming both candidates,
+//          never picking one) for a prefix matching two live opIds; returns kind:"none" for an opId with
+//          no live entry at all (never existed, or already settled) — three DISTINGUISHABLE outcomes, and
+//          once settled, the same full opId no longer resolves either.
 //   (e2e)  SessionService.gateStatus, via the REAL runWorkerGate AND confirmWorkerMergeTracked (an
 //          injected `runGate` seam controls timing without a real spawn): "running" while genuinely
-//          in-flight, with a plausible elapsedMs, and "not_found" once the op has settled — proving this
-//          never surfaces a terminal result itself, only live run state.
+//          in-flight (by full id AND by its 8-char prefix), with a plausible elapsedMs, and "not_found"
+//          once the op has settled — proving this never surfaces a terminal result itself, only live run
+//          state, and that the prefix fix reaches the actual MCP-facing method, not just the unit layer.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-status.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -37,22 +48,52 @@ const now = new Date().toISOString();
 
 // ── (unit) GateSemaphore.findByOpId ──────────────────────────────────────────────────────────────────
 {
+  const mkHold = () => { let release; const p = new Promise((res) => { release = res; }); return { p, release: (v) => release(v) }; };
+
   const sem = new GateSemaphore();
-  let releaseHolder;
-  const holder = () => new Promise((res) => { releaseHolder = res; });
-  const pRun = sem.runExclusive(1, { gateType: "merge", projectId: "P", sessionId: "s1", opId: "op-running" }, () => holder());
-  const pQueued = sem.runExclusive(1, { gateType: "worker", projectId: "P", sessionId: "s2", opId: "op-queued" }, async () => "second");
-  await sleep(20); // let pRun acquire the lane + pQueued queue behind it
+  const OP_RUNNING = "ec0f9383-bcd0-498e-9f51-7f5fdd66dd14"; // real-shaped opId (card 225bc7bd's own repro)
+  const OP_QUEUED = "b7a1c9de-1111-2222-3333-444455556666";
+  const hRunning = mkHold();
+  const pRun = sem.runExclusive(1, { gateType: "merge", projectId: "P", sessionId: "s1", opId: OP_RUNNING }, () => hRunning.p);
+  const pQueued = sem.runExclusive(1, { gateType: "worker", projectId: "P", sessionId: "s2", opId: OP_QUEUED }, async () => "second");
+  await sleep(20); // let pRun acquire the lane (cap 1) + pQueued queue behind it, never invoking its own fn
 
-  const running = sem.findByOpId("op-running");
-  check("(unit) findByOpId locates the RUNNING entry by its descriptor's opId", running !== undefined && running.phase === "running" && running.opId === "op-running");
-  const queued = sem.findByOpId("op-queued");
-  check("(unit) findByOpId locates the QUEUED entry by its descriptor's opId", queued !== undefined && queued.phase === "queued" && queued.opId === "op-queued");
-  check("(unit) an unknown opId returns undefined", sem.findByOpId("nope") === undefined);
+  const running = sem.findByOpId(OP_RUNNING);
+  check("(unit) findByOpId locates the RUNNING entry by its FULL opId", running.kind === "found" && running.record.phase === "running" && running.record.opId === OP_RUNNING);
+  const queued = sem.findByOpId(OP_QUEUED);
+  check("(unit) findByOpId locates the QUEUED entry by its FULL opId", queued.kind === "found" && queued.record.phase === "queued" && queued.record.opId === OP_QUEUED);
 
-  releaseHolder("done");
-  await Promise.all([pRun, pQueued]);
-  check("(unit) once settled, the SAME opId is no longer found (live-only lookup, never a terminal result)", sem.findByOpId("op-running") === undefined);
+  // card 225bc7bd's actual bug: an 8-char PREFIX of a live opId used to report "not found" (undefined) —
+  // indistinguishable from a settled/nonexistent op — even though the run was genuinely live.
+  const prefixHit = sem.findByOpId(OP_RUNNING.slice(0, 8));
+  check("(unit) an unambiguous 8-char opId PREFIX resolves to the SAME running entry", prefixHit.kind === "found" && prefixHit.record.opId === OP_RUNNING);
+  const prefixHitQueued = sem.findByOpId(OP_QUEUED.slice(0, 8));
+  check("(unit) an unambiguous 8-char opId PREFIX also resolves a QUEUED entry", prefixHitQueued.kind === "found" && prefixHitQueued.record.opId === OP_QUEUED);
+
+  // An AMBIGUOUS prefix (matches two distinct live opIds) is a THIRD, distinguishable outcome — must never
+  // silently pick one, and must never collapse into "not found" (a miss that can't resolve is a different
+  // answer than a miss that means "gone").
+  const OP_AMBIG_A = "aaaaaaaa-0001-0000-0000-000000000000";
+  const OP_AMBIG_B = "aaaaaaaa-0002-0000-0000-000000000000";
+  const hAmbigA = mkHold();
+  const pAmbigA = sem.runExclusive(1, { gateType: "worker", projectId: "P", sessionId: "s3", opId: OP_AMBIG_A }, () => hAmbigA.p);
+  const pAmbigB = sem.runExclusive(1, { gateType: "worker", projectId: "P", sessionId: "s4", opId: OP_AMBIG_B }, async () => "second"); // queues behind A
+  await sleep(20);
+  const ambiguous = sem.findByOpId("aaaaaaaa");
+  check(
+    "(unit) a prefix matching TWO live opIds returns kind:\"ambiguous\", naming BOTH candidates",
+    ambiguous.kind === "ambiguous" && ambiguous.ids.length === 2 && ambiguous.ids.includes(OP_AMBIG_A) && ambiguous.ids.includes(OP_AMBIG_B),
+  );
+
+  const none = sem.findByOpId("deadbeef-0000-0000-0000-000000000000");
+  check("(unit) an opId with no match at all returns kind:\"none\" — distinguishable from \"found\" and \"ambiguous\"", none.kind === "none");
+  const tooShort = sem.findByOpId(OP_RUNNING.slice(0, 4));
+  check("(unit) a ref shorter than the 8-char prefix floor never matches, even against a live op (too short to resolve safely)", tooShort.kind === "none");
+
+  hRunning.release("done");
+  hAmbigA.release("done");
+  await Promise.all([pRun, pQueued, pAmbigA, pAmbigB]);
+  check("(unit) once settled, the SAME full opId is no longer found (live-only lookup, never a terminal result)", sem.findByOpId(OP_RUNNING).kind === "none");
 }
 
 function makeRepo(repo) {
@@ -94,6 +135,12 @@ try {
     check("(e2e gate) gate_status reports state:\"running\" while genuinely in flight", status.state === "running" && status.gateType === "worker");
     check("(e2e gate) elapsedMs is a plausible number (at least the sync-wait budget already elapsed)", typeof status.elapsedMs === "number" && status.elapsedMs >= 0);
 
+    // card 225bc7bd's actual bug, reproduced against the REAL MCP-facing method (not just the unit-layer
+    // GateSemaphore): the 8-char short id Loom displays for this SAME opId used to report "not_found" —
+    // indistinguishable from settled/nonexistent — even though the run was genuinely live.
+    const prefixStatus = sessions.gateStatus(opId.slice(0, 8));
+    check("(e2e gate) gate_status ALSO resolves an unambiguous 8-char opId PREFIX to the SAME live run", prefixStatus.state === "running" && prefixStatus.gateType === "worker");
+
     releaseGate({ passed: true });
     await sleep(200); // let the settle .then() microtask actually clear the semaphore registry entry
     const after = sessions.gateStatus(opId);
@@ -106,6 +153,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateSemaphore.findByOpId locates a running/queued entry by its descriptor's opId (and nothing once settled), and SessionService.gateStatus reports \"running\" with a plausible elapsedMs for a genuinely in-flight gate op and \"not_found\" once it settles — never a terminal result of its own."
+  ? "\n✅ ALL PASS — GateSemaphore.findByOpId locates a running/queued entry by its FULL opId or an unambiguous 8-char PREFIX (card 225bc7bd), distinguishes an ambiguous prefix (kind:\"ambiguous\") from no match at all (kind:\"none\"), and nothing once settled; SessionService.gateStatus reports \"running\" (by full id or prefix) with a plausible elapsedMs for a genuinely in-flight gate op and \"not_found\" once it settles — never a terminal result of its own, and never for a live op whose short id was pasted in."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
