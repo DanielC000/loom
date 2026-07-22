@@ -496,7 +496,9 @@ const remoteAccessOverride = z.object({
 // `integrations` reaches an agent no differently than gateCommand reaches one via the project schema —
 // it simply isn't reachable. Named keys (not a generic record) mirror `obsidian`/`python`/`codescape`
 // above, keeping the `.strict()` typo-guard.
-// codescape is PATH-only: `codescapeMcpServer` (pty/host.ts) only ever reads a resolved bin path.
+// codescape is PATH-only: the codescape supervisor (codescape/supervisor.ts `resolveCodescapeBin`) only
+// ever reads a resolved bin path to spawn `ingest`/`serve` — the per-session MCP mount (P4 wiring, card
+// 088afc94) is a streamable-HTTP URL built from the manifest + the supervisor's live port, never a bin path.
 const codescapeIntegrationOverride = z.object({
   path: z.string().min(1).optional(),
 }).strict();

@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolveConfig, type ProjectConfigOverride } from "@loom/shared";
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
+import { resolveCodescapeProjectId } from "./manifest.js";
 
 /**
  * Codescape fleet-daemon wiring epic (`369dde3c`), card C1 — FOUNDATION, updated by card 503a30a0. Under
@@ -51,6 +52,17 @@ const DEFAULT_REINGEST_TIMEOUT_MS = 45_000;
 const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 /** A `serve` that ran at least this long before dying is treated as a fresh failure — resets the backoff. */
 const DEFAULT_HEALTHY_RUN_MS = 30_000;
+/**
+ * CR follow-up (card 088afc94): how long a `resolveProjectId` MISS (no in-memory cache entry, no manifest
+ * entry either) is remembered before the next call is allowed to re-read the manifest. Without this, a
+ * repo that boot registration never covered (a project created, or `codescape.enabled` toggled on, after
+ * boot — a case the code explicitly advertises as needing no restart) re-runs a synchronous
+ * `readFileSync`+`JSON.parse` on the SPAWN HOT PATH on EVERY call, forever — `CLAUDE.md` pins that path to
+ * no blocking work. Bounded TTL (not a permanent negative cache, unlike a resolved HIT which never
+ * changes): the tradeoff is a newly-ingested repo can take up to this long to be picked up here instead of
+ * showing up on the very next spawn — acceptable, since ingestion itself already takes far longer than this.
+ */
+const PROJECT_ID_NEGATIVE_CACHE_TTL_MS = 30_000;
 
 export interface CodescapeSupervisorOpts {
   /** The shared ingest+serve cwd (the CWD CONTRACT). Default {@link CODESCAPE_HOME_DIR}. Test seam. */
@@ -62,6 +74,8 @@ export interface CodescapeSupervisorOpts {
   ingestTimeoutMs?: number;
   registerTimeoutMs?: number;
   reingestTimeoutMs?: number;
+  /** Test seam: shrink {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS} so an expiry test doesn't wait 30 real seconds. */
+  negativeCacheTtlMs?: number;
   /**
    * Test-only seam: pre-seed a live port (and mark `alive`) WITHOUT spawning anything, so the
    * control-plane client methods can be exercised hermetically against a fake HTTP server.
@@ -73,6 +87,9 @@ export interface CodescapeRequestResult {
   ok: boolean;
   status?: number;
   error?: string;
+  /** Parsed JSON response body, when the response carried one. Most control-plane calls ignore this
+   *  (fire-and-forget); {@link CodescapeSupervisor.registerProject} reads it for the resolved `id`/`mode`. */
+  json?: unknown;
 }
 
 /** Result shape of {@link CodescapeSupervisor.ingest}. */
@@ -129,6 +146,17 @@ function runBounded(command: string, args: string[], cwd: string, timeoutMs: num
   });
 }
 
+/**
+ * Nitpick fix (card 088afc94): normalize a repo path for use as a `projectIds`/`unresolvedProjectIds` map
+ * key. Resolved + lowercased — mirrors `codescape/manifest.ts`'s `samePath` (itself mirroring codescape's
+ * own `projectIdFor`: "Windows paths are case-insensitive"), so this instance's own cache can't miss a hit
+ * the manifest fallback would have found purely over case, even though no live caller is known to differ
+ * today.
+ */
+function repoKey(repoRoot: string): string {
+  return path.resolve(repoRoot).toLowerCase();
+}
+
 /** Pick a free loopback port by binding ephemeral (`:0`) then releasing it. Async — never blocks. */
 function pickLoopbackPort(): Promise<number> {
   return new Promise((resolve, reject) => {
@@ -172,6 +200,7 @@ export class CodescapeSupervisor {
   private readonly ingestTimeoutMs: number;
   private readonly registerTimeoutMs: number;
   private readonly reingestTimeoutMs: number;
+  private readonly negativeCacheTtlMs: number;
 
   private port: number | null = null;
   /** True once `serve` has actually been spawned and hasn't since exited/errored. Distinct from `port`
@@ -184,6 +213,21 @@ export class CodescapeSupervisor {
   private spawnedAt: number | null = null;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Card 088afc94 P4 follow-up: codescape's OWN authoritative project id, cached per NORMALIZED (resolved
+   * + lowercased — see {@link repoKey}) repoRoot once {@link registerProject} succeeds OR a manifest read
+   * inside {@link resolveProjectId} hits — the fast path resolveProjectId checks before ever falling back
+   * to a cold manifest-by-path read. In-memory only (never persisted here — codescape's OWN manifest file
+   * is the durable record; this is purely a per-process cache to avoid re-reading that file on every lookup
+   * once a repo's id is already known this boot).
+   */
+  private readonly projectIds = new Map<string, string>();
+  /**
+   * CR follow-up: a bounded-TTL negative cache — see {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS} for why a
+   * MISS needs remembering too, not just a HIT. Keyed the same as {@link projectIds}; value is the epoch ms
+   * after which the entry expires and the next lookup is allowed to re-read the manifest.
+   */
+  private readonly unresolvedProjectIds = new Map<string, number>();
 
   constructor(opts?: CodescapeSupervisorOpts) {
     this.homeDir = opts?.homeDir ?? CODESCAPE_HOME_DIR;
@@ -192,6 +236,7 @@ export class CodescapeSupervisor {
     this.ingestTimeoutMs = opts?.ingestTimeoutMs ?? DEFAULT_INGEST_TIMEOUT_MS;
     this.registerTimeoutMs = opts?.registerTimeoutMs ?? DEFAULT_REGISTER_TIMEOUT_MS;
     this.reingestTimeoutMs = opts?.reingestTimeoutMs ?? DEFAULT_REINGEST_TIMEOUT_MS;
+    this.negativeCacheTtlMs = opts?.negativeCacheTtlMs ?? PROJECT_ID_NEGATIVE_CACHE_TTL_MS;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
@@ -202,6 +247,13 @@ export class CodescapeSupervisor {
   /** The live loopback port, or null when not running (disabled, never started, mid-restart, or gave up). */
   getPort(): number | null {
     return this.alive ? this.port : null;
+  }
+
+  /** The shared ingest+serve cwd this instance uses (the CWD CONTRACT) — exposed so a caller resolving
+   *  codescape's OWN project id (`codescape/manifest.ts` `resolveCodescapeProjectId`) reads the manifest
+   *  from the SAME `homeDir` this instance actually ingests into, rather than assuming the default. */
+  getHomeDir(): string {
+    return this.homeDir;
   }
 
   /** The live child's PID, or null when not running. Diagnostic / test seam. */
@@ -233,33 +285,6 @@ export class CodescapeSupervisor {
     return { ok: r.ok, outcome: r.ok ? "ready" : r.timedOut ? "timeout" : "failed", errorTail: r.output || undefined };
   }
 
-  /**
-   * Card C2/C3 rewrite (`369dde3c`, card e068a2ab): ingest `repoPath` straight to an explicit `graphPath`
-   * (`codescape ingest <repoPath> --out <graphPath>`) — the file the per-session stdio MCP
-   * (`pty/host.ts` `codescapeMcpServer`) reads via `codescape mcp --graph <graphPath>`. DECOUPLED from
-   * the shared `serve`'s own `.codescape/projects/index.json` bookkeeping that {@link ingest} (no `--out`)
-   * feeds — this is the sole write path for the agent-read graph, independent of whether `serve` is
-   * running at all. Same async/bounded/never-throws discipline as {@link ingest}: gated on
-   * `isCodescapeSupervisorEnabled()` (the daemon-wide host-CLI-presence master gate — still the gate for
-   * the whole feature, not just the optional shared `serve` process), still runs from the
-   * shared `homeDir` (the CWD CONTRACT, even though `--out` itself is an absolute/caller-given path —
-   * consistency with every other codescape invocation, and ingest may still touch its own cwd-relative
-   * `.codescape/projects/index.json` bookkeeping as a side effect), creates `graphPath`'s parent dir
-   * first (a fresh `<LOOM_HOME>/codescape/<projectId>/` may not exist yet).
-   */
-  async ingestToGraph(repoPath: string, graphPath: string): Promise<CodescapeIngestResult> {
-    if (!isCodescapeSupervisorEnabled()) {
-      return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + a codescape CLI detected on the host)" };
-    }
-    fs.mkdirSync(this.homeDir, { recursive: true });
-    fs.mkdirSync(path.dirname(graphPath), { recursive: true });
-    const { command, args } = resolveCodescapeBin();
-    const r = await runBounded(command, [...args, "ingest", repoPath, "--out", graphPath], this.homeDir, this.ingestTimeoutMs);
-    if (!r.ok) {
-      console.warn(`[codescape] ingest ${repoPath} --out ${graphPath} ${r.timedOut ? "timed out" : `failed (exit ${r.code})`}${r.output ? ` — ${r.output}` : ""}`);
-    }
-    return { ok: r.ok, outcome: r.ok ? "ready" : r.timedOut ? "timeout" : "failed", errorTail: r.output || undefined };
-  }
 
   /**
    * Start supervision: no-op (a) when disabled (`isCodescapeSupervisorEnabled()` false — the negative
@@ -290,6 +315,31 @@ export class CodescapeSupervisor {
       this.restartAttempts = 0;
       this.spawnServe();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate()}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
+      // Card 088afc94 P4 follow-up: codescape's `POST /project` dynamic registration (confirmed merged/
+      // live, commit 669548e) is now the SANCTIONED id-resolution path. Register every project
+      // UNCONDITIONALLY, every boot — idempotent by contract (the subprocess ingest loop just above
+      // already populated the manifest `serve` reads at its own boot, so this call resolves
+      // `mode:"already-registered"` in the common case: fast, no re-ingest). What this buys is the
+      // AUTHORITATIVE `id` cached on THIS instance (see registerProject), so resolveProjectId never has
+      // to fall back to a manifest re-read for a project this boot already confirmed. Best-effort +
+      // bounded (registerProjectWithRetry): `serve` was just spawned above and its HTTP listener may not
+      // be up yet for the first attempt or two — a transient failure here is NOT fatal, it just leaves
+      // resolveProjectId falling back to the cold manifest read for that repo, exactly as it already did
+      // before this follow-up existed.
+      for (const repoPath of repoPaths) {
+        // CR fix: this loop can take up to ~51s PER repo worst-case (registerProjectWithRetry's own
+        // bound) — without this check, a stop() mid-loop (a fast daemon shutdown right after boot) keeps
+        // POSTing at a now-dead-intent port for every remaining repo instead of stopping, mirroring the
+        // SAME guard spawnServe already applies against a stop() racing its own restart.
+        if (this.stopped) break;
+        const res = await this.registerProjectWithRetry(repoPath);
+        if (res.ok) {
+          const mode = (res.json as { mode?: string } | undefined)?.mode ?? "unknown";
+          console.log(`[codescape] registered project ${repoPath} (mode: ${mode})`);
+        } else {
+          console.warn(`[codescape] register-project failed for ${repoPath} (falling back to manifest-by-path for id resolution): ${res.error ?? res.status}`);
+        }
+      }
     } catch (err) {
       console.warn(`[codescape] start failed (continuing boot): ${(err as Error).message}`);
     } finally {
@@ -401,12 +451,112 @@ export class CodescapeSupervisor {
         body: body !== undefined ? JSON.stringify(body) : undefined,
         signal: controller.signal,
       });
-      return { ok: res.ok, status: res.status };
+      let json: unknown;
+      try { json = await res.json(); } catch { /* no/non-JSON body — fine, most callers never read .json */ }
+      return { ok: res.ok, status: res.status, json };
     } catch (err) {
       return { ok: false, error: (err as Error).message };
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  /**
+   * `POST /project` `{repoRoot, graphPath?}` — codescape's fleet-daemon P4 dynamic registration (commit
+   * `669548e`, confirmed merged/live). Registers `repoRoot` into codescape's LIVE registry with NO
+   * `serve` restart — idempotent (`mode:"already-registered"` for a repo already live, `"attached"` if a
+   * graph.json already existed on disk, `"ingested"` for a brand-new repo — run through codescape's OWN
+   * single-flight queue, so this can genuinely take as long as a real ingest). Defaults to
+   * `ingestTimeoutMs` (the long bound, appropriate for a standalone/on-demand call that may be doing a
+   * real first-time ingest); `timeoutMs` lets a caller override it — {@link registerProjectWithRetry}
+   * passes the SHORT `registerTimeoutMs` instead, since ITS retries exist to close a spawn-timing race,
+   * not to babysit a slow ingest (see that method's own doc for why the distinction matters). On success,
+   * caches the response's AUTHORITATIVE `id` (Codescape's own `slugify+sha256` result — NEVER
+   * reimplemented here) keyed by the resolved repoRoot, so {@link resolveProjectId} serves it without a
+   * manifest re-read. Never throws: a 400 (bad repoRoot)/409 (id conflict)/500 (ingest/persist
+   * failure)/network error/timeout all resolve `ok:false` with NOTHING cached — the caller falls back to
+   * the cold manifest-by-path resolver, exactly as it already does when this call is never made at all.
+   */
+  async registerProject(repoRoot: string, graphPath?: string, timeoutMs?: number): Promise<CodescapeRequestResult> {
+    const res = await this.request("POST", "/project", graphPath ? { repoRoot, graphPath } : { repoRoot }, timeoutMs ?? this.ingestTimeoutMs);
+    if (res.ok) {
+      const id = (res.json as { id?: string } | undefined)?.id;
+      if (id) {
+        const key = repoKey(repoRoot);
+        this.projectIds.set(key, id);
+        this.unresolvedProjectIds.delete(key); // a fresh HIT supersedes any still-live negative marker
+      }
+    }
+    return res;
+  }
+
+  /**
+   * A few quick retries around {@link registerProject}, for the BOOT-TIME call in {@link start} only:
+   * `serve` was just spawned synchronously a moment earlier and its HTTP listener may not be up yet on
+   * the first attempt — a bare single try would spuriously fall back to the manifest on every single
+   * boot for no real reason.
+   *
+   * BOUNDED PER ATTEMPT AT `registerTimeoutMs` (the FAST 10s control-plane bound), DELIBERATELY NOT the
+   * full `ingestTimeoutMs` (120s) `registerProject`'s own default uses: the race this retry exists to
+   * close (a listener that isn't bound YET) fails via an immediate ECONNREFUSED, not a hang — so a short
+   * per-attempt bound is the correct fit, and using the long one would let a single HUNG (accepted-but-
+   * never-responds) attempt burn up to 2 minutes before even trying again, times up to 5 attempts —
+   * exactly the "retry over a hung operation" shape this project has a documented scar from (the
+   * worktree-GC threadpool leak, card bd9fc808). With this bound, 5 attempts worst-case total ~50s, not
+   * ~10 minutes. A repo whose subprocess `ingest()` step (in {@link start}, just above) silently failed
+   * and genuinely needs a slow first ingest via THIS call may still read as "failed" here within that
+   * ~50s window — it self-heals via the cold manifest fallback once codescape's own single-flight queue
+   * finishes the ingest server-side (this client giving up does not stop codescape's own in-progress
+   * work), or on the next boot's subprocess-ingest retry. Boot itself is NEVER blocked by any of this —
+   * {@link start} is always fire-and-forget from index.ts (`void ... .catch(...)`, called well AFTER the
+   * daemon's own HTTP listener is already up), so a fully-exhausted worst case here delays only this
+   * repo's id-cache warm-up, never the daemon's availability.
+   */
+  private async registerProjectWithRetry(repoRoot: string, attempts = 5, delayMs = 300): Promise<CodescapeRequestResult> {
+    let last: CodescapeRequestResult = { ok: false, error: "registerProjectWithRetry: never attempted" };
+    for (let i = 0; i < attempts; i++) {
+      last = await this.registerProject(repoRoot, undefined, this.registerTimeoutMs);
+      if (last.ok) return last;
+      // Nitpick fix: don't sleep after the FINAL failed attempt — there's no next try waiting on it, so
+      // that delay only adds dead latency to every caller of this already best-effort, bounded call.
+      if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+    }
+    return last;
+  }
+
+  /**
+   * Resolve codescape's project id for `repoRoot` — the ONE seam every caller (sessions/service.ts's
+   * lifecycle hooks, pty/host.ts's per-session MCP mount) should use, so swapping the resolution
+   * strategy later is a change in this one place. Checks THIS instance's own in-memory cache first
+   * (populated by a successful {@link registerProject} — the authoritative source for anything this
+   * boot has confirmed), falling back to the COLD manifest-by-path read
+   * (`codescape/manifest.ts` `resolveCodescapeProjectId`) on a cache miss (registration never ran,
+   * failed, or hasn't happened yet for this repo). The manifest fallback is DELIBERATELY kept, not
+   * retired: `POST /project` can fail transiently (serve mid-restart, a bad repoRoot, a genuine
+   * conflict), while the manifest still resolves an id for any repo codescape has EVER ingested — cache
+   * miss or not, restart or not. Never throws; `null` is an honest "cannot resolve right now", which
+   * every caller already treats as a clean skip.
+   *
+   * CR follow-up (card 088afc94): a manifest-read HIT is now cached into {@link projectIds} too (not just
+   * a {@link registerProject} success) — this is the SPAWN HOT PATH (per-session MCP mount resolution),
+   * and `CLAUDE.md` pins it to no blocking work, so the cold `readFileSync`+`JSON.parse` inside
+   * `resolveCodescapeProjectId` must run at most once per repo, not once per lookup. A MISS is also
+   * remembered, but only for {@link PROJECT_ID_NEGATIVE_CACHE_TTL_MS} — see that constant's doc for why a
+   * miss can't be cached forever the way a hit can.
+   */
+  resolveProjectId(repoRoot: string): string | null {
+    const key = repoKey(repoRoot);
+    const cached = this.projectIds.get(key);
+    if (cached) return cached;
+    const negativeUntil = this.unresolvedProjectIds.get(key);
+    if (negativeUntil != null) {
+      if (Date.now() < negativeUntil) return null;
+      this.unresolvedProjectIds.delete(key); // expired — allow a fresh manifest read below
+    }
+    const id = resolveCodescapeProjectId(repoRoot, this.homeDir);
+    if (id) this.projectIds.set(key, id);
+    else this.unresolvedProjectIds.set(key, Date.now() + this.negativeCacheTtlMs);
+    return id;
   }
 
   /** `POST /project/<id>/worktree` — register a newly-spawned worker/manager worktree. */

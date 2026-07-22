@@ -16,7 +16,7 @@ import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire } from "../orchestration/paste-tripwire.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, resolveCodescapeBin, codescapeGraphPath, resolveHostToolBin } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -745,24 +745,30 @@ export function markitdownMcpServer(pythonInterpreterPath?: string): { type: "st
 }
 
 /**
- * The stdio MCP-config entry for a codescape-enabled session, or null when `graphPath` doesn't exist
- * yet — a CLEAN-SKIP mirroring markitdownMcpServer's "venv not warm yet" fallback: an ingest that
- * hasn't completed (or hasn't run at all) never breaks the spawn, it just skips the mount for THIS
- * spawn — a later spawn (or the merge-triggered reingest landing) picks it up once the file exists.
+ * Card 088afc94 (P4 wiring) — the streamable-HTTP MCP-config entry for a codescape-enabled session,
+ * pointed at the SHARED `codescape serve` process (`/mcp/<codescapeId>` for a manager, or
+ * `/mcp/<codescapeId>/<worktreeId>` for a worker tied to a task — codescape confirmed this route is the
+ * STABLE long-term interface: it serves the project's main graph today and will serve worktree-adjusted
+ * overlay content through this SAME URL once that ships, so this is not a placeholder to "simplify" back
+ * to the bare route later). Returns `null` — a CLEAN SKIP, never a stale/absent fallback (Platform Lead
+ * ruling on this card: silent staleness was the ORIGINAL defect, and a stdio-snapshot fallback would
+ * silently reproduce exactly that) — when `port` is null (serve isn't up: disabled, never started, mid-
+ * restart, or gave up) or when `resolveProjectId` can't resolve an id for `repoPath` (never registered).
+ * `resolveProjectId` should be the SAME supervisor instance's `resolveProjectId` (its own boot-
+ * registration cache first, falling back to the cold manifest read — see codescape/supervisor.ts) — kept
+ * as an injected function (not a raw homeDir) so this stays a pure, hermetically-testable seam and so
+ * every caller shares the ONE id-resolution strategy in one place.
  *
- * Card C2 REWRITE (`369dde3c`, card e068a2ab): replaces the old shared `codescape serve` HTTP mount
- * (scoped by the LOOM projectId, which never matched codescape's OWN ingested project id — the MCP
- * never registered) with a per-session STDIO `codescape mcp --graph <graphPath>` process, the SAME
- * per-session-MCP shape as Playwright/markitdown above. `resolveCodescapeBin(dbPath)` already
- * encodes the two spawn shapes (a `.js` checkout wrapped in `process.execPath`; a resolved PATH/compiled
- * binary launched directly) via the shared {@link resolveHostToolBin} — reused here rather than
- * re-derived. `dbPath` (card 8dc5ebb9's `integrations.codescape.path`) wins over `LOOM_CODESCAPE_BIN`,
- * mirroring every other host-tool resolver's DB-first-env-fallback precedence.
+ * PRIOR-ATTEMPT NOTE: an EARLIER HTTP-mount attempt was abandoned because it scoped by Loom's own
+ * project.id, which never matched codescape's OWN path-derived id — the MCP never registered, silently.
+ * Resolving via `resolveProjectId` (never a reimplemented hash) is what fixes that class of bug for good.
  */
-export function codescapeMcpServer(graphPath: string, dbPath?: string): { type: "stdio"; command: string; args: string[] } | null {
-  if (!fs.existsSync(graphPath)) return null;
-  const { command, args } = resolveCodescapeBin(dbPath);
-  return { type: "stdio", command, args: [...args, "mcp", "--graph", graphPath] };
+export function codescapeHttpMcpServer(opts: { repoPath: string; port: number | null; worktreeId?: string | null; resolveProjectId?: (repoPath: string) => string | null }): { type: "http"; url: string } | null {
+  if (opts.port == null || !opts.resolveProjectId) return null;
+  const id = opts.resolveProjectId(opts.repoPath);
+  if (!id) return null;
+  const scope = opts.worktreeId ? `${id}/${opts.worktreeId}` : id;
+  return { type: "http", url: `http://127.0.0.1:${opts.port}/mcp/${scope}` };
 }
 
 /**
@@ -807,13 +813,24 @@ export function buildMcpServers(o: {
   resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
   /** Card C2: the project's raw `codescape.enabled` flag — see the "codescape" mount below. */
   codescapeEnabled?: boolean;
-  /** Card C2: the session's project id — resolves to the project's graph file (`codescapeGraphPath`). */
+  /** Card C2: the session's project id (non-Codescape uses only, e.g. connection-secret scoping). */
   projectId?: string;
   /**
-   * Card 8dc5ebb9: DB-persisted host-tool integration paths (`PlatformConfigOverride.integrations`),
-   * resolved PER-SPAWN (not boot-bound) via PtyHost's `getIntegrationPaths` seam and threaded straight
-   * into `codescapeMcpServer` below — DB path wins, env var falls back, neither set is the
-   * byte-identical today-behavior. Default `{}` (no DB path set).
+   * Card 088afc94 (P4 wiring): the project's PRIMARY repo path, `codescapeSupervisor.getPort()`, and
+   * `codescapeSupervisor.resolveProjectId` (bound to that instance) — the three ingredients
+   * `codescapeHttpMcpServer` needs to resolve codescape's OWN project id and build the streamable-HTTP
+   * mount URL. `worktreeId` scopes a worker's mount to its own worktree route; absent for every other
+   * role. See SpawnOpts's identical fields for the full doc.
+   */
+  repoPath?: string;
+  codescapePort?: number | null;
+  codescapeResolveProjectId?: (repoPath: string) => string | null;
+  worktreeId?: string | null;
+  /**
+   * Card 8dc5ebb9: DB-persisted host-tool integration paths (`PlatformConfigOverride.integrations`) —
+   * resolved PER-SPAWN (not boot-bound) via PtyHost's `getIntegrationPaths` seam, consulted ONLY for the
+   * daemon-wide `isCodescapeSupervisorEnabled` gate check below (DB path wins, env var falls back). No
+   * longer feeds a bin-resolution call — the per-session mount is a URL now, not a spawn.
    */
   integrationPaths?: { codescape?: string };
 }): Record<string, unknown> {
@@ -932,32 +949,41 @@ export function buildMcpServers(o: {
       console.warn(`[pty] ${o.sessionId} capability '${grant.slug}' could not be resolved — spawning without it (provisioning may be in progress in the background).`);
     }
   }
-  // Card C2 (Codescape wiring epic `369dde3c`): a per-PROJECT opt-in (NOT a profile capability grant,
-  // hence outside the resolveProfileCapabilities loop above). `o.codescapeEnabled` is the RAW project
-  // flag — isLoomDev() is re-checked HERE (not pre-baked
-  // by the caller) so this pure seam can assert the LOOM_DEV-off negative case directly.
+  // Card C2 (Codescape wiring epic `369dde3c`), P4 REWRITE (card 088afc94): a per-PROJECT opt-in (NOT a
+  // profile capability grant, hence outside the resolveProfileCapabilities loop above). `o.codescapeEnabled`
+  // is the RAW project flag — isLoomDev() is re-checked HERE (not pre-baked by the caller) so this pure
+  // seam can assert the LOOM_DEV-off negative case directly.
   //
-  // C2 REWRITE (card e068a2ab): was a shared `codescape serve` HTTP mount scoped by the LOOM projectId —
-  // codescape ingested the repo under its OWN derived id, so scope lookups 400/404'd and the MCP never
-  // registered (agents got zero tools). NOW: a per-session STDIO `codescape mcp --graph <graph.json>`
-  // process reading a project-wide graph file the daemon keeps fresh via `codescape ingest --out`
-  // (sessions/service.ts C3 hooks) — no shared serve on the agent path, no scope multiplexing, no
-  // project-id mismatch possible. Card 503a30a0: `isCodescapeSupervisorEnabled(dbPath)` (isLoomDev() AND a
-  // codescape CLI actually detected on the host — no hand-set env toggle anymore) stays the daemon-wide
-  // master switch for the whole Codescape feature (ingest lifecycle included), not just the optional
-  // shared `serve` process a future C4 human canvas may still use. `o.integrationPaths?.codescape` (the
-  // DB-persisted path, already threaded per-spawn via PtyHost's `getIntegrationPaths` seam below) is
-  // passed through so detection honors the SAME DB-first precedence the MCP resolver itself uses — a
-  // daemon with the DB path set but no LOOM_CODESCAPE_BIN/bare-PATH binary still detects correctly.
-  if (o.codescapeEnabled && o.projectId) {
+  // P4: the per-session mount is now a streamable-HTTP entry pointed at the SHARED `codescape serve`
+  // process (`codescapeHttpMcpServer`) — no per-session spawn at all. This SUPERSEDES the C2/C3-era
+  // per-session stdio `codescape mcp --graph <graph.json>` process (which read a Loom-maintained snapshot
+  // file); that mechanism is gone. `isCodescapeSupervisorEnabled(dbPath)` (isLoomDev() AND a codescape CLI
+  // actually detected on the host) stays the daemon-wide master switch for the whole Codescape feature.
+  // `o.integrationPaths?.codescape` (the DB-persisted path) is passed through so THIS gate check honors
+  // the same DB-first precedence the supervisor's own detection uses — a daemon with the DB path set but
+  // no LOOM_CODESCAPE_BIN/bare-PATH binary still detects correctly. Ruling (card 088afc94): when serve
+  // isn't up (`codescapePort` null) or `resolveCodescapeProjectId` can't resolve an id for this repo,
+  // this CLEAN-SKIPS — no stdio-snapshot fallback — a silent stale/absent mount masquerading as fresh is
+  // the exact defect this card exists to fix, and a permanent second code path is exactly the "weaker
+  // architecture" avoided by not duplicating codescape's own server-side staleness/single-flight machinery.
+  if (o.codescapeEnabled && o.repoPath) {
     if (isLoomDev()) {
       if (isCodescapeSupervisorEnabled(o.integrationPaths?.codescape)) {
-        const cs = codescapeMcpServer(codescapeGraphPath(o.projectId), o.integrationPaths?.codescape);
+        const cs = codescapeHttpMcpServer({ repoPath: o.repoPath, port: o.codescapePort ?? null, worktreeId: o.worktreeId, resolveProjectId: o.codescapeResolveProjectId });
         if (cs) {
           mcpServers["codescape"] = cs;
+        } else if (o.codescapePort == null) {
+          // CR fix: split from the id-unresolved case below — both facts (port vs id) are already in hand
+          // here, and `codescapeHttpMcpServer` checks port BEFORE id (see its own body), so a null `cs`
+          // with a null port can ONLY be the serve-is-down case. The whole design premise of a clean skip
+          // is that it's distinguishable from a silent failure — a merged message defeats that for anyone
+          // reading the log, since "serve down" (self-heals once serve restarts) and "id unresolved"
+          // (self-heals once this repo is registered/ingested) point at different fixes.
+          // eslint-disable-next-line no-console
+          console.warn(`[pty] ${o.sessionId} codescape enabled but serve isn't up (port unresolved) for repo ${o.repoPath} — spawning WITHOUT the Codescape MCP. A later spawn will pick it up once serve is back.`);
         } else {
           // eslint-disable-next-line no-console
-          console.warn(`[pty] ${o.sessionId} codescape enabled but no graph.json is ready yet for project ${o.projectId} (or the codescape bin is unresolvable) — spawning WITHOUT the Codescape MCP. Ingest may still be in progress; a later spawn will pick it up once ready.`);
+          console.warn(`[pty] ${o.sessionId} codescape enabled but codescape has no id resolvable for repo ${o.repoPath} (not yet registered/ingested?) — spawning WITHOUT the Codescape MCP. A later spawn will pick it up once ready.`);
         }
       }
       // else: no codescape CLI detected on this host — the benign "feature not present" case; no per-spawn warning.
@@ -1402,8 +1428,22 @@ export interface SpawnOpts {
    * existing spawn is byte-identical when unset.
    */
   codescapeEnabled?: boolean;
-  /** Card C2: the session's project id — resolves to the project's graph file (`codescapeGraphPath`). */
+  /** Card C2: the session's project id (used for non-Codescape purposes too, e.g. connection-secret scoping). */
   projectId?: string;
+  /**
+   * Card 088afc94 (P4 wiring): the project's PRIMARY repo path — used to resolve codescape's OWN project
+   * id via its manifest (never Loom's `projectId` above; see `codescapeHttpMcpServer`'s doc for why).
+   * ALWAYS the project's main checkout, never a worker's own worktree (codescape indexes one graph per
+   * project). Default undefined — every existing spawn is byte-identical (the codescape branch requires
+   * this to be present).
+   */
+  repoPath?: string;
+  /**
+   * Card 088afc94 (P4 wiring): this session's codescape worktree scope (`codescapeWorktreeId(taskId)`) —
+   * present for a worker tied to a task, absent for every other role (and a taskless worker), which fall
+   * back to the bare `/mcp/<codescapeId>` project route. Default undefined ⇒ bare route.
+   */
+  worktreeId?: string | null;
   /**
    * Agent-tooling P4: registry-capability grants BEYOND the two legacy booleans above (resolved from the
    * session's Profile/row, RAW — see resolveProfileCapabilities). Default [] — every existing spawn is
@@ -2179,6 +2219,14 @@ export class PtyHost {
    * test — behaves byte-identically: both resolvers fall back to their env var exactly as before.
    */
   private readonly getIntegrationPaths: () => { codescape?: string };
+  /**
+   * Card 088afc94 (P4 wiring): read access to the codescape supervisor's live port + its bound
+   * `resolveProjectId` (cache-then-manifest — see codescape/supervisor.ts), wired in by index.ts at boot
+   * (mirrors `getIntegrationPaths` above — PtyHost stays supervisor-unaware). `port:null` / a
+   * `resolveProjectId` that always resolves `null` both clean-skip the codescape MCP mount for every
+   * spawn — the byte-identical default for every existing hermetic test that doesn't wire this.
+   */
+  private readonly getCodescapeSupervisorState: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
   constructor(
     private events: PtyHostEvents,
     opts?: {
@@ -2186,6 +2234,7 @@ export class PtyHost {
       getCapabilityCatalog?: () => CapabilityDefRow[];
       resolveConnectionSecret?: (connectionId: string, projectId?: string) => string | undefined;
       getIntegrationPaths?: () => { codescape?: string };
+      getCodescapeSupervisorState?: () => { port: number | null; resolveProjectId: (repoPath: string) => string | null };
     },
   ) {
     this.busyStaleMs = opts?.busyStaleMs ?? BUSY_STALE_MS;
@@ -2193,6 +2242,7 @@ export class PtyHost {
     this.getCapabilityCatalog = opts?.getCapabilityCatalog ?? (() => []);
     this.resolveConnectionSecret = opts?.resolveConnectionSecret ?? (() => undefined);
     this.getIntegrationPaths = opts?.getIntegrationPaths ?? (() => ({}));
+    this.getCodescapeSupervisorState = opts?.getCodescapeSupervisorState ?? (() => ({ port: null, resolveProjectId: () => null }));
   }
 
   spawn(opts: SpawnOpts): void {
@@ -2602,11 +2652,14 @@ export class PtyHost {
     // Computed BEFORE extraAllow (moved up from below) so a mounted "codescape" entry can gate its OWN
     // tool allowlist off the actual mount decision, rather than re-deriving the same isLoomDev()/port/
     // project-enabled condition a second time here.
+    const codescapeState = this.getCodescapeSupervisorState();
     const mcpServers = buildMcpServers({
       sessionId: opts.sessionId, port: PORT, role: opts.role, browserTesting: opts.browserTesting, documentConversion: opts.documentConversion,
       pythonInterpreterPath: opts.sessionEnv?.LOOM_PYTHON_INTERPRETER,
       capabilities: opts.capabilities, capabilityCatalog, resolveConnectionSecret: this.resolveConnectionSecret,
       codescapeEnabled: opts.codescapeEnabled, projectId: opts.projectId,
+      repoPath: opts.repoPath, worktreeId: opts.worktreeId,
+      codescapePort: codescapeState.port, codescapeResolveProjectId: codescapeState.resolveProjectId,
       integrationPaths: this.getIntegrationPaths(),
     });
     // Card C2: the Codescape MCP tools ALSO need allowlisting (acceptEdits doesn't auto-approve MCP tools —

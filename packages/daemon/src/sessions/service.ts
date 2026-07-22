@@ -16,7 +16,7 @@ import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
-import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
+import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile } from "./context.js";
@@ -723,13 +723,14 @@ export class SessionService {
    */
   private readonly redriveInFlightMsgIds = new Set<string>();
   /**
-   * Codescape fleet-daemon wiring (card C1, epic `369dde3c`): the daemon-singleton supervisor handle,
-   * injected like every other boot-owned dependency here. C2's per-session stdio MCP mount
-   * (`codescapeMcpServer`) reads the project's graph FILE directly (no supervisor call); C3
-   * (`fireCodescapeEnsureGraph`/`fireCodescapeReingest`/`fireCodescapeDrop`) fires `ingestToGraph` off
-   * this handle at worktree-spawn/merge time to keep that file fresh — every call gated
-   * `isCodescapeEnabled(config)` (folds in `isLoomDev()`), so a non-dev or Codescape-disabled project
-   * calls none of its methods.
+   * Codescape fleet-daemon wiring (card C1, epic `369dde3c`; P4 rewrite, card 088afc94): the
+   * daemon-singleton supervisor handle, injected like every other boot-owned dependency here. P4's
+   * per-session MCP mount is a streamable-HTTP entry pointed at the SHARED `codescape serve` process
+   * (`pty/host.ts` `codescapeHttpMcpServer`, resolved via `codescape/manifest.ts`'s manifest read — no
+   * per-session spawn at all); the three lifecycle hooks below (`fireCodescapeRegisterWorktree`/
+   * `fireCodescapeReingest`/`fireCodescapeDrop`) fire the corresponding control-plane calls off this
+   * handle at worktree-spawn/merge/gc time — every call gated `isCodescapeEnabled(config)` (folds in
+   * `isLoomDev()`), so a non-dev or Codescape-disabled project calls none of its methods.
    * `undefined` in every existing test constructor (3-arg or opts-less) ⇒ byte-identical (`this.codescape?.`
    * everywhere, never a bare `this.codescape.`).
    */
@@ -1014,6 +1015,9 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
+      repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+      // no worktreeId: this path never runs in a worktree/has a task (see the "adhoc" comment just below) —
+      // it hits the bare /mcp/<codescapeId> project route, same as a manager.
       startupPrompt: withProjectMemory,
       role,
       browserTesting,
@@ -1090,6 +1094,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
       // PL Auditor finding #8: MANAGERS ONLY get a "Where things live" pre-block (absolute repo+vault
       // roots) so a cold-boot orchestrator reads its resume doc by absolute path instead of Globbing.
       // vaultPath is passed here UNGATED by docLint — the orchestrator needs the location regardless of
@@ -1193,6 +1198,7 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
       startupPrompt: composePlatformLeadStartupPrompt(startupPrompt, leadResumeDocPath, resumeDocNotes),
       role,
       browserTesting,
@@ -1266,6 +1272,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an auditor runs in the main repo
       startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
       role,
       browserTesting,
@@ -1346,6 +1353,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled, projectId: project.id, // card C2: Codescape MCP wiring
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a workspace-auditor runs in the main repo
       startupPrompt: appendScheduledPrompt(startupPrompt, prompt),
       role,
       browserTesting,
@@ -1427,6 +1435,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, projectId: project.id, // card C2
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — setup runs in the main repo
       startupPrompt,
       role,
       browserTesting,
@@ -1511,6 +1520,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, projectId: project.id, // card C2
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — an operator runs in the main repo
       startupPrompt,
       role,
       browserTesting,
@@ -1584,6 +1594,12 @@ export class SessionService {
     // fast-failing spawn's onExit re-archives it (the M5 ordering above) rather than this clearing a
     // dead session. restoreSession is the existing archived_at clear (it subsumes the old manual restore).
     this.db.restoreSession(session.id);
+    // CR blocking fix (card 088afc94): codescape's worktree registry is IN-MEMORY, never persisted on
+    // their side (their own header: "Loom re-registers on its next hook fire") — so a resumed worker's
+    // /mcp/<codescapeId>/<worktreeId> route 404s honestly after any `codescape serve` restart or crash
+    // unless THIS resume re-fires the same registration hook spawnWorker fired at creation. Fire-and-forget
+    // + idempotent per codescape's own contract, so a redundant fire against a still-warm registry is free.
+    this.fireCodescapeRegisterWorktree(project.id, config, project.repoPath, codescapeWorktreeId(session.taskId), session.worktreePath ?? session.cwd, session.branch ?? "");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd, // SAME cwd — Claude keys sessions to the project dir
@@ -1610,6 +1626,11 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
+      repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+      // Carry the SAME worktree scoping a fresh spawn of this session would get — a resumed worker keeps
+      // its /mcp/<codescapeId>/<worktreeId> route (session.taskId is whatever this row was ORIGINALLY
+      // spawned with; a non-worker role never has one, so this is naturally undefined for those).
+      worktreeId: codescapeWorktreeId(session.taskId),
       resumeId: session.engineSessionId,
       // Carry the role across resume so a manager/worker/platform session is re-spawned WITH its
       // role-gated MCP surface (loom-orchestration / loom-platform) + allowlist. Without this a
@@ -2933,6 +2954,11 @@ export class SessionService {
       : config.permission;
     // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
     this.db.setProcessState(session.id, "live");
+    // CR blocking fix (card 088afc94): a fork shares its SOURCE's cwd/worktree (see the repoKey comment
+    // above) and mounts that SAME worktree-scoped codescape route below — exactly as stale/lost across a
+    // serve restart as resume()'s registration would be. Fire-and-forget + idempotent; src.taskId (NOT
+    // this fork row's own, which never carries one) mirrors the worktreeId passed to pty.spawn just below.
+    this.fireCodescapeRegisterWorktree(project.id, config, project.repoPath, codescapeWorktreeId(src.taskId), src.cwd, src.branch ?? "");
     this.pty.spawn({
       sessionId: session.id,
       cwd: session.cwd,
@@ -2942,6 +2968,10 @@ export class SessionService {
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
       projectId: project.id,
+      repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+      // src.taskId, NOT the fork row's own (deliberately uncarried, see the repoKey comment above) — a fork
+      // shares its SOURCE's cwd/worktree, so it must scope to that SAME worktree's codescape route too.
+      worktreeId: codescapeWorktreeId(src.taskId),
       resumeId: src.engineSessionId, // resume the SOURCE conversation...
       fork: true,                    // ...but fork it (--fork-session)...
       forkSessionId: forkEngineId,   // ...into this pre-assigned id (--session-id).
@@ -3623,15 +3653,13 @@ export class SessionService {
       // the task each time — see that field's doc for why.
       const targetRepo = resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
       const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key);
-      // Codescape C3: ensure the project's graph.json exists yet (lazily, on first worker spawn) —
-      // fire-and-forget, NEVER blocks the spawn (isCodescapeEnabled folds in isLoomDev(), so a non-dev/
-      // disabled daemon fires nothing; a graph that already exists is a no-op — see
-      // fireCodescapeEnsureGraph's doc). Ingests the project's MAIN repo, not this new worktree — every
-      // session on the project reads the SAME project-wide graph. DELIBERATELY pinned to `project.repoPath`
-      // (the primary), NOT `targetRepo.path` — Codescape indexes ONE graph per project regardless of which
-      // repo a given task targets (multi-repo epic 49136451 is out of scope for Codescape); this is NOT a
-      // missed multi-repo callsite, see the grep-proof note in the phase-2 done-report.
-      this.fireCodescapeEnsureGraph(project.id, config, project.repoPath);
+      // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
+      // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
+      // `targetRepo.path` — Codescape indexes ONE graph per project regardless of which repo a given task
+      // targets (multi-repo epic 49136451 is out of scope for Codescape); this is NOT a missed multi-repo
+      // callsite, see the grep-proof note in the phase-2 done-report. `codescapeWorktreeId(taskId)` is null
+      // for a taskless spawn (no stable id to register under) — skipped, degrading to the bare project route.
+      this.fireCodescapeRegisterWorktree(project.id, config, project.repoPath, codescapeWorktreeId(taskId), worktreePath, branch);
 
       const now = new Date().toISOString();
       const worker: Session = {
@@ -3680,6 +3708,11 @@ export class SessionService {
         vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
         codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
         projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+        // A taskless spawn has no stable id (codescapeWorktreeId(null) -> null), so it falls back to the
+        // bare /mcp/<codescapeId> project route — same as a manager. Matches ensure-graph's own
+        // existence-gated-not-taskless-gated posture: this is a degrade, not a correctness bug.
+        worktreeId: codescapeWorktreeId(taskId),
         // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
         // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
@@ -5995,6 +6028,10 @@ export class SessionService {
       }
       const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
       this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
+      // CR blocking fix (card 088afc94): same reasoning as resume() — a recycle reuses the OLD worker's
+      // worktree, so its codescape registration is exactly as stale/lost across a serve restart as a plain
+      // resume's would be. Fire-and-forget + idempotent; see resume()'s identical call for the full doc.
+      this.fireCodescapeRegisterWorktree(project.id, config, project.repoPath, codescapeWorktreeId(taskId), worktreePath, branch ?? "");
       this.pty.spawn({
         sessionId: fresh.id,
         cwd: worktreePath,
@@ -6004,6 +6041,8 @@ export class SessionService {
         vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
         codescapeEnabled: config.codescape.enabled, // card C2: Codescape MCP wiring, per-project opt-in
         projectId: project.id,
+        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+        worktreeId: codescapeWorktreeId(taskId), // SAME worktree as the predecessor — same codescape scope
         // Lead with the worktree LOCATION block (same worktree — a recycled worker is equally at risk of
         // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
         // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
@@ -6138,6 +6177,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, projectId: project.id, // card C2
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — a manager runs in the main repo
       startupPrompt: appendMemoryRecallToStartupPrompt(startupPrompt, recycleManagerProjectMemoryFramed),
       role: "manager", // successor keeps the orchestration surface
       browserTesting: old.browserTesting ?? false,
@@ -6291,6 +6331,7 @@ export class SessionService {
       sessionEnv: config.sessionEnv,
       vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
       codescapeEnabled: config.codescape.enabled, projectId: project.id, // card C2
+      repoPath: project.repoPath, // P4 wiring (088afc94); no worktreeId — the Lead runs in the main repo
       startupPrompt,
       role: "platform", // successor keeps the platform surface
       browserTesting: old.browserTesting ?? false,
@@ -8180,36 +8221,46 @@ export class SessionService {
   }
 
   /**
-   * Codescape C3 REWRITE (`369dde3c`, card e068a2ab) — ensure the project's graph.json exists yet, firing
-   * a `codescape ingest --out` on first need (lazily, at worker-spawn time) rather than blocking any spawn
-   * on it. Fire-and-forget: called synchronously (not awaited by the caller) so a Codescape hiccup can
-   * never delay a worker spawn. Gated on `isCodescapeEnabled(config)` (folds in `isLoomDev()` — a non-dev
-   * or Codescape-disabled project fires nothing). Skips the ingest entirely when the graph file ALREADY
-   * exists — an ingest can take up to ~2 minutes on a big repo, and re-running it on every single worker
-   * spawn would be wasteful; the merge-triggered {@link fireCodescapeReingest} is what keeps it fresh
-   * thereafter. `repoPath` is the project's MAIN checkout (not the new worker's own worktree) — every
-   * session on a project reads the SAME project-wide graph (see `codescapeGraphPath`'s doc).
+   * Card 088afc94 (P4 wiring) — register a freshly-created worktree with codescape's fleet daemon
+   * (`POST /project/<codescapeId>/worktree`), so the per-session streamable-HTTP MCP route
+   * (`/mcp/<codescapeId>/<worktreeId>`, see `pty/host.ts` `codescapeHttpMcpServer`) 404s honestly instead
+   * of silently mismatching, and so a later {@link fireCodescapeDrop} has something real to deregister.
+   * Fire-and-forget: called synchronously (not awaited by the caller) so a Codescape hiccup can never
+   * delay a worker spawn. Gated on `isCodescapeEnabled(config)` (folds in `isLoomDev()`) AND a non-null
+   * `worktreeId` (null for a taskless spawn — no stable id to register under; that worker's MCP mount
+   * simply degrades to the bare project route, see `buildMcpServers`). `repoPath` is the project's MAIN
+   * checkout (not the new worker's own worktree) — codescape indexes ONE graph per project regardless of
+   * which repo a task targets (see `fireCodescapeReingest`'s identical note). Resolves codescape's OWN
+   * project id via `CodescapeSupervisor.resolveProjectId` (P4 follow-up: its own boot-registration cache
+   * first, falling back to the cold manifest read — `codescape/manifest.ts`) — an unresolved id (not yet
+   * ingested) is a CLEAN SKIP, logged loudly (never a silent no-op — that's the exact failure class an
+   * earlier HTTP-mount attempt died to, see `codescapeMcpServer`'s — now `codescapeHttpMcpServer`'s —
+   * doc history).
    */
-  private fireCodescapeEnsureGraph(projectId: string, config: ResolvedConfig, repoPath: string): void {
-    if (!isCodescapeEnabled(config)) return;
-    const graphPath = codescapeGraphPath(projectId);
-    if (fs.existsSync(graphPath)) return;
-    void this.codescape?.ingestToGraph(repoPath, graphPath)
+  private fireCodescapeRegisterWorktree(projectId: string, config: ResolvedConfig, repoPath: string, worktreeId: string | null, worktreePath: string, baseRef: string): void {
+    if (!isCodescapeEnabled(config) || !worktreeId || !this.codescape) return;
+    const codescapeProjectId = this.codescape.resolveProjectId(repoPath);
+    if (!codescapeProjectId) {
+      console.warn(`[codescape] register-worktree skipped for project ${projectId}: no codescape manifest entry for ${repoPath} (not yet ingested?)`);
+      return;
+    }
+    void this.codescape.registerWorktree(codescapeProjectId, { worktreeId, path: worktreePath, baseRef })
       .then((res) => {
-        if (!res.ok) console.warn(`[codescape] ensure-graph ingest failed for project ${projectId}: ${res.errorTail ?? res.outcome}`);
+        if (!res.ok) console.warn(`[codescape] register-worktree failed for project ${projectId} (codescape id ${codescapeProjectId}, worktree ${worktreeId}): ${res.error ?? res.status}`);
       })
-      .catch((err) => console.warn(`[codescape] ensure-graph ingest errored for project ${projectId}: ${(err as Error).message}`));
+      .catch((err) => console.warn(`[codescape] register-worktree errored for project ${projectId} (codescape id ${codescapeProjectId}, worktree ${worktreeId}): ${(err as Error).message}`));
   }
 
   /**
-   * Codescape C3 — reingest main's current working tree after a merge lands (both the Green and
-   * ALREADY_MERGED paths converge in {@link finalizeMerge}, which calls this once at the end), REFRESHING
-   * the project's graph.json (`codescape ingest --out`, unconditional — unlike {@link
-   * fireCodescapeEnsureGraph}'s existence-gated first-ingest, a merge landing is exactly the signal that
-   * the graph is now STALE). Resolves the project's config LIVE (mirrors the gate-command re-resolve
-   * elsewhere) so a human toggling the per-project `codescape.enabled` flag takes effect with no daemon
-   * restart. Fire-and-forget: a big-repo ingest can take up to ~2 minutes — awaiting it here would hold
-   * the merge caller for that whole window, which the contract explicitly forbids.
+   * Card 088afc94 (P4 wiring) — trigger codescape's own `POST /project/<codescapeId>/reingest-main` after
+   * a merge lands (both the Green and ALREADY_MERGED paths converge in {@link finalizeMerge}, which calls
+   * this once at the end) — the owner's "update the graph on each merge" delivered through CODESCAPE's own
+   * server-side single-flight ingest queue (`ingestQueue.ts`, confirmed Codescape-side), NOT a Loom-side
+   * debounce/scheduling layer — building one here would duplicate work Codescape already does, into a
+   * weaker architecture (Platform Lead ruling on this card). Resolves the project's config LIVE (mirrors
+   * the gate-command re-resolve elsewhere) so a human toggling the per-project `codescape.enabled` flag
+   * takes effect with no daemon restart. Fire-and-forget: a big-repo reingest can take up to ~2 minutes —
+   * awaiting it here would hold the merge caller for that whole window, which the contract forbids.
    *
    * The whole body is wrapped: this is the LAST statement of {@link finalizeMerge}, called AFTER the
    * merge has already landed — a synchronous throw here (a closed db mid-shutdown, a malformed config)
@@ -8220,37 +8271,62 @@ export class SessionService {
    * Multi-repo epic (49136451) phase 2: takes ONLY `projectId`, not a repoPath — it reads `project.repoPath`
    * (the PRIMARY) itself, DELIBERATELY, rather than accepting whatever repo the caller just merged into.
    * Codescape indexes ONE graph per project regardless of which repo a given task targeted (see
-   * `fireCodescapeEnsureGraph`'s identical doc) — a repoPath param here would let a future caller pass a
-   * secondary repo's path and silently start mixing that repo's content into the project's one graph. This
-   * is NOT a missed multi-repo callsite; it's intentionally excluded from the grep-proof for that reason.
+   * {@link fireCodescapeRegisterWorktree}'s identical doc) — a repoPath param here would let a future
+   * caller pass a secondary repo's path and silently start mixing that repo's content into the project's
+   * one graph. This is NOT a missed multi-repo callsite; it's intentionally excluded from the grep-proof.
    */
   private fireCodescapeReingest(projectId: string): void {
     try {
       const project = this.db.getProject(projectId);
       if (!project) return;
       const config = resolveConfig(project.config);
-      if (!isCodescapeEnabled(config)) return;
-      const graphPath = codescapeGraphPath(projectId);
-      void this.codescape?.ingestToGraph(project.repoPath, graphPath)
+      if (!isCodescapeEnabled(config) || !this.codescape) return;
+      const codescapeProjectId = this.codescape.resolveProjectId(project.repoPath);
+      if (!codescapeProjectId) {
+        console.warn(`[codescape] reingest skipped for project ${projectId}: no codescape manifest entry for ${project.repoPath} (not yet ingested?)`);
+        return;
+      }
+      void this.codescape.reingestMain(codescapeProjectId)
         .then((res) => {
-          if (!res.ok) console.warn(`[codescape] reingest failed for project ${projectId}: ${res.errorTail ?? res.outcome}`);
+          if (!res.ok) console.warn(`[codescape] reingest-main failed for project ${projectId} (codescape id ${codescapeProjectId}): ${res.error ?? res.status}`);
         })
-        .catch((err) => console.warn(`[codescape] reingest errored for project ${projectId}: ${(err as Error).message}`));
+        .catch((err) => console.warn(`[codescape] reingest-main errored for project ${projectId} (codescape id ${codescapeProjectId}): ${(err as Error).message}`));
     } catch (err) {
       console.warn(`[codescape] reingest setup errored for project ${projectId} (merge already landed, unaffected): ${(err as Error).message}`);
     }
   }
 
   /**
-   * Codescape C3 REWRITE — a NO-OP kept for call-site compatibility. Pre-rewrite this deregistered a
-   * worktree from the shared `serve`'s per-worktree overlay state; the C2/C3 rewrite (card e068a2ab)
-   * moved the agent read path to ONE project-wide graph.json (no per-worktree registration exists to
-   * drop — see `codescapeGraphPath`'s doc). Left in place (rather than ripped out of every
-   * {@link gcWorktreeDir} caller) so a future C4 human-canvas overlay — which WOULD still track
-   * per-worktree state against the optional shared `serve` — has an obvious hook to fill back in.
+   * Card 088afc94 (P4 wiring) — deregister a removed worktree (`DELETE
+   * /project/<codescapeId>/worktree/<worktreeId>`), which ALSO evicts that worktree's live streamable-HTTP
+   * MCP sessions on codescape's side (their own `evictSessions`, confirmed in `worktreeRoute.ts`). Revives
+   * the hook the C2/C3 rewrite (card e068a2ab) had left as an inert no-op "for a future C4… to fill back
+   * in" — this is that future card. Fire-and-forget, best-effort: a deregister failure is logged, never
+   * blocks or fails the worktree removal it's called alongside (see {@link gcWorktreeDir}). Skipped
+   * entirely when `worktreeId` is null (a taskless worker was never registered in the first place — see
+   * {@link fireCodescapeRegisterWorktree}) or codescape isn't enabled/resolvable for this project.
    */
-  private fireCodescapeDrop(_ctx?: { projectId: string; worktreeId: string | null }): void {
-    // Intentional no-op — see doc above.
+  private fireCodescapeDrop(ctx?: { projectId: string; worktreeId: string | null }): void {
+    if (!ctx?.worktreeId || !this.codescape) return;
+    try {
+      const project = this.db.getProject(ctx.projectId);
+      if (!project) return;
+      const config = resolveConfig(project.config);
+      if (!isCodescapeEnabled(config)) return;
+      const worktreeId = ctx.worktreeId;
+      const codescapeProjectId = this.codescape.resolveProjectId(project.repoPath);
+      if (!codescapeProjectId) {
+        console.warn(`[codescape] drop-worktree skipped for project ${ctx.projectId}: no codescape manifest entry for ${project.repoPath} (not yet ingested?)`);
+        return;
+      }
+      void this.codescape.dropWorktree(codescapeProjectId, worktreeId)
+        .then((res) => {
+          if (!res.ok) console.warn(`[codescape] drop-worktree failed for project ${ctx.projectId} (codescape id ${codescapeProjectId}, worktree ${worktreeId}): ${res.error ?? res.status}`);
+        })
+        .catch((err) => console.warn(`[codescape] drop-worktree errored for project ${ctx.projectId} (codescape id ${codescapeProjectId}, worktree ${worktreeId}): ${(err as Error).message}`));
+    } catch (err) {
+      console.warn(`[codescape] drop-worktree setup errored for project ${ctx.projectId} (worktree removal already landed, unaffected): ${(err as Error).message}`);
+    }
   }
 
   /**

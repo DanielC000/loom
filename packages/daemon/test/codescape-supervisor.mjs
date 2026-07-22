@@ -130,42 +130,167 @@ check("(a) CWD CONTRACT: ingest ran from the shared homeDir",
 check("(a) CWD CONTRACT: serve ran from the SAME shared homeDir as ingest",
   calls1[0]?.cwd === calls1[1]?.cwd);
 
-// ===================== (a2) ingestToGraph (C2/C3 rewrite, e068a2ab): --out flag, decoupled from serve =====================
-// The agent-read-path write method: `codescape ingest <repoPath> --out <graphPath>` — independent of
-// whether `serve` is running at all (unlike the CWD-CONTRACT-bound `.codescape/projects/index.json`
-// bookkeeping `ingest()` above feeds serve's own project index). Uses its OWN supervisor + homeDir (NOT
-// `sup`/`homeDir`) so its calls never land in `fake-codescape-calls.jsonl` under the shared `homeDir` —
-// section (b) below indexes that file by POSITION (calls1/calls2), and an extra call recorded there would
-// shift those indices.
-const graphSupHomeDir = path.join(tmpHome, "ingest-to-graph-home");
-const graphSup = new CodescapeSupervisor({ homeDir: graphSupHomeDir, ingestTimeoutMs: 15_000 });
-const graphOutPath = path.join(tmpHome, "graphs", "projA", "graph.json");
-check("(a2) graph file does not exist before ingestToGraph runs", !fs.existsSync(graphOutPath));
-const ingestResult = await graphSup.ingestToGraph("/fake/repo/two", graphOutPath);
-check("(a2) ingestToGraph resolves ok:true against the fixture CLI", ingestResult.ok === true && ingestResult.outcome === "ready");
-check("(a2) ingestToGraph creates the graph file's parent dir and writes a real file", fs.existsSync(graphOutPath));
-const graphSupCallsFile = path.join(graphSupHomeDir, "fake-codescape-calls.jsonl");
-const graphSupCalls = fs.existsSync(graphSupCallsFile)
-  ? fs.readFileSync(graphSupCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
-  : [];
-const lastIngestCall = [...graphSupCalls].reverse().find((c) => c.cmd === "ingest" && c.out);
-check("(a2) the fixture recorded an 'ingest --out <graphPath>' call", lastIngestCall?.repoPath === "/fake/repo/two" && lastIngestCall?.out === graphOutPath);
-check("(a2) ingestToGraph ran from ITS OWN shared homeDir (the CWD CONTRACT, even for an explicit --out path)",
-  path.resolve(lastIngestCall?.cwd || "") === path.resolve(graphSupHomeDir));
+// ===================== (a2) getHomeDir() (P4 wiring, card 088afc94) =====================
+// Exposes the shared ingest+serve cwd so a caller resolving codescape's OWN project id (manifest.ts
+// `resolveCodescapeProjectId`) reads the manifest from the SAME homeDir this instance actually ingests
+// into — a test-only supervisor with a custom homeDir must not silently fall back to the daemon default.
+check("(a2) getHomeDir() returns the SAME homeDir this instance was constructed with", sup.getHomeDir() === homeDir);
+const otherHomeSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "some-other-home") });
+check("(a2) getHomeDir() differs across two independently-constructed instances",
+  otherHomeSup.getHomeDir() !== sup.getHomeDir() && otherHomeSup.getHomeDir() === path.join(tmpHome, "some-other-home"));
 
-// Disabled-gate negative case: mirrors ingest()'s own disabled-gate check — ingestToGraph must refuse
-// (never spawn, never create dirs) when the daemon-wide switch is off. Card 503a30a0: disabling it now
-// means no codescape CLI resolvable, not a hand-set LOOM_CODESCAPE_ENABLED toggle — temporarily clear the
-// ambient fixture-CLI env var this file otherwise keeps set throughout.
+// ===================== (a3) registerProject / resolveProjectId (P4 follow-up, card 088afc94) =====================
+// `sup.start(["/fake/repo/one"])` above already ran the NEW boot-time registration loop internally (after
+// spawnServe, with a bounded retry for the spawn-race — see registerProjectWithRetry's doc) against the
+// fixture's now-REAL minimal HTTP listener (see fake-codescape-cli.mjs). So resolveProjectId for that
+// repo should already be CACHED, with no further network call needed.
+const bootRegisteredId = sup.resolveProjectId("/fake/repo/one");
+check("(a3) resolveProjectId resolves the repo registered at boot (from the in-memory cache, no manifest needed)",
+  typeof bootRegisteredId === "string" && bootRegisteredId.length > 0);
+
+// Re-registering the SAME repoRoot the boot loop already registered is idempotent: same id, mode flips
+// to "already-registered" (the fixture's own registered-repoRoot tracking).
+const reReg = await sup.registerProject("/fake/repo/one");
+check("(a3) re-registering an already-boot-registered repo resolves ok:true", reReg.ok === true);
+check("(a3) mode is 'already-registered' (idempotent, matches the fixture's own tracking)", reReg.json?.mode === "already-registered");
+check("(a3) the id is STABLE across calls", reReg.json?.id === bootRegisteredId);
+
+// A brand-new repo (never passed to start(), never registered before) registers fresh via POST /project
+// directly — proves registerProject works standalone, not just via the boot loop.
+const freshRepo = "/fake/repo/three";
+check("(a3) resolveProjectId for an unregistered repo returns null BEFORE any registerProject call (no cache, no manifest)",
+  sup.resolveProjectId(freshRepo) === null);
+const freshReg = await sup.registerProject(freshRepo);
+check("(a3) registerProject on a brand-new repo resolves ok:true", freshReg.ok === true);
+check("(a3) mode is 'ingested' (first time this repoRoot is seen)", freshReg.json?.mode === "ingested");
+check("(a3) its id DIFFERS from the boot-registered repo's id (distinct repos, distinct ids)", freshReg.json?.id !== bootRegisteredId);
+check("(a3) resolveProjectId now resolves it from the cache (no further network call needed)",
+  sup.resolveProjectId(freshRepo) === freshReg.json?.id);
+
+// ===================== (a4) resolveProjectId cache-miss falls back to the cold manifest read =====================
+// A FRESH supervisor instance (empty cache) pointed at a homeDir whose manifest already has an entry —
+// mirrors a daemon restart: the in-memory cache is gone, but codescape's own manifest file survives.
 {
-  const disabledSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "ingest-to-graph-disabled-home") });
-  const savedBin = process.env.LOOM_CODESCAPE_BIN;
-  delete process.env.LOOM_CODESCAPE_BIN;
-  const disabledGraphPath = path.join(tmpHome, "disabled-graphs", "projB", "graph.json");
-  const disabledResult = await disabledSup.ingestToGraph("/fake/repo/three", disabledGraphPath);
-  check("(a2-neg) ingestToGraph refuses when isCodescapeSupervisorEnabled() is false", disabledResult.ok === false && disabledResult.outcome === "failed");
-  check("(a2-neg) it never creates the graph file when disabled", !fs.existsSync(disabledGraphPath));
-  process.env.LOOM_CODESCAPE_BIN = savedBin; // restore for the rest of this test
+  const fallbackHomeDir = path.join(tmpHome, "fallback-home");
+  const manifestDir = path.join(fallbackHomeDir, ".codescape", "projects");
+  fs.mkdirSync(manifestDir, { recursive: true });
+  fs.writeFileSync(path.join(manifestDir, "index.json"), JSON.stringify({
+    version: 1,
+    projects: [{ id: "manifest-only-id-123", name: "x", path: "/fake/repo/four", lastIngested: new Date(0).toISOString(), graphPath: "/x/graph.json" }],
+  }));
+  const freshSup = new CodescapeSupervisor({ homeDir: fallbackHomeDir }); // no port — never started, empty cache
+  check("(a4) a fresh instance's empty cache falls back to the manifest for a repo it never registered itself",
+    freshSup.resolveProjectId("/fake/repo/four") === "manifest-only-id-123");
+  check("(a4) a repo with NEITHER a cache entry NOR a manifest entry resolves null (honest, not a guess)",
+    freshSup.resolveProjectId("/fake/repo/five") === null);
+}
+
+// ===================== (a5) registerProject failure paths never throw, never cache a bad result =====================
+{
+  const neverStartedSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "never-started-for-register") });
+  const noPortReg = await neverStartedSup.registerProject("/fake/repo/six");
+  check("(a5) registerProject with no live port resolves ok:false (never throws)", noPortReg.ok === false);
+  check("(a5) nothing gets cached on failure", neverStartedSup.resolveProjectId("/fake/repo/six") === null);
+}
+
+// ===================== (a5b) CR fix (item 1): resolveProjectId caches a manifest HIT too, not just a =====
+// ===================== registerProject success — the spawn hot path must not re-read the manifest file ===
+// ===================== on every single lookup once a repo's id is already known. ==========================
+{
+  const cacheHomeDir = path.join(tmpHome, "manifest-cache-home");
+  const cacheManifestDir = path.join(cacheHomeDir, ".codescape", "projects");
+  fs.mkdirSync(cacheManifestDir, { recursive: true });
+  fs.writeFileSync(path.join(cacheManifestDir, "index.json"), JSON.stringify({
+    version: 1,
+    projects: [{ id: "cache-hit-id-789", name: "y", path: "/fake/repo/cache-hit", lastIngested: new Date(0).toISOString(), graphPath: "/x/graph.json" }],
+  }));
+  const cacheSup = new CodescapeSupervisor({ homeDir: cacheHomeDir });
+  check("(a5b) first call resolves via the manifest", cacheSup.resolveProjectId("/fake/repo/cache-hit") === "cache-hit-id-789");
+  // Delete the manifest file entirely — if the SECOND call still resolves the id, it can only be serving
+  // it from the in-memory cache the first call populated, never re-reading the (now-gone) file.
+  fs.rmSync(path.join(cacheManifestDir, "index.json"));
+  check("(a5b) a SECOND call still resolves the SAME id after the manifest file is deleted (served from cache, no re-read)",
+    cacheSup.resolveProjectId("/fake/repo/cache-hit") === "cache-hit-id-789");
+}
+
+// ===================== (a5c) CR fix (item 1): resolveProjectId caches a MISS too, bounded by a TTL (test =
+// ===================== seam negativeCacheTtlMs shrinks it so this doesn't wait 30 real seconds) ============
+{
+  const negCacheHomeDir = path.join(tmpHome, "negative-cache-home");
+  const NEG_TTL_MS = 200;
+  const negSup2 = new CodescapeSupervisor({ homeDir: negCacheHomeDir, negativeCacheTtlMs: NEG_TTL_MS }); // no manifest at all yet
+  check("(a5c) a repo with no manifest at all resolves null (nothing to cache positively)",
+    negSup2.resolveProjectId("/fake/repo/late-ingest") === null);
+  // Simulate the repo getting ingested WHILE the negative TTL is still live — this proves the miss is
+  // genuinely being served from the negative cache (not re-reading the manifest every call): if it were
+  // re-reading, this would immediately pick up the new entry instead of staying null.
+  const negManifestDir = path.join(negCacheHomeDir, ".codescape", "projects");
+  fs.mkdirSync(negManifestDir, { recursive: true });
+  fs.writeFileSync(path.join(negManifestDir, "index.json"), JSON.stringify({
+    version: 1,
+    projects: [{ id: "late-ingest-id", name: "z", path: "/fake/repo/late-ingest", lastIngested: new Date(0).toISOString(), graphPath: "/x/graph.json" }],
+  }));
+  check("(a5c) immediately after: STILL null — the negative cache is honored, not re-reading every call",
+    negSup2.resolveProjectId("/fake/repo/late-ingest") === null);
+  // Once the (short, test-only) TTL expires, the NEXT call is allowed to re-read the manifest and pick up
+  // the now-real entry — proving the cache is a BOUNDED TTL, not a permanent negative result.
+  await sleep(NEG_TTL_MS + 100);
+  check("(a5c) after the negative TTL expires, the SAME repo now resolves the newly-ingested id",
+    negSup2.resolveProjectId("/fake/repo/late-ingest") === "late-ingest-id");
+}
+
+// ===================== (a5d) nitpick fix: the projectIds/unresolvedProjectIds cache key is normalized =====
+// ===================== case-insensitively — consistent with manifest.ts's own samePath matching ===========
+{
+  const caseHomeDir = path.join(tmpHome, "case-cache-home");
+  const caseManifestDir = path.join(caseHomeDir, ".codescape", "projects");
+  fs.mkdirSync(caseManifestDir, { recursive: true });
+  fs.writeFileSync(path.join(caseManifestDir, "index.json"), JSON.stringify({
+    version: 1,
+    projects: [{ id: "case-id-abc", name: "c", path: "/Fake/Repo/Case-Test", lastIngested: new Date(0).toISOString(), graphPath: "/x/graph.json" }],
+  }));
+  const caseSup = new CodescapeSupervisor({ homeDir: caseHomeDir });
+  check("(a5d) first call (exact case) resolves via the manifest", caseSup.resolveProjectId("/Fake/Repo/Case-Test") === "case-id-abc");
+  fs.rmSync(path.join(caseManifestDir, "index.json"));
+  check("(a5d) a DIFFERENTLY-CASED lookup of the SAME repo still hits the cache (no re-read of the now-gone manifest)",
+    caseSup.resolveProjectId("/fake/repo/case-test") === "case-id-abc");
+}
+
+// ===================== (a6b) nitpick fix: registerProjectWithRetry does NOT sleep after the FINAL failed =====
+// ===================== attempt — a single-attempt call against a refusing port returns near-instantly, ====
+// ===================== not delayMs later (proving the trailing sleep guard actually skips) ==================
+{
+  const neverListeningSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "never-listening-for-retry") });
+  const t0b = Date.now();
+  const singleAttempt = await neverListeningSup.registerProjectWithRetry("/fake/repo/never-listening", 1, 5_000); // 1 attempt, would-be 5s trailing sleep if not guarded
+  const elapsedB = Date.now() - t0b;
+  check("(a6b) single-attempt registerProjectWithRetry resolves ok:false (no live port)", singleAttempt.ok === false);
+  check(`(a6b) resolves near-instantly (${elapsedB}ms), NOT after the delayMs trailing sleep that would follow a non-final attempt`,
+    elapsedB < 2_000);
+}
+
+// ===================== (a6) registerProjectWithRetry bounds EACH attempt at the SHORT registerTimeoutMs, =====
+// ===================== NOT the much larger ingestTimeoutMs — a hung (not refused) connection can't stack =====
+// ===================== retries into a long wait (manager follow-up question on card 088afc94) ==============
+// A server that ACCEPTS the connection but never responds — the only way to prove a bound is actually
+// enforced (a fast connection-refused would pass even with the wrong, larger timeout wired in by
+// mistake — see the (d-hang) section below for the same technique). `ingestTimeoutMs` is set deliberately
+// large (30s) so this test would take at least 2×30s if the retry loop ever fell back to using it instead
+// of the short `registerTimeoutMs` — this is a FALSIFIABLE proof, not just an assertion.
+{
+  const hungServer = http.createServer(() => { /* never responds — simulates a hung/wedged codescape serve */ });
+  await new Promise((resolve) => hungServer.listen(0, "127.0.0.1", resolve));
+  const hungPort = hungServer.address().port;
+  const RETRY_TIMEOUT_MS = 300;
+  const retrySup = new CodescapeSupervisor({ port: hungPort, registerTimeoutMs: RETRY_TIMEOUT_MS, ingestTimeoutMs: 30_000 });
+  const t0 = Date.now();
+  const result = await retrySup.registerProjectWithRetry("/fake/repo/hung", 2, 50); // 2 attempts, 50ms apart
+  const elapsed = Date.now() - t0;
+  check("(a6) registerProjectWithRetry resolves ok:false against a hung server (never throws)", result.ok === false);
+  check(`(a6) both attempts bounded at registerTimeoutMs (~${RETRY_TIMEOUT_MS}ms each), NOT ingestTimeoutMs (30s) — elapsed ${elapsed}ms for 2 attempts, well under the 30s a single wrongly-bounded attempt would already take`,
+    elapsed < 10_000);
+  hungServer.closeAllConnections();
+  await new Promise((resolve) => hungServer.close(resolve));
 }
 
 // ===================== (b) restart-on-death: bounded, same port, new pid =====================
@@ -345,6 +470,6 @@ delete process.env.LOOM_DEV;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor (C1, + C2/C3 rewrite e068a2ab): codescapeBootRepoPaths filters projects to only those with codescape.enabled resolved true; LOOM_DEV unset never spawns anything (getPort/getPid null, zero side effects); enabled ingest-then-serve run from the SAME shared cwd (CWD CONTRACT) on a real loopback port; killing the child triggers a bounded restart (same port, new pid); stop() disarms restart-on-death; ingestToGraph writes an explicit --out graph file (decoupled from serve, still the CWD CONTRACT) and refuses cleanly when disabled; the control-plane client (register/reingest/drop/overlay, kept for a future C4) hits the right method+URL+body, is bounded, and NEVER throws — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape supervisor (C1, + P4 wiring 088afc94 + its dynamic-registration follow-up): codescapeBootRepoPaths filters projects to only those with codescape.enabled resolved true; LOOM_DEV unset never spawns anything (getPort/getPid null, zero side effects); enabled ingest-then-serve run from the SAME shared cwd (CWD CONTRACT) on a real loopback port, and start()'s own boot loop registers each project via a REAL POST /project round-trip against the fixture's minimal HTTP listener, caching the resolved id; registerProject/resolveProjectId are idempotent (re-registering an already-known repo returns the SAME id, mode 'already-registered'), a brand-new repo registers fresh ('ingested', a distinct id), a fresh instance's empty cache falls back to the cold manifest read for a repo it never registered itself, and a repo in neither cache nor manifest resolves an honest null; registerProject with no live port resolves ok:false and caches nothing; registerProjectWithRetry bounds EACH attempt at the SHORT registerTimeoutMs (falsifiably proven against a hung, never-responding server — the retry never stacks into the much larger ingestTimeoutMs); getHomeDir() exposes that same shared cwd per-instance; killing the child triggers a bounded restart (same port, new pid); stop() disarms restart-on-death; the control-plane client (register/reingest/drop/overlay) hits the right method+URL+body, is bounded, and NEVER throws — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -323,7 +323,8 @@ export function resolveHostToolBin(bin: string): { command: string; args: string
  * unchanged when nothing resolves — `fs.existsSync` on the unresolved bare name then correctly reads
  * false in the overwhelming common case). Used ONLY by the human-only `/api/integrations` detect
  * endpoint (a live "is this configured tool actually there" check) — NEVER on the synchronous spawn hot
- * path, which stays each resolver's own fast existsSync/isAbsolute check (codescapeMcpServer), unchanged.
+ * path, which stays each resolver's own fast existsSync/isAbsolute check (e.g. `resolveExecutable`'s own
+ * PATH search inside `resolveCodescapeBin`), unchanged.
  */
 export function hostToolBinExists(bin: string): boolean {
   const target = HOST_TOOL_SCRIPT_RE.test(bin) ? bin : resolveExecutable(bin);
@@ -352,18 +353,6 @@ export function codescapeBinCandidate(dbPath?: string): string {
  */
 export function resolveCodescapeBin(dbPath?: string): { command: string; args: string[] } {
   return resolveHostToolBin(codescapeBinCandidate(dbPath));
-}
-
-/**
- * Card C2 rewrite (`369dde3c`): the per-project graph file BOTH `codescape ingest <repo> --out
- * <path>` (sessions/service.ts C3 hooks) and the per-session stdio `codescape mcp --graph <path>`
- * (pty/host.ts `codescapeMcpServer`) agree on — replaces the old shared-`serve` HTTP-scope model
- * (see codescape/supervisor.ts's CWD CONTRACT for the now-agent-path-decoupled shared-serve index,
- * which this graph file is independent of). One graph per PROJECT (not per-worktree/session) —
- * every session on a project reads the same always-current main graph.
- */
-export function codescapeGraphPath(projectId: string): string {
-  return path.join(CODESCAPE_HOME_DIR, projectId, "graph.json");
 }
 
 export function ensureDirs(): void {

@@ -542,10 +542,12 @@ export interface ConnectionsGuardConfig {
 }
 
 /**
- * Codescape's integration config: PATH-only. `codescapeMcpServer` (pty/host.ts) resolves via a bin path
- * (DB override → `LOOM_CODESCAPE_BIN` → a bare PATH-resolvable default name) and never reads a full
- * stdio spec, so an `mcpConfig`-shaped field is REJECTED at validation (`mcp/platform.ts`'s
- * `codescapeIntegrationOverride`) rather than silently accepted-and-ignored.
+ * Codescape's integration config: PATH-only. The codescape supervisor (`codescape/supervisor.ts`
+ * `resolveCodescapeBin`) resolves this `path` (DB override → `LOOM_CODESCAPE_BIN` → a bare
+ * PATH-resolvable default name) only to spawn `ingest`/`serve` — the per-session MCP mount (P4 wiring,
+ * card 088afc94) is a streamable-HTTP URL built from the manifest + the supervisor's live port
+ * (`codescapeHttpMcpServer`, pty/host.ts), never a bin path. So an `mcpConfig`-shaped field is REJECTED at
+ * validation (`mcp/platform.ts`'s `codescapeIntegrationOverride`) rather than silently accepted-and-ignored.
  */
 export interface CodescapeIntegrationConfig {
   path?: string;

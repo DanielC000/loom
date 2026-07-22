@@ -1,39 +1,40 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Codescape wiring epic `369dde3c`, card C2 REWRITE (card e068a2ab) — inject the built-in Codescape MCP
-// for agents on a LOOM_DEV Codescape-enabled project. DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE,
-// hermetic: isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService
-// driven against a FAKE pty injected via PtyHost's createPty() seam, and a FAKE CodescapeSupervisor (just
-// `ingestToGraph`) injected via SessionService's `opts.codescape` — no real supervisor/serve process, no
-// real claude spawn. `LOOM_CODESCAPE_BIN` points at the fixture CLI (test/fixtures/fake-codescape-cli.mjs)
-// so `codescapeMcpServer`'s spawn-shape assertions are real without needing a real `codescape` install.
+// Codescape wiring epic `369dde3c`, card C2 → P4 REWRITE (card 088afc94) — inject the built-in Codescape
+// MCP for agents on a LOOM_DEV Codescape-enabled project. DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE,
+// hermetic: isolated LOOM_HOME + a sandboxed HOME, a REAL Db + SessionService driven against a FAKE pty
+// injected via PtyHost's createPty() seam, and a FAKE CodescapeSupervisor injected via SessionService's
+// `opts.codescape` — no real supervisor/serve process, no real claude spawn.
 //
-// WAS: a shared `codescape serve` HTTP mount scoped by the LOOM projectId — codescape ingested the repo
-// under its OWN derived id, so scope lookups 400/404'd and the MCP never registered (agents got zero
-// tools; card e068a2ab). NOW: a per-session STDIO `codescape mcp --graph <graph.json>` process reading a
-// project-wide graph file the daemon keeps fresh via `codescape ingest --out` — no shared serve on the
-// agent path, no scope multiplexing, no project-id mismatch possible.
+// HISTORY: C2 (e068a2ab) was a shared `codescape serve` HTTP mount scoped by the LOOM projectId — codescape
+// ingested the repo under its OWN derived id, so scope lookups 400/404'd and the MCP never registered
+// (agents got zero tools). C2/C3-REWRITE moved to a per-session STDIO `codescape mcp --graph <graph.json>`
+// process reading a Loom-maintained snapshot file. P4 (088afc94) REPLACES BOTH: the per-session mount is
+// now a streamable-HTTP entry pointed at the SHARED `codescape serve` process, scoped via codescape's OWN
+// project id — resolved by READING BACK codescape's manifest file (never reimplementing their id hash),
+// so the project-id-mismatch bug that killed the C2 attempt can't recur. Card 088afc94 ALSO ruled: no
+// stdio-snapshot fallback when serve is down — a clean skip, logged, never a stale/absent mount.
 //
 // Proves the DoD:
 //   (helpers) shared/src/config.ts's `codescape.enabled` resolves default-false / per-project-override
 //       through resolveConfig; paths.ts's `isCodescapeEnabled` combines the daemon-wide supervisor gate
-//       with the per-project flag; paths.ts's `codescapeGraphPath` derives the ONE project-wide graph path.
-//   (resolver) `codescapeMcpServer(graphPath)` returns null when the graph file doesn't exist yet
-//       (clean-skip, mirrors markitdown's "venv not warm" fallback), and a real `{type:"stdio", command,
-//       args}` entry — command wrapped in `process.execPath` for a `.js`/`.mjs` codescape checkout,
-//       args ending `mcp --graph <graphPath>` — once it exists.
-//   (a) buildMcpServers mounts that stdio entry for "codescape" iff codescapeEnabled && isLoomDev() &&
-//       isCodescapeSupervisorEnabled() && the project's graph.json exists — orthogonal to role: worker,
-//       manager, and plain all get the SAME project-wide entry (no more worktree-scoped 2-/3-segment URL).
+//       with the per-project flag.
+//   (resolver) `codescapeHttpMcpServer` returns null when serve isn't up (port null) or codescape's
+//       manifest has no entry for the repo yet (clean-skip, never a fallback), and a real
+//       `{type:"http", url}` entry — bare `/mcp/<codescapeId>` project route, or `/mcp/<codescapeId>/
+//       <worktreeId>` when a worktreeId is given — once both resolve.
+//   (a) buildMcpServers mounts that http entry for "codescape" iff codescapeEnabled && isLoomDev() &&
+//       isCodescapeSupervisorEnabled() && codescape's manifest resolves an id for repoPath && serve's port
+//       is live — a manager gets the bare project route, a worker tied to a task gets the worktree-scoped
+//       route (SAME stable URL shape codescape confirmed it will serve worktree-adjusted content through
+//       later — this is not a placeholder to simplify back to the bare route).
 //   NEGATIVE CASES (byte-identical to a no-flag spawn): LOOM_DEV off / no codescape CLI detected on the
-//       host (card 503a30a0 — the daemon-wide gate is now host-CLI-presence-based, not a hand-set env
-//       toggle) / project not enabled / graph.json missing.
+//       host / project not enabled / codescape has no manifest entry for this repo (never ingested) /
+//       serve not up (port null) — ALL clean-skip, never a stale/absent fallback.
 //   (b) CODESCAPE_TOOL_ALLOW carries exactly the 7 read tools, none of the 5 control/write tools; createPty
 //       allowlists them iff the mcpServers map actually carries the "codescape" entry (shape-independent —
 //       keys off presence, not transport).
-//   plus end-to-end: spawnWorker's C3 `fireCodescapeEnsureGraph` hook fires `ingestToGraph` against the
-//       PROJECT's main repoPath (not the worker's own worktree) and writes the project-wide graph file;
-//       once it lands, buildMcpServers (fed the real spawn opts) mounts the codescape entry; a SECOND
-//       worker spawn does NOT re-ingest (existence-gated); opts carry no codescapePort/worktreeId keys.
+//   plus end-to-end: spawnWorker's opts carry repoPath (the project's MAIN repo, not its own worktree) and
+//       worktreeId (a task-tied worker); the manifest-based resolver + buildMcpServers connect end to end.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codescape-mcp-spawn.mjs
 import fs from "node:fs";
@@ -45,6 +46,18 @@ import { execSync, execFileSync } from "node:child_process";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// CR fix (card 088afc94, item 5, the flagged test gap): capture console.warn output around a call so the
+// clean-skip WARN's actual TEXT can be asserted, not just the resulting mcpServers shape — a future
+// refactor that silently dropped the warn (or re-merged the split messages) would otherwise pass every
+// other check in this file untouched.
+function captureWarnings(fn) {
+  const original = console.warn;
+  const lines = [];
+  console.warn = (...args) => { lines.push(args.join(" ")); };
+  try { fn(); } finally { console.warn = original; }
+  return lines;
+}
 
 // --- Hermetic LOOM_HOME (host.ts log dir) AND a sandboxed HOME so resume()'s engineTranscriptExists
 // reads under the temp dir, never the real ~/.claude. Set BEFORE importing dist. ---
@@ -66,11 +79,22 @@ delete process.env.LOOM_CODESCAPE_BIN;
 process.env.LOOM_CODESCAPE_BIN = fixtureCli;
 
 const { Db } = await import("../dist/db.js");
-const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, codescapeMcpServer, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS } = await import("../dist/pty/host.js");
+const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, codescapeHttpMcpServer, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled, codescapeGraphPath, resolveCodescapeBin, codescapeBinCandidate, hostToolBinExists, resolveHostToolBin } = await import("../dist/paths.js");
+const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled, resolveCodescapeBin, codescapeBinCandidate, hostToolBinExists, resolveHostToolBin } = await import("../dist/paths.js");
+const { resolveCodescapeProjectId } = await import("../dist/codescape/manifest.js");
 const { resolveConfig } = await import("@loom/shared");
+
+// Manifest helper (mirrors codescape-manifest.mjs's writeManifest) — codescape's OWN plain-JSON
+// project-id registry, read back by resolveCodescapeProjectId. Hand-written here rather than driven
+// through a real ingest: the fixture CLI's `ingest` (no `--out`) doesn't simulate manifest-writing, and
+// this file's own manifest.mjs unit tests already cover that resolver in isolation.
+function writeManifest(homeDir, entries) {
+  const p = path.join(homeDir, ".codescape", "projects", "index.json");
+  fs.mkdirSync(path.dirname(p), { recursive: true });
+  fs.writeFileSync(p, JSON.stringify({ version: 1, projects: entries }));
+}
 
 // ===================== shared config: codescape.enabled default-false / per-project override =====================
 check("(config) default resolveConfig(undefined) ⇒ codescape.enabled === false", resolveConfig(undefined).codescape.enabled === false);
@@ -106,11 +130,6 @@ check("(gate) dbPath param: an explicit REAL dbPath wins and resolves detected",
   isCodescapeSupervisorEnabled(process.execPath) === true);
 delete process.env.LOOM_DEV;
 
-// ===================== codescapeGraphPath: ONE project-wide graph file =====================
-check("(graphpath) codescapeGraphPath derives <LOOM_HOME>/codescape/<projectId>/graph.json",
-  codescapeGraphPath("projA") === path.join(tmpHome, "codescape", "projA", "graph.json"));
-check("(graphpath) different projects get different paths", codescapeGraphPath("projA") !== codescapeGraphPath("projB"));
-
 // ===================== CODESCAPE_TOOL_ALLOW: exactly the 7 read tools, none of the 5 write tools =====================
 const expectedRead = ["mcp__codescape__list_flows", "mcp__codescape__trace_flow", "mcp__codescape__what_touches",
   "mcp__codescape__describe_symbol", "mcp__codescape__render_tree", "mcp__codescape__boundary_map", "mcp__codescape__scenario_space"];
@@ -127,7 +146,7 @@ check("(allowlist) CODESCAPE_TOOL_ALLOW contains NONE of the 5 control/write too
 // wedge a Loom-driven worker session. disallowedToolsForSpawn must union CODESCAPE_WRITE_TOOLS into
 // `--disallowedTools` whenever the codescape MCP is actually mounted — proving the write tools are
 // structurally unreachable, not merely unallowlisted. Shape-independent: it keys off the "codescape"
-// entry's mere PRESENCE in mcpServers, not its transport, so this holds for the new stdio shape too.
+// entry's mere PRESENCE in mcpServers, not its transport, so this holds for the http shape too.
 check("(CODESCAPE_WRITE_TOOLS) carries exactly the 5 control/write tool names",
   CODESCAPE_WRITE_TOOLS.length === 5 && forbiddenWrite.every((t) => CODESCAPE_WRITE_TOOLS.includes(t)));
 
@@ -141,11 +160,11 @@ check("(disallow) codescapeMounted + restrictedTools both off ⇒ byte-identical
   JSON.stringify(disallowedToolsForSpawn("worker", false, false)) === JSON.stringify(disallowedToolsForSpawn("worker")));
 
 // End-to-end through buildSpawnArgs: the write tools actually land in `--disallowedTools` argv when
-// codescape is mounted (now a stdio entry), and are absent when it isn't — proving the flag is emitted,
+// codescape is mounted (now an http entry), and are absent when it isn't — proving the flag is emitted,
 // not just the array.
 {
   const mcpNoCodescape = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
-  const mcpWithCodescape = { ...mcpNoCodescape, codescape: { type: "stdio", command: process.execPath, args: [fixtureCli, "mcp", "--graph", "g.json"] } };
+  const mcpWithCodescape = { ...mcpNoCodescape, codescape: { type: "http", url: "http://127.0.0.1:55000/mcp/myrepo-abc12345" } };
   const argsWithout = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpNoCodescape, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, !!mcpNoCodescape.codescape) });
   const argsWith = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers: mcpWithCodescape, startupPrompt: "GO", disallowedTools: disallowedToolsForSpawn("worker", false, !!mcpWithCodescape.codescape) });
   check("(e2e-disallow) codescape NOT mounted: none of the 5 write tools appear in argv",
@@ -158,35 +177,43 @@ check("(disallow) codescapeMounted + restrictedTools both off ⇒ byte-identical
     d !== -1 && strict !== -1 && d < strict);
 }
 
-// ===================== codescapeMcpServer: the stdio resolver (new C2 seam) =====================
-const graphPathA = codescapeGraphPath("projA");
+// ===================== codescapeHttpMcpServer: the streamable-HTTP URL resolver (P4 seam) =====================
+// `resolveProjectId` is an INJECTED function (never a raw homeDir) — production wiring passes
+// `CodescapeSupervisor.resolveProjectId` (its own boot-registration cache first, falling back to the
+// cold manifest read); here a plain manifest-backed resolver stands in, proving the seam itself works
+// against ANY conforming resolver, cache or not.
 {
-  const missingPath = path.join(tmpHome, "codescape", "no-such-project", "graph.json");
-  check("(resolver) codescapeMcpServer returns null when the graph file doesn't exist yet (clean-skip)",
-    codescapeMcpServer(missingPath) === null);
+  const repoA = path.join(tmpHome, "repo-a");
+  const homeDirA = path.join(tmpHome, "codescape-home-a");
+  writeManifest(homeDirA, [{ id: "repo-a-deadbeef", name: "repo-a", path: repoA, lastIngested: "2026-07-22T00:00:00.000Z", graphPath: "/x/graph.json" }]);
+  const manifestResolver = (repoPath) => resolveCodescapeProjectId(repoPath, homeDirA);
 
-  fs.mkdirSync(path.dirname(graphPathA), { recursive: true });
-  fs.writeFileSync(graphPathA, JSON.stringify({ nodes: [], edges: [], flows: [] }));
-  const entry = codescapeMcpServer(graphPathA);
-  check("(resolver) returns a stdio entry once the graph file exists", entry?.type === "stdio");
-  check("(resolver) a .mjs codescape checkout is wrapped in process.execPath",
-    entry?.command === process.execPath);
-  check("(resolver) args are [<cli.js>, 'mcp', '--graph', <graphPath>]",
-    JSON.stringify(entry?.args) === JSON.stringify([fixtureCli, "mcp", "--graph", graphPathA]));
+  check("(resolver) port null (serve not up) ⇒ null, even with a resolvable id",
+    codescapeHttpMcpServer({ repoPath: repoA, port: null, resolveProjectId: manifestResolver }) === null);
+  check("(resolver) resolveProjectId undefined ⇒ null (nothing to resolve an id with)",
+    codescapeHttpMcpServer({ repoPath: repoA, port: 4400, resolveProjectId: undefined }) === null);
+  check("(resolver) no manifest entry for this repo (never ingested) ⇒ null, clean-skip",
+    codescapeHttpMcpServer({ repoPath: path.join(tmpHome, "never-ingested-repo"), port: 4400, resolveProjectId: manifestResolver }) === null);
+
+  const bareEntry = codescapeHttpMcpServer({ repoPath: repoA, port: 4400, resolveProjectId: manifestResolver });
+  check("(resolver) resolved: {type:'http', url} shape", bareEntry?.type === "http" && typeof bareEntry?.url === "string");
+  check("(resolver) bare project route (no worktreeId): /mcp/<codescapeId>", bareEntry?.url === "http://127.0.0.1:4400/mcp/repo-a-deadbeef");
+
+  const scopedEntry = codescapeHttpMcpServer({ repoPath: repoA, port: 4400, worktreeId: "wt-123", resolveProjectId: manifestResolver });
+  check("(resolver) worktree-scoped route: /mcp/<codescapeId>/<worktreeId>", scopedEntry?.url === "http://127.0.0.1:4400/mcp/repo-a-deadbeef/wt-123");
 }
 
-// ===================== DB-first, env-fallback precedence (card 8dc5ebb9) =====================
+// ===================== DB-first, env-fallback precedence (card 8dc5ebb9) — the SUPERVISOR's own bin resolution =====================
+// codescapeBinCandidate/resolveCodescapeBin back the supervisor's ingest/serve spawn (codescape/supervisor.ts)
+// and the isCodescapeSupervisorEnabled gate — NOT the per-session mount, which is a pure URL build with no
+// bin resolution at all (P4). hostToolBinExists backs the same detection.
 {
-  // DB path set ⇒ wins over LOOM_CODESCAPE_BIN (still pointed at fixtureCli above).
   const otherFixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli-2.mjs");
   fs.copyFileSync(fixtureCli, otherFixtureCli);
   check("(precedence) codescapeBinCandidate: a DB path wins over LOOM_CODESCAPE_BIN", codescapeBinCandidate(otherFixtureCli) === otherFixtureCli);
   const viaDb = resolveCodescapeBin(otherFixtureCli);
   check("(precedence) resolveCodescapeBin: DB path wins, still shape-resolved (.mjs wrapped in process.execPath)",
     viaDb.command === process.execPath && JSON.stringify(viaDb.args) === JSON.stringify([otherFixtureCli]));
-  const entryViaDb = codescapeMcpServer(graphPathA, otherFixtureCli);
-  check("(precedence) codescapeMcpServer: a DB path wins over LOOM_CODESCAPE_BIN end-to-end",
-    JSON.stringify(entryViaDb?.args) === JSON.stringify([otherFixtureCli, "mcp", "--graph", graphPathA]));
   // A blank/whitespace DB path is treated as absent — falls through to env, not a literal "" bin.
   check("(precedence) a blank DB path falls back to the env var", codescapeBinCandidate("   ") === fixtureCli);
   // Neither DB nor env set ⇒ the bare PATH-resolvable default name "codescape" (unchanged today-behavior).
@@ -219,11 +246,16 @@ const graphPathA = codescapeGraphPath("projA");
 }
 
 // ===================== buildMcpServers: NEGATIVE CASES — byte-identical to a no-flag spawn =====================
+const posRepo = path.join(tmpHome, "pos-repo");
+const posHomeDir = path.join(tmpHome, "pos-home");
+writeManifest(posHomeDir, [{ id: "pos-repo-cafe1234", name: "pos-repo", path: posRepo, lastIngested: "2026-07-22T00:00:00.000Z", graphPath: "/x/graph.json" }]);
+const posResolver = (repoPath) => resolveCodescapeProjectId(repoPath, posHomeDir);
+
 const noFlag = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker" });
 
-// (1) LOOM_DEV off (graph exists, everything else on) — the hard gate wins first.
+// (1) LOOM_DEV off (everything else on) — the hard gate wins first.
 delete process.env.LOOM_DEV;
-const devOff = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA" });
+const devOff = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver });
 check("(neg-1) LOOM_DEV off ⇒ NO 'codescape' entry", !("codescape" in devOff));
 check("(neg-1) LOOM_DEV off ⇒ mcpServers byte-identical to a no-flag spawn", JSON.stringify(devOff) === JSON.stringify(noFlag));
 
@@ -232,56 +264,82 @@ check("(neg-1) LOOM_DEV off ⇒ mcpServers byte-identical to a no-flag spawn", J
 process.env.LOOM_DEV = "1";
 const savedBinForNeg2 = process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_BIN;
-const supervisorOff = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA" });
+const supervisorOff = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver });
 check("(neg-2) no codescape CLI detected ⇒ NO 'codescape' entry", !("codescape" in supervisorOff));
 check("(neg-2) byte-identical to a no-flag spawn", JSON.stringify(supervisorOff) === JSON.stringify(noFlag));
 process.env.LOOM_CODESCAPE_BIN = savedBinForNeg2;
 
 // (3) project NOT enabled (codescapeEnabled: false), everything else on.
-const notEnabled = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: false, projectId: "projA" });
+const notEnabled = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: false, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver });
 check("(neg-3) project not enabled ⇒ NO 'codescape' entry", !("codescape" in notEnabled));
 check("(neg-3) project not enabled ⇒ mcpServers byte-identical to a no-flag spawn", JSON.stringify(notEnabled) === JSON.stringify(noFlag));
 
-// (4) graph.json missing (a DIFFERENT, never-ingested project) — the async-provisioning clean-skip.
-const missingGraph = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "proj-never-ingested" });
-check("(neg-4) missing graph.json ⇒ NO 'codescape' entry (clean-skip, never throws)", !("codescape" in missingGraph));
-check("(neg-4) missing graph.json ⇒ mcpServers byte-identical to a no-flag spawn", JSON.stringify(missingGraph) === JSON.stringify(noFlag));
+// (4) codescape has no manifest entry for this repo (a DIFFERENT, never-ingested repo) — the honest
+// clean-skip, never a guessed/fallback id.
+let missingManifestEntry;
+const idUnresolvedWarnings = captureWarnings(() => {
+  missingManifestEntry = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, repoPath: path.join(tmpHome, "never-ingested"), codescapePort: 55000, codescapeResolveProjectId: posResolver });
+});
+check("(neg-4) no manifest entry for this repo ⇒ NO 'codescape' entry (clean-skip, never throws)", !("codescape" in missingManifestEntry));
+check("(neg-4) mcpServers byte-identical to a no-flag spawn", JSON.stringify(missingManifestEntry) === JSON.stringify(noFlag));
+// CR fix (item 5): the clean-skip WARN actually fires, and its TEXT names the id-unresolved cause
+// specifically (not the merged "serve down or id unresolved" wording the review flagged) — port WAS live
+// (55000) here, so this can only be the manifest-miss case.
+check("(neg-4) the clean-skip WARN fires exactly once", idUnresolvedWarnings.length === 1);
+check("(neg-4) its text names the id-unresolved cause, not serve-down",
+  idUnresolvedWarnings[0]?.includes("no id resolvable") && !idUnresolvedWarnings[0]?.includes("serve isn't up"));
+
+// (5) serve not up (codescapePort null) — everything else resolvable. Card 088afc94 ruling: NO
+// stdio-snapshot (or any other) fallback here — a clean skip is the whole point.
+let serveDown;
+const serveDownWarnings = captureWarnings(() => {
+  serveDown = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, repoPath: posRepo, codescapePort: null, codescapeResolveProjectId: posResolver });
+});
+check("(neg-5) serve not up (port null) ⇒ NO 'codescape' entry, no fallback of any kind", !("codescape" in serveDown));
+check("(neg-5) mcpServers byte-identical to a no-flag spawn", JSON.stringify(serveDown) === JSON.stringify(noFlag));
+// CR fix (item 5): the split message's OTHER half — port was null, so this must name serve-down, distinct
+// from the id-unresolved wording checked above.
+check("(neg-5) the clean-skip WARN fires exactly once", serveDownWarnings.length === 1);
+check("(neg-5) its text names the serve-down cause, not id-unresolved",
+  serveDownWarnings[0]?.includes("serve isn't up") && !serveDownWarnings[0]?.includes("no id resolvable"));
 
 // unset entirely (no codescapeEnabled key at all) ⇒ also byte-identical (fully additive).
-const unset = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", projectId: "projA" });
-check("(neg-5) codescapeEnabled unset ⇒ mcpServers byte-identical to a no-flag spawn", JSON.stringify(unset) === JSON.stringify(noFlag));
+const unset = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", repoPath: posRepo });
+check("(neg-6) codescapeEnabled unset ⇒ mcpServers byte-identical to a no-flag spawn", JSON.stringify(unset) === JSON.stringify(noFlag));
 
-// ===================== buildMcpServers: POSITIVE — same project-wide entry regardless of role =====================
-const workerOn = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA" });
+// ===================== buildMcpServers: POSITIVE — worktree-scoped for a worker, bare for a manager =====================
+const workerOn = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver, worktreeId: "wt-9" });
 check("(a) worker: 'codescape' entry present", "codescape" in workerOn);
-check("(a) worker: entry shape is {type:'stdio', command, args} (NOT the old http/URL shape)",
-  workerOn.codescape.type === "stdio" && typeof workerOn.codescape.command === "string" && Array.isArray(workerOn.codescape.args) && !("url" in workerOn.codescape));
-check("(a) worker: args end in 'mcp' '--graph' <graphPath>", JSON.stringify(workerOn.codescape.args.slice(-3)) === JSON.stringify(["mcp", "--graph", graphPathA]));
+check("(a) worker: entry shape is {type:'http', url}", workerOn.codescape.type === "http" && typeof workerOn.codescape.url === "string");
+check("(a) worker: url is the worktree-scoped route /mcp/<id>/<worktreeId>",
+  workerOn.codescape.url === "http://127.0.0.1:55000/mcp/pos-repo-cafe1234/wt-9");
 
-const managerOn = buildMcpServers({ sessionId: "s1", port: 4317, role: "manager", codescapeEnabled: true, projectId: "projA" });
-check("(a) manager gets the EXACT SAME project-wide entry as a worker (no more worktree scoping)",
-  JSON.stringify(managerOn.codescape) === JSON.stringify(workerOn.codescape));
+const managerOn = buildMcpServers({ sessionId: "s1", port: 4317, role: "manager", codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver });
+check("(a) manager (no worktreeId): bare project route /mcp/<id>",
+  managerOn.codescape.url === "http://127.0.0.1:55000/mcp/pos-repo-cafe1234");
 
-const plainOn = buildMcpServers({ sessionId: "s1", port: 4317, codescapeEnabled: true, projectId: "projA" });
-check("(a) plain (role-less) session also gets it (orthogonal to role)",
-  JSON.stringify(plainOn.codescape) === JSON.stringify(workerOn.codescape));
+const plainOn = buildMcpServers({ sessionId: "s1", port: 4317, codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver });
+check("(a) plain (role-less) session also gets the bare route (orthogonal to role, absent a worktreeId)",
+  plainOn.codescape.url === managerOn.codescape.url);
 
 // ON adds exactly the codescape key, nothing else changes vs the negative-case map.
 check("(a) ON adds exactly the codescape key (everything else unchanged)",
-  JSON.stringify({ ...workerOn, codescape: undefined }) === JSON.stringify({ ...notEnabled, codescape: undefined }));
+  JSON.stringify({ ...managerOn, codescape: undefined }) === JSON.stringify({ ...notEnabled, codescape: undefined }));
 
-// ===================== byte-identical-when-absent + DB-path precedence through buildMcpServers (card 8dc5ebb9) ====
+// ===================== byte-identical-when-absent + DB-path precedence for the GATE (card 8dc5ebb9) =====================
 {
-  const withEmptyIntegrationPaths = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA", integrationPaths: {} });
+  const withEmptyIntegrationPaths = buildMcpServers({ sessionId: "s1", port: 4317, role: "manager", codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver, integrationPaths: {} });
   check("(byte-identical) integrationPaths:{} is byte-identical to integrationPaths omitted entirely",
-    JSON.stringify(withEmptyIntegrationPaths) === JSON.stringify(workerOn));
-  // A DB path threaded through integrationPaths wins over LOOM_CODESCAPE_BIN, end-to-end through buildMcpServers.
-  const otherFixtureCli2 = path.join(__dirname, "fixtures", "fake-codescape-cli-3.mjs");
-  fs.copyFileSync(fixtureCli, otherFixtureCli2);
-  const withDbPath = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA", integrationPaths: { codescape: otherFixtureCli2 } });
-  check("(precedence, e2e) integrationPaths.codescape wins over LOOM_CODESCAPE_BIN through buildMcpServers",
-    withDbPath.codescape?.args?.[0] === otherFixtureCli2);
-  fs.rmSync(otherFixtureCli2, { force: true });
+    JSON.stringify(withEmptyIntegrationPaths) === JSON.stringify(managerOn));
+  // A DB path threaded through integrationPaths wins over LOOM_CODESCAPE_BIN for the GATE check — proven
+  // by making LOOM_CODESCAPE_BIN point at a NONEXISTENT binary (gate would otherwise fail) while the DB
+  // path still resolves to the real fixture — the mount must still succeed.
+  const savedBin = process.env.LOOM_CODESCAPE_BIN;
+  process.env.LOOM_CODESCAPE_BIN = path.join(tmpHome, "no-such-bin.mjs");
+  const withDbPath = buildMcpServers({ sessionId: "s1", port: 4317, role: "manager", codescapeEnabled: true, repoPath: posRepo, codescapePort: 55000, codescapeResolveProjectId: posResolver, integrationPaths: { codescape: fixtureCli } });
+  check("(precedence, e2e) integrationPaths.codescape wins over a broken LOOM_CODESCAPE_BIN for the gate — mount still succeeds",
+    "codescape" in withDbPath && withDbPath.codescape.url === managerOn.codescape.url);
+  process.env.LOOM_CODESCAPE_BIN = savedBin;
 }
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
@@ -292,7 +350,10 @@ execSync(`git init -q && git add . && git -c user.email=cs@loom -c user.name=cs 
 
 const now = new Date().toISOString();
 const db = new Db();
-// Project A: codescape enabled (its graph.json does NOT exist yet at start of this section).
+// Project A: codescape enabled. Its manifest entry is seeded up front (mirrors a repo already ingested
+// by a prior boot/merge — the register-worktree hook doesn't itself ingest, see the class doc).
+const e2eHomeDir = path.join(tmpHome, "e2e-codescape-home");
+writeManifest(e2eHomeDir, [{ id: "pa-e2e-1234abcd", name: "A", path: repo, lastIngested: now, graphPath: "/x/graph.json" }]);
 db.insertProject({ id: "pA", name: "A", repoPath: repo, vaultPath: repo, config: { codescape: { enabled: true } }, createdAt: now, archivedAt: null });
 db.insertAgent({ id: "agentMgrA", projectId: "pA", name: "Mgr", startupPrompt: "MGR_PROMPT", position: 0, profileId: null });
 db.insertAgent({ id: "agentWorkerA", projectId: "pA", name: "Worker", startupPrompt: "WORKER_PROMPT", position: 1, profileId: null });
@@ -309,33 +370,27 @@ const events = {
   onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
 };
 const host = new SeamHost(events);
-// A fake CodescapeSupervisor whose ingestToGraph resolves immediately and writes a REAL graph file — the
-// real spawn shape (fixture-CLI-backed) is already proven above via codescapeMcpServer() directly, so this
-// e2e section only needs to prove the C3 threading (WHO gets called, WITH what args, WHEN).
-const ingestCalls = [];
+// A fake CodescapeSupervisor: only registerWorktree is exercised by this file (the mount-side threading);
+// codescape-lifecycle-hooks.mjs covers the full register/reingest/drop lifecycle in depth.
+const registerCalls = [];
 const fakeSupervisor = {
-  async ingestToGraph(repoPath, graphPath) {
-    ingestCalls.push({ repoPath, graphPath });
-    fs.mkdirSync(path.dirname(graphPath), { recursive: true });
-    fs.writeFileSync(graphPath, JSON.stringify({ nodes: [], edges: [], flows: [] }));
-    return { ok: true, outcome: "ready" };
+  getHomeDir: () => e2eHomeDir,
+  resolveProjectId: (repoPath) => resolveCodescapeProjectId(repoPath, e2eHomeDir),
+  async registerWorktree(projectId, info) {
+    registerCalls.push({ projectId, ...info });
+    return { ok: true };
   },
 };
 const svc = new SessionService(db, host, new OrchestrationControl(), { codescape: fakeSupervisor });
 const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 
 let workerWorktree = null;
-let worker2Worktree = null;
 try {
   const mgrA = svc.startManager("agentMgrA");
   const oMgrA = optsFor(mgrA.id);
   check("(e2e) manager: opts.codescapeEnabled === true (project A opted in)", oMgrA?.codescapeEnabled === true);
-  check("(e2e) manager: opts.projectId === 'pA'", oMgrA?.projectId === "pA");
-  check("(e2e) manager: opts carry NO codescapePort/worktreeId keys anymore (C2 rewrite dropped them)",
-    !("codescapePort" in oMgrA) && !("worktreeId" in oMgrA));
-  const mgrMcp = buildMcpServers({ sessionId: mgrA.id, port: 4317, role: oMgrA.role, codescapeEnabled: oMgrA.codescapeEnabled, projectId: oMgrA.projectId });
-  check("(e2e) manager: mcpServers has NO codescape entry yet (pA's graph.json doesn't exist until a worker ensures it)",
-    !("codescape" in mgrMcp));
+  check("(e2e) manager: opts.repoPath === the project's repo", oMgrA?.repoPath === repo);
+  check("(e2e) manager: opts carry NO worktreeId (a manager runs in the main repo)", !oMgrA?.worktreeId);
 
   const tW1 = "22222222-2222-4222-8222-222222222222";
   db.insertTask({ id: tW1, projectId: "pA", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
@@ -343,32 +398,25 @@ try {
   workerWorktree = worker.worktreePath;
   const oWorker = optsFor(worker.id);
   check("(e2e) worker: opts.codescapeEnabled === true", oWorker?.codescapeEnabled === true);
-  check("(e2e) worker: opts.projectId === 'pA'", oWorker?.projectId === "pA");
+  check("(e2e) worker: opts.repoPath === the PROJECT's main repo (not its own new worktree)", oWorker?.repoPath === repo && oWorker?.repoPath !== worker.worktreePath);
+  check("(e2e) worker: opts.worktreeId is a stable, non-empty string (task-tied)", typeof oWorker?.worktreeId === "string" && oWorker.worktreeId.length > 0);
 
-  // fireCodescapeEnsureGraph is fire-and-forget (not awaited by spawnWorker) — give it a beat to land.
-  for (let i = 0; i < 100 && ingestCalls.length === 0; i++) await sleep(20);
-  check("(e2e) spawnWorker's C3 ensure-graph hook fired ingestToGraph exactly once", ingestCalls.length === 1);
-  check("(e2e) ensure-graph ingested the PROJECT'S MAIN repoPath (not the worker's own new worktree)", ingestCalls[0]?.repoPath === repo);
-  check("(e2e) ensure-graph wrote to codescapeGraphPath('pA')", ingestCalls[0]?.graphPath === codescapeGraphPath("pA"));
-  check("(e2e) the project's graph file now genuinely exists on disk", fs.existsSync(codescapeGraphPath("pA")));
+  // fireCodescapeRegisterWorktree is fire-and-forget (not awaited by spawnWorker) — give it a beat to land.
+  for (let i = 0; i < 100 && registerCalls.length === 0; i++) await sleep(20);
+  check("(e2e) spawnWorker's register-worktree hook fired exactly once", registerCalls.length === 1);
+  check("(e2e) it registered under codescape's OWN manifest-resolved id (not Loom's project.id)", registerCalls[0]?.projectId === "pa-e2e-1234abcd");
+  check("(e2e) it registered the SAME worktreeId that landed in the spawn opts", registerCalls[0]?.worktreeId === oWorker.worktreeId);
+  check("(e2e) it registered the worker's actual worktree path", registerCalls[0]?.path === worker.worktreePath);
 
-  // NOW buildMcpServers (fed the SAME real spawn opts) mounts the codescape entry — proving C2+C3 connect.
-  const workerMcp = buildMcpServers({ sessionId: worker.id, port: 4317, role: oWorker.role, codescapeEnabled: oWorker.codescapeEnabled, projectId: oWorker.projectId });
-  check("(e2e) after ensure-graph lands, buildMcpServers mounts the codescape stdio entry", workerMcp.codescape?.type === "stdio");
-  check("(e2e) its args point at pA's graph file", JSON.stringify(workerMcp.codescape.args.slice(-3)) === JSON.stringify(["mcp", "--graph", codescapeGraphPath("pA")]));
-
-  // A SECOND worker spawn must NOT re-ingest — ensure-graph is existence-gated (an ingest can take up to
-  // ~2 minutes on a big repo; re-running it on every worker spawn would be wasteful).
-  const tW2 = "33333333-3333-4333-8333-333333333333";
-  db.insertTask({ id: tW2, projectId: "pA", title: "t2", body: "", columnKey: "backlog", position: 2, priority: "p2", createdAt: now, updatedAt: now });
-  const worker2 = await svc.spawnWorker(mgrA.id, { taskId: tW2, agentId: "agentWorkerA", kickoffPrompt: "GO" });
-  worker2Worktree = worker2.worktreePath;
-  await sleep(150);
-  check("(e2e) a second worker spawn does NOT re-ingest (graph already exists)", ingestCalls.length === 1);
+  // NOW buildMcpServers (fed the SAME real spawn opts, plus a live port/homeDir as the boot wiring would
+  // supply) mounts the codescape entry — proving the manifest resolution + mount connect end to end.
+  const workerMcp = buildMcpServers({ sessionId: worker.id, port: 4317, role: oWorker.role, codescapeEnabled: oWorker.codescapeEnabled, repoPath: oWorker.repoPath, worktreeId: oWorker.worktreeId, codescapePort: 55000, codescapeResolveProjectId: fakeSupervisor.resolveProjectId });
+  check("(e2e) buildMcpServers mounts the codescape http entry once port+manifest both resolve", workerMcp.codescape?.type === "http");
+  check("(e2e) its url is worktree-scoped to THIS worker's own worktreeId", workerMcp.codescape.url === `http://127.0.0.1:55000/mcp/pa-e2e-1234abcd/${oWorker.worktreeId}`);
 } finally {
   try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
-    for (const wt of [workerWorktree, worker2Worktree].filter(Boolean)) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
+    if (workerWorktree) { try { await removeWorktree(repo, workerWorktree); } catch { /* best-effort */ } }
   } catch { /* best-effort */ }
   db.close();
   delete process.env.LOOM_DEV;
@@ -378,6 +426,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape MCP wiring (card C2 rewrite, e068a2ab): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeGraphPath derives ONE project-wide graph file; codescapeMcpServer clean-skips until that file exists then returns a real stdio entry (process.execPath-wrapped for a .mjs checkout); buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+graph-exists, with all 4 negative cases byte-identical off, orthogonally across worker/manager/plain roles; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's C3 hook ingests the project's MAIN repoPath (not the worktree) exactly once, after which buildMcpServers mounts it and a second spawn skips re-ingesting; card 8dc5ebb9: codescapeBinCandidate/resolveCodescapeBin are DB-first with an env fallback (proven at the resolver level AND end-to-end through buildMcpServers), a blank DB path or omitted/empty integrationPaths is byte-identical to today, hostToolBinExists backs the /api/integrations detect read for both resolver shapes, and a REAL cross-process spawn proves the direct-launch (non-.mjs) shape actually runs — claude-free, network-free."
+  ? "\n✅ ALL PASS — Codescape MCP wiring (P4 rewrite, card 088afc94): shared config default-false/per-project-override; isCodescapeEnabled combines the daemon-wide + per-project gates; codescapeHttpMcpServer clean-skips when serve is down (port null) or codescape's manifest has no entry for the repo, and returns a real {type:'http', url} entry — bare /mcp/<id> or worktree-scoped /mcp/<id>/<worktreeId> — once both resolve, via a manifest read-back rather than a reimplemented id hash; buildMcpServers mounts it iff enabled+isLoomDev+supervisorEnabled+manifest-resolves+serve-up, with all 5 negative cases (incl. the NEW 'serve down' clean-skip — no stdio fallback) byte-identical off; the 7-tool read-only allowlist excludes the 5 write tools and they're structurally disallowed once mounted; end-to-end, spawnWorker's opts carry the project's MAIN repoPath (never its own worktree) plus a stable worktreeId, its register-worktree hook fires exactly once under codescape's OWN manifest-resolved id (never Loom's), and buildMcpServers (fed those same opts) mounts the matching worktree-scoped route — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
