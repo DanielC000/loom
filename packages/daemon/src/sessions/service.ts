@@ -7760,6 +7760,49 @@ export class SessionService {
     | { settled: true; ok: false; error: unknown }
     | { settled: false; op: PendingOpView; attachedToInFlight: boolean; staleAgainstWorktree: boolean }
   > {
+    // FUNCTION-ENTRY CAPTURE (card 7dc0cca5): stamped as the FIRST statement, before `checkGateTimeoutBreaker`
+    // or anything else below that can `await` and yield. SEMANTIC: `opStartedAt` means the instant this
+    // call to run_gate WAS ISSUED, not whenever this function happened to get around to stamping it after
+    // some incidental prefix work — a wake scheduled any time at-or-after the call was issued genuinely
+    // was "scheduled while parked on this op" and belongs in `autoCancelSettleWakes`'s
+    // `createdAt >= opStartedAt` reap. Capturing it here (before ANY await) is what makes that true by
+    // construction, instead of by luck.
+    //
+    // THE RACE THIS CLOSES IS A REAL CROSS-REQUEST ONE, NOT MERELY "THE CALLER DIDN'T AWAIT": `run_gate`
+    // (this file, served at /mcp-orch/:sessionId) and `wake_me` (mcp/server.ts, served at the SEPARATE
+    // /mcp/:sessionId task-MCP route — see gateway/server.ts) are two independent MCP router instances
+    // behind two independent Fastify routes, with NO shared per-session lock between them. A worker whose
+    // turn emits both as parallel tool calls (Claude routinely batches tool calls it judges independent,
+    // and nothing here tells it not to) can have `wake_me`'s `db.insertWake` land on the SAME event loop
+    // WHILE this function's own prefix is still running, at any await point below (`checkGateTimeoutBreaker`
+    // — a no-op in the common case, but a REAL bounded git subprocess call, up to `gitOpMs`/15s, once this
+    // branch has tripped the GATE_TIMEOUT_BREAKER_THRESHOLD=3 circuit — so the vulnerable window is normally
+    // ~2ms but can legitimately reach SECONDS under load once a branch's gate has been timing out).
+    //
+    // THIS IS NOT AN EDGE CASE THE WIDER WINDOW HAPPENS TO TOLERATE — IT IS THE FEATURE'S OWN PRIMARY USE
+    // CASE (card 9d521792): "kick off the gate, and set a fallback wake in case it never comes back" IS
+    // auto-cancel-on-settle's whole reason to exist, and expressing that as ONE batched turn (rather than
+    // waiting a full turn to see run_gate's pending reply before scheduling the wake) is the single most
+    // natural way for a worker to say it. Under the OLD late stamp, that exact natural expression could
+    // land the wake's `createdAt` BEFORE `opStartedAt` and slip through un-reaped — quietly reproducing
+    // the original stale-fallback-wake bug (finding 23d8864a) the whole feature exists to close, for
+    // precisely the pattern it was built to cover. So this earlier capture doesn't just remove a test
+    // race; it closes a real gap in the feature's primary use case. The PREVIOUS fallback (`new Date()`
+    // captured after `preAttachPeek` below, i.e. after that await) raced exactly this: under host CPU
+    // contention the resume could land in the NEXT millisecond, making `opStartedAt` read LATER than a wake
+    // the caller created earlier in wall time, silently excluding it from the reap (evidence: instrumented
+    // repro, wake createdAt/opStartedAt 1ms apart, no fail-safe branch hit — see card 7dc0cca5's worker_report
+    // history for the full instrumented trace and the deterministic 10/10-fail / 10/10-pass injection test).
+    // Fixing this at the SOURCE (capture earlier) rather than loosening the comparison — a slack/fudge
+    // factor on `>=` would only lower the failure rate, not remove the race (the exact anti-pattern
+    // card 9d521792 already rejected once for the settle-time-peek version of this same class of bug).
+    //
+    // RESIDUAL (accepted, not a bug): once the breaker HAS tripped and the window runs to seconds, an
+    // UNRELATED wake the same worker created for something else in that window is also reaped — this
+    // enlarges an EXISTING class (the design already reaps any wake created after `opStartedAt` regardless
+    // of purpose) rather than creating a new one, and the settle nudge wakes the worker anyway, so the
+    // worst case is a redundant wake lost, never a stranded worker.
+    const fnEntryInstant = new Date().toISOString();
     this.requireWorker(workerSessionId, "run_gate");
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown session");
@@ -7805,12 +7848,33 @@ export class SessionService {
     // found here was started by an EARLIER call (this one is merely attaching), never by this call itself.
     const preAttachPeek = this.pendingOps.peek(key);
     const attachedToInFlight = preAttachPeek?.state === "running";
-    // OP-START CAPTURE (card 9d521792 CR follow-up): reuses the SAME pre-attach peek above — captured
-    // synchronously before attach(), instead of re-derived via a settle-time `peek()` (which raced the
-    // registry's own retain-then-notify ordering under CPU-contended concurrent test runs, op 473b8596,
-    // even though both happen inside one synchronous callback). See confirmWorkerMergeTracked's
-    // identical capture for the full reasoning; closed over by the settle callback below.
-    const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : new Date().toISOString();
+    // OP-START CAPTURE (card 9d521792 CR follow-up, fallback re-sourced by card 7dc0cca5): an
+    // already-running entry's OWN `startedAt` always wins — this call is merely attaching/re-observing,
+    // never the one that started that op. Only the FALLBACK (no RUNNING entry — either nothing peeked at
+    // all, or a settled/RETAINED terminal view — this call is about to mint a fresh one) changed: it now
+    // reuses `fnEntryInstant` (captured above, before ANY await in this function) instead of a fresh
+    // `new Date()` read here — see `fnEntryInstant`'s own doc for why a post-await capture raced the
+    // caller's own wake-scheduling under host load.
+    //
+    // WHY THE CONDITION STAYS `attachedToInFlight ? … : …` INSTEAD OF `preAttachPeek?.startedAt ?? …`
+    // (Code Review, card 7dc0cca5): a RETAINED (settled-but-cached) peek is CURRENTLY unreachable-by-
+    // consumption here — `attach()`'s own retained-hit check (pending-ops.ts ~347-365) reads the SAME
+    // `this.retained` map this `preAttachPeek` just read, and short-circuits BEFORE ever creating a fresh
+    // entry or invoking the settle closure that reads `opStartedAt` (via `autoCancelSettleWakes`) — so
+    // today, whichever value `opStartedAt` takes in the retained case is dead: never consumed either way.
+    // We deliberately do NOT rely on that to justify a `preAttachPeek?.startedAt ?? fnEntryInstant`
+    // simplification, because that "currently unreachable" conclusion itself rests on a TIMING assumption:
+    // `peek()` and `attach()` each evaluate `Date.now() < retainedHit.expiresAt` with their OWN `Date.now()`
+    // read, moments apart. If a retained entry's expiry falls between those two reads, `peek()` sees it as
+    // retained (non-running) while `attach()` sees it as expired and mints a FRESH op — and THEN the settle
+    // closure genuinely runs and would consume a stale PREVIOUS op's `startedAt`, over-cancelling wakes
+    // created any time since that earlier op began. The window is microsecond-wide, but this whole card
+    // exists because a comparably narrow window (a single await's microtask-resume gap) turned out to be
+    // real under host load, not theoretical — so a form that rests on nothing (this ternary: a retained/
+    // non-running peek can NEVER supply `startedAt`, full stop) beats a form that's merely correct by
+    // today's control-flow analysis. If you're reading this because `??` looks like a clean simplification:
+    // it was considered and rejected for exactly this reason — don't reintroduce it.
+    const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : fnEntryInstant;
     const result = await this.pendingOps.attach<WorkerGateResult>(
       key, "gate", workerSessionId, SYNC_ATTACH_BUDGET_MS,
       async (opId) => {

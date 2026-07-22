@@ -34,6 +34,30 @@ import { execSync } from "node:child_process";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ON-FAILURE DIAGNOSTIC (card 7dc0cca5): this scenario's two checks around the fallback wake's fate are
+// racing a millisecond-resolution timestamp comparison (autoCancelSettleWakes's `createdAt >= opStartedAt`)
+// against real wall-clock scheduling — a bare PASS/FAIL never showed WHICH of the two candidate causes
+// (a missed comparison vs. the documented fail-safe) actually fired. Captured unconditionally (cheap: one
+// timestamp read + a console wrap) but only PRINTED if a check above failed, so a normal green run stays
+// quiet. `capturedSettleLogLines` intercepts the exact two production log lines autoCancelSettleWakes
+// itself emits — "auto-cancelling wake …" (reaped) and "auto-cancel-on-nudge skipped …" (the fail-safe,
+// opStartedAt unavailable) — so a future regression is diagnosable from THIS test's own output, not by
+// re-deriving the mechanism from scratch the way this card had to.
+const capturedSettleLogLines = [];
+const realConsoleLog = console.log.bind(console), realConsoleWarn = console.warn.bind(console);
+console.log = (...args) => { const s = String(args[0] ?? ""); if (/auto-cancelling wake/.test(s)) capturedSettleLogLines.push(s); realConsoleLog(...args); };
+console.warn = (...args) => { const s = String(args[0] ?? ""); if (/auto-cancel-on-nudge skipped/.test(s)) capturedSettleLogLines.push(s); realConsoleWarn(...args); };
+let diagPreCallInstant = null, diagFallbackWakeCreatedAt = null;
+function printFailureDiagnosticIfAny() {
+  if (failures === 0) return;
+  realConsoleLog("\n--- ON-FAILURE DIAGNOSTIC (card 7dc0cca5): millisecond-resolution race evidence ---");
+  realConsoleLog(`caller-side instant right before issuing run_gate (proxy for opStartedAt's own capture): ${diagPreCallInstant}`);
+  realConsoleLog(`fallback wake's own createdAt (stamped by the test immediately after issuing run_gate): ${diagFallbackWakeCreatedAt}`);
+  realConsoleLog(capturedSettleLogLines.length
+    ? `captured settle-wake log line(s):\n  ${capturedSettleLogLines.join("\n  ")}`
+    : "NO settle-wake log line was emitted for the fallback wake at all — it was silently excluded by the createdAt >= opStartedAt comparison (not the fail-safe branch, which always logs 'auto-cancel-on-nudge skipped').");
+}
 async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
   const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
   while (performance.now() - start < timeoutMs) {
@@ -122,12 +146,14 @@ try {
   db.insertWake({ id: "wake-unrelated", sessionId: workerAId, wakeAt: unrelatedWakeAt, note: "unrelated — check the owner decision", createdAt: new Date(Date.now() - 60_000).toISOString() });
 
   // Kick off the gate — degrades to pending past SYNC_ATTACH_BUDGET_MS (12s).
+  diagPreCallInstant = new Date().toISOString();
   const firstPromise = svc.runWorkerGate(workerAId);
 
   // (2) FALLBACK wake, scheduled immediately AFTER run_gate started (mirrors the doctrine: park on
   // run_gate, then wake_me as a fallback in the same/next turn) — createdAt is now, at/after the op's
   // own startedAt, so it's in-scope for the auto-cancel.
-  db.insertWake({ id: "wake-fallback", sessionId: workerAId, wakeAt: new Date(Date.now() + 3600_000).toISOString(), note: "fallback in case gate-done never lands", createdAt: new Date().toISOString() });
+  diagFallbackWakeCreatedAt = new Date().toISOString();
+  db.insertWake({ id: "wake-fallback", sessionId: workerAId, wakeAt: new Date(Date.now() + 3600_000).toISOString(), note: "fallback in case gate-done never lands", createdAt: diagFallbackWakeCreatedAt });
 
   const first = await firstPromise;
   check("degrades to pending past the sync-wait budget", first.settled === false);
@@ -158,6 +184,7 @@ try {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
+printFailureDiagnosticIfAny();
 console.log(failures === 0
   ? "\n✅ ALL PASS — a settle nudge's SUCCESSFUL delivery auto-cancels only the fallback wake(s) scheduled while the awaited op was pending (createdAt >= opStartedAt), correctly following a mid-op recycle onto the LIVE SUCCESSOR (wakes already reparented there), while a wake that predates the op survives untouched."
   : `\n❌ ${failures} FAILURE(S).`);
