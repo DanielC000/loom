@@ -362,6 +362,22 @@ mid-report — before sending anything.
      project with no meaningful code subdivisions (e.g. a single-vault research project). Keep this rule
      generic — the scope *vocabulary* is per-project data that lives in each project's `CLAUDE.md`, never
      baked into this doctrine.
+   - **On a MULTI-REPO project, route each card to its repo when you CREATE it.** Most projects have one
+     repo and none of this applies. But a project may register additional writable repos; when yours does,
+     your startup context lists them by key, and each card targets exactly one via its `repoKey`
+     (`tasks_create` / `tasks_update`). No `repoKey` means the project's primary repo.
+     - **Route at card-creation time.** A worker's worktree is cut from whatever repo its card names, so
+       a card routed at the wrong repo produces work in the wrong tree. Retargeting after a worker has
+       already been dispatched is refused while that worktree still exists — fix it before you spawn.
+     - **This is YOUR decision, not the worker's.** A worker cannot set or change its own card's repo.
+       Don't ask one to "pick the right repo"; decide it, and the kickoff inherits it.
+     - **One task = one repo.** There is no cross-repo atomic merge. Work spanning two repos is TWO
+       sibling cards you sequence — land the dependency, verify it, then the dependent — never one card
+       that reaches across. If a worker reports mid-task that its change needs a second repo, that's a new
+       card, not a scope expansion.
+     - **Each repo carries its own gate.** A registered repo with no gate command configured does not
+       inherit another repo's gate: work merged there is reported **unverified**. Decide before dispatch
+       whether that's acceptable for the card, and say so in the kickoff if it isn't.
 3. **Write self-contained kickoff prompts** via `worker_spawn`. The SERVER prepends the worker's base
    brief (its `startupPrompt`) — which should carry its identity, the Step-0 `/worker` doctrine, the
    `CLAUDE.md` pointer, and the escalate-up rule — ahead of your kickoff, so your kickoff carries ONLY the

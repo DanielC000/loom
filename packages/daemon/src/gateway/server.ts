@@ -3495,6 +3495,25 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return new GitReader(refRepoPath).log();
   });
 
+  // Registered-repo git log (multi-repo epic 49136451, phase 3) — the WRITABLE-registry counterpart to
+  // the reference-repo log directly above, and a deliberate byte-for-byte mirror of its shape: read-only,
+  // the same GitReader, and the SAME index-by-construction allowlist. The client passes an INDEX into the
+  // project's OWN `repos` array, resolved server-side, so it can never supply an arbitrary host path (a
+  // git-log of an arbitrary path would be a read-any-git-repo-on-host info leak). An out-of-range or
+  // non-integer index 404s BEFORE GitReader is ever constructed. No write surface — the registry itself
+  // stays HUMAN REST only (each entry carries a gateCommand, i.e. the host-RCE trust class), and this
+  // route adds only a read.
+  app.get("/api/projects/:id/git/repos/:index/log", async (req, reply) => {
+    const p = deps.db.getProject((req.params as { id: string }).id);
+    if (!p) return reply.code(404).send({ error: "project not found" });
+    const idx = Number((req.params as { index: string }).index);
+    const entry = Number.isInteger(idx) ? p.repos[idx] : undefined;
+    if (idx < 0 || entry === undefined) {
+      return reply.code(404).send({ error: "registered repo not found at that index" });
+    }
+    return new GitReader(entry.path).log();
+  });
+
   // Git WRITE — HUMAN/REST + the role-gated PLATFORM exception. This is a TRUST-BOUNDARY surface like
   // the vault writer and gateCommand: checkout/commit and ESPECIALLY push (outward-facing, network,
   // irreversible) are absent from the loom-tasks/orchestration (manager/worker) MCP servers — no

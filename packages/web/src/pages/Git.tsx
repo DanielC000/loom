@@ -1,5 +1,6 @@
 import { useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import type { RepoRegistryEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, SectionLabel, Dot, Button, Input } from "../components/ui";
@@ -115,6 +116,24 @@ export default function Git() {
               </div>
             </Panel>
           )}
+
+          {/* Registered repos (multi-repo epic 49136451, phase 3) — the WRITABLE registry, distinct from
+              the read-only reference repos above: a card can be routed at one of these, and it gets its
+              own worktree, branch and gate. Read surfaces only this phase (the git-WRITE controls at the
+              top of this page still act on the primary repo alone). Same lazy collapsed treatment. */}
+          {project && project.repos.length > 0 && (
+            <Panel>
+              <SectionLabel>Registered Repos</SectionLabel>
+              <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+                writable · a card targets one by its key
+              </span>
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 8 }}>
+                {project.repos.map((r, i) => (
+                  <RegisteredRepoLog key={r.key} projectId={projectId} index={i} entry={r} />
+                ))}
+              </div>
+            </Panel>
+          )}
         </>
       )}
     </div>
@@ -155,6 +174,45 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
           background: "transparent", border: "none", padding: 0,
           fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
         <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>{path}
+      </button>
+      {open && (
+        <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }}>
+          {log.isLoading && <Hint>loading log…</Hint>}
+          {log.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(log.error as Error).message}</span>}
+          <CommitTable commits={log.data} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+// One collapsible read-only git log for a single REGISTERED repo. Mirrors ReferenceRepoLog exactly —
+// `index` is the entry's position in project.repos and the daemon resolves the path SERVER-side from it,
+// so this client never sends a host path over the wire. Beyond that it shows the two facts the reference
+// list has no equivalent of: the repo's KEY (what a card's repoKey names) and whether it has a gate — a
+// gateless registered repo merges as unverified, and it does NOT inherit the project's gate command.
+function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; index: number; entry: RepoRegistryEntry }) {
+  const [open, setOpen] = useState(false);
+  const log = useQuery({
+    queryKey: ["registered-repo-git-log", projectId, index],
+    queryFn: () => api.registeredRepoGitLog(projectId, index),
+    enabled: open,
+  });
+  return (
+    <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <button onClick={() => setOpen((o) => !o)}
+        style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", textAlign: "left", cursor: "pointer",
+          background: "transparent", border: "none", padding: 0,
+          fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+        <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>
+        <span style={{ color: color.cyan }}>{entry.key}</span>
+        <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{entry.path}</span>
+        <span style={{ marginLeft: "auto", flexShrink: 0, fontSize: 11, color: entry.gateCommand ? color.textMuted : color.amber }}
+          title={entry.gateCommand
+            ? `This repo's own gate command — the merge gate and a worker's run_gate both run this here`
+            : "No gate command configured — work merged here is reported unverified. It does not fall back to this project's gate command."}>
+          {entry.gateCommand ? `gate: ${entry.gateCommand}` : "no gate"}
+        </span>
       </button>
       {open && (
         <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }}>

@@ -1,4 +1,4 @@
-import type { Project, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -298,14 +298,18 @@ export const api = {
   // `referenceRepos` (optional) binds read-only sibling repos at creation — each validated absolute +
   // isGitRepo server-side; a bad entry 400s with a reason. postErr (not post) surfaces that `{ error }`
   // body verbatim so the wizard/creation UI can show it inline instead of a bare `-> 400`.
-  createProject: (b: { name: string; repoPath: string; vaultPath: string; referenceRepos?: string[] }) =>
+  // `repos` (optional) binds the WRITABLE multi-repo registry (multi-repo epic 49136451) — the
+  // counterpart to the read-only `referenceRepos` above. Each entry carries its own `gateCommand`, so
+  // this is the SAME host-RCE trust class as repoPath/gateCommand: HUMAN REST only, never an agent MCP
+  // path. Validated server-side by `validateRepoRegistry`, which 400s naming the FIRST offending entry.
+  createProject: (b: { name: string; repoPath: string; vaultPath: string; referenceRepos?: string[]; repos?: RepoRegistryEntry[] }) =>
     postErr<Project>("/api/projects", b),
   // The wizard's "Create new" mode: init a BRAND-NEW project dir under Loom's sanctioned workspace base
   // (confined + traversal-rejected server-side — see setup/bootstrap.ts) instead of registering a
   // user-typed path. kind "git" (default) `git init`s it; kind "vault" leaves a plain notes folder.
   // `referenceRepos` binds read-only sibling repos (same absolute + isGitRepo validation as POST
   // /api/projects). postErr surfaces the confinement/traversal-rejection/ref-repo `{ error }` verbatim.
-  projectInit: (b: { name: string; kind?: "git" | "vault"; referenceRepos?: string[] }) =>
+  projectInit: (b: { name: string; kind?: "git" | "vault"; referenceRepos?: string[]; repos?: RepoRegistryEntry[] }) =>
     postErr<Project & { identityWarning?: string }>("/api/setup/project-init", b),
   // --- HUMAN-only project/agent management (rename / archive / restore / PERMANENT delete + agent
   // delete). DESTRUCTIVE, loopback-only — there is NO agent MCP path to any of these (same posture as
@@ -314,7 +318,7 @@ export const api = {
   // STRUCTURAL edit (name / vaultPath / repoPath rebind) — distinct from updateProjectConfig (the
   // validated machine config). A repoPath rebind goes through the daemon's shared guard (isGitRepo +
   // live-worktree refusal); patchProject surfaces both the `{ error }` reason AND the named liveSessions[].
-  updateProject: (id: string, body: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[] }) =>
+  updateProject: (id: string, body: { name?: string; vaultPath?: string; repoPath?: string; referenceRepos?: string[]; repos?: RepoRegistryEntry[] }) =>
     patchProject(`/api/projects/${id}`, body),
   // Soft-archive (reversible "delete"). 400s on the reserved home or a live fleet (surfaced via delErr).
   archiveProject: (id: string) => delErr<{ ok: boolean }>(`/api/projects/${id}`),
@@ -372,8 +376,11 @@ export const api = {
   // Full entries incl. the note `text`, so client-side search (title+key+content) + the note-detail
   // body render off this one read. Human-only; there is deliberately no write/forget counterpart.
   projectMemory: (projectId: string) => get<ProjectMemoryEntry[]>(`/api/projects/${projectId}/memory`),
-  createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"] }) =>
-    post<Task>(`/api/projects/${projectId}/tasks`, b),
+  // `repoKey` (multi-repo epic 49136451) routes the card at a NON-primary registered repo; omitted /
+  // null = the project's primary repo. postErr so the server's `resolveRepoKeyOrError` 400 (which names
+  // the registered keys) surfaces verbatim instead of a bare `-> 400`.
+  createTask: (projectId: string, b: { title: string; body?: string; columnKey?: string; priority?: Task["priority"]; repoKey?: string | null }) =>
+    postErr<Task>(`/api/projects/${projectId}/tasks`, b),
   sessions: (agentId: string) => get<Session[]>(`/api/agents/${agentId}/sessions`),
   // role omitted/undefined = auto (the agent's profile role applies, server-side); "manager"/"platform"
   // = explicit role; "auditor" = the read-and-file-only Platform Auditor (P5; locked role server-side);
@@ -458,6 +465,11 @@ export const api = {
   // reach an arbitrary host path. An out-of-range index 404s.
   referenceRepoGitLog: (projectId: string, index: number) =>
     get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/reference-repos/${index}/log`),
+  // Read-only git log for a REGISTERED (writable-registry) repo (multi-repo epic 49136451, phase 3) —
+  // same index-by-construction contract as the reference-repo log above, indexing the project's OWN
+  // repos[]. Read only: the registry itself is written via updateProject, never here.
+  registeredRepoGitLog: (projectId: string, index: number) =>
+    get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/repos/${index}/log`),
   // Git WRITE (HUMAN-only; mirrors the vault writer — no agent MCP surface). Each returns a structured
   // { ok, error? } so the UI shows an expected git failure (dirty tree, no upstream, conflict) instead
   // of a generic throw. commit takes ONLY a message (repo-configured identity, no overrides/trailer).
@@ -482,8 +494,13 @@ export const api = {
   // (e.g. dropping a non-required role lane) — shown but non-blocking.
   updateProjectColumns: (id: string, columns: DesiredColumn[]) =>
     putErr<{ ok: boolean; columns: KanbanColumn[]; warnings: string[] }>(`/api/projects/${id}/columns`, { columns }),
-  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred">>) =>
-    post<{ ok: boolean }>(`/api/tasks/${id}`, patch),
+  // `repoKey` retargets which registered repo the card lands on. postErr (not post) because BOTH repoKey
+  // guards 400 with a reason the drawer must show verbatim: `resolveRepoKeyOrError` (unknown key, listing
+  // the registered ones) and `checkTaskRepoKeyRebind` (fails CLOSED while any session ever bound to this
+  // task still holds a worktree or an undeleted branch — a retarget then would gate against a repo the
+  // worktree doesn't live in). "-> 400" would hide both.
+  updateTask: (id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>) =>
+    postErr<{ ok: boolean }>(`/api/tasks/${id}`, patch),
   // PERMANENTLY delete a task card (drawer Delete button). HUMAN/loopback REST only — no MCP path. Uses
   // delErr so the server's live-session guard 400 ({ error }) surfaces verbatim to the user.
   deleteTask: (id: string) => delErr<{ ok: boolean }>(`/api/tasks/${id}`),

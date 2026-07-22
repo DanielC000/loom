@@ -2,10 +2,10 @@ import { useState, useEffect, useRef } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import { DndContext, useDraggable, useDroppable, type DragEndEvent } from "@dnd-kit/core";
-import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge } from "@loom/shared";
+import type { Task, BoardTask, TaskPriority, KanbanColumn, SessionListItem, QuestionInboxItem, PendingMerge, RepoRegistryEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { Button, Input, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
+import { Button, Input, Select, SectionLabel, StatusPill, Chip, Badge, Dot } from "../components/ui";
 import { useOpenRequest, RequestTypeTag } from "../components/requests";
 import { DecisionStateChip } from "../components/decisions";
 import { relativeAge, requestHint, REQUEST_TYPE_TONE } from "../lib/questions";
@@ -44,6 +44,14 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
   // Link the board to the orchestration spine: a worker carries its task id, so cards can show the
   // live worker's status + branch for the task they represent.
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
+  // The project's WRITABLE repo registry (multi-repo epic 49136451, phase 3). Drives the card repo
+  // picker + badge. A project with an EMPTY registry (the overwhelmingly common case) renders no picker
+  // and no badge at all — zero UI tax for a single-repo project, which is the point. Reuses the
+  // already-cached ["projects"] query every other page shares, so this costs no extra round trip.
+  const projects = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const project = (projects.data ?? []).find((p) => p.id === projectId) ?? null;
+  const repos = project?.repos ?? [];
+  const multiRepo = repos.length > 0;
   const workerByTask = new Map<string, SessionListItem>();
   for (const s of sessions.data ?? []) if (s.taskId) workerByTask.set(s.taskId, s);
 
@@ -51,13 +59,25 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
     mutationFn: ({ id, columnKey }: { id: string; columnKey: string }) => api.updateTask(id, { columnKey }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
   });
+  // `repoKey` routes the new card at a registered repo; null = the project's primary. Passed only as
+  // whatever the picker resolved — a single-repo project always sends null, i.e. the same request body
+  // this mutation sent before multi-repo existed.
   const create = useMutation({
-    mutationFn: (title: string) => api.createTask(projectId, { title, columnKey: "inbox" }),
+    // Inline-only (see NewTask's error line) — no global blocking alert. Same reason as the drawer's
+    // edit mutation below: an unknown repoKey is a message to read next to the control that caused it.
+    meta: { inlineError: true },
+    mutationFn: ({ title, repoKey }: { title: string; repoKey: string | null }) =>
+      api.createTask(projectId, { title, columnKey: "inbox", repoKey }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ["board", projectId] }),
+    onError: () => { /* surfaced inline by NewTask via create.error */ },
   });
   // Edit a task's title/description/priority/held/deferred from the detail drawer (same store the MCP tools read/write).
   const edit = useMutation({
-    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean } }) => api.updateTask(id, patch),
+    // Inline-only (the drawer renders saveError beside Save). The repoKey retarget refusal is a
+    // paragraph of reasoning about worktrees — it belongs next to the picker, not in a modal the user
+    // must dismiss before they can act on it.
+    meta: { inlineError: true },
+    mutationFn: ({ id, patch }: { id: string; patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null } }) => api.updateTask(id, patch),
     // Invalidate BOTH the board list and this card's own lazy-fetched detail (a done card's body query,
     // below) — a save must never leave the detail cache holding the pre-edit body on next open.
     onSuccess: (_r, { id }) => {
@@ -136,7 +156,8 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       )}
       {projectId && board.data && (
         <>
-          <NewTask onCreate={(t) => create.mutate(t)} />
+          <NewTask repos={repos} onCreate={(title, repoKey) => create.mutate({ title, repoKey })}
+            error={create.error ? (create.error as Error).message : null} />
           <FilterBar search={search} onSearch={setSearch} columns={board.data.columns}
             priFilter={priFilter} onTogglePri={togglePri} colFilter={colFilter} onToggleCol={toggleCol}
             shown={shownTasks.length} total={allTasks.length} active={filterActive} onClear={clearFilters} />
@@ -151,6 +172,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
                       .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
+                    multiRepo={multiRepo}
                     cardCount={allTasks.filter((t) => t.columnKey === col.key).length} />
                 ))}
               </div>
@@ -167,7 +189,9 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
       )}
       {openTask && drawerTask && (
         <TaskDrawer key={drawerTask.id} task={drawerTask} column={openColumn} onClose={() => setOpenTaskId(null)}
+          repos={repos} primaryRepoPath={project?.repoPath ?? ""}
           onSave={(patch) => edit.mutate({ id: openTask.id, patch })} saving={edit.isPending}
+          saveError={edit.error ? (edit.error as Error).message : null}
           onDelete={() => del.mutate(openTask.id)} deleting={del.isPending}
           deleteError={del.error ? (del.error as Error).message : null} />
       )}
@@ -223,8 +247,8 @@ function labelColorFor(accent: string | null): string {
   return accent;
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, cardCount }:
-  { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void;
+function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, cardCount }:
+  { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
     cardCount: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
@@ -272,7 +296,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, cardCount }:
         )}
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} onOpen={() => onOpen(task.id)} />)}
+        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} onOpen={() => onOpen(task.id)} />)}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {tasks.length === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
@@ -453,7 +477,7 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
   );
 }
 
-function Card({ task, accent, worker, onOpen }: { task: BoardTask; accent: string; worker?: SessionListItem; onOpen: () => void }) {
+function Card({ task, accent, worker, multiRepo, onOpen }: { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
@@ -493,6 +517,22 @@ function Card({ task, accent, worker, onOpen }: { task: BoardTask; accent: strin
                 style={{ flexShrink: 0, fontFamily: font.head, fontSize: 9, fontWeight: 700, letterSpacing: "0.08em",
                   textTransform: "uppercase", color: color.bg, background: color.amber, borderRadius: 3, padding: "1px 4px" }}>
                 held
+              </span>
+            )}
+            {/* Repo badge (multi-repo epic 49136451, phase 3) — rendered ONLY for a card routed at a
+                NON-primary registered repo on a project that HAS a registry. A single-repo project (no
+                registry) and a primary-targeted card both render nothing, so the common card is
+                byte-identical to before multi-repo: the badge is a positive signal that this card lands
+                somewhere other than where you'd assume, never decoration on every card. Muted/outline
+                rather than a filled chip, so it can't compete with held (amber) or deferred (cyan),
+                which are STATE; this is a target. */}
+            {multiRepo && task.repoKey && (
+              <span title={`Targets the "${task.repoKey}" repo — this card's worktree, branch and gate all land there, not on the primary repo`}
+                style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 9.5, letterSpacing: "0.04em",
+                  color: color.textDim, background: "transparent", borderRadius: 3, padding: "0 4px",
+                  border: `1px solid ${color.border}`, maxWidth: 110, overflow: "hidden",
+                  textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                ⑂ {task.repoKey}
               </span>
             )}
             {task.deferred && (
@@ -561,18 +601,26 @@ function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
 // Linked-requests section opens the request dialog ABOVE this one. Save patches the shared task store,
 // then the board refetches. EVERY entry point (a Board card click, the `?task=` deep-link, a Request's
 // reverse linked-task chip → /board?task=) funnels through Board's openTaskId state into this one modal.
-function TaskDrawer({ task, column, onClose, onSave, saving, onDelete, deleting, deleteError }:
-  { task: Task; column: KanbanColumn | null; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean }) => void; saving: boolean;
+function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, saving, saveError, onDelete, deleting, deleteError }:
+  { task: Task; column: KanbanColumn | null; repos: RepoRegistryEntry[]; primaryRepoPath: string; onClose: () => void; onSave: (patch: { title?: string; body?: string; priority?: TaskPriority; held?: boolean; deferred?: boolean; repoKey?: string | null }) => void; saving: boolean; saveError: string | null;
     onDelete: () => void; deleting: boolean; deleteError: string | null }) {
   const [title, setTitle] = useState(task.title);
   const [body, setBody] = useState(task.body ?? "");
   const [priority, setPriority] = useState<TaskPriority>(prio(task));
   const [held, setHeld] = useState<boolean>(task.held ?? false);
   const [deferred, setDeferred] = useState<boolean>(task.deferred ?? false);
+  // Which registered repo this card targets. "" = primary. Only editable when the project HAS a
+  // registry — see the Repo field below.
+  const [repoKey, setRepoKey] = useState<string>(task.repoKey ?? "");
+  // This card names a repo the registry no longer has (the entry was removed after the card was written —
+  // supported, since removal is only blocked while a live worktree session holds the card). The picker and
+  // the path line both have to say so rather than silently reading as primary.
+  const stale = !!task.repoKey && !repos.some((r) => r.key === task.repoKey);
   // Two-step delete: a first click arms the confirm so the destructive action can't fire on a single misclick.
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const dirty = title !== task.title || body !== (task.body ?? "") || priority !== prio(task)
-    || held !== (task.held ?? false) || deferred !== (task.deferred ?? false);
+    || held !== (task.held ?? false) || deferred !== (task.deferred ?? false)
+    || (repoKey || null) !== (task.repoKey ?? null);
   // Guard the three close paths (backdrop / Esc / ✕) against silently discarding unsaved edits. When dirty,
   // a close request arms an in-drawer "Discard unsaved changes?" confirm (mirroring the delete two-step)
   // instead of closing; when clean it closes immediately, zero extra friction.
@@ -718,6 +766,40 @@ function TaskDrawer({ task, column, onClose, onSave, saving, onDelete, deleting,
             );
           })}
         </div>
+        {/* Target repo (multi-repo epic 49136451, phase 3). Rendered ONLY when the project has a
+            registry — a single-repo project's drawer is byte-identical to before. Shows the RESOLVED
+            absolute path of whatever is currently selected, which is the thing a human actually needs to
+            confirm ("is this landing where I think it is") and is why this reads as a target, not a
+            state toggle. Retargeting is guarded server-side: it FAILS CLOSED while any session ever
+            bound to this card still holds a worktree or an undeleted branch, because the worktree is
+            physically rooted in the repo it was cut from — that 400 surfaces verbatim next to Save. */}
+        {repos.length > 0 && (
+          <>
+            <span style={labelStyle}>Repo</span>
+            <Select value={repoKey} onChange={(e) => setRepoKey(e.target.value)} aria-label="Target repo"
+              style={{ width: "100%", boxSizing: "border-box" }}>
+              <option value="">primary</option>
+              {repos.map((r) => <option key={r.key} value={r.key}>{r.key}</option>)}
+              {/* A card can outlive the registry entry it targets (removing an entry is allowed once no
+                  live worktree session holds the card). Without an option matching that key the Select
+                  falls back to rendering the FIRST option — so it would read "primary" while the card
+                  actually targets `site`, i.e. the control would state the opposite of the truth. Carry
+                  an explicit option for the orphaned key instead, labelled for what it is; the path line
+                  below says the same thing in words. Selecting anything else is a real retarget and
+                  validates normally. */}
+              {stale && <option value={task.repoKey!}>{task.repoKey} — no longer registered</option>}
+            </Select>
+            {/* flexShrink:0 is load-bearing, not defensive: this span sets `overflow: hidden` for the
+                ellipsis, which removes the automatic min-height floor a flex item normally gets — so in
+                this overflowing flex column it was being crushed to ZERO height and the path never
+                rendered at all (caught by eyeballing it; the DOM node was present the whole time). */}
+            <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, marginTop: -4, flexShrink: 0,
+              overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+              title={repoKey ? (repos.find((r) => r.key === repoKey)?.path ?? "") : primaryRepoPath}>
+              {repoKey ? (repos.find((r) => r.key === repoKey)?.path ?? "unknown repo — this key is no longer registered") : (primaryRepoPath || "the project's primary repo")}
+            </span>
+          </>
+        )}
         {/* Owner HOLD gate — the SOLE human brake (Board Hold Model): held=true means this card won't be
             worked (spawnWorker refuses to dispatch onto it) AND won't nag (excluded from the idle-watcher's
             actionable count) — in whatever column it sits. Distinct from priority/column — an owner-only
@@ -774,10 +856,23 @@ function TaskDrawer({ task, column, onClose, onSave, saving, onDelete, deleting,
           }} />
         {speech.supported && <DescriptionVoiceNote speech={speech} />}
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({ title, body, priority, held, deferred })}>{saving ? "Saving…" : "Save"}</Button>
+          {/* `repoKey` rides along ONLY when it actually changed. Both write paths validate an explicit
+              repoKey against the CURRENT registry BEFORE their no-op exemption applies, so sending it
+              unconditionally made a card whose key was later de-registered un-saveable for EVERY field —
+              a pure title edit would 400 with `repoKey "site" does not name a registered repo`. Registry
+              removal is supported whenever no live worktree session holds the card, so that state is
+              reachable, not hypothetical. Omitting an unchanged key matches the exemption the server
+              already models, and leaves retargeting (the only case that SHOULD be validated) untouched. */}
+          <Button variant="primary" disabled={!dirty || saving} onClick={() => onSave({
+            title, body, priority, held, deferred,
+            ...(repoKey !== (task.repoKey ?? "") ? { repoKey: repoKey || null } : {}),
+          })}>{saving ? "Saving…" : "Save"}</Button>
           {dirty
-            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); }}>Reset</Button>
+            ? <Button onClick={() => { setTitle(task.title); setBody(task.body ?? ""); setPriority(prio(task)); setHeld(task.held ?? false); setDeferred(task.deferred ?? false); setRepoKey(task.repoKey ?? ""); }}>Reset</Button>
             : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
+          {saveError && (
+            <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.4, flex: "1 1 100%" }}>{saveError}</span>
+          )}
           {/* Destructive delete, pushed to the right and visually separated from Save. Two-step confirm. */}
           <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
             {confirmingDelete ? (
@@ -1030,17 +1125,37 @@ function DescriptionVoiceNote({ speech }: { speech: SpeechRecognitionApi }) {
   );
 }
 
-function NewTask({ onCreate }: { onCreate: (title: string) => void }) {
+function NewTask({ repos, onCreate, error }: { repos: RepoRegistryEntry[]; onCreate: (title: string, repoKey: string | null) => void; error: string | null }) {
   const [title, setTitle] = useState("");
-  const submit = () => { if (title.trim()) { onCreate(title); setTitle(""); } };
+  // Which repo the new card targets. "" = primary (the default, and the ONLY option a single-repo project
+  // has). Deliberately NOT reset on submit: filing several cards against the same repo in a row is the
+  // normal multi-repo rhythm, and re-picking every time would be pure friction.
+  const [repoKey, setRepoKey] = useState("");
+  const submit = () => { if (title.trim()) { onCreate(title, repoKey || null); setTitle(""); } };
   // flexWrap + a shrinkable, growing input: on a narrow viewport the button wraps below instead of
   // forcing the row (and the page) to overflow horizontally. Enter submits (keyboard parity with the button).
   return (
-    <div style={{ marginTop: 10, display: "flex", gap: 6, flexWrap: "wrap" }}>
-      <Input placeholder="new task title" value={title} onChange={(e) => setTitle(e.target.value)}
-        onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
-        style={{ flex: "1 1 260px", minWidth: 0 }} />
-      <Button variant="primary" disabled={!title.trim()} onClick={submit}>Add to Inbox</Button>
+    <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 4 }}>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        <Input placeholder="new task title" value={title} onChange={(e) => setTitle(e.target.value)}
+          onKeyDown={(e) => { if (e.key === "Enter") { e.preventDefault(); submit(); } }}
+          style={{ flex: "1 1 260px", minWidth: 0 }} />
+        {/* Repo picker — rendered ONLY when the project actually has a registry. A single-repo project
+            gets no extra control at all (the DoD's zero-UI-tax requirement), and the card it files is
+            identical to what it filed before multi-repo existed. */}
+        {repos.length > 0 && (
+          <Select value={repoKey} onChange={(e) => setRepoKey(e.target.value)} aria-label="Target repo"
+            title="Which repo this card targets. One task = one repo — work spanning two repos is two cards."
+            style={{ flex: "0 1 150px", minWidth: 0 }}>
+            <option value="">primary repo</option>
+            {repos.map((r) => <option key={r.key} value={r.key}>{r.key}</option>)}
+          </Select>
+        )}
+        <Button variant="primary" disabled={!title.trim()} onClick={submit}>Add to Inbox</Button>
+      </div>
+      {error && (
+        <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>{error}</span>
+      )}
     </div>
   );
 }

@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project } from "@loom/shared";
+import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type RepoRegistryEntry } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots } from "../components/ui";
@@ -419,6 +419,7 @@ function ProjectManage(
           <Button variant="primary" disabled={!dirty || saving}
             onClick={() => onSave({ name: name.trim(), vaultPath: vaultTrim })}>{saving ? "Saving…" : "Save changes"}</Button>
           <ReferenceReposEditor project={project} />
+          <RepoRegistryEditor project={project} />
           <Button disabled={live || archiving} title={liveTitle}
             onClick={() => { if (window.confirm(`Archive "${project.name}"? It moves to the Archived section and can be restored later.`)) onArchive(); }}>
             {archiving ? "Archiving…" : "Archive (reversible)"}
@@ -463,6 +464,10 @@ function ReferenceReposEditor({ project }: { project: Project }) {
   const dirty = JSON.stringify(clean) !== JSON.stringify(saved);
 
   const save = useMutation({
+    // Opt out of main.tsx's global blocking window.alert — this editor already renders the server's
+    // validation message inline (below), and the alert duplicated it on top of a modal the user had to
+    // dismiss first. Missing since this editor shipped; found while building the registry editor's twin.
+    meta: { inlineError: true },
     mutationFn: () => api.updateProject(project.id, { referenceRepos: clean }),
     onMutate: () => setError(null),
     // Sync local rows to what the server actually stored (the source of truth) so `dirty` settles cleanly.
@@ -497,6 +502,104 @@ function ReferenceReposEditor({ project }: { project: Project }) {
         <Button onClick={add}>＋ Add repo</Button>
         <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save reference repos"}
+        </Button>
+      </div>
+      {error && (
+        <span role="alert" style={{ fontFamily: font.mono, fontSize: 11, color: color.red, lineHeight: 1.5 }}>{error}</span>
+      )}
+    </div>
+  );
+}
+
+// The WRITABLE multi-repo registry editor (multi-repo epic 49136451, phase 3). Sibling to
+// ReferenceReposEditor above, and deliberately shaped the same way — but the two are NOT the same thing
+// and the copy says so: a reference repo is READ-only (no worktree, no branch, no gate), while a registry
+// entry is a full target a card can be routed at, with its own worktree/branch/gate. `repoPath` stays the
+// PRIMARY repo and is NOT editable here (nor anywhere in the UI) — the registry is the editable
+// multi-repo surface, and "primary" is a RESERVED key the server rejects.
+//
+// Before this editor existed the registry was REST-only: registering a repo meant hand-rolling a curl.
+// That is the gap this closes. Same trust posture as the reference-repos editor — HUMAN REST only; each
+// entry carries a `gateCommand` (host-RCE class), so no agent MCP surface may ever reach this.
+//
+// The server (`validateRepoRegistry`) is the ONLY validator — this editor deliberately re-implements
+// none of its rules (unique key, reserved "primary", the [A-Za-z0-9._-] path-segment charset, absolute +
+// existing-git-repo path, no aliasing repoPath/vaultPath/another entry). It just surfaces the server's
+// FIRST-OFFENDER message verbatim, which names the entry that failed. It also stores the CANONICALIZED
+// (realpath'd) path, so a saved row commonly differs from what was typed — `onSuccess` resyncs the rows
+// from what the server actually stored, or `dirty` would never settle after a successful save.
+function RepoRegistryEditor({ project }: { project: Project }) {
+  const qc = useQueryClient();
+  const saved = project.repos ?? [];
+  const [repos, setRepos] = useState<RepoRegistryEntry[]>(saved);
+  const [error, setError] = useState<string | null>(null);
+  // The persisted candidate: trimmed, fully-blank rows dropped, and a blank gateCommand OMITTED rather
+  // than sent as "" (the validator rejects an empty-string gateCommand, and "no gate" is a real, distinct
+  // state — see the hint below). Dirty and the payload both key off this, so a stray blank row neither
+  // enables Save nor reaches the validator.
+  const clean: RepoRegistryEntry[] = repos
+    .map((r) => ({ key: r.key.trim(), path: r.path.trim(), gateCommand: r.gateCommand?.trim() || undefined }))
+    .filter((r) => r.key || r.path)
+    .map((r) => (r.gateCommand === undefined ? { key: r.key, path: r.path } : r));
+  const dirty = JSON.stringify(clean) !== JSON.stringify(saved);
+
+  const save = useMutation({
+    // Opt out of main.tsx's global blocking window.alert — this editor renders the server's
+    // first-offender message inline (below), and a native alert on top of it would both duplicate the
+    // message and wedge automation on a modal dialog.
+    meta: { inlineError: true },
+    mutationFn: () => api.updateProject(project.id, { repos: clean }),
+    onMutate: () => setError(null),
+    // Resync to what the server STORED (canonicalized paths), not what was typed — see the note above.
+    onSuccess: (updated) => { setRepos(updated.repos ?? []); qc.invalidateQueries({ queryKey: ["projects"] }); },
+    onError: (e) => setError((e as Error).message),
+  });
+
+  // Any edit clears a stale server error so it never lingers past the input it referred to.
+  const edit = (i: number, patch: Partial<RepoRegistryEntry>) => {
+    setError(null);
+    setRepos((rs) => rs.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  };
+  const remove = (i: number) => { setError(null); setRepos((rs) => rs.filter((_, j) => j !== i)); };
+  const add = () => { setError(null); setRepos((rs) => [...rs, { key: "", path: "" }]); };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 10, borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
+      <div>
+        <SectionLabel style={{ margin: 0 }}>Registered repos</SectionLabel>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>writable · a card targets one via its repo key</span>
+      </div>
+      <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, lineHeight: 1.5 }}>
+        This project's own repo is the <span style={{ color: color.cyan }}>primary</span> target — no entry needed.
+      </span>
+      {repos.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>No registered repos.</span>
+      ) : (
+        repos.map((r, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <Input placeholder="key" value={r.key} onChange={(e) => edit(i, { key: e.target.value })}
+              aria-label={`Repo ${i + 1} key`} style={{ flex: "0 1 120px", minWidth: 0 }} />
+            <Input placeholder="/absolute/path/to/repo" value={r.path} onChange={(e) => edit(i, { path: e.target.value })}
+              aria-label={`Repo ${i + 1} path`} style={{ flex: "2 1 200px", minWidth: 0 }} />
+            <Input placeholder="gate command (optional)" value={r.gateCommand ?? ""} onChange={(e) => edit(i, { gateCommand: e.target.value })}
+              aria-label={`Repo ${i + 1} gate command`} style={{ flex: "2 1 200px", minWidth: 0 }} />
+            <Button variant="ghost" title="Remove this repo" aria-label={`Remove repo ${i + 1}`}
+              onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+          </div>
+        ))
+      )}
+      {/* The no-gate consequence, stated where the decision is made. A registry entry does NOT inherit the
+          project-level gate command by design: a gate that exits 0 for an unrelated reason would report a
+          FALSE green on code it never tested. Missing is honest ("unverified"); wrong looks verified. */}
+      {repos.length > 0 && (
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textDim, lineHeight: 1.5 }}>
+          A repo with no gate command merges as <span style={{ color: color.amber }}>unverified</span> — it does not fall back to this project's gate command.
+        </span>
+      )}
+      <div style={{ display: "flex", gap: 6 }}>
+        <Button onClick={add}>＋ Register repo</Button>
+        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+          {save.isPending ? "Saving…" : "Save registered repos"}
         </Button>
       </div>
       {error && (

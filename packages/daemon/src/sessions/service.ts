@@ -25,7 +25,7 @@ import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../r
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
 import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
-import { composeWorkerStartupPrompt } from "./worker-prompt.js";
+import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
@@ -975,7 +975,7 @@ export class SessionService {
     const finalStartupPrompt = role === "assistant"
       ? appendMemoryRecallToStartupPrompt(startupPrompt!, companionRecallFramed)
       : role === "manager"
-      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename })
+      ? composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename })
       : startupPrompt;
     // Poll-triggered spawn (P3): append the untrusted-framed kickoff AFTER the agent's own resolved
     // prompt — reuses composeWorkerStartupPrompt's brief+"---"+dynamicPart shape verbatim (no new
@@ -1097,7 +1097,7 @@ export class SessionService {
       // through UNCHANGED — byte-identical to today.
       startupPrompt: ((): string | undefined => {
         const scheduled = appendScheduledPrompt(
-          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename }),
+          composeManagerStartupPrompt(startupPrompt, { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename }),
           prompt,
         );
         const projectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, prompt ?? startupPrompt ?? "");
@@ -3655,7 +3655,9 @@ export class SessionService {
         // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
         // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
         startupPrompt: appendMemoryRecallToStartupPrompt(
-          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase),
+          // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
+          // session row above — the same resolution, so the prompt can never disagree with the worktree.
+          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo)),
           workerProjectMemoryFramed,
         ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
@@ -5948,6 +5950,19 @@ export class SessionService {
       // Same one-liner as spawnWorker, searched against the predecessor's handoff (the richest match text
       // available here); null (no notes) ⇒ byte-identical to today. Card ea648f89: stamp the dedup map so
       // this recycled worker's FIRST resume compares against what this fresh spawn just showed it.
+      // Multi-repo epic 49136451, phase 3: resolve the OLD session's OWN stamped repoKey — NOT the task's
+      // current one. A recycle REUSES the existing worktree, which is physically rooted in whatever repo
+      // it was originally cut from, and a manager may have retargeted the card since; re-deriving here
+      // would tell the successor it is working in a repo its worktree does not live in. A stale key (the
+      // registry entry was removed while this worker was live) degrades to NO block rather than failing
+      // the recycle — this is prompt text, a read-shaped concern, and the worktree is still on disk.
+      let recycleRepoContext: WorkerRepoContext | undefined;
+      try {
+        recycleRepoContext = buildWorkerRepoContext(project, resolveRepoByKey(project, old.repoKey));
+      } catch (e) {
+        if (!(e instanceof UnknownRepoKeyError)) throw e;
+        console.warn(`[sessions] recycled worker ${old.id} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — omitting the repo block from its successor's prompt`);
+      }
       const recycleProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, framed);
       this.stampProjectMemoryDigest(fresh.id, recycleProjectMemoryFramed);
       this.pty.spawn({
@@ -5963,7 +5978,7 @@ export class SessionService {
         // leaking edits to the main checkout), then the worker's agent base brief, then the handoff
         // (mirrors spawnWorker + the manager recycle warm-up). Empty brief ⇒ the block + handoff.
         startupPrompt: appendMemoryRecallToStartupPrompt(
-          composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos),
+          composeWorkerStartupPrompt(agent?.startupPrompt, framed, worktreePath, project.referenceRepos, undefined, undefined, recycleRepoContext),
           recycleProjectMemoryFramed,
         ),
         role: "worker",
@@ -6043,7 +6058,7 @@ export class SessionService {
         `[loom:continuation] You are the successor to a previous manager session that recycled as it neared its ` +
         `context limit. Continue its work from this handoff — your predecessor's live workers have been re-parented ` +
         `to you (run worker_list to see them). Predecessor's handoff:\n\n${continuationPrompt}`,
-      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, resumeDocFilename: config.orchestration.resumeDocFilename },
+      { repoPath: project.repoPath, vaultPath: project.vaultPath, name: project.name, referenceRepos: project.referenceRepos, repos: project.repos, resumeDocFilename: config.orchestration.resumeDocFilename },
     );
 
     const now = new Date().toISOString();

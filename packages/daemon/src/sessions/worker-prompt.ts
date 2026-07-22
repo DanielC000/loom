@@ -1,4 +1,53 @@
+import type { Project, RepoRegistryEntry } from "@loom/shared";
+import type { ResolvedRepo } from "../projects/resolve-repo.js";
 import type { ReusedDirtyWorktreeInfo, StaleBaseInfo } from "../git/worktrees.js";
+
+/**
+ * What a worker needs to know about a MULTI-REPO project's writable registry (multi-repo epic 49136451,
+ * phase 3). Supplied ONLY when the project actually has a registry — a single-repo project passes
+ * `undefined` and the whole block is omitted, so its prompt is byte-identical to before this existed.
+ *
+ * `targetKey` is the repo THIS worker's worktree was cut from: `null` = the project's primary repo, same
+ * convention as `Task.repoKey`/`Session.repoKey`. It is deliberately the SESSION's stamped key, not the
+ * task's current one — a manager may retarget the card after the worktree already exists, and the
+ * worktree is physically rooted in the repo it was cut from (see `Session.repoKey`'s own doc).
+ *
+ * `targetGateCommand` is that repo's OWN gate, and `undefined` genuinely means "this repo has no gate
+ * configured" — it does NOT fall back to the project-level command, by design (a gate that exits 0 for
+ * an unrelated reason would report a FALSE green on code it never tested). The block says so explicitly,
+ * because "will my work be verified?" is the single fact a worker most needs from the registry.
+ */
+export interface WorkerRepoContext {
+  targetKey: string | null;
+  targetPath: string;
+  targetGateCommand?: string;
+  registry: RepoRegistryEntry[];
+}
+
+/**
+ * Build the {@link WorkerRepoContext} for a worker spawn from an ALREADY-RESOLVED repo — returns
+ * `undefined` (⇒ no block at all) for a project with no registry, which is the single-repo case and must
+ * stay byte-identical.
+ *
+ * Takes a {@link ResolvedRepo} rather than a raw key on purpose: resolution is the caller's job because
+ * WHICH key to resolve differs by call site and getting it wrong is the bug this epic's phase 2 exists to
+ * prevent. A fresh spawn resolves the TASK's key (it is about to stamp that onto the new session); a
+ * recycle resolves the SESSION's own stamped key, because the worktree it is reusing is physically rooted
+ * in whatever repo it was originally cut from. Handing this function a pre-resolved repo keeps that
+ * decision visible at each call site instead of hiding it behind a shared default.
+ */
+export function buildWorkerRepoContext(
+  project: Pick<Project, "repos">,
+  resolved: ResolvedRepo,
+): WorkerRepoContext | undefined {
+  if (project.repos.length === 0) return undefined;
+  return {
+    targetKey: resolved.key === "primary" ? null : resolved.key,
+    targetPath: resolved.path,
+    targetGateCommand: resolved.gateCommand,
+    registry: project.repos,
+  };
+}
 
 /**
  * Card af902717 — compose a WORKER session's opening from its agent BASE BRIEF + the dynamic part.
@@ -49,6 +98,7 @@ export function composeWorkerStartupPrompt(
   referenceRepos?: string[],
   reusedDirtyWorktree?: ReusedDirtyWorktreeInfo,
   staleBase?: StaleBaseInfo,
+  repoContext?: WorkerRepoContext,
 ): string {
   const base = brief?.trim();
   const body = base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
@@ -66,6 +116,37 @@ export function composeWorkerStartupPrompt(
       "\n\nYou may read/inspect these repos, but never commit there — there is no worktree, branch, " +
       "or gate for a reference repo. If your task turns out to need changes IN a reference repo, that's " +
       "out of scope for this worktree; escalate it up instead of committing there."
+    : "";
+  // Multi-repo epic 49136451, phase 3. Emitted whenever the project HAS a registry — including when this
+  // task targets the primary repo, because a worker on the primary of a multi-repo project still needs to
+  // know the other repos exist and are not its own (that is exactly the worker who would otherwise wander
+  // into one). Omitted entirely for a project with no registry.
+  const repoBlock = repoContext
+    ? (() => {
+        const targetLabel = repoContext.targetKey ?? "primary";
+        const others = repoContext.registry.filter((r) => r.key !== repoContext.targetKey);
+        const otherLines = [
+          ...(repoContext.targetKey === null ? [] : [`- \`primary\` — the project's primary repo`]),
+          ...others.map((r) => `- \`${r.key}\` — \`${r.path}\``),
+        ];
+        return (
+          `\n\n**This task targets the \`${targetLabel}\` repo** (\`${repoContext.targetPath}\`) — the worktree above was ` +
+          "cut FROM that repo, and your branch, your gate and your merge all land there.\n\n" +
+          (repoContext.targetGateCommand
+            ? `Your \`run_gate\` self-check and the merge gate both run THIS repo's own gate command (\`${repoContext.targetGateCommand}\`).`
+            : "This repo has NO gate command configured, so a merge here is reported as **unverified**. It does " +
+              "not fall back to another repo's gate — a gate that passed for an unrelated repo would look like " +
+              "verification without being any. Test your change by hand, and say plainly in your report what you " +
+              "ran and what is unverified.") +
+          (otherLines.length > 0
+            ? "\n\n**Other repos registered on this project (NOT yours for this task):**\n" + otherLines.join("\n")
+            : "") +
+          "\n\n**One task = one repo.** You never choose or change which repo a task targets — that is your " +
+          "manager's dispatch decision. If your task turns out to need a change in another registered repo, " +
+          "that is a SEPARATE card: report it up via `worker_report` and let your manager sequence a sibling " +
+          "task there. Do not edit or commit in another repo's working tree from here."
+        );
+      })()
     : "";
   const dirtyBlock = reusedDirtyWorktree
     ? "\n\n**⚠ Reused worktree — reconcile before you start:** this worktree was REUSED from a prior " +
@@ -87,5 +168,5 @@ export function composeWorkerStartupPrompt(
           (staleBase.truncated ? `\n(showing the first ${staleBase.changedFiles.length} — more files changed)\n` : "")
         : "")
     : "";
-  return `${block}${refBlock}${dirtyBlock}${staleBlock}\n\n${body}`;
+  return `${block}${refBlock}${repoBlock}${dirtyBlock}${staleBlock}\n\n${body}`;
 }

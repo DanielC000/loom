@@ -95,6 +95,11 @@ const TIER_1_ROUTES: readonly TierRule[] = [
   { method: "GET", pattern: "/api/projects/:id/git/log" },
   { method: "GET", pattern: "/api/projects/:id/git/branches" },
   { method: "GET", pattern: "/api/projects/:id/git/reference-repos/:index/log" },
+  // Sibling of the reference-repos log above and the same trust class: a read-only git log for one of
+  // the project's OWN registered repos, resolved server-side from an INDEX the client supplies (never a
+  // host path). Tier-1 for the same reason — without this the Git page would serve one repo's log and
+  // 403 the identical panel next to it under a remote bind.
+  { method: "GET", pattern: "/api/projects/:id/git/repos/:index/log" },
   { method: "GET", pattern: "/api/profiles" },
   { method: "GET", pattern: "/api/profiles/:id" },
   { method: "GET", pattern: "/api/skills" },

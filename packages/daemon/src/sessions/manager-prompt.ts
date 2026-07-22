@@ -1,4 +1,5 @@
 import path from "node:path";
+import type { RepoRegistryEntry } from "@loom/shared";
 import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.js";
 
 /**
@@ -36,7 +37,7 @@ import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.j
  */
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
-  loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; resumeDocFilename?: string },
+  loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; repos?: RepoRegistryEntry[]; resumeDocFilename?: string },
 ): string {
   // A project with no vault bound (`vaultPath === ""` — see shared/types.ts) has no resume doc to
   // resolve: omit both the vault-dir and resume-doc lines entirely rather than feed "" into
@@ -82,7 +83,35 @@ export function composeManagerStartupPrompt(
       "or gate for a reference repo. If a task turns out to need changes IN a reference repo, that's " +
       "out of scope here; surface it instead of committing there."
     : "";
-  const full = blockWithNote + refBlock;
+  // Multi-repo epic 49136451, phase 3: the project's WRITABLE repo registry — the repos a manager may
+  // actually route cards at (distinct from the read-only reference repos above). Omitted entirely when the
+  // project registers none, so a single-repo project's prompt is byte-identical to before this existed.
+  //
+  // The two facts here are the ones that were previously discoverable nowhere: repoKey is the manager's
+  // OWN dispatch lever (a worker cannot set it), and a registered repo's missing gate does NOT inherit
+  // this project's gate command — it merges unverified, which is a thing to decide about before
+  // dispatching, not to discover at merge time.
+  // NOT filtered, deliberately — and this must stay symmetric with the worker's block
+  // (`worker-prompt.ts` › `WorkerRepoContext.registry`), which also consumes the registry as-is.
+  // `validateRepoRegistry` is the single gate on every write path and already rejects a blank, duplicate,
+  // reserved, or non-`[A-Za-z0-9._-]` key, so a defensive blank-key filter here would be dead code that
+  // implies the data is untrusted — which then invites the next reader to add the same filter in the two
+  // or three other places the registry is read. The reference-repos blocks above DO filter, and that
+  // asymmetry is intentional: `referenceRepos` is a bare `string[]`, this is a validated typed record.
+  const registry = loc.repos;
+  const repoBlock = registry && registry.length > 0
+    ? "\n\n**Registered repos (this project is multi-repo):**\n" +
+      `- \`primary\` — \`${loc.repoPath}\` (the default target, and your own cwd)\n` +
+      registry.map((r) => `- \`${r.key}\` — \`${r.path}\`` + (r.gateCommand ? ` · gate: \`${r.gateCommand}\`` : " · **no gate configured** — merges here report as unverified")).join("\n") +
+      "\n\nRoute each card at CREATION time by setting its `repoKey` (`tasks_create`/`tasks_update`); a card " +
+      "with no `repoKey` targets `primary`. This is YOUR dispatch decision — a worker cannot set or change " +
+      "its own card's repo, so a card routed at the wrong repo stays wrong until you fix it.\n\n" +
+      "**One task = one repo.** There is no cross-repo atomic merge, so a change spanning two repos is TWO " +
+      "sibling cards you sequence — land the dependency first, then the dependent — never one card. And a " +
+      "registered repo with no gate command does NOT inherit this project's gate: work merged there is " +
+      "reported unverified, so decide before you dispatch whether that is acceptable for the card."
+    : "";
+  const full = blockWithNote + refBlock + repoBlock;
   const own = startupPrompt?.trim();
   return own ? `${full}\n\n${own}` : full;
 }

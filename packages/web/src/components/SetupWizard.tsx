@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNavigate } from "react-router-dom";
-import type { Profile } from "@loom/shared";
+import type { Profile, RepoRegistryEntry } from "@loom/shared";
 import { api, type SetupTemplate, type TemplateApplyResult } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { color, font, radius } from "../theme";
@@ -72,6 +72,14 @@ function WizardBody({ onClose }: { onClose: () => void }) {
   // both modes; trimmed + blanks dropped before submit, so a stray empty row never reaches the server.
   const [referenceRepos, setReferenceRepos] = useState<string[]>([]);
   const cleanRefs = referenceRepos.map((r) => r.trim()).filter(Boolean);
+  // WRITABLE repo registry to bind at creation (multi-repo epic 49136451). Optional in both modes;
+  // trimmed, fully-blank rows dropped, and a blank gateCommand OMITTED rather than sent as "" (the
+  // validator rejects an empty-string gateCommand, and "no gate" is a distinct, meaningful state).
+  const [registeredRepos, setRegisteredRepos] = useState<RepoRegistryEntry[]>([]);
+  const cleanRepos: RepoRegistryEntry[] = registeredRepos
+    .map((r) => ({ key: r.key.trim(), path: r.path.trim(), gateCommand: r.gateCommand?.trim() || undefined }))
+    .filter((r) => r.key || r.path)
+    .map((r) => (r.gateCommand === undefined ? { key: r.key, path: r.path } : r));
   const [created, setCreated] = useState<{ projectId: string; projectName: string; result: TemplateApplyResult | null } | null>(null);
   const narrow = useNarrowViewport();
 
@@ -90,9 +98,12 @@ function WizardBody({ onClose }: { onClose: () => void }) {
       // existing" registers a project at the path the user already has on disk.
       // Bind read-only reference repos in BOTH modes (empty list → omitted, byte-identical to before).
       const refs = cleanRefs.length ? { referenceRepos: cleanRefs } : {};
+      // Same additive contract as `refs`: an empty registry is OMITTED, not sent as [], so a single-repo
+      // project's create payload is byte-identical to what it was before multi-repo existed.
+      const reg = cleanRepos.length ? { repos: cleanRepos } : {};
       const project = mode === "new"
-        ? await api.projectInit({ name: name.trim(), ...refs })
-        : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim(), ...refs });
+        ? await api.projectInit({ name: name.trim(), ...refs, ...reg })
+        : await api.createProject({ name: name.trim(), repoPath: repoPath.trim(), vaultPath: vaultPath.trim(), ...refs, ...reg });
       // "Start empty" registers the project only — no template to apply.
       const result = choice && choice !== "empty" ? await api.applyTemplate(project.id, choice) : null;
       return { projectId: project.id, projectName: project.name, result };
@@ -172,12 +183,13 @@ function WizardBody({ onClose }: { onClose: () => void }) {
             repoPath={repoPath} onRepoPath={onRepoPath}
             vaultPath={vaultPath} onVaultPath={setVaultPath}
             referenceRepos={referenceRepos} onReferenceRepos={setReferenceRepos}
+            registeredRepos={registeredRepos} onRegisteredRepos={setRegisteredRepos}
           />
         )}
         {step === 3 && (
           <StepReview
             mode={mode} name={name.trim()} repoPath={repoPath.trim()} vaultPath={vaultPath.trim()}
-            referenceRepos={cleanRefs}
+            referenceRepos={cleanRefs} registeredRepos={cleanRepos}
             template={chosenTemplate} isEmpty={choice === "empty"} profileByName={profileByName}
             error={apply.isError ? (apply.error as Error).message : null}
           />
@@ -386,12 +398,14 @@ function TemplateCard({
 // ── Screen 2 — Project step ─────────────────────────────────────────────────────────────────────────────
 function StepProject({
   mode, onMode, name, onName, repoPath, onRepoPath, vaultPath, onVaultPath, referenceRepos, onReferenceRepos,
+  registeredRepos, onRegisteredRepos,
 }: {
   mode: ProjectMode; onMode: (m: ProjectMode) => void;
   name: string; onName: (v: string) => void;
   repoPath: string; onRepoPath: (v: string) => void;
   vaultPath: string; onVaultPath: (v: string) => void;
   referenceRepos: string[]; onReferenceRepos: (r: string[]) => void;
+  registeredRepos: RepoRegistryEntry[]; onRegisteredRepos: (r: RepoRegistryEntry[]) => void;
 }) {
   return (
     <div>
@@ -434,6 +448,9 @@ function StepProject({
 
         {/* Read-only reference repos — optional in both modes, a distinct field from the primary repo. */}
         <ReferenceReposField repos={referenceRepos} onChange={onReferenceRepos} />
+
+        {/* Writable multi-repo registry — optional in both modes; the primary repo needs no entry. */}
+        <RegisteredReposField repos={registeredRepos} onChange={onRegisteredRepos} />
       </div>
     </div>
   );
@@ -478,6 +495,56 @@ function ReferenceReposField({ repos, onChange }: { repos: string[]; onChange: (
   );
 }
 
+// ── Registered-repos editor (wizard variant) ────────────────────────────────────────────────────────────
+// The WRITABLE multi-repo registry (multi-repo epic 49136451, phase 3) — sibling to ReferenceReposField
+// above and the same no-Save shape (the wizard binds the rows at Apply), but a DIFFERENT thing: a
+// reference repo is read-only, a registered repo is a real target a card can be routed at, with its own
+// worktree, branch and gate. Optional in both modes; an empty list is omitted from the create payload
+// entirely, so a single-repo project's creation request stays byte-identical to before this existed.
+// The primary repo needs no entry ("primary" is a reserved key the server rejects). A bad entry surfaces
+// the server's first-offender 400 on the Review screen.
+function RegisteredReposField({ repos, onChange }: { repos: RepoRegistryEntry[]; onChange: (r: RepoRegistryEntry[]) => void }) {
+  const edit = (i: number, patch: Partial<RepoRegistryEntry>) => onChange(repos.map((r, j) => (j === i ? { ...r, ...patch } : r)));
+  const remove = (i: number) => onChange(repos.filter((_, j) => j !== i));
+  const add = () => onChange([...repos, { key: "", path: "" }]);
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 6, paddingTop: 16, borderTop: `1px solid ${color.border}` }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
+        <label style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: color.textDim }}>
+          Registered repos <span style={{ color: color.textMuted, textTransform: "none", letterSpacing: 0 }}>· optional</span>
+        </label>
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted }}>
+          Additional writable repos. Give each a short key — a card targets one repo by its key. One task, one repo.
+        </span>
+      </div>
+      {repos.length === 0 ? (
+        <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textMuted, padding: "2px 0" }}>None — every card targets this project's primary repo.</span>
+      ) : (
+        repos.map((r, i) => (
+          <div key={i} style={{ display: "flex", gap: 6, alignItems: "flex-start", flexWrap: "wrap" }}>
+            <Input value={r.key} onChange={(e) => edit(i, { key: e.target.value })} spellCheck={false}
+              placeholder="api" aria-label={`Repo ${i + 1} key`} style={{ flex: "0 1 110px", minWidth: 0, boxSizing: "border-box" }} />
+            <Input value={r.path} onChange={(e) => edit(i, { path: e.target.value })} spellCheck={false}
+              placeholder="/Users/you/code/aurora-api" aria-label={`Repo ${i + 1} path`} style={{ flex: "2 1 180px", minWidth: 0, boxSizing: "border-box" }} />
+            <Input value={r.gateCommand ?? ""} onChange={(e) => edit(i, { gateCommand: e.target.value })} spellCheck={false}
+              placeholder="gate command (optional)" aria-label={`Repo ${i + 1} gate command`} style={{ flex: "2 1 180px", minWidth: 0, boxSizing: "border-box" }} />
+            <Button variant="ghost" title="Remove this repo" aria-label={`Remove repo ${i + 1}`}
+              onClick={() => remove(i)} style={{ padding: "4px 9px" }}>✕</Button>
+          </div>
+        ))
+      )}
+      {repos.length > 0 && (
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, lineHeight: 1.5 }}>
+          A repo with no gate command merges as <span style={{ color: color.amber }}>unverified</span> — it does not fall back to another repo's gate.
+        </span>
+      )}
+      <div>
+        <Button onClick={add}>＋ Register repo</Button>
+      </div>
+    </div>
+  );
+}
+
 function SegButton({ on, onClick, title, sub }: { on: boolean; onClick: () => void; title: string; sub: string }) {
   return (
     <button
@@ -508,9 +575,10 @@ function Field({ label, hint, children }: { label: string; hint: string; childre
 
 // ── Screen 3 — Review & confirm ─────────────────────────────────────────────────────────────────────────
 function StepReview({
-  mode, name, repoPath, vaultPath, referenceRepos, template, isEmpty, profileByName, error,
+  mode, name, repoPath, vaultPath, referenceRepos, registeredRepos, template, isEmpty, profileByName, error,
 }: {
   mode: ProjectMode; name: string; repoPath: string; vaultPath: string; referenceRepos: string[];
+  registeredRepos: RepoRegistryEntry[];
   template: SetupTemplate | null; isEmpty: boolean;
   profileByName: Map<string, Profile>; error: string | null;
 }) {
@@ -536,6 +604,9 @@ function StepReview({
           )}
           {referenceRepos.map((r, i) => (
             <ReceiptLine key={r + i} k={i === 0 ? "refs" : ""} v={r} mono />
+          ))}
+          {registeredRepos.map((r, i) => (
+            <ReceiptLine key={r.key + i} k={i === 0 ? "repos" : ""} v={`${r.key} → ${r.path}`} mono />
           ))}
         </ReceiptSection>
 
