@@ -117,43 +117,18 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    gate sees `filesChanged:0` and bounces the task back. For UI/visual work: if your session **mounts
    Playwright** (the `@playwright/mcp` surface — `browserTesting` provisioned + allowlisted, the QA / Web
    Designer rigs), **self-verify** by driving Playwright to the running app and confirming the change
-   renders and behaves before reporting done. **The screenshot, scratch-dir, and download mechanics that
-   follow are `@playwright/mcp`-specific** — a session on a DIFFERENT browser tool (e.g. claude-in-chrome)
-   or with no browser at all gets none of them (no `$LOOM_SCRATCH_DIR`, no auto-named screenshots), so skip
-   this block and report UI work **up** for your manager to verify instead. **When you capture a
-   verification screenshot, take it with no filename** so it
-   auto-names into your session's out-of-tree scratch dir and the working tree stays clean; pass a path
-   only to deliberately persist one, and make it **absolute under the per-session scratch directory the
-   Playwright client itself allows writes to** — this is not necessarily the same as your generic
-   harness scratch/temp dir, and a path outside Playwright's own allowed roots is rejected ("… is
-   outside allowed roots"); a bare or relative name also lands in the repo working tree (`git status`
-   flags it) and risks an accidental commit. The only sanctioned destinations are the repo-external
-   per-session scratch dir (the auto-name default) or, if you must persist a shot as a project artifact,
-   the project's configured `vaultPath` when it has one — never an arbitrary path you pick. When unsure of
-   that root, pass no filename/path at all and let the tool auto-name into it. **If your session has
-   browser-testing tools, that allowed root is also exposed to you directly as the `$LOOM_SCRATCH_DIR`
-   environment variable** — stage a file-upload source there too (not your generic harness scratchpad,
-   which the browser tools reject as outside allowed roots). **Verifying a file download?** The browser
-   MCP auto-saves every triggered download to its output dir (the same scratch dir your screenshots land
-   in) and reports the saved path in the *triggering* call's own response, under an **"Events"** section
-   — a line like `Downloaded file <name> to "<path>"`. So check a download at the byte level: trigger it
-   with a normal browser action (e.g. `browser_click`), read the saved path out of that response's Events
-   section, then `Read()` the file off disk — don't reach first for `page.waitForEvent('download')` in a
-   separate `browser_run_code_unsafe` call, which always times out because the MCP already consumed the
-   download event. If that trigger→read-Events→`Read()` ever comes up empty, that's the `<a download
-   href="data:…">` edge case — do a deliberate fresh repro rather than settling for a weaker functional
-   check. For a NEW interactive control (toggle, button, input, menu), a render-only check is
-   not enough: **EXERCISE it** and confirm an **observable state change** — DOM/network/text differs
-   before vs. after — not just that the page renders without console errors. `@playwright/mcp`'s
-   `browser_click` takes `{ element: "<human-readable description>", target: "<exact ref from a
-   browser_snapshot, or a unique selector>" }` — the required key is **`target`**, not `ref` (`ref` is a
-   different browser tool's arg name); if a click is rejected asking for `target`, that's the mix-up.
-   Otherwise report the UI
-   work **up** for your manager to verify. When you self-verify,
-   point Playwright at the dev server's **actual bound URL** — read the port from the framework's startup
-   line (e.g. vite's `Local: http://…:PORT`); never assume a default port. If that port is already held
-   by another process, the dev server binds a different one or fails — verifying the default would
-   silently drive the wrong, *stale* server and report a false pass. **Stop any dev server (or other long-running process) you started BEFORE you
+   renders and behaves before reporting done — and **read `references/browser-verification.md` (under
+   this skill's own directory) BEFORE driving the browser**: the screenshot/scratch-dir, download, and
+   click-arg mechanics live there and are `@playwright/mcp`-specific (short version: capture screenshots
+   with NO filename so they auto-name into the out-of-tree scratch dir — a bare or relative path lands
+   in the repo working tree and risks an accidental commit). A session on a DIFFERENT browser
+   tool (e.g. claude-in-chrome) or with no browser at all gets none of those mechanics — skip them and
+   report UI work **up** for your manager to verify instead. For a NEW interactive control (toggle,
+   button, input, menu), a render-only check is not enough: **EXERCISE it** and confirm an **observable
+   state change** — DOM/network/text differs before vs. after — not just that the page renders without
+   console errors. When you self-verify, point Playwright at the dev server's **actual bound URL** —
+   read the port from the framework's startup line, never assume a default (a stale server already
+   holding the default port would silently verify the wrong thing and report a false pass). **Stop any dev server (or other long-running process) you started BEFORE you
    `worker_report done` — and stop it SAFELY.** Terminate it via the handle you started it with (the child
    process YOU spawned); don't re-discover it by process name or port. A stray dev server holds OS file
    locks on its own `node_modules` (on Windows a live Vite/esbuild binary can't be unlinked), so the merge
@@ -194,26 +169,16 @@ map-of-content at the vault root (read `_Index.md` to find an existing note rath
 the `CLAUDE.md` pins by exact path stay at the root. Wikilinks resolve by note name, so the folder never
 breaks a `[[link]]`.
 
-**Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent on
-this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won root-cause or
-repro — capture it with `memory_write` (`mcp__loom-tasks__memory_write`). Its exact params are **`key`**,
-**`text`**, and optional **`title`** — these `memory_*` tools are DEFERRED, so ToolSearch-load them first
-and use those names verbatim; a GUESSED param (`args`/`value`/`content`) is silently stripped and the call
-fails validation for the missing required field. Pass a stable `key` (re-writing the same key UPDATES in
-place — refine, don't mint near-duplicates), a short `title`, and a compact `text` (≤4000 bytes, a curated
-fact — not a dumping ground). This store is SHARED across every session on the project and its
-relevant notes auto-inject into each kickoff, so one small note spares a successor or sibling from re-deriving
-what you learned. Leave `pinned` off for the normal case (it surfaces by relevance); pin only a rare
-always-load-bearing fact. It's NOT task state (the board) or a design doc (a vault note) — just the durable,
-reusable nugget. **The store is queryable, not write-only** — `memory_read`(`key`)/`memory_list` (no args) pull a relevant
-note on demand, so consult it when a decision or gotcha might already be captured; don't only append.
-Read-first also gates an UPDATE: to overwrite an existing key, read it and pass its current `version` as
-`baseVersion` — a stale or omitted base is rejected with the current note returned so you reconcile.
-**Stamp a durable note with light provenance** (`verified: <date> against <mainline>`) and cite identifiers
-that survive — commit SUBJECTS, symbol names — never ephemeral ones (a pre-squash branch SHA rots on merge;
-line numbers drift). **If a note's validity has an expiry, write it as a runnable predicate** (a grep /
-commit-presence / card-state check), not prose like "until X lands" — with the honest caveat that nothing
-runs that predicate for you today, so it only pays off when an agent thinks to check it.
+**Learned something durable? Write it to project memory.** When your task surfaces a fact a FUTURE agent
+on this project would want handed to it — a verified invariant, a load-bearing gotcha, a hard-won
+root-cause or repro — capture it with `memory_write`: the store is SHARED across every session on the
+project and its relevant notes auto-inject into each kickoff, so one small note spares a successor or
+sibling from re-deriving what you learned. **Query it too, don't only write it** — consult the store
+(`memory_read`/`memory_list`) when a decision or gotcha might already be captured. **Read
+`references/project-memory.md` (under this skill's own directory) BEFORE your first memory call** — the
+`memory_*` tools are deferred with exact param names (a guessed param is silently stripped and the call
+fails), and updates are version-gated; that reference carries the mechanics plus the provenance
+discipline for what you write.
 
 **Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
 working tree, so a careless relative path can climb out of it. Use **absolute paths** for every

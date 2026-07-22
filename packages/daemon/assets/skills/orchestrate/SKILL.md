@@ -440,18 +440,14 @@ mid-report — before sending anything.
    append log — that a successor can read COLD: what's merged,
    the prioritized backlog, key decisions, open findings + gotchas, where things stand. Update it after
    each meaningful step. This single doc IS your recycle handoff and your re-orientation after a pause.
-   **Size budget + rotate-and-archive — never lose old notes.** Keep the ACTIVE doc comfortably inside ONE
-   `Read` page: target ~150 lines, hard-cap ~400, well under the 256KB / ~25k-token Read caps — a doc that
-   exceeds them breaks a successor's very first read (real incident: an Orchestrator Log grew to 266KB /
-   906 lines of mostly-superseded provenance and broke `Read` twice, blocking cold resume until hand-trimmed).
-   Carry forward only CURRENT state. **Check size BEFORE each rewrite, not after:** before you write, glance
-   at whether the doc is already near the hard-cap — if it is, ROTATE FIRST, then write the new content into
-   the fresh doc. Don't wait for the write that finally crosses the cap; by then a cold successor may already
-   be reading a broken file. **When a rewrite would push the doc past the budget, ROTATE rather than
-   trim-and-lose:** (1) move the current doc to a dated archive sibling — `<name>.archive/<YYYY-MM-DD>-NN.md`
-   — old notes preserved intact, nothing deleted; (2) start a FRESH active doc holding only the live state
-   plus a one-line pointer ("older provenance in `<name>.archive/`, newest first"). A successor always reads
-   the small active doc; the history stays retrievable in the archive.
+   **Size budget + rotate-and-archive — never lose old notes.** Keep the ACTIVE doc comfortably inside
+   ONE `Read` page: target ~150 lines, hard-cap ~400 (an oversized doc breaks a cold successor's very
+   first read). Carry forward only CURRENT state. **Check size BEFORE each rewrite, not after** — if the
+   doc is near the hard-cap, ROTATE FIRST (move the current doc to a dated archive sibling, start a
+   FRESH active doc holding only live state), then write; **never trim-and-lose old notes.** The exact
+   rotation procedure, archive naming, and the incident behind the budget are in
+   `references/resume-doc-rotation.md` (under this skill's own directory) — read it the first time a
+   rotation comes due.
    **Where it lives:** your session's **"Where things live"** context block gives your project's
    absolute **vault root**; your resume doc is `<vaultRoot>/Projects/<Project>/Orchestrator Log.md`
    (substitute your project's name). **Read and write it by that ABSOLUTE path — never Glob, Bash
@@ -485,25 +481,16 @@ mid-report — before sending anything.
    instead of Globbing or Bash `find`/`ls`**, and add/update the note's line in it when you create or
    move a note. Wikilinks resolve by note name, so moving a note between folders never breaks a link.
 
-   **Project memory — the SHARED nugget store, distinct from your resume doc.** Your resume doc is YOUR lineage
-   handoff (full state, for your successor). `memory_write` (`mcp__loom-tasks__memory_write`) instead writes a
-   project-scoped note SHARED across EVERY agent/session and auto-injected into each kickoff. Its exact
-   params are **`key`**, **`text`**, and optional **`title`** — these `memory_*` tools are DEFERRED, so
-   ToolSearch-load them first and use those names verbatim; a guessed param (`args`/`value`/`content`) is
-   silently stripped and the call fails validation for the missing required field. When you or a worker
-   establishes a durable cross-session fact any future agent should have — a verified invariant, a load-bearing
-   gotcha, a settled decision + why, a "this is already done/closed" fact — capture it as a compact titled note
-   under a stable `key` (same key UPDATES in place; ≤4000 bytes, curated, not task chatter). Pin only a rare
-   always-relevant fact; leave the rest unpinned to surface by relevance, and `memory_forget` a note gone stale.
-   The recall/injection side is automatic — writing the nuggets is the half that makes it pay off. **Query it,
-   don't only write it** — `memory_read`(`key`)/`memory_list` (no args) pull a relevant note on demand, so consult the store when
-   a decision might already be settled in it. Read-first also gates an UPDATE: to overwrite an existing key,
-   read it and pass its current `version` as `baseVersion` — a stale or omitted base is rejected with the
-   current note returned so you reconcile. **Stamp a durable note with the same provenance discipline as your
-   resume doc (above)** — date it, cite commit SUBJECTS / symbol names, never a branch SHA or line number.
-   **If a note carries an expiry, write it as a runnable predicate** (a grep / commit-presence / card-state
-   check), not prose like "until X lands" — with the honest caveat that nothing runs it automatically today,
-   so it only helps when an agent thinks to check it.
+   **Project memory — the SHARED nugget store, distinct from your resume doc.** Your resume doc is YOUR
+   lineage handoff (full state, for your successor). `memory_write` instead writes a project-scoped note
+   SHARED across EVERY agent/session and auto-injected into each kickoff. When you or a worker
+   establishes a durable cross-session fact any future agent should have — a verified invariant, a
+   load-bearing gotcha, a settled decision + why, a "this is already done/closed" fact — capture it
+   there. **Query it, don't only write it** — consult the store (`memory_read`/`memory_list`) when a
+   decision might already be settled in it. **Read `references/project-memory.md` (under this skill's
+   own directory) BEFORE your first memory call** — the `memory_*` tools are deferred with exact param
+   names (a guessed param is silently stripped and the call fails), and updates are version-gated; that
+   reference carries the mechanics plus the provenance discipline for what you write.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if
@@ -527,51 +514,18 @@ mid-report — before sending anything.
    startup line, never assume a default. Hold both when you review a browser-capable worker's
    "verified live."
 
-   To eyeball a **static on-disk HTML artifact** (no dev server) — or when the deliverable *itself* is a
-   static artifact a worker is building (a CV, a report, a static site) — don't navigate `file://`
-   (Playwright blocks it) and don't hand-roll a `python -m http.server` per render cycle. Serve its
-   directory over loopback with the **bundled** helper: `node
-   .claude/skills/orchestrate/scripts/serve-static.mjs start <dir>` prints the URL + the exact tracked
-   pid and returns immediately (the server keeps running); eyeball via Playwright at the printed URL,
-   then `node .claude/skills/orchestrate/scripts/serve-static.mjs stop <dir>` tears down EXACTLY that
-   tracked pid before you request a merge for that worktree — same tracked-pid discipline as
-   `dev-server.mjs` below, never a `netstat`/`taskkill` port hunt. It's dependency-free and already ships
-   in this skill's `scripts/` dir — point a worker producing such an artifact at it rather than letting
-   them reinvent an ephemeral server.
-
-   To eyeball a **live dev server** you launch yourself against a worker's worktree (not a static
-   artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: that output is
-   locale-dependent to parse (a non-English OS locale renders different column headers/states), and a
-   kill by name or port can reach a process you never spawned — another dev server, an unrelated
-   project, or even the self-hosting daemon. Launch it through the **bundled** helper instead — it
-   records the EXACT child pid it spawns and tears down only that pid (never a name/port search):
-   `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir> -- <command...>` prints
-   the pid and returns immediately (the server keeps running); eyeball via Playwright at whatever URL
-   the command itself prints, then
-   `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
-   merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
-   `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by
-   tracked handle before you request the merge avoids that. **Never kill by image name
-   (`taskkill /IM node.exe`) and never kill by port** — a host-wide by-name kill has previously taken
-   down the entire self-hosting daemon.
-
-   To turn that same HTML into a **PDF** deliverable, print it headlessly — no external converter. Drive
-   Playwright's Chromium to the served loopback URL and call `page.pdf`:
-   `await page.pdf({ path: 'out.pdf', format: 'A4', printBackground: true })` (`page.pdf` is
-   Chromium-headless-only; `printBackground` keeps CSS backgrounds/colors). Serve → navigate → `page.pdf`
-   gives a clean PDF from the exact HTML you eyeball.
-
-   To keep a screenshot **as a file** (to attach or diff), don't rely on claude-in-chrome `save_to_disk` —
-   it renders the inline base64 but writes no reachable file (a known claude-in-chrome save-to-disk gap). Use Playwright
-   `page.screenshot({ path })` against the loopback page (launch with `{ channel: 'chrome' }` to reuse
-   system Chrome and skip a download), or decode the base64 from the transcript for a shot already captured.
-   **Always pass an ABSOLUTE path** to the screenshot call (`page.screenshot({ path })` /
-   `browser_take_screenshot`) — and know **which** absolute root Playwright will accept. It only writes
-   under the **per-session scratch dir**, `.loom/tmp/scratch/<sessionId>` (exposed to a Playwright-mounted
-   session as the `$LOOM_SCRATCH_DIR` env var), or the project's configured vault path; a path outside
-   those roots is rejected ("… is outside allowed roots"). **Never a bare filename** — it defaults to the
-   session's working directory (the repo tree), risking a stray PNG committed into the repo. When unsure of
-   the root, pass no path at all and let the tool auto-name into the scratch dir.
+   To eyeball a **static on-disk HTML artifact**, to launch a **live dev server** against a worker's
+   worktree, to print served HTML to **PDF**, or to keep a screenshot **as a file** — read
+   `references/serving-and-capture.md` (under this skill's own directory) FIRST and follow its recipes;
+   the bundled tracked-pid helpers it teaches (`serve-static.mjs` / `dev-server.mjs`) already ship in
+   this skill's `scripts/` dir, so never hand-roll an ephemeral server or a `netstat`/`taskkill` port
+   hunt. The binding rules hold whether or not you open it: launch such servers ONLY through the bundled
+   helpers (they record the exact child pid); **stop that tracked pid before you request a merge for the
+   worktree** (a live process holds the worktree dir open and fails the merge's cleanup on Windows);
+   **never kill by image name (`taskkill /IM node.exe`) and never kill by port** — a host-wide by-name
+   kill has previously taken down the entire self-hosting daemon; and pass screenshot calls an
+   **ABSOLUTE path under an allowed root** (the per-session scratch dir or the project's vault path) or
+   no path at all — never a bare filename, which lands in the repo working tree.
 
    **A render-only eyeball is necessary but not sufficient for an interactive control.** For every NEW
    interactive control (toggle, button, input, menu) the verification must **EXERCISE it** and confirm
@@ -584,21 +538,14 @@ mid-report — before sending anything.
    **Run-shaped features need a REAL end-to-end smoke run — hermetic gates alone are insufficient.**
    When a feature's *runtime crosses a boundary a unit test stubs out*, a passing hermetic/unit gate
    proves the wiring, NOT that it works live. Two shapes of this, each a hard DoD before you call it done:
-   - **Agent-turn runtimes** — agent runs, dispatch, tool-IO, anything where a live model call drives
-     the behavior: the schema the agent actually sees, how a real model phrases its output, and the
-     timeout/teardown path only exercise under a real turn. Make **≥1 real-agent smoke run** the DoD.
-     (This is the classic run/tool-IO miss: every hermetic test was green while a real agent looped
-     repeatedly because its result was a stringified JSON that the result schema rejected.) Bake that
-     exact failure into your hermetic-test guidance too: a run/tool-IO feature's tests must cover the
-     **stringified-result case** — an agent passing a JSON-encoded *string* where an object is expected —
-     not just the already-well-formed payload, since that's the shape real models actually emit.
-   - **Subprocess / spawn / hook boundaries** — anything that shells out: spawns a child process, execs
-     a CLI, or fires an OS hook. Mocking the exec call never exercises the real cross-platform spawn, so
-     a binary that isn't found, an arg quoted wrong, or an interpreter/file-type mismatch can make the
-     feature **silently no-op** while every unit test stays green — and it's OS-specific, so a green run
-     on one platform doesn't cover the others. Make **≥1 real spawn on the target OS** the DoD: exercise
-     the feature end-to-end across the process boundary and confirm the observable side effect actually
-     happened, don't just assert the exec was called.
+   - **Agent-turn runtimes** (agent runs, dispatch, tool-IO — a live model call drives the behavior):
+     make **≥1 real-agent smoke run** the DoD.
+   - **Subprocess / spawn / hook boundaries** (anything that shells out, spawns a child process, or
+     fires an OS hook): make **≥1 real spawn on the target OS** the DoD — confirm the observable side
+     effect actually happened, don't just assert the exec was called.
+   The elaborated failure modes behind each shape — and the hermetic-test cases they imply (e.g. the
+   stringified-result case) — are in `references/live-verification.md` (under this skill's own
+   directory); read it when carding or reviewing such a feature.
 
    Require the worker to run whichever applies and report the live trace, or run the integrated pass yourself.
 
