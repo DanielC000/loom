@@ -46,39 +46,62 @@ const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.s
 
 /**
  * `gate_status(opId)` (card edc1ec12, Platform-Audit finding 7afa6ea9) — a read-only LIVE-state lookup.
- * MANAGER-ONLY (see the comment at its call site in `buildServer` below for why the worker role does NOT
- * get this tool — its tested depth-1 MCP surface stays exactly `{my_context, run_gate, worker_report}`).
- * Deliberately has NO terminal-outcome path of its own — it only ever answers "still queued / still
- * running / not found / ambiguous prefix" from the live GateSemaphore registry (see SessionService
- * .gateStatus's doc for why `not_found` covers both "already settled" and "never existed", and why there's
- * no live output tail). `opId` accepts a full id or an unambiguous 8-char prefix (card 225bc7bd — the
- * exact-match-only lookup this replaced silently reported a live op as `not_found` for a valid prefix,
- * indistinguishable from a genuinely settled/nonexistent op).
+ * Registered on BOTH the manager and worker surfaces (card fc243a43 added the worker variant), with the
+ * worker's own call SCOPED to opIds it owns (`scopeSessionId`, threaded straight through to
+ * `SessionService.gateStatus` → `GateSemaphore.findByOpId` — see their docs for why this is a
+ * candidate-set filter, not a post-hoc check: a worker's lookup never even SEES another session's live op,
+ * so it cannot learn one exists). The manager call site (`scopeSessionId` omitted) is unchanged from
+ * before this card. Deliberately has NO terminal-outcome path of its own — it only ever answers "still
+ * queued / still running / not found / ambiguous prefix" from the live GateSemaphore registry (see
+ * SessionService.gateStatus's doc for why `not_found` covers both "already settled" and "never existed",
+ * and why there's no live output tail). `opId` accepts a full id or an unambiguous 8-char prefix (card
+ * 225bc7bd — the exact-match-only lookup this replaced silently reported a live op as `not_found` for a
+ * valid prefix, indistinguishable from a genuinely settled/nonexistent op).
  */
-function registerGateStatus(server: McpServer, sessions: SessionService): void {
+function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string): void {
+  const forWorker = scopeSessionId != null;
+  const description = forWorker
+    ? "Read-only LIVE status for YOUR OWN gate run, by the `opId` a `run_gate` {status:\"pending\"} " +
+      "response returned — lets you check whether that run is still queued behind the daemon's gate " +
+      "concurrency cap or actually executing, and for how long, WITHOUT starting a new gate run and " +
+      "WITHOUT waiting for the eventual completion nudge. Use this instead of re-calling `run_gate` when " +
+      "you only want to ask \"am I queued or stuck?\" — re-calling `run_gate` is also an ACTION (it can " +
+      "attach to your in-flight op and return `staleAgainstWorktree`, a result you must then discard); this " +
+      "tool never starts or affects a run, it only reads. SCOPED to YOUR OWN session: an opId belonging to " +
+      "another session's gate run is indistinguishable from `not_found` here — you cannot use this to probe " +
+      "another worker's run. `opId` accepts the FULL id OR an unambiguous 8-char id-prefix (the short id " +
+      "`run_gate` returned). Returns {state:\"queued\"|\"running\"|\"not_found\"|\"ambiguous\", gateType, " +
+      "elapsedMs, error?}. `not_found` covers \"already settled\" (rely on the `[loom:gate-done]`/" +
+      "`[loom:gate-failed]` nudge for the actual outcome), \"never existed\", AND \"belongs to another " +
+      "session\" — this tool never reports a terminal result itself, only live run state. `ambiguous` (with " +
+      "`error` naming the matching opIds, among YOUR OWN ops only) means your prefix matches more than one " +
+      "of your own live ops — pass more characters or the full id. A large `elapsedMs` alone doesn't mean " +
+      "you're stuck — compare it against how long this project's gate normally takes before concluding it's " +
+      "wedged and re-firing. Still not a replacement for the completion nudge — check this when you're " +
+      "unsure whether to keep waiting, don't poll it on a timer."
+    : "Read-only LIVE status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
+      "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
+      "daemon's gate concurrency cap or actually executing, and for how long, WITHOUT waiting for the " +
+      "eventual completion nudge. `opId` accepts the FULL id OR an unambiguous 8-char id-prefix (the short " +
+      "id Loom displays everywhere else — same resolution as `tasks_get`/`worker_spawn`/`escalation_status`). " +
+      "Returns {state:\"queued\"|\"running\"|\"not_found\"|\"ambiguous\", gateType, elapsedMs, error?}. " +
+      "`not_found` covers ONLY \"already settled\" (rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
+      "`[loom:merge-failed]` nudge for the actual outcome) and \"never existed\" — this tool never reports a " +
+      "terminal result itself, only live run state. `ambiguous` (with `error` naming the matching opIds) " +
+      "means your prefix matches more than one LIVE op — pass more characters or the full id; it is a " +
+      "DISTINCT outcome from `not_found`, never fold the two together. Use this when a merge has been " +
+      "pending for a long time and you want to confirm it's genuinely still working (a large elapsedMs " +
+      "alone doesn't mean it's stuck — check it against how long the project's gate normally takes) rather " +
+      "than concluding it's wedged.";
   server.registerTool(
     "gate_status",
     {
-      description:
-        "Read-only LIVE status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
-        "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
-        "daemon's gate concurrency cap or actually executing, and for how long, WITHOUT waiting for the " +
-        "eventual completion nudge. `opId` accepts the FULL id OR an unambiguous 8-char id-prefix (the short " +
-        "id Loom displays everywhere else — same resolution as `tasks_get`/`worker_spawn`/`escalation_status`). " +
-        "Returns {state:\"queued\"|\"running\"|\"not_found\"|\"ambiguous\", gateType, elapsedMs, error?}. " +
-        "`not_found` covers ONLY \"already settled\" (rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
-        "`[loom:merge-failed]` nudge for the actual outcome) and \"never existed\" — this tool never reports a " +
-        "terminal result itself, only live run state. `ambiguous` (with `error` naming the matching opIds) " +
-        "means your prefix matches more than one LIVE op — pass more characters or the full id; it is a " +
-        "DISTINCT outcome from `not_found`, never fold the two together. Use this when a merge has been " +
-        "pending for a long time and you want to confirm it's genuinely still working (a large elapsedMs " +
-        "alone doesn't mean it's stuck — check it against how long the project's gate normally takes) rather " +
-        "than concluding it's wedged.",
+      description,
       inputSchema: { opId: z.string() },
     },
     async ({ opId }) => {
       try {
-        return ok(sessions.gateStatus(opId));
+        return ok(sessions.gateStatus(opId, scopeSessionId));
       } catch (e) {
         return ok({ error: (e as Error).message });
       }
@@ -785,12 +808,16 @@ export class OrchestrationMcpRouter {
           }
         },
       );
-      // gate_status is NOT registered here (card edc1ec12 scoping): the worker's own MCP surface is a
-      // tested depth-1 invariant, held to EXACTLY { my_context, run_gate, worker_report } (my-context-gate.mjs,
-      // idle-report.mjs, inbox-pull.mjs all anchor this) — and a worker has no independent use for it anyway,
-      // since its own `run_gate` is already idempotent-retryable ("just re-call run_gate" IS its own status
-      // check). A manager, by contrast, genuinely needs this: it holds an opId from its OWN
-      // `worker_merge_confirm` pending response with no other way to check on it mid-flight.
+      // gate_status (card fc243a43): a worker's ONLY instrument for "is my run_gate op alive?" used to be
+      // re-calling run_gate itself — which is ALSO an action (it can attach to the in-flight op and return
+      // staleAgainstWorktree, a result the caller must discard) and exposes no `elapsedMs`. This is the
+      // read-only complement: SCOPED to this session's own ops (registerGateStatus's `scopeSessionId`), so
+      // a worker can check queued/running/elapsed without starting anything and cannot probe another
+      // session's run. The worker's tested depth-1 surface is now EXACTLY
+      // { gate_status, my_context, run_gate, worker_report } — my-context-gate.mjs, idle-report.mjs,
+      // inbox-pull.mjs, orch-scope.mjs, and mgmt-surface.mjs all pin this sorted list; update ALL of them
+      // if this surface ever changes again.
+      registerGateStatus(server, sessions, sessionId);
       return server;
     }
 

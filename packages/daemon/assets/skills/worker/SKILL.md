@@ -99,6 +99,17 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something else while still
      parked on this same gate may get reaped too — if you still need it once the nudge lands,
      re-schedule it then.
+   - **If you're unsure whether a long park means "still queued" or "actually stuck," CHECK before you
+     act — don't blind-fire `run_gate` again to find out.** `run_gate` returned an `opId`; pass that same
+     `opId` to `gate_status` (also on your tool list) to read its LIVE state — `queued`/`running` plus
+     `elapsedMs` — WITHOUT starting anything. It only ever shows YOU your own op; there's nothing to
+     configure. Re-calling `run_gate` itself is a real ACTION, not a free status check: it can attach to
+     your still-in-flight run and hand back a result you must then discard (`staleAgainstWorktree`) —
+     wasting a turn to learn what `gate_status` would have told you for free. Compare the `elapsedMs` it
+     reports against how long this project's gate normally takes before concluding it's wedged; a long
+     wait behind a shared concurrency cap is routine, not proof of a stall. This is a CHECK, not a
+     replacement for the nudge — don't poll it on a timer; use it when you're genuinely deciding whether to
+     keep waiting or escalate.
    - **If it reports your project has no gate command configured**, only then fall back to running your
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report
@@ -240,13 +251,14 @@ too, so prefer absolute paths there as well.
 ## Report protocol
 
 Your action/report tools live under the `mcp__loom-orchestration__` namespace — `worker_report`,
-`run_gate` (your DoD gate — see step 4), and `my_context` (you RECEIVE `worker_message`, and your manager
+`run_gate` (your DoD gate — see step 4), `gate_status` (a read-only check on your OWN gate op — see step
+4's note on checking vs re-firing), and `my_context` (you RECEIVE `worker_message`, and your manager
 may `worker_recycle` you — neither is a
 tool you call); board reads are `mcp__loom-tasks__tasks_get` / `tasks_list`; and the `mcp__loom-tasks__`
 namespace also gives you `wake_me` (schedule a wake — `delaySeconds` OR `minutes`, plus a `note`/`reason`;
 `wake_cancel` / `wake_list` manage pending wakes) and `task_requests_list` / `task_request_get` (read your
 card's connected Requests). Load them in ONE ToolSearch:
-`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
+`select:mcp__loom-orchestration__worker_report,mcp__loom-orchestration__run_gate,mcp__loom-orchestration__gate_status,mcp__loom-orchestration__my_context,mcp__loom-tasks__tasks_get,mcp__loom-tasks__tasks_list,mcp__loom-tasks__wake_me`.
 (`authenticated_request` — a proxied outbound HTTP call over a human-granted connection — exists **only
 when your session was provisioned such a connection**; assume it's absent unless your brief says otherwise.)
 

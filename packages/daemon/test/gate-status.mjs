@@ -42,6 +42,9 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
 const { GateSemaphore } = await import("../dist/orchestration/gate-semaphore.js");
+const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
+const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 const GIT_ID = "-c user.email=gst@loom -c user.name=gst";
 const now = new Date().toISOString();
@@ -89,6 +92,23 @@ const now = new Date().toISOString();
   check("(unit) an opId with no match at all returns kind:\"none\" — distinguishable from \"found\" and \"ambiguous\"", none.kind === "none");
   const tooShort = sem.findByOpId(OP_RUNNING.slice(0, 4));
   check("(unit) a ref shorter than the 8-char prefix floor never matches, even against a live op (too short to resolve safely)", tooShort.kind === "none");
+
+  // card fc243a43 — the worker-facing gate_status: `scopeSessionId` filters the CANDIDATE SET itself
+  // before prefix resolution, so a caller can never learn anything about another session's live op.
+  const ownScoped = sem.findByOpId(OP_RUNNING, "s1");
+  check("(unit) scopeSessionId=owner still resolves the entry (own op, full id)", ownScoped.kind === "found" && ownScoped.record.opId === OP_RUNNING);
+  const ownScopedPrefix = sem.findByOpId(OP_RUNNING.slice(0, 8), "s1");
+  check("(unit) scopeSessionId=owner still resolves the entry (own op, 8-char prefix)", ownScopedPrefix.kind === "found" && ownScopedPrefix.record.opId === OP_RUNNING);
+  const foreignScoped = sem.findByOpId(OP_RUNNING, "s2");
+  check("(unit) scopeSessionId=non-owner (s2, the OP_QUEUED owner) gets kind:\"none\" for s1's op — never \"found\"", foreignScoped.kind === "none");
+  // The ambiguous-prefix pair (OP_AMBIG_A owned by s3, OP_AMBIG_B owned by s4, set up just above) is the
+  // key proof: scoped to s3 alone, the SAME prefix that was ambiguous UNSCOPED now resolves UNIQUELY to
+  // s3's own op — a scoped caller's ambiguity is computed ONLY over its own ops, so it can never learn
+  // that a same-prefix op exists under a session it doesn't own (no count, no ids, not even "ambiguous").
+  const ambigScopedToOwner = sem.findByOpId("aaaaaaaa", "s3");
+  check("(unit) the SAME ambiguous prefix, scoped to s3, resolves UNIQUELY to s3's own op — never \"ambiguous\"", ambigScopedToOwner.kind === "found" && ambigScopedToOwner.record.opId === OP_AMBIG_A);
+  const ambigScopedToNobody = sem.findByOpId("aaaaaaaa", "s-nobody");
+  check("(unit) the SAME ambiguous prefix, scoped to a session that owns NEITHER candidate, resolves \"none\"", ambigScopedToNobody.kind === "none");
 
   hRunning.release("done");
   hAmbigA.release("done");
@@ -140,6 +160,48 @@ try {
     // indistinguishable from settled/nonexistent — even though the run was genuinely live.
     const prefixStatus = sessions.gateStatus(opId.slice(0, 8));
     check("(e2e gate) gate_status ALSO resolves an unambiguous 8-char opId PREFIX to the SAME live run", prefixStatus.state === "running" && prefixStatus.gateType === "worker");
+
+    // ── card fc243a43 — the worker-facing gate_status is SCOPED to the caller's own op ─────────────────
+    // A second worker in the SAME project, with no gate op of its own, must NOT be able to read the first
+    // worker's genuinely-in-flight op — the exact security question the card names as "the entire design
+    // question". Proven first at the service layer (sessions.gateStatus's scopeSessionId), then again at
+    // the real MCP tool-call boundary below.
+    const otherWorkerId = `${P}-wkr-other`;
+    db.insertSession({ id: otherWorkerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker" });
+
+    const ownScoped = sessions.gateStatus(opId, workerId);
+    check("(e2e scope) the OWNING worker reads its OWN in-flight op fine (state:\"running\")", ownScoped.state === "running" && ownScoped.gateType === "worker");
+    const foreignScoped = sessions.gateStatus(opId, otherWorkerId);
+    check("(e2e scope) a DIFFERENT worker in the same project CANNOT read that op by its opId — refused as \"not_found\", never \"running\"", foreignScoped.state === "not_found" && foreignScoped.gateType === null);
+
+    // Same proof again at the ACTUAL MCP tool-call boundary — each worker gets its own buildServer'd
+    // surface (mirrors production: sessionId is derived server-side from the URL path, never client-
+    // supplied), so this exercises the real registerGateStatus(server, sessions, sessionId) wiring, not
+    // just the service method directly.
+    const router = new OrchestrationMcpRouter(db, sessions);
+    const connect = async (sessionId) => {
+      const server = router.buildServer(sessionId, "worker");
+      const [clientT, serverT] = InMemoryTransport.createLinkedPair();
+      await server.connect(serverT);
+      const client = new Client({ name: `gate-status-scope-${sessionId}`, version: "0" });
+      await client.connect(clientT);
+      return { server, client, call: async (name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text) };
+    };
+
+    const owner = await connect(workerId);
+    check("(e2e scope, MCP) gate_status IS registered on the worker's own MCP surface", Object.keys(owner.server._registeredTools).includes("gate_status"));
+    const ownToolStatus = await owner.call("gate_status", { opId });
+    check("(e2e scope, MCP) the owning worker's gate_status tool call reports its OWN op's real state", ownToolStatus.state === "running" && ownToolStatus.gateType === "worker");
+
+    const stranger = await connect(otherWorkerId);
+    const strangerToolStatus = await stranger.call("gate_status", { opId });
+    check("(e2e scope, MCP) a DIFFERENT worker's gate_status tool call CANNOT read the owner's op — refused as \"not_found\"", strangerToolStatus.state === "not_found" && strangerToolStatus.gateType === null);
+    // ...and the same holds for the OWNER's short 8-char prefix — a stranger gets no partial credit either.
+    const strangerPrefixStatus = await stranger.call("gate_status", { opId: opId.slice(0, 8) });
+    check("(e2e scope, MCP) a stranger ALSO can't resolve the owner's op by its 8-char prefix", strangerPrefixStatus.state === "not_found");
+
+    await owner.client.close();
+    await stranger.client.close();
 
     releaseGate({ passed: true });
     await sleep(200); // let the settle .then() microtask actually clear the semaphore registry entry

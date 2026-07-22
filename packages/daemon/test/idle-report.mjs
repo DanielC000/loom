@@ -199,12 +199,13 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 
   check("(T) idle_report IS registered on the MANAGER surface", managerTools.includes("idle_report"));
   check("(T) idle_report is NOT on the worker surface", !workerTools.includes("idle_report"));
-  // Anchor the gate: the worker surface is exactly { my_context, run_gate, worker_report } (depth-1 tree
-  // holds at the surface). my_context is the own-occupancy self-assessment tool available to ANY role
-  // (5561afb8 added it to both role branches); worker_report is the worker-coordination tool; run_gate
-  // (card 7f96aa09) is the daemon-mediated DoD self-gate, added since this anchor was first written.
-  check("(T) worker surface is exactly { my_context, run_gate, worker_report }",
-    workerTools.slice().sort().join(",") === "my_context,run_gate,worker_report");
+  // Anchor the gate: the worker surface is exactly { gate_status, my_context, run_gate, worker_report }
+  // (depth-1 tree holds at the surface). my_context is the own-occupancy self-assessment tool available to
+  // ANY role (5561afb8 added it to both role branches); worker_report is the worker-coordination tool;
+  // run_gate (card 7f96aa09) is the daemon-mediated DoD self-gate; gate_status (card fc243a43) is the
+  // read-only, own-op-scoped complement to run_gate — both added since this anchor was first written.
+  check("(T) worker surface is exactly { gate_status, my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "gate_status,my_context,run_gate,worker_report");
   // Sanity: idle_report sits ALONGSIDE its siblings recycle_me / worker_report-less manager tools.
   check("(T) manager surface also carries its siblings (recycle_me, worker_spawn)",
     managerTools.includes("recycle_me") && managerTools.includes("worker_spawn"));

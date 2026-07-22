@@ -2125,9 +2125,16 @@ export class SessionService {
    * THIRD, distinguishable outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must
    * never collapse into `"not_found"`, which is exactly the bug being fixed: a miss that can't resolve is a
    * different answer than a miss that means "gone", and neither may impersonate the other.
+   *
+   * `scopeSessionId` (card fc243a43 — the worker-facing `gate_status`) is threaded straight to
+   * `GateSemaphore.findByOpId`'s own scoping: when set, the lookup only ever considers ops OWNED by that
+   * session (see its doc for why this is a candidate-set filter, not a post-hoc check — an op belonging to
+   * another session is indistinguishable from `not_found`/`ambiguous`-among-only-your-own-ops, never a
+   * distinct "forbidden" outcome that would itself leak that a foreign op exists). Omitted (the manager
+   * call site), behavior is unchanged.
    */
-  gateStatus(opId: string): { state: "queued" | "running" | "not_found" | "ambiguous"; gateType: GateType | null; elapsedMs: number | null; error?: string } {
-    const r = this.gateSemaphore.findByOpId(opId);
+  gateStatus(opId: string, scopeSessionId?: string): { state: "queued" | "running" | "not_found" | "ambiguous"; gateType: GateType | null; elapsedMs: number | null; error?: string } {
+    const r = this.gateSemaphore.findByOpId(opId, scopeSessionId);
     if (r.kind === "found") {
       const entry = r.record;
       return { state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since };

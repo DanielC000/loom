@@ -216,10 +216,18 @@ export class GateSemaphore {
    *  two apart, but BOTH are a real "no live run", unlike the ambiguous case. Entries with no `opId` (a run
    *  whose descriptor never carried a correlating one) are excluded from the candidate set entirely, so
    *  they can never spuriously satisfy a prefix match. O(n) over the live registry, which is bounded by
-   *  `maxConcurrentGates` + queue depth — never large enough to matter. */
-  findByOpId(opId: string): IdPrefixResult<GateSnapshotEntry> {
+   *  `maxConcurrentGates` + queue depth — never large enough to matter.
+   *
+   *  `scopeSessionId` (card fc243a43 — the worker-facing `gate_status`) restricts the CANDIDATE SET itself
+   *  to entries whose `descriptor.sessionId` matches, BEFORE prefix resolution runs — not just a post-hoc
+   *  filter on the result. A scoped caller's `ambiguous`/`none` outcomes are therefore computed only over
+   *  ITS OWN live ops: it can never learn that a same-prefix op exists under another session (no count, no
+   *  ids leak). Omitted (every pre-existing manager call site), this is byte-identical to before the param
+   *  existed. */
+  findByOpId(opId: string, scopeSessionId?: string): IdPrefixResult<GateSnapshotEntry> {
     const candidates = this.snapshot().entries
       .filter((e): e is GateSnapshotEntry & { opId: string } => e.opId != null)
+      .filter((e) => scopeSessionId == null || e.sessionId === scopeSessionId)
       .map((e) => ({ id: e.opId, entry: e }));
     const r = resolveIdPrefix(candidates, opId);
     if (r.kind === "found") return { kind: "found", record: r.record.entry };

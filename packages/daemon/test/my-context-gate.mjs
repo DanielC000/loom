@@ -206,20 +206,22 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const workerTools = toolNames("worker");
 
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
-  // `run_gate` (card 7f96aa09) and `gate_status` (card edc1ec12, manager-only) are DELIBERATE, reviewed
-  // exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand
-  // (daemon-mediated, through the GateSemaphore), and `gate_status` only READS the live GateSemaphore
-  // registry by opId — neither ever sets/configures gateCommand, so the trust boundary this check
-  // protects (no agent-writable gateCommand surface) is untouched by either.
+  // `run_gate` (card 7f96aa09) and `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
+  // the worker's own call is scoped to its own ops) are DELIBERATE, reviewed exceptions to the /gate/i
+  // sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the
+  // GateSemaphore), and `gate_status` only READS the live GateSemaphore registry by opId — neither ever
+  // sets/configures gateCommand, so the trust boundary this check protects (no agent-writable gateCommand
+  // surface) is untouched by either.
   const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",
     gateSetTool(workerTools) === undefined);
-  // The worker surface is exactly { my_context, run_gate, worker_report } — run_gate (card 7f96aa09) is
-  // the one deliberate addition since this assertion was written; anything else would be a surface leak.
-  check("(S) worker surface is STILL exactly { my_context, run_gate, worker_report }",
-    workerTools.slice().sort().join(",") === "my_context,run_gate,worker_report");
+  // The worker surface is exactly { gate_status, my_context, run_gate, worker_report } — run_gate (card
+  // 7f96aa09) and gate_status (card fc243a43, read-only + own-op-scoped) are the deliberate additions
+  // since this assertion was written; anything else would be a surface leak.
+  check("(S) worker surface is STILL exactly { gate_status, my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "gate_status,my_context,run_gate,worker_report");
   // my_context is present on BOTH role branches (it's the tool the gate is folded into).
   check("(S) my_context registered on both manager + worker surfaces",
     managerTools.includes("my_context") && workerTools.includes("my_context"));
