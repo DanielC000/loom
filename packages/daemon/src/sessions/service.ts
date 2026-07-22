@@ -33,7 +33,7 @@ import type { OrchestrationControl } from "../orchestration/control.js";
 import type { CodescapeSupervisor } from "../codescape/supervisor.js";
 import { isLikelyNearClaudeUsageLimit, getClaudeUsageLimitRetryAfter, getClaudeExpectedResetAt, UsageLimitError } from "../orchestration/usage-awareness.js";
 import { rateLimitDeadline } from "../orchestration/usage-limit.js";
-import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry } from "../orchestration/restart.js";
+import { RESTART_EXIT_CODE, isSupervised, writeRestartIntent, buildDaemon, resumeSetFromIntent, isNoOpManagerWake, extractCommitShas, supervisorScriptChangedSince, SUPERVISOR_CHANGED_WARNING, type RestartIntent, type RestartResumeEntry, type BuildDeps } from "../orchestration/restart.js";
 import { computeWakeImpact } from "../orchestration/wake-impact.js";
 import { resolveBackupConfig, takeBackup } from "../orchestration/db-backup.js";
 import { recordUndeliveredReport, isCrashRecoveryEligible } from "../orchestration/crash-recovery-watcher.js";
@@ -1875,23 +1875,40 @@ export class SessionService {
   }
 
   /**
-   * Manager-triggered daemon restart (the `daemon_restart` tool) — for SELF-HOSTING (orchestrating
-   * Loom WITH Loom). After a manager merges daemon-`src` worker branches, the new code isn't running
-   * until the daemon is rebuilt + restarted; this does that and brings the manager (+ its live
-   * workers) back on the other side via the restart-intent file (consumed in index.ts boot).
+   * Manager/platform-Lead-triggered daemon restart (the `daemon_restart` tool, registered on BOTH the
+   * manager's orchestration MCP and the Lead's platform MCP — card 39fcaad3) — for SELF-HOSTING
+   * (orchestrating Loom WITH Loom). After merging daemon-`src` worker branches, the new code isn't
+   * running until the daemon is rebuilt + restarted; this does that and brings the caller (+ its live
+   * workers, if any) back on the other side via the restart-intent file (consumed in index.ts boot).
    *
    * Safety: (1) refuses unless under the supervisor (LOOM_SUPERVISED) — otherwise nothing relaunches
    * the daemon; (2) REBUILDS FIRST while still alive, so a broken build aborts the restart and leaves
-   * the manager running to fix it, instead of exiting into a daemon that won't boot. On a green build
-   * it records intent and exits with RESTART_EXIT_CODE; the supervisor relaunches.
+   * the caller running to fix it, instead of exiting into a daemon that won't boot. On a green build
+   * it records intent and exits with RESTART_EXIT_CODE; the supervisor relaunches. Both gates are
+   * ROLE-INDEPENDENT — a platform-Lead caller gets the identical supervisor-check/rebuild-first/
+   * full-fleet-capture behavior a manager gets, not a weaker path (card 39fcaad3's investigation: the
+   * real safety here lives in these structural gates, not in which role holds the tool).
+   *
+   * `deps` is a TEST-ONLY injection seam (mirrors {@link BuildDeps} on `buildDaemon` itself and
+   * `resumeOne` on `resumeFleetOnBoot`) — every real caller (mcp/orchestration.ts, mcp/platform.ts) omits
+   * it, so production behavior is byte-identical to before it existed. Without it, exercising the
+   * `writeRestartIntent` call below from a test would mean either a REAL `pnpm install`/turbo build (slow,
+   * heavy, wrong for a hermetic unit test) or a REAL `process.exit(75)` (which would kill the test's own
+   * process) — `deps.buildDeps` lets a test fake an instant green build, and `deps.exit` lets it capture
+   * the intended exit instead of actually calling it.
    */
-  async requestDaemonRestart(managerSessionId: string, reason: string): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorWarning?: string }> {
-    const mgr = this.db.getSession(managerSessionId);
-    if (!mgr || mgr.role !== "manager") throw new Error("only a manager can restart the daemon");
+  async requestDaemonRestart(
+    callerSessionId: string, reason: string,
+    deps: { buildDeps?: BuildDeps; exit?: (code: number) => void } = {},
+  ): Promise<{ restarting: boolean; error?: string; supervisorChanged?: boolean; supervisorWarning?: string }> {
+    const caller = this.db.getSession(callerSessionId);
+    if (!caller || (caller.role !== "manager" && caller.role !== "platform")) {
+      throw new Error("only a manager or the platform Lead can restart the daemon");
+    }
     if (!isSupervised()) {
       return { restarting: false, error: "daemon is not running under the restart supervisor (pnpm daemon:stable) — cannot self-restart. Flag that the human must restart for your merged code to go live." };
     }
-    const build = await buildDaemon();
+    const build = await buildDaemon(deps.buildDeps);
     if (build.code !== 0) {
       return { restarting: false, error: `daemon build failed — NOT restarting (your code stays un-deployed but the daemon stays up). Fix and retry:\n${build.tail}` };
     }
@@ -1946,14 +1963,15 @@ export class SessionService {
     this.snapshotAllLive();
     writeRestartIntent({
       reason,
-      managerSessionId,
+      managerSessionId: callerSessionId,
       resume,
       requestedAt: new Date().toISOString(),
       ...(Object.keys(pending).length > 0 ? { pending } : {}),
     });
-    // Exit AFTER this MCP response flushes; the pty (incl. this manager) dies with the process, the
+    // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
-    setTimeout(() => process.exit(RESTART_EXIT_CODE), 300);
+    const exit = deps.exit ?? ((code: number) => process.exit(code));
+    setTimeout(() => exit(RESTART_EXIT_CODE), 300);
     return supervisorChanged
       ? { restarting: true, supervisorChanged: true, supervisorWarning: SUPERVISOR_CHANGED_WARNING }
       : { restarting: true };
@@ -2413,15 +2431,38 @@ export class SessionService {
         // card 90058589: the deploy REQUESTER is NEVER FYI-short-circuited — initiating a deploy is active
         // work, so it always gets the full "code is live — continue/verify" nudge (even at 0 live workers
         // with a stale done/waiting idle-policy, the case the old converged-FYI branch wrongly stalled).
-        // The requester (RestartIntent.managerSessionId) is always a manager — mounts loom-orchestration,
-        // so this nudge is deferred exactly like any other manager's (see this.deferredNudge below).
-        this.deferredNudge(
-          reqId,
-          `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
-          `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
-          `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
-          `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote,
-        );
+        // Card 39fcaad3: the requester is no longer ALWAYS a manager — the platform Lead can now request
+        // its own restart too (RestartIntent.managerSessionId is kept named for on-disk compat; read it as
+        // "the requester" — see its doc in orchestration/restart.ts). Dispatch via the role-aware
+        // `enqueueNudge` (already used for the non-requester manager/platform branch above) rather than
+        // calling `deferredNudge` directly: for role "manager" `enqueueNudge` calls that SAME
+        // `deferredNudge` (waits on `waitForMcpSeen`), so the manager path stays byte-identical; a
+        // platform-Lead requester never mounts loom-orchestration (see `usesOrchestrationMcp`), so
+        // `waitForMcpSeen` could never see it — `enqueueNudge` correctly delivers immediately instead of
+        // waiting out the MCP-ready timeout for a signal that would never fire.
+        // Derive from the DB (the authoritative, live source), NOT from `entries` alone: `entries` comes
+        // from `liveFleetResumeSet()`'s capture-time snapshot, which filters on `fs.existsSync(s.cwd)` —
+        // a platform Lead whose project home is transiently unreachable (network/removable path, an
+        // in-flight rename) would be dropped from `entries` at capture time yet still resumed here
+        // (`resumeOne(reqId)` runs unconditionally, un-gated on entries membership), and mis-derived as
+        // "manager" by the old `entries`-only lookup — reinstating exactly the pointless MCP-ready wait
+        // this fix removes. `entries` stays as a fast-path fallback (it's the pre-existing lookup, still
+        // correct whenever the requester's own row IS present), with "manager" as the final fallback for
+        // anything falling through both — the OLD-format resumeSetFromIntent path always is one (its
+        // synthesized requester entry is always role:"manager", so this default matches it exactly).
+        const reqRole = this.db.getSession(reqId)?.role ?? entries.find((e) => e.sessionId === reqId)?.role ?? "manager";
+        const reqText = reqRole === "platform"
+          // Lead-appropriate framing (mirrors the non-requester Lead branch above): no worktrees/workers
+          // of its own to report a resumed-count for.
+          ? `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+            `running daemon (reason: ${intent.reason}). The whole fleet across all projects was resumed too. ` +
+            `Re-orient from your home board and your living resume doc, then end-to-end verify the live ` +
+            `behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote
+          : `[loom:daemon-restarted] Rebuild + restart complete — your merged daemon code is now LIVE in the ` +
+            `running daemon (reason: ${intent.reason}). ${reqWorkersResumed}/${reqWorkers.length} of your live ` +
+            `workers were resumed (the rest of the fleet across all projects was resumed too). You can now ` +
+            `end-to-end verify the live behavior. Continue.` + RESUME_NUDGE_TAIL + reqDraftNote;
+        this.enqueueNudge(reqId, reqRole, reqText);
       }
     } else {
       failed.push(reqId);

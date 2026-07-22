@@ -1430,6 +1430,48 @@ export class PlatformMcpRouter {
       },
     );
 
+    // daemon_restart — the Lead-surface twin of the manager's orchestration.ts `daemon_restart` (card
+    // 39fcaad3: a daemon restart affecting ALL projects is a cross-project, platform-level concern the
+    // Lead already owns per doctrine — see assets/skills/platform-lead/SKILL.md's "own cross-project
+    // concerns" — but had no tool to act on it directly, forcing a two-session relay through a project
+    // manager for every self-hosting deploy). A platform session never reaches /mcp/:sessionId
+    // (resolveRole there gates manager/worker/assistant only), so without THIS registration a Lead has no
+    // way to call it — mirrors the manager tool's schema/description/delegation exactly; both call the
+    // SAME SessionService.requestDaemonRestart (whose role gate now accepts 'platform' too). The
+    // supervisor-only refusal, rebuild-first fail-closed behavior, and full-fleet capture/resume are
+    // ALL preserved verbatim — none of that safety is role-specific (see requestDaemonRestart's own doc).
+    server.registerTool(
+      "daemon_restart",
+      {
+        description:
+          "SELF-HOSTING ONLY (orchestrating Loom with Loom): rebuild + restart the Loom daemon so merged " +
+          "daemon-`src` code goes LIVE in the running process — a cross-project, platform-level action " +
+          "that's naturally yours to own (no need to relay execution through a project manager). This is " +
+          "a DEPLOY (per /platform-lead's safety posture) — it drops every live session across every " +
+          "project, the largest blast radius on this surface: get the human's go via `question_ask` " +
+          "FIRST, then fire this yourself. Use after " +
+          "you've merged worker/project branch(es) that change the daemon and you need the new behavior " +
+          "actually running (e.g. to end-to-end verify it). Loom REBUILDS FIRST: if the build fails it does " +
+          "NOT restart and returns the error (stays up — fix it and retry). On a green build the daemon " +
+          "restarts: EVERY live session across ALL projects is dropped, then the whole fleet — you " +
+          "included — is AUTOMATICALLY resumed with a note once it's back. Returns {restarting:true} on " +
+          "success, or {restarting:false, error} if unsupervised / build failed. If the deploy going live " +
+          "also touches scripts/daemon-supervisor.mjs (the OUTER process that spawned this daemon and is " +
+          "NOT re-execed by this restart), the success result additionally carries " +
+          "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does " +
+          "a manual `pnpm daemon:stable`; never report that part of the change as fully live.",
+        inputSchema: { reason: z.string() },
+      },
+      async ({ reason }) => {
+        if (!callerSessionId) return ok({ error: "no caller session" });
+        try {
+          return ok(await sessions.requestDaemonRestart(callerSessionId, reason));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // --- projects (cross-project structural edits; config changes go through project_configure) ---
     server.registerTool(
       "project_update",

@@ -74,9 +74,13 @@ export interface RestartResumeEntry {
 export interface RestartIntent {
   reason: string;
   /**
-   * The manager that REQUESTED the restart. It alone is re-prompted ("your merged code is now live —
-   * continue/verify"); every OTHER captured session resumes as-is. Always present in `resume` too (it
-   * is itself a live session) — this field only marks WHICH of them is the requester.
+   * The session that REQUESTED the restart — a manager, OR (card 39fcaad3) the platform Lead calling
+   * its own `daemon_restart` twin. Kept named `managerSessionId` for on-disk compat (an in-flight
+   * intent written by an older daemon must still deserialize on the new one across exactly the
+   * upgrade this field's meaning widened in) — read it as "the requester", not literally "a manager".
+   * It alone is re-prompted ("your merged code is now live — continue/verify"); every OTHER captured
+   * session resumes as-is. Always present in `resume` too (it is itself a live session) — this field
+   * only marks WHICH of them is the requester.
    */
   managerSessionId: string;
   /**
