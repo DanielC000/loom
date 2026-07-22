@@ -3609,8 +3609,12 @@ export class PtyHost {
    *  - Confirmed / stale generation / the session died by the time the wait elapses → stop, nothing more.
    *  - Not confirmed and attempts remain → log it (this IS the live validation the merge gate wants:
    *    it proves whether a real drop/swallow happened) and re-send `\r` for the next attempt.
-   *  - Not confirmed and out of attempts → give up: log an error, recover busy (setBusy(false)) so the
-   *    session is never left busy=true with an unsent composer forever, AND clear the stranded injection
+   *  - Not confirmed and out of attempts → GIVE-UP SUPPRESSED (card 71de1f9c) if the engine produced any
+   *    output after this final Enter write — that's strong evidence the Enter registered and a turn is
+   *    actually running, just with a slow-to-confirm hook; do nothing and let the real Stop/UserPromptSubmit
+   *    (however late) finalize normally. Otherwise (genuinely no output at all) → GIVE-UP RECOVERY: log an
+   *    error, recover busy (setBusy(false)) so the session is never left busy=true with an unsent composer
+   *    forever, AND clear the stranded injection
    *    (card ee082fbb) — but ONLY when `composerLen === 0`. `composerLen` tracks ONLY human raw-terminal
    *    keystrokes (never our own `pty.write`), so `===0` proves the composer holds NOTHING but this
    *    give-up'd injection — a human never got a chance to start a draft during the failed retries (if one
@@ -3678,6 +3682,9 @@ export class PtyHost {
     if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
     if (attempt > 1) live.pty.write(BRACKET_PASTE_START + BRACKET_PASTE_END);
     live.pty.write(ENTER);
+    // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
+    // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.
+    const enterWrittenAt = Date.now();
     // eslint-disable-next-line no-console
     console.log(`[submit] ${sessionId} Enter attempt ${attempt}/${SUBMIT_MAX_ATTEMPTS} written — awaiting confirmation`);
     setTimeout(() => {
@@ -3688,8 +3695,45 @@ export class PtyHost {
         console.log(`[submit] ${sessionId} Enter attempt ${attempt} NOT confirmed within ${SUBMIT_VERIFY_TIMEOUT_MS}ms — retrying`);
         this.sendEnterAndVerify(sessionId, attempt + 1, gen);
       } else {
+        // Card 71de1f9c: most give-ups are FALSE NEGATIVES — the Enter genuinely registered and a turn is
+        // running, only the confirming hook's round-trip is slow (observed under fleet load: 79% of a
+        // measured sample of give-ups WERE followed by a UserPromptSubmit for the same session). Treating
+        // every give-up as a real failure is actively harmful, not just imprecise: clearing busy here
+        // reopens enqueueStdin's `!live.busy` immediate-submit path, so the NEXT message can land — and get
+        // interleaved with — a turn that is actually still generating (the owner-reported "text sitting in
+        // the input field, unsent" symptom). Distinguish the two cases with `lastOutputAt` (bumped on every
+        // real pty.onData chunk, already used the same way by healIfStuck): if the engine produced ANY
+        // output after THIS attempt's own Enter write, the Enter almost certainly reached and registered
+        // with the engine — by attempt>1 (always true at give-up in production), the reassert above already
+        // guaranteed the paste was closed going into this Enter, so a landed keystroke here can only be a
+        // real submit, not paste-content-swallowing. Anchoring on the FINAL Enter write (not on submit()'s
+        // own start) is required: the pasted body's own render bumps lastOutputAt within the very first
+        // attempt, long before give-up, so anchoring any earlier makes the check vacuously true and useless.
+        // Real-engine measurement (not a guess): a claude sitting genuinely idle at the composer emitted
+        // ZERO pty output over an 85+ second observation window on this project's own live fleet, while a
+        // concurrently-busy session's output stream grew continuously in the same window — confirming idle
+        // claude does not emit periodic output (no spinner/repaint chatter) that could make this discriminator
+        // misfire on a genuine drop. If this read is ever wrong regardless, healIfStuck's existing stale
+        // backstop (busySince AND lastOutputAt both stale) still recovers a truly-wedged session — just not
+        // as fast as this branch would have.
+        //
+        // REJECTED ALTERNATIVE — do not "simplify" this back into a bigger SUBMIT_VERIFY_TIMEOUT_MS. Give-
+        // ups are CONTENTION-DRIVEN BURSTS, not uniformly-distributed slow hooks (measured: median gap
+        // between consecutive give-ups is 12 log lines vs ~39 expected under a uniform distribution, 34% land
+        // within 10 lines of each other, and local [submit]+[hook] log density around a give-up is 54.3 vs
+        // 43.7 baseline — give-ups cluster where the daemon is already busy). A larger constant is therefore
+        // LOAD-SENSITIVE: it just relocates the threshold to wherever fleet contention happens to peak next,
+        // the same anti-pattern this project has hit and reverted repeatedly (cards 595aad10, fea23514,
+        // 0fa5beef). Keying on `lastOutputAt` instead is LOAD-TOLERANT — it asks "did the engine actually do
+        // something" rather than "did enough wall-clock time pass," so it stays correct regardless of how
+        // bad the contention gets.
+        if (l.lastOutputAt > enterWrittenAt) {
+          // eslint-disable-next-line no-console
+          console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); leaving busy=true for the real Stop/UserPromptSubmit to finalize`);
+          return;
+        }
         // eslint-disable-next-line no-console
-        console.error(`[submit] ${sessionId} gave up after ${attempt} Enter attempts — turn never confirmed started; recovering busy so the session doesn't wedge`);
+        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge`);
         // card ee082fbb: clear the stranded injection — ONLY when the composer holds nothing but it (no
         // human draft started during the failed retries; see the class doc above for the composerLen===0
         // safety reasoning and the real-claude findings behind exact-backspace as the clear mechanism).
