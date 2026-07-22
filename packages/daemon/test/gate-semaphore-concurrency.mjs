@@ -239,6 +239,15 @@ try {
     const reposDir = path.join(os.tmpdir(), `loom-gs-repos-a-${sfx}`);
     const { db, mgrId, workers } = await seedTwoWorkers(sfx, reposDir);
 
+    // (A) deliberately keeps a plain fixed sleep — do NOT replace it with (B)'s rendezvous barrier.
+    // (A)'s maxActive===1 bound is guaranteed STRUCTURALLY by the real cap-1 GateSemaphore mutex: under
+    // cap 1, worker[2]'s call cannot even reach fakeGate until worker[1]'s call has fully exited and
+    // released the slot (release happens in runExclusive's finally, after fn resolves) — there is never
+    // a moment where 2 calls are inside fakeGate concurrently, regardless of how slow pre-gate git work
+    // is. There is no wall-clock coincidence here to de-race. Applying a 2-arrival barrier to THIS gate
+    // would be wrong: arrived would never reach 2 while the cap holds, so the wait would always run out
+    // the bound before falling through — turning a fast, reliable PASS into a slow one at best, and at
+    // worst inviting a future edit to shrink/remove the bound and reintroduce a hang.
     let active = 0, maxActive = 0, calls = 0;
     const fakeGate = async () => {
       calls++; active++; maxActive = Math.max(maxActive, active);
@@ -265,10 +274,31 @@ try {
     const { db, mgrId, workers } = await seedTwoWorkers(sfx, reposDir);
     db.setPlatformConfig({ maxConcurrentGates: 2 });
 
-    let active = 0, maxActive = 0, calls = 0;
+    // Rendezvous barrier, not a blind sleep: (B) needs to PROVE both gates are in-flight together, not
+    // hope a fixed sleep outlasts whatever real git-prep work precedes it under host load (the bug this
+    // card fixes — see the card body / commit message for the incident). Each fakeGate call announces
+    // arrival; the 2nd arrival releases the barrier, so overlap is observed directly instead of timed.
+    //
+    // BOUND_MS is deliberately generous — 8s, not ~1s — by design, not oversight: on the PASS path the
+    // barrier resolves near-instantly (no wall-clock wait at all), so a large bound costs nothing when
+    // things work. It only matters on the FAIL path, where a genuinely-broken cap needs to give up and
+    // report red rather than hang — and a fast-but-tight bound there just reintroduces a narrower version
+    // of the same host-load flake this card exists to remove (pre-gate git-prep skew under load has to
+    // stay well under BOUND_MS or a correct cap-2 semaphore fails anyway). Do not dial this down as
+    // "wasteful" without re-reading this comment — this project has already shipped that exact mistake
+    // once (6c3d2d3 widened a different timing constant and it still didn't hold).
+    const BOUND_MS = 8000;
+    let active = 0, maxActive = 0, calls = 0, arrived = 0, barrierTimedOut = false;
+    let releaseBarrier;
+    const barrier = new Promise((resolve) => { releaseBarrier = resolve; });
     const fakeGate = async () => {
       calls++; active++; maxActive = Math.max(maxActive, active);
-      await sleep(150);
+      if (++arrived === 2) releaseBarrier();
+      const outcome = await Promise.race([
+        barrier.then(() => "resolved"),
+        sleep(BOUND_MS).then(() => "timed-out"),
+      ]);
+      if (outcome === "timed-out") barrierTimedOut = true;
       active--;
       return { passed: true };
     };
@@ -280,7 +310,15 @@ try {
       sessions.confirmWorkerMerge(mgrId, workers[1]),
     ]);
     check("(B) both confirms ran the gate", calls === 2);
-    check("(B) cap 2 actually let both gates run concurrently (not a silent hardcoded serialize)", maxActive === 2);
+    // A barrier timeout and a real cap-honoring serialization both observably leave maxActive at 1 — an
+    // ambiguous signal is exactly what this de-race is supposed to remove, so the two are reported with
+    // distinct, diagnosable messages rather than one shared label.
+    check(
+      barrierTimedOut
+        ? `(B) cap 2 actually let both gates run concurrently — barrier timed out after ${BOUND_MS}ms: the two gates never overlapped within the bound, meaning either the semaphore cap is not being honored, or the host is pathologically slow (BOUND_MS is deliberately generous — rule out host load before suspecting the semaphore)`
+        : "(B) cap 2 actually let both gates run concurrently (not a silent hardcoded serialize)",
+      !barrierTimedOut && maxActive === 2,
+    );
     check("(B) both merges succeeded", r1.merged === true && r2.merged === true);
   }
 } finally {
