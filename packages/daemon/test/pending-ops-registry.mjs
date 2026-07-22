@@ -227,9 +227,13 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   check("(clobber guard) peek shows nothing immediately after eviction", reg.peek("k6") === undefined);
 
   // A fresh attach() under the SAME key starts run_C — a genuinely new, live-owner op (mirrors
-  // confirmWorkerMergeTracked's fresh confirm after evicting a dead-owner zombie).
+  // confirmWorkerMergeTracked's fresh confirm after evicting a dead-owner zombie). Manually-resolved,
+  // same as run_A (card fea23514 de-race) — a real timer here previously self-evicted at a fixed ~30ms
+  // wall-clock mark that raced the "survives" assertion below under host load; a held resolver removes
+  // that race entirely instead of widening the margin.
   let runCStarted = false;
-  const runC = async () => { runCStarted = true; await sleep(30); return { fromC: true }; };
+  let resolveC;
+  const runC = () => { runCStarted = true; return new Promise((resolve) => { resolveC = resolve; }); }; // never settles on its own — resolved explicitly below
   const pendingC = await reg.attach("k6", "merge", "liveMgr", 10, runC);
   check("(clobber guard) run_C actually started under the same key", runCStarted === true);
   check("(clobber guard) run_C is tracked as running (the successor), NOT re-attached to run_A", pendingC.settled === false && pendingC.op.managerSessionId === "liveMgr");
@@ -239,12 +243,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   // against it. THIS is the exact clobber the CR flagged: without the identity guard, this delete-by-key
   // wipes out run_C's live entry out from under it.
   resolveA({ fromA: true });
-  await sleep(5); // let run_A's .then() microtask actually run
+  // A fixed short delay (not a race): this attach() call passed no retainMs/onSettledAfterPending, so
+  // PendingOpRegistry's settle callback for this key is plain synchronous code — no setTimeout/setImmediate
+  // hop (retain()'s own timer is the only macrotask in the settle path, and it's opt-in via retainMs, which
+  // this call doesn't set). Node fully drains the microtask queue — including run_A's `.then()` registered
+  // inside attach() — before any timer callback fires, so any positive delay here is sufficient regardless
+  // of host load; this is not competing against a moving deadline the way run_C's old internal sleep(30) was.
+  await sleep(5);
   check("(clobber guard) run_C's entry SURVIVES run_A's late settle — NOT clobbered", reg.peek("k6") !== undefined && reg.peek("k6").managerSessionId === "liveMgr");
   check("(clobber guard) run_A's own completion nudge does NOT spuriously fire against the successor", nudgesA.length === 0);
 
-  // Let run_C itself actually settle — ITS OWN settle (identity matches) correctly evicts.
-  await sleep(40);
+  // Resolve run_C explicitly — ITS OWN settle (identity matches) correctly evicts. Same fixed-short-delay
+  // reasoning as above applies here too: run_C's settle callback is equally synchronous/timer-free, so this
+  // is a microtask-flush wait, not a deadline race.
+  resolveC({ fromC: true });
+  await sleep(5);
   check("(clobber guard) run_C's OWN settle correctly evicts once IT finishes", reg.peek("k6") === undefined);
 }
 
