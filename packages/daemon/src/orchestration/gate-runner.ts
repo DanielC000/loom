@@ -59,13 +59,21 @@ export const GATE_TIMEOUT_EXTEND_ENABLED = process.env.LOOM_GATE_TIMEOUT_EXTEND_
 /** One gate step's outcome: exit code, spawn error (if any), the signal that killed it (if any — e.g. an
  *  OOM SIGKILL, or our own timeout-kill), whether OUR timeout bound was what killed it, and the bounded
  *  combined stdout+stderr tail. `signal`/`timedOut` are captured (not yet acted on) so a later change
- *  (card bcba83a1) can classify an OOM/SIGKILL kill distinctly from a genuine non-zero exit. */
+ *  (card bcba83a1) can classify an OOM/SIGKILL kill distinctly from a genuine non-zero exit.
+ *  `decidedAt` (card 9f3164b8) is `performance.now()` at the instant the outcome was DECIDED — i.e. when
+ *  the close/error event fired, or when the timeout branch chose to kill rather than extend — BEFORE any
+ *  async teardown (the timeout path's `killGateProcessTree`, a real OS-process wait that can itself run
+ *  hundreds of ms under host contention). A caller measuring step latency against `decidedAt` gets the
+ *  time the DECISION took, uncontaminated by teardown cost that isn't part of what's being measured; a
+ *  caller that wants total wall time including teardown still has that in its own measurement of when the
+ *  promise resolved. Purely additive/diagnostic — never read by any decision in this file. */
 export interface GateStepResult {
   status: number | null;
   error?: Error;
   signal?: NodeJS.Signals | null;
   timedOut?: boolean;
   outputTail?: string;
+  decidedAt?: number;
 }
 
 /** Real, NON-BLOCKING runner for one gate step (`spawn`, not `spawnSync` — see the note below). Same
@@ -135,11 +143,11 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   let settled = false;
   let extended = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const done = (result: Omit<GateStepResult, "outputTail">) => {
+  const done = (result: Omit<GateStepResult, "outputTail" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
-    resolve({ ...result, outputTail: tail() });
+    resolve({ ...result, outputTail: tail(), decidedAt: performance.now() });
   };
   // ONE-TIME AUTO-EXTEND (card 24642c3d — the false-fail-under-fleet-load fix): fires when `timeoutMs` is
   // hit. If the child has been idle (no stdout/stderr byte) for less than GATE_EXTEND_IDLE_MS, it's still
@@ -166,11 +174,12 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
       return;
     }
     settled = true;
+    const decidedAt = performance.now(); // captured BEFORE the async tree-kill below — see GateStepResult.decidedAt
     void killGateProcessTree(child).finally(() => {
       resolve({
         status: null,
         error: new Error(`gate step exceeded ${timeoutMs}ms${extended ? " (after one auto-extend)" : ""}`),
-        signal: "SIGKILL", timedOut: true, outputTail: tail(),
+        signal: "SIGKILL", timedOut: true, outputTail: tail(), decidedAt,
       });
     });
   };
