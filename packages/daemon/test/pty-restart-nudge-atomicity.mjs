@@ -59,6 +59,14 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Poll for `cond()` instead of a blind fixed sleep, bounded by a generous ceiling so a genuinely broken
+// case still fails loudly rather than hanging. See the (A) write-contiguity block below for WHY a fixed
+// sleep is wrong here (card 2b9adeed).
+const waitUntil = async (cond, ceilingMs = 8000, intervalMs = 20) => {
+  const deadline = performance.now() + ceilingMs;
+  while (!cond() && performance.now() < deadline) await sleep(intervalMs);
+  return cond();
+};
 
 // Hermetic LOOM_HOME + tight, test-only timing windows — all read at MODULE IMPORT time (host.ts), so
 // they must be set BEFORE importing host.js. PTY_WRITE_CHUNK_BYTES/_DELAY_MS are shrunk/widened (env
@@ -135,20 +143,43 @@ try {
     check("(A) mid-race: the kickoff-guarantee QUEUED the kickoff instead of writing it now",
       host.getPending(SID).includes(KICKOFF));
 
-    // Let the nudge's writeChunked chain fully finish (no interleave to break it). Empirically the
-    // fake-timer chain (39 chunks @ 15ms + scheduling overhead) settles around ~800ms; wait generously.
-    await sleep(900);
-    check("(A) the NUDGE landed as ONE CONTIGUOUS write — no interleave broke it", writtenOf(fa).includes(NUDGE));
+    // Let the nudge's writeChunked chain fully finish (no interleave to break it). This chain is 39 real
+    // setTimeout ticks (@15ms) — its wall-clock duration is NOT fixed, so wait for the actual condition
+    // instead of guessing a duration (card 2b9adeed, was `await sleep(900)`):
+    //   - measured on a QUIET host (40 sequential trials, real dist build): mean 644ms, p90 686ms, MAX
+    //     779.6ms — already only ~320ms (~29%) under the old 1100ms (200+900) budget.
+    //   - this project's own timing-test-constants-vs-scheduling-jitter finding (card 9f3164b8) measured
+    //     ~1.6s of real scheduling delay on a loaded gate host — an order of magnitude bigger than that
+    //     margin, and enough on its own to blow the old fixed sleep.
+    //   - falsified: a scratch harness that fires the second Stop with NO wait (forcing the two chains'
+    //     setTimeout chains to genuinely interleave on the SAME fake pty, since neither writeChunked nor
+    //     deliverHook's Stop branch gate on a prior chain's completion) reproduced this exact 3-assertion
+    //     failure pattern (NUDGE/KICKOFF contiguity + FIFO order all FAIL, "exactly two submits" still
+    //     PASSes) byte-for-byte against real dist code. The same harness, gated on `waitUntil` below
+    //     instead of firing blind, went green. So polling for the real condition — not a bigger guess —
+    //     is what removes the flake.
+    //   - WHY waiting for actual completion is also the CORRECT simulation, not just a workaround: in
+    //     production a Stop hook can only ever be delivered by the real Claude CLI after it has processed
+    //     a turn, which requires Enter to have already landed — and Enter is only sent from writeChunked's
+    //     own `done` callback (submit(), host.ts), i.e. strictly AFTER the chain fully completes. A real
+    //     Stop can therefore never race an in-flight chain; this test's hand-driven `deliverHook(Stop)`
+    //     must mirror that same ordering to stay a faithful simulation, not fire on a wall-clock guess.
+    const nudgeSettled = await waitUntil(() => writtenOf(fa).includes(NUDGE));
+    check("(A) the NUDGE landed as ONE CONTIGUOUS write — no interleave broke it", nudgeSettled);
 
     // End the nudge's turn (a Stop for it) — drains the QUEUED kickoff (the guarantee is preserved: it
-    // was held, never dropped) as its own, now-unraced, submit.
+    // was held, never dropped) as its own, now-unraced, submit. Only fired once the nudge chain is
+    // CONFIRMED complete above — see the WHY block above for why this ordering is load-bearing, not
+    // cosmetic: firing it early is exactly the forced-failure scenario that was falsified.
     host.deliverHook(SID, { hook_event_name: "Stop" });
     check("(A) the queued kickoff drains as a SECOND, separate bracketed paste", countIn(fa, PASTE_START) === 2);
     check("(A) pending is now empty (the kickoff was delivered, not stranded)", host.getPending(SID).length === 0);
 
-    await sleep(900); // let the kickoff's own writeChunked chain fully finish (same generous margin as above)
+    // Same reasoning as the nudge above: poll for the kickoff's own chain to actually finish (measured
+    // quiet-host max 673ms against the old fixed 900ms sleep — only ~227ms/~25% margin) instead of guessing.
+    const kickoffSettled = await waitUntil(() => writtenOf(fa).includes(KICKOFF));
     check("(A) the KICKOFF also landed as ONE CONTIGUOUS write — the guarantee delivered it intact",
-      writtenOf(fa).includes(KICKOFF));
+      kickoffSettled);
     check("(A) FIFO ORDER preserved — the nudge (queued+drained first) precedes the kickoff in the write log",
       writtenOf(fa).indexOf(NUDGE) < writtenOf(fa).indexOf(KICKOFF));
     check("(A) exactly two submits total (nudge + kickoff) — never a third phantom write", countIn(fa, PASTE_START) === 2);
