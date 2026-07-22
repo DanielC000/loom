@@ -70,6 +70,217 @@ function writeBase(name: string, content: string): void {
   atomicWriteFile(baseFile(name), content);
 }
 
+// --- Per-file (references/**, scripts/**, …) tracking ----------------------------------------------
+// Everything above tracks ONLY SKILL.md. A skill dir can carry other files (reference docs, helper
+// scripts, a NOTICE) that seed.ts backfills seed-if-absent (cpSync force:false) and then never touches
+// again — an edit to an already-seeded one of these never reached an existing install (board card
+// 75a0755d). The functions below extend base-snapshot tracking to the WHOLE skill directory so those
+// files fast-forward too, on the same pristine-only, never-clobber terms as SKILL.md.
+//
+// Base snapshots for these files live at SKILL_BASE_DIR/<name>/<relPath>, mirroring the skill's own
+// tree — a SIBLING of the flat <name>.md used for SKILL.md's base, never colliding with it (one is a
+// file, the other a directory) and never re-injected (SKILL_BASE_DIR is outside SKILLS_DIR).
+//
+// Pre-fast-forward backups (the one-time safety net below) live under a reserved
+// SKILL_BASE_DIR/.pre-ff-backups/<name>/<relPath> namespace — `.pre-ff-backups` can never collide with
+// a real skill name (NAME_RE forbids a leading dot).
+const FILE_BASE_ROOT = SKILL_BASE_DIR;
+const PRE_FF_BACKUP_ROOT = path.join(SKILL_BASE_DIR, ".pre-ff-backups");
+const toOsPath = (root: string, name: string, relPath: string): string => path.join(root, name, ...relPath.split("/"));
+const storeExtraFile = (name: string, relPath: string): string => toOsPath(SKILLS_DIR, name, relPath);
+const assetExtraFile = (name: string, relPath: string): string => toOsPath(ASSET_SKILLS, name, relPath);
+const fileBasePath = (name: string, relPath: string): string => toOsPath(FILE_BASE_ROOT, name, relPath);
+const fileBackupPath = (name: string, relPath: string): string => toOsPath(PRE_FF_BACKUP_ROOT, name, relPath);
+
+/** Recursively list files under `root` as POSIX-style relative paths ("references/foo.md"). Missing/
+ *  unreadable dir → []. Used to enumerate a skill's non-SKILL.md files on both the store and asset side. */
+function walkFiles(root: string): string[] {
+  const out: string[] = [];
+  const rec = (dir: string, prefix: string): void => {
+    let entries: fs.Dirent[];
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+    for (const e of entries) {
+      const rel = prefix ? `${prefix}/${e.name}` : e.name;
+      if (e.isDirectory()) rec(path.join(dir, e.name), rel);
+      else if (e.isFile()) out.push(rel);
+    }
+  };
+  rec(root, "");
+  return out;
+}
+
+/** Every non-SKILL.md relative file path for a bundled skill, from the STORE side only. Walking the
+ *  asset side too would be redundant here: every call site below (customization state, base backfill,
+ *  advance) reads `mine` from the store FIRST and bails to a no-op the instant it's missing — and by
+ *  the time any of these run, seed.ts's cpSync(force:false) has already copied a brand-new asset file
+ *  into the store, so an asset-only path (not yet copied) would never do anything but add a redundant
+ *  directory walk per skill per call. A store-only path (removed from a later bundle) still enumerates
+ *  correctly — see the deletions note on advancePristineExtraFiles. */
+function extraFileRelPaths(name: string): string[] {
+  return walkFiles(path.join(SKILLS_DIR, name)).filter((p) => p !== "SKILL.md").sort();
+}
+
+/** Heuristic binary-file sniff (a NUL byte in the first 8KB — the same signal git/most tools use).
+ *  Reading a binary file as utf8 (as every other function in this module does) mangles it into
+ *  replacement characters on the very first read; writing that back would corrupt the store file AND
+ *  the "recoverable" backup with the SAME mangled bytes, defeating the safety net exactly when it's
+ *  needed. Only reachable via extraFileRelPaths (references/scripts/…, never SKILL.md), so this is
+ *  purely a latent-future guard — no bundled skill ships a binary file today — not a proper binary FF
+ *  path: a binary file is simply left alone (never tracked, compared, or advanced), same "leave it"
+ *  posture as a file with no shipped counterpart. Unreadable path → false (let the normal
+ *  readFileOrNull path decide; nothing to sniff). */
+function isBinaryFile(p: string): boolean {
+  let fd: number;
+  try { fd = fs.openSync(p, "r"); } catch { return false; }
+  try {
+    const buf = Buffer.alloc(8000);
+    const bytesRead = fs.readSync(fd, buf, 0, buf.length, 0);
+    for (let i = 0; i < bytesRead; i++) if (buf[i] === 0) return true;
+    return false;
+  } catch { return false; } finally { fs.closeSync(fd); }
+}
+
+/**
+ * base/mine/shipped for ONE non-SKILL.md file of a bundled skill. Unlike threeVersions (SKILL.md,
+ * missing base ?? SHIPPED — conservative, because a real edit surface exists for SKILL.md via the
+ * Skills UI), a missing base here falls back to `mine`: every skill write route (`PUT/POST
+ * /api/skills/:name`, `/adopt`, `/reset`, `/publish`) reads/writes SKILL.md only, so NO product surface
+ * can ever edit a reference doc or helper script file — on-disk drift here can only be an old seed,
+ * never a legitimate edit. Falling back to `mine` records "last synced" accurately instead of permanently
+ * freezing already-stale content as customized (which `?? shipped` would do). null when there's no
+ * store copy (nothing to compare), no shipped counterpart (removed from the bundle — see the deletions
+ * note below; leave the store file alone rather than comparing it to nothing), or either side looks
+ * binary (see isBinaryFile — leave it alone rather than risk a utf8-mangled read/write).
+ */
+function fileThreeVersions(name: string, relPath: string): { base: string; mine: string; shipped: string } | null {
+  const storePath = storeExtraFile(name, relPath);
+  if (isBinaryFile(storePath)) return null;
+  const mine = readFileOrNull(storePath);
+  if (mine == null) return null;
+  const assetPath = assetExtraFile(name, relPath);
+  if (isBinaryFile(assetPath)) return null;
+  const shipped = readFileOrNull(assetPath);
+  if (shipped == null) return null;
+  const base = readFileOrNull(fileBasePath(name, relPath)) ?? mine;
+  return { base, mine, shipped };
+}
+
+/** Write `content` as one file's base snapshot (tmp+rename via atomicWriteFile, creating parent dirs as
+ *  needed) — the per-file analog of writeBase, shared by seedFileBaseSnapshots (base := mine, first
+ *  sight), advanceExtraFile (base := shipped, on fast-forward), and resetSkillToBundled (base := shipped,
+ *  on explicit discard — see its own doc for why the WHOLE directory's bases must move together). */
+function writeFileBaseSnapshot(name: string, relPath: string, content: string): void {
+  const basePath = fileBasePath(name, relPath);
+  fs.mkdirSync(path.dirname(basePath), { recursive: true });
+  atomicWriteFile(basePath, content);
+}
+
+/**
+ * Backfill the per-file `base` snapshot for every bundled skill's non-SKILL.md files that have none —
+ * seed-if-absent, mirrors seedBaseSnapshots but base := MINE (see fileThreeVersions' doc for why: no
+ * edit surface exists for these files, so the current store content IS an accurate "last synced" point,
+ * unlike SKILL.md where base := shipped is the safe read). Called from seedGlobalSkills() at boot,
+ * AFTER seedBaseSnapshots() (ordering is not load-bearing between the two, but mirrors it) and BEFORE
+ * autoFastForwardPristineSkills() (base must exist for that equality to mean anything).
+ *
+ * Runs before the DB even opens, across the WHOLE store (every bundled skill's every file) — a wider
+ * surface than the single-file-per-skill seedBaseSnapshots, so a per-skill try/catch here is NOT
+ * optional the way it might look by parity: one bad file (a permission error, a weird special file)
+ * must not take the whole boot sequence down with it. Returns "name/relPath" for every file backfilled.
+ */
+export function seedFileBaseSnapshots(): string[] {
+  const seeded: string[] = [];
+  for (const name of bundledNames()) {
+    try {
+      for (const relPath of extraFileRelPaths(name)) {
+        const basePath = fileBasePath(name, relPath);
+        if (fs.existsSync(basePath)) continue; // already snapshotted — never clobber (seed-if-absent)
+        const storePath = storeExtraFile(name, relPath);
+        if (isBinaryFile(storePath)) continue; // leave binary files untracked — see isBinaryFile's doc
+        const mine = readFileOrNull(storePath);
+        if (mine == null) continue; // not (yet) in the store — nothing to snapshot
+        if (readFileOrNull(assetExtraFile(name, relPath)) == null) continue; // no shipped counterpart —
+        // removed from the bundle (the deletions policy): leave it alone COMPLETELY, not just
+        // untouched-but-tracked — recording a base for a file we'll never compare against again is
+        // pointless disk churn and confusing state, not merely inert.
+        writeFileBaseSnapshot(name, relPath, mine);
+        seeded.push(`${name}/${relPath}`);
+      }
+    } catch { /* best-effort per skill — a bad file must never break boot */ }
+  }
+  return seeded;
+}
+
+/**
+ * Advance ONE non-SKILL.md file to `shipped`, first taking a ONE-TIME backup of what's about to be
+ * overwritten (SKILL_BASE_DIR/.pre-ff-backups/<name>/<relPath>) if — and only if — no backup exists yet
+ * for this exact file. This is the recoverability net for the one residual risk in the base:=mine
+ * backfill above: if a file's on-disk content before this fix shipped happened to be a rare, out-of-
+ * band hand-edit (no product surface makes this possible, but the file is still just a plain file on
+ * disk) rather than genuine staleness, the pre-overwrite content is never lost — it's one rename away
+ * under .pre-ff-backups. The backup is written ONCE per file, ever: a file that's already been through
+ * one fast-forward has no more "was this actually customized" ambiguity to hedge against on the next.
+ */
+function advanceExtraFile(name: string, relPath: string, shipped: string): void {
+  const backupPath = fileBackupPath(name, relPath);
+  if (!fs.existsSync(backupPath)) {
+    const current = readFileOrNull(storeExtraFile(name, relPath));
+    if (current != null) {
+      fs.mkdirSync(path.dirname(backupPath), { recursive: true });
+      atomicWriteFile(backupPath, current);
+    }
+  }
+  const storePath = storeExtraFile(name, relPath);
+  fs.mkdirSync(path.dirname(storePath), { recursive: true });
+  atomicWriteFile(storePath, shipped);
+  writeFileBaseSnapshot(name, relPath, shipped);
+}
+
+/**
+ * Advance every PRISTINE, out-of-date non-SKILL.md file of a bundled skill to shipped — the reference/
+ * script analog of the SKILL.md fast-forward, gated PER FILE (not per skill): a skill whose SKILL.md is
+ * customized can still have a reference file advance, and vice versa, because there is no single
+ * "is this skill pristine" bit that means anything across a multi-file directory. Called from both
+ * autoFastForwardPristineSkills (boot) and adoptSkillUpdate (the manual "Adopt update" UI action) — the
+ * "normal update path" for a bundled skill in both cases.
+ *
+ * Deletions: a store file whose bundle counterpart is gone (fileThreeVersions returns null) is left
+ * exactly where it is — never removed. Safer default: a file Loom no longer ships may still be in use
+ * (e.g. cross-referenced from SKILL.md prose), and there is no UI signal yet to tell a stale leftover
+ * from a deliberately-kept one.
+ *
+ * Returns the relPaths advanced, and logs one line per file so a post-deploy sweep is auditable.
+ */
+function advancePristineExtraFiles(name: string): string[] {
+  const advanced: string[] = [];
+  for (const relPath of extraFileRelPaths(name)) {
+    const v = fileThreeVersions(name, relPath);
+    if (!v) continue;
+    const customized = normalizeForCompare(v.mine) !== normalizeForCompare(v.base);
+    const updateAvailable = normalizeForCompare(v.base) !== normalizeForCompare(v.shipped);
+    if (customized || !updateAvailable) continue; // protect user edits; skip when nothing to advance
+    advanceExtraFile(name, relPath, v.shipped);
+    advanced.push(relPath);
+    console.log(`[skills] fast-forwarded ${name}/${relPath}`);
+  }
+  return advanced;
+}
+
+/** OR-aggregate of a bundled skill's non-SKILL.md files into the same two flags customizationState
+ *  reports for SKILL.md — see listSkills' doc: the single customized/updateAvailable pair stays a
+ *  per-skill display concern even though enforcement (advancePristineExtraFiles) is per-file. */
+function extraFilesCustomizationState(name: string): { customized: boolean; updateAvailable: boolean } {
+  let customized = false;
+  let updateAvailable = false;
+  for (const relPath of extraFileRelPaths(name)) {
+    const v = fileThreeVersions(name, relPath);
+    if (!v) continue;
+    if (normalizeForCompare(v.mine) !== normalizeForCompare(v.base)) customized = true;
+    if (normalizeForCompare(v.base) !== normalizeForCompare(v.shipped)) updateAvailable = true;
+  }
+  return { customized, updateAvailable };
+}
+
 // LOAD-BEARING: store SKILL.md is written CRLF on Windows; the asset may be CRLF or LF. Normalize both
 // (CRLF/CR -> LF, strip trailing per-line whitespace, strip trailing newlines) BEFORE comparing, else a
 // clean skill reads permanently "out of sync" purely on line-ending difference.
@@ -113,11 +324,29 @@ export function listSkills(): SkillSummary[] {
     let content = "";
     try { content = fs.readFileSync(skillMd(e.name), "utf8"); } catch { continue; } // dir without SKILL.md → not a skill
     const isBundled = bundled.has(e.name);
+    let state: { customized: boolean; updateAvailable: boolean; mdCustomized: boolean; mdUpdateAvailable: boolean } | Record<string, never> = {};
+    if (isBundled) {
+      const md = customizationState(e.name, content);
+      const extra = extraFilesCustomizationState(e.name);
+      // OR across SKILL.md and every tracked reference/script file — "any part of this skill diverges
+      // from what was last synced", the same single pair the UI has always read, now accurate for the
+      // whole directory instead of blind to references/**/scripts/**. ALSO carry the SKILL.md-only pair
+      // (mdCustomized/mdUpdateAvailable) separately: the web's "sync to shipped" destructive-discard
+      // banner must trigger on SKILL.md divergence only, never on a reference-file-only divergence — a
+      // reference file has no diff UI and no other edit surface, so offering a destructive sync behind
+      // an empty diff would be worse than leaving the divergence to the sidebar dot / badge alone.
+      state = {
+        customized: md.customized || extra.customized,
+        updateAvailable: md.updateAvailable || extra.updateAvailable,
+        mdCustomized: md.customized,
+        mdUpdateAvailable: md.updateAvailable,
+      };
+    }
     out.push({
       name: e.name,
       description: descriptionOf(content),
       bundled: isBundled,
-      ...(isBundled ? customizationState(e.name, content) : {}),
+      ...state,
     });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
@@ -158,19 +387,32 @@ export function seedBaseSnapshots(): string[] {
  * weakening the by-design protection of user edits: any customized:true skill is left for manual adopt
  * exactly as today — it is NEVER auto-advanced. The equality is the SAME merge-engine normalizeForCompare
  * used everywhere (customizationState / mergeSkillContent), never a new heuristic.
+ *
+ * ALSO advances the skill's non-SKILL.md files (references/**, scripts/**), gated PER FILE via
+ * advancePristineExtraFiles — independently of whether SKILL.md itself is eligible this round. When
+ * SKILL.md IS eligible, adoptSkillUpdate below already covers both (it calls advancePristineExtraFiles
+ * itself); the `else` branch is what covers the mixed case — a customized SKILL.md (or one with nothing
+ * to adopt) must not gate a still-pristine reference file's own advance.
  * Best-effort + boot-safe: each skill is wrapped in try/catch and this NEVER throws (mirrors
- * seedBaseSnapshots' tolerance). Returns the names advanced.
+ * seedBaseSnapshots' tolerance). Returns the names of skills with SOME advancement (SKILL.md and/or
+ * any file).
  */
 export function autoFastForwardPristineSkills(): string[] {
   const advanced: string[] = [];
   for (const name of bundledNames()) {
     try {
+      let didAdvance = false;
       const v = threeVersions(name);
-      if (!v) continue; // not bundled / no store copy
-      const customized = normalizeForCompare(v.mine) !== normalizeForCompare(v.base);
-      const updateAvailable = normalizeForCompare(v.base) !== normalizeForCompare(v.shipped);
-      if (customized || !updateAvailable) continue; // protect user edits; skip when nothing to advance
-      if (adoptSkillUpdate(name, v.shipped)) advanced.push(name); // clean FF == take shipped verbatim
+      if (v) {
+        const customized = normalizeForCompare(v.mine) !== normalizeForCompare(v.base);
+        const updateAvailable = normalizeForCompare(v.base) !== normalizeForCompare(v.shipped);
+        if (!customized && updateAvailable) {
+          if (adoptSkillUpdate(name, v.shipped)) didAdvance = true; // clean FF == take shipped verbatim; also advances extra files
+        } else if (advancePristineExtraFiles(name).length) {
+          didAdvance = true; // SKILL.md not eligible this round — a reference/script file still can be
+        }
+      }
+      if (didAdvance) advanced.push(name);
     } catch { /* best-effort per skill — a bad skill must never break boot */ }
   }
   return advanced;
@@ -280,12 +522,22 @@ function threeVersions(name: string): { base: string; mine: string; shipped: str
   return { base, mine, shipped };
 }
 
-/** True iff a shipped update is available (base != shipped) for a bundled skill — the adopt/preview guard. */
+/**
+ * True iff a shipped update is available (base != shipped) for a bundled skill — the adopt/preview
+ * guard for the REST layer (`/merge-preview`, `/adopt`). ALSO true when only a non-SKILL.md file (a
+ * reference doc or helper script) has an update, even if SKILL.md itself is fully in sync (board card
+ * 75a0755d, CR M2): listSkills already ORs a reference-file update into the `updateAvailable` badge the
+ * UI shows, so this guard must widen the SAME way — otherwise the badge and the Adopt button render but
+ * the click 409s "no update available", because the display and the guard disagreed about what counts.
+ * When SKILL.md itself has nothing to adopt, adoptSkillUpdate's merge is a same-content no-op fast-
+ * forward (mine == base == shipped) and the real work happens in its advancePristineExtraFiles call.
+ */
 export function skillUpdateAvailable(name: string): boolean {
   if (!isValidSkillName(name)) return false;
   const v = threeVersions(name);
   if (!v) return false;
-  return normalizeForCompare(v.base) !== normalizeForCompare(v.shipped);
+  if (normalizeForCompare(v.base) !== normalizeForCompare(v.shipped)) return true;
+  return extraFilesCustomizationState(name).updateAvailable;
 }
 
 /** Preview the adopt-update merge for a bundled skill. null if not a bundled skill with a store copy. */
@@ -308,7 +560,13 @@ export function skillUpdateDiff(name: string): { base: string; shipped: string }
  * Adopt the shipped update NON-DESTRUCTIVELY: write `mine` = resolvedContent (the clean merged content,
  * or the user-resolved content for a conflicted merge) and ADVANCE base := current shipped. Never auto-
  * applied — the REST layer calls this only on explicit user action and only when updateAvailable.
- * Returns the new skill, or null if not a bundled skill / invalid name / write failed.
+ * ALSO fast-forwards this skill's pristine non-SKILL.md files (advancePristineExtraFiles) — "adopt the
+ * update" means sync this skill to shipped, not just its SKILL.md; a reference/script file the user
+ * never touched should not need a second action to catch up. That call is best-effort (try/catch,
+ * matching its boot sibling autoFastForwardPristineSkills): SKILL.md has ALREADY been written and its
+ * base ALREADY advanced by this point, so an EPERM/EBUSY on one reference file must not 500 the whole
+ * REST response for what is otherwise a successful adopt. Returns the new skill, or null if not a
+ * bundled skill / invalid name / write failed.
  */
 export function adoptSkillUpdate(name: string, resolvedContent: string): { name: string; content: string } | null {
   if (!isValidSkillName(name)) return null;
@@ -316,6 +574,7 @@ export function adoptSkillUpdate(name: string, resolvedContent: string): { name:
   if (!v) return null;
   if (!writeSkill(name, resolvedContent)) return null;
   writeBase(name, v.shipped); // base = shipped: the update is now adopted (clears updateAvailable)
+  try { advancePristineExtraFiles(name); } catch { /* best-effort — SKILL.md adopt already succeeded */ }
   return readSkill(name);
 }
 
@@ -343,6 +602,27 @@ export function deleteSkill(name: string): boolean {
  * Closes the seed-if-absent gap: seedGlobalSkills() never overwrites, so improvements to a bundled
  * skill don't reach an existing store on reboot — this is the explicit, per-skill opt-in refresh.
  * Returns false if the skill has no bundled asset (a user-created skill can't be "reset").
+ *
+ * mine = base = shipped for the WHOLE directory, not just SKILL.md (board card 75a0755d, CR M1): the
+ * cpSync below already rewrites every reference doc / helper script file to shipped, but a reset that only
+ * re-synced SKILL.md's base would leave every OTHER file's base stuck at its pre-reset value — reading
+ * customized:true AND updateAvailable:true forever after, since mine (now shipped) would permanently
+ * disagree with a base that reset never touched. That's this card's own bug, reintroduced through the
+ * one action whose entire job is "discard and re-sync". Binary files are skipped (see isBinaryFile) —
+ * cpSync already copied their real bytes correctly; there is simply no safe base to RECORD for them
+ * without a utf8-mangling read, so (consistent with the rest of this module) they stay untracked.
+ *
+ * `.pre-ff-backups` entries for this skill are deliberately left in place, NOT cleared: they exist to
+ * hedge against a rare pre-fix hand-edit being misread as `base` on first sight, and that hedge is about
+ * the ORIGINAL pre-fix content, not this reset — an explicit, user-initiated "discard everything" is a
+ * different action with a different intent, and clearing a backup subtree here would trade a real (if
+ * currently unlikely) recovery path for no correctness benefit.
+ *
+ * The per-file base loop is wrapped best-effort (CR round 2 Minor #2), matching its two siblings
+ * (seedFileBaseSnapshots' per-skill try/catch, adoptSkillUpdate's advance call) — an EBUSY/EPERM on one
+ * file (e.g. a Windows AV lock) must not throw AFTER the destructive rmSync+cpSync above has ALREADY
+ * discarded the old store contents: the route would 500 while the store is actually correct, and every
+ * write here is unconditional + per-file atomic, so a second Reset click simply converges the rest.
  */
 export function resetSkillToBundled(name: string): boolean {
   if (!isValidSkillName(name)) return false;
@@ -354,6 +634,14 @@ export function resetSkillToBundled(name: string): boolean {
   // mine = base = shipped: a full discard also re-syncs the base snapshot, clearing any update-available.
   const shipped = readFileOrNull(assetMd(name));
   if (shipped != null) writeBase(name, shipped);
+  try {
+    for (const relPath of extraFileRelPaths(name)) {
+      const assetPath = assetExtraFile(name, relPath);
+      if (isBinaryFile(assetPath)) continue;
+      const shippedFile = readFileOrNull(assetPath);
+      if (shippedFile != null) writeFileBaseSnapshot(name, relPath, shippedFile);
+    }
+  } catch { /* best-effort — the store contents above are already correct; a stray base is self-healing on retry */ }
   return true;
 }
 

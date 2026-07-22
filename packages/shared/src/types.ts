@@ -2134,10 +2134,21 @@ export interface SkillSummary {
   name: string;
   description: string;
   bundled: boolean;
-  /** Bundled skills only: the user's store SKILL.md (`mine`) differs from the `base` snapshot — they edited it. */
+  /** Bundled skills only: ANY tracked file (SKILL.md or a reference doc / helper script) differs from
+   *  its `base` snapshot — OR'd across the whole skill directory. Drives the sidebar dot + header badge. */
   customized?: boolean;
-  /** Bundled skills only: Loom shipped a newer asset than the `base` snapshot — an update is available to adopt. */
+  /** Bundled skills only: Loom shipped a newer asset than `base` for ANY tracked file — OR'd across the
+   *  whole skill directory. Drives the sidebar dot + header badge + whether Adopt is reachable. */
   updateAvailable?: boolean;
+  /** Bundled skills only: SKILL.md ITSELF (not the OR'd aggregate above) differs from its `base`
+   *  snapshot. A reference/script file has no edit surface and no diff UI, so the destructive "sync to
+   *  shipped" banner must key off THIS, not the aggregate `customized` — otherwise a reference-file-only
+   *  divergence (which the daemon already protects and fast-forwards on its own) would surface a
+   *  discard action behind an empty diff. */
+  mdCustomized?: boolean;
+  /** Bundled skills only: SKILL.md ITSELF (not the OR'd aggregate above) has a shipped update pending —
+   *  the SKILL.md-only counterpart to mdCustomized, same reasoning. */
+  mdUpdateAvailable?: boolean;
 }
 
 // --- Context-window sizing -------------------------------------------------------------------

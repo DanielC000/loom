@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { SKILLS_DIR } from "../paths.js";
-import { seedBaseSnapshots, autoFastForwardPristineSkills, retireOrphanedBundledSkillDirs } from "./store.js";
+import { seedBaseSnapshots, seedFileBaseSnapshots, autoFastForwardPristineSkills, retireOrphanedBundledSkillDirs } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // dist/skills -> dist -> daemon root -> assets/skills
@@ -25,11 +25,11 @@ const ASSET_SKILLS = path.join(__dirname, "..", "..", "assets", "skills");
  * a hollow dir that a dir-keyed "if absent" check would never refill), this (re)copies the bundled
  * asset so the store repopulates on the next boot. A present SKILL.md means a genuine skill (possibly
  * UI-edited) and is left untouched — EXCEPT that non-SKILL.md asset entries (a `scripts/` helper, a
- * `references/` doc, `NOTICE`, …) shipped by a LATER asset update are still backfilled: bundled-skill
- * adopt/customization tracking (store.ts) only ever diffs SKILL.md content, so a skill seeded before a
- * new supporting file was added to its asset dir would otherwise never receive it — the store forever
- * missing e.g. `orchestrate/scripts/serve-static.mjs` even after an update ships it (card 7f73979f).
- * `force:false` copies only entries ABSENT from the store; every existing file (incl. an edited
+ * `references/` doc, `NOTICE`, …) shipped by a LATER asset update are still backfilled here so a
+ * BRAND-NEW file lands even for a skill seeded before it existed (card 7f73979f) — an EXISTING
+ * reference/script file's own content updates are the separate, per-file base-tracked fast-forward
+ * below (seedFileBaseSnapshots / autoFastForwardPristineSkills, card 75a0755d), not this seed-if-absent
+ * copy. `force:false` copies only entries ABSENT from the store; every existing file (incl. an edited
  * SKILL.md) is left completely untouched.
  */
 export function seedGlobalSkills(): string[] {
@@ -53,6 +53,11 @@ export function seedGlobalSkills(): string[] {
   // customized / updateAvailable state and the adopt-update 3-way merge has a common ancestor. Lives
   // OUTSIDE SKILLS_DIR (never injected); store.ts owns the asset-path resolution (LOOM_ASSET_SKILLS-aware).
   seedBaseSnapshots();
+  // Per-file (references/**, scripts/**, …) base backfill — the non-SKILL.md analog of the line above.
+  // AFTER seedBaseSnapshots (mirrors its position, though the two aren't order-dependent on each other)
+  // and BEFORE autoFastForwardPristineSkills, which needs every base to exist for its equality checks
+  // to mean anything.
+  seedFileBaseSnapshots();
   // Auto-retire store dirs left behind by a bundled-skill RENAME (e.g. `pickup` -> `loom-pickup`) — see
   // retireOrphanedBundledSkillDirs' own doc for the safety predicate. Uses each retired name's OWN base
   // snapshot (already backfilled above, or from a prior boot while it was still bundled), so it must run

@@ -73,6 +73,12 @@ export default function Skills() {
   const bundled = selectedSkill?.bundled ?? false;
   const customized = !!selectedSkill?.customized;
   const updateAvailable = !!selectedSkill?.updateAvailable;
+  // SKILL.md-only pair (NOT the OR'd aggregate above) — gates the destructive DivergedBanner below,
+  // which offers "sync to shipped" against a SKILL.md diff. A reference/script file has no edit surface
+  // and no diff UI of its own, so a reference-file-only divergence must never trigger that banner: it'd
+  // show an empty diff and offer to discard the very edit the daemon's per-file protection preserves.
+  const mdCustomized = !!selectedSkill?.mdCustomized;
+  const mdUpdateAvailable = !!selectedSkill?.mdUpdateAvailable;
 
   return (
     <div style={{ display: "grid", gridTemplateColumns: "300px 1fr", gap: 16 }}>
@@ -104,7 +110,8 @@ export default function Skills() {
       <Panel style={{ minHeight: "72vh", padding: 12 }}>
         {selected && current.data ? (
           <SkillEditor key={`${selected}:${reloadNonce}`} name={selected} content={current.data.content}
-            bundled={bundled} customized={customized} updateAvailable={updateAvailable} canPublish={isDev}
+            bundled={bundled} customized={customized} updateAvailable={updateAvailable}
+            mdCustomized={mdCustomized} mdUpdateAvailable={mdUpdateAvailable} canPublish={isDev}
             onSave={(content) => save.mutate({ name: selected, content })} saving={save.isPending}
             onDelete={() => remove.mutate(selected)} deleting={remove.isPending}
             onReset={() => reset.mutate(selected)} resetting={reset.isPending}
@@ -135,10 +142,11 @@ function Dot({ tone, title }: { tone: Tone; title: string }) {
 // Remounted per skill (key=name:nonce) so the textarea resets on switch / reset / adopt; after Save the
 // query refetches and `dirty` clears against the new content. Mirrors the agent-preset / task editors.
 function SkillEditor({
-  name, content, bundled, customized, updateAvailable, canPublish,
+  name, content, bundled, customized, updateAvailable, mdCustomized, mdUpdateAvailable, canPublish,
   onSave, saving, onDelete, deleting, onReset, resetting, onAdopt, adopting, adoptError, onPublish, publishing,
 }: {
-  name: string; content: string; bundled: boolean; customized: boolean; updateAvailable: boolean; canPublish: boolean;
+  name: string; content: string; bundled: boolean; customized: boolean; updateAvailable: boolean;
+  mdCustomized: boolean; mdUpdateAvailable: boolean; canPublish: boolean;
   onSave: (c: string) => void; saving: boolean; onDelete: () => void; deleting: boolean;
   onReset: () => void; resetting: boolean; onAdopt: (content?: string) => void; adopting: boolean; adoptError: Error | null;
   onPublish: () => void; publishing: boolean;
@@ -182,12 +190,19 @@ function SkillEditor({
           error={(preview.error as Error | null) ?? adoptError} />
       )}
 
-      {/* Diverged banner — customized but NO shipped update pending (mine ≠ base, base == shipped). This
-          ALSO catches the "mine behind both" staleness state (board card dd940682), which is data-identical
-          to an ordinary customization: either way the served copy differs from the current shipped version.
+      {/* Diverged banner — SKILL.md itself customized but no shipped SKILL.md update pending (mine ≠ base,
+          base == shipped, SKILL.md-only — NOT the OR'd aggregate). This ALSO catches the "mine behind
+          both" staleness state (board card dd940682), which is data-identical to an ordinary
+          customization: either way SKILL.md's served copy differs from the current shipped version.
           adopt can't help (it's gated on updateAvailable), so we surface a compare + a clear sync-to-shipped
-          path instead of leaving the divergence invisible behind the "customized" badge alone. */}
-      {customized && !updateAvailable && (
+          path instead of leaving the divergence invisible behind the "customized" badge alone.
+          Deliberately scoped to mdCustomized/mdUpdateAvailable (board card 75a0755d, CR M3): a reference/
+          script file has no edit surface of its own, so a reference-file-only divergence must NOT trigger
+          this banner — "Compare with shipped" would show an empty SKILL.md diff (update-diff is SKILL.md-
+          only) while "Sync to shipped" would discard the very edit the daemon's per-file protection exists
+          to preserve, on the one file class with nowhere else to save it. Teaching the diff/sync UI about
+          reference files is a real improvement but a bigger change than this fix — follow-up, not here. */}
+      {mdCustomized && !mdUpdateAvailable && (
         <DivergedBanner name={name} mine={content} onSync={onReset} syncing={resetting} />
       )}
 
