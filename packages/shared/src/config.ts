@@ -138,10 +138,12 @@ export interface PythonConfig {
 
 /**
  * Codescape fleet-daemon wiring (epic `369dde3c`, card C2), per-PROJECT opt-in — LEAD RULING: NOT
- * per-profile. Gated ADDITIONALLY behind the daemon-wide `isCodescapeSupervisorEnabled()` (LOOM_DEV +
- * LOOM_CODESCAPE_ENABLED) — this flag alone never wires anything on a regular `loomctl` build. Benign
- * on/off boolean (no host-launch capability of its own — it only conditionally mounts an HTTP MCP entry
- * pointing at the ALREADY-running daemon-owned supervisor), so it stays agent-settable, mirroring `docLint`.
+ * per-profile. Gated ADDITIONALLY behind the daemon-wide `isCodescapeSupervisorEnabled()` (card 503a30a0:
+ * `isLoomDev()` AND a codescape CLI actually detected present on the host — a private internal tool, never
+ * a hand-set env toggle) — this flag alone never wires anything on a regular `loomctl` build (no host on a
+ * vanilla install ever has the CLI). Benign on/off boolean (no host-launch capability of its own — it only
+ * conditionally mounts an HTTP MCP entry pointing at the ALREADY-running daemon-owned supervisor), so it
+ * stays agent-settable, mirroring `docLint`.
  */
 export interface CodescapeConfig {
   enabled: boolean;

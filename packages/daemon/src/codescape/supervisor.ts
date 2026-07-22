@@ -3,14 +3,16 @@ import net from "node:net";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
 import { resolveConfig, type ProjectConfigOverride } from "@loom/shared";
-import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin } from "../paths.js";
+import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
 
 /**
- * Codescape fleet-daemon wiring epic (`369dde3c`), card C1 — FOUNDATION. Under `isCodescapeSupervisorEnabled()`
- * (isLoomDev() + LOOM_CODESCAPE_ENABLED=1, see paths.ts), Loom starts + supervises ONE `codescape serve`
- * process per host on a loopback port, bootstrapped by `codescape ingest <repoPath>` for each target
- * project BEFORE serve starts (v1: projects load from `.codescape/projects/index.json` at serve BOOT —
- * a project ingested after serve started isn't picked up until a restart).
+ * Codescape fleet-daemon wiring epic (`369dde3c`), card C1 — FOUNDATION, updated by card 503a30a0. Under
+ * `isCodescapeSupervisorEnabled()` (isLoomDev() + a codescape CLI actually detected on the host — see
+ * paths.ts; codescape is a private internal tool, so this is a non-discoverable, config/host-driven gate,
+ * not a hand-set env toggle), Loom starts + supervises ONE `codescape serve` process per host on a
+ * loopback port, bootstrapped by `codescape ingest <repoPath>` for each target project BEFORE serve starts
+ * (v1: projects load from `.codescape/projects/index.json` at serve BOOT — a project ingested after serve
+ * started isn't picked up until a restart).
  *
  * ★ CWD CONTRACT (load-bearing): both `ingest` and `serve` resolve their `.codescape` state dir relative
  * to `process.cwd()`. So EVERY spawn — ingest and serve alike — runs from the exact same `homeDir`
@@ -220,7 +222,7 @@ export class CodescapeSupervisor {
       // independently of start() (C2/C3's "onboard a newly-enabled project" path) — it must NEVER create
       // CODESCAPE_HOME_DIR (or spawn anything) on a disabled daemon, matching start()'s own zero-side-effects
       // guarantee.
-      return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + LOOM_CODESCAPE_ENABLED=1)" };
+      return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + a codescape CLI detected on the host)" };
     }
     fs.mkdirSync(this.homeDir, { recursive: true });
     const { command, args } = resolveCodescapeBin();
@@ -238,8 +240,8 @@ export class CodescapeSupervisor {
    * the shared `serve`'s own `.codescape/projects/index.json` bookkeeping that {@link ingest} (no `--out`)
    * feeds — this is the sole write path for the agent-read graph, independent of whether `serve` is
    * running at all. Same async/bounded/never-throws discipline as {@link ingest}: gated on
-   * `isCodescapeSupervisorEnabled()` (the daemon-wide LOOM_CODESCAPE_ENABLED master switch — still the
-   * gate for the whole feature, not just the optional shared `serve` process), still runs from the
+   * `isCodescapeSupervisorEnabled()` (the daemon-wide host-CLI-presence master gate — still the gate for
+   * the whole feature, not just the optional shared `serve` process), still runs from the
    * shared `homeDir` (the CWD CONTRACT, even though `--out` itself is an absolute/caller-given path —
    * consistency with every other codescape invocation, and ingest may still touch its own cwd-relative
    * `.codescape/projects/index.json` bookkeeping as a side effect), creates `graphPath`'s parent dir
@@ -247,7 +249,7 @@ export class CodescapeSupervisor {
    */
   async ingestToGraph(repoPath: string, graphPath: string): Promise<CodescapeIngestResult> {
     if (!isCodescapeSupervisorEnabled()) {
-      return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + LOOM_CODESCAPE_ENABLED=1)" };
+      return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + a codescape CLI detected on the host)" };
     }
     fs.mkdirSync(this.homeDir, { recursive: true });
     fs.mkdirSync(path.dirname(graphPath), { recursive: true });
@@ -270,9 +272,11 @@ export class CodescapeSupervisor {
     if (this.starting || this.child) return;
     if (!isCodescapeSupervisorEnabled()) {
       // isLoomDev()-gated: a regular (non-dev) end user never sees a reference to this unshipped,
-      // LOOM_DEV-only feature at every boot — only a LOOM_DEV=1 dev build without LOOM_CODESCAPE_ENABLED
-      // (the "off but could be on" case) gets the reminder.
-      if (isLoomDev()) console.log("[boot] codescape off (set LOOM_DEV=1 and LOOM_CODESCAPE_ENABLED=1 to enable fleet-daemon supervision)");
+      // LOOM_DEV-only feature at every boot — only a LOOM_DEV=1 dev build gets the resolved-decision line,
+      // and host-local console output is never a user-facing leak (card 503a30a0: the RESOLVED decision +
+      // its REASON, not a bare on/off — this is what would have made the 2026-07 four-day freeze visible
+      // on day one instead of silently persisting across 12+ boots).
+      if (isLoomDev()) console.log(`[boot] codescape off (no codescape CLI detected — checked "${codescapeBinCandidate()}"; not installed on this host)`);
       return;
     }
     this.starting = true;
@@ -285,7 +289,7 @@ export class CodescapeSupervisor {
       if (this.port == null) this.port = await pickLoopbackPort();
       this.restartAttempts = 0;
       this.spawnServe();
-      console.log(`[boot] codescape serve starting (port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
+      console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate()}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
     } catch (err) {
       console.warn(`[codescape] start failed (continuing boot): ${(err as Error).message}`);
     } finally {

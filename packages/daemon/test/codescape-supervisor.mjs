@@ -7,9 +7,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Proves the DoD:
 //   (neg)   LOOM_DEV unset ⇒ the supervisor NEVER spawns anything: getPort()/getPid() stay null, no
 //           fake-codescape-calls.jsonl is ever written, boot is behaviorally byte-identical to today.
-//   (a)     with LOOM_DEV=1 + LOOM_CODESCAPE_ENABLED=1: ingest runs (one call recorded), THEN serve spawns
-//           on the loopback port getPort() returns — and BOTH ran from the exact SAME shared cwd (the
-//           CWD CONTRACT).
+//   (a)     with LOOM_DEV=1 + a codescape CLI actually resolvable (card 503a30a0: host-CLI-PRESENCE is
+//           the gate now, not a hand-set LOOM_CODESCAPE_ENABLED toggle): ingest runs (one call recorded),
+//           THEN serve spawns on the loopback port getPort() returns — and BOTH ran from the exact SAME
+//           shared cwd (the CWD CONTRACT).
 //   (b)     killing the live child triggers a BOUNDED restart: a fresh serve call is recorded (new pid),
 //           reusing the SAME port, without the caller doing anything.
 //   (c)     stop() disarms restart-on-death and clears getPort()/getPid().
@@ -73,7 +74,7 @@ check("(resolver) a .mjs override resolves to {command: node, args:[fixture]} (n
 
 // ===================== (neg) LOOM_DEV unset — the hard negative case =====================
 check("(neg) isLoomDev() is FALSE by default", isLoomDev() === false);
-check("(neg) isCodescapeSupervisorEnabled() is FALSE by default", isCodescapeSupervisorEnabled() === false);
+check("(neg) isCodescapeSupervisorEnabled() is FALSE by default (even with the fixture CLI resolvable)", isCodescapeSupervisorEnabled() === false);
 const negHomeDir = path.join(tmpHome, "neg-home");
 const negSup = new CodescapeSupervisor({ homeDir: negHomeDir });
 await negSup.start(["/some/repo"]);
@@ -81,18 +82,23 @@ check("(neg) start() with LOOM_DEV unset never spawns — getPort() is null", ne
 check("(neg) start() with LOOM_DEV unset never spawns — getPid() is null", negSup.getPid() === null);
 check("(neg) start() with LOOM_DEV unset never creates the home dir (zero side effects)", !fs.existsSync(negHomeDir));
 
-// Even LOOM_CODESCAPE_ENABLED alone (no LOOM_DEV) must not enable it — isLoomDev() is a HARD prerequisite.
-process.env.LOOM_CODESCAPE_ENABLED = "1";
-check("(neg) LOOM_CODESCAPE_ENABLED=1 alone (LOOM_DEV still unset) does NOT enable the supervisor",
-  isCodescapeSupervisorEnabled() === false);
-delete process.env.LOOM_CODESCAPE_ENABLED;
-
-// ===================== enable: LOOM_DEV=1 + LOOM_CODESCAPE_ENABLED=1 =====================
+// ===================== (neg2) LOOM_DEV on but NO codescape CLI resolvable — host-CLI-PRESENCE is the =====
+// ===================== actual gate now (card 503a30a0), not a hand-set env toggle =====================
 process.env.LOOM_DEV = "1";
-check("(gate) isLoomDev() is TRUE once LOOM_DEV=1 (still not enabled — the opt-in toggle is separate)",
-  isLoomDev() === true && isCodescapeSupervisorEnabled() === false);
-process.env.LOOM_CODESCAPE_ENABLED = "1";
-check("(gate) isCodescapeSupervisorEnabled() is TRUE once BOTH are set", isCodescapeSupervisorEnabled() === true);
+{
+  const savedBin = process.env.LOOM_CODESCAPE_BIN;
+  delete process.env.LOOM_CODESCAPE_BIN;
+  check("(neg2) LOOM_DEV=1 but no codescape CLI resolvable at all ⇒ still disabled",
+    isCodescapeSupervisorEnabled() === false);
+  process.env.LOOM_CODESCAPE_BIN = savedBin;
+}
+
+// ===================== (gate) enable: LOOM_DEV=1 + a resolvable codescape CLI (card 503a30a0) =====================
+// No separate hand-set toggle needed — the fixture CLI standing in for a real installed binary is enough
+// once LOOM_DEV is on. This is the whole point of the fix: on the owner's own dev machine (which actually
+// has the CLI), this activates automatically; on a vanilla end-user host (which never does), it stays off.
+check("(gate) isCodescapeSupervisorEnabled() is TRUE once LOOM_DEV=1 AND the fixture CLI is resolvable",
+  isLoomDev() === true && isCodescapeSupervisorEnabled() === true);
 
 // ===================== (a) REAL-SPAWN: ingest-then-serve, shared cwd =====================
 const homeDir = path.join(tmpHome, "codescape-home");
@@ -148,15 +154,18 @@ check("(a2) ingestToGraph ran from ITS OWN shared homeDir (the CWD CONTRACT, eve
   path.resolve(lastIngestCall?.cwd || "") === path.resolve(graphSupHomeDir));
 
 // Disabled-gate negative case: mirrors ingest()'s own disabled-gate check — ingestToGraph must refuse
-// (never spawn, never create dirs) when the daemon-wide switch is off.
+// (never spawn, never create dirs) when the daemon-wide switch is off. Card 503a30a0: disabling it now
+// means no codescape CLI resolvable, not a hand-set LOOM_CODESCAPE_ENABLED toggle — temporarily clear the
+// ambient fixture-CLI env var this file otherwise keeps set throughout.
 {
   const disabledSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "ingest-to-graph-disabled-home") });
-  delete process.env.LOOM_CODESCAPE_ENABLED;
+  const savedBin = process.env.LOOM_CODESCAPE_BIN;
+  delete process.env.LOOM_CODESCAPE_BIN;
   const disabledGraphPath = path.join(tmpHome, "disabled-graphs", "projB", "graph.json");
   const disabledResult = await disabledSup.ingestToGraph("/fake/repo/three", disabledGraphPath);
   check("(a2-neg) ingestToGraph refuses when isCodescapeSupervisorEnabled() is false", disabledResult.ok === false && disabledResult.outcome === "failed");
   check("(a2-neg) it never creates the graph file when disabled", !fs.existsSync(disabledGraphPath));
-  process.env.LOOM_CODESCAPE_ENABLED = "1"; // restore for the rest of this test
+  process.env.LOOM_CODESCAPE_BIN = savedBin; // restore for the rest of this test
 }
 
 // ===================== (b) restart-on-death: bounded, same port, new pid =====================
@@ -186,21 +195,35 @@ await sleep(300);
 check("(c) no further serve call is recorded after stop() (restart-on-death is disarmed)",
   readCalls().length === callsAfterStop);
 
-// ===================== (bad-bin) CR fix: a spawn-FAILURE (ENOENT) must give up, never phantom-alive =====
-// The negative spawn-failure case the original test never exercised (the CR-flagged gap): a bad binary
-// fires Node's 'error' event (which per Node's own docs is NOT guaranteed to be followed by 'exit') —
-// restart-on-death must be wired off BOTH, or the supervisor wedges phantom-alive (getPort() lying about
-// a serve that never started) with the give-up diagnostic never firing.
-process.env.LOOM_CODESCAPE_BIN = path.join(tmpHome, "does-not-exist-codescape-binary");
+// ===================== (bad-bin) CR fix: repeated spawn death must give up, never phantom-alive =========
+// The negative spawn-failure case the original test never exercised (the CR-flagged gap): repeated
+// restart-on-death must give up (not phantom-alive) once the bounded backoff schedule is exhausted.
+// Card 503a30a0 NOTE: this used to point LOOM_CODESCAPE_BIN at a NONEXISTENT path to force an ENOENT
+// spawn-level 'error' — that specific trigger is no longer reachable through the public API now that CLI
+// PRESENCE is itself the enablement gate (a nonexistent bin now fails the OUTER gate in start()/ingest(),
+// so spawnServe is never even reached — arguably better production behavior, since a misconfigured path
+// now refuses cleanly instead of attempting and failing). What's still exercised here instead: the SAME
+// scheduleRestart give-up-after-N-attempts logic, reached via REPEATED real deaths (the working fixture
+// CLI, killed over and over) rather than a single ENOENT — `onDeath` wires BOTH child.on("error",...) and
+// child.on("exit",...) to the identical handler (see spawnServe's own doc), so this still proves the give-up
+// bound genuinely fires and stays down; only the specific "spawn never even started" flavor of death is
+// no longer independently triggerable from outside the class.
 const badBinSup = new CodescapeSupervisor({
   homeDir: path.join(tmpHome, "bad-bin-home"),
   restartBackoffMs: [50, 50, 50], // fast + few — prove the give-up bound without a long wait
-  healthyRunMs: 60_000,
+  healthyRunMs: 60_000, // never long enough to count a kill-right-after-spawn as "healthy"
 });
-await badBinSup.start(); // no repoPaths — goes straight to the failing spawnServe()
+await badBinSup.start(); // the fixture CLI is enabled (LOOM_CODESCAPE_BIN still fixtureCli) — spawns for real
 
-// Poll until the bounded schedule is exhausted and the supervisor gives up (stays down).
-for (let i = 0; i < 100 && badBinSup.getPort() !== null; i++) await sleep(50);
+// Repeatedly kill the live child immediately after each (re)spawn — never letting a run last long enough
+// to be "healthy" — until the bounded backoff schedule is exhausted and the supervisor gives up for good.
+for (let i = 0; i < 10 && badBinSup.getPort() !== null; i++) {
+  const pid = badBinSup.getPid();
+  if (pid != null) { try { process.kill(pid); } catch { /* already gone */ } }
+  await sleep(80);
+}
+// Poll a bit longer in case the last restart is still settling.
+for (let i = 0; i < 50 && badBinSup.getPort() !== null; i++) await sleep(50);
 
 check("(bad-bin) after exhausting the bounded restart schedule, getPort() is null (gave up, NOT phantom-alive)",
   badBinSup.getPort() === null);
@@ -209,7 +232,6 @@ check("(bad-bin) getPid() is null too (no live child left dangling)", badBinSup.
 // re-confirm it STAYS down rather than a stray extra attempt reviving it.
 await sleep(300);
 check("(bad-bin) stays down (no stray restart revives it after giving up)", badBinSup.getPort() === null);
-process.env.LOOM_CODESCAPE_BIN = fixtureCli; // restore for anything after this point
 
 // ===================== (d) control-plane client: bounded, never throws =====================
 const requests = [];

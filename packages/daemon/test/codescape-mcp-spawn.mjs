@@ -24,8 +24,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (a) buildMcpServers mounts that stdio entry for "codescape" iff codescapeEnabled && isLoomDev() &&
 //       isCodescapeSupervisorEnabled() && the project's graph.json exists — orthogonal to role: worker,
 //       manager, and plain all get the SAME project-wide entry (no more worktree-scoped 2-/3-segment URL).
-//   NEGATIVE CASES (byte-identical to a no-flag spawn): LOOM_DEV off / LOOM_CODESCAPE_ENABLED unset /
-//       project not enabled / graph.json missing.
+//   NEGATIVE CASES (byte-identical to a no-flag spawn): LOOM_DEV off / no codescape CLI detected on the
+//       host (card 503a30a0 — the daemon-wide gate is now host-CLI-presence-based, not a hand-set env
+//       toggle) / project not enabled / graph.json missing.
 //   (b) CODESCAPE_TOOL_ALLOW carries exactly the 7 read tools, none of the 5 control/write tools; createPty
 //       allowlists them iff the mcpServers map actually carries the "codescape" entry (shape-independent —
 //       keys off presence, not transport).
@@ -78,20 +79,32 @@ check("(config) resolveConfig({codescape:{enabled:true}}) ⇒ true", resolveConf
 check("(config) resolveConfig({codescape:{enabled:false}}) ⇒ false", resolveConfig({ codescape: { enabled: false } }).codescape.enabled === false);
 
 // ===================== isCodescapeEnabled: daemon-wide supervisor gate AND the per-project flag =====================
+// Card 503a30a0: the daemon-wide gate is now HOST-CLI-PRESENCE-based — isLoomDev() AND a codescape binary
+// actually resolvable (DB path ?? LOOM_CODESCAPE_BIN ?? bare "codescape" on PATH) — never a hand-set env
+// toggle. `LOOM_CODESCAPE_BIN` is already pointed at the fixture CLI (a REAL file) from the top of this
+// test, so "detected" is the ambient state for the rest of the file once LOOM_DEV is on; the nested
+// block below proves the CLI-ABSENT negative case by temporarily clearing it, then restores it.
 check("(gate) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
-check("(gate) isCodescapeSupervisorEnabled() is FALSE by default", isCodescapeSupervisorEnabled() === false);
+check("(gate) isCodescapeSupervisorEnabled() is FALSE by default (LOOM_DEV off, even though the fixture CLI exists)", isCodescapeSupervisorEnabled() === false);
 check("(gate) isCodescapeEnabled: LOOM_DEV off + project enabled ⇒ still false (daemon-wide gate wins)",
   isCodescapeEnabled({ codescape: { enabled: true } }) === false);
 process.env.LOOM_DEV = "1";
-check("(gate) LOOM_DEV=1 alone (LOOM_CODESCAPE_ENABLED unset) ⇒ isCodescapeEnabled still false",
-  isCodescapeEnabled({ codescape: { enabled: true } }) === false);
-process.env.LOOM_CODESCAPE_ENABLED = "1";
-check("(gate) LOOM_DEV=1 + LOOM_CODESCAPE_ENABLED=1 + project enabled ⇒ true",
+{
+  const savedBin = process.env.LOOM_CODESCAPE_BIN;
+  delete process.env.LOOM_CODESCAPE_BIN;
+  check("(gate) LOOM_DEV=1 but no codescape CLI resolvable at all ⇒ isCodescapeEnabled still false",
+    isCodescapeEnabled({ codescape: { enabled: true } }) === false);
+  process.env.LOOM_CODESCAPE_BIN = savedBin;
+}
+check("(gate) LOOM_DEV=1 + the fixture CLI resolvable (LOOM_CODESCAPE_BIN) + project enabled ⇒ true",
   isCodescapeEnabled({ codescape: { enabled: true } }) === true);
 check("(gate) daemon-wide gate on but project NOT enabled ⇒ false",
   isCodescapeEnabled({ codescape: { enabled: false } }) === false);
+check("(gate) dbPath param: an explicit nonexistent dbPath overrides LOOM_CODESCAPE_BIN and resolves not-detected",
+  isCodescapeSupervisorEnabled(path.join(tmpHome, "no-such-codescape-binary")) === false);
+check("(gate) dbPath param: an explicit REAL dbPath wins and resolves detected",
+  isCodescapeSupervisorEnabled(process.execPath) === true);
 delete process.env.LOOM_DEV;
-delete process.env.LOOM_CODESCAPE_ENABLED;
 
 // ===================== codescapeGraphPath: ONE project-wide graph file =====================
 check("(graphpath) codescapeGraphPath derives <LOOM_HOME>/codescape/<projectId>/graph.json",
@@ -214,13 +227,15 @@ const devOff = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", co
 check("(neg-1) LOOM_DEV off ⇒ NO 'codescape' entry", !("codescape" in devOff));
 check("(neg-1) LOOM_DEV off ⇒ mcpServers byte-identical to a no-flag spawn", JSON.stringify(devOff) === JSON.stringify(noFlag));
 
-// (2) LOOM_DEV on, LOOM_CODESCAPE_ENABLED unset (the daemon-wide feature switch itself off).
+// (2) LOOM_DEV on, but no codescape CLI resolvable at all (the daemon-wide feature switch itself off) —
+// temporarily clears the ambient fixture-CLI env var this file otherwise keeps set throughout.
 process.env.LOOM_DEV = "1";
-delete process.env.LOOM_CODESCAPE_ENABLED;
+const savedBinForNeg2 = process.env.LOOM_CODESCAPE_BIN;
+delete process.env.LOOM_CODESCAPE_BIN;
 const supervisorOff = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: true, projectId: "projA" });
-check("(neg-2) LOOM_CODESCAPE_ENABLED unset ⇒ NO 'codescape' entry", !("codescape" in supervisorOff));
+check("(neg-2) no codescape CLI detected ⇒ NO 'codescape' entry", !("codescape" in supervisorOff));
 check("(neg-2) byte-identical to a no-flag spawn", JSON.stringify(supervisorOff) === JSON.stringify(noFlag));
-process.env.LOOM_CODESCAPE_ENABLED = "1";
+process.env.LOOM_CODESCAPE_BIN = savedBinForNeg2;
 
 // (3) project NOT enabled (codescapeEnabled: false), everything else on.
 const notEnabled = buildMcpServers({ sessionId: "s1", port: 4317, role: "worker", codescapeEnabled: false, projectId: "projA" });
@@ -357,7 +372,6 @@ try {
   } catch { /* best-effort */ }
   db.close();
   delete process.env.LOOM_DEV;
-  delete process.env.LOOM_CODESCAPE_ENABLED;
   delete process.env.LOOM_CODESCAPE_BIN;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }

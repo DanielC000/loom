@@ -942,21 +942,25 @@ export function buildMcpServers(o: {
   // registered (agents got zero tools). NOW: a per-session STDIO `codescape mcp --graph <graph.json>`
   // process reading a project-wide graph file the daemon keeps fresh via `codescape ingest --out`
   // (sessions/service.ts C3 hooks) — no shared serve on the agent path, no scope multiplexing, no
-  // project-id mismatch possible. `isCodescapeSupervisorEnabled()` (LOOM_CODESCAPE_ENABLED=1) stays the
-  // daemon-wide master switch for the whole Codescape feature (ingest lifecycle included), not just the
-  // optional shared `serve` process a future C4 human canvas may still use.
+  // project-id mismatch possible. Card 503a30a0: `isCodescapeSupervisorEnabled(dbPath)` (isLoomDev() AND a
+  // codescape CLI actually detected on the host — no hand-set env toggle anymore) stays the daemon-wide
+  // master switch for the whole Codescape feature (ingest lifecycle included), not just the optional
+  // shared `serve` process a future C4 human canvas may still use. `o.integrationPaths?.codescape` (the
+  // DB-persisted path, already threaded per-spawn via PtyHost's `getIntegrationPaths` seam below) is
+  // passed through so detection honors the SAME DB-first precedence the MCP resolver itself uses — a
+  // daemon with the DB path set but no LOOM_CODESCAPE_BIN/bare-PATH binary still detects correctly.
   if (o.codescapeEnabled && o.projectId) {
     if (isLoomDev()) {
-      if (isCodescapeSupervisorEnabled()) {
+      if (isCodescapeSupervisorEnabled(o.integrationPaths?.codescape)) {
         const cs = codescapeMcpServer(codescapeGraphPath(o.projectId), o.integrationPaths?.codescape);
         if (cs) {
           mcpServers["codescape"] = cs;
         } else {
           // eslint-disable-next-line no-console
-          console.warn(`[pty] ${o.sessionId} codescape enabled but no graph.json is ready yet for project ${o.projectId} (or LOOM_CODESCAPE_BIN is unresolvable) — spawning WITHOUT the Codescape MCP. Ingest may still be in progress; a later spawn will pick it up once ready.`);
+          console.warn(`[pty] ${o.sessionId} codescape enabled but no graph.json is ready yet for project ${o.projectId} (or the codescape bin is unresolvable) — spawning WITHOUT the Codescape MCP. Ingest may still be in progress; a later spawn will pick it up once ready.`);
         }
       }
-      // else: LOOM_CODESCAPE_ENABLED unset — the benign "feature disabled" case; no per-spawn warning.
+      // else: no codescape CLI detected on this host — the benign "feature not present" case; no per-spawn warning.
     }
     // !isLoomDev(): silent skip — the "missing" reason is the gate itself.
   }

@@ -84,21 +84,6 @@ export interface PythonProvisioning {
   lastAttemptAt?: number;
 }
 
-// Host-tool integrations (card 8dc5ebb9, GET /api/integrations) — one row per optional host tool
-// (Codescape, …). `state` mirrors the daemon's live resolver (never a re-derived client-side
-// check); `detail` is a one-line human hint present whenever state !== "detected". See
-// packages/daemon/src/integrations/detect.ts.
-export type IntegrationSource = "db" | "env" | "none";
-export type IntegrationState = "detected" | "not-found";
-export interface IntegrationStatus {
-  slug: "codescape";
-  label: string;
-  path: string | null;
-  source: IntegrationSource;
-  state: IntegrationState;
-  detail?: string;
-}
-
 // Guided-onboarding workflow templates (onboarding C3 REST — GET /api/setup/templates). The human-only
 // mirror of the agent-facing template_list tool: each bundled preset's name + one-line purpose + its
 // agent→profile roster, plus a `boardSeed` summary (card count + title(s)) so the wizard's pre-apply
@@ -728,11 +713,6 @@ export const api = {
   // `retryPythonProvisioning` re-kicks it off the daemon's event loop and returns the same status shape. ---
   pythonProvisioning: () => get<PythonProvisioning>("/api/python/provisioning"),
   retryPythonProvisioning: () => post<PythonProvisioning>("/api/python/provisioning/retry"),
-
-  // --- Host-tool integrations (card 8dc5ebb9): live detect/validate for the Settings › Integrations
-  // panel. HUMAN-only loopback REST, read-only — writing a path goes through updatePlatformConfig above
-  // (the `integrations` key on PlatformConfigOverride), there is no separate write call. ---
-  integrations: () => get<{ integrations: IntegrationStatus[] }>("/api/integrations"),
 
   // --- Schedules (phase-2 Pillar B): cron triggers that boot a manager in `agentId` on each due
   // boundary. HUMAN-managed (this page + REST) — there is no agent-writable MCP surface. createSchedule

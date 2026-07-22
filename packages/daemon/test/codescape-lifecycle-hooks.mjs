@@ -31,6 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 // --- Hermetic LOOM_HOME + sandboxed HOME (mirrors codescape-mcp-spawn.mjs) — set BEFORE importing dist. ---
 const tmpHome = path.join(os.tmpdir(), `loom-clh-${Date.now()}-${process.pid}`);
@@ -41,7 +42,12 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 delete process.env.LOOM_DEV;
-delete process.env.LOOM_CODESCAPE_ENABLED;
+delete process.env.LOOM_CODESCAPE_BIN;
+// Card 503a30a0: the daemon-wide gate is now host-CLI-PRESENCE-based (isLoomDev() AND a codescape binary
+// actually resolvable), not a hand-set LOOM_CODESCAPE_ENABLED toggle — the fixture CLI stands in for a
+// real installed binary in the "detected" sections below.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const fixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli.mjs");
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -113,10 +119,10 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
   return cond();
 }
 
-// ===================== (1)-(3) POSITIVE: LOOM_DEV=1 + LOOM_CODESCAPE_ENABLED=1 + project opted in =====================
+// ===================== (1)-(3) POSITIVE: LOOM_DEV=1 + a detected codescape CLI + project opted in =====================
 {
   process.env.LOOM_DEV = "1";
-  process.env.LOOM_CODESCAPE_ENABLED = "1";
+  process.env.LOOM_CODESCAPE_BIN = fixtureCli;
   const fake = makeFakeCodescape();
   const db = new Db();
   const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
@@ -205,14 +211,14 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
     db.close();
     try { fs.rmSync(P.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
     delete process.env.LOOM_DEV;
-    delete process.env.LOOM_CODESCAPE_ENABLED;
+    delete process.env.LOOM_CODESCAPE_BIN;
   }
 }
 
 // ===================== (5) NEGATIVE CASE: LOOM_DEV off ⇒ zero hooks fire across the same lifecycle =====================
 {
   delete process.env.LOOM_DEV;
-  delete process.env.LOOM_CODESCAPE_ENABLED;
+  delete process.env.LOOM_CODESCAPE_BIN;
   const fake = makeFakeCodescape();
   const db = new Db();
   const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
@@ -240,10 +246,10 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
   }
 }
 
-// ===================== (6) NEGATIVE CASE: LOOM_DEV+LOOM_CODESCAPE_ENABLED on, but project NOT opted in =====================
+// ===================== (6) NEGATIVE CASE: LOOM_DEV on + a detected codescape CLI, but project NOT opted in =====================
 {
   process.env.LOOM_DEV = "1";
-  process.env.LOOM_CODESCAPE_ENABLED = "1";
+  process.env.LOOM_CODESCAPE_BIN = fixtureCli;
   const fake = makeFakeCodescape();
   const db = new Db();
   const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
@@ -269,7 +275,7 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
     db.close();
     try { fs.rmSync(N.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
     delete process.env.LOOM_DEV;
-    delete process.env.LOOM_CODESCAPE_ENABLED;
+    delete process.env.LOOM_CODESCAPE_BIN;
   }
 }
 

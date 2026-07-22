@@ -262,27 +262,38 @@ export function isUsagePollerSuppressed(): boolean {
 export const CODESCAPE_HOME_DIR = path.join(LOOM_HOME, "codescape");
 
 /**
- * Card C1: whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a HARD
- * prerequisite — Codescape supervision lives in the same LOOM_DEV-gated layer as the Platform Lead
- * builtins and NEVER runs for a regular `loomctl` user, flag or not. Within dev, `LOOM_CODESCAPE_ENABLED=1`
- * narrows it further (default OFF, mirroring the scheduler's own opt-in env var `LOOM_SCHEDULER_ENABLED`,
- * index.ts:680-681) so `LOOM_DEV=1` alone doesn't spawn an extra host process. Read at CALL time (like
- * `isLoomDev`) so a single test process can exercise both the default-off and the enabled state.
+ * Card 503a30a0: whether the Codescape fleet-daemon supervisor should start at boot. `isLoomDev()` is a
+ * HARD prerequisite — Codescape supervision lives in the same LOOM_DEV-gated layer as the Platform Lead
+ * builtins and NEVER runs for a regular `loomctl` user, flag or not. Within dev, the gate is now HOST-CLI
+ * PRESENCE, not a hand-set env toggle: `hostToolBinExists(codescapeBinCandidate(dbPath))` — the SAME
+ * DB-path → `LOOM_CODESCAPE_BIN` → bare-PATH-name precedence the spawn resolvers already use (see
+ * `codescapeBinCandidate`/`resolveCodescapeBin` below). Codescape is a PRIVATE internal tool: a vanilla
+ * end-user's host never has a `codescape` binary anywhere on PATH, so this resolves false for every
+ * ordinary install with ZERO configuration and no discoverable toggle — it activates automatically, with
+ * no hand-set env var, on the ONE class of host that actually has the CLI installed (the owner's own dev
+ * machine). Retires the old `LOOM_CODESCAPE_ENABLED=1` hardcoded env-only gate entirely (the exact class
+ * of knob the `f487df9d` sweep retired elsewhere) — there is no env-based "master switch" left to hand-set.
+ * `dbPath` is the optional DB-persisted `integrations.codescape.path` override (card 8dc5ebb9), threaded
+ * in by a caller that has one (e.g. `pty/host.ts`'s per-spawn `getIntegrationPaths` seam); omitted by a
+ * caller with no DB context (paths.ts itself has none), which still resolves correctly via the
+ * env/bare-PATH layers alone. Read at CALL time (like `isLoomDev`) so a single test process can exercise
+ * both the CLI-present and CLI-absent state within one run.
  */
-export function isCodescapeSupervisorEnabled(): boolean {
-  return isLoomDev() && process.env.LOOM_CODESCAPE_ENABLED === "1";
+export function isCodescapeSupervisorEnabled(dbPath?: string): boolean {
+  return isLoomDev() && hostToolBinExists(codescapeBinCandidate(dbPath));
 }
 
 /**
- * Card C2: whether a SPECIFIC project should get the per-session Codescape MCP wired in. Combines the
- * daemon-wide supervisor gate ({@link isCodescapeSupervisorEnabled}) with the per-project opt-in
- * (`ResolvedConfig.codescape.enabled`, LEAD RULING: per-project, NOT per-profile) — a project can only
- * opt in to what the daemon has already enabled; flipping the project flag alone on a non-dev build (or
- * with the daemon-wide flag off) wires nothing. Shared with C3 (the worktree lifecycle hooks), which
- * gates its own ingest/register/drop calls the same way.
+ * Card C2 (updated 503a30a0): whether a SPECIFIC project should get the per-session Codescape MCP wired
+ * in. Combines the daemon-wide supervisor gate ({@link isCodescapeSupervisorEnabled}, now host-CLI-
+ * presence-based) with the per-project opt-in (`ResolvedConfig.codescape.enabled`, LEAD RULING:
+ * per-project, NOT per-profile) — a project can only opt in to what the daemon has already detected as
+ * available. Flipping the project flag alone on a non-dev build (or on a host with no codescape CLI)
+ * wires nothing. Shared with C3 (the worktree lifecycle hooks), which gates its own ingest/register/drop
+ * calls the same way. `dbPath` forwards straight to {@link isCodescapeSupervisorEnabled}.
  */
-export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }): boolean {
-  return isCodescapeSupervisorEnabled() && config.codescape.enabled;
+export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }, dbPath?: string): boolean {
+  return isCodescapeSupervisorEnabled(dbPath) && config.codescape.enabled;
 }
 
 /**

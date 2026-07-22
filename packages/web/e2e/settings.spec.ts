@@ -552,85 +552,13 @@ test.describe("cross-group sibling preservation (code-review fix, card fd55ac8a;
   });
 });
 
-test("editing a host-tool integration path persists to the platform override (card 8dc5ebb9)", async ({ page, loomDaemon }) => {
-  const project = await loomDaemon.createProject(`settings-integrations-${Date.now()}`);
-  await pinActiveProject(page, project.id);
-
-  await page.goto(`${loomDaemon.baseURL}/settings`);
-
-  await expect(page.getByText("Integrations", { exact: true })).toBeVisible();
-  const codescapePath = field(page, "Codescape");
-  await expect(codescapePath).toBeVisible();
-  // BEFORE: a freshly booted daemon has no integrations override, so the field is empty.
-  await expect(codescapePath).toHaveValue("");
-
-  await codescapePath.fill("/abs/path/to/codescape");
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
-  await expect(globalSave).toBeEnabled();
-  await globalSave.click();
-
-  // Observable: the platform override now carries integrations.codescape.path — the SAME REST surface
-  // the resolver reads DB-first from at the next session spawn (no daemon restart needed).
-  await expect
-    .poll(async () => {
-      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
-      const body = (await res.json()) as { override?: { integrations?: { codescape?: { path?: string } } } };
-      return body?.override?.integrations?.codescape?.path ?? null;
-    })
-    .toBe("/abs/path/to/codescape");
-
-  // A reload re-seeds the field from the persisted override.
-  await page.reload();
-  await expect(field(page, "Codescape")).toHaveValue("/abs/path/to/codescape");
-});
-
-test("clearing a host-tool integration path actually clears it (code-review fix, card 8dc5ebb9)", async ({ page, loomDaemon }) => {
-  // An exec-surface path a user removes must actually clear — the PATCH handler shallow-merges only at
-  // the TOP level, so the old Settings behavior (omitting `integrations` entirely when both fields were
-  // blank) left a stale path persisted forever once set. buildGlobalOverride now ALWAYS emits
-  // `integrations`, so a cleared field replaces the persisted key wholesale.
-  const project = await loomDaemon.createProject(`settings-integrations-clear-${Date.now()}`);
-  await pinActiveProject(page, project.id);
-
-  await page.goto(`${loomDaemon.baseURL}/settings`);
-
-  const codescapePath = field(page, "Codescape");
-  await expect(codescapePath).toBeVisible();
-  const globalSave = page.getByRole("button", { name: "Save", exact: true }).last();
-
-  // Daemon-global config (unlike the per-project section) has NO per-test isolation across this shared
-  // worker-scoped daemon — a prior test in this file may have already persisted a path. A unique value
-  // guarantees this fill is a real diff from whatever's currently loaded, so Save reliably enables.
-  const uniquePath = `/abs/path/to/codescape-clear-test-${Date.now()}`;
-  await codescapePath.fill(uniquePath);
-  await expect(globalSave).toBeEnabled();
-  await globalSave.click();
-  await expect
-    .poll(async () => {
-      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
-      const body = (await res.json()) as { override?: { integrations?: { codescape?: { path?: string } } } };
-      return body?.override?.integrations?.codescape?.path ?? null;
-    })
-    .toBe(uniquePath);
-
-  // Clear it and save again.
-  await codescapePath.fill("");
-  await expect(globalSave).toBeEnabled();
-  await globalSave.click();
-
-  // Observable #1: GET /api/platform/config shows the path is genuinely GONE, not stale.
-  await expect
-    .poll(async () => {
-      const res = await fetch(`${loomDaemon.baseURL}/api/platform/config`);
-      const body = (await res.json()) as { override?: { integrations?: { codescape?: { path?: string } } } };
-      return body?.override?.integrations?.codescape?.path ?? null;
-    })
-    .toBe(null);
-
-  // Observable #2: a reload does NOT re-seed the old value.
-  await page.reload();
-  await expect(field(page, "Codescape")).toHaveValue("");
-});
+// Card 503a30a0 (owner privacy constraint): the "Codescape" host-tool integration row was removed from
+// Settings — codescape is a private internal tool and must have NO discoverable web-Settings surface on
+// a vanilla install. The two e2e specs that used to live here (editing / clearing the field through the
+// UI) are retired along with the UI; the underlying `integrations.codescape.path` REST round-trip (set,
+// persist, clear-back) stays covered directly against the REST API by
+// packages/daemon/test/platform-config.mjs's "(14) host-tool integrations" section, which never went
+// through the web UI at all.
 
 test("editing the newly-added watcher/timeout fields (crashRecoveryWatchMs, runMs) persists (sweep §2)", async ({ page, loomDaemon }) => {
   // Same GLOBAL_FIELDS grid + buildGlobalOverride ms-loop as every other watcher/timeout field (e.g. the
