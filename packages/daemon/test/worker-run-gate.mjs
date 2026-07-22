@@ -40,9 +40,12 @@ function makeRepo(repo) {
 }
 
 // Seeds a manager + ONE merge-capable worker (real git worktree, for confirmWorkerMerge) + ONE
-// gate-only worker (no real git needed — runWorkerGate never touches git, only the injected fake
-// runGate is called with its worktreePath, which the fake ignores). Separate repos, same reasoning as
-// gate-semaphore-concurrency.mjs: isolates the git side so the semaphore is the only shared resource.
+// gate-only worker whose worktreePath is a directory that's never created. The injected fake runGate
+// is called with that path, which it ignores; runWorkerGate's OWN worktree-stamp read (card 50c1e0d0)
+// against a nonexistent dir fails fast (simpleGit's constructor throws synchronously for a missing
+// path — see computeWorktreeGateStamp's fail-safe catch), so this stays git-free in practice for these
+// cases. Separate repos, same reasoning as gate-semaphore-concurrency.mjs: isolates the git side so the
+// semaphore is the only shared resource.
 async function seedWorkers(sfx, reposDir) {
   const db = new Db();
   dbs.push(db);
@@ -246,8 +249,18 @@ try {
     // exception — runWorkerGate itself never throws for a rejecting gate.
     const r1 = await sessions.runWorkerGate(gateWorkerId);
     check("(G) a rejecting gate run surfaces as ok:false (not swallowed, not a throw)", r1.settled === true && r1.ok === false);
+
+    // An IMMEDIATE re-call lands inside GATE_OP_RETAIN_MS (card 50c1e0d0's settle-grace window, 5s) —
+    // it must be served the SAME cached errored outcome, NOT trigger a second (recovering) run.
+    const rImmediate = await sessions.runWorkerGate(gateWorkerId);
+    check("(G) an immediate re-call within the retention window replays the SAME errored outcome (no new run)", rImmediate.settled === true && rImmediate.ok === false);
+    check("(G) that re-call did NOT invoke the gate again", callNum === 1);
+
+    // Only OUTSIDE the retention window does a re-call genuinely retry — proving the slot isn't
+    // PERMANENTLY leaked by a rejecting run, which is what this case is actually about.
+    await new Promise((r) => setTimeout(r, 5_200));
     const r2 = await sessions.runWorkerGate(gateWorkerId);
-    check("(G) a SUBSEQUENT gate run still acquires the semaphore slot (no permanent leak)", r2.settled === true && r2.ok === true && r2.value.passed === true);
+    check("(G) a SUBSEQUENT gate run (past the retention window) still acquires the semaphore slot (no permanent leak)", r2.settled === true && r2.ok === true && r2.value.passed === true);
     // AUDIT-ON-ERROR (CR follow-up): a genuine throw (not a gate FAILURE) used to leave NO durable
     // event at all — appendEvent was only ever reached after a normal settle. Confirm the FIRST
     // (rejecting) call still left a worker_gate audit row with the error message recorded.

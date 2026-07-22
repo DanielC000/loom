@@ -1299,6 +1299,71 @@ export async function getWorktreeLatestNonMergeSha(worktreePath: string, deps: B
   }
 }
 
+/**
+ * A fingerprint of a worktree's state at a point in time — the `run_gate` result-consumption fix (card
+ * 50c1e0d0): {@link SessionService.runWorkerGate} stamps ONE of these the moment a gate run actually
+ * starts, so a LATER re-call — whether it lands mid-flight (the op is still running) or is being served
+ * the SAME settled result back from a brief post-settle retention window — can tell whether the worktree
+ * it's asking about is still the one the gate actually validated, or has moved on since (a new commit, or
+ * an uncommitted edit). See {@link gateStampsDiffer}.
+ */
+export interface WorktreeGateStamp {
+  /** `git rev-parse HEAD` in the worktree, or `null` only if the worktree was unreadable (a git
+   *  error/timeout) — see {@link computeWorktreeGateStamp}'s fail-safe direction. */
+  head: string | null;
+  /** Whether the worktree carried any REAL uncommitted work (via {@link uncommittedWorkFiles}'s
+   *  daemon-noise filter) at the moment this stamp was taken. */
+  dirty: boolean;
+  /** sha256 over `git status --porcelain` + `git diff HEAD` when `dirty` — content-level for TRACKED
+   *  changes (staged or unstaged). `null` when clean or unreadable. KNOWN GAP: editing the CONTENT of an
+   *  already-untracked new file IN PLACE (no `git add`, no commit) changes neither input, so that exact
+   *  edit is invisible to this hash — accepted here because the reported incidents (card 50c1e0d0) were
+   *  edits to an EXISTING tracked file, not a brand-new untracked one.
+   */
+  dirtyHash: string | null;
+}
+
+/**
+ * Fingerprint the worktree's current HEAD + uncommitted state (see {@link WorktreeGateStamp}).
+ * FAIL-SAFE like its siblings ({@link getWorktreeHeadSha}, {@link detectStrandedWork}) in that it never
+ * throws — but, DELIBERATELY, in the OPPOSITE direction: those helpers fail toward "don't block a
+ * legitimate merge/gate" (an unreadable signal is treated as if nothing changed). This one is read by
+ * {@link gateStampsDiffer} to decide whether to WARN a caller that a gate's outcome may not reflect the
+ * current worktree — silently treating "can't tell" as "unchanged" would recreate exactly the green-but-
+ * stale trap this stamp exists to catch, so an unreadable `head` here is ALWAYS treated as stale by
+ * `gateStampsDiffer`, never as "confirmed unchanged".
+ */
+export async function computeWorktreeGateStamp(worktreePath: string, deps: BoundedGitDeps = {}): Promise<WorktreeGateStamp> {
+  try {
+    const { git, timeoutMs } = boundedGit(worktreePath, deps);
+    const head = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "gate-stamp rev-parse HEAD")).trim();
+    const porcelain = await withTimeout(git.raw(["status", "--porcelain"]), timeoutMs, "gate-stamp status --porcelain");
+    if (!worktreeStatusHasWork(porcelain)) return { head, dirty: false, dirtyHash: null };
+    // Best-effort: a `diff HEAD` failure still yields a (slightly weaker, porcelain-only) comparable hash
+    // rather than aborting the whole stamp — the outer try/catch is reserved for a genuinely unreadable
+    // worktree (rev-parse/status themselves failing).
+    const diff = await withTimeout(git.raw(["diff", "HEAD"]), timeoutMs, "gate-stamp diff HEAD").catch(() => "");
+    const dirtyHash = createHash("sha256").update(porcelain).update(diff).digest("hex");
+    return { head, dirty: true, dirtyHash };
+  } catch {
+    return { head: null, dirty: false, dirtyHash: null };
+  }
+}
+
+/**
+ * Did the worktree change between two {@link WorktreeGateStamp}s taken at different times? `true` means
+ * stale — assume the worktree moved on (a new commit, or an uncommitted edit) — and is the ONLY answer
+ * when either stamp's `head` is `null` (an unreadable read on either side never gets to assert "unchanged"
+ * — see {@link computeWorktreeGateStamp}'s fail-safe direction).
+ */
+export function gateStampsDiffer(a: WorktreeGateStamp, b: WorktreeGateStamp): boolean {
+  if (a.head === null || b.head === null) return true;
+  if (a.head !== b.head) return true;
+  if (a.dirty !== b.dirty) return true;
+  if (a.dirty && a.dirtyHash !== b.dirtyHash) return true;
+  return false;
+}
+
 /** A branch's changes since it diverged from base — the manager's pre-merge diff review (#16). */
 /** One row of a diffstat — a changed file with its insertion/deletion counts (0/0 for binary). */
 export interface DiffstatFile {

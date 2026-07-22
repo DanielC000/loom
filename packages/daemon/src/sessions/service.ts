@@ -13,7 +13,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -116,8 +116,19 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  actually executed, in the worker's own worktree. Reuses `GateRejectionDetail`'s shape on a failure — the
  *  same diagnostic enrichment (phase/failedStep/failingTest/stderrTail/exitCode/signal/timedOut) the merge
  *  gate's own rejection carries — but this is a single run: unlike `confirmWorkerMerge`, a transient-kill
- *  classification is NOT auto-retried here (the worker can just re-call run_gate itself). */
-type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string };
+ *  classification is NOT auto-retried here (the worker can just re-call run_gate itself).
+ *  `validatedHead` (card 50c1e0d0 — the result-consumption fix) is the worktree `HEAD` this run actually
+ *  gated against, stamped at the moment the run started (`null` only if the worktree was unreadable at
+ *  that moment) — set on EVERY `ran:true` outcome (pass or fail) so a caller can tell, after the fact,
+ *  exactly which commit a `[loom:gate-done]`/`[loom:gate-failed]` result is about. */
+type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null };
+
+/** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
+ *  point of card 50c1e0d0, how long `PendingOpRegistry.attach()`'s own retention-window dedupe (see its
+ *  class doc) will hand a RE-CALL back the SAME settled result instead of starting a genuinely fresh gate
+ *  run. Mirrors {@link MERGE_OP_RETAIN_MS} exactly — same grace window, same reasoning: long enough that a
+ *  worker's "did it pass?" re-call lands inside it, short enough that a stale terminal view doesn't linger. */
+const GATE_OP_RETAIN_MS = 5_000;
 
 /** Forced onto the worker self-gate's OWN spawned child (card 7f96aa09, revised by 68920f5b), additive to
  *  whatever env the worker's shell already has — pins the daemon test runner's own internal test-lane pool
@@ -504,6 +515,25 @@ export class SessionService {
    */
   private readonly gateTimeoutStreak = new Map<string, { count: number; sha: string | null }>();
   /**
+   * The worktree stamp {@link runWorkerGate} recorded at the moment its CURRENTLY-RUNNING gate op actually
+   * started (card 50c1e0d0 — the result-consumption fix) — keyed the SAME as the op itself
+   * (`gate:${workerSessionId}`), so a re-call that attaches to the still-running op (rather than minting a
+   * fresh one) can still read the stamp the ORIGINAL call recorded, to compare against the worktree's
+   * CURRENT state and report `staleAgainstWorktree`. Set at the top of `run()`'s closure (before the gate
+   * itself is invoked) and cleared in that same closure's `finally` — so it only ever holds an entry for
+   * the DURATION of one real gate invocation, never leaking past its own settle. In-memory only, same
+   * daemon-uptime-scoped posture as {@link gateTimeoutStreak}: a restart losing an in-flight op's stamp is
+   * harmless (nothing can attach to it after restart anyway — the op itself doesn't survive either).
+   */
+  private readonly gateStartStamps = new Map<string, WorktreeGateStamp>();
+  /** Test-only override for {@link GATE_OP_RETAIN_MS} (mirrors the `wedgeSweepIntervalMs`-style seams
+   *  below) — defaults to the real production constant. A hermetic test that deliberately issues several
+   *  BACK-TO-BACK `runWorkerGate` calls, each expecting to trigger its OWN fresh gate invocation (e.g. the
+   *  gate-timeout circuit breaker's streak tests), sets this to `0` to disable the settle-grace retention
+   *  window entirely — `0` is falsy, so `PendingOpRegistry.attach`'s `if (opts?.retainMs)` check skips
+   *  retention exactly as if `retainMs` were never passed at all. */
+  private readonly gateOpRetainMs: number;
+  /**
    * Test-only seam for {@link findNestedGitRepos} (card b6d41db1's follow-up — the shared-chokepoint
    * fix). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real scan. Lets a test
    * drive a deterministic TRUNCATED result (`{repos:[],truncated:true}`) through gcWorktreeDir's
@@ -709,6 +739,7 @@ export class SessionService {
       runGate?: (gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv) => Promise<GateSequentialResult>;
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       codescape?: CodescapeSupervisor;
+      gateOpRetainMs?: number;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -717,6 +748,7 @@ export class SessionService {
     this.reapWorktreeProcesses = opts?.reapWorktreeProcesses;
     this.findNestedGitReposOverride = opts?.findNestedGitRepos;
     this.runGate = opts?.runGate;
+    this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -5281,9 +5313,10 @@ export class SessionService {
     // `run_gate` op is DAEMON-OWNED state (PendingOpRegistry), not a claim the worker has to make about
     // itself, so this classifies a gate-parked worker correctly even if it never called worker_report at
     // all before going idle (the self-report-reliance gap the false alarms in the origin finding trace
-    // back to). `peek()` only ever returns a "running" view for the "gate" kind (runWorkerGate passes no
-    // `retainMs`, so a settled op is evicted immediately, not retained) — so this branch simply stops
-    // matching the instant the gate actually finishes, with no separate cleanup needed here.
+    // back to). `runWorkerGate` DOES now pass `retainMs` (card 50c1e0d0), so `peek()` can also return a
+    // RETAINED terminal view briefly after a settle — but that view's `state` is "done"/"failed", never
+    // "running", so the explicit state check below still stops matching the instant the gate actually
+    // finishes; the retention window doesn't make a just-settled gate misread as still in progress here.
     const pendingGate = this.pendingOps.peek(`gate:${workerSessionId}`);
     if (pendingGate && pendingGate.state === "running") {
       const minutesSinceStart = (Date.now() - Date.parse(pendingGate.startedAt)) / 60_000;
@@ -7301,11 +7334,50 @@ export class SessionService {
    *
    * LONG-RUNNING (mirrors `confirmWorkerMergeTracked`): wrapped in `PendingOpRegistry.attach` under kind
    * "gate", key `gate:${workerSessionId}` — a fast run (under `SYNC_ATTACH_BUDGET_MS`) returns inline; a
-   * genuinely slow one degrades to `{settled:false, op}` and, on its eventual settle, pushes a
-   * `[loom:gate-done]`/`[loom:gate-failed]` nudge straight to the WORKER's own session (not a manager — the
-   * caller and the beneficiary are the same session here) via `pty.enqueueStdin`. The key is single-flight
-   * per worker and needs no dead-owner eviction: unlike the "merge" kind (owned by a manager distinct from
-   * the worker being confirmed), a "gate" op's only possible caller IS the session named by its own key.
+   * genuinely slow one degrades to `{settled:false, op, attachedToInFlight, staleAgainstWorktree}` and, on
+   * its eventual settle, pushes a `[loom:gate-done]`/`[loom:gate-failed]` nudge straight to the WORKER's
+   * own session (not a manager — the caller and the beneficiary are the same session here) via
+   * `pty.enqueueStdin`. The key is single-flight per worker and needs no dead-owner eviction: unlike the
+   * "merge" kind (owned by a manager distinct from the worker being confirmed), a "gate" op's only possible
+   * caller IS the session named by its own key.
+   *
+   * RESULT-CONSUMPTION FIX (card 50c1e0d0 — three footguns the pending note used to paper over):
+   *  (1) SETTLE-GRACE RE-CALL: `retainMs: GATE_OP_RETAIN_MS` on `attach()`'s opts means a re-call landing
+   *      within that window AFTER the op settles is served the SAME settled result (keyed by the SAME
+   *      `opId`) straight out of `PendingOpRegistry`'s retention cache — `run()` below is NOT invoked again
+   *      — instead of silently starting a brand-new ~gate-timeout-long run (the origin incident: a re-call
+   *      meant to "fetch the passed result" instead ran a whole fresh gate that then failed on unrelated
+   *      flakes).
+   *      KNOWN BOUNDARY (Code Review, card 50c1e0d0 hardening — intentionally NOT re-checked here, mirroring
+   *      the merge-op retention precedent, which also never re-validates its own cache hit): this cached path
+   *      is served straight out of `PendingOpRegistry` — it never re-derives `staleAgainstWorktree`, so it
+   *      carries only `validatedHead` (a caller CAN detect a HEAD change by comparing it to their own HEAD),
+   *      not a fresh dirty-state comparison. A caller who made an UNCOMMITTED edit since the cached run
+   *      started and re-calls within the grace window sees a cached `{passed, validatedHead:<unchanged>}`
+   *      with NO staleness signal — footgun #2 stays closed for the MID-FLIGHT branch above, not this settled
+   *      one. In practice this only matters for a fast (<`SYNC_ATTACH_BUDGET_MS`) `gateCommand`: Loom's own
+   *      ~8-minute gate always degrades to the covered in-flight path first.
+   *
+   *      Deliberately not fixed by ALSO stamping+comparing on the cached path: that would mean re-running
+   *      `computeWorktreeGateStamp` on every cache hit just to potentially discard it, adding a git round-trip
+   *      to the fast path this retention window exists to keep fast, for a case (a fast-gate project + an
+   *      edit inside a 5s window) the origin incidents never actually hit. If this becomes a real footgun in
+   *      practice, the fix is comparing `validatedHead`/a fresh dirty stamp on the cache-hit path too — not
+   *      today's minimal fix.
+   *  (2) MID-FLIGHT STALENESS: `attachedToInFlight` (computed via a `peek()` BEFORE this call's own
+   *      `attach()`, so it reflects whether SOME EARLIER call — not this one — already has an op running
+   *      under this key) tells a re-caller it attached to an already-running op rather than starting one.
+   *      `staleAgainstWorktree` (via `gateStampsDiffer` against the {@link WorktreeGateStamp} `run()`
+   *      recorded in `gateStartStamps` at the moment IT started) tells the caller whether the worktree has
+   *      moved on since — a new commit, or an uncommitted edit — since that in-flight op is validating
+   *      whatever was on disk when IT started, not necessarily what's on disk now. Both fields are computed
+   *      independently of each other and are meaningful even for the ORIGINATING call itself (a slow gate
+   *      degrading past `SYNC_ATTACH_BUDGET_MS` on its own first call reports `attachedToInFlight:false`
+   *      but can still report `staleAgainstWorktree:true` if the worktree was edited during that same wait).
+   *  (3) VALIDATED-HEAD STAMP: every `ran:true` settled outcome (pass or fail) carries `validatedHead` — the
+   *      worktree `HEAD` `run()` stamped at its own start — so a caller reading a `[loom:gate-done]`/
+   *      `[loom:gate-failed]` nudge (or a cached settle-grace result) can tell exactly which commit it's
+   *      about, without having to trust that "the worktree hasn't moved since."
    *
    * CRASH-SAFETY: the gate's child process is spawned by the DAEMON (`runGateStep`), never the worker's own
    * pty — `gateSemaphore.runExclusive`'s `finally{release()}` fires on the child's own close/error/timeout
@@ -7313,7 +7385,11 @@ export class SessionService {
    * a held semaphore slot. A worker that dies before ever consuming a `{status:"pending"}` result just
    * wastes one gate run — harmless.
    */
-  async runWorkerGate(workerSessionId: string): Promise<AttachResult<WorkerGateResult>> {
+  async runWorkerGate(workerSessionId: string): Promise<
+    | { settled: true; ok: true; value: WorkerGateResult }
+    | { settled: true; ok: false; error: unknown }
+    | { settled: false; op: PendingOpView; attachedToInFlight: boolean; staleAgainstWorktree: boolean }
+  > {
     this.requireWorker(workerSessionId, "run_gate");
     const worker = this.db.getSession(workerSessionId);
     if (!worker) throw new Error("unknown session");
@@ -7348,83 +7424,95 @@ export class SessionService {
         value: { ran: true, passed: false, reason, gateDetail: { timedOut: true, circuitBroken: true } },
       };
     }
-    return this.pendingOps.attach<WorkerGateResult>(
+    // MID-FLIGHT DETECTION (card 50c1e0d0): captured BEFORE this call's own attach() — a running entry
+    // found here was started by an EARLIER call (this one is merely attaching), never by this call itself.
+    const attachedToInFlight = this.pendingOps.peek(key)?.state === "running";
+    const result = await this.pendingOps.attach<WorkerGateResult>(
       key, "gate", workerSessionId, SYNC_ATTACH_BUDGET_MS,
       async (opId) => {
-        const evt = (detail: Record<string, unknown>) => this.db.appendEvent({
-          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: workerSessionId, workerSessionId,
-          taskId: worker.taskId ?? null, kind: "worker_gate", detail,
-        });
-        let gateResult: GateSequentialResult;
-        // Card a1c86452: the descriptor surfaces this worker self-check on the Gates page's active lane;
-        // `startedAt` (admission) drives the `worker_gate` event's real run-time `durationMs`, excluding
-        // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
-        const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId };
-        let gateStartedAt = 0;
+        // WORKTREE STAMP (card 50c1e0d0): recorded ONCE, at the true start of a genuinely fresh run — never
+        // re-recorded by a call that merely attaches to this same running op. Cleared in `finally` so the
+        // map only ever holds an entry for the lifetime of ITS OWN in-flight invocation.
+        const startStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        this.gateStartStamps.set(key, startStamp);
         try {
-          // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
-          // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
-          // one-time auto-extend since it has no outer retry-on-timeout of its own ("the worker can just
-          // re-call run_gate itself" — see the `orchestration.gateRetry`-gated retry in confirmWorkerMerge
-          // above, which this function deliberately does not share).
-          gateResult = await this.gateSemaphore.runExclusive(
-            gateCap, gateDescriptor,
-            (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE); },
-            "low",
-          );
-        } catch (err) {
-          // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
-          // not an ordinary gate FAILURE) used to leave NO audit trail at all — appendEvent was only ever
-          // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
-          // caller (PendingOpRegistry.attach) already turns a rejection into a normal {ok:false} outcome —
-          // this audit write adds a durable record, it does not change that error-handling behavior.
-          evt({ passed: false, error: err instanceof Error ? err.message : String(err), ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
-          throw err;
-        }
-        if (worker.branch) {
-          if (gateResult.failedTimedOut) {
-            // POST-TIMEOUT SWEEP (card 3564fd1e): same worktree-path-scoped backstop confirmWorkerMerge's
-            // gate section uses, for anything that detached before gate-runner.ts's own tree-kill landed.
-            // Excludes the calling worker's own live pty pid — this sweep must never kill the very worker
-            // whose gate just timed out.
-            const workerPid = this.pty.getPid?.(workerSessionId);
-            const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
-            try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+          const evt = (detail: Record<string, unknown>) => this.db.appendEvent({
+            id: randomUUID(), ts: new Date().toISOString(), managerSessionId: workerSessionId, workerSessionId,
+            taskId: worker.taskId ?? null, kind: "worker_gate", detail,
+          });
+          let gateResult: GateSequentialResult;
+          // Card a1c86452: the descriptor surfaces this worker self-check on the Gates page's active lane;
+          // `startedAt` (admission) drives the `worker_gate` event's real run-time `durationMs`, excluding
+          // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
+          const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId };
+          let gateStartedAt = 0;
+          try {
+            // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
+            // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
+            // one-time auto-extend since it has no outer retry-on-timeout of its own ("the worker can just
+            // re-call run_gate itself" — see the `orchestration.gateRetry`-gated retry in confirmWorkerMerge
+            // above, which this function deliberately does not share).
+            gateResult = await this.gateSemaphore.runExclusive(
+              gateCap, gateDescriptor,
+              (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE); },
+              "low",
+            );
+          } catch (err) {
+            // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
+            // not an ordinary gate FAILURE) used to leave NO audit trail at all — appendEvent was only ever
+            // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
+            // caller (PendingOpRegistry.attach) already turns a rejection into a normal {ok:false} outcome —
+            // this audit write adds a durable record, it does not change that error-handling behavior.
+            evt({ passed: false, error: err instanceof Error ? err.message : String(err), ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
+            throw err;
           }
-          await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
+          if (worker.branch) {
+            if (gateResult.failedTimedOut) {
+              // POST-TIMEOUT SWEEP (card 3564fd1e): same worktree-path-scoped backstop confirmWorkerMerge's
+              // gate section uses, for anything that detached before gate-runner.ts's own tree-kill landed.
+              // Excludes the calling worker's own live pty pid — this sweep must never kill the very worker
+              // whose gate just timed out.
+              const workerPid = this.pty.getPid?.(workerSessionId);
+              const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
+              try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+            }
+            await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
+          }
+          if (gateResult.passed) {
+            evt({ passed: true, durationMs: Date.now() - gateStartedAt });
+            return { ran: true, passed: true, opId, validatedHead: startStamp.head };
+          }
+          const finalClass = classifyGateFailure(gateResult);
+          const phase = classifyGatePhase(gateResult.failedStep);
+          // Same INJECTION HYGIENE as confirmWorkerMerge's own rejection path: strip C0 control chars before
+          // this raw process output is embedded into the `[loom:gate-failed]` pty text.
+          const outputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
+          const rawFailingTest = outputTail ? extractFailingTest(outputTail) : undefined;
+          const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
+          const headline = finalClass === "kill"
+            ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""}`
+            : finalClass === "timeout"
+              ? "gate timed out (possibly resource-starved under load)"
+              : "build gate failed";
+          // AUDIT ENRICHMENT (CR follow-up): carry the same failure detail the sibling `deploy` event records
+          // (exitCode/signal/timedOut/outputTail) PLUS phase/failedStep/failingTest — we already compute all
+          // of this for the nudge/return value below, so the durable event shouldn't be a flatter `{passed}`.
+          evt({
+            passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
+            exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
+            durationMs: Date.now() - gateStartedAt,
+            ...(outputTail ? { outputTail } : {}),
+          });
+          return {
+            ran: true, passed: false, reason: headline, opId, validatedHead: startStamp.head,
+            gateDetail: {
+              phase, failedStep: gateResult.failedStep, failingTest, stderrTail: outputTail,
+              exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
+            },
+          };
+        } finally {
+          if (this.gateStartStamps.get(key) === startStamp) this.gateStartStamps.delete(key);
         }
-        if (gateResult.passed) {
-          evt({ passed: true, durationMs: Date.now() - gateStartedAt });
-          return { ran: true, passed: true, opId };
-        }
-        const finalClass = classifyGateFailure(gateResult);
-        const phase = classifyGatePhase(gateResult.failedStep);
-        // Same INJECTION HYGIENE as confirmWorkerMerge's own rejection path: strip C0 control chars before
-        // this raw process output is embedded into the `[loom:gate-failed]` pty text.
-        const outputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
-        const rawFailingTest = outputTail ? extractFailingTest(outputTail) : undefined;
-        const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
-        const headline = finalClass === "kill"
-          ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""}`
-          : finalClass === "timeout"
-            ? "gate timed out (possibly resource-starved under load)"
-            : "build gate failed";
-        // AUDIT ENRICHMENT (CR follow-up): carry the same failure detail the sibling `deploy` event records
-        // (exitCode/signal/timedOut/outputTail) PLUS phase/failedStep/failingTest — we already compute all
-        // of this for the nudge/return value below, so the durable event shouldn't be a flatter `{passed}`.
-        evt({
-          passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
-          exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
-          durationMs: Date.now() - gateStartedAt,
-          ...(outputTail ? { outputTail } : {}),
-        });
-        return {
-          ran: true, passed: false, reason: headline, opId,
-          gateDetail: {
-            phase, failedStep: gateResult.failedStep, failingTest, stderrTail: outputTail,
-            exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
-          },
-        };
       },
       (outcome, opId) => {
         // DURABLE-MARKER CLEANUP (card edc1ec12): this op settled normally (the daemon process is still
@@ -7432,14 +7520,26 @@ export class SessionService {
         // below wrote, so ONLY a genuine process death (which skips this callback entirely) ever leaves a
         // row for reconcileOrphanedGateOps to find at the next boot.
         this.db.clearPendingGateOp(opId);
+        const headSuffix = outcome.ok && outcome.value.validatedHead ? ` (validated ${outcome.value.validatedHead.slice(0, 8)})` : "";
         const msg = outcome.ok
           ? (outcome.value.passed
-            ? `[loom:gate-done] op ${opId} — gate passed.`
-            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${outcome.value.gateDetail?.stderrTail ? `\n--- gate output tail ---\n${outcome.value.gateDetail.stderrTail}` : ""}`)
+            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}.`
+            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${headSuffix}${outcome.value.gateDetail?.stderrTail ? `\n--- gate output tail ---\n${outcome.value.gateDetail.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         try { this.pty.enqueueStdin(workerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
       },
       {
+        // SETTLE-GRACE WINDOW (card 50c1e0d0): see the "RESULT-CONSUMPTION FIX" doc above — a re-call
+        // landing within this window of settle is served this SAME cached outcome by attach() itself,
+        // never reaching this closure again. `this.gateOpRetainMs` defaults to GATE_OP_RETAIN_MS in
+        // production; see its doc for the test-only override.
+        // KNOWN BOUNDARY (Code Review hardening): this cached outcome is NOT re-checked against the
+        // worktree's CURRENT state — it carries `validatedHead` only (a caller can compare that to their
+        // own HEAD), never a fresh `staleAgainstWorktree`. An uncommitted edit made after this run started
+        // and before a re-call lands inside the window is invisible here — see the doc above for why this
+        // is accepted (mirrors the merge-op retention precedent, which doesn't re-check its cache either).
+        retainMs: this.gateOpRetainMs,
+        classifyOutcome: (outcome) => (!outcome.ok ? "errored" : outcome.value.passed ? "passed" : "failed"),
         // DURABLE MARKER (card edc1ec12): fires synchronously, strictly before any possible settle for
         // this op (see PendingOpRegistry.attach's onSurfacedPending doc) — records that workerSessionId is
         // now owed an async [loom:gate-*] nudge, so a real process death before this op settles can still
@@ -7453,6 +7553,18 @@ export class SessionService {
         },
       },
     );
+    if (!result.settled) {
+      // STALENESS CHECK (card 50c1e0d0): compare the running op's own start stamp (recorded by `run()`
+      // above — present as long as this key still has anything running/attachable, INCLUDING when THIS
+      // call is the one that just minted it) against the worktree's CURRENT state, taken NOW. A missing
+      // start stamp (a read that lost an extreme race, or an unreadable worktree) fails toward "assume
+      // stale" — never silently vouches for "unchanged" without actually having compared anything.
+      const startStamp = this.gateStartStamps.get(key);
+      const currentStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+      const staleAgainstWorktree = startStamp ? gateStampsDiffer(startStamp, currentStamp) : true;
+      return { settled: false, op: result.op, attachedToInFlight, staleAgainstWorktree };
+    }
+    return result;
   }
 
   /**

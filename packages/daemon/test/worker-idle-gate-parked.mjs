@@ -31,6 +31,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       reply" (neither is known to be true for a possibly-wedged gate).
 //   (d) once the gate op is gone (settled/evicted) with no report on record, classification correctly
 //       reverts to the ORIGINAL stranded nudge — the gate check doesn't leak past the op's real lifecycle.
+//   (e) card 50c1e0d0's settle-grace RETENTION window (still peek()-able briefly after settle, unlike (d)'s
+//       plain eviction) must NOT be misread as still-running: a retained view's `state` is "done"/"failed",
+//       so the PENDING-GATE GUARD (which only ever matches `state === "running"`) correctly falls through
+//       and the ORIGINAL stranded nudge still fires — the retention window can't suppress a nudge the
+//       manager should get by making a just-settled gate look like it's still in flight.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -175,8 +180,9 @@ async function seedRunningGate(e, workerId) {
   await seedRunningGate(e, "wkr-d");
   check("(d setup) the gate op is registered as running", e.sessions.pendingOps.peek("gate:wkr-d")?.state === "running");
   // Simulate the op having settled and been evicted (PendingOpRegistry's evict-on-settle — see its class
-  // doc) — a real settle removes the entry from `entries` entirely (runWorkerGate passes no retainMs for
-  // the "gate" kind, so there's no retained view left behind either).
+  // doc) with NO retained view either — this test's own seedRunningGate() drives a manual attach() call
+  // that (unlike the real runWorkerGate, which passes retainMs as of card 50c1e0d0) never opts into
+  // retention, so a direct `entries.delete` here fully clears this key exactly as a real settle would.
   e.sessions.pendingOps.entries.delete("gate:wkr-d");
   check("(d setup) peek() now finds nothing", e.sessions.pendingOps.peek("gate:wkr-d") === undefined);
 
@@ -188,7 +194,37 @@ async function seedRunningGate(e, workerId) {
   cleanup(e);
 }
 
+// ============ (e) RETENTION WINDOW: a just-settled (retained) gate op must NOT read as still-running =====
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-e");
+  seedTask(e, "tk-e", "in_progress");
+  seedWorker(e, "wkr-e", "mgr-e", "tk-e", { idleMin: 60 });
+
+  // Mirrors the REAL runWorkerGate wiring (retainMs + classifyOutcome) — unlike (d)'s manual
+  // entries.delete, this drives the op through a GENUINE settle so PendingOpRegistry itself populates
+  // the retained cache exactly as production code does.
+  const key = "gate:wkr-e";
+  await e.sessions.pendingOps.attach(
+    key, "gate", "wkr-e", 500,
+    async () => ({ ran: true, passed: true }),
+    undefined,
+    { retainMs: 5_000, classifyOutcome: (o) => (!o.ok ? "errored" : o.value.passed ? "passed" : "failed") },
+  );
+  const retained = e.sessions.pendingOps.peek(key);
+  check("(e setup) the settled op is still peek()-able (retained, not evicted like (d))", !!retained);
+  check("(e setup) the retained view's state is NOT \"running\"", !!retained && retained.state !== "running");
+
+  check("(e) isWorkerGenuinelyStranded reverts to TRUE — a retained (settled) gate is never mistaken for a running one",
+    e.sessions.isWorkerGenuinelyStranded("wkr-e") === true);
+  e.sessions.notifyManagerOfIdleWorker("wkr-e");
+  const nudge = e.enqueued.find((x) => x.id === "mgr-e" && /worker-idle/.test(x.text));
+  check("(e) the ORIGINAL stranded nudge fires — the retention window does NOT suppress it as still-parked",
+    !!nudge && /did NOT call worker_report/.test(nudge.text));
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a worker parked on its OWN pending run_gate is auto-classified straight from PendingOpRegistry with zero self-report; a fresh gate park costs its manager no nudge at all; a stale one escalates with honest wording; and classification correctly reverts to plain stranded once the gate op is actually gone."
+  ? "\n✅ ALL PASS — a worker parked on its OWN pending run_gate is auto-classified straight from PendingOpRegistry with zero self-report; a fresh gate park costs its manager no nudge at all; a stale one escalates with honest wording; classification correctly reverts to plain stranded once the gate op is actually gone; and card 50c1e0d0's settle-grace retention window never makes a just-settled gate misread as still-parked."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -732,20 +732,40 @@ export class OrchestrationMcpRouter {
             "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
-            "returns {ran:true, passed, gateDetail?} — on a failure, gateDetail carries {phase, failedStep, " +
-            "failingTest, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure vs. a " +
-            "flake without re-running blind. CLIENT-TIMEOUT RESILIENT, same shape as worker_merge_confirm: a " +
-            "fast run returns the full result inline (stamped with a correlation `opId`); a genuinely slow one " +
-            "(a real multi-minute test suite) instead returns {opId, status:\"pending\"} — wait for the async " +
-            "`[loom:gate-done]`/`[loom:gate-failed]` nudge (carrying this SAME opId) pushed into YOUR OWN " +
-            "session, or just RE-CALL run_gate with no args (idempotent-retryable: it attaches to the SAME " +
-            "in-flight run rather than starting a second one, and never throws 'already in flight').",
+            "returns {ran:true, passed, validatedHead, gateDetail?} — `validatedHead` is the worktree commit " +
+            "this run actually gated (compare it to your own HEAD if you're unsure whether a result is about " +
+            "your current code); on a failure, gateDetail carries {phase, failedStep, failingTest, stderrTail, " +
+            "exitCode, signal, timedOut} so you can diagnose a real test failure vs. a flake without re-running " +
+            "blind. CLIENT-TIMEOUT RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
+            "result inline (stamped with a correlation `opId`); a genuinely slow one (a real multi-minute test " +
+            "suite) instead returns {opId, status:\"pending\", attachedToInFlight, staleAgainstWorktree}. " +
+            "DO NOT POLL OR RE-CALL TO FETCH THE RESULT — worker_report progress with awaiting:\"background\" " +
+            "and END YOUR TURN; the [loom:gate-done]/[loom:gate-failed] nudge (carrying this SAME opId) starts " +
+            "your next turn with the result. A re-call IS still safe and well-defined, just not how you fetch a " +
+            "result: while the gate is still running, a re-call attaches to that SAME run (attachedToInFlight:" +
+            "true) instead of starting a second one — `staleAgainstWorktree:true` on that reply means the " +
+            "worktree changed (a new commit or an uncommitted edit) since THAT run started, so trust nothing it " +
+            "reports about your current code. Within a short grace window AFTER a run settles, a re-call is " +
+            "served that SAME settled result (same opId) instead of starting a fresh run; only a re-call " +
+            "OUTSIDE that window starts a genuinely new one. CAVEAT on that settled-window reply: it is NOT " +
+            "re-checked against your worktree's current state — you can still tell if the commit changed by " +
+            "comparing its `validatedHead` to your own HEAD, but an UNCOMMITTED edit you made since that run " +
+            "started is invisible to it. If you've edited since the last run_gate call, don't trust a cached " +
+            "pass — wait out the grace window (or just act on your own judgment) before treating it as current.",
           inputSchema: {},
         },
         async () => {
           try {
             const r = await sessions.runWorkerGate(sessionId);
-            if (!r.settled) return ok({ opId: r.op.opId, status: "pending", note: "gate still running — wait for the [loom:gate-done]/[loom:gate-failed] nudge, or re-call run_gate to fetch the result once ready." });
+            if (!r.settled) {
+              const staleWarning = r.staleAgainstWorktree
+                ? " WARNING: staleAgainstWorktree is true — your worktree has changed since this run started, so do not trust its outcome for your current code."
+                : "";
+              return ok({
+                opId: r.op.opId, status: "pending", attachedToInFlight: r.attachedToInFlight, staleAgainstWorktree: r.staleAgainstWorktree,
+                note: `gate still running.${staleWarning} Do NOT poll or re-call to fetch the result — worker_report progress with awaiting:"background" and END your turn; the [loom:gate-done]/[loom:gate-failed] nudge starts your next turn with the result.`,
+              });
+            }
             if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });
             return ok(r.value);
           } catch (e) {
