@@ -68,6 +68,27 @@ try {
   await versioner.commit();
   check("double-resume is harmless; commit() still works normally after", git("log", "--oneline").trim().split("\n").length === 5);
 
+  // 8. Per-op token (card 237d1899): op A pauses, then op B re-pauses the SAME repo while A's lease is
+  // still held — simulating two overlapping same-repo GitWriter ops (a real reachable race: REST,
+  // Platform, and companion git-push all construct their own GitWriter with no cross-surface mutex). A
+  // finishes first; its resume must NOT clear B's lease, since A no longer holds the CURRENT one (B's
+  // pause overwrote the file with a fresh token). Only B's own resume actually lifts the pause.
+  const tokenA = pauseVaultAutoCommit(root, 60_000);
+  const tokenB = pauseVaultAutoCommit(root, 60_000); // B "arrives" while A's lease is still held
+  resumeVaultAutoCommit(root, tokenA); // A's cleanup — stale token now, must be a no-op
+  fs.writeFileSync(path.join(root, "doc5.md"), "# edit 5 (during B's still-held lease)\n");
+  await versioner.commit();
+  check(
+    "A's stale-token resume does not drop B's lease — commit() still a no-op (still 5 commits)",
+    git("log", "--oneline").trim().split("\n").length === 5,
+  );
+  resumeVaultAutoCommit(root, tokenB); // B finishes — its OWN token clears its OWN lease
+  await versioner.commit();
+  check(
+    "B's own-token resume lifts the pause — the pending edit now commits (6 commits)",
+    git("log", "--oneline").trim().split("\n").length === 6,
+  );
+
   await versioner.stop();
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }

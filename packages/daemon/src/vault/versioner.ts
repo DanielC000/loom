@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import chokidar, { type FSWatcher } from "chokidar";
 import { simpleGit, type SimpleGit } from "simple-git";
 import type { Db } from "../db.js";
@@ -15,10 +16,14 @@ const FALLBACK_GIT_IDENTITY = { name: "Loom", email: "loom@localhost" } as const
  * GitHub backup (GitHub hard-rejects any push containing a >100MB object). 95MB leaves headroom below
  * that hard limit for git's own object-format overhead. Overridable via `commitVault`'s `opts.maxFileBytes`
  * (tests use a tiny value — writing a real 95MB fixture file per test run would be slow and wasteful).
+ *
+ * Exported so `git/writer.ts` can size its OWN staged-file warning (finding 2 of card 237d1899) off the
+ * SAME number rather than a second hardcoded copy — see that file's `commit()` for why the two paths
+ * react differently (unstage-silently here vs. warn-not-refuse there) despite sharing this threshold.
  */
-const DEFAULT_MAX_VAULT_FILE_BYTES = 95 * 1024 * 1024;
+export const DEFAULT_MAX_VAULT_FILE_BYTES = 95 * 1024 * 1024;
 
-function humanBytes(n: number): string {
+export function humanBytes(n: number): string {
   if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}GB`;
   if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)}MB`;
   if (n >= 1024) return `${(n / 1024).toFixed(1)}KB`;
@@ -116,7 +121,13 @@ async function hasConfiguredGitIdentity(git: SimpleGit): Promise<boolean> {
  * **Oversized-file guard** (card 614dfbef): before committing, any staged file above `opts.maxFileBytes`
  * (default `DEFAULT_MAX_VAULT_FILE_BYTES`, ~95MB) is unstaged and warned about instead of committed — see
  * {@link unstageOversizedFiles}. Applies to every caller of this shared path (the auto-committer below AND
- * `vault/writer.ts`'s UI writes), so a giant file can never enter vault history through either route.
+ * `vault/writer.ts`'s UI writes), so a giant file is unstaged before it can enter vault history through
+ * either route — UNLESS the per-file `git reset` itself fails, which leaves that one file staged (a
+ * documented, rare exception swallowed per-file rather than aborting the whole commit; see
+ * {@link unstageOversizedFiles}'s own doc). This is an AUTOMATIC, unattended path (no human in the loop),
+ * which is why it silently unstages rather than warning — contrast `git/writer.ts`'s `GitWriter.commit`,
+ * a DELIBERATE human/agent act on the project's code repo, which instead WARNS on the same threshold
+ * without unstaging or refusing (see that method's own doc for the reasoning).
  */
 export async function commitVault(
   vaultPath: string,
@@ -228,6 +239,10 @@ function pauseLeasePath(commitPath: string): string {
   return path.join(commitPath, ".git", PAUSE_LEASE_FILENAME);
 }
 
+/** Opaque per-op handle returned by {@link pauseVaultAutoCommit} — pass it back to
+ *  {@link resumeVaultAutoCommit} so a resume only ever clears the lease IT holds. */
+export type VaultPauseToken = string;
+
 /**
  * Advisory pause (card 614dfbef, origin finding 4ae8a3c9): create a short-lived lease telling this repo
  * root's `VaultVersioner` to skip its commits — for an agent doing SANCTIONED git surgery on a vault repo
@@ -235,20 +250,45 @@ function pauseLeasePath(commitPath: string): string {
  * auto-committer. Purely advisory: a plain file the versioner checks before it commits, not an OS-level
  * lock — nothing else is blocked from touching the repo. `durationMs` is clamped to
  * `[0, MAX_VAULT_PAUSE_MS]`. Best-effort: never throws (a failed write just means "not paused").
+ *
+ * **Per-op token (card 237d1899, follow-up to 614dfbef):** the lease is NOT ref-counted — two concurrent
+ * same-repo callers (e.g. two `GitWriter` ops on one repo, reachable from the REST/Platform/companion
+ * git-write surfaces with no cross-surface mutex) can overlap. Each call writes a fresh random `token`
+ * into the lease file (last writer wins the `until`/`token` pair) and returns it; the caller must pass
+ * that SAME token to {@link resumeVaultAutoCommit} so a resume only clears the lease it actually holds
+ * — see that function's doc for the "resume-only-if-mine" check this enables.
  */
-export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VAULT_PAUSE_MS): void {
+export function pauseVaultAutoCommit(commitPath: string, durationMs = DEFAULT_VAULT_PAUSE_MS): VaultPauseToken {
   const clamped = Math.max(0, Math.min(durationMs, MAX_VAULT_PAUSE_MS));
+  const token = randomUUID();
   try {
     const p = pauseLeasePath(commitPath);
     fs.mkdirSync(path.dirname(p), { recursive: true });
-    fs.writeFileSync(p, JSON.stringify({ until: Date.now() + clamped }));
+    fs.writeFileSync(p, JSON.stringify({ until: Date.now() + clamped, token }));
   } catch { /* best-effort — never throws into the caller's git-surgery flow */ }
+  return token;
 }
 
-/** End an advisory pause early (the surgery finished before the lease would have expired anyway). A
- *  no-op if no lease exists. Best-effort: never throws. */
-export function resumeVaultAutoCommit(commitPath: string): void {
-  try { fs.rmSync(pauseLeasePath(commitPath)); } catch { /* no lease to remove — fine */ }
+/**
+ * End an advisory pause early (the surgery finished before the lease would have expired anyway).
+ *
+ * **Resume-only-if-mine (card 237d1899):** when `token` is passed, the lease is removed ONLY if it still
+ * carries that exact token — so op A's `finally` can never delete a lease op B re-paused (with a NEW
+ * token) while A was still running; B's protection survives until B itself resumes (or the lease's own
+ * TTL expires). `token` is OPTIONAL for back-compat with a caller that never re-paused mid-op (there's
+ * only ever one lease to clear) and with direct test setup; every real GitWriter op always passes the
+ * token `pauseVaultAutoCommit` gave it. A missing/unreadable/mismatched lease is a harmless no-op either
+ * way — best-effort: never throws.
+ */
+export function resumeVaultAutoCommit(commitPath: string, token?: VaultPauseToken): void {
+  const p = pauseLeasePath(commitPath);
+  try {
+    if (token !== undefined) {
+      const current = JSON.parse(fs.readFileSync(p, "utf8")) as { token?: string };
+      if (current?.token !== token) return; // a newer op's lease — not mine to remove
+    }
+    fs.rmSync(p);
+  } catch { /* no lease, unreadable, or already gone — fine */ }
 }
 
 /** Whether an unexpired pause lease exists for `commitPath`. A missing, unreadable, malformed, or expired

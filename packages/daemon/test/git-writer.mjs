@@ -151,6 +151,21 @@ try {
 
   const summaryBadRepo = await new GitWriter(path.join(root, "does-not-exist")).pendingPushSummary();
   check("pendingPushSummary: a non-existent repo path returns null, never throws", summaryBadRepo === null);
+
+  // 10. Oversized-staged-file WARNING, not a refusal (card 237d1899, decision on CR finding 2): unlike
+  //     commitVault (the automatic vault path, which silently unstages), this DELIBERATE human/agent path
+  //     commits the file as asked but surfaces a non-blocking `warning`. `maxFileBytes` is a test-only
+  //     override (mirrors commitVault's own opts.maxFileBytes) so this doesn't need a real ~95MB fixture.
+  await w.checkout(baseBranch);
+  fs.writeFileSync(path.join(repo, "big.txt"), "x".repeat(2048));
+  const bigCommit = await w.commit("add an oversized-for-the-test file", { maxFileBytes: 1024 });
+  check("oversized commit still succeeds (warns, does not refuse)", bigCommit.ok === true && typeof bigCommit.hash === "string");
+  check("oversized commit surfaces a warning naming the file", bigCommit.ok === true && bigCommit.warning?.includes("big.txt"));
+  check("oversized file actually landed in history (not silently unstaged)", git("show", "--stat", "HEAD").includes("big.txt"));
+
+  fs.writeFileSync(path.join(repo, "small.txt"), "small\n");
+  const smallCommit = await w.commit("add a normal-sized file", { maxFileBytes: 1024 });
+  check("normal-sized commit carries no warning", smallCommit.ok === true && smallCommit.warning === undefined);
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

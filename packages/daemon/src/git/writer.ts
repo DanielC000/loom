@@ -1,5 +1,13 @@
+import fs from "node:fs";
+import path from "node:path";
 import { simpleGit, type SimpleGit } from "simple-git";
-import { recordGitPushOutcome, pauseVaultAutoCommit, resumeVaultAutoCommit } from "../vault/versioner.js";
+import {
+  recordGitPushOutcome,
+  pauseVaultAutoCommit,
+  resumeVaultAutoCommit,
+  DEFAULT_MAX_VAULT_FILE_BYTES,
+  humanBytes,
+} from "../vault/versioner.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -184,13 +192,22 @@ export class GitWriter {
    * unused file under its own `.git/` that nothing reads. Always resumes in `finally`, so a lease is
    * never left held past this call even if `fn` throws (its own timeout ceiling is a self-healing
    * backstop regardless).
+   *
+   * **Per-op token (card 237d1899):** the lease is a single shared file, not ref-counted, and every
+   * surface that writes (REST, Platform, companion git-push) constructs its own `new GitWriter(repoPath)`
+   * with no cross-surface mutex — so two ops on the same repo CAN overlap. Without a token, op A's
+   * `finally` would unconditionally `rm` the lease file, un-protecting op B mid-flight even though B is
+   * still running. Threading THIS call's own token through to `resumeVaultAutoCommit` makes the resume
+   * "mine-only": if B re-paused (writing a new token) before A's `finally` runs, A's resume no-ops and
+   * B's lease survives until B resumes it (or the TTL expires). Low-severity even before this fix — see
+   * the card body — but now closed rather than merely self-healing.
    */
   private async withVaultPauseLease<T>(fn: () => Promise<T>): Promise<T> {
-    pauseVaultAutoCommit(this.repoPath);
+    const pauseToken = pauseVaultAutoCommit(this.repoPath);
     try {
       return await fn();
     } finally {
-      resumeVaultAutoCommit(this.repoPath);
+      resumeVaultAutoCommit(this.repoPath, pauseToken);
     }
   }
 
@@ -225,11 +242,33 @@ export class GitWriter {
     });
   }
 
-  /** Stage ALL changes (`add -A`) and commit with the UI-supplied message. Returns the new commit hash.
-   *  A clean tree is an EXPECTED no-op failure ("nothing to commit") — surfaced, not thrown. Identity is
-   *  the repo's configured user (no overrides, no trailer). */
-  async commit(message: string): Promise<GitWriteResult<{ hash: string }>> {
+  /**
+   * Stage ALL changes (`add -A`) and commit with the UI-supplied message. Returns the new commit hash.
+   * A clean tree is an EXPECTED no-op failure ("nothing to commit") — surfaced, not thrown. Identity is
+   * the repo's configured user (no overrides, no trailer).
+   *
+   * **Oversized-staged-file WARNING, not a refusal (card 237d1899, decision on finding 2 of 614dfbef's
+   * CR):** `vault/versioner.ts`'s `commitVault` silently unstages a staged file above
+   * {@link DEFAULT_MAX_VAULT_FILE_BYTES} (~95MB) before committing — correct THERE because that path is
+   * fully automatic/unattended (no human in the loop, so overriding silently is the safe default). This
+   * method is instead a DELIBERATE act by a human or agent on the project's code repo — silently
+   * unstaging (or refusing outright) would override an intent that may be entirely legitimate (a large
+   * asset the repo genuinely wants tracked). So this path commits the file as asked, but surfaces a
+   * non-blocking `warning` on the result when a staged file exceeds the SAME shared threshold — enough
+   * signal that a human/agent isn't blindsided by a push later wedging on a remote's object-size limit
+   * (e.g. GitHub's 100MB hard cap), without taking the choice out of their hands. Detection is
+   * best-effort (a stat failure just skips that file) and never blocks the commit itself.
+   *
+   * `opts.maxFileBytes` overrides the shared default — a TEST seam only (mirrors `commitVault`'s own
+   * `opts.maxFileBytes`: writing a real ~95MB fixture per test run would be slow and wasteful). Every
+   * real caller omits it and gets {@link DEFAULT_MAX_VAULT_FILE_BYTES}.
+   */
+  async commit(
+    message: string,
+    opts?: { maxFileBytes?: number },
+  ): Promise<GitWriteResult<{ hash: string; warning?: string }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
+    const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
     return this.withVaultPauseLease(async () => {
       try {
         const git = this.git(this.localMs);
@@ -237,13 +276,33 @@ export class GitWriter {
         const status = await withTimeout(git.status(), this.localMs, "git status");
         if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
         await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
+        const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
+        const warning = this.oversizedStagedWarning(staged.files, maxFileBytes);
         const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
         const hash = res.commit || (await git.revparse(["HEAD"])).trim();
-        return { ok: true, hash };
+        return warning ? { ok: true, hash, warning } : { ok: true, hash };
       } catch (e) {
         return { ok: false, error: gitError(e) };
       }
     });
+  }
+
+  /** A human-readable warning naming any staged (non-deletion) file over `maxFileBytes`, or `undefined`
+   *  if none — see {@link commit}'s doc for why this path warns instead of unstaging. */
+  private oversizedStagedWarning(
+    files: Array<{ path: string; working_dir: string; index: string }>,
+    maxFileBytes: number,
+  ): string | undefined {
+    const oversized: string[] = [];
+    for (const f of files) {
+      if (f.working_dir === "D" || f.index === "D") continue; // deletion — nothing to stat
+      let size: number;
+      try { size = fs.statSync(path.join(this.repoPath, f.path)).size; } catch { continue; }
+      if (size > maxFileBytes) oversized.push(`${f.path} (${humanBytes(size)})`);
+    }
+    if (!oversized.length) return undefined;
+    return `Staged file(s) exceed ${humanBytes(maxFileBytes)}: ${oversized.join(", ")} — ` +
+      `this may be rejected by a remote with an object-size limit (e.g. GitHub's 100MB hard cap).`;
   }
 
   /**
