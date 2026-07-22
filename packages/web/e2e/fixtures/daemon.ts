@@ -145,6 +145,14 @@ export interface SeededLiveSession {
 export interface LoomDaemon {
   /** The isolated daemon's actual bound origin, e.g. http://127.0.0.1:4399 — parsed from its boot log. */
   baseURL: string;
+  /**
+   * This daemon's scratch LOOM_HOME. Exposed for the ONE class of state a spec cannot otherwise build:
+   * a skill's reference/script file has NO REST or agent write surface BY DESIGN (only SKILL.md does),
+   * so a spec covering the per-file compare/resolve view (card c01fd791) must write such a file
+   * directly, exactly as the out-of-band hand-edit it models. Prefer REST for anything REST can express
+   * — reaching into the daemon's home to fake state REST owns would test a fiction.
+   */
+  loomHome: string;
   /** Seed a project (with a real, empty git repo as repoPath + a plain dir as vaultPath) via REST. */
   createProject: (name?: string) => Promise<SeededProject>;
   /** Seed a board task on a project via REST — the same store the kanban UI and the MCP task tools share. */
@@ -641,7 +649,7 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
       }
     };
 
-    await use({ baseURL, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
+    await use({ baseURL, loomHome, createProject, createTask, seedProjectMemory, seedUsageSample, seedCompanion, seedCompanionConversations, seedLiveSession, enqueueMessage, seedOrchestrationEvent, seedScheduleDeferral, seedQuestion, spawnShell, killSpawnedShells, archiveSeededSessions, resolveSeededQuestions });
 
     // Teardown: assert nothing spawned a real claude across the WHOLE session (defense in depth beyond
     // the post-boot check), then shut down gracefully, hard-kill as a backstop, and clean up disk.

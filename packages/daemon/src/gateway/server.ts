@@ -60,7 +60,7 @@ import { validateVaultPath } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
 import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/writer.js";
-import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff } from "../skills/store.js";
+import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { cloneAgentCore } from "../agents/clone-core.js";
@@ -3121,13 +3121,51 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return readSkill(name);
   });
   // "What shipped changed" since the user's last sync: base + current shipped asset, for the web to render
-  // the incoming base→shipped diff next to "update available". 404 if not a bundled skill.
+  // the incoming base→shipped diff next to "update available". 404 if not a bundled skill. ALSO carries
+  // `files` — the per-file (SKILL.md + references/** + scripts/**) flag summary, content-free so this
+  // stays cheap; the web fetches one file's CONTENT on demand via /file-diff below.
   app.get("/api/skills/:name/update-diff", async (req, reply) => {
     const { name } = req.params as { name: string };
     if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
     const d = skillUpdateDiff(name);
     if (!d) return reply.code(404).send({ error: "no bundled version for this skill" });
     return d;
+  });
+  // The CONTENT tier of the compare view: all three versions (base/mine/shipped) of ONE tracked file,
+  // fetched only when the user expands that file's row. `path` is validated by MEMBERSHIP in the live
+  // server-derived tracked-file set — the caller names a choice from that set, never a path — so
+  // traversal, absolute paths, and untracked files all 404 through the same check.
+  // `shippedHash` in the response is the token /file-resolve requires back (see its TOCTOU guard).
+  app.get("/api/skills/:name/file-diff", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const { path: relPath } = (req.query ?? {}) as { path?: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (typeof relPath !== "string" || !relPath) return reply.code(400).send({ error: "path required" });
+    const d = skillFileDiff(name, relPath);
+    if (!d) return reply.code(404).send({ error: "not a tracked file of this skill" });
+    return d;
+  });
+  // Resolve ONE diverged reference/script file — the non-destructive escape from a customized file with
+  // a pending update, whose badge otherwise never clears (advancePristineExtraFiles rightly refuses to
+  // overwrite the edit, leaving only Reset's whole-directory discard).
+  //   take:"mine"    — keep the user's file byte-identical, advance base := shipped. Discards NOTHING.
+  //   take:"shipped" — take shipped (backing up the overwritten content first). One file, never the dir.
+  // `shippedHash` is REQUIRED and 409s on mismatch: assets/** is read live, so shipped can change between
+  // the diff being read and the button being clicked — without it, take:"shipped" could discard content
+  // behind a diff that no longer shows what is being discarded (this card's own defect, as a race).
+  app.post("/api/skills/:name/file-resolve", async (req, reply) => {
+    const { name } = req.params as { name: string };
+    const b = (req.body ?? {}) as { path?: string; take?: string; shippedHash?: string };
+    if (!isValidSkillName(name)) return reply.code(400).send({ error: "invalid skill name" });
+    if (typeof b.path !== "string" || !b.path) return reply.code(400).send({ error: "path required" });
+    if (b.take !== "mine" && b.take !== "shipped") return reply.code(400).send({ error: "take must be \"mine\" or \"shipped\"" });
+    if (typeof b.shippedHash !== "string" || !b.shippedHash) return reply.code(400).send({ error: "shippedHash required (re-open the diff to get one)" });
+    const r = resolveSkillFile(name, b.path, b.take, b.shippedHash);
+    if (!r.ok) {
+      const code = r.code === "invalid" ? 400 : r.code === "not-found" ? 404 : 409;
+      return reply.code(code).send({ error: r.message, ...(r.shippedHash ? { shippedHash: r.shippedHash } : {}) });
+    }
+    return r;
   });
   // Preview the non-destructive 3-way adopt merge (base, mine, shipped). Only meaningful when an update is
   // available (409 otherwise). { clean:true, merged } for a one-click apply; { clean:false, merged, conflicts:[…] }

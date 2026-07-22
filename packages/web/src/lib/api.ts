@@ -54,7 +54,16 @@ export interface BranchDiff { filesChanged: number; insertions: number; deletion
 // `clean` one-clicks, otherwise `merged` carries git-style conflict markers (<<<<<<< mine / ||||||| base
 // / ======= / >>>>>>> shipped) for a whole-file editor and `conflicts[]` enumerates each hunk for a
 // per-hunk resolver. POST adopt with the resolved full content (or none, for a clean auto-merge).
-export interface SkillUpdateDiff { base: string; shipped: string; }
+// `files` (card c01fd791) is the per-file flag summary across the WHOLE skill directory — SKILL.md plus
+// every tracked reference doc / helper script. Content-free by design so this read stays cheap; one
+// file's actual content comes from `skillFileDiff` on demand when its row is expanded.
+export interface SkillUpdateDiff { base: string; shipped: string; files: SkillFileState[]; }
+/** One tracked file's own state. `customized` = the user's copy differs from base; `updateAvailable` =
+ *  Loom shipped a newer version of THIS file. Both true is the state that had no non-destructive exit. */
+export interface SkillFileState { path: string; customized: boolean; updateAvailable: boolean; }
+/** One file's three versions + `shippedHash`, the identity token `resolveSkillFile` requires back to
+ *  prove the shipped content hasn't changed since this diff was displayed (assets/** is read live). */
+export interface SkillFileDiff extends SkillFileState { base: string; mine: string; shipped: string; shippedHash: string; }
 export interface SkillMergeConflict { mine: string; base: string; shipped: string; }
 export type SkillMergePreview =
   | { clean: true; merged: string }
@@ -672,8 +681,18 @@ export const api = {
   resetSkill: (name: string) => post<{ name: string; content: string }>(`/api/skills/${encodeURIComponent(name)}/reset`),
   publishSkill: (name: string) => post<{ ok: boolean }>(`/api/skills/${encodeURIComponent(name)}/publish`),
   // --- Skill update adoption (3-way merge; only meaningful when a skill reports updateAvailable). ---
-  // The raw base→shipped pair; the UI renders the computed line diff ("what shipped changed").
+  // The raw base→shipped pair (SKILL.md) + the content-free per-file flag summary for the whole dir.
   skillUpdateDiff: (name: string) => get<SkillUpdateDiff>(`/api/skills/${encodeURIComponent(name)}/update-diff`),
+  // One tracked file's three versions — fetched only when that file's row is expanded (the content tier).
+  skillFileDiff: (name: string, path: string) =>
+    get<SkillFileDiff>(`/api/skills/${encodeURIComponent(name)}/file-diff?path=${encodeURIComponent(path)}`),
+  // Resolve ONE diverged reference/script file. take:"mine" keeps the user's copy byte-identical and just
+  // advances base (discards nothing, clears the stuck "update available"); take:"shipped" takes shipped
+  // for that ONE file. `shippedHash` comes from the file-diff that is currently on screen and 409s if the
+  // shipped content changed underneath — never resolve against a diff the user didn't actually see.
+  resolveSkillFile: (name: string, path: string, take: "mine" | "shipped", shippedHash: string) =>
+    postErr<{ ok: true; path: string; take: "mine" | "shipped" }>(
+      `/api/skills/${encodeURIComponent(name)}/file-resolve`, { path, take, shippedHash }),
   // Dry-run the 3-way merge: { clean } → one-click adopt; otherwise conflicts to resolve. 409 if no update.
   skillMergePreview: (name: string) => get<SkillMergePreview>(`/api/skills/${encodeURIComponent(name)}/merge-preview`),
   // Adopt the update: empty content one-clicks the clean auto-merge; resolved full content lands a

@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -558,12 +559,189 @@ export function previewSkillMerge(name: string): SkillMergeResult | null {
   return mergeSkillContent(v.base, v.mine, v.shipped);
 }
 
-/** base + shipped for the "what shipped changed" (base→shipped) diff. null if not a bundled skill. */
-export function skillUpdateDiff(name: string): { base: string; shipped: string } | null {
+// --- Per-file compare / resolve (references/**, scripts/**) ----------------------------------------
+// Board card c01fd791. `75a0755d` taught the DAEMON to track the whole skill directory but left the
+// compare VIEW SKILL.md-only, which produced a badge with no explorable diff and — for a file that is
+// both customized AND has a shipped update — a badge that could never clear, because
+// advancePristineExtraFiles correctly refuses to overwrite a user edit and the only escape was Reset (a
+// whole-directory discard). These functions make the compare truthful per file and give that state a
+// NON-DESTRUCTIVE resolution.
+//
+// Payload discipline: the summary below carries FLAGS ONLY (no content) and rides on the already-lazy
+// update-diff read; file CONTENT is fetched one file at a time via skillFileDiff. listSkills is
+// deliberately untouched — it is the hot read and already does a recursive walk per skill.
+
+/** One tracked file's own customization state — flags only, no content (the cheap summary tier). */
+export interface SkillFileState {
+  /** POSIX-style path relative to the skill dir: "SKILL.md", "references/anti-patterns.md", … */
+  path: string;
+  /** mine != base — the user's copy carries an edit. */
+  customized: boolean;
+  /** base != shipped — Loom shipped a newer version of THIS file since the last sync. */
+  updateAvailable: boolean;
+}
+/** One tracked file's full three-version view + the identity guard for a later resolve (content tier). */
+export interface SkillFileDiff extends SkillFileState {
+  base: string;
+  mine: string;
+  shipped: string;
+  /** Content identity of `shipped` AS DISPLAYED — echoed back by resolveSkillFile. See its doc. */
+  shippedHash: string;
+}
+
+/**
+ * Content identity of one side of a diff, for the resolve TOCTOU guard. Hashes the RAW bytes, NOT
+ * normalizeForCompare's output: this guard is fail-closed on purpose. A whitespace-only asset change
+ * that normalization would discount still invalidates the token, costing the user one "re-open the
+ * diff" round-trip — strictly better than the alternative failure, which is silently resolving against
+ * content the user never saw. Truncated to 16 hex chars: this is a change DETECTOR, not a security
+ * primitive (the asset side is Loom's own package dir, not attacker-controlled).
+ */
+function contentHash(s: string): string {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex").slice(0, 16);
+}
+
+/**
+ * Membership test for a caller-named file. The caller names a CHOICE FROM A SERVER-DERIVED SET — never
+ * a path — so traversal ("../../etc/passwd"), absolute paths, and merely-untracked files all fail the
+ * SAME check for the same reason, with no string sanitization to get subtly wrong. `extraFileRelPaths`
+ * is a live walk of the store dir, so the set is always current.
+ */
+function isTrackedSkillFile(name: string, relPath: string): boolean {
+  if (relPath === "SKILL.md") return true;
+  return extraFileRelPaths(name).includes(relPath);
+}
+
+/**
+ * Per-file flags for every tracked file of a bundled skill, SKILL.md FIRST then the extra files in
+ * their existing sorted order. A file fileThreeVersions can't compare (binary, or no shipped
+ * counterpart) is omitted entirely rather than reported as pristine — an omission is honest about
+ * "not tracked"; a false `customized:false` would claim we checked.
+ */
+function skillFileStates(name: string): SkillFileState[] {
+  const out: SkillFileState[] = [];
+  const md = threeVersions(name);
+  if (md) {
+    out.push({
+      path: "SKILL.md",
+      customized: normalizeForCompare(md.mine) !== normalizeForCompare(md.base),
+      updateAvailable: normalizeForCompare(md.base) !== normalizeForCompare(md.shipped),
+    });
+  }
+  for (const relPath of extraFileRelPaths(name)) {
+    const v = fileThreeVersions(name, relPath);
+    if (!v) continue;
+    out.push({
+      path: relPath,
+      customized: normalizeForCompare(v.mine) !== normalizeForCompare(v.base),
+      updateAvailable: normalizeForCompare(v.base) !== normalizeForCompare(v.shipped),
+    });
+  }
+  return out;
+}
+
+/**
+ * base + shipped for SKILL.md's "what shipped changed" (base→shipped) diff, PLUS `files` — the per-file
+ * flag summary across the whole skill directory. null if not a bundled skill.
+ *
+ * `base`/`shipped` are retained unchanged so both existing banners keep rendering exactly as before;
+ * `files` is purely additive and content-free, so this stays a cheap read.
+ */
+export function skillUpdateDiff(name: string): { base: string; shipped: string; files: SkillFileState[] } | null {
   if (!isValidSkillName(name)) return null;
   const v = threeVersions(name);
   if (!v) return null;
-  return { base: v.base, shipped: v.shipped };
+  return { base: v.base, shipped: v.shipped, files: skillFileStates(name) };
+}
+
+/**
+ * All three versions of ONE tracked file, fetched on demand when the user expands that file's row —
+ * this is the content tier, deliberately never bundled into the summary above. SKILL.md is READABLE
+ * here (so the file list renders uniformly) even though it is not RESOLVABLE — see resolveSkillFile.
+ * null on an invalid name, an untracked path, or a file with no comparable three versions.
+ */
+export function skillFileDiff(name: string, relPath: string): SkillFileDiff | null {
+  if (!isValidSkillName(name)) return null;
+  if (!isTrackedSkillFile(name, relPath)) return null;
+  const v = relPath === "SKILL.md" ? threeVersions(name) : fileThreeVersions(name, relPath);
+  if (!v) return null;
+  return {
+    path: relPath,
+    base: v.base,
+    mine: v.mine,
+    shipped: v.shipped,
+    customized: normalizeForCompare(v.mine) !== normalizeForCompare(v.base),
+    updateAvailable: normalizeForCompare(v.base) !== normalizeForCompare(v.shipped),
+    shippedHash: contentHash(v.shipped),
+  };
+}
+
+export type SkillFileResolveOutcome =
+  | { ok: true; path: string; take: "mine" | "shipped" }
+  | { ok: false; code: "invalid" | "not-found" | "not-diverged" | "stale-shipped"; message: string; shippedHash?: string };
+
+/**
+ * Resolve ONE diverged reference/script file, per the user's explicit choice. This is the escape hatch
+ * for the state that had none: a file that is BOTH customized AND has a shipped update is skipped by
+ * advancePristineExtraFiles (correctly — it protects the edit), so its badge could never clear and the
+ * only remedy was Reset, a whole-directory discard.
+ *
+ *  take:"mine"    — leave `mine` BYTE-IDENTICAL; advance base := shipped ONLY. "I've seen the shipped
+ *                   update and I'm keeping my version." updateAvailable clears; customized stays true,
+ *                   which is honest — their copy really does still differ from shipped. NOTHING is
+ *                   discarded, so this deliberately does NOT go through advanceExtraFile and writes NO
+ *                   `.pre-ff-backups` entry: a backup here would misrepresent itself as a copy of
+ *                   something that was overwritten, when nothing was. This is not a new semantics — it
+ *                   is exactly what adoptSkillUpdate already does for SKILL.md when the user resolves
+ *                   every conflict hunk to "mine" (write their content, advance base := shipped).
+ *  take:"shipped" — take the shipped version via advanceExtraFile, so the pre-overwrite content lands
+ *                   under `.pre-ff-backups` first. Destructive to THIS ONE FILE, never the directory,
+ *                   and the REST layer only ever reaches it from a row already showing this file's diff.
+ *
+ * `expectedShippedHash` is a REQUIRED TOCTOU guard, not an optimization. `assets/**` is read LIVE from
+ * the package dir (see CLAUDE.md), so an asset merge takes effect with no daemon restart — `shipped`
+ * can change between the user reading the diff and clicking a button. Without this, take:"shipped"
+ * would overwrite `mine` with content the displayed diff never showed: a discard behind a diff that no
+ * longer shows what is being discarded, which is precisely the defect this card exists to close,
+ * reappearing as a race. It guards take:"mine" too — that writes base := shipped, so it can otherwise
+ * silently record a base the user never saw. Same class, lower stakes, one guard covers both.
+ *
+ * SKILL.md is REJECTED here: it has a real edit surface and its own 3-way merge/adopt/reset flow, and
+ * routing it through a two-button per-file resolve would be a second, subtly-different notion of
+ * "resolved" for the one file that already has one.
+ */
+export function resolveSkillFile(
+  name: string,
+  relPath: string,
+  take: "mine" | "shipped",
+  expectedShippedHash: string,
+): SkillFileResolveOutcome {
+  if (!isValidSkillName(name)) return { ok: false, code: "invalid", message: "invalid skill name" };
+  if (relPath === "SKILL.md") {
+    return { ok: false, code: "invalid", message: "SKILL.md resolves through adopt / reset, not per-file resolve" };
+  }
+  if (!isTrackedSkillFile(name, relPath)) return { ok: false, code: "invalid", message: "not a tracked file of this skill" };
+  const v = fileThreeVersions(name, relPath);
+  if (!v) return { ok: false, code: "not-found", message: "no comparable shipped version for this file" };
+
+  const customized = normalizeForCompare(v.mine) !== normalizeForCompare(v.base);
+  const updateAvailable = normalizeForCompare(v.base) !== normalizeForCompare(v.shipped);
+  if (!customized && !updateAvailable) return { ok: false, code: "not-diverged", message: "this file is already in sync — nothing to resolve" };
+
+  const currentHash = contentHash(v.shipped);
+  if (expectedShippedHash !== currentHash) {
+    return {
+      ok: false,
+      code: "stale-shipped",
+      message: "the shipped version of this file changed since you opened the diff — re-open it to see the current change",
+      shippedHash: currentHash,
+    };
+  }
+
+  if (take === "shipped") advanceExtraFile(name, relPath, v.shipped); // backs up `mine` first
+  else writeFileBaseSnapshot(name, relPath, v.shipped);               // base := shipped; `mine` untouched, no backup
+  console.log(`[skills] resolved ${name}/${relPath} — took ${take}`);
+  return { ok: true, path: relPath, take };
 }
 
 /**
