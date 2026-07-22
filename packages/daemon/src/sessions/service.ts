@@ -2680,6 +2680,19 @@ export class SessionService {
       this.resolveQueuedMessage(msgId, { recipientId, reason: "recipient-gone-or-superseded" });
       return "retired";
     }
+
+    // STALE-REDRIVE GUARD (card 02621025, origin finding 39cbe5b5): a durable record that predates a
+    // LATER redirect, or whose instructed outcome the worker has ALREADY reported, is retired instead of
+    // blindly redriven. Deliberately narrow — see staleQueuedMessageReason's own doc for why a newer
+    // PLAIN/additive message_worker/session_message does NOT retire an older one.
+    const staleReason = this.staleQueuedMessageReason(recipientId, e);
+    if (staleReason) {
+      // eslint-disable-next-line no-console
+      console.log(`[redrive] retiring stale queued message ${msgId} for ${recipientId} — ${staleReason}`);
+      this.resolveQueuedMessage(msgId, { recipientId, reason: staleReason });
+      return "retired";
+    }
+
     if (recipient.processState === "live") {
       // Re-enqueue with the SAME msgId so its drain resolves THIS queued event (no duplicate record). Mark
       // it in-flight FIRST so the overlapping path skips it; the onDeliver wrapper clears the mark AND
@@ -2697,6 +2710,64 @@ export class SessionService {
       this.redriveInFlightMsgIds.delete(msgId);
     }
     return "stuck"; // not live (exited / starting) or live-without-pty
+  }
+
+  /**
+   * Card 02621025: is durable record `e` STALE for `recipientId` — safe to retire rather than redrive?
+   * ONE shared timeline fetch (`db.listEventsForWorker`, already ts-ordered) backs both checks below.
+   *
+   *  1. SUPERSEDED BY A LATER REDIRECT — `worker_redirect`'s own contract already declares "flush + supersede
+   *     ALL pending direction" (deliverRedirect's step (a): `pty.flushPending` + `onDeliver("superseded")`).
+   *     But that flush only reaches whatever is sitting in the LIVE `live.pending` FIFO at redirect-send
+   *     time. If the recipient wasn't live then (crashed / not yet resumed), flushPending finds nothing to
+   *     supersede, and this durable record is the ONLY surviving trace of the direction the redirect had
+   *     already declared dead. Retiring it here at redrive time just extends that SAME declared semantics
+   *     into the gap flushPending couldn't reach — it is not new supersession policy.
+   *
+   *     SELF-MATCH HAZARD (caught in review — do not "fix" by relying on `ts` alone): a HELD redirect
+   *     enqueues its OWN `session_message_queued` record (inside `enqueueDurableMessage`) and THEN appends
+   *     its sibling `redirect_worker` event (`deliverRedirect`, after the enqueue) — two SEPARATE `new
+   *     Date()` calls, so the sibling event's `ts` is typically AT OR AFTER its own record's `ts` (not a
+   *     rare millisecond-boundary edge case — it's the ordinary case, since real work, incl.
+   *     `interruptForRedirect`, runs between the two timestamps). A plain `ev.ts > e.ts` scan would treat a
+   *     redirect's own just-queued record as "superseded by itself" and silently drop it — the exact
+   *     silent-direction-loss failure this card exists to prevent, just relocated to the redirect arm. So
+   *     this excludes the sibling by IDENTITY, not timing: `deliverRedirect` stamps `detail.queuedMsgId` on
+   *     its `redirect_worker` event with the exact `msgId` of the `session_message_queued` record it just
+   *     created (when held) — a `redirect_worker` event only counts as "later" if its `queuedMsgId` is
+   *     something OTHER than `e`'s own `msgId`, i.e. it is a genuinely different, independent redirect.
+   *
+   *  2. ALREADY REPORTED — the worker submitted a `worker_report` for the SAME taskId after this record was
+   *     queued. Whatever this instruction was asking it to check/commit/report has a known outcome already;
+   *     redriving it just re-asks an already-answered question. This is the origin-incident's actual shape
+   *     (39cbe5b5): the worker recognized the redriven text as something it "already completed" — i.e. a
+   *     worker_report for that task had already landed between this record's queue time and its redrive.
+   *     No self-match hazard here: a `session_message_queued` and a `worker_report` are never siblings of
+   *     the same call, so `ev.id !== e.id` (always true across different kinds) is sufficient.
+   *
+   * DELIBERATELY NOT triggered by a later PLAIN `message_worker` / `session_message` — worker_message is
+   * ADDITIVE by contract (a manager routinely sends "fix finding 1" then, separately, "also fix finding
+   * 2"). Retiring an older queued record merely because a newer additive one exists would SILENTLY DESTROY
+   * manager-authored content — the same failure class this card fixes (a directive never executed), just
+   * with worse, invisible blast radius (no worker ever sees a stale-and-wrong redrive to notice; the
+   * instruction just vanishes). Two co-pending DURABLE records for the same recipient already redrive in
+   * chronological order (`ORDER BY ts, rowid` in listUndeliveredQueuedMessages / listUnresolvedQueuedMessages
+   * ForWorker); the only way order breaks is a newer message that bypassed the durable table by delivering
+   * as an immediate live turn, and the daemon cannot rewind an already-executed turn to "demote" the older
+   * one behind it — so that case is left to redrive as today, unchanged by this guard.
+   */
+  private staleQueuedMessageReason(recipientId: string, e: OrchestrationEvent): string | undefined {
+    const ownMsgId = typeof e.detail?.msgId === "string" ? e.detail.msgId : null;
+    const timeline = this.db.listEventsForWorker(recipientId);
+    const supersededByRedirect = timeline.some((ev) =>
+      ev.id !== e.id && ev.ts > e.ts && ev.kind === "redirect_worker" && ev.detail?.queuedMsgId !== ownMsgId);
+    if (supersededByRedirect) return "superseded-by-redirect";
+    if (e.taskId) {
+      const alreadyReported = timeline.some((ev) =>
+        ev.id !== e.id && ev.ts > e.ts && ev.kind === "worker_report" && ev.taskId === e.taskId);
+      if (alreadyReported) return "already-reported";
+    }
+    return undefined;
   }
 
   /**
@@ -3928,10 +3999,18 @@ export class SessionService {
     // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
     // cancel that very turn.
     if (!r.delivered) this.pty.interruptForRedirect(target.id);
+    // `queuedMsgId` links this event to its OWN sibling session_message_queued record (card 02621025) —
+    // present only on the held path, since an immediate delivery (r.delivered) never persists one. Without
+    // this linkage a later staleness check has ONLY `ts` to tell "this redirect's own record" apart from
+    // "a genuinely different, later redirect" — and this event's ts is computed by a SEPARATE `new Date()`
+    // call strictly after enqueueDurableMessage's own, so it is not just possible but TYPICAL for this
+    // event to land at or after its own record's ts. Without the explicit id, that self-comparison would
+    // retire the redirect's own just-queued record as "superseded by itself" — the exact silent-drop
+    // failure this card exists to prevent, just relocated to the redirect arm.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: opts.eventManagerId, workerSessionId: target.id, taskId: target.taskId ?? null, kind: "redirect_worker",
-      detail: { delivered: r.delivered, superseded: flushed.length, ...opts.extraDetail },
+      detail: { delivered: r.delivered, superseded: flushed.length, queuedMsgId: r.delivered ? undefined : r.msgId, ...opts.extraDetail },
     });
     return r;
   }
@@ -4023,7 +4102,7 @@ export class SessionService {
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
-  ): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
+  ): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason; msgId: string } {
     const msgId = randomUUID();
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
@@ -4039,7 +4118,10 @@ export class SessionService {
         kind: "session_message_queued", detail: { msgId, text: framedText, sender: ctx.sender },
       });
     }
-    return r;
+    // msgId is returned UNCONDITIONALLY (not just on the held path) so a caller that needs to correlate
+    // its OWN follow-up event to this exact enqueue attempt (deliverRedirect's redirect_worker event, card
+    // 02621025) always has it to hand — cheap, since it's already minted above regardless of outcome.
+    return { ...r, msgId };
   }
 
   /**

@@ -19,6 +19,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -52,6 +53,10 @@ class PtyStub {
   getPending(id) { return (this.q.get(id) ?? []).map((m) => m.text); }
   // Simulate a pty DEATH without draining (session exited, FIFO lost): held copies vanish, onDeliver never fires.
   killWithoutDrain(id) { this.q.set(id, []); }
+  // deliverRedirect's mechanics (card 02621025 scenario 8): flush the FIFO (empty when not-live/not-held —
+  // no-op) and a no-op interrupt (real Esc-write timing isn't under test here).
+  flushPending(id) { const a = this.q.get(id) ?? []; this.q.set(id, []); return a; }
+  interruptForRedirect() { /* no-op stub — not under test here */ }
 }
 
 try {
@@ -200,12 +205,165 @@ try {
     check("(4) and it finally delivers + resolves", typeof drained === "string" && drained.includes("STALE DISPATCH") && undelivered("STALE DISPATCH") === 0);
   }
 
+  // Append a synthetic orchestration event directly (bypassing SessionService), so a test can place a
+  // `redirect_worker` / `worker_report` at a precise, guaranteed-later point in a recipient's timeline
+  // without the full mechanics (the Playwright-free PtyStub doesn't implement flushPending /
+  // interruptForRedirect, so driving redirectWorker()/workerReport() directly isn't viable here).
+  const laterTs = () => new Date(Date.now() + 60_000).toISOString(); // +1min: safely after any "now" write above
+
+  // ===================== (5) REDIRECT SUPERSEDES — card 02621025, DoD-1 =====================
+  // A durable record's OWN redirect (worker_redirect's contract: "replace ALL pending direction") already
+  // fires while the recipient is live, via deliverRedirect's flushPending+supersede step — but that only
+  // reaches `live.pending`. If the recipient is NOT live when the redirect goes out, flushPending finds
+  // nothing, and the durable record is the ONLY surviving trace of the direction the redirect declared
+  // dead. staleQueuedMessageReason must retire it (not redrive it) once the recipient comes back live.
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `qml-E-mgr-${sfx}`, wkr = `qml-E-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    sessions.messageWorker(mgr, wkr, "STALE PRE-REDIRECT");
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("STALE PRE-REDIRECT"));
+    const msgId = rec?.detail?.msgId;
+    check("(5) the pre-redirect message is held + persisted", typeof msgId === "string");
+
+    // Recipient crashes before it can drain (undelivered). A redirect is sent while it's down — recorded
+    // as a `redirect_worker` event with a LATER ts (its own durable session_message_queued detail is
+    // irrelevant here; only the sibling event kind/ts matters to staleQueuedMessageReason).
+    db.setProcessState(wkr, "exited");
+    db.appendEvent({ id: randomUUID(), ts: laterTs(), managerSessionId: mgr, workerSessionId: wkr, taskId: null, kind: "redirect_worker", detail: { delivered: false, superseded: 0 } });
+
+    // Recipient comes back live (live-flip path).
+    const ptyBoot = new PtyStub();
+    const sessionsBoot = new SessionService(db, ptyBoot, new OrchestrationControl());
+    db.setProcessState(wkr, "live"); ptyBoot.setLive(wkr); ptyBoot.setBusy(wkr);
+    sessionsBoot.redriveUndeliveredMessagesForRecipient(wkr);
+
+    check("(5) the redirect-superseded record is NEVER redriven", dispatchCount(ptyBoot, wkr, "STALE PRE-REDIRECT") === 0);
+    check("(5) the redirect-superseded record is retired (zero undelivered)", undelivered("STALE PRE-REDIRECT") === 0);
+    const marker = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_delivered" && e.detail?.msgId === msgId);
+    check("(5) the resolution records reason \"superseded-by-redirect\"", marker?.detail?.reason === "superseded-by-redirect");
+  }
+
+  // ===================== (6) ADDITIVE PRESERVED — the regression guard proving the fix did NOT overcorrect =====================
+  // worker_message is ADDITIVE by contract: a manager routinely sends "fix finding 1" then, separately,
+  // "also fix finding 2". A newer PLAIN message_worker existing must NEVER retire an older queued one —
+  // that would SILENTLY DESTROY manager-authored direction, the same failure class this card fixes (a
+  // directive never executed) with WORSE blast radius (invisible — no stale-and-wrong redrive for anyone
+  // to notice; the instruction just vanishes). This is the test that stops a future well-meaning change
+  // from re-introducing silent direction loss by widening the staleness check to plain messages.
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `qml-F-mgr-${sfx}`, wkr = `qml-F-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    sessions.messageWorker(mgr, wkr, "OLDER FIX 1");
+
+    // Recipient crashes before either message can drain. A SECOND, additive worker_message is sent while
+    // it's down — also held + persisted (not a synthetic event this time: the real messageWorker call, so
+    // its own `message_worker` sibling event is genuine, exactly like the real incident's M2).
+    db.setProcessState(wkr, "exited");
+    sessions.messageWorker(mgr, wkr, "ALSO FIX 2");
+    check("(6) both additive messages are held + persisted while the recipient is down",
+      undelivered("OLDER FIX 1") === 1 && undelivered("ALSO FIX 2") === 1);
+
+    // Recipient comes back live (live-flip path) — both should redrive, in chronological order.
+    const ptyBoot = new PtyStub();
+    const sessionsBoot = new SessionService(db, ptyBoot, new OrchestrationControl());
+    db.setProcessState(wkr, "live"); ptyBoot.setLive(wkr); ptyBoot.setBusy(wkr);
+    sessionsBoot.redriveUndeliveredMessagesForRecipient(wkr);
+
+    check("(6) the OLDER additive message is still redriven (never silently retired)", dispatchCount(ptyBoot, wkr, "OLDER FIX 1") === 1);
+    check("(6) the NEWER additive message is also redriven", dispatchCount(ptyBoot, wkr, "ALSO FIX 2") === 1);
+    const order = ptyBoot.getPending(wkr);
+    const idxOlder = order.findIndex((t) => t.includes("OLDER FIX 1"));
+    const idxNewer = order.findIndex((t) => t.includes("ALSO FIX 2"));
+    check("(6) they redrive in chronological (FIFO) order — OLDER before NEWER", idxOlder >= 0 && idxNewer >= 0 && idxOlder < idxNewer);
+  }
+
+  // ===================== (7) ALREADY-REPORTED — card 02621025, DoD-2 =====================
+  // Mirrors the origin incident (39cbe5b5) directly: a "check background task… commit… report done"
+  // instruction is queued, the worker (via its own natural progress) already worker_report's for that
+  // SAME task before the stale instruction is ever redriven — so redriving it now would just re-ask an
+  // already-answered question. Must retire, not redrive.
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `qml-G-mgr-${sfx}`, wkr = `qml-G-wkr-${sfx}`, taskId = `qml-G-task-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    sessions.messageWorker(mgr, wkr, "CHECK BG THEN COMMIT THEN REPORT DONE");
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("CHECK BG THEN COMMIT THEN REPORT DONE"));
+    const msgId = rec?.detail?.msgId;
+    check("(7) the background-check instruction is held + persisted", typeof msgId === "string");
+
+    // Recipient crashes before it can drain. It resumes on its own (crash-recovery), independently
+    // completes the exact sequence, and reports done for the SAME task — recorded with a LATER ts.
+    db.setProcessState(wkr, "exited");
+    db.appendEvent({ id: randomUUID(), ts: laterTs(), managerSessionId: mgr, workerSessionId: wkr, taskId, kind: "worker_report", detail: { status: "done", summary: "checked background task, committed" } });
+
+    // NOW the recipient is redriven (live-flip) — the stale instruction must be retired, not redelivered.
+    const ptyBoot = new PtyStub();
+    const sessionsBoot = new SessionService(db, ptyBoot, new OrchestrationControl());
+    db.setProcessState(wkr, "live"); ptyBoot.setLive(wkr); ptyBoot.setBusy(wkr);
+    sessionsBoot.redriveUndeliveredMessagesForRecipient(wkr);
+
+    check("(7) the already-reported instruction is NEVER redriven", dispatchCount(ptyBoot, wkr, "CHECK BG THEN COMMIT THEN REPORT DONE") === 0);
+    check("(7) the already-reported instruction is retired (zero undelivered)", undelivered("CHECK BG THEN COMMIT THEN REPORT DONE") === 0);
+    const marker = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_delivered" && e.detail?.msgId === msgId);
+    check("(7) the resolution records reason \"already-reported\"", marker?.detail?.reason === "already-reported");
+  }
+
+  // ===================== (8) SELF-MATCH HAZARD — a HELD redirect to a NOT-LIVE recipient must still redrive =====================
+  // Caught in review: `deliverRedirect` appends its `redirect_worker` event via a SEPARATE `new Date()`
+  // call, strictly AFTER `enqueueDurableMessage` (inside it) computes the ts for the redirect's OWN
+  // session_message_queued record — so the sibling event's ts typically lands AT OR AFTER the record's own
+  // ts (real work, incl. interruptForRedirect, runs between the two calls). Drives the REAL redirectWorker
+  // → deliverRedirect path (not a synthetic event, unlike scenario 5) specifically so this reproduces that
+  // ordinary ordering, not a contrived one. Before the fix this would have retired the redirect's own
+  // record as "superseded by itself" — silently dropping a redirect sent to a not-live recipient. Must NOT
+  // regress: the record must still redrive and deliver.
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `qml-H-mgr-${sfx}`, wkr = `qml-H-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); // recipient NOT live — deliverRedirect's own flushPending finds nothing to supersede,
+    // so its durable record is the only surviving trace of the redirect.
+    const r = sessions.redirectWorker(mgr, wkr, "URGENT REDIRECT WHILE DOWN");
+    check("(8) the redirect is held (recipient not live) and persisted durably", r.delivered === false);
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail.text.includes("URGENT REDIRECT WHILE DOWN"));
+    const msgId = rec?.detail?.msgId;
+    check("(8) the redirect's own record carries a msgId", typeof msgId === "string");
+    const sibling = db.listEventsForWorker(wkr).find((e) => e.kind === "redirect_worker");
+    check("(8) the sibling redirect_worker event stamps the SAME queuedMsgId (the linkage this fix relies on)", sibling?.detail?.queuedMsgId === msgId);
+    check("(8) the sibling event's ts is AT/AFTER the record's own ts — the ordinary case, not an edge case", sibling && rec && sibling.ts >= rec.ts);
+
+    // Recipient comes back live later (live-flip path).
+    const ptyBoot = new PtyStub();
+    const sessionsBoot = new SessionService(db, ptyBoot, new OrchestrationControl());
+    db.setProcessState(wkr, "live"); ptyBoot.setLive(wkr); ptyBoot.setBusy(wkr);
+    sessionsBoot.redriveUndeliveredMessagesForRecipient(wkr);
+
+    check("(8) the redirect's OWN record is still redriven — NOT self-retired", dispatchCount(ptyBoot, wkr, "URGENT REDIRECT WHILE DOWN") === 1);
+    const drained = ptyBoot.drainOne(wkr);
+    check("(8) it delivers on the recipient's next turn", typeof drained === "string" && drained.includes("URGENT REDIRECT WHILE DOWN"));
+    const marker = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_delivered" && e.detail?.msgId === msgId);
+    check("(8) it resolves as a PLAIN delivery, not a \"superseded-by-redirect\" retirement", marker !== undefined && marker.detail?.reason === undefined);
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a session_message_queued whose recipient is NOT live at boot recovery is re-driven EXACTLY once when that recipient transitions to live (resume/live-flip), idempotent with the boot scan (no double, order-insensitive), retires a gone/superseded recipient (no zombie), and a held copy lost to a mid-process pty death is recovered once on the next boot (never doubled, never lost)."
+  ? "\n✅ ALL PASS — a session_message_queued whose recipient is NOT live at boot recovery is re-driven EXACTLY once when that recipient transitions to live (resume/live-flip), idempotent with the boot scan (no double, order-insensitive), retires a gone/superseded recipient (no zombie), a held copy lost to a mid-process pty death is recovered once on the next boot (never doubled, never lost), a record superseded by a LATER redirect is retired (not redriven), a record superseded by a LATER additive message_worker is STILL redriven (never silently destroyed), and a record whose instructed outcome the worker already worker_report'd is retired as already-reported."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
