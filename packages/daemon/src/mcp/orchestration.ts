@@ -742,9 +742,13 @@ export class OrchestrationMcpRouter {
             "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
             "returns {ran:true, passed, validatedHead, gateDetail?} — `validatedHead` is the worktree commit " +
             "this run actually gated (compare it to your own HEAD if you're unsure whether a result is about " +
-            "your current code); on a failure, gateDetail carries {phase, failedStep, failingTest, stderrTail, " +
-            "exitCode, signal, timedOut} so you can diagnose a real test failure vs. a flake without re-running " +
-            "blind. CLIENT-TIMEOUT RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
+            "your current code); on a failure, gateDetail carries {phase, failedStep, failingTest, " +
+            "failingTestReason, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure " +
+            "vs. a flake without re-running blind — failingTest is `undefined` (never a guessed name) only when " +
+            "nothing recognizable was found, and failingTestReason then says why. The async [loom:gate-failed] " +
+            "nudge (see below) carries this SAME phase/failedStep/failingTest detail in its own text, not just a " +
+            "raw stderr tail — you don't need the sync result in hand to get the diagnosis. CLIENT-TIMEOUT " +
+            "RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
             "result inline (stamped with a correlation `opId`); a genuinely slow one (a real multi-minute test " +
             "suite) instead returns {opId, status:\"pending\", attachedToInFlight, staleAgainstWorktree}. " +
             "DO NOT POLL OR RE-CALL TO FETCH THE RESULT — worker_report progress with awaiting:\"background\" " +

@@ -40,6 +40,90 @@ export function splitGateSteps(gate: string): string[] {
  *  a bounded ring, never the full log. Mirrors python/venv.ts's `OUTPUT_TAIL_BYTES`. */
 const OUTPUT_TAIL_BYTES = 4096;
 
+/** Failing-test/assertion marker patterns, shared by the LIVE per-step scanner (below) and the post-hoc
+ *  {@link extractFailingTest} (kept for a caller holding only a raw string, e.g. a test double that bypasses
+ *  the real runner). Recognizes cross-ecosystem failure markers: Loom's own `FAIL  <label>` convention,
+ *  Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and `error TSxxxx` typechecker
+ *  diagnostics. */
+const FAILING_TEST_PATTERNS: RegExp[] = [
+  /^\s*(FAIL|✗|✖|not ok)\b.*/i,
+  /AssertionError.*/,
+  /error TS\d+:.*/,
+];
+
+/** Cap (bytes/UTF-16 code units) on `createFailingTestTracker`'s `carry` — the not-yet-newline-terminated
+ *  remainder it holds between `feed()` calls. See that function's own doc for why this must be bounded. */
+const FAILING_TEST_CARRY_CAP_BYTES = 8192;
+
+/**
+ * Card 55cba5c5: scans a step's stdout+stderr AS IT STREAMS for the LAST failing-test/assertion marker
+ * line, independent of the bounded {@link OUTPUT_TAIL_BYTES} ring `runGateStep`'s `tail()` keeps for
+ * display. A tail dominated by trailing warnings or a pnpm epilogue — the COMMON failure mode, not an edge
+ * case — can truncate the actual failing-test line right out of the last N bytes of combined output;
+ * scanning the FULL stream as it arrives means the failing test's identity survives that truncation.
+ *
+ * PRIORITY PRESERVED, PER TIER: tracks the LAST line matching EACH {@link FAILING_TEST_PATTERNS} entry
+ * independently (one slot per pattern), then `result()` returns the highest-priority tier (lowest index)
+ * that has ANY match — mirroring {@link extractFailingTest}'s own "first pattern with a hit wins" ordering
+ * (a `FAIL`/`not ok` marker always wins over a bare `AssertionError` line, matching a runner's own PASS/
+ * FAIL-by-name summary over an incidental thrown-error line) — while still preferring the LAST occurrence
+ * *within* that winning tier, which is what actually survives truncation (a summary line near the end of
+ * a long run, not necessarily the first thing printed).
+ *
+ * Deliberately keeps only one line per pattern (a handful of bytes total), never the whole output, so this
+ * adds no meaningful memory over the existing ring. Uses a streaming `TextDecoder` (not a per-chunk
+ * `Buffer#toString`) so a multi-byte UTF-8 character split across two chunks decodes correctly instead of
+ * producing a mangled replacement character right at the boundary.
+ *
+ * CARRY IS BOUNDED, TWO LAYERS (Code Review, card 55cba5c5):
+ *  1. **A bare `\r` is a line boundary too** — `split(/\r\n|\r|\n/)`, not the original `/\r?\n/`. A
+ *     progress-bar/download-meter renderer (pnpm/npm/turbo all use one) rewrites its line in place via a
+ *     bare `\r` with NO following `\n`; the original regex never splits on that, so a step dominated by
+ *     that kind of output would never pop anything off `carry` — it would grow to hold the step's ENTIRE
+ *     combined output in daemon memory, exactly the unbounded thing {@link OUTPUT_TAIL_BYTES}'s own ring
+ *     exists to avoid. Treating `\r` as a real boundary flushes each progress frame through `scanLine`
+ *     the moment it arrives (matching or not — most don't), so `carry` naturally stays small for this
+ *     realistic case AND a marker written with a bare `\r` (not just `\n`) is still found immediately,
+ *     regardless of how much unrelated progress-bar text follows it in the SAME feed() call — `lastByPattern`
+ *     only ever holds one short line per tier, not the stream itself.
+ *  2. **A hard cap on `carry` as the backstop** for the residual pathological case this splitting can't
+ *     help — a single write with NO `\r` and NO `\n` anywhere (an arbitrarily long unbroken string). That
+ *     can't be flushed early no matter how the splitting is done, so `carry` is capped to the last
+ *     {@link FAILING_TEST_CARRY_CAP_BYTES} after every `feed()` regardless. A real failing-test marker
+ *     line is never anywhere close to that size, so this never interferes with the marker this tracker
+ *     exists to find in the realistic case — it only discards old content that was never going to match.
+ *
+ * Exported (unlike the rest of this module's internals) so a hermetic test can drive it directly with
+ * synthetic bare-`\r`/no-delimiter chunks, mirroring how `runGateStep`/`splitGateSteps` are already
+ * exported for the same reason.
+ */
+export function createFailingTestTracker(): { feed(chunk: Buffer): void; result(): string | undefined } {
+  const decoder = new TextDecoder("utf-8");
+  let carry = "";
+  const lastByPattern: (string | undefined)[] = new Array(FAILING_TEST_PATTERNS.length).fill(undefined);
+  const scanLine = (line: string): void => {
+    for (let i = 0; i < FAILING_TEST_PATTERNS.length; i++) {
+      if (FAILING_TEST_PATTERNS[i]!.test(line)) { lastByPattern[i] = line.trim(); return; }
+    }
+  };
+  return {
+    feed(chunk: Buffer): void {
+      const text = carry + decoder.decode(chunk, { stream: true });
+      const lines = text.split(/\r\n|\r|\n/);
+      carry = lines.pop() ?? "";
+      if (carry.length > FAILING_TEST_CARRY_CAP_BYTES) carry = carry.slice(-FAILING_TEST_CARRY_CAP_BYTES);
+      for (const line of lines) scanLine(line);
+    },
+    result(): string | undefined {
+      // A final partial line (no trailing newline/CR, e.g. the process exited mid-write) can still be the
+      // failing marker itself — scan it too before resolving the winning tier.
+      scanLine(carry);
+      for (const m of lastByPattern) if (m) return m;
+      return undefined;
+    },
+  };
+}
+
 /** Idle-liveness threshold for the ONE-TIME auto-extend (card 24642c3d, see {@link runGateStep}): if the
  *  child has produced any stdout/stderr byte within this many ms of the timeout firing, it's still
  *  actively working, not stalled — worth one more full `timeoutMs` window instead of an immediate kill.
@@ -73,6 +157,11 @@ export interface GateStepResult {
   signal?: NodeJS.Signals | null;
   timedOut?: boolean;
   outputTail?: string;
+  /** Best-effort failing-test/assertion line, scanned LIVE across the full stream (see
+   *  {@link createFailingTestTracker}) — unlike `outputTail`, never truncated to the last
+   *  {@link OUTPUT_TAIL_BYTES}. `undefined` when nothing recognizable was found (an honest miss, never a
+   *  guess — see {@link extractFailingTest}'s own doc). */
+  failingTest?: string;
   decidedAt?: number;
 }
 
@@ -107,11 +196,16 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // (setTimeout, also monotonic) — a backward wall-clock step (NTP) mid-gate can't flip the extend
   // decision (mirrors Loom's existing monotonic-clock preference for timing logic).
   let lastOutputAt = performance.now();
+  // Card 55cba5c5: scans the FULL stream for the failing-test marker, independent of the ring's own
+  // OUTPUT_TAIL_BYTES eviction above — see createFailingTestTracker's doc for why the ring alone isn't
+  // enough (a tail dominated by trailing warnings/a pnpm epilogue truncates the marker right out of it).
+  const failingTestTracker = createFailingTestTracker();
   const capture = (b: Buffer): void => {
     chunks.push(b);
     bytes += b.length;
     lastOutputAt = performance.now();
     while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
+    failingTestTracker.feed(b);
   };
   const tail = (): string => {
     const s = Buffer.concat(chunks).toString("utf-8").trim();
@@ -143,11 +237,11 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   let settled = false;
   let extended = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const done = (result: Omit<GateStepResult, "outputTail" | "decidedAt">) => {
+  const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
-    resolve({ ...result, outputTail: tail(), decidedAt: performance.now() });
+    resolve({ ...result, outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt: performance.now() });
   };
   // ONE-TIME AUTO-EXTEND (card 24642c3d — the false-fail-under-fleet-load fix): fires when `timeoutMs` is
   // hit. If the child has been idle (no stdout/stderr byte) for less than GATE_EXTEND_IDLE_MS, it's still
@@ -179,7 +273,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
       resolve({
         status: null,
         error: new Error(`gate step exceeded ${timeoutMs}ms${extended ? " (after one auto-extend)" : ""}`),
-        signal: "SIGKILL", timedOut: true, outputTail: tail(), decidedAt,
+        signal: "SIGKILL", timedOut: true, outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt,
       });
     });
   };
@@ -232,6 +326,9 @@ export interface GateSequentialResult {
   failedSignal?: NodeJS.Signals | null;
   failedTimedOut?: boolean;
   outputTail?: string;
+  /** See {@link GateStepResult.failingTest} — forwarded verbatim from the failing step's own result, so a
+   *  caller no longer has to re-derive it (truncation-prone) from `outputTail` itself. */
+  failingTest?: string;
 }
 
 /**
@@ -258,7 +355,7 @@ export async function runGateSequential(
     if (!passed) {
       return {
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail,
+        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest,
       };
     }
   }
@@ -329,19 +426,19 @@ export function classifyGatePhase(step: string | undefined): "typecheck" | "test
 
 /**
  * Best-effort extraction of the first failing-test name/assertion line from a gate step's captured output
- * tail — scans for common cross-ecosystem failure markers (Loom's own `FAIL  <label>` convention, Jest/AVA/
- * tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and `error TSxxxx` typechecker
- * diagnostics) and returns the FIRST matching line, trimmed. Returns `undefined` when nothing recognizable
- * is found — this is a diagnostic aid, not a parser, so a silent miss just means the raw tail is still
- * surfaced on its own.
+ * tail — a FALLBACK for a caller holding only a raw string (e.g. an injected test double that bypasses the
+ * real `runGateStep`/`runGateSequential`, or `outputTail` from a caller that never ran the live scan). A
+ * real gate run should prefer {@link GateSequentialResult.failingTest} (populated by the LIVE
+ * {@link createFailingTestTracker} scan, which is NOT subject to this tail's own truncation) over calling
+ * this at all. Scans for the same cross-ecosystem failure markers as that live scan (Loom's own
+ * `FAIL  <label>` convention, Jest/AVA/tap-style `FAIL`/`not ok`/✗/✖ markers, thrown `AssertionError`s, and
+ * `error TSxxxx` typechecker diagnostics) and returns the FIRST matching line, trimmed. Returns `undefined`
+ * when nothing recognizable is found — this is a diagnostic aid, not a parser, so a silent miss just means
+ * the raw tail is still surfaced on its own.
  */
 export function extractFailingTest(outputTail: string): string | undefined {
   const lines = outputTail.split(/\r?\n/);
-  const patterns = [
-    /^\s*(FAIL|✗|✖|not ok)\b.*/i,
-    /AssertionError.*/,
-    /error TS\d+:.*/,
-  ];
+  const patterns = FAILING_TEST_PATTERNS;
   for (const pattern of patterns) {
     const hit = lines.find((l) => pattern.test(l));
     if (hit) return hit.trim();

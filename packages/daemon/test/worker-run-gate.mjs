@@ -371,6 +371,45 @@ try {
     try { await sessions.runWorkerGate(mgrId); } catch { threw = true; }
     check("(H) a manager session is REFUSED run_gate (worker-only surface)", threw === true);
   }
+
+  // ── (K) card 55cba5c5: the ASYNC [loom:gate-failed] nudge — the ONLY thing a worker sees for a
+  //        genuinely slow gate (its tool set has no fetch-by-opId) — carries the structured
+  //        phase/failedStep/failingTest detail, not just a raw stderr tail. Forces the real pending→
+  //        settle→nudge path (the fake gate sleeps past SYNC_ATTACH_BUDGET_MS=12s) through the ACTUAL
+  //        runWorkerGate/PendingOpRegistry wiring — not a re-derivation — and supplies a `failingTest`
+  //        separately from `outputTail` (an unrelated epilogue), exactly the truncation shape the card
+  //        was filed over: the tail alone would never reveal the failing test's identity. ────────────
+  {
+    const sfx = `k-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-k-${sfx}`);
+    const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    const failingAsyncGate = async () => {
+      await sleep(12_300); // past the 12s SYNC_ATTACH_BUDGET_MS — forces the pending→settle→nudge path
+      return {
+        passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+        // Live-scanned by gate-runner.ts independently of outputTail (card 55cba5c5) — outputTail here is
+        // deliberately UNRELATED trailing noise, mirroring a tail dominated by a pnpm epilogue that never
+        // itself contains the failing-test line.
+        failingTest: "FAIL some-test.mjs > widget renders",
+        outputTail: "epilogue noise unrelated to the failure\n".repeat(50),
+      };
+    };
+    const { stub, enqueued } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: failingAsyncGate });
+
+    const pending = await sessions.runWorkerGate(gateWorkerId);
+    check("(K) the slow gate degrades to the pending shape", pending.settled === false);
+    await sleep(600); // let the fake's own remaining sleep (~300ms past the budget) finish and settle
+
+    const gateFailedMsgs = enqueued.filter((args) => args[0] === gateWorkerId && typeof args[1] === "string" && args[1].includes("[loom:gate-failed]"));
+    check("(K) exactly ONE [loom:gate-failed] nudge reached the worker's own pty", gateFailedMsgs.length === 1);
+    const text = gateFailedMsgs[0]?.[1] ?? "";
+    check("(K) the nudge names the failed step (not just a raw tail)", text.includes("step: pnpm test"));
+    check("(K) the nudge names the phase", text.includes("phase: test"));
+    check("(K) the nudge names the failing test from the LIVE-scanned field", text.includes("failing: FAIL some-test.mjs > widget renders"));
+    const tailBlock = text.split("--- gate output tail ---")[1] ?? "";
+    check("(K) the raw tail block does NOT itself contain the failing test — proving the identity came from the live field, not the tail", !tailBlock.includes("widget renders"));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }

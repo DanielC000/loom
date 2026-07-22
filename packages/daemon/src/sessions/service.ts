@@ -92,6 +92,10 @@ type GateRejectionDetail = {
   phase?: "typecheck" | "test" | "build";
   failedStep?: string;
   failingTest?: string;
+  /** Set ONLY when `failingTest` is absent — the honest reason nothing recognizable was found (card
+   *  55cba5c5), so a consumer can tell "genuinely unattributable" apart from a field that was never
+   *  populated at all. Never a substitute for a fabricated best-guess test name. */
+  failingTestReason?: string;
   stderrTail?: string;
   exitCode?: number | null;
   signal?: NodeJS.Signals | null;
@@ -7377,8 +7381,15 @@ export class SessionService {
         // inventing a new regex. Sanitized once and reused for both the pty text and the sync gateDetail so
         // the two never disagree.
         const outputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
-        const rawFailingTest = outputTail ? extractFailingTest(outputTail) : undefined;
+        // Card 55cba5c5: prefer the LIVE-scanned failingTest gate-runner.ts already extracted across the
+        // FULL output stream (not subject to outputTail's own truncation) — extractFailingTest(outputTail)
+        // is now only a fallback for a caller (a test double) whose result never populated it.
+        const rawFailingTest = gateResult.failingTest ?? (outputTail ? extractFailingTest(outputTail) : undefined);
         const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
+        // Honest-null companion (card 55cba5c5 DoD): a caller reading gateDetail must be able to tell
+        // "genuinely nothing recognizable found" apart from "this field was never populated" — never
+        // fabricate a best-guess test name for the former.
+        const failingTestReason = failingTest ? undefined : "no recognizable failing-test marker found in gate output";
         const killNote = gateResult.failedTimedOut
           ? `timed out after ${gateTimeoutMs}ms`
           : gateResult.failedSignal
@@ -7391,12 +7402,12 @@ export class SessionService {
           phase ? `phase: ${phase}` : undefined,
           killNote,
           gateRetried ? `retried once (settled ${orchestration.gateRetry.settleMs}ms)` : undefined,
-          failingTest ? `failing: ${failingTest}` : undefined,
+          failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
         const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${headline}${detailBits ? ` (${detailBits})` : ""}; canonical repo untouched, worktree retained.${tailBlock}`);
         evt("merge_rejected", {
-          reason: "gate", phase, failedStep: gateResult.failedStep, failingTest,
+          reason: "gate", phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           killClass: finalClass, retried: gateRetried,
           ...(suppressed ? { suppressed: true } : {}),
@@ -7405,7 +7416,7 @@ export class SessionService {
           merged: false,
           reason: headline,
           gateDetail: {
-            phase, failedStep: gateResult.failedStep, failingTest, stderrTail: outputTail,
+            phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
             exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           },
           notified: !suppressed,
@@ -7969,8 +7980,13 @@ export class SessionService {
           // Same INJECTION HYGIENE as confirmWorkerMerge's own rejection path: strip C0 control chars before
           // this raw process output is embedded into the `[loom:gate-failed]` pty text.
           const outputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
-          const rawFailingTest = outputTail ? extractFailingTest(outputTail) : undefined;
+          // Card 55cba5c5: same LIVE-scanned-first preference as confirmWorkerMerge's own rejection path —
+          // gateResult.failingTest (scanned across the FULL stream by gate-runner.ts, not just outputTail's
+          // bounded tail) wins; extractFailingTest(outputTail) is only a fallback for a caller/test double
+          // that never populated it.
+          const rawFailingTest = gateResult.failingTest ?? (outputTail ? extractFailingTest(outputTail) : undefined);
           const failingTest = rawFailingTest ? rawFailingTest.replace(CONTROL_CHAR_RE, "") : undefined;
+          const failingTestReason = failingTest ? undefined : "no recognizable failing-test marker found in gate output";
           const headline = finalClass === "kill"
             ? `gate killed by ${gateResult.failedSignal}${gateResult.failedSignal === "SIGKILL" ? " (possibly OOM/resource)" : ""}`
             : finalClass === "timeout"
@@ -7981,6 +7997,7 @@ export class SessionService {
           // of this for the nudge/return value below, so the durable event shouldn't be a flatter `{passed}`.
           evt({
             passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
+            failingTestReason: failingTestReason ?? null,
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
             durationMs: Date.now() - gateStartedAt,
             ...(outputTail ? { outputTail } : {}),
@@ -7988,7 +8005,7 @@ export class SessionService {
           return {
             ran: true, passed: false, reason: headline, opId, validatedHead: startStamp.head,
             gateDetail: {
-              phase, failedStep: gateResult.failedStep, failingTest, stderrTail: outputTail,
+              phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
               exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
             },
           };
@@ -8003,10 +8020,31 @@ export class SessionService {
         // row for reconcileOrphanedGateOps to find at the next boot.
         this.db.clearPendingGateOp(opId);
         const headSuffix = outcome.ok && outcome.value.validatedHead ? ` (validated ${outcome.value.validatedHead.slice(0, 8)})` : "";
+        // Card 55cba5c5: this nudge is the ONLY thing a worker ever sees for an async-settled gate — a
+        // worker's tool set has no fetch-by-opId to go back for the sync gateDetail object afterwards. It
+        // used to embed ONLY the raw stderr tail; mirror confirmWorkerMerge's own `detailBits` format here
+        // so the worker gets the SAME phase/failedStep/failingTest diagnosis the manager path already had,
+        // instead of an unattributed tail a worker can only guess at.
+        const gd = outcome.ok ? outcome.value.gateDetail : undefined;
+        const killNote = gd?.circuitBroken
+          ? undefined
+          : gd?.timedOut
+            ? `timed out after ${gateTimeoutMs}ms`
+            : gd?.signal
+              ? `killed by ${gd.signal}`
+              : gd?.exitCode != null
+                ? `exit ${gd.exitCode}`
+                : undefined;
+        const detailBits = gd ? [
+          gd.failedStep ? `step: ${gd.failedStep}` : undefined,
+          gd.phase ? `phase: ${gd.phase}` : undefined,
+          killNote,
+          gd.failingTest ? `failing: ${gd.failingTest}` : (gd.failingTestReason ? `failing test: unknown (${gd.failingTestReason})` : undefined),
+        ].filter(Boolean).join("; ") : "";
         const msg = outcome.ok
           ? (outcome.value.passed
             ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}.`
-            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${headSuffix}${outcome.value.gateDetail?.stderrTail ? `\n--- gate output tail ---\n${outcome.value.gateDetail.stderrTail}` : ""}`)
+            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in workerSessionId's
         // recycle lineage at settle time — a worker can worker_recycle mid-gate exactly like a manager can

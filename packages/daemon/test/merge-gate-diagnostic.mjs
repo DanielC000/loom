@@ -79,6 +79,7 @@ const mk = (label, file) => ({
 });
 const A = mk("a", "feature-a.txt"); // (A) real failing gate step → diagnostic rejection
 const B = mk("b", "feature-b.txt"); // (B) green gate → exactly one merge_done, no gateDetail
+const C = mk("c", "feature-c.txt"); // (C) card 55cba5c5: unattributable failure → honest null + reason
 
 try {
   // ── (A) DIAGNOSTIC REJECTION: a real `node run-tests.mjs` step fails with 1 ───────────────────────────
@@ -136,9 +137,33 @@ try {
     check("(B) worktree removed (clean merge cleanup)", !fs.existsSync(B.worktreePath));
     check("(B) task moved to done", db.getTask(B.taskId).columnKey === "done");
   }
+
+  // ── (C) card 55cba5c5: a genuinely UNATTRIBUTABLE failure (no recognizable failing-test marker at
+  //        all) reports an honest failingTest:undefined + a failingTestReason explaining why — never a
+  //        fabricated best-guess test name, in EITHER the sync gateDetail or the [loom:merge-rejected]
+  //        text ──────────────────────────────────────────────────────────────────────────────────────
+  makeRepo(C);
+  {
+    const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
+    C.worktreePath = worktreePath; C.branch = branch;
+    fs.writeFileSync(path.join(worktreePath, C.file), "work for C\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    seed(C, 'node -e "console.error(\'kaboom, no idea why\'); process.exit(1)"');
+
+    const confirmC = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
+    check("(C) rejected: merged:false", confirmC.merged === false);
+    check("(C) gateDetail.failingTest is undefined — no recognizable marker, so no guess", confirmC.gateDetail?.failingTest === undefined);
+    check("(C) gateDetail.failingTestReason explains the honest miss", typeof confirmC.gateDetail?.failingTestReason === "string" && confirmC.gateDetail.failingTestReason.length > 0);
+
+    const rejectMsgsC = enqueued.filter((args) => args[0] === C.mgrId && typeof args[1] === "string" && args[1].includes("[loom:merge-rejected]"));
+    check("(C) exactly ONE [loom:merge-rejected] signal fired", rejectMsgsC.length === 1);
+    const textC = rejectMsgsC[0]?.[1] ?? "";
+    check("(C) signal text never fabricates a 'failing: <name>' claim", !textC.includes("failing: "));
+    check("(C) signal text names the honest reason instead", textC.includes(confirmC.gateDetail.failingTestReason));
+  }
 } finally {
   db.close();
-  for (const p of [A, B]) {
+  for (const p of [A, B, C]) {
     try { if (p.worktreePath) fs.rmSync(p.worktreePath, { recursive: true, force: true }); } catch { /* ignore */ }
     try { fs.rmSync(p.repo, { recursive: true, force: true }); } catch { /* ignore */ }
   }
