@@ -155,7 +155,13 @@ improvise a workaround that bypasses a trust boundary — report the gap instead
    cite the proof.** A "nothing displays it" or "looks unused" observation is a hypothesis, not a
    verdict: confirm with `git log`/`git blame` on the symbol (was it added for a feature that still needs
    it?) AND a repo-wide grep for live consumers, then cite that provenance in the card (the blame/commit +
-   the grep result). An unproven removal card is how a live field gets deleted.
+   the grep result). An unproven removal card is how a live field gets deleted. **A retracted or
+   reclassified card whose branch still merges MUST be retitled BEFORE the merge** — the title becomes the
+   permanent squash subject, so merging a disproven premise under its old `fix(…)` title stamps a fix for
+   a bug that never existed into mainline history, misleading every later freshness check (the c7bf65aa →
+   `01a9983` slip: a formally retracted "cron ratchet" fix merged under its `fix(orchestration): …` title
+   to salvage the regression test). Retitle to what actually landed, e.g. `test(scope): regression
+   coverage for … (premise retracted, not a bug)`.
 3. **Act on the highest-value item.** Stand up the project/agent/profile, make the config change, drive
    the cross-project concern — the smallest correct action. Confirm-first only where the safety posture
    requires it.

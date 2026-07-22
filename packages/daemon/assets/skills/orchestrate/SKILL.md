@@ -400,6 +400,13 @@ mid-report — before sending anything.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
+   - **Retitle a retracted or reclassified card BEFORE its branch merges.** When a card's premise didn't
+     survive — the "bug" proved not to exist, the work changed nature — but you still merge its branch
+     (say, to keep a regression test as coverage), update the card title FIRST so the squash subject
+     describes what actually landed: a `fix(x): …` becomes e.g. `test(x): regression coverage for …
+     (premise retracted, not a bug)`. The title becomes permanent mainline history; merging under the
+     dead premise records a fix for a bug that never existed, misleading everyone who later reads the
+     log to answer "is X already fixed?".
    - **A slow gate degrades `worker_merge_confirm` to `{status:"pending", opId}` — don't spin-poll it.**
      Once you're told the op is pending, go do something else (review another worker, work your queue) and
      wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` nudge that
