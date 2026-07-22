@@ -781,12 +781,10 @@ async function main(): Promise<void> {
   // means something narrower now: an ACTUAL removal, not merely a retried attempt).
   // NOTE (multi-repo epic 49136451 phase 2): `worktreesStaleRepoKey` is DELIBERATELY left OUT of this
   // condensed summary line/gate — reconcileOrchestrationOnBoot already emits its OWN dedicated warn for
-  // it, mirroring worktreesNeedsHuman/stillWedged (also not folded into this line's wording). Growing
-  // this specific template literal pushes its compiled length past boot-listen-not-blocked.mjs's fixed
-  // byte-offset window for the sibling `.catch()` text just below — keep new counters as SEPARATE
-  // surfaced signals rather than appending to this line. (This whole comment block sits BEFORE the
-  // `reconcileOrchestrationOnBoot(` call text on purpose — that test slices FROM that call site onward,
-  // so a comment placed here costs nothing against its window; one placed after it would.)
+  // it, mirroring worktreesNeedsHuman/stillWedged (also not folded into this line's wording). Keep new
+  // counters as SEPARATE surfaced signals rather than appending to this line — readability, not a test
+  // constraint: boot-listen-not-blocked.mjs (card fdf93d3a) now asserts this chain via the real AST
+  // (src/index.ts), so growing this line or adding comments near the call site below is safe.
   void sessions.reconcileOrchestrationOnBoot(protectedSessionIds).then((reconciled) => {
     if (reconciled.mergesFinished || reconciled.mergesFailed || reconciled.staleMergesResolved || reconciled.worktreesPruned || reconciled.worktreesKept || reconciled.worktreesNeedsHuman || reconciled.worktreesStillWedged) {
       console.log(`[boot] orchestration reconcile: finished ${reconciled.mergesFinished} orphaned merge(s), ${reconciled.mergesFailed} failed (retry next boot), resolved ${reconciled.staleMergesResolved} branch-gone dangling merge(s), pruned ${reconciled.worktreesPruned} orphaned worktree(s), ${reconciled.worktreesStillWedged} still wedged (retried, not skipped, until it clears), kept ${reconciled.worktreesKept} holding unmerged/uncommitted work, gave up on ${reconciled.worktreesNeedsHuman} worktree(s) wedged too long (needs a human)`);
