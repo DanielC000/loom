@@ -141,7 +141,13 @@ export default function Git() {
 }
 
 // Shared commit-table rendering, reused by both the primary repo's log and each reference repo's log below.
+// A commitless repo (e.g. straight out of `git init`) is a valid, expected state — the daemon returns an
+// empty list rather than an error, so an empty (but defined, i.e. loaded) list renders an honest empty
+// state instead of a blank table that reads as broken.
 function CommitTable({ commits }: { commits: { hash: string; date: string; message: string; author: string }[] | undefined }) {
+  if (commits && commits.length === 0) {
+    return <Hint>no commits yet</Hint>;
+  }
   return (
     <table style={{ width: "100%", borderCollapse: "collapse", fontFamily: font.mono, fontSize: 13 }}>
       <tbody>
