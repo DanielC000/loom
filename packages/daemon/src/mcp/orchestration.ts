@@ -1382,28 +1382,41 @@ export class OrchestrationMcpRouter {
     // (mcp/questionTool.ts) verbatim with the Lead surface (mcp/platform.ts) — see its doc for the
     // anti-fabrication invariant (the note is ALWAYS server-captured owner text, never agent-authored)
     // and why this skips the Companion's propose/confirm friction ladder.
+    //
+    // ownerText source (card fix(mcp): let question_resolve accept mid-turn-tool composer answers,
+    // origin finding ca341979): falls back from the CURRENT turn to the single most-recent owner-authored
+    // turn (PtyHost.getRecentOwnerTurns[0]) when the current turn isn't owner-formed — e.g. the manager
+    // spawned workers, ended its own turn, and only gets to question_resolve on a LATER turn triggered by
+    // something else (a worker report drain, an idle nudge). Same bounded, never-cleared-at-Stop ring
+    // companion/attestation.ts's isVerbatimOwnerText already widens onto (card 2b26035c) — [0] only (not a
+    // scan of the whole window), so the note always attests the owner's LATEST word, never an older one
+    // stitched in to make a match.
     server.registerTool(
       "question_resolve",
       {
         description:
           "Mark a still-PENDING request YOU asked via question_ask as ANSWERED, using the OWNER'S OWN " +
-          "words from the reply they JUST sent you in THIS chat — for when the owner answers " +
-          "conversationally instead of using the web Requests UI. You do NOT supply the answer text: the " +
-          "`note` recorded is always the exact, server-captured text of the owner's current turn (never " +
-          "something you write or paraphrase) — this is what lets you resolve your OWN question without " +
-          "reopening the human-only answer boundary. Refused if there is no owner-authored turn in " +
-          "flight right now (the owner hasn't replied this turn — nothing to attest), if the request " +
-          "isn't yours (own agent lineage only) or isn't still 'pending', and for type:\"credential\" " +
-          "(a secret must go through the secure REST answer flow, never chat text). `chosenOption` is " +
-          "REQUIRED for type:\"permission\" (must be \"authorize\" or \"deny\"), optional-but-validated " +
-          "for a \"decision\" that offers `options` (must be one of them), and must be OMITTED for a " +
-          "question with no offered options — the owner's reply stands alone as the note either way. " +
-          "Prefer this over question_ask-then-question_cancel whenever the owner has already answered " +
-          "live in this chat. Returns {resolved:true, questionId, chosenOption, note} or {error}.",
+          "words from their most recent reply — for when the owner answers conversationally instead of " +
+          "using the web Requests UI. You do NOT supply the answer text: the `note` recorded is always " +
+          "the exact, server-captured text of the owner's current turn, or (if the current turn isn't " +
+          "owner-authored) their single most recent owner-authored turn — never something you write or " +
+          "paraphrase. This is what lets you resolve your OWN question without reopening the human-only " +
+          "answer boundary. Refused if there is no owner-authored turn at all yet this session (nothing " +
+          "to attest), if the request isn't yours (own agent lineage only) or isn't still 'pending', and " +
+          "for type:\"credential\" (a secret must go through the secure REST answer flow, never chat " +
+          "text). `chosenOption` is REQUIRED for type:\"permission\" (must be \"authorize\" or \"deny\"), " +
+          "optional-but-validated for a \"decision\" that offers `options` (must be one of them), and " +
+          "must be OMITTED for a question with no offered options — the owner's reply stands alone as " +
+          "the note either way. Prefer this over question_ask-then-question_cancel whenever the owner " +
+          "has already answered live in this chat. Returns {resolved:true, questionId, chosenOption, " +
+          "note} or {error}.",
         inputSchema: { questionId: z.string(), chosenOption: z.string().optional() },
       },
       async ({ questionId, chosenOption }) =>
-        ok(resolveQuestionForAgent(db, managerSessionId, questionId, chosenOption, pty?.getActiveTurnOwnerText(managerSessionId) ?? null)),
+        ok(resolveQuestionForAgent(
+          db, managerSessionId, questionId, chosenOption,
+          pty?.getActiveTurnOwnerText(managerSessionId) ?? pty?.getRecentOwnerTurns?.(managerSessionId)?.[0] ?? null,
+        )),
     );
 
     // requests_list (card 988bb585 follow-up): a NON-CONSUMING, board-wide read of YOUR OWN project's

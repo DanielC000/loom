@@ -344,27 +344,36 @@ export function cancelQuestionForAgent(
  * history shows "cancelled"/moot rather than "answered").
  *
  * **THE ANTI-FABRICATION INVARIANT (load-bearing — do not weaken):** `note` is ALWAYS `ownerText` —
- * the CALLER-SUPPLIED, server-captured-verbatim text of the session's current in-flight turn (from
- * `PtyHost.getActiveTurnOwnerText`, populated only when the turn was formed from an actual human
- * composer submission — see `pty/host.ts`'s `submit()`). The agent NEVER supplies free-text note
- * content here; only `questionId` and (for a question that offers them) `chosenOption`. This is what
- * lets an agent write its OWN question's answer without reopening the self-answer hole the human-only
- * `POST /api/questions/:id/answer` route exists to close — the daemon captured the words, not the agent.
+ * the CALLER-SUPPLIED, server-captured-verbatim text of an owner-authored turn, never something the
+ * agent writes or paraphrases. The caller (both `mcp/orchestration.ts` and `mcp/platform.ts`) resolves
+ * this by falling back from `PtyHost.getActiveTurnOwnerText` (the session's CURRENT in-flight turn) to
+ * `PtyHost.getRecentOwnerTurns(sid)[0]` (the single most-recent owner-authored turn, never cleared at
+ * Stop — card fix(mcp): let question_resolve accept mid-turn-tool composer answers, origin finding
+ * ca341979) when the current turn isn't owner-formed — e.g. the asker ended its own turn after other
+ * work (spawning workers, checking status) and only gets to `question_resolve` on a LATER turn. Both
+ * sources are populated only from an actual human composer submission (see `pty/host.ts`'s `submit()`);
+ * this function itself doesn't care which of the two supplied it — either way `ownerText` is
+ * server-captured, never agent-authored. This is what lets an agent resolve its OWN question's answer
+ * without reopening the self-answer hole the human-only `POST /api/questions/:id/answer` route exists
+ * to close — the daemon captured the words, not the agent. Deliberately [0]-only, not a scan of the
+ * whole recent-turns window: the note always attests the owner's LATEST word, never an older one
+ * stitched in to make a match (mirrors why `isVerbatimOwnerSubstringRecent`, companion/attestation.ts,
+ * checks each recent turn independently rather than concatenating them).
  *
  * **Why this may skip the Companion's propose/confirm friction ladder (`decision_resolve`,
  * `companion/capabilities.ts`):** that ladder exists because the Companion relays an EXTERNAL,
  * injection-exposed chat channel — the text reaching it was never itself authenticated as the owner's
  * own bytes until Primitive A/B/C says so. A manager/Lead session's `ownerText` comes from the SAME
  * loopback-only, human-authenticated REST composer (`POST /api/sessions/:id/input`) that answers a
- * question directly — there is no relay hop and nothing to attest beyond "this turn was actually formed
- * from that route", which `getActiveTurnOwnerText` already guarantees. Do not "harden" this into a
- * second confirm round-trip; that would just be the Companion's cross-channel-injection defense applied
- * to a channel that was never exposed to that risk.
+ * question directly — there is no relay hop and nothing to attest beyond "this turn (or a recent one)
+ * was actually formed from that route", which `getActiveTurnOwnerText`/`getRecentOwnerTurns` already
+ * guarantee. Do not "harden" this into a second confirm round-trip; that would just be the Companion's
+ * cross-channel-injection defense applied to a channel that was never exposed to that risk.
  *
  * Rejects (mirroring `cancelQuestionForAgent`'s ownership scoping + the REST answer route's per-type
  * validation): an unknown session/question; a question asked by a DIFFERENT agent lineage; a
  * non-'pending' question (an answered/consumed/cancelled question is never re-answered); `null`
- * `ownerText` (the current turn was not formed from an owner composer message — nothing to attest);
+ * `ownerText` (no owner-authored turn at all yet this session — nothing to attest, current or recent);
  * `type:"credential"` (secrets stay on the encrypted human-only REST flow, never chat text); and a
  * `chosenOption` that doesn't match what the question actually offers (its `options` for "decision", or
  * `PERMISSION_ANSWERS` for "permission" — REQUIRED for "permission", optional-but-validated for
@@ -383,9 +392,9 @@ export function resolveQuestionForAgent(
 ): { resolved: true; questionId: string; chosenOption: string | null; note: string } | { error: string } {
   if (ownerText === null) {
     return {
-      error: "no owner reply this turn — question_resolve can only act on a turn formed by the owner's " +
-        "own composer message; wait for the owner's reply to land as your current turn, then call this " +
-        "again in that same turn",
+      error: "no owner reply yet this session — question_resolve can only act on the owner's own " +
+        "composer message, current turn or a recent one; wait for the owner's reply to land, then call " +
+        "this again",
     };
   }
   const asker = db.getSession(askerSessionId);

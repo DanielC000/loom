@@ -6,17 +6,23 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // reasoning to chat scrollback and lands a moot 'cancelled' row instead of an 'answered' one).
 //
 // THE LOAD-BEARING ANTI-FABRICATION INVARIANT under test: `note` is ALWAYS the server-captured
-// `ownerText` of the caller's current in-flight turn (PtyHost.getActiveTurnOwnerText) — the agent
-// supplies only `questionId` (+ `chosenOption` where the question offers one). There is no free-text
-// note param the agent can populate.
+// `ownerText` of an owner-authored turn — the CURRENT one (PtyHost.getActiveTurnOwnerText), or (card
+// fix(mcp): let question_resolve accept mid-turn-tool composer answers, origin finding ca341979) the
+// single most-recent one (PtyHost.getRecentOwnerTurns[0]) when the current turn isn't owner-formed — the
+// agent supplies only `questionId` (+ `chosenOption` where the question offers one). There is no
+// free-text note param the agent can populate.
 //
 // HERMETIC + CLAUDE-FREE.
-//   PART 1 — a lightweight fake `pty` (just getActiveTurnOwnerText, keyed by a settable map) drives the
-//     MCP tool handlers directly (OrchestrationMcpRouter / PlatformMcpRouter), covering:
+//   PART 1 — a lightweight fake `pty` (getActiveTurnOwnerText + an independently-settable
+//     getRecentOwnerTurns ring) drives the MCP tool handlers directly (OrchestrationMcpRouter /
+//     PlatformMcpRouter), covering:
 //   (A) resolve-with-owner-text on a free-text (no-options) decision — lands 'answered' with the
 //       verbatim ownerText as note, chosenOption null; identical terminal shape to a REST answer
 //       (db.answerQuestion — same write, same fields) so question_pull/history behave the same.
-//   (B) refuse when getActiveTurnOwnerText is null (no owner reply this turn).
+//   (B) refuse when NEITHER the current turn NOR any recent turn is owner-formed.
+//   (B2) CROSS-TURN fallback — current turn not owner-formed, but a recent one was: resolves via
+//       getRecentOwnerTurns[0] (the LATEST recent turn, not an older one).
+//   (B3) the current turn's ownerText is preferred over the recent-turns fallback when both exist.
 //   (C) refuse type:"credential" outright.
 //   (D) chosenOption validated against a decision's offered `options` (wrong option rejected; a
 //       question with NO options rejects a supplied chosenOption too — omit it, the note carries it).
@@ -34,6 +40,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //     PtyHost.getActiveTurnOwnerText/getRecentOwnerTurns (previously populated ONLY for Companion
 //     inbound) — and question_resolve, built against that SAME real host, resolves the pending question
 //     with that exact composer text as the note.
+//   (Part 2b) the REAL cross-turn case: a genuine Stop hook ends the owner-formed turn (clearing
+//     getActiveTurnOwnerText), then a LATER question_resolve call still resolves via the real
+//     getRecentOwnerTurns ring, which Stop never clears — the actual gap the card fixes.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/question-resolve.mjs
 import fs from "node:fs";
@@ -94,8 +103,17 @@ try {
   // ============ PART 1 — fake pty, MCP tool handlers ============
   const fakePty = {
     ownerText: new Map(),
+    // Separate, independently-settable recent-turns ring (card fix(mcp): let question_resolve accept
+    // mid-turn-tool composer answers) — defaults to mirroring `ownerText` (byte-identical to the old
+    // fake) unless a test explicitly overrides it via `recentTurns.set(sid, [...])`, so a case can
+    // simulate "current turn is NOT owner-formed, but a recent one was" independently of the current-turn
+    // map.
+    recentTurns: new Map(),
     getActiveTurnOwnerText(sid) { return this.ownerText.has(sid) ? this.ownerText.get(sid) : null; },
-    getRecentOwnerTurns(sid) { const t = this.ownerText.get(sid); return t ? [t] : []; },
+    getRecentOwnerTurns(sid) {
+      if (this.recentTurns.has(sid)) return this.recentTurns.get(sid);
+      const t = this.ownerText.get(sid); return t ? [t] : [];
+    },
     isAlive: () => true,
     enqueueStdin: () => ({ delivered: true }),
     getActiveTurnOrigin: () => null,
@@ -121,12 +139,34 @@ try {
   check("(A) question_pull returns it like any other answered question", pulledA.questions.some((q) => q.questionId === "a1" && q.note === "Yeah go ahead and ship it tomorrow morning, that works."));
   check("(A) pulling consumed it", db.getQuestion("a1").state === "consumed");
 
-  // ============ (B) refuse when there is no owner reply this turn ============
+  // ============ (B) refuse when there is no owner reply at all (current OR recent) ============
   insertQ("b1", { sessionId: "mgrA", projectId: "pA", title: "No owner text yet" });
-  fakePty.ownerText.delete("mgrA"); // simulate: no owner-authored turn in flight
+  fakePty.ownerText.delete("mgrA"); // simulate: no owner-authored turn in flight, and (default mirroring) no recent one either
   const refusedB = await call(mgrServer, "question_resolve", { questionId: "b1" });
-  check("(B) refused — no owner reply this turn", typeof refusedB.error === "string" && refusedB.error.includes("no owner reply this turn"));
+  check("(B) refused — no owner reply yet this session", typeof refusedB.error === "string" && refusedB.error.includes("no owner reply yet this session"));
   check("(B) the row is untouched (still pending)", db.getQuestion("b1").state === "pending");
+
+  // ============ (B2) CROSS-TURN fallback — current turn not owner-formed, but a RECENT one was ============
+  // (card fix(mcp): let question_resolve accept mid-turn-tool composer answers, origin finding ca341979,
+  // axis a) — the asker ended its own turn (e.g. after spawning workers) and only calls question_resolve
+  // on a LATER, non-owner-formed turn. getActiveTurnOwnerText is null, but getRecentOwnerTurns still
+  // carries the owner's most recent reply — question_resolve must fall back to it rather than refuse.
+  insertQ("b2", { sessionId: "mgrA", projectId: "pA", title: "Cross-turn resolve" });
+  fakePty.ownerText.delete("mgrA"); // current turn is NOT owner-formed (e.g. a worker-report-triggered turn)
+  fakePty.recentTurns.set("mgrA", ["Go with option two, thanks", "an even older owner turn"]);
+  const resolvedB2 = await call(mgrServer, "question_resolve", { questionId: "b2" });
+  check("(B2) resolves via the RECENT-turn fallback when the current turn isn't owner-formed", resolvedB2.resolved === true && resolvedB2.note === "Go with option two, thanks");
+  check("(B2) uses index [0] only (the LATEST recent turn), not an older one", resolvedB2.note !== "an even older owner turn");
+  fakePty.recentTurns.delete("mgrA"); // reset back to default mirroring for later cases
+
+  // ============ (B3) current-turn ownerText WINS over a stale recent-turns entry ============
+  insertQ("b3", { sessionId: "mgrA", projectId: "pA", title: "Current beats recent" });
+  fakePty.ownerText.set("mgrA", "the CURRENT reply");
+  fakePty.recentTurns.set("mgrA", ["a STALE older reply", "the CURRENT reply"]);
+  const resolvedB3 = await call(mgrServer, "question_resolve", { questionId: "b3" });
+  check("(B3) the CURRENT turn's ownerText is preferred over the recent-turns fallback", resolvedB3.resolved === true && resolvedB3.note === "the CURRENT reply");
+  fakePty.ownerText.delete("mgrA");
+  fakePty.recentTurns.delete("mgrA");
 
   // ============ (C) refuse type:"credential" outright ============
   insertQ("c1", { sessionId: "mgrA", projectId: "pA", title: "A secret", type: "credential", credentialEnvVar: "X" });
@@ -220,6 +260,19 @@ try {
     const liveResolve = await call(liveServer, "question_resolve", { questionId: "p1" });
     check("(Part 2) question_resolve resolves using the REAL composer text end-to-end", liveResolve.resolved === true && liveResolve.note === composerText);
     check("(Part 2) the row is 'answered' with that exact note", db.getQuestion("p1").state === "answered" && db.getQuestion("p1").note === composerText);
+
+    // ============ (Part 2b) REAL cross-turn fallback — a genuine Stop hook ends the owner-formed turn,
+    // then question_resolve is called on a LATER turn (card fix(mcp): let question_resolve accept
+    // mid-turn-tool composer answers, origin finding ca341979, axis a). This is the actual real-world gap
+    // the card fixes: the asker's engagement with the owner's reply spans MORE than one daemon turn (it
+    // ends its own turn — e.g. after spawning workers — before getting to question_resolve). ============
+    insertQ("p2", { sessionId: "mgrLive", projectId: "pA", title: "Resolved on a later, non-owner-formed turn" });
+    realHost.deliverHook("mgrLive", { hook_event_name: "Stop" }); // ends the turn that carried composerText
+    check("(Part 2b) a real Stop clears the CURRENT-turn attestation", realHost.getActiveTurnOwnerText("mgrLive") === null);
+    check("(Part 2b) but getRecentOwnerTurns still carries it — never cleared at Stop", realHost.getRecentOwnerTurns("mgrLive").includes(composerText));
+    const crossTurnResolve = await call(liveServer, "question_resolve", { questionId: "p2" });
+    check("(Part 2b) question_resolve resolves via the recent-turn fallback on a turn the owner never formed", crossTurnResolve.resolved === true && crossTurnResolve.note === composerText);
+    check("(Part 2b) the row is 'answered' with the recent (not current) owner text as its note", db.getQuestion("p2").state === "answered" && db.getQuestion("p2").note === composerText);
   } finally {
     await app.close();
   }
@@ -229,6 +282,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — question_resolve (manager + Lead surfaces) marks a pending Request 'answered' using ONLY the server-captured verbatim owner text (never agent-authored), refuses cleanly with no owner turn / a credential type / an unoffered chosenOption / a foreign agent's question, is absent from the worker surface entirely, and — end-to-end via a REAL PtyHost — the composer route's newly-threaded ownerText (plan A) correctly feeds it without exposing any Companion-only capability to a non-Companion session."
+  ? "\n✅ ALL PASS — question_resolve (manager + Lead surfaces) marks a pending Request 'answered' using ONLY the server-captured verbatim owner text (never agent-authored, current-turn or the single most-recent turn as a cross-turn fallback), refuses cleanly with no owner turn at all / a credential type / an unoffered chosenOption / a foreign agent's question, is absent from the worker surface entirely, and — end-to-end via a REAL PtyHost, including a genuine Stop hook ending the owner-formed turn — the cross-turn fallback resolves a question on a LATER, non-owner-formed turn without exposing any Companion-only capability to a non-Companion session."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
