@@ -954,6 +954,25 @@ export function buildMcpServers(o: {
   // is the RAW project flag — isLoomDev() is re-checked HERE (not pre-baked by the caller) so this pure
   // seam can assert the LOOM_DEV-off negative case directly.
   //
+  // GATE ORDERING IS LOAD-BEARING (card 3e429d83) — keep the cheap checks (`o.codescapeEnabled`,
+  // `isLoomDev()`) first; don't reorder or hoist them behind `isCodescapeSupervisorEnabled`.
+  // `isCodescapeSupervisorEnabled` bottoms out in `resolveExecutable`, a SYNCHRONOUS walk of every PATH
+  // dir × PATHEXT extension (measured ~17-20ms on a real Windows PATH) — exactly the kind of blocking
+  // work the spawn hot path (`createPty` → `buildMcpServers`) must never do (see CLAUDE.md's "no blocking
+  // work on the hot path" invariant).
+  //
+  // TWO INDEPENDENT LAYERS keep that walk off the hot path for a normal spawn, not one: this outer
+  // ordering, AND `isCodescapeSupervisorEnabled` itself re-checking `isLoomDev()` before touching the
+  // filesystem (paths.ts). A regression has to defeat BOTH to actually reach `resolveExecutable`.
+  //
+  // test/pty-hot-path-no-path-walk.mjs guards the INVARIANT — "no PATH walk on the hot path for a normal
+  // spawn" — not this specific ordering: it reddens on anything that actually causes the walk (e.g.
+  // removing/inlining `isCodescapeSupervisorEnabled`'s own `isLoomDev()` short-circuit, confirmed by
+  // fail-first testing), but it will NOT catch a reorder of just this outer gate — the inner short-circuit
+  // still prevents the walk, so that alone is harmless and the test correctly stays green. Keep this
+  // ordering as defense-in-depth anyway; just don't read the test's silence on a reorder as proof nothing
+  // changed.
+  //
   // P4: the per-session mount is now a streamable-HTTP entry pointed at the SHARED `codescape serve`
   // process (`codescapeHttpMcpServer`) — no per-session spawn at all. This SUPERSEDES the C2/C3-era
   // per-session stdio `codescape mcp --graph <graph.json>` process (which read a Loom-maintained snapshot
