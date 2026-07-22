@@ -190,7 +190,11 @@ sibling from re-deriving what you learned. **Query it too, don't only write it**
 `references/project-memory.md` (under this skill's own directory) BEFORE your first memory call** — the
 `memory_*` tools are deferred with exact param names (a guessed param is silently stripped and the call
 fails), and updates are version-gated; that reference carries the mechanics plus the provenance
-discipline for what you write.
+discipline for what you write. **A note that touches an owner gate — a pending approval, authorization,
+or spend — must record the REQUEST ID + its STATE, in asking voice** ("PENDING request `<id>` asks the
+owner to authorize X"), never the decided form ("owner authorizes X"): a decided-voice note becomes
+false authority the moment it outlives the pending state, while the recorded id lets any later reader
+check what's true NOW via the non-consuming `task_requests_list` / `task_request_get` reads.
 
 **Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
 working tree, so a careless relative path can climb out of it. Use **absolute paths** for every

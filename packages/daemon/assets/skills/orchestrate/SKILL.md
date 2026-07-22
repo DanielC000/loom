@@ -505,7 +505,12 @@ mid-report — before sending anything.
    decision might already be settled in it. **Read `references/project-memory.md` (under this skill's
    own directory) BEFORE your first memory call** — the `memory_*` tools are deferred with exact param
    names (a guessed param is silently stripped and the call fails), and updates are version-gated; that
-   reference carries the mechanics plus the provenance discipline for what you write.
+   reference carries the mechanics plus the provenance discipline for what you write. **A note touching
+   an owner gate — a pending approval, authorization, or spend — records the REQUEST ID + its STATE, in
+   asking voice** ("PENDING request `<id>` asks the owner to authorize X"), never the decided form: a
+   decided-voice note becomes false authority the moment it outlives the pending state; the id lets any
+   later reader check the LIVE state via the non-consuming `task_requests_list` / `task_request_get`
+   reads.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if
