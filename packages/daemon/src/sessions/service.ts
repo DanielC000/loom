@@ -3738,6 +3738,51 @@ export class SessionService {
   }
 
   /**
+   * LINEAGE-RESOLVED SETTLE-NUDGE TARGET (card 05c36bf4): the single choke point BOTH `PendingOpRegistry`
+   * settle callbacks (`confirmWorkerMergeTracked`'s manager-owned "merge" nudge, `runWorkerGate`'s
+   * worker-owned "gate" nudge) route their `pty.enqueueStdin` target through, instead of each hand-rolling
+   * its own lineage walk. Reuses `liveLineageSuccessor` — the SAME primitive `deliverSessionMessage`
+   * already uses for the card-2ca18433 durable-message precedent — so there is still exactly ONE place
+   * that walks a `recycledFrom`/successor chain; this is only a thin fallback wrapper around it.
+   *
+   * Real incident (finding 2e42ae6b): a merge op's settle callback closes over the ASKING manager's session
+   * id at `attach()`-call time; if that manager recycles before the async gate/merge settles, the callback
+   * fired its `[loom:merge-done]` at the now-dead predecessor — the successor never heard it, and instead
+   * spent 30 minutes re-deriving the outcome from git and nearly re-drove an already-merged branch. Calling
+   * this immediately before `enqueueStdin` re-resolves to whoever is CURRENTLY live in `sessionId`'s
+   * lineage at settle time, not whoever asked when the op started.
+   *
+   * `sessionId` itself if still live (never recycled, or IS the live end of its own chain) → returned
+   * unchanged, so the common (non-recycled) case is byte-identical to before this existed. Recycled with a
+   * live successor → the live successor's id. WHOLE lineage dead (no live session anywhere, including
+   * `sessionId` itself) → `sessionId` UNCHANGED, so the caller's existing best-effort `enqueueStdin`
+   * try/catch still silently no-ops exactly as it did before — deliberately NOT widened into
+   * `deliverSessionMessage`'s board-a-task fallback here (out of scope for this card); the fully-dead-lineage
+   * case is already covered by `confirmWorkerMergeTracked`'s own dead-owner eviction sweep (card 27ea069e)
+   * on the NEXT confirm call, and by `tasks_get`'s git-derived `merged` field either way.
+   */
+  private resolveSettleNudgeTarget(sessionId: string): string {
+    return liveLineageSuccessor(this.db, sessionId)?.id ?? sessionId;
+  }
+
+  /**
+   * Predecessor-attribution suffix for a settle nudge whose `target` (the output of
+   * {@link resolveSettleNudgeTarget}) differs from `originSessionId` (the id the op was actually keyed/
+   * captured under) — i.e. a recycle routed this nudge to a successor. Code Review finding (card 05c36bf4):
+   * the "gate" kind is keyed `gate:${workerSessionId}`, per-ORIGINATING-session, not per-lineage — so a
+   * recycled worker's fresh successor can have its OWN `run_gate` in flight under its OWN key AND, on the
+   * same turn, receive a predecessor's `[loom:gate-done] op X` for a DIFFERENT op it never itself started.
+   * `pending_op_status`-style lookups on the successor's own key can't help it tell the two apart (a miss
+   * there ambiguously means "already settled" or "never existed"). Without attribution, a successor could
+   * misread the predecessor's result as its own gate passing and report done against pre-handoff code. Also
+   * disambiguates the merge side for a manager juggling several concurrent merges across a recycle. Returns
+   * `""` (nothing to attribute) when `target === originSessionId`.
+   */
+  private settleNudgeAttribution(target: string, originSessionId: string): string {
+    return target === originSessionId ? "" : ` (started by your predecessor session ${originSessionId.slice(0, 8)} before you were recycled)`;
+  }
+
+  /**
    * Boot-time (and generally callable) dead-owner sweep for orphaned MERGE ops (card 27ea069e — a daemon
    * restart mid-merge used to leave `worker_merge_confirm` dedup-attaching to a zombie op forever, keyed
    * `merge:${workerSessionId}`, because nothing ever reconciled/expired an entry whose owning manager
@@ -3790,15 +3835,22 @@ export class SessionService {
       const isMerge = row.kind === "merge";
       const tag = isMerge ? "[loom:merge-failed]" : "[loom:gate-failed]";
       const verb = isMerge ? "re-run `worker_merge_confirm`" : "re-run `run_gate`";
-      const msg = `${tag} op ${row.opId} — daemon restart killed this run before it could finish (reason: restart) — ${verb}.`;
+      // LINEAGE-RESOLVED (card 05c36bf4, CR Major 2): row.ownerSessionId is the raw id captured when the
+      // op was surfaced pending — if that owner recycled before the daemon restart that orphaned this row,
+      // pushing at it directly reaches a dead predecessor that will never be resumed (it wasn't live at
+      // boot-reconcile time), and the row is cleared below regardless — silently losing the signal for a
+      // live successor that's actually waiting on this merge/gate. Resolve through the same lineage helper
+      // every other settle push uses.
+      const target = this.resolveSettleNudgeTarget(row.ownerSessionId);
+      const msg = `${tag} op ${row.opId} — daemon restart killed this run before it could finish (reason: restart) — ${verb}.` + this.settleNudgeAttribution(target, row.ownerSessionId);
       try {
-        this.pty.enqueueStdin(row.ownerSessionId, msg, "system", undefined, undefined, "warning");
+        this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "warning");
       } catch {
         /* owning session not live — best-effort, mirrors every other completion nudge */
       }
       this.db.clearPendingGateOp(row.opId);
       cleared++;
-      console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was orphaned by a daemon restart — resurfaced ${tag} to session ${row.ownerSessionId.slice(0, 8)}`);
+      console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was orphaned by a daemon restart — resurfaced ${tag} to session ${target.slice(0, 8)}${target !== row.ownerSessionId ? ` (lineage-resolved from ${row.ownerSessionId.slice(0, 8)})` : ""}`);
     }
     return cleared;
   }
@@ -6934,7 +6986,15 @@ export class SessionService {
     // notification).
     const rejectNotify = async (reason: string, msg: string) => {
       const suppressed = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, project.repoPath, reason);
-      if (!suppressed) { try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ } }
+      if (!suppressed) {
+        // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this is confirmWorkerMergeTracked's own
+        // onSettledAfterPending's SUPPRESSING push (outcome.value.notified:true skips its generic echo —
+        // see EXACTLY-ONE-SIGNAL below) — so if THIS push still targets a dead recycled predecessor, the
+        // successor gets nothing at all for a rejection, not even the generic failed echo. Route through the
+        // SAME lineage resolution the generic echo uses.
+        const target = this.resolveSettleNudgeTarget(managerSessionId);
+        try { this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+      }
       return suppressed;
     };
 
@@ -7289,7 +7349,12 @@ export class SessionService {
   }): Promise<ConfirmMergeResult> {
     const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
     if (!alreadyFinalized) {
-      try { this.pty.enqueueStdin(args.managerSessionId, `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.`, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
+      // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this success announcement OWNS notified:true (see
+      // this method's doc), suppressing confirmWorkerMergeTracked's generic echo — so it must itself reach
+      // the current lineage owner, not the (possibly recycled) manager captured when the confirm started.
+      const target = this.resolveSettleNudgeTarget(args.managerSessionId);
+      const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId);
+      try { this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "agent"); } catch { /* manager not live */ }
     }
     this.pty.stop(args.workerSessionId, "hard");
     for (let i = 0; i < 50 && this.pty.isAlive(args.workerSessionId); i++) {
@@ -7401,7 +7466,13 @@ export class SessionService {
             ? `[loom:merge-done] ${who(opId)} merged.`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.reason ?? "merge did not complete"}`)
           : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
-        try { this.pty.enqueueStdin(managerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+        // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in managerSessionId's
+        // recycle lineage at settle time — not the (possibly long-recycled) asking manager captured when
+        // this op started. See resolveSettleNudgeTarget's doc for the incident this fixes. Attributed to
+        // the predecessor when routed, so a manager juggling several concurrent merges across a recycle can
+        // tell this nudge apart from one of its own.
+        const target = this.resolveSettleNudgeTarget(managerSessionId);
+        try { this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "warning"); } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
       },
       {
         // RETAIN + CLASSIFY (card d1aee5f1 follow-up): keep the settled op briefly `peek()`-able (see
@@ -7649,7 +7720,14 @@ export class SessionService {
             ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}.`
             : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${headSuffix}${outcome.value.gateDetail?.stderrTail ? `\n--- gate output tail ---\n${outcome.value.gateDetail.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
-        try { this.pty.enqueueStdin(workerSessionId, msg, "system", undefined, undefined, "warning"); } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
+        // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in workerSessionId's
+        // recycle lineage at settle time — a worker can worker_recycle mid-gate exactly like a manager can
+        // recycle mid-merge. See resolveSettleNudgeTarget's doc for the incident this fixes. ATTRIBUTED
+        // when routed (CR finding): the "gate" key is per-ORIGINATING-session, so a recycled worker's
+        // successor can hold its OWN run_gate under its OWN key AND receive this predecessor nudge on the
+        // same turn — without attribution it could misread the predecessor's op as its own gate passing.
+        const target = this.resolveSettleNudgeTarget(workerSessionId);
+        try { this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, workerSessionId), "system", undefined, undefined, "warning"); } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
       },
       {
         // SETTLE-GRACE WINDOW (card 50c1e0d0): see the "RESULT-CONSUMPTION FIX" doc above — a re-call
