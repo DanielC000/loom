@@ -13,8 +13,11 @@ export default function Git() {
   const qc = useQueryClient();
   const { projectId, projects } = useActiveProject();
   const project = projects.find((p) => p.id === projectId) ?? null;
-  const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId });
-  const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId });
+  // retry:false (matches Platform.tsx/MissionControl.tsx/requests.tsx's own expected-error queries): a
+  // git read failure (corrupt repo, blocked env var) is deterministic, not transient — retrying 3x with
+  // react-query's default backoff just delays the error by several seconds for no chance of success.
+  const branches = useQuery({ queryKey: ["git-branches", projectId], queryFn: () => api.gitBranches(projectId), enabled: !!projectId, retry: false });
+  const log = useQuery({ queryKey: ["git-log", projectId], queryFn: () => api.gitLog(projectId), enabled: !!projectId, retry: false });
 
   const [feedback, setFeedback] = useState<{ ok: boolean; text: string } | null>(null);
   const [message, setMessage] = useState("");
@@ -62,21 +65,28 @@ export default function Git() {
 
           <Panel style={{ marginTop: 12 }}>
             <SectionLabel>Branches</SectionLabel>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-              {branches.data?.all.map((b) => {
-                const current = b === branches.data?.current;
-                return (
-                  <button key={b} title={current ? "current branch" : "checkout"} disabled={current || busy}
-                    onClick={() => checkout.mutate(b)}
-                    style={{
-                      display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none",
-                      cursor: current ? "default" : "pointer", padding: 0,
-                      fontFamily: font.mono, fontSize: 12, color: current ? color.phosphor : color.textDim,
-                    }}>
-                    {current && <Dot tone="phosphor" glow />}{b}
-                  </button>
-                );
-              })}
+            {/* Panel doesn't forward arbitrary props to its DOM node, so the e2e address hook lives on
+                this plain div instead — see the analogous note on the Commits panel below. */}
+            <div data-git-pane="branches">
+              {branches.isError && <ErrorLine error={branches.error} />}
+              {!branches.isError && (
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+                  {branches.data?.all.map((b) => {
+                    const current = b === branches.data?.current;
+                    return (
+                      <button key={b} title={current ? "current branch" : "checkout"} disabled={current || busy}
+                        onClick={() => checkout.mutate(b)}
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none",
+                          cursor: current ? "default" : "pointer", padding: 0,
+                          fontFamily: font.mono, fontSize: 12, color: current ? color.phosphor : color.textDim,
+                        }}>
+                        {current && <Dot tone="phosphor" glow />}{b}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
             </div>
             <div style={{ display: "flex", gap: 6, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}` }}>
               <Input placeholder="new-branch-name" value={newBranch} onChange={(e) => setNewBranch(e.target.value)}
@@ -99,7 +109,13 @@ export default function Git() {
 
           <Panel style={{ maxHeight: "50vh", overflow: "auto" }}>
             <SectionLabel>Commits</SectionLabel>
-            <CommitTable commits={log.data} />
+            {/* Panel (components/ui) doesn't spread arbitrary props onto its DOM node — a data attribute
+                passed directly to it is accepted by TS (data- and aria- names bypass excess-property
+                checks on any JSX element) but silently dropped at runtime, never reaching the DOM. The
+                e2e address hook needs a plain element Panel actually renders, hence this wrapper div. */}
+            <div data-git-pane="primary-log">
+              {log.isError ? <ErrorLine error={log.error} /> : <CommitTable commits={log.data} />}
+            </div>
           </Panel>
 
           {/* Reference repos (reference-repos epic Phase 5, card f4888775) — read-only git log per bound
@@ -172,6 +188,7 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
     queryKey: ["reference-repo-git-log", projectId, index],
     queryFn: () => api.referenceRepoGitLog(projectId, index),
     enabled: open,
+    retry: false, // a git read failure is deterministic — see the primary branches/log queries above
   });
   return (
     <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
@@ -182,10 +199,9 @@ function ReferenceRepoLog({ projectId, index, path }: { projectId: string; index
         <span style={{ color: color.phosphor }}>{open ? "▾" : "▸"}</span>{path}
       </button>
       {open && (
-        <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }}>
+        <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }} data-git-pane={`reference-repo-${index}`}>
           {log.isLoading && <Hint>loading log…</Hint>}
-          {log.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(log.error as Error).message}</span>}
-          <CommitTable commits={log.data} />
+          {log.isError ? <ErrorLine error={log.error} /> : <CommitTable commits={log.data} />}
         </div>
       )}
     </div>
@@ -203,6 +219,7 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
     queryKey: ["registered-repo-git-log", projectId, index],
     queryFn: () => api.registeredRepoGitLog(projectId, index),
     enabled: open,
+    retry: false, // a git read failure is deterministic — see the primary branches/log queries above
   });
   return (
     <div style={{ borderTop: `1px solid ${color.border}`, paddingTop: 8 }}>
@@ -221,14 +238,20 @@ function RegisteredRepoLog({ projectId, index, entry }: { projectId: string; ind
         </span>
       </button>
       {open && (
-        <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }}>
+        <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }} data-git-pane={`registered-repo-${index}`}>
           {log.isLoading && <Hint>loading log…</Hint>}
-          {log.isError && <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(log.error as Error).message}</span>}
-          <CommitTable commits={log.data} />
+          {log.isError ? <ErrorLine error={log.error} /> : <CommitTable commits={log.data} />}
         </div>
       )}
     </div>
   );
+}
+
+// Shared cause-naming error line for a failed git read — one look across the primary Branches/Commits
+// panels and both secondary (reference/registered repo) panels, so the four surfaces render consistently
+// instead of three different not-quite-matching shapes (card 60b53c8d).
+function ErrorLine({ error }: { error: unknown }) {
+  return <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono }}>{(error as Error).message}</span>;
 }
 
 function Hint({ children }: { children: ReactNode }) {

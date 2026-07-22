@@ -48,7 +48,7 @@ import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
 import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
-import { GitWriter } from "../git/writer.js";
+import { GitWriter, gitError } from "../git/writer.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
@@ -3496,15 +3496,28 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
 
   // Git view — read (log/branches) + write (checkout/commit/push/create-branch).
+  // Both reads are wrapped: a genuine git failure (corrupt repo, permissions, a blocked auth/transport
+  // var — see writer.ts's nonInteractiveEnv comment) must surface as a NAMED cause, never a bare 500 that
+  // the client silently renders as "this repo has no commits" (card 60b53c8d — a failed read was
+  // indistinguishable from an empty repo). `gitError` mirrors the write side's own error shape so both
+  // halves of the git view speak the same `{error}` body.
   app.get("/api/projects/:id/git/log", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return new GitReader(p.repoPath).log();
+    try {
+      return await new GitReader(p.repoPath).log();
+    } catch (e) {
+      return reply.code(500).send({ error: gitError(e) });
+    }
   });
   app.get("/api/projects/:id/git/branches", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
-    return new GitReader(p.repoPath).branches();
+    try {
+      return await new GitReader(p.repoPath).branches();
+    } catch (e) {
+      return reply.code(500).send({ error: gitError(e) });
+    }
   });
 
   // Whether repoPath is a real git repo — lets the web Manage-project panel tell a genuine vault-only
@@ -3530,7 +3543,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (idx < 0 || refRepoPath === undefined) {
       return reply.code(404).send({ error: "reference repo not found at that index" });
     }
-    return new GitReader(refRepoPath).log();
+    try {
+      return await new GitReader(refRepoPath).log();
+    } catch (e) {
+      return reply.code(500).send({ error: gitError(e) });
+    }
   });
 
   // Registered-repo git log (multi-repo epic 49136451, phase 3) — the WRITABLE-registry counterpart to
@@ -3549,7 +3566,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (idx < 0 || entry === undefined) {
       return reply.code(404).send({ error: "registered repo not found at that index" });
     }
-    return new GitReader(entry.path).log();
+    try {
+      return await new GitReader(entry.path).log();
+    } catch (e) {
+      return reply.code(500).send({ error: gitError(e) });
+    }
   });
 
   // Git WRITE — HUMAN/REST + the role-gated PLATFORM exception. This is a TRUST-BOUNDARY surface like

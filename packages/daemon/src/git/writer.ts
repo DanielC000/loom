@@ -136,8 +136,11 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
 /** A structured outcome the UI can render — never a thrown 500 for an EXPECTED git failure. */
 export type GitWriteResult<T = Record<string, never>> = ({ ok: true } & T) | { ok: false; error: string };
 
-/** First line of a git/simple-git error — the human-readable reason (dirty tree, no upstream, etc.). */
-function gitError(e: unknown): string {
+/** First line of a git/simple-git error — the human-readable reason (dirty tree, no upstream, etc.).
+ *  Exported so the READ side (gateway/server.ts's git/log, git/branches, and the reference/registered
+ *  repo log routes) can surface the same clean, cause-naming message on a genuine failure instead of
+ *  fastify's generic default-error-handler body — one helper, so the two sides can't drift apart. */
+export function gitError(e: unknown): string {
   const msg = (e as Error)?.message ?? String(e);
   return msg.split("\n").map((l) => l.trim()).filter(Boolean)[0] ?? "git operation failed";
 }

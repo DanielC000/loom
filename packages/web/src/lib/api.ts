@@ -446,10 +446,13 @@ export const api = {
     post<{ ok: boolean; path: string; committed: boolean }>(`/api/projects/${projectId}/vault/file`, { path, content }),
   deleteVaultFile: (projectId: string, path: string) =>
     del<{ ok: boolean; path: string; committed: boolean }>(`/api/projects/${projectId}/vault/file?path=${encodeURIComponent(path)}`),
+  // getErr (not get): a failed read now comes back as a structured `{error}` body (gateway/server.ts
+  // catches into `gitError(e)`, card 60b53c8d) — getErr surfaces that named cause as the thrown message
+  // instead of an opaque "<url> -> 500".
   gitLog: (projectId: string) =>
-    get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
+    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/log`),
   gitBranches: (projectId: string) =>
-    get<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
+    getErr<{ current: string; all: string[] }>(`/api/projects/${projectId}/git/branches`),
   // Is repoPath an actual git repo — used to tell a genuine vault-only project apart from a legacy
   // repo-bound project whose vaultPath happens to equal repoPath (card d867e478).
   isGitRepo: (projectId: string) =>
@@ -458,12 +461,12 @@ export const api = {
   // in the project's OWN referenceRepos[] — the server resolves the path server-side, so this can never
   // reach an arbitrary host path. An out-of-range index 404s.
   referenceRepoGitLog: (projectId: string, index: number) =>
-    get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/reference-repos/${index}/log`),
+    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/reference-repos/${index}/log`),
   // Read-only git log for a REGISTERED (writable-registry) repo (multi-repo epic 49136451, phase 3) —
   // same index-by-construction contract as the reference-repo log above, indexing the project's OWN
   // repos[]. Read only: the registry itself is written via updateProject, never here.
   registeredRepoGitLog: (projectId: string, index: number) =>
-    get<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/repos/${index}/log`),
+    getErr<{ hash: string; date: string; message: string; author: string }[]>(`/api/projects/${projectId}/git/repos/${index}/log`),
   // Git WRITE (HUMAN-only; mirrors the vault writer — no agent MCP surface). Each returns a structured
   // { ok, error? } so the UI shows an expected git failure (dirty tree, no upstream, conflict) instead
   // of a generic throw. commit takes ONLY a message (repo-configured identity, no overrides/trailer).

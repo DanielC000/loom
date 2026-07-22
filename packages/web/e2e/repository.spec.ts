@@ -43,8 +43,9 @@ async function pinActiveProject(page: Page, projectId: string) {
 
 // Seed a project whose repoPath is a real git repo WITH an initial commit (so the Git pane lists a branch
 // and create-branch works off HEAD) and whose vaultPath holds a seeded note (so the Files pane lists it),
-// then POST it. Returns the created project id.
-async function seedRepoProject(baseURL: string): Promise<{ id: string }> {
+// then POST it. Returns the created project id + its on-disk repoDir (a test that needs to corrupt the
+// bound repo AFTER creation — POST /api/projects requires an existing git repo at create time — reads it).
+async function seedRepoProject(baseURL: string): Promise<{ id: string; repoDir: string }> {
   const scratch = mkdtempSync(path.join(tmpdir(), "loom-repo-e2e-"));
   seededDirs.push(scratch);
   const repoDir = path.join(scratch, "repo");
@@ -67,7 +68,7 @@ async function seedRepoProject(baseURL: string): Promise<{ id: string }> {
   });
   if (!res.ok) throw new Error(`POST /api/projects -> ${res.status}: ${await res.text()}`);
   const project = (await res.json()) as { id: string };
-  return { id: project.id };
+  return { id: project.id, repoDir };
 }
 
 test.describe("repository (Vault + Git consolidation)", () => {
@@ -137,6 +138,33 @@ test.describe("repository (Vault + Git consolidation)", () => {
     // repo has exactly one branch, so this proves live repo state, not an empty/god-eye view).
     await page.getByRole("tab", { name: "Git" }).click();
     await expect(page.getByRole("button", { name: /^(main|master)$/ })).toBeVisible();
+  });
+
+  // Card 60b53c8d: a failed branches/log read must render a VISIBLE, cause-naming error — not a silently
+  // empty repo. Seeds a HEALTHY repo (create requires one), confirms the Git tab loads normally, then
+  // corrupts it on disk (deletes .git — a genuine read failure, distinct from a commitless-but-real repo)
+  // and reloads, proving the addressable Branches/Commits panes (data-git-pane hooks in Git.tsx) show a
+  // named cause instead of the friendly "no commits yet" empty state. Scoped to those panes specifically —
+  // a page-wide text search could be satisfied by an unrelated sibling element and prove nothing.
+  test("a broken repo surfaces a visible, cause-naming error on the Git tab — not an empty repo", async ({ page, loomDaemon }) => {
+    const { id, repoDir } = await seedRepoProject(loomDaemon.baseURL);
+    await pinActiveProject(page, id);
+    await page.goto(`${loomDaemon.baseURL}/repository?tab=git`);
+
+    // BEFORE: a healthy repo — the real branch chip renders, proving the pane loaded against a working repo.
+    await expect(page.getByRole("button", { name: /^(main|master)$/ })).toBeVisible();
+
+    // Corrupt the bound repo on disk.
+    rmSync(path.join(repoDir, ".git"), { recursive: true, force: true });
+    await page.reload();
+
+    const branchesPane = page.locator('[data-git-pane="branches"]');
+    const commitsPane = page.locator('[data-git-pane="primary-log"]');
+    await expect(branchesPane.getByText(/not a git repository/i)).toBeVisible();
+    await expect(commitsPane.getByText(/not a git repository/i)).toBeVisible();
+    // The genuinely-empty hint must NOT appear for a broken (not empty) repo — that's the other half of
+    // the card's DoD: a real empty repo must still show it, a broken one must never.
+    await expect(commitsPane.getByText("no commits yet")).toHaveCount(0);
   });
 
   test("a real action on the Files tab produces an observable state change (open a note → it renders)", async ({ page, loomDaemon }) => {
