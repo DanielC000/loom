@@ -27,13 +27,17 @@ import path from "node:path";
 // Arm the Db prod-guard for THIS process (and inherited by spawned daemons) the moment we're imported.
 process.env.LOOM_TEST = "1";
 
-// Strip GIT_PAGER/PAGER from the test process env. The suite exercises the daemon's simple-git, which
-// REFUSES to run with GIT_PAGER set ("Use of GIT_PAGER is not permitted without enabling allowUnsafePager").
-// In production that simple-git always runs in the supervisor-spawned daemon process — NEVER the
-// worker/manager pty's GIT_PAGER=cat shell-git backstop env (set in buildSpawnEnv, the actual wedge fix).
-// But when this suite is run FROM a session pty (e.g. a worker gating on `pnpm test`), it inherits that
-// GIT_PAGER=cat/PAGER=cat and 6 simple-git tests fail. Stripping these makes a session-spawned test run
-// faithful to the production daemon env + satisfies simple-git's allowUnsafePager guard.
+// Strip GIT_PAGER/PAGER from the test process env. This USED to be the only defense — card 42544916
+// proved the assumption behind it wrong: "production only runs in the supervisor-spawned daemon
+// process, never the worker/manager pty's GIT_PAGER=cat" ignored that the supervisor itself inherits
+// whatever env the HUMAN's own launching shell has, and a real end user with GIT_PAGER/PAGER set in
+// their own shell profile (an ordinary personal git config) hit the exact same 500 in production — not
+// just in a worker-spawned test run. The REAL fix now lives at the source: `nonInteractiveEnv()`
+// (git/writer.ts) strips GIT_PAGER/PAGER (and EDITOR/GIT_EXTERNAL_DIFF alongside the pre-existing
+// GIT_EDITOR/GIT_SEQUENCE_EDITOR) itself, so GitReader/GitWriter are immune regardless of ambient env —
+// see its own comment for the full enumeration of what's stripped vs. deliberately still blocked. This
+// strip stays here only for parity with a bare test process that imports simple-git directly without
+// going through nonInteractiveEnv(); it is no longer load-bearing for the daemon's own git reads/writes.
 delete process.env.GIT_PAGER;
 delete process.env.PAGER;
 

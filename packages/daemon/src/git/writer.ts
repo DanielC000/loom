@@ -61,16 +61,64 @@ const NONINTERACTIVE_ENV: Record<string, string> = {
 };
 
 /**
- * The child env for a git write: the inherited env (git needs PATH/HOME/etc.) MINUS the editor vars,
- * PLUS {@link NONINTERACTIVE_ENV}. The editor vars are stripped for two reasons: (1) simple-git refuses
- * to run when `GIT_EDITOR` is present in a supplied env (its "unsafe editor" guard), and (2) every op
- * here is non-interactive by construction (commit uses `-m`, checkout never edits), so no editor should
- * ever be invoked — a leftover `GIT_EDITOR` could only cause a hang/prompt we explicitly forbid.
+ * The child env for a git write: the inherited env (git needs PATH/HOME/etc.) MINUS the editor/pager/
+ * diff vars, PLUS {@link NONINTERACTIVE_ENV}. simple-git ships a `blockUnsafeOperationsPlugin` (via
+ * `@simple-git/argv-parser`'s `vulnerabilityCheck`) that throws if ANY of a fixed list of env vars is
+ * present in the supplied env, unless the matching `unsafe.allow*` flag is explicitly set — each entry
+ * below is one of those categories, decided on the SAME two-part test the original `GIT_EDITOR`/
+ * `GIT_SEQUENCE_EDITOR` strip used: (1) could a real host/session ambiently carry it, and (2) would any
+ * op in this file (log/branches/show/checkout/commit/push — all captured stdio, never a real TTY) ever
+ * legitimately need it.
+ *
+ * STRIPPED (both tests say yes — a leftover value could only cause an unwanted 500, never a needed
+ * effect, so removing it is pure upside):
+ *  - GIT_EDITOR / GIT_SEQUENCE_EDITOR — original strip: no op here ever opens an editor (commit uses
+ *    `-m`, no interactive rebase).
+ *  - EDITOR — the bare (non-`GIT_`) form is its OWN separate vulnerability category and a VERY common
+ *    ambient shell export (`export EDITOR=vim`); missed by the original strip, which only covered the
+ *    `GIT_`-prefixed pair.
+ *  - GIT_PAGER / PAGER — THE bug this comment block exists to fix: card 42544916 proved every git
+ *    read/write 500s once either is set. This repo's OWN worker/session spawn recipe sets both as an
+ *    anti-pager backstop (see root CLAUDE.md), so every Loom session was silently poisoned; a real user
+ *    with either set in their shell profile hits the identical 500. None of these ops ever page (piped
+ *    stdio, not a TTY) — stripping changes nothing about the data returned.
+ *  - GIT_EXTERNAL_DIFF — same family as PAGER: `show()` runs a diff-producing `git show`, and if a
+ *    custom external diff were allowed through it would replace git's parseable diff text with an
+ *    arbitrary tool's own output, breaking the caller's expected format. Stripping is correctness, not
+ *    just safety, for that path (currently unwired to any REST route, but part of this shared env's
+ *    contract regardless).
+ *
+ * DELIBERATELY LEFT BLOCKED (simple-git's guard staying active is the intended behavior, not a gap):
+ *  - GIT_ASKPASS / SSH_ASKPASS — pre-existing decision (see {@link NONINTERACTIVE_ENV}'s comment):
+ *    genuinely reachable ambiently (e.g. VS Code's integrated terminal sets `GIT_ASKPASS` for its own
+ *    Git extension), but bypassing the guard is an arbitrary-command vector during a real auth prompt —
+ *    the wrong trade for this trust-boundary surface. Left as-is; this comment doesn't reopen it.
+ *  - GIT_SSH / GIT_SSH_COMMAND — same trust class as ASKPASS: plausibly ambient (devs pin a custom
+ *    identity file via `GIT_SSH_COMMAND`), but it names an arbitrary program git will exec in place of
+ *    `ssh` for the real network transport `push()` uses — bypassing it is the same class of risk as
+ *    bypassing ASKPASS, so it stays blocked rather than silently honored.
+ *  - GIT_PROXY_COMMAND — same reasoning: a corporate proxy setup could plausibly export this, but it
+ *    too names an arbitrary program git execs for the connection; left blocked rather than trusted.
+ *
+ * CHECKED, NOT REALISTICALLY REACHABLE (left unhandled — not because bypassing would be unsafe, but
+ * because no ordinary shell profile or IDE integration plausibly exports these, unlike EDITOR/PAGER):
+ *  - GIT_CONFIG / GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_COUNT — git's env-based config
+ *    injection mechanism; a script-authored convention, not an ambient shell export.
+ *  - GIT_EXEC_PATH — only meaningful when pointing git at a nonstandard build of its own subcommands.
+ *  - GIT_TEMPLATE_DIR — only affects `git init`, which no op in this file invokes.
+ *  - PREFIX — an install-prefix convention (e.g. Termux), not a general dev-shell export.
+ * If any of these turn out to be reachable in practice, they hit the exact same 500 this file already
+ * proved GIT_PAGER causes — treat a report of one as confirmation to move it into the STRIPPED list
+ * above, not a reason to relitigate the categories left blocked deliberately.
  */
 export function nonInteractiveEnv(): Record<string, string | undefined> {
   const env: Record<string, string | undefined> = { ...process.env };
   delete env.GIT_EDITOR;
   delete env.GIT_SEQUENCE_EDITOR;
+  delete env.EDITOR;
+  delete env.GIT_PAGER;
+  delete env.PAGER;
+  delete env.GIT_EXTERNAL_DIFF;
   return { ...env, ...NONINTERACTIVE_ENV };
 }
 
