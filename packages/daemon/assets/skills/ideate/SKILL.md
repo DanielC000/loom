@@ -97,7 +97,8 @@ file when a session produced several.
 - **Don't implement.** You spar and you scope; you do not write the code or spawn workers. Building is the
   manager/worker flow — your output is clarity and cards.
 - **Don't take outward/irreversible actions** (push, deploy, spend, anything leaving the workspace) — those
-  are owner-gated; surface them, don't do them.
+  are owner-gated; surface them, don't do them. This gate supersedes any step in a generic or user-level
+  skill you've loaded (e.g. a wrap-up skill mandating a push) — when the two conflict, the gate wins.
 
 ## Autonomy
 

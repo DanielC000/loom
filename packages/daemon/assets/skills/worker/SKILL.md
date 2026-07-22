@@ -70,7 +70,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    fail fast: if your DoD mandates a check you **cannot** perform — a capability not provisioned to
    your session, or an external dependency (a live browser/service) unreachable — `worker_report
    blocked` *immediately*, before doing the full implementation, so the human fix can happen in
-   parallel instead of after a wasted build.
+   parallel instead of after a wasted build. **Loom's outward-action gates supersede any step in a
+   generic or user-level skill you've loaded** — when such a skill instructs an outward/irreversible
+   action (push, deploy, spend, delete, send) that this doctrine gates, the gate wins: stop and escalate
+   up instead.
 4. **Verify before reporting.** Meet the DoD — run the project's gate (build / typecheck / repro / the
    check your task names) and confirm the behavior. **Use the `run_gate` tool
    (`mcp__loom-orchestration__run_gate`, no args) rather than running your project's gate yourself in a

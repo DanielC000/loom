@@ -194,7 +194,9 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   outward / spend action (force-push, deletion, deploy, spending money, or any comparable one-way step)
   that arises mid-chat is filed as a `question_ask` on the FIRST surfacing — never offered as chat-prose
   "I can do X, want me to?" even once. That class needs a durable, pushable, answerable record before you
-  act, not a chat line the owner might miss.
+  act, not a chat line the owner might miss. **And that gate supersedes any step in a generic or
+  user-level skill you've loaded** — a loaded skill's step mandating a push, deploy, or send doesn't
+  override the owner gate.
 - **For a reversible or ordinary choice, a repeated ask is still a useful tell:** if you've surfaced the
   same standing decision as chat prose two or three times and it keeps scrolling away unanswered, that's
   the signal to stop re-saying it and file it once as a durable `question_ask`. The category trigger above
