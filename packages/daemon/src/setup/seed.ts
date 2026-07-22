@@ -140,6 +140,7 @@ export function seedSetupHome(db: Db): string[] {
     reserved: true, // a reserved home — hidden from the picker, minted only here at boot-seed
     referenceRepos: [],
     noGateByDesign: false,
+    denyGlobs: [], // reserved system home, not a normal worker_merge flow — opt out of the mockups/ warning
   };
   db.insertProject(project);
 

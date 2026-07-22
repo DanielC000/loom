@@ -48,6 +48,17 @@ export interface Project {
    * set it; those surfaces simply don't declare the field, so an agent-passed value is stripped.
    */
   noGateByDesign: boolean;
+  /**
+   * Glob patterns (matched against a POSIX, repo-relative path) that flag a WARNING — never a hard
+   * block — at `worker_merge` review time when the branch diff ADDS a file under one of them (card
+   * d5d3bdc9). Default `["mockups/**"]`: mockup deliverables (HTML/PNG/README) belong in the Obsidian
+   * vault, not the code repo, and workers have repeatedly committed them here by accident, caught only
+   * as a merge-gate diffstat surprise on a repo that's PUBLIC. An empty array opts a project OUT
+   * entirely. Additive; legacy rows backfill to the same default (not `[]`) so the warning applies
+   * out of the box. HUMAN-set only via the REST create/update paths — same trust posture as
+   * `repoPath`/`referenceRepos`/`noGateByDesign`: no agent MCP tool ever declares this key.
+   */
+  denyGlobs: string[];
 }
 
 /**

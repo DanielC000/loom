@@ -13,7 +13,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
@@ -6458,7 +6458,7 @@ export class SessionService {
     // OPTIONAL files/pathGlob filter (additive — see diffBranch) further scopes BOTH the diffstat and the
     // patch to matching file(s), so a manager can pull one file's hunk at a time instead of the whole patch.
     const includePatch = opts.includePatch === true;
-    const diff = await diffBranch(project.repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob });
+    const diff = await diffBranch(project.repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
     // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
     // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an
@@ -6476,7 +6476,16 @@ export class SessionService {
     const staleWarning = behindMain && behindMain > 0
       ? `STALE BASE: this branch is rooted ${behindMain} commit(s) behind current main. confirmWorkerMerge's own union-merge will attempt to forward it automatically before the gate runs, but review the diff with that in mind — a stale-based rebuild can silently overwrite or conflict with a change that landed on main after this branch was cut.`
       : undefined;
-    const warning = [strandedWarning, staleWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // DENY-GLOB backstop (card d5d3bdc9): flag — never block — a branch that ADDS a file under a
+    // project-configured deny path (default `mockups/**`). Matched against diff.allFiles (the
+    // UNFILTERED branch diff), not diff.files, so a manager's own files/pathGlob display-narrowing on
+    // this call can never hide the warning. A modified-but-not-newly-added deny-path file (already on
+    // main, or added by an earlier commit) does not match — see matchAddedDenyGlobs.
+    const deniedAdds = matchAddedDenyGlobs(diff.allFiles, project.denyGlobs ?? []);
+    const denyGlobWarning = deniedAdds.length > 0
+      ? `DENY-GLOB: branch adds ${deniedAdds.length} file(s) under a project-configured deny path (${(project.denyGlobs ?? []).join(", ")}): ${deniedAdds.slice(0, 10).join(", ")}${deniedAdds.length > 10 ? `, +${deniedAdds.length - 10} more` : ""}. This commonly means a mockup or other deliverable landed in the code repo instead of the vault. Not a hard block — confirming will merge it as-is; verify that's intended before proceeding.`
+      : undefined;
+    const warning = [strandedWarning, staleWarning, denyGlobWarning].filter((w): w is string => !!w).join(" ") || undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",
@@ -6484,6 +6493,7 @@ export class SessionService {
         branch: worker.branch, filesChanged: diff.filesChanged,
         ...(stranded.stranded ? { stranded: stranded.branch } : {}),
         ...(behindMain ? { behindMain } : {}),
+        ...(deniedAdds.length ? { deniedAdds: deniedAdds.length } : {}),
       },
     });
     // Bounded by default: diffstat (files + totals) only. The full patch is included ONLY when requested;

@@ -162,6 +162,7 @@ export function seedPlatformHome(db: Db): string[] {
     reserved: true, // the ONLY place a reserved project is minted — boot-seed, never an agent/REST path
     referenceRepos: [],
     noGateByDesign: false,
+    denyGlobs: [], // reserved system home, not a normal worker_merge flow — opt out of the mockups/ warning
   };
   db.insertProject(project);
 

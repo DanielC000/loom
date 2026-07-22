@@ -1306,6 +1306,15 @@ export interface DiffstatFile {
   insertions: number;
   deletions: number;
   binary: boolean;
+  /**
+   * Change-type letter from `git diff --name-status`, populated ONLY when `diffBranch` is called with
+   * `includeStatus:true` (card d5d3bdc9's deny-glob merge-review warning — the only consumer today).
+   * `undefined` on every other diffBranch caller (byte-identical) and on any entry `diffNameStatus`
+   * couldn't confidently attribute (a rename/copy pairing line, an unparseable row) — status is
+   * best-effort and fails safe to "no status" rather than a guess. "A" (added) is the only value the
+   * deny-glob matcher (`matchAddedDenyGlobs`) treats as an addition.
+   */
+  status?: "A" | "M" | "D" | "T" | "U" | "X" | "B";
 }
 
 /**
@@ -1347,10 +1356,46 @@ function pathGlobToRegExp(rawGlob: string): RegExp {
   return new RegExp(re + "$");
 }
 
+/**
+ * Best-effort `git diff --name-status <range>` → `Map<path, status>`, used ONLY by `diffBranch`'s
+ * `includeStatus` opt (card d5d3bdc9). Deliberately narrow and fail-safe: `reviewWorkerMerge` must
+ * NEVER throw on a weird diff, so any parse miss silently drops that line's status rather than guessing.
+ *
+ * - A rename/copy line (`R100\told\tnew` / `C100\told\tnew`) carries TWO paths on one row — attributing
+ *   status to either would be a guess (is the new path "added"? is the old path "deleted"?), so these
+ *   lines are skipped entirely; both paths end up with no status, same as an untracked file.
+ * - A path containing a tab, or any row that doesn't parse as `<letter><digits?>\t<path>`, is skipped.
+ * - Any git failure (missing range, non-repo, etc.) returns an empty map — the caller degrades to "no
+ *   status available", not an error.
+ */
+async function diffNameStatus(git: SimpleGit, range: string): Promise<Map<string, DiffstatFile["status"]>> {
+  const map = new Map<string, DiffstatFile["status"]>();
+  const SINGLE_PATH_STATUS = new Set(["A", "M", "D", "T", "U", "X", "B"]);
+  try {
+    const raw = await git.raw(["diff", "--name-status", range]);
+    for (const line of raw.split("\n")) {
+      if (!line.trim()) continue;
+      const tab = line.indexOf("\t");
+      if (tab < 1) continue; // no tab, or an empty status column — can't parse
+      const code = line.slice(0, tab);
+      const letter = code[0];
+      if (!letter || !SINGLE_PATH_STATUS.has(letter)) continue; // R/C (rename/copy) or unrecognized — skip
+      const rest = line.slice(tab + 1);
+      if (rest.includes("\t")) continue; // a second tab means more than one path on this row — skip
+      const file = rest.trim();
+      if (!file) continue;
+      map.set(file, letter as DiffstatFile["status"]);
+    }
+  } catch {
+    // fail-safe: a name-status failure never blocks or alters the diffstat/review — just no status.
+  }
+  return map;
+}
+
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",
-  opts: { includePatch?: boolean; files?: string[]; pathGlob?: string } = {},
-): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; patch: string; hint?: string }> {
+  opts: { includePatch?: boolean; files?: string[]; pathGlob?: string; includeStatus?: boolean } = {},
+): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; allFiles: DiffstatFile[]; patch: string; hint?: string }> {
   // The full unified `patch` is UNBOUNDED — on a large change it overflows an MCP display limit, blinding a
   // manager exactly when the diff is biggest/riskiest. So the patch is OPT-IN: callers that only need a
   // bounded summary pass includePatch:false and skip the expensive `git diff` entirely. Defaults to true so
@@ -1366,6 +1411,17 @@ export async function diffBranch(
     deletions: "deletions" in f ? f.deletions : 0,
     binary: f.binary,
   }));
+
+  // OPTIONAL status enrichment (includeStatus): a second, best-effort `git diff --name-status` call,
+  // merged onto allFiles by path. Off by default — every existing caller pays no extra git call and
+  // stays byte-identical; only reviewWorkerMerge's deny-glob check opts in.
+  if (opts.includeStatus) {
+    const statusByPath = await diffNameStatus(git, range);
+    for (const f of allFiles) {
+      const s = statusByPath.get(f.file);
+      if (s) f.status = s;
+    }
+  }
 
   // OPTIONAL scope-down filter (files/pathGlob): narrows the diffstat + patch to matching file(s) so a
   // manager can pull one file's hunk at a time instead of the whole patch. ADDITIVE — with neither param
@@ -1399,7 +1455,25 @@ export async function diffBranch(
       `paths reliably as an alternative.`
     : undefined;
 
-  return { filesChanged, insertions, deletions, files, patch, ...(hint ? { hint } : {}) };
+  // allFiles is the UNFILTERED branch diff, always — independent of the opts.files/pathGlob display
+  // narrowing (which only scopes `files`/`patch`/the totals). A caller that needs "did this branch
+  // change X anywhere" (e.g. the deny-glob check) must not have that answer silently narrowed by a
+  // manager's unrelated "show me just this one file" review filter.
+  return { filesChanged, insertions, deletions, files, allFiles, patch, ...(hint ? { hint } : {}) };
+}
+
+/**
+ * The deny-glob merge-review warning's matching primitive (card d5d3bdc9): files a branch ADDED
+ * (`status:"A"`, from `diffBranch({ includeStatus: true })`) whose path matches any of a project's
+ * `denyGlobs`. A file only MODIFIED under a deny path (already on main, or added by a prior commit and
+ * merely edited here) does NOT match — this card's scope is deliberately "adds files", not "touches".
+ * Reuses the same glob semantics as `pathGlob` (`**`/`*`/`?`, POSIX repo-relative, anchored). Returns
+ * `[]` when `denyGlobs` is empty (a project opted out) or no file was newly added under any of them.
+ */
+export function matchAddedDenyGlobs(files: DiffstatFile[], denyGlobs: string[]): string[] {
+  if (denyGlobs.length === 0) return [];
+  const regexes = denyGlobs.map(pathGlobToRegExp);
+  return files.filter((f) => f.status === "A" && regexes.some((re) => re.test(f.file))).map((f) => f.file);
 }
 
 export interface WorkerDiff {
