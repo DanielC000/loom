@@ -55,7 +55,7 @@ import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } fr
 import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
-import { validateRepoRegistry, resolveRepoKeyOrError } from "../projects/repos.js";
+import { validateRepoRegistry, resolveRepoKeyOrError, diffRepoRegistry, composeRepoRegistryChangeNote, type RepoRegistryDiff } from "../projects/repos.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { listProjectLinks, createProjectLink, deleteProjectLink } from "../projects/links.js";
 import { listVaultTree, readVaultFile, statVaultFile, vaultFileContentType } from "../vault/browser.js";
@@ -3716,6 +3716,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // against, not the pre-patch value) so a registry entry can never alias whatever this same PATCH ends
     // up binding as primary.
     let repos: RepoRegistryEntry[] | undefined;
+    // Set ONLY on a genuine `repos` registry change (never on the repoPath/vaultPath-rebind branch below,
+    // which re-validates the SAME array and so always diffs empty) — the live-manager/platform notify
+    // fired after the write below (card 540a3281).
+    let repoRegistryDiff: RepoRegistryDiff | undefined;
     if (b.repos !== undefined) {
       const check = await validateRepoRegistry(b.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
       if (!check.ok) return reply.code(400).send({ error: check.error });
@@ -3731,6 +3735,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (JSON.stringify(check.value) !== JSON.stringify(p.repos)) {
         const liveCheck = checkLiveWorktreeSessions(deps.db, id);
         if (!liveCheck.ok) return reply.code(400).send({ error: liveCheck.error, ...(liveCheck.liveSessions ? { liveSessions: liveCheck.liveSessions } : {}) });
+        // Same no-op gate as the live-worktree guard just above — a real change was just confirmed, so
+        // this is the ONE place in the whole handler that can ever produce a non-empty diff.
+        repoRegistryDiff = diffRepoRegistry(p.repos, check.value);
       }
       repos = check.value;
     } else if ((repoPath !== undefined || vaultPath !== undefined) && p.repos.length > 0) {
@@ -3757,6 +3764,29 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       denyGlobs,
       repos,
     });
+    // NOTIFY live manager/platform sessions of a REAL repos registry change (card 540a3281): the write
+    // above already succeeded — this is a best-effort FYI, never allowed to turn a successful PATCH into
+    // an error. `resolveSettleNudgeTarget`-style lineage resolution is deliberately NOT used here (unlike
+    // the merge/gate completion nudges) — a manager/Lead that recycled between the edit and now simply
+    // gets no nudge; the NEXT live occupant's own spawn-time `composeManagerStartupPrompt` already reads
+    // the current registry fresh, so there's no stale-state risk to cover, only a best-effort FYI to a
+    // session that's live RIGHT NOW.
+    if (repoRegistryDiff) {
+      const projectName = (b.name === undefined ? undefined : (b.name as string).trim()) ?? p.name;
+      const managerNote = composeRepoRegistryChangeNote(repoRegistryDiff);
+      for (const m of deps.db.listLiveManagersInProject(id)) {
+        try { deps.pty.enqueueStdin(m.id, managerNote); } catch { /* manager not live — best-effort */ }
+      }
+      // Platform (Lead) sessions span every project (card 540a3281 / sibling card a0dff493) and dispatch
+      // cards at an explicit `repoKey` via `project_task_create`/`project_task_update` exactly like a
+      // manager does, so a Lead holding a stale registry has the identical failure mode. Its own session
+      // is never scoped to THIS project, so its note names the project explicitly (a manager's doesn't —
+      // it's already scoped to exactly one project and its own name would be redundant).
+      const leadNote = composeRepoRegistryChangeNote(repoRegistryDiff, { projectName });
+      for (const lead of deps.db.listLivePlatformSessions()) {
+        try { deps.pty.enqueueStdin(lead.id, leadNote); } catch { /* Lead not live — best-effort */ }
+      }
+    }
     return deps.db.getProject(id);
   });
 

@@ -4390,6 +4390,18 @@ export class Db {
       .all() as Row[]).map(toSession);
   }
   /**
+   * A project's currently-LIVE manager sessions (card 540a3281: notify a live manager when the project's
+   * `repos` registry changes). Distinct from {@link listLiveManagers} (daemon-global — ContextWatcher's
+   * work set): a `repos` PATCH is scoped to ONE project, so the notification's work set must be too, the
+   * same way {@link listLiveWorktreeSessionsInProject} scopes the sibling repoPath-rebind guard. A manager
+   * has no worktree, so it never appears in that worktree-scoped query — this is the project-scoped query
+   * a manager DOES appear in.
+   */
+  listLiveManagersInProject(projectId: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE project_id = ? AND role = 'manager' AND process_state = 'live'")
+      .all(projectId) as Row[]).map(toSession);
+  }
+  /**
    * Currently-LIVE platform (Lead) sessions — IdleWatcher's SECOND work set, kept separate from
    * listLiveManagers on purpose: ContextWatcher also reads listLiveManagers (recycle-by-context), and
    * widening THAT method would silently pull Lead sessions into context-recycle nudging too — out of

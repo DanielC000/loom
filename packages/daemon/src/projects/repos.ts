@@ -155,6 +155,64 @@ export async function validateRepoRegistry(
   return { ok: true, value: out };
 }
 
+/** Result of {@link diffRepoRegistry} — a project's live manager/platform sessions need to be told which
+ *  keys changed, not just that "something changed" (card 540a3281). Keyed by `key` (the stable identity
+ *  of an entry across a PATCH), never by array position. */
+export interface RepoRegistryDiff {
+  added: string[];
+  removed: string[];
+  /** A key present in BOTH before/after but whose `path` or `gateCommand` differs — a repo that MOVED or
+   *  gained/lost its gate is exactly as significant to a manager holding the OLD registry as an add/remove
+   *  (a stale path assumption, or a merge that now reports unverified for a reason the manager can't see). */
+  updated: string[];
+}
+
+/**
+ * Pure key-level diff between a project's `repos` registry before/after a PATCH — the shared basis for
+ * both the "is this actually a change" gate and the human-readable notification (card 540a3281: notify
+ * live manager/platform sessions when the registry changes). Deliberately NOT the same thing as the
+ * PATCH handler's own `JSON.stringify(...) !== JSON.stringify(...)` no-op guard (array order differences
+ * would trip that but produce an empty diff here) — this is the finer-grained "what do I tell a manager"
+ * view, always computed only after that coarser guard has already confirmed SOME change exists.
+ */
+export function diffRepoRegistry(before: RepoRegistryEntry[], after: RepoRegistryEntry[]): RepoRegistryDiff {
+  const beforeByKey = new Map(before.map((e) => [e.key, e]));
+  const afterByKey = new Map(after.map((e) => [e.key, e]));
+  const added: string[] = [];
+  const removed: string[] = [];
+  const updated: string[] = [];
+  for (const [key, entry] of afterByKey) {
+    const prior = beforeByKey.get(key);
+    if (!prior) added.push(key);
+    else if (JSON.stringify(prior) !== JSON.stringify(entry)) updated.push(key);
+  }
+  for (const key of beforeByKey.keys()) if (!afterByKey.has(key)) removed.push(key);
+  return { added: added.sort(), removed: removed.sort(), updated: updated.sort() };
+}
+
+/**
+ * Compose the `[loom:repo-registry-changed]` operational note (card 540a3281) — enqueued `kind:"warning"`
+ * (an FYI that coalesces with other Loom nudges, never interrupts a directive) into live manager/platform
+ * sessions on a REAL `repos` registry change. Names every added/removed/UPDATED key explicitly (a bare
+ * "the registry changed" makes the reader re-derive state it can't see), and always restates the dispatch
+ * mechanism (`repoKey` at card-creation time; unset = primary; a removed key 400s if still targeted) since
+ * that's the actionable part regardless of which keys moved.
+ *
+ * `opts.projectName`, when given, prefixes the note with the project's name — for a platform (Lead)
+ * session, which spans every project and so is never implicitly scoped to the one that changed (unlike a
+ * manager session, which IS scoped to exactly this project and would find its own name redundant).
+ */
+export function composeRepoRegistryChangeNote(diff: RepoRegistryDiff, opts: { projectName?: string } = {}): string {
+  const fmt = (keys: string[]) => keys.map((k) => `\`${k}\``).join(", ");
+  const parts: string[] = [];
+  if (diff.added.length) parts.push(`added: ${fmt(diff.added)}`);
+  if (diff.removed.length) parts.push(`removed: ${fmt(diff.removed)}`);
+  if (diff.updated.length) parts.push(`reconfigured (path/gateCommand changed): ${fmt(diff.updated)}`);
+  const changeSummary = parts.length ? parts.join("; ") : "its entries were updated";
+  const scope = opts.projectName ? `Project "${opts.projectName}"'s` : "This project's";
+  return `[loom:repo-registry-changed] ${scope} repo registry changed (${changeSummary}). Cards are routed to a repo at CREATION time via \`repoKey\` (tasks_create/tasks_update); a card with no repoKey targets \`primary\`. A removed key can no longer be targeted — a card still carrying one will 400 at write time, so re-route or hold anything you were about to file at a removed key. A reconfigured key's new path/gate applies to any card routed there going forward.`;
+}
+
 /** Result of {@link resolveRepoKeyOrError}. */
 export type RepoKeyCheck =
   | { ok: true; value: string | null }
