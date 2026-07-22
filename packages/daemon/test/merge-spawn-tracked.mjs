@@ -24,6 +24,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       cached (unforced) result — proven against a REAL nested-git-repo worktree end-to-end through
 //       confirmWorkerMergeTracked, not just the untracked confirmWorkerMerge worktree-nested-repo-guard.mjs
 //       already covers.
+//   (5b) card 4032ba4d: a REJECTED concurrent Tracked call (AttachResult {settled,ok:false,error}, e.g.
+//        under real host starvation) reports a clean, named FAIL with its `.error` printed — never an
+//        uncaught property-read TypeError on `.value` — and the rest of the file still runs afterward.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/merge-spawn-tracked.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -115,14 +118,19 @@ try {
     const p2 = svc.spawnWorkerTracked(`${P}-mgr1`, { taskId, agentId: `${P}-dev`, kickoffPrompt: "GO" });
     const [r1, r2] = await Promise.all([p1, p2]);
 
-    check("(spawn race) BOTH concurrent calls settle successfully (attach, not a rejection)", r1.settled && r1.ok && r2.settled && r2.ok);
-    check("(spawn race) BOTH resolve to the SAME worker (one real spawn, shared result)", r1.value.id === r2.value.id);
+    // AttachResult is `{settled,ok,value}` on success or `{settled,ok:false,error}` on a genuine
+    // rejection (see pending-ops.ts) — NEVER assume `.value` is present without checking `.ok` first
+    // (card 4032ba4d: the sibling merge-race block below crashed the whole file this way under load).
+    const bothOk = r1.settled && r1.ok && r2.settled && r2.ok;
+    if (!bothOk) for (const [label, r] of [["r1", r1], ["r2", r2]]) if (!(r.settled && r.ok)) console.log(`  -> (spawn race) ${label} rejected: ${r.error instanceof Error ? r.error.message : r.error}`);
+    check("(spawn race) BOTH concurrent calls settle successfully (attach, not a rejection)", bothOk);
+    check("(spawn race) BOTH resolve to the SAME worker (one real spawn, shared result)", bothOk && r1.value.id === r2.value.id);
     const rowsForTask = db.listAllSessions().filter((s) => s.taskId === taskId);
     check("(spawn race) exactly ONE session row was created (no double-spawn)", rowsForTask.length === 1);
     const liveForTask = db.listLiveWorkers().filter((w) => w.taskId === taskId);
     check("(spawn race) exactly ONE live worker holds the task", liveForTask.length === 1);
     check("(spawn race) NO pendingSpawn placeholder lingers alongside the now-real worker row (no dup/over-count)", !svc.listPendingSpawns(`${P}-mgr1`).some((op) => op.taskId === taskId));
-    worktrees.push([repo, r1.value.worktreePath]);
+    if (bothOk) worktrees.push([repo, r1.value.worktreePath]);
   }
 
   // ============================ SPAWN (3): post-eviction stale retry → falls through to live-guard ============================
@@ -188,13 +196,49 @@ try {
     const p2 = svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId);
     const [r1, r2] = await Promise.all([p1, p2]);
 
-    check("(merge race) BOTH concurrent calls settle successfully", r1.settled && r1.ok && r2.settled && r2.ok);
-    check("(merge race) BOTH resolve to the SAME merge result (one real gate+merge, shared result)", r1.value.merged === true && r2.value.merged === true && r1.value.emptyKind === r2.value.emptyKind);
+    // AttachResult is `{settled,ok,value}` on success or `{settled,ok:false,error}` on a genuine
+    // rejection (see pending-ops.ts) — NEVER read `.value` without checking `.ok` first (card 4032ba4d:
+    // under extreme host starvation one of the two raced calls rejected, `.value` was undefined, and the
+    // uncaught property-read TypeError crashed the whole file, discarding every remaining assertion AND
+    // the real `.error` that would have explained why). DECISION (stated, not accidental): a rejection
+    // here IS a real FAIL, not tolerated — "gate runs exactly once" is a dedup/attach invariant the
+    // attach() mechanics should uphold regardless of load, so a genuine rejection is worth surfacing
+    // loudly, not silently waved through. Print the reason either way so a real failure is diagnosable.
+    const bothOk = r1.settled && r1.ok && r2.settled && r2.ok;
+    if (!bothOk) for (const [label, r] of [["r1", r1], ["r2", r2]]) if (!(r.settled && r.ok)) console.log(`  -> (merge race) ${label} rejected: ${r.error instanceof Error ? r.error.message : r.error}`);
+    check("(merge race) BOTH concurrent calls settle successfully (attach, not a rejection)", bothOk);
+    check("(merge race) BOTH resolve to the SAME merge result (one real gate+merge, shared result)", bothOk && r1.value.merged === true && r2.value.merged === true && r1.value.emptyKind === r2.value.emptyKind);
     check("(merge race) exactly ONE new commit landed (no double-squash)", git(repo, `rev-list --count ${headBefore}..HEAD`) === "1");
     const markerContents = fs.existsSync(marker) ? fs.readFileSync(marker, "utf8") : "";
     check("(merge race) the gate ran EXACTLY ONCE across both concurrent calls (marker has one 'x')", markerContents === "x");
     delete process.env.LOOM_MST_MARKER;
     try { fs.rmSync(marker, { force: true }); } catch { /* best-effort */ }
+  }
+
+  // === MERGE (5b): a REJECTED concurrent merge reports a clean, named FAIL — never an uncaught
+  // TypeError — and the rest of the file still runs after it (card 4032ba4d regression proof) ===
+  // Forces a REAL rejection (not a domain-level merged:false) by seeding a worker with no `branch` —
+  // confirmWorkerMerge's own guard (`if (!worker.branch) throw ...`) rejects synchronously for that,
+  // giving the exact `{settled:true, ok:false, error}` shape the (merge race) fix above must survive.
+  // Both concurrent calls attach to the SAME real invocation (see the (spawn race)/(merge race) comment
+  // above), so both see the identical rejection. This block runs BEFORE (6)/(7)/(8) below — their
+  // continued execution (and the file reaching its final summary) is the proof the crash didn't recur.
+  {
+    const P = "mst-merge-reject", repo = makeRepo();
+    seedProject(P, repo);
+    const workerId = `${P}-wkr`;
+    db.insertTask({ id: "t5b", projectId: P, title: "t5b", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: `${P}-mgr1`, taskId: "t5b", worktreePath: repo, branch: null });
+
+    const p1 = svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId);
+    const p2 = svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId);
+    const [r1, r2] = await Promise.all([p1, p2]);
+
+    const bothRejected = r1.settled && !r1.ok && r2.settled && !r2.ok;
+    console.log(`  -> (merge reject) reason: ${bothRejected ? (r1.error instanceof Error ? r1.error.message : r1.error) : "(did not reject as expected)"}`);
+    check("(merge reject) a worker with no branch genuinely REJECTS both concurrent calls (proves this is a real rejection, not a crash)", bothRejected);
+    check("(merge reject) both concurrent calls share the SAME underlying error (one real invocation, attach didn't re-run it)", bothRejected && r1.error === r2.error);
+    check("(merge reject) the printed reason names the real cause, not a property-read TypeError", bothRejected && r1.error instanceof Error && /worker has no branch/.test(r1.error.message));
   }
 
   // ==================== MERGE (6): a fresh (post-eviction-shaped) call composes with ALREADY_MERGED ====================
@@ -305,6 +349,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — spawnWorkerTracked/confirmWorkerMergeTracked: fast path matches today's exact shape, two concurrent calls on the same key attach to ONE real invocation (no double-spawn, gate runs exactly once), a post-eviction stale retry safely falls through to the underlying method's OWN idempotency (live-worker guard / ALREADY_MERGED) instead of double-creating, card 33172f01: a merge re-confirm landing genuinely AFTER the first settled but still within the retention window dedupe-attaches to the cached result (same opId, gate runs exactly once) instead of starting a second real merge attempt, and CR BLOCKER 1: forceRemoveWorktree:true on such a re-confirm bypasses the cache and re-runs for real against a nested-repo worktree instead of silently swallowing the escalation."
+  ? "\n✅ ALL PASS — spawnWorkerTracked/confirmWorkerMergeTracked: fast path matches today's exact shape, two concurrent calls on the same key attach to ONE real invocation (no double-spawn, gate runs exactly once), a post-eviction stale retry safely falls through to the underlying method's OWN idempotency (live-worker guard / ALREADY_MERGED) instead of double-creating, card 33172f01: a merge re-confirm landing genuinely AFTER the first settled but still within the retention window dedupe-attaches to the cached result (same opId, gate runs exactly once) instead of starting a second real merge attempt, CR BLOCKER 1: forceRemoveWorktree:true on such a re-confirm bypasses the cache and re-runs for real against a nested-repo worktree instead of silently swallowing the escalation, and card 4032ba4d: a genuinely REJECTED concurrent call reports a clean, named FAIL with its reason printed — never an uncaught TypeError — with every later assertion in the file still running."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
