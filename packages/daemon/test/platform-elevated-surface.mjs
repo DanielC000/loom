@@ -59,6 +59,20 @@ execSync("git add . && git commit -q -m init", { cwd: repo });
 execSync(`git init --bare -q "${bare}"`, { cwd: os.tmpdir() });
 execSync(`git remote add origin "${bare}"`, { cwd: repo }); // local bare remote — push target
 
+// --- a SECOND real temp git repo (a registered `repos` entry, key "api") + its own local bare remote —
+// proves repoKey (card a0dff493) actually retargets the git writers instead of always hitting primary.
+const repo2 = path.join(os.tmpdir(), `loom-p3-repo2-${Date.now()}`);
+const bare2 = path.join(os.tmpdir(), `loom-p3-bare2-${Date.now()}.git`);
+fs.mkdirSync(repo2, { recursive: true });
+execSync("git init -q", { cwd: repo2 });
+execSync("git config user.email p3@loom && git config user.name p3", { cwd: repo2 });
+fs.writeFileSync(path.join(repo2, "README.md"), "# platform P3 secondary (api) repo\n");
+execSync("git add . && git commit -q -m init", { cwd: repo2 });
+execSync(`git init --bare -q "${bare2}"`, { cwd: os.tmpdir() });
+execSync(`git remote add origin "${bare2}"`, { cwd: repo2 });
+const branchExists = (dir, branch) => { try { execSync(`git rev-parse --verify refs/heads/${branch}`, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); return true; } catch { return false; } };
+const remoteBranchExists = (bareDir, branch) => { try { execSync(`git --git-dir="${bareDir}" rev-parse --verify refs/heads/${branch}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); return true; } catch { return false; } };
+
 // --- a real temp VAULT dir (the project vaultPath), git-init'd so vault_write's commit path is exercised.
 const vault = path.join(os.tmpdir(), `loom-p3-vault-${Date.now()}`);
 const outside = path.join(os.tmpdir(), `loom-p3-outside-${Date.now()}`); // path-escape target (must stay empty)
@@ -174,6 +188,60 @@ try {
   check("(b) git_checkout an unknown branch fails (structured, not a throw)", checkoutGhost.ok === false && typeof checkoutGhost.error === "string");
   check("(b) a git tool on an unknown project 404s", (await call("git_commit", { projectId: "ghost", message: "x" })).error === "project not found");
 
+  // ===================== (e) repoKey — the Lead's git writers become repo-aware (card a0dff493) =====================
+  db.updateProject("pOrd", { repos: [{ key: "api", path: repo2 }] });
+
+  // (e1) repoKey is a SELECTOR into the registry, not a path — it retargets git_create_branch/git_commit/
+  // git_push to the SECONDARY repo, leaving primary untouched.
+  const mkBranchApi = await call("git_create_branch", { projectId: "pOrd", name: "api-feat", repoKey: "api" });
+  check("(e1) git_create_branch with repoKey targets the SECONDARY repo", mkBranchApi.ok === true && mkBranchApi.branch === "api-feat");
+  check("(e1) the branch landed in repo2, not primary", branchExists(repo2, "api-feat") && !branchExists(repo, "api-feat"));
+  fs.writeFileSync(path.join(repo2, "api.txt"), "secondary repo change\n");
+  const commitApi = await call("git_commit", { projectId: "pOrd", message: "add api.txt", repoKey: "api" });
+  check("(e1) git_commit with repoKey commits into the SECONDARY repo", commitApi.ok === true && typeof commitApi.hash === "string");
+  check("(e1) the file exists in repo2, not in primary", fs.existsSync(path.join(repo2, "api.txt")) && !fs.existsSync(path.join(repo, "api.txt")));
+  const checkoutApi = await call("git_checkout", { projectId: "pOrd", branch: "api-feat", repoKey: "api" });
+  check("(e1) git_checkout with repoKey operates against the SECONDARY repo", checkoutApi.ok === true && checkoutApi.branch === "api-feat");
+  const pushApi = await call("git_push", { projectId: "pOrd", repoKey: "api" });
+  check("(e1) git_push with repoKey pushes to the SECONDARY repo's own remote", pushApi.ok === true && pushApi.branch === "api-feat");
+  check("(e1) the commit reached repo2's bare remote, not primary's", remoteBranchExists(bare2, "api-feat") && !remoteBranchExists(bare, "api-feat"));
+
+  // (e2) an unknown repoKey — INCLUDING one that is path-shaped — is REJECTED on all four tools, exactly
+  // like any other unrecognized key: the resolver only matches against project.repos keys, so an agent can
+  // never coerce it into treating the input as a filesystem path and reaching an unregistered target.
+  // NOTE: an unknown-key rejection comes back as { error } with no `ok` field at all — the same shape
+  // the "project not found" 404 already uses on this router (see (b)'s last check) — so these assert
+  // `typeof X.error === "string"`, not `X.ok === false`.
+  const badKeys = ["bogus", "C:/some/other/repo", "../escape", repo2];
+  for (const bad of badKeys) {
+    const co = await call("git_checkout", { projectId: "pOrd", branch: "api-feat", repoKey: bad });
+    check(`(e2) git_checkout REJECTS unrecognized repoKey "${bad}"`, typeof co.error === "string" && !co.branch);
+    const cb = await call("git_create_branch", { projectId: "pOrd", name: "should-not-exist", repoKey: bad });
+    check(`(e2) git_create_branch REJECTS unrecognized repoKey "${bad}"`, typeof cb.error === "string" && !cb.branch);
+    const cm = await call("git_commit", { projectId: "pOrd", message: "should not commit", repoKey: bad });
+    check(`(e2) git_commit REJECTS unrecognized repoKey "${bad}"`, typeof cm.error === "string" && !cm.hash);
+    const ps = await call("git_push", { projectId: "pOrd", repoKey: bad });
+    check(`(e2) git_push REJECTS unrecognized repoKey "${bad}"`, typeof ps.error === "string" && !ps.branch);
+  }
+  check("(e2) fail-closed proved nothing written: no 'should-not-exist' branch in EITHER repo",
+    !branchExists(repo, "should-not-exist") && !branchExists(repo2, "should-not-exist"));
+  check("(e2) fail-closed proved no push was attempted: a NEW local-only branch never reached either bare remote",
+    (() => {
+      execSync("git checkout -q -b never-pushed", { cwd: repo2 });
+      return !remoteBranchExists(bare2, "never-pushed") && !remoteBranchExists(bare, "never-pushed");
+    })());
+
+  // (e3) byte-identical when repoKey is omitted/null/"primary" — all three resolve to the project's
+  // PRIMARY repo, exactly as this surface behaved before card a0dff493 (protects every existing
+  // single-repo project + every existing Lead workflow that never passes repoKey at all).
+  execSync("git checkout -q feat", { cwd: repo }); // back to a known primary branch before these 3 checks
+  const omitted = await call("git_create_branch", { projectId: "pOrd", name: "prim-omitted" });
+  check("(e3) repoKey OMITTED still targets primary", omitted.ok === true && branchExists(repo, "prim-omitted") && !branchExists(repo2, "prim-omitted"));
+  const nullKey = await call("git_create_branch", { projectId: "pOrd", name: "prim-null", repoKey: null });
+  check("(e3) repoKey:null still targets primary", nullKey.ok === true && branchExists(repo, "prim-null") && !branchExists(repo2, "prim-null"));
+  const primaryStr = await call("git_create_branch", { projectId: "pOrd", name: "prim-primary-str", repoKey: "primary" });
+  check("(e3) repoKey:\"primary\" still targets primary", primaryStr.ok === true && branchExists(repo, "prim-primary-str") && !branchExists(repo2, "prim-primary-str"));
+
   // ===================== (c) VAULT WRITE — reuse writeVaultFile verbatim (path-traversal guard) =====================
   const vw = await call("vault_write", { projectId: "pOrd", path: "notes/hello.md", content: "# hello\nfrom the platform lead\n" });
   check("(c) vault_write writes a file under the vault", vw.ok === true);
@@ -207,7 +275,7 @@ try {
   await client.close();
 } finally {
   db.close();
-  for (const d of [tmpHome, repo, bare, vault, outside, freshVault]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
+  for (const d of [tmpHome, repo, bare, repo2, bare2, vault, outside, freshVault]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0

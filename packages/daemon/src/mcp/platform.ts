@@ -17,6 +17,7 @@ import { expandTilde } from "../paths.js";
 import { checkRepoRebind } from "../projects/rebind.js";
 import { validateVaultPath } from "../projects/vault-path.js";
 import { validateRepoRegistry } from "../projects/repos.js";
+import { resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile, ensureVaultRoot } from "../vault/writer.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -2082,60 +2083,100 @@ export class PlatformMcpRouter {
     // ===================================================================================================
 
     // --- git writes (reuse git/writer.ts GitWriter VERBATIM — bounded + non-interactive). Each resolves
-    //     the project's repoPath by explicit projectId and returns GitWriter's structured GitWriteResult
-    //     ({ ok:true, ... } | { ok:false, error }); an EXPECTED git failure (dirty tree, no upstream,
-    //     rejected push) comes back as ok:false, never a throw. 404 if the project is unknown. ---
+    //     the project's repo by explicit projectId + optional repoKey (multi-repo epic 49136451) and
+    //     returns GitWriter's structured GitWriteResult ({ ok:true, ... } | { ok:false, error }); an
+    //     EXPECTED git failure (dirty tree, no upstream, rejected push) comes back as ok:false, never a
+    //     throw. 404 if the project is unknown. Card a0dff493: these four were the one repoKey-shaped
+    //     writer surface that never got threaded through resolveRepoByKey when phase 2 landed everywhere
+    //     else — before this they read p.repoPath directly and SILENTLY always targeted primary on a
+    //     multi-repo project, no error or warning, even though the Lead already dispatches cards at an
+    //     explicit repoKey via project_task_create/update. Decided repo-aware (not primary-only-by-design):
+    //     the Lead already reasons in repo-key terms, so refusing it the ability to act on the key it
+    //     already names would just trade a silent wrong-target for a hard block with no better option. The
+    //     concept itself is taught HERE, in each tool's own description (point-of-use, never stale) rather
+    //     than in the Lead's spawn-time brief (platform-lead-prompt.ts) — that file carries no project data
+    //     at all today, and a baked-in registry snapshot for a session that spans every project would be
+    //     exactly the stale-state-as-authority failure this project keeps getting bitten by; project_get/
+    //     list_all_projects already give the Lead live, current registries on demand. ---
     const gitWriterFor = (repoPath: string) => new GitWriter(repoPath, gitWriteTimeouts);
+
+    /**
+     * Resolve which repo ONE Lead git-write call targets, via the SHARED resolveRepoByKey (never a second
+     * resolution path). `repoKey` is a SELECTOR into `project.repos` ONLY — never a path: an unrecognized
+     * string (a raw filesystem path, a traversal attempt like "../escape", or a typo) simply fails to match
+     * any registered key and is rejected exactly like any other unknown key, the same fail-closed shape
+     * `resolveRepoKeyOrError`/`resolveRepoByKey` already give every other repoKey consumer. The security
+     * property this preserves: an agent can only choose AMONG repos a human already registered, never name
+     * a new target. repoKey omitted/null/"primary" resolves to the project's primary repo (repoPath) —
+     * byte-identical to this tool surface's pre-card-a0dff493 behavior, so an existing single-repo project
+     * or an unchanged caller sees no behavior change.
+     */
+    const resolveGitWriter = (p: Project, repoKey: string | null | undefined): { ok: true; writer: GitWriter } | { ok: false; error: string } => {
+      try {
+        return { ok: true, writer: gitWriterFor(resolveRepoByKey(p, repoKey).path) };
+      } catch (e) {
+        if (e instanceof UnknownRepoKeyError) return { ok: false, error: e.message };
+        throw e;
+      }
+    };
 
     server.registerTool(
       "git_checkout",
       {
-        description: "Switch a project's repo to an EXISTING local branch (reuses the bounded, non-interactive human git-write path). Explicit projectId. Returns { ok:true, branch } or { ok:false, error } (unknown branch / dirty tree). 404 if the project is unknown.",
-        inputSchema: { projectId: z.string(), branch: z.string() },
+        description: "Switch a project's repo to an EXISTING local branch (reuses the bounded, non-interactive human git-write path). Explicit projectId. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error}, never silently falling back to primary. Returns { ok:true, branch } or { ok:false, error } (unknown branch / dirty tree). 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), branch: z.string(), repoKey: z.string().nullable().optional() },
       },
-      async ({ projectId, branch }) => {
+      async ({ projectId, branch, repoKey }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
-        return ok(await gitWriterFor(p.repoPath).checkout(branch));
+        const resolved = resolveGitWriter(p, repoKey);
+        if (!resolved.ok) return ok({ error: resolved.error });
+        return ok(await resolved.writer.checkout(branch));
       },
     );
 
     server.registerTool(
       "git_create_branch",
       {
-        description: "Create a NEW local branch off the current HEAD and switch to it (checkout -b), in a project's repo by explicit projectId. Does NOT touch any remote. Returns { ok:true, branch } or { ok:false, error } (branch already exists / invalid name). 404 if the project is unknown.",
-        inputSchema: { projectId: z.string(), name: z.string() },
+        description: "Create a NEW local branch off the current HEAD and switch to it (checkout -b), in a project's repo by explicit projectId. Does NOT touch any remote. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error}, never silently falling back to primary. Returns { ok:true, branch } or { ok:false, error } (branch already exists / invalid name). 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), name: z.string(), repoKey: z.string().nullable().optional() },
       },
-      async ({ projectId, name }) => {
+      async ({ projectId, name, repoKey }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
-        return ok(await gitWriterFor(p.repoPath).createBranch(name));
+        const resolved = resolveGitWriter(p, repoKey);
+        if (!resolved.ok) return ok({ error: resolved.error });
+        return ok(await resolved.writer.createBranch(name));
       },
     );
 
     server.registerTool(
       "git_commit",
       {
-        description: "Stage ALL changes (add -A) and commit a project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). Explicit projectId. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash } or { ok:false, error }. 404 if the project is unknown.",
-        inputSchema: { projectId: z.string(), message: z.string() },
+        description: "Stage ALL changes (add -A) and commit a project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). Explicit projectId. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error}, never silently falling back to primary. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash } or { ok:false, error }. 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), message: z.string(), repoKey: z.string().nullable().optional() },
       },
-      async ({ projectId, message }) => {
+      async ({ projectId, message, repoKey }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
-        return ok(await gitWriterFor(p.repoPath).commit(message));
+        const resolved = resolveGitWriter(p, repoKey);
+        if (!resolved.ok) return ok({ error: resolved.error });
+        return ok(await resolved.writer.commit(message));
       },
     );
 
     server.registerTool(
       "git_push",
       {
-        description: "Push a project's current branch to its remote — the one genuinely-outward op. Reuses GitWriter.push() VERBATIM: a plain `git push`, retried as `git push -u origin <branch>` ONLY when the branch has no upstream; any other failure (unreachable/auth/rejected) is surfaced unchanged. Bounded + non-interactive (GIT_TERMINAL_PROMPT=0 + push timeout) so a credential-needing remote FAILS FAST rather than hanging. No force-push. Explicit projectId. Returns { ok:true, branch } or { ok:false, error }. 404 if the project is unknown.",
-        inputSchema: { projectId: z.string() },
+        description: "Push a project's current branch to its remote — the one genuinely-outward op. Reuses GitWriter.push() VERBATIM: a plain `git push`, retried as `git push -u origin <branch>` ONLY when the branch has no upstream; any other failure (unreachable/auth/rejected) is surfaced unchanged. Bounded + non-interactive (GIT_TERMINAL_PROMPT=0 + push timeout) so a credential-needing remote FAILS FAST rather than hanging. No force-push. Explicit projectId. Optional repoKey (multi-repo epic) targets one of the project's registered `repos` entries instead of its primary repo — omit (or pass \"primary\") for primary; an unknown key (including anything path-shaped) is rejected with {error} and NO push is attempted, never silently falling back to primary. Returns { ok:true, branch } or { ok:false, error }. 404 if the project is unknown.",
+        inputSchema: { projectId: z.string(), repoKey: z.string().nullable().optional() },
       },
-      async ({ projectId }) => {
+      async ({ projectId, repoKey }) => {
         const p = db.getProject(projectId);
         if (!p) return ok({ error: "project not found" });
-        return ok(await gitWriterFor(p.repoPath).push());
+        const resolved = resolveGitWriter(p, repoKey);
+        if (!resolved.ok) return ok({ error: resolved.error });
+        return ok(await resolved.writer.push());
       },
     );
 
