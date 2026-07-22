@@ -1427,14 +1427,14 @@ const BOARD_REACH: CompanionCapability = {
           && (!hasBody || ctx.attest.isVerbatimOwnerText(ctx.sessionId, normalizedBody as string));
         const grantAllows = !cfgAllows && !verbatimOk && ctx.attest.hasAuthoredContentGrant(ctx.sessionId, task.projectId);
         const contentIsVerbatim = cfgAllows || verbatimOk || grantAllows;
-        const applyPatch = (): { error: string } | { updated: Task | TaskUpdateAck } => {
+        const applyPatch = async (): Promise<{ error: string } | { updated: Task | TaskUpdateAck }> => {
           const patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "priority" | "held">> = {};
           if (hasTitle) patch.title = normalizedTitle;
           if (hasBody) patch.body = normalizedBody;
           if (columnKey !== undefined) patch.columnKey = columnKey;
           if (priority !== undefined) patch.priority = priority;
           if (held !== undefined) patch.held = held;
-          const result = updateProjectTask(db, task.projectId, id, patch);
+          const result = await updateProjectTask(db, task.projectId, id, patch);
           return "error" in result ? { error: result.error } : { updated: result };
         };
 
@@ -1444,7 +1444,7 @@ const BOARD_REACH: CompanionCapability = {
           if (!contentIsVerbatim) {
             return ok({ error: "title/body must be a verbatim quote of what the owner said (this turn or a recent one) — you may not author it" });
           }
-          const result = applyPatch();
+          const result = await applyPatch();
           if ("error" in result) return ok({ error: result.error });
           if (grantAllows) ctx.attest.consumeAuthoredContentGrantIfOnce(ctx.sessionId, task.projectId);
           const updated = result.updated;
@@ -1466,7 +1466,7 @@ const BOARD_REACH: CompanionCapability = {
           ) {
             return ok({ error: "the confirmed action no longer matches what was proposed — call board_update again to re-propose" });
           }
-          const result = applyPatch();
+          const result = await applyPatch();
           if ("error" in result) return ok({ error: result.error });
           // See board_create's own confirm-branch doc for why this reads `pending.grantBacked` (frozen
           // at propose time) rather than recomputing `grantAllows` against THIS turn's owner text (the

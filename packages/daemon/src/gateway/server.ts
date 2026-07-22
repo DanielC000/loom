@@ -51,7 +51,8 @@ import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter } from "../git/writer.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached } from "../git/worktrees.js";
-import { checkRepoRebind } from "../projects/rebind.js";
+import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
+import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
 import { validateRepoRegistry, resolveRepoKeyOrError } from "../projects/repos.js";
@@ -3339,11 +3340,23 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!s?.branch) return reply.code(404).send({ error: "session has no branch" });
     const p = deps.db.getProject(s.projectId);
     if (!p) return reply.code(404).send({ error: "project not found" });
+    // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo (Session.repoKey), not
+    // p.repoPath — a secondary-repo worker's diff otherwise reads/misreads the WRONG repo. READ path,
+    // polled every ~4s per card, so a stale repoKey (a registry entry removed after this worker finished)
+    // degrades to the primary repo rather than 500ing the whole card — mirrors resolveMergedInfo's
+    // identical posture in mcp/tasks.ts.
+    let diffRepoPath = p.repoPath;
+    try {
+      diffRepoPath = resolveRepo(p, s).path;
+    } catch (e) {
+      if (!(e instanceof UnknownRepoKeyError)) throw e;
+      console.warn(`[gateway] session ${s.id} has a stale repoKey (${e.repoKey}) not in project ${p.id}'s registry — falling back to the primary repo for its diff`);
+    }
     // Lifecycle-robust: live worktree (uncommitted) → committed branch → reconstructed merge diff.
     // Cached (see getWorkerDiffCached in worktrees.ts): Overview polls this every ~4s per rendered
     // worker card regardless of whether the worktree changed, and the underlying git subprocess costs
     // 350-415ms/poll — an unchanged poll skips it entirely via a git-free freshness proof.
-    const d = await getWorkerDiffCached(p.repoPath, { branch: s.branch, worktreePath: s.worktreePath ?? null });
+    const d = await getWorkerDiffCached(diffRepoPath, { branch: s.branch, worktreePath: s.worktreePath ?? null });
     if (!d) return reply.code(404).send({ error: "no diff available (no worktree, and branch gone/unmergeable)" });
     return d;
   });
@@ -3687,6 +3700,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.repos !== undefined) {
       const check = await validateRepoRegistry(b.repos, { repoPath: repoPath ?? p.repoPath, vaultPath: vaultPath ?? p.vaultPath });
       if (!check.ok) return reply.code(400).send({ error: check.error });
+      // LIVE-WORKTREE GUARD (CARRIED 3, multi-repo epic 49136451 phase 2): a `repos` edit can repath or
+      // remove an entry a LIVE worker's worktree was cut from — stranding it exactly like an unguarded
+      // repoPath rebind would. Same blanket per-project policy as checkRepoRebind (registry edits are
+      // rare/human-only; a precise per-key diff isn't worth the added complexity) — see
+      // checkLiveWorktreeSessions's doc. Code Review Minor 6: exempt a genuine NO-OP (the validated/
+      // canonicalized registry is deep-equal to what's already stored) — mirrors the repoKey retarget
+      // guards' own no-op exemption. Without this, a full-object PATCH that simply echoes back an
+      // unchanged registry (the shape a future registry-editing UI would naturally send) would 400 every
+      // settings edit while any worker anywhere in the project is live, even though nothing would change.
+      if (JSON.stringify(check.value) !== JSON.stringify(p.repos)) {
+        const liveCheck = checkLiveWorktreeSessions(deps.db, id);
+        if (!liveCheck.ok) return reply.code(400).send({ error: liveCheck.error, ...(liveCheck.liveSessions ? { liveSessions: liveCheck.liveSessions } : {}) });
+      }
       repos = check.value;
     } else if ((repoPath !== undefined || vaultPath !== undefined) && p.repos.length > 0) {
       // repos OMITTED, but repoPath and/or vaultPath IS changing on this SAME PATCH (code-review Major 1):
@@ -4331,6 +4357,19 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (b.repoKey !== undefined) {
       const check = resolveRepoKeyOrError(project?.repos ?? [], b.repoKey);
       if (!check.ok) return reply.code(400).send({ error: check.error });
+      // TASK-SCOPED RETARGET GUARD (multi-repo epic 49136451 phase 2, required addition, widened by Code
+      // Review Major 1): same guard as the agent-facing mcp/tasks.ts updateProjectTask — a session's
+      // worktree/branch can OUTLIVE its process_state (a rejected merge or worker_stop RETAINS both by
+      // design), so retargeting a task's repoKey while ANY of its sessions still holds a worktree on disk
+      // or an undeleted branch would let a later re-confirm land the merge on the OLD repo while
+      // ship-state scans the NEW one, permanently misreading the card as unmerged. This is a correctness
+      // guard, not an authority one, so it applies here too even though this human REST route otherwise
+      // bypasses the agent-only repoKey authority check above it in mcp/tasks.ts. No-op writes (value
+      // unchanged) are exempt — see checkTaskRepoKeyRebind's doc.
+      if (project && check.value !== (existingTask.repoKey ?? null)) {
+        const retargetCheck = await checkTaskRepoKeyRebind(deps.db, project, existingTask.id);
+        if (!retargetCheck.ok) return reply.code(400).send({ error: retargetCheck.error, ...(retargetCheck.liveSessions ? { liveSessions: retargetCheck.liveSessions } : {}) });
+      }
       b.repoKey = check.value;
     }
     // held-clear provenance (card 9b0373c0, Platform-Audit bb23d15a): this loopback REST route is the

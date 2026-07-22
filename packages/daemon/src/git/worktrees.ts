@@ -639,13 +639,24 @@ async function resolveStaleBase(
  * first (see {@link recutStaleReusedBranch}) so a fresh re-spawn doesn't inherit a stale base; a branch
  * carrying unmerged work (recovery) is left untouched. The fresh `-b` path already cuts off current
  * HEAD, so it needs no re-cut.
+ *
+ * `repoKey` (multi-repo epic 49136451 phase 2) adds a REPO AXIS to the worktree dir for a NON-primary
+ * repo: `WORKTREES_DIR/projectId/<repoKey>/<taskKey>` instead of `WORKTREES_DIR/projectId/<taskKey>`, so
+ * a task re-targeted across repos (or two different tasks on two different registry repos) can never
+ * collide on the same dir. Omitted, `undefined`, or `"primary"` keeps the ORIGINAL 2-segment path —
+ * BYTE-IDENTICAL to every call before this param existed, which is load-bearing: an existing live
+ * worktree/branch must survive a daemon upgrade mid-flight. The branch name (`loom/<key>`) itself gets
+ * NO axis — branches are a per-repo namespace, so the same key can never collide across two distinct
+ * repos; only the shared filesystem path needs disambiguating.
  */
 export async function createWorktree(
-  repoPath: string, projectId: string, taskId: string, deps: ProvisionDeps = {},
+  repoPath: string, projectId: string, taskId: string, deps: ProvisionDeps = {}, repoKey?: string | null,
 ): Promise<WorktreeInfo> {
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
-  const worktreePath = path.join(WORKTREES_DIR, projectId, key);
+  const worktreePath = repoKey && repoKey !== "primary"
+    ? path.join(WORKTREES_DIR, projectId, repoKey, key)
+    : path.join(WORKTREES_DIR, projectId, key);
   // The repo's CURRENT HEAD — the fork point this worktree's branch is (or was) cut off, captured up
   // front so it's correct for every path below (fresh cut, reuse, and reattach all fork off THIS sha).
   const mainSha = (await simpleGit(repoPath).raw(["rev-parse", "HEAD"])).trim();
@@ -669,7 +680,7 @@ export async function createWorktree(
   }
 
   const git = simpleGit(repoPath);
-  fs.mkdirSync(path.join(WORKTREES_DIR, projectId), { recursive: true });
+  fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
   await git.raw(["worktree", "prune"]); // drop any stale admin record for a since-deleted dir
   const branchExists = (await git.raw(["branch", "--list", branch])).trim() !== "";
   await git.raw(branchExists
@@ -718,6 +729,27 @@ export async function deleteBranch(repoPath: string, branch: string, deps: Bound
     if (/not found/i.test(msg)) return;
     // eslint-disable-next-line no-console
     console.warn(`[worktree] could not delete merged branch ${branch}: ${msg}`);
+  }
+}
+
+/**
+ * Does `branch` still exist in `repoPath`? Multi-repo epic (49136451) phase 2, Major 1 fix:
+ * `checkTaskRepoKeyRebind` (projects/rebind.ts) uses this to tell whether a session bound to a task whose
+ * worktree dir is already gone still has an undeleted branch (e.g. a retained-on-reject branch whose
+ * worktree was separately force-removed) — either signal means the session is still physically rooted in
+ * that repo and a `repoKey` retarget past it would risk the silent ship-state divergence the whole guard
+ * exists to prevent. BOUNDED (mirrors {@link deleteBranch}/{@link findLandedSquashCommit}): a hung `git
+ * branch --list` must not wedge the human/manager write path calling this. FAILS SAFE to `true` (treat as
+ * still-existing, i.e. still blocking) on any git error/timeout — a check we can't complete must never be
+ * read as "confirmed gone."
+ */
+export async function branchExistsInRepo(repoPath: string, branch: string, deps: BoundedGitDeps = {}): Promise<boolean> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const out = await withTimeout(git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list");
+    return out.trim() !== "";
+  } catch {
+    return true; // fail safe: can't confirm gone ⇒ treat as still present
   }
 }
 

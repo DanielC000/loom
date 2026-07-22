@@ -122,6 +122,47 @@ try {
       check("(A6) POST with the reserved key \"primary\" -> 400", badPrimary.statusCode === 400);
       check("(A6) error names the reserved-key rule", /reserved/.test(badPrimary.json().error ?? ""));
 
+      // (A6b) multi-repo epic phase 2, Code Review Major 2: `key` is now used as a FILESYSTEM PATH
+      // SEGMENT (WORKTREES_DIR/projectId/<key>/<taskKey>) — an unrestricted key could cut a worktree
+      // OUTSIDE the project's worktree namespace, and boot-reconcile would later force-remove at that
+      // escaped path. A key containing `/`, `\`, or other special characters is REJECTED.
+      const badSlash = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadSlash", repoPath: primary, vaultPath: primary, repos: [{ key: "svc/a", path: svcA }] },
+      });
+      check("(A6b) POST with a repos key containing '/' -> 400", badSlash.statusCode === 400);
+      check("(A6b) error names the charset rule", /\[A-Za-z0-9._-\]/.test(badSlash.json().error ?? ""));
+
+      const badBackslash = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadBackslash", repoPath: primary, vaultPath: primary, repos: [{ key: "svc\\a", path: svcA }] },
+      });
+      check("(A6c) POST with a repos key containing '\\' -> 400", badBackslash.statusCode === 400);
+
+      // (A6d) traversal keys `.` and `..` are REJECTED explicitly — both happen to match the plain
+      // charset regex on their own, so they need their own dedicated rejection.
+      const badDotDot = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadDotDot", repoPath: primary, vaultPath: primary, repos: [{ key: "..", path: svcA }] },
+      });
+      check("(A6d) POST with a repos key of '..' -> 400", badDotDot.statusCode === 400);
+      check("(A6d) error names the reserved traversal rule", /reserved/.test(badDotDot.json().error ?? ""));
+
+      const badDot = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadDot", repoPath: primary, vaultPath: primary, repos: [{ key: ".", path: svcA }] },
+      });
+      check("(A6e) POST with a repos key of '.' -> 400", badDot.statusCode === 400);
+
+      // (A6f) control: a key using the FULL allowed charset (letters/digits/dot/underscore/dash) is
+      // accepted normally — the charset guard isn't over-matching legitimate keys.
+      const goodCharset = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "GoodCharset", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a.v2_beta", path: svcA }] },
+      });
+      check("(A6f) control: a repos key using the full allowed charset -> 201", goodCharset.statusCode === 201);
+      check("(A6f) control: key round-trips verbatim", goodCharset.json().repos?.[0]?.key === "svc-a.v2_beta");
+
       // (A7) a DUPLICATE key across two entries is REJECTED.
       const badDup = await app.inject({
         method: "POST", url: "/api/projects",
@@ -288,6 +329,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Project.repos round-trips on the HUMAN-only REST create/update/project-init (isGitRepo + absolute-path + unique-key + reserved-key + no-aliasing validated, rejection leaves the stored value unchanged / creates no row, gateCommand round-trips per-entry), and is absent from every agent-facing MCP write surface's inputSchema (loom-setup + the elevated loom-platform's project_create/project_init/project_update) with the handler itself hardcoding repos:[] regardless of the project's real state — claude-free, network-free."
+  ? "\n✅ ALL PASS — Project.repos round-trips on the HUMAN-only REST create/update/project-init (isGitRepo + absolute-path + unique-key + reserved-key + charset (phase 2, Code Review Major 2 — a key is a filesystem path segment, so `/`/`\\`/other specials and the traversal keys `.`/`..` are rejected) + no-aliasing validated, rejection leaves the stored value unchanged / creates no row, gateCommand round-trips per-entry), and is absent from every agent-facing MCP write surface's inputSchema (loom-setup + the elevated loom-platform's project_create/project_init/project_update) with the handler itself hardcoding repos:[] regardless of the project's real state — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

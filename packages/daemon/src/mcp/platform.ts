@@ -1698,7 +1698,7 @@ export class PlatformMcpRouter {
         // role: "platform" literal — this whole router is gated to role==="platform" (resolveRole above),
         // so a caller that reaches this handler at all is ALWAYS a platform session; this satisfies
         // updateProjectTask's repoKey authority guard (manager/platform only) the same way question_ask does.
-        return ok(updateProjectTask(db, project.id, taskId, patch, callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined));
+        return ok(await updateProjectTask(db, project.id, taskId, patch, callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined));
       },
     );
 

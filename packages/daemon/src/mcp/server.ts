@@ -174,7 +174,7 @@ export class TaskMcpRouter {
           // role threaded for the repoKey authority guard (code-review ruling): a worker on this SAME
           // router can reach tasks_update, but must not be able to set repoKey (a dispatch decision) —
           // see updateProjectTask's own doc.
-          return ok(updateProjectTask(db, projectId, resolvedId, patch, { sessionId, role: session?.role }));
+          return ok(await updateProjectTask(db, projectId, resolvedId, patch, { sessionId, role: session?.role }));
         },
       );
     }

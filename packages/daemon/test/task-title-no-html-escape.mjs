@@ -38,7 +38,7 @@ try {
 
   // (b) updateProjectTask: patching a title/body with the same characters is equally unescaped.
   const quoteTitle = `fix(web): guard the "A & B" <Partial> case`;
-  const updated = updateProjectTask(db, "projA", created.id, { title: quoteTitle, body: 'quotes: " and \' and & too' });
+  const updated = await updateProjectTask(db, "projA", created.id, { title: quoteTitle, body: 'quotes: " and \' and & too' });
   check("(b) updateProjectTask returns the patched title unescaped", updated.title === quoteTitle);
   const reread2 = db.getTask(created.id);
   check("(b) stored title after update reads back byte-identical", reread2.title === quoteTitle);

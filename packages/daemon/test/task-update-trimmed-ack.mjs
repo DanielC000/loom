@@ -32,7 +32,7 @@ try {
   check("setup: card created with a body", !card.error && card.body.length === 400);
 
   // (1) columnKey-only move: trimmed ack, body ABSENT (not just falsy).
-  const moved = updateProjectTask(db, "projA", card.id, { columnKey: "review" });
+  const moved = await updateProjectTask(db, "projA", card.id, { columnKey: "review" });
   check("(1) columnKey-only update: no error", !moved.error);
   check("(1) columnKey-only update: body key is ABSENT from the ack", !("body" in moved));
   check("(1) columnKey-only update: carries id + the changed field", moved.id === card.id && moved.columnKey === "review");
@@ -40,7 +40,7 @@ try {
   check("(1) columnKey-only update: persisted to the DB", db.getTask(card.id).columnKey === "review" && db.getTask(card.id).body.length === 400);
 
   // (2) priority/held/deferred-only patch: same trimmed shape.
-  const reprioritized = updateProjectTask(db, "projA", card.id, { priority: "p0", held: true, deferred: true });
+  const reprioritized = await updateProjectTask(db, "projA", card.id, { priority: "p0", held: true, deferred: true });
   check("(2) priority/held/deferred-only update: body key is ABSENT", !("body" in reprioritized));
   check("(2) priority/held/deferred-only update: fields applied", reprioritized.priority === "p0" && reprioritized.held === true && reprioritized.deferred === true);
   check("(2) `changed` names all three patched fields", ["priority", "held", "deferred"].every((k) => reprioritized.changed.includes(k)) && reprioritized.changed.length === 3);
@@ -51,7 +51,7 @@ try {
     "position" in reprioritized && "held" in reprioritized && "deferred" in reprioritized && "updatedAt" in reprioritized);
 
   // (3) a patch that DOES pass body returns the FULL task, body included.
-  const bodyEdit = updateProjectTask(db, "projA", card.id, { body: "a deliberately edited body" });
+  const bodyEdit = await updateProjectTask(db, "projA", card.id, { body: "a deliberately edited body" });
   check("(3) body-editing update: no error", !bodyEdit.error);
   check("(3) body-editing update: returns the FULL task, body included", bodyEdit.body === "a deliberately edited body");
   check("(3) body-editing update: still carries the small fields too", bodyEdit.id === card.id && bodyEdit.columnKey === "review" && bodyEdit.priority === "p0");

@@ -207,11 +207,66 @@ try {
       db.close();
     }
   }
+
+  // =====================================================================================================
+  // PART D — CARRIED item 3 (multi-repo epic 49136451 phase 2): a `repos` registry EDIT (not just a
+  // repoPath rebind) is refused while ANY live worktree session exists for the project — the gap phase
+  // 1's checkRepoRebind never covered at all (it only ever ran on a repoPath rebind). Blanket per-project
+  // policy, same as checkRepoRebind's own — registry edits are rare/human-only, and this reuses the SAME
+  // shared checkLiveWorktreeSessions helper rather than a precise per-key diff.
+  // =====================================================================================================
+  {
+    const db = new Db(path.join(tmpHome, "registry-edit-live-d.db"));
+    const stub = {};
+    const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });
+    try {
+      const created = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "RegistryEditLiveTest", repoPath: primary, vaultPath: primary, repos: [{ key: "api", path: svcA }] },
+      });
+      const projectId = created.json().id;
+      const now = new Date().toISOString();
+      db.insertAgent({ id: "agentW", projectId, name: "Worker", startupPrompt: "", position: 0, profileId: null });
+      db.insertSession({
+        id: "liveWorktreeSession", projectId, agentId: "agentW", engineSessionId: null, title: null,
+        cwd: svcA, processState: "live", resumability: "unknown", busy: false,
+        createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: null,
+        worktreePath: svcA, branch: "loom/somekey", repoKey: "api",
+      });
+
+      // (D1) editing the registry (repathing the "api" entry) while a live worktree session exists on
+      // this project -> refused, registry UNCHANGED.
+      const beforeRepos = db.getProject(projectId)?.repos;
+      const badEdit = await app.inject({
+        method: "PATCH", url: `/api/projects/${projectId}`,
+        payload: { repos: [{ key: "api", path: newPrimary }] },
+      });
+      check("(D1) editing the repos registry while a live worktree session exists -> 400", badEdit.statusCode === 400);
+      check("(D1) error names the live-worktree reason", /live worktree session/i.test(badEdit.json().error ?? ""));
+      check("(D1) registry UNCHANGED after the refusal", JSON.stringify(db.getProject(projectId)?.repos) === JSON.stringify(beforeRepos));
+
+      // (D2) removing the entry entirely (empty repos array) while live is ALSO refused, not just a repath.
+      const badRemove = await app.inject({ method: "PATCH", url: `/api/projects/${projectId}`, payload: { repos: [] } });
+      check("(D2) removing a registry entry while a live worktree session exists -> 400", badRemove.statusCode === 400);
+      check("(D2) registry still UNCHANGED", db.getProject(projectId)?.repos?.length === 1);
+
+      // (D3) once the live session exits, the SAME registry edit succeeds normally.
+      db.setProcessState("liveWorktreeSession", "exited");
+      const goodEdit = await app.inject({
+        method: "PATCH", url: `/api/projects/${projectId}`,
+        payload: { repos: [{ key: "api", path: newPrimary }] },
+      });
+      check("(D3) the same registry edit succeeds once the worktree session exits", goodEdit.statusCode === 200);
+      check("(D3) registry actually updated", db.getProject(projectId)?.repos?.[0]?.path?.toLowerCase() === newPrimary.toLowerCase());
+    } finally {
+      db.close();
+    }
+  }
 } finally {
   for (const d of [tmpHome, primary, svcA, newPrimary]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a repoPath/vaultPath rebind that OMITS `repos` still re-validates the EXISTING registry against the new primary on both the human REST PATCH and the elevated platform project_update (rejecting a conflict, leaving a non-conflicting rebind unaffected), and every alias/dedup comparison canonicalizes paths first (native realpath + win32 case-fold) so differently-spelled/-cased/trailing-slashed paths to the identical real directory are still caught as the same repo."
+  ? "\n✅ ALL PASS — a repoPath/vaultPath rebind that OMITS `repos` still re-validates the EXISTING registry against the new primary on both the human REST PATCH and the elevated platform project_update (rejecting a conflict, leaving a non-conflicting rebind unaffected), every alias/dedup comparison canonicalizes paths first (native realpath + win32 case-fold) so differently-spelled/-cased/trailing-slashed paths to the identical real directory are still caught as the same repo, and (CARRIED item 3, phase 2) a `repos` registry EDIT itself — repathing or removing an entry, not just a repoPath rebind — is refused while ANY live worktree session exists for the project, succeeding again once it exits."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -160,9 +160,9 @@ try {
   check("(4) project_task_update 404s an unknown project", (await call("project_task_update", { projectId: "ghost", taskId: card.id, priority: "p1" })).error === "project not found");
 
   // The SHARED backing path is used by the in-project tasks_update too: column-existence guard applies there.
-  const badIn = updateProjectTask(db, "pTarget", card.id, { columnKey: "still_not_a_col" });
+  const badIn = await updateProjectTask(db, "pTarget", card.id, { columnKey: "still_not_a_col" });
   check("(4) the in-project updateProjectTask ALSO rejects an unknown column (shared guard)", /unknown column/.test(badIn.error || ""));
-  const goodIn = updateProjectTask(db, "pTarget", card.id, { columnKey: "review" });
+  const goodIn = await updateProjectTask(db, "pTarget", card.id, { columnKey: "review" });
   check("(4) a valid in-project move is accepted (review exists on the default board)", goodIn.columnKey === "review" && !goodIn.error);
 
   // list_all_tasks aggregates across projects; projectId narrows; done excluded; summary drops body.

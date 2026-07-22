@@ -15,7 +15,7 @@ import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProce
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
-import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
+import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled, codescapeGraphPath } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
@@ -2879,6 +2879,15 @@ export class SessionService {
       skills: src.skills ?? null, // a fork inherits the source's pinned skill subset (null ⇒ all)
       connections: src.connections ?? [], // a fork inherits the source's authenticated-egress allowlist
       vaultWrite: src.vaultWrite ?? false, // a fork inherits the source's confined vault-write grant
+      // Multi-repo epic (49136451) phase 2, Code Review Minor 4: `taskId`/`worktreePath`/`branch` are
+      // deliberately NOT carried (a fork is a conversation branch, not a worker — see this method's own
+      // doc), but `cwd` IS carried, and for a worker `cwd` === its worktree. `repoKey` alone (with no
+      // taskId/branch) has no dispatch effect on its own — it exists so `runWorkerGate`'s gate resolution
+      // (`resolveRepoByKey(project, worker.repoKey)`) still asks the RIGHT repo for its gateCommand when
+      // called on a forked worker session: every OTHER worker-lifecycle path is gated on `worker.branch`
+      // (which a fork never has), but run_gate only needs `cwd`/`worktreePath` — a fork of a secondary-repo
+      // worker would otherwise run the PRIMARY project's gateCommand inside a SECONDARY worktree.
+      repoKey: src.repoKey ?? null,
     };
     this.db.insertSession(session);
     // Re-resolve the agent's spawn so the fork keeps its profile's LAYERED allowlist (baseline
@@ -3573,12 +3582,25 @@ export class SessionService {
       // guaranteeing its own ISOLATED worktree/branch that can never collide with a task's worktree or
       // with another taskless spawn's (this is also how a read-only reviewer avoids ever sharing the
       // author's worktree — see the guard note above).
-      const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(project.repoPath, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit });
+      //
+      // Multi-repo epic (49136451) phase 2: resolve which repo THIS worktree is cut from — a taskless
+      // spawn has no repoKey to carry (always primary); a tasked spawn resolves off the task's CURRENT
+      // repoKey. This is a WRITE/spawn path (unlike the ship-state/advisory reads elsewhere), so a stale
+      // `repoKey` (a registry entry removed after the task was written) is left to THROW here rather than
+      // silently degrade to primary — better to fail the spawn loudly than cut a worktree in the wrong
+      // repo. The resolved `{key, path}` is stamped onto the session below (Session.repoKey) and used for
+      // every later op on THIS worktree (gate/merge/finalize/boot-reconcile) instead of re-resolving from
+      // the task each time — see that field's doc for why.
+      const targetRepo = resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
+      const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key);
       // Codescape C3: ensure the project's graph.json exists yet (lazily, on first worker spawn) —
       // fire-and-forget, NEVER blocks the spawn (isCodescapeEnabled folds in isLoomDev(), so a non-dev/
       // disabled daemon fires nothing; a graph that already exists is a no-op — see
       // fireCodescapeEnsureGraph's doc). Ingests the project's MAIN repo, not this new worktree — every
-      // session on the project reads the SAME project-wide graph.
+      // session on the project reads the SAME project-wide graph. DELIBERATELY pinned to `project.repoPath`
+      // (the primary), NOT `targetRepo.path` — Codescape indexes ONE graph per project regardless of which
+      // repo a given task targets (multi-repo epic 49136451 is out of scope for Codescape); this is NOT a
+      // missed multi-repo callsite, see the grep-proof note in the phase-2 done-report.
       this.fireCodescapeEnsureGraph(project.id, config, project.repoPath);
 
       const now = new Date().toISOString();
@@ -3608,6 +3630,7 @@ export class SessionService {
         taskId,
         worktreePath,
         branch,
+        repoKey: targetRepo.key === "primary" ? null : targetRepo.key, // stamped once — see Session.repoKey's doc
       };
       this.db.insertSession(worker);
       // M5: flip to live BEFORE wiring the pty so a fast-failing spawn's onExit ('exited') always wins.
@@ -5285,7 +5308,10 @@ export class SessionService {
       const project = this.db.getProject(worker.projectId);
       const worktreePath = worker.worktreePath ?? worker.cwd;
       if (project && worktreePath && worker.branch && fs.existsSync(worktreePath)) {
-        const precheck = await precheckWorkerDone(project.repoPath, worktreePath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
+        // Multi-repo epic (49136451) phase 2: this worktree may be rooted in a registry repo — resolve
+        // against the SESSION's own stamped repoKey (see Session.repoKey's doc), not project.repoPath.
+        const precheckRepoPath = resolveRepoByKey(project, worker.repoKey).path;
+        const precheck = await precheckWorkerDone(precheckRepoPath, worktreePath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
         if (precheck.uncommitted) {
           // REFUSE: do NOT move the task — the worker stays in_progress to commit + re-report. Name the
           // uncommitted files so the worker knows exactly what to commit.
@@ -5905,6 +5931,7 @@ export class SessionService {
         taskId,
         worktreePath,
         branch,
+        repoKey: old.repoKey ?? null, // SAME worktree, SAME repo — carried forward like browserTesting/skills
         gen: newGen,
         recycledFrom: old.id,
       };
@@ -6745,18 +6772,22 @@ export class SessionService {
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
+    // Multi-repo epic (49136451) phase 2: this manager-facing diff/review is against ONE worker's ONE
+    // worktree — resolve against the SESSION's own stamped repoKey (see Session.repoKey's doc), not
+    // project.repoPath, so a manager reviewing a secondary-repo worker's diff sees the actual branch.
+    const repoPath = resolveRepoByKey(project, worker.repoKey).path;
     // DEFAULT: a bounded diffstat (per-file ± + totals) so step-1 can't overflow the display on a big diff.
     // The full unified patch is opt-in (includePatch) — see the worker_merge tool's `fullDiff` flag. An
     // OPTIONAL files/pathGlob filter (additive — see diffBranch) further scopes BOTH the diffstat and the
     // patch to matching file(s), so a manager can pull one file's hunk at a time instead of the whole patch.
     const includePatch = opts.includePatch === true;
-    const diff = await diffBranch(project.repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true });
+    const diff = await diffBranch(repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
     // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
     // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an
     // AFFIRMATIVE stranded signal warns; a check failure fails safe to NOT stranded). The diff fields
     // are returned unchanged.
-    const stranded = await detectStrandedWork(project.repoPath, worker.worktreePath ?? worker.cwd, worker.branch, { timeoutMs: this.gitOpMs });
+    const stranded = await detectStrandedWork(repoPath, worker.worktreePath ?? worker.cwd, worker.branch, { timeoutMs: this.gitOpMs });
     const strandedWarning = stranded.stranded
       ? `STRANDED WORK: worker committed to '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} commit(s) ahead) instead of its assigned branch '${worker.branch}', which is empty. Confirming would merge nothing and LOSE that work. Re-point '${worker.branch}' to ${stranded.commit} (or cherry-pick it) before confirming.`
       : undefined;
@@ -6764,7 +6795,7 @@ export class SessionService {
     // current main, independent of whether the spawn-time detection/kickoff note (parts 1+2) ran for this
     // worker at all (it may have been spawned before this fix, or fallen behind mid-session). FAILS SAFE
     // to `undefined` on any git error — never blocks or alters the review.
-    const behindMain = await countCommitsBehind(project.repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
+    const behindMain = await countCommitsBehind(repoPath, worker.branch, "HEAD", { timeoutMs: this.gitOpMs });
     const staleWarning = behindMain && behindMain > 0
       ? `STALE BASE: this branch is rooted ${behindMain} commit(s) behind current main. confirmWorkerMerge's own union-merge will attempt to forward it automatically before the gate runs, but review the diff with that in mind — a stale-based rebuild can silently overwrite or conflict with a change that landed on main after this branch was cut.`
       : undefined;
@@ -7014,7 +7045,18 @@ export class SessionService {
     // `orchestration.maxConcurrentGates` (host-load guard, card 301d8c01) resolves correctly below —
     // that field has no per-project layer (like schedulerEnabled).
     const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
-    const gate = orchestration.gateCommand;
+    // Multi-repo epic (49136451) phase 2: resolve THIS worker's OWN target repo — anchored to the
+    // SESSION's stamped `repoKey` (set once at worktree-cut, see Session.repoKey's doc), NOT a fresh
+    // read of `task.repoKey`, so a manager retargeting the task's repoKey mid-flight can never make this
+    // worker's already-cut worktree gate/merge/squash against a DIFFERENT repo than the one it physically
+    // lives in. Still resolved LIVE (a human editing this registry entry's path/gateCommand takes effect
+    // with no restart) — just anchored to the session's key rather than the task's current one. A
+    // gateless registry entry's `gateCommand` is `undefined` verbatim — NO fallback to the project-level
+    // `orchestration.gateCommand` (carried decision, phase 1) — so `gate` below flows straight into the
+    // SAME "unverified: no gateCommand" warning path a gateless PROJECT gets today (see the warning below).
+    const targetRepo = resolveRepoByKey(project, worker.repoKey);
+    const repoPath = targetRepo.path;
+    const gate = targetRepo.gateCommand;
     const gateTimeoutMs = orchestration.gateCommandTimeoutMs;
 
     // EARLY IDEMPOTENCY (finding 864e79fe — false-negative "build gate failed" after a SUCCESSFUL merge;
@@ -7058,9 +7100,9 @@ export class SessionService {
       return !!task && !!terminalKey && task.columnKey === terminalKey;
     })();
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
-      const alreadyLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      const alreadyLanded = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (alreadyLanded) {
-        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt });
+        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt });
       }
     }
 
@@ -7074,7 +7116,7 @@ export class SessionService {
     // events — never its own about-to-be-appended one (which would otherwise self-suppress the very first
     // notification).
     const rejectNotify = async (reason: string, msg: string) => {
-      const suppressed = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, project.repoPath, reason);
+      const suppressed = await this.shouldSuppressMergeReject(workerSessionId, taskId, branch, repoPath, reason);
       if (!suppressed) {
         // LINEAGE-RESOLVED (card 05c36bf4, CR Major 1): this is confirmWorkerMergeTracked's own
         // onSettledAfterPending's SUPPRESSING push (outcome.value.notified:true skips its generic echo —
@@ -7101,7 +7143,7 @@ export class SessionService {
     // commit 1309552). Only an AFFIRMATIVE stranded signal refuses — a check error/timeout fails safe
     // to NOT stranded so a flaky check never blocks a legitimate merge. Leaves the repo/worktree
     // untouched so the manager can recover the commit.
-    const stranded = await detectStrandedWork(project.repoPath, worktreePath, branch, { timeoutMs: this.gitOpMs });
+    const stranded = await detectStrandedWork(repoPath, worktreePath, branch, { timeoutMs: this.gitOpMs });
     if (stranded.stranded) {
       const suppressed = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`);
       evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit, ...(suppressed ? { suppressed: true } : {}) });
@@ -7183,9 +7225,9 @@ export class SessionService {
       // `mergeBranch`'s own noop classification) exists to detect. That would misclassify a legitimate
       // ALREADY_MERGED re-confirm as STAGE_EMPTY_RETRY. `mergeBranch`'s own noop/ALREADY_MERGED handling
       // already covers this case correctly, untouched.
-      const preLanded = await findLandedSquashCommit(project.repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+      const preLanded = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (!preLanded) {
-        const union = await mergeMainIntoWorktree(project.repoPath, worktreePath, { timeoutMs: this.gitOpMs });
+        const union = await mergeMainIntoWorktree(repoPath, worktreePath, { timeoutMs: this.gitOpMs });
         if (!union.ok) {
           const why = union.conflict ? "branch conflicts with current main — rebase/resolve before merge" : (union.reason ?? "union merge failed");
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
@@ -7341,7 +7383,7 @@ export class SessionService {
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
     // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
     const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
-    const merge = await mergeBranch(project.repoPath, branch, taskTitle);
+    const merge = await mergeBranch(repoPath, branch, taskTitle);
     if (!merge.ok) {
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       const failReason = merge.conflict ? "conflict" : "merge_failed";
@@ -7382,7 +7424,7 @@ export class SessionService {
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses.
-      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree });
+      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree });
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
@@ -7397,22 +7439,29 @@ export class SessionService {
     // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
     // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath: project.repoPath, projectId: project.id, forceRemoveWorktree });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree });
     // NESTED-REPO WARNING (card b6d41db1): the worktree was retained (not force-removed) because it holds
     // an unrecoverable nested clone (or the scan couldn't confirm it was clean) — surface it so the
     // manager knows cleanup is on it.
     const nestedWarning = finalizeResult.nestedRepoBlock ? nestedRepoBlockWarning(finalizeResult.nestedRepoBlock) : undefined;
-    // NO-GATE WARNING (finding 8363e602): with no gateCommand configured, the branch above merges
+    // NO-GATE WARNING (finding 8363e602; made repo-aware by CARRIED item 2, multi-repo epic 49136451
+    // phase 2): with no gateCommand configured FOR THE TARGET REPO, the branch above merges
     // unconditionally — carry that forward explicitly so the manager knows this merge was NOT verified by
-    // any build/DoD check, rather than silently rubber-stamping it with no signal either way. `notified`
-    // is left undefined here (unlike every other branch): the GREEN path sends no direct nudge of its
-    // own, so confirmWorkerMergeTracked's generic `[loom:merge-done]` echo is the sole terminal signal.
-    // SUPPRESSED when the project is flagged `noGateByDesign` (card 58b0bb60) — a deliberately gateless
-    // project (vault/markdown/knowledge, no buildable code) opted OUT of this signal; an UNFLAGGED
-    // gateless project still warns, so a genuinely missing gate stays surfaced.
+    // any build/DoD check, rather than silently rubber-stamping it with no signal either way. `gate` is
+    // `targetRepo.gateCommand` (resolved above) — a gateless REGISTRY repo warns exactly like a gateless
+    // PROJECT did before this phase, since it flows through the SAME variable/warning path; the message
+    // names which repo when it isn't the primary, so the warning stays honest instead of blaming
+    // "this project" for a per-repo gap. `notified` is left undefined here (unlike every other branch):
+    // the GREEN path sends no direct nudge of its own, so confirmWorkerMergeTracked's generic
+    // `[loom:merge-done]` echo is the sole terminal signal. SUPPRESSED when the project is flagged
+    // `noGateByDesign` (card 58b0bb60) — a deliberately gateless project (vault/markdown/knowledge, no
+    // buildable code) opted OUT of this signal; an UNFLAGGED gateless project/repo still warns, so a
+    // genuinely missing gate stays surfaced. `noGateByDesign` has no per-registry-entry counterpart
+    // (phase-1 schema) — a gateless registry repo in an otherwise-gated project always warns; carded for
+    // a future phase, not built here (owner ruling).
     const gateWarning = gate || project.noGateByDesign
       ? undefined
-      : "unverified: no gateCommand is configured for this project — the merge was NOT checked by any build/DoD gate";
+      : `unverified: no gateCommand is configured for ${targetRepo.key === "primary" ? "this project" : `repo "${targetRepo.key}"`} — the merge was NOT checked by any build/DoD gate`;
     const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;
     return warning ? { merged: true, opId: thisOpId, warning } : { merged: true, opId: thisOpId };
   }
@@ -7720,13 +7769,20 @@ export class SessionService {
     // RESOLVE-LIVE (mirrors confirmWorkerMerge): read fresh so a human PATCH to gateCommand/its timeout/
     // maxConcurrentGates takes effect on the very next call with no daemon restart.
     const orchestration = resolveConfig(project.config, this.db.getPlatformConfig()).orchestration;
-    const gate = orchestration.gateCommand;
+    // Multi-repo epic (49136451) phase 2: resolve THIS worker's OWN target repo's gateCommand — anchored
+    // to the SESSION's stamped `repoKey` (see Session.repoKey's doc / confirmWorkerMerge's identical
+    // resolution), NOT a fresh task.repoKey read. No fallback to the project-level gateCommand (carried
+    // decision, phase 1) — a gateless registry entry means run_gate has nothing to preview, exactly like
+    // a gateless project today.
+    const gate = resolveRepoByKey(project, worker.repoKey).gateCommand;
     if (!gate) {
       return {
         settled: true, ok: true,
         value: {
           ran: false,
-          reason: "no gateCommand configured for this project — ask the owner to set orchestration.gateCommand, or fall back to a raw self-check (pin LOOM_TEST_CONCURRENCY=1 yourself)",
+          reason: worker.repoKey
+            ? `no gateCommand configured for repo "${worker.repoKey}" — ask the owner to set it on that registry entry, or fall back to a raw self-check (pin LOOM_TEST_CONCURRENCY=1 yourself)`
+            : "no gateCommand configured for this project — ask the owner to set orchestration.gateCommand, or fall back to a raw self-check (pin LOOM_TEST_CONCURRENCY=1 yourself)",
         },
       };
     }
@@ -7991,15 +8047,22 @@ export class SessionService {
    * must never surface as finalizeMerge REJECTING a merge that already fully succeeded (which would give
    * the manager a spurious merge-failed for a task that's actually done). Best-effort by construction,
    * never propagates.
+   *
+   * Multi-repo epic (49136451) phase 2: takes ONLY `projectId`, not a repoPath — it reads `project.repoPath`
+   * (the PRIMARY) itself, DELIBERATELY, rather than accepting whatever repo the caller just merged into.
+   * Codescape indexes ONE graph per project regardless of which repo a given task targeted (see
+   * `fireCodescapeEnsureGraph`'s identical doc) — a repoPath param here would let a future caller pass a
+   * secondary repo's path and silently start mixing that repo's content into the project's one graph. This
+   * is NOT a missed multi-repo callsite; it's intentionally excluded from the grep-proof for that reason.
    */
-  private fireCodescapeReingest(projectId: string, repoPath: string): void {
+  private fireCodescapeReingest(projectId: string): void {
     try {
       const project = this.db.getProject(projectId);
       if (!project) return;
       const config = resolveConfig(project.config);
       if (!isCodescapeEnabled(config)) return;
       const graphPath = codescapeGraphPath(projectId);
-      void this.codescape?.ingestToGraph(repoPath, graphPath)
+      void this.codescape?.ingestToGraph(project.repoPath, graphPath)
         .then((res) => {
           if (!res.ok) console.warn(`[codescape] reingest failed for project ${projectId}: ${res.errorTail ?? res.outcome}`);
         })
@@ -8205,7 +8268,12 @@ export class SessionService {
    */
   private async finalizeMerge(args: {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
-    worktreePath: string; branch: string; repoPath: string; projectId: string;
+    worktreePath: string; branch: string;
+    /** The RESOLVED repo this worker's worktree was actually cut from (may be a secondary registry repo,
+     *  multi-repo epic 49136451 phase 2) — used for every GIT op below (gcWorktreeDir, deleteBranch).
+     *  DELIBERATELY NOT threaded into `fireCodescapeReingest`, which stays pinned to the project's primary
+     *  repo — see that method's own doc. */
+    repoPath: string; projectId: string;
     /**
      * Skip the nested-git-repo guard below and force the removal through regardless (card b6d41db1's
      * override) — for a manager that has confirmed the worktree's untracked content is disposable.
@@ -8282,7 +8350,7 @@ export class SessionService {
     // Green path and the ALREADY_MERGED path converge here) — fire-and-forget, NEVER awaited inline: a
     // big-repo ingest can take up to ~2 minutes, so awaiting it here would hold the merge caller for that
     // whole window. Best-effort by construction.
-    this.fireCodescapeReingest(args.projectId, args.repoPath);
+    this.fireCodescapeReingest(args.projectId);
     // The merged worker's slot is now genuinely, finally free — nothing else claims it afterward (unlike
     // recycleWorker's own predecessor exit), so drain here rather than waiting for the caller's own
     // hard-stop of the merged worker to reach the generic onExit-driven drain. Fire-and-forget; a
@@ -8326,7 +8394,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -8336,6 +8404,7 @@ export class SessionService {
     let worktreesPruned = 0;
     let worktreesKept = 0;
     let worktreesNeedsHuman = 0;
+    let worktreesStaleRepoKey = 0;
 
     // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
     // throw internally (so a busy dir won't even abort the per-session finalize), but the try/catch
@@ -8349,6 +8418,14 @@ export class SessionService {
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
       try {
+        // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo — anchored to its
+        // stamped `repoKey` (see Session.repoKey's doc), not `project.repoPath`. A stale key (the registry
+        // entry was removed) throws {@link UnknownRepoKeyError}, caught by the SAME per-session catch this
+        // whole pass already has below — boot must never crash on one stale session, and this session's
+        // merge-finish is simply retried on a later boot once a human fixes the registry (mirrors every
+        // other per-session failure this pass already tolerates). WRITE/RECOVERY path, but reconcile's
+        // existing catch-and-count IS the degrade here, not a silent swallow — mergesFailed still counts it.
+        const repoPath = resolveRepoByKey(project, s.repoKey).path;
         // SQUASH detection (the CRUX): the worker branch is NOT in main's ancestry, so the old
         // isBranchMerged is always false and worktreeHasWork (branch-ahead) cannot tell a landed-squash
         // orphan from a live worker. findLandedSquashCommit keys on the deterministic `Loom-Worker-Branch`
@@ -8359,7 +8436,7 @@ export class SessionService {
         // dir via worktreeHasWork.) We deliberately do NOT re-apply the worktreeHasWork guard here — under
         // squash a confirmed-landed branch is STILL ahead-of-base, so that guard would wrongly KEEP a real
         // orphan; the trailer (with its re-task guard) is the correct, deterministic signal.
-        const landedSha = await findLandedSquashCommit(project.repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs });
+        const landedSha = await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs });
         if (!landedSha) continue;
         const worktreePath = s.worktreePath ?? s.cwd;
         const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
@@ -8372,7 +8449,7 @@ export class SessionService {
         if (alreadyFinalized && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
-          worktreePath, branch: s.branch, repoPath: project.repoPath, projectId: project.id,
+          worktreePath, branch: s.branch, repoPath, projectId: project.id,
         });
         handledWorktrees.add(worktreePath);
         mergesFinished++;
@@ -8423,6 +8500,24 @@ export class SessionService {
       if (!fs.existsSync(worktreePath)) continue;
       const project = this.db.getProject(s.projectId);
       if (!project) continue;
+      // Multi-repo epic (49136451) phase 2: resolve THIS session's OWN target repo (Session.repoKey), not
+      // project.repoPath. UNLIKE Pass A (which has a per-session try/catch that already counts+warns on
+      // any failure), Pass B has none — a stale key (registry entry removed) degrades here to SKIPPING
+      // this worktree for THIS boot pass (never delete/inspect it without knowing its real repo), mirroring
+      // Pass B's own existing philosophy of failing safe to KEEP whenever it can't be sure. Retried on the
+      // next boot once a human fixes the registry, same as every other Pass B uncertainty. Code Review
+      // Minor 5: counted in the reconcile result (worktreesStaleRepoKey), not just a console.warn — a
+      // registry entry removed permanently would otherwise leak this worktree forever with no surfaced
+      // signal, mirroring the wedged-worktree give-up path's own countable outcome.
+      let repoPath: string;
+      try {
+        repoPath = resolveRepoByKey(project, s.repoKey).path;
+      } catch (e) {
+        if (!(e instanceof UnknownRepoKeyError)) throw e;
+        worktreesStaleRepoKey++;
+        console.warn(`[reconcile] session ${s.id} has a stale repoKey (${e.repoKey}) not in project ${project.id}'s registry — skipping its worktree ${worktreePath} for this boot pass`);
+        continue;
+      }
       handledWorktrees.add(worktreePath); // recycle chains share a worktree → decide once
       // DEAD LEFTOVER: a dir with NO `.git` linkage file is the residue of an already-completed
       // removeWorktree whose Windows fs delete partially failed (node_modules handle-lock) — git dropped
@@ -8438,7 +8533,7 @@ export class SessionService {
         // gcWorktreeDir's nested-repo guard applies here too (card b6d41db1 follow-up) — a partially-
         // deleted worktree (no root `.git` linkage left) can still hold a live nested clone; NO override
         // is ever passed on this automatic path, so a hit is always retained + logged, never destroyed.
-        const { outcome } = await this.gcWorktreeDir(project.repoPath, worktreePath, {
+        const { outcome } = await this.gcWorktreeDir(repoPath, worktreePath, {
           projectId: project.id,
           worktreeId: codescapeWorktreeId(s.taskId),
         }, { branch: s.branch ?? undefined }).catch(() => ({ outcome: "left-on-disk" as const }));
@@ -8449,7 +8544,7 @@ export class SessionService {
         else if (outcome === "removed") worktreesPruned++;
         continue;
       }
-      if (await worktreeHasWork(project.repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
+      if (await worktreeHasWork(repoPath, worktreePath, s.branch ?? null, "HEAD", { timeoutMs: this.gitOpMs })) {
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
         worktreesKept++;
@@ -8460,7 +8555,7 @@ export class SessionService {
       // worse real trigger: a pre-merge crash orphans a worktree whose nested clone is GITIGNORED, so
       // `git status --porcelain`/worktreeHasWork are both blind to it and would otherwise force-remove
       // straight through.
-      const { outcome } = await this.gcWorktreeDir(project.repoPath, worktreePath, {
+      const { outcome } = await this.gcWorktreeDir(repoPath, worktreePath, {
         projectId: project.id,
         worktreeId: codescapeWorktreeId(s.taskId),
       }, { branch: s.branch ?? undefined }).catch(() => ({ outcome: "left-on-disk" as const }));
@@ -8489,6 +8584,10 @@ export class SessionService {
     // removal) so a boot pass whose only activity is retrying an already-wedged worktree — pruned=0,
     // kept=0, needsHuman=0, no merges — doesn't read as "nothing happened" to a caller's summary log; see
     // index.ts's boot-reconcile summary line, which gates on this alongside the other counters.
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length };
+    if (worktreesStaleRepoKey > 0) {
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] ${worktreesStaleRepoKey} worktree(s) skipped this boot — their session's stamped repoKey no longer names a registered repo (the registry entry was removed) — retried automatically once a human restores/fixes the registry entry.`);
+    }
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey };
   }
 }

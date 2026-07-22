@@ -608,6 +608,16 @@ export interface Session {
   taskId?: string | null;           // the board task this worker is working (references tasks)
   worktreePath?: string | null;     // a worker's isolated git worktree cwd
   branch?: string | null;           // the worker's branch
+  /**
+   * Multi-repo epic (49136451) phase 2: which `project.repos` entry this worker's worktree was cut
+   * from, stamped ONCE at spawn/recycle time (never re-derived from `task.repoKey` afterward) — the
+   * worktree is physically rooted in ONE repo, so every later op on it (gate, merge, finalize,
+   * boot-reconcile) must resolve against the repo it actually lives in, not whatever the task's
+   * repoKey happens to say NOW (a manager may retarget the task's repoKey after the worktree already
+   * exists). `null` = primary, same convention as `Task.repoKey`. Absent/null on every session that
+   * predates this field or never cut a worktree.
+   */
+  repoKey?: string | null;
   gen?: number;                     // recycle generation (0 = original)
   recycledFrom?: string | null;     // the prior-generation session id this was recycled from
   ctxInputTokens?: number | null;   // measured engine context occupancy (last-assistant usage)

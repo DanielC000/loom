@@ -101,6 +101,22 @@ export async function validateRepoRegistry(
     if (key === "primary") {
       return { ok: false, error: `repos entry key "primary" is reserved (it always means repoPath)` };
     }
+    // CHARSET GUARD (multi-repo epic 49136451 phase 2, Code Review Major 2): phase 2 promotes `key` to a
+    // FILESYSTEM PATH SEGMENT — worktrees.ts's createWorktree joins it straight into
+    // `WORKTREES_DIR/projectId/<repoKey>/<taskKey>` with no further sanitization. An unrestricted key
+    // (e.g. "..", "../shared", or anything containing `/`/`\`) would cut that worktree OUTSIDE the
+    // project's worktree namespace — and boot-reconcile's Pass B then FORCE-REMOVES at whatever path it
+    // resolves to (gcWorktreeDir), turning a typo into a force-remove outside the intended directory. This
+    // input is human-only (REST create/PATCH), so it isn't a privilege-escalation vector, but the
+    // data-loss SHAPE is new in this phase and cheap to close now, before real registries exist in the
+    // wild that would need a migration to retrofit it onto. `.`/`..` both match the charset below on their
+    // own, so they're rejected explicitly rather than relying on the regex to catch them.
+    if (!/^[A-Za-z0-9._-]+$/.test(key)) {
+      return { ok: false, error: `repos entry key "${key}" must match [A-Za-z0-9._-]+ — it is used as a filesystem path segment for the worktree axis, so slashes, backslashes, and other special characters are rejected` };
+    }
+    if (key === "." || key === "..") {
+      return { ok: false, error: `repos entry key "${key}" is reserved — a filesystem path segment cannot be "." or ".."` };
+    }
     if (seenKeys.has(key)) {
       return { ok: false, error: `repos entry key "${key}" is duplicated — keys must be unique` };
     }

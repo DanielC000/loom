@@ -61,7 +61,7 @@ try {
   check("createProjectTask honors explicit priority", createdP0.priority === "p0");
 
   // (3) updateProjectTask round-trips a priority patch; tasks_list summary carries priority.
-  const upd = updateProjectTask(db, "projA", "legacy-1", { priority: "p1" });
+  const upd = await updateProjectTask(db, "projA", "legacy-1", { priority: "p1" });
   check("updateProjectTask returns the patched priority", upd.priority === "p1");
   check("updateProjectTask persists priority", db.getTask("legacy-1").priority === "p1");
   const summary = await listProjectTasks(db, "projA");

@@ -7,6 +7,7 @@ import { taskRequestGetItem } from "./questionTool.js";
 import { getTaskMergedInfo, type MergedCommitInfo } from "../git/worktrees.js";
 import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { resolveRepoKeyOrError } from "../projects/repos.js";
+import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -382,11 +383,11 @@ export interface TaskUpdateActor {
   role?: string | null;
 }
 
-export function updateProjectTask(
+export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
   patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>,
   actor?: TaskUpdateActor,
-): Task | TaskUpdateAck | { error: string } {
+): Promise<Task | TaskUpdateAck | { error: string }> {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
   // 8-char id-prefix (card 342e433d). Resolve to the FULL id before writing: `db.updateTask` takes
   // an exact id, so a prefix must never be written straight through.
@@ -403,7 +404,7 @@ export function updateProjectTask(
       return { error: `unknown column "${patch.columnKey}" on this project's board (valid: ${cols.map((c) => c.key).join(", ")})` };
     }
   }
-  // repoKey guard (multi-repo epic 49136451, phase 1). Two checks, both whole-patch-reject (nothing
+  // repoKey guard (multi-repo epic 49136451, phases 1+2). Three checks, all whole-patch-reject (nothing
   // written, not even other fields in the same patch — same convention as the held-clear guard below):
   //  (a) AUTHORITY (code-review ruling): from phase 2 on, repoKey decides which repo a worktree is cut
   //      from and which gateCommand runs — a DISPATCH decision, and dispatch is the manager's job
@@ -411,12 +412,28 @@ export function updateProjectTask(
   //      manager/platform actor; `tasks_create`'s repoKey is deliberately NOT gated here — a worker filing
   //      a follow-up card on the repo it's already working in is legitimate, this guard is update-only.
   //  (b) the unknown-key check (shared validator, same as create).
+  //  (c) TASK-SCOPED RETARGET GUARD (phase 2, widened by Code Review Major 1): a worker's worktree is
+  //      physically cut from ONE repo, stamped onto its OWN session (Session.repoKey) at spawn time and
+  //      never re-derived from the task afterward (see that field's doc). Retargeting THIS task's repoKey
+  //      while a session still holds that worktree on disk (or an undeleted branch) would let a LATER
+  //      confirm on that session gate/merge/squash into the OLD repo while ship-state (`resolveMergedInfo`
+  //      above) scans the NEW one — the card would then read as never-merged, permanently, with no error
+  //      anywhere. `checkTaskRepoKeyRebind` checks this WIDER than mere `process_state='live'` (a rejected
+  //      merge or `worker_stop` RETAINS the worktree/branch by design — see its own doc for the reachable
+  //      sequence this closes) and is scoped to THIS task ONLY — unlike the project-wide `repos` registry
+  //      guard, an UNRELATED task's retained worktree must never block this one's retarget. Exempt a
+  //      genuine no-op (the resolved value already matches the task's current repoKey): it changes
+  //      nothing, so it can never cause the divergence this guard exists to prevent.
   if (patch.repoKey !== undefined) {
     if (actor?.role !== "manager" && actor?.role !== "platform") {
       return { error: "repoKey is a dispatch decision — only a manager or the Platform Lead may set it, not a worker" };
     }
     const check = resolveRepoKeyOrError(project?.repos ?? [], patch.repoKey);
     if (!check.ok) return { error: check.error };
+    if (project && check.value !== (owned.repoKey ?? null)) {
+      const retargetCheck = await checkTaskRepoKeyRebind(db, project, owned.id);
+      if (!retargetCheck.ok) return { error: retargetCheck.error };
+    }
     patch = { ...patch, repoKey: check.value };
   }
   // held-clear guard (card 9b0373c0, Platform-Audit bb23d15a): this function is the ONE choke point both

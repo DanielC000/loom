@@ -1235,6 +1235,11 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   task_id: "TEXT",
   worktree_path: "TEXT",
   branch: "TEXT",
+  // Multi-repo epic (49136451) phase 2: which project.repos entry this worker's worktree was cut from,
+  // stamped once at spawn/recycle (mirrors Task.repo_key's own nullable/no-DEFAULT shape — see Session's
+  // repoKey doc). Nullable, no DEFAULT: NULL means "primary", so every legacy row backfills to the exact
+  // behavior it already had.
+  repo_key: "TEXT",
   gen: "INTEGER DEFAULT 0",
   recycled_from: "TEXT",
   ctx_input_tokens: "INTEGER",
@@ -3984,12 +3989,12 @@ export class Db {
       `INSERT INTO sessions (
          id,project_id,agent_id,engine_session_id,title,cwd,process_state,resumability,busy,
          created_at,last_activity,last_error,
-         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,gen,recycled_from,
+         role,browser_testing,document_conversion,vault_write,restricted_tools,no_commit,skills,connections,capabilities,parent_session_id,task_id,worktree_path,branch,repo_key,gen,recycled_from,
          ctx_input_tokens,ctx_turns,ctx_updated_at,model,rate_limited_until,rate_limit_deadline,scheduled_spawn)
        VALUES (
          @id,@projectId,@agentId,@engineSessionId,@title,@cwd,@processState,@resumability,@busy,
          @createdAt,@lastActivity,@lastError,
-         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@gen,@recycledFrom,
+         @role,@browserTesting,@documentConversion,@vaultWrite,@restrictedTools,@noCommit,@skills,@connections,@capabilities,@parentSessionId,@taskId,@worktreePath,@branch,@repoKey,@gen,@recycledFrom,
          @ctxInputTokens,@ctxTurns,@ctxUpdatedAt,@model,@rateLimitedUntil,@rateLimitDeadline,@scheduledSpawn)`,
     ).run({
       ...s,
@@ -4015,6 +4020,7 @@ export class Db {
       taskId: s.taskId ?? null,
       worktreePath: s.worktreePath ?? null,
       branch: s.branch ?? null,
+      repoKey: s.repoKey ?? null,
       gen: s.gen ?? 0,
       recycledFrom: s.recycledFrom ?? null,
       ctxInputTokens: s.ctxInputTokens ?? null,
@@ -4767,6 +4773,18 @@ export class Db {
    * single-id {@link liveSessionIdForTask} returns only the first; this returns the whole set. */
   listLiveSessionsForTask(id: string): Session[] {
     return (this.db.prepare("SELECT * FROM sessions WHERE task_id = ? AND process_state = 'live' ORDER BY created_at")
+      .all(id) as Row[]).map(toSession);
+  }
+  /**
+   * EVERY session ever bound to this task that was handed a worktree — regardless of `process_state`.
+   * Multi-repo epic (49136451) phase 2, Major 1 fix: unlike {@link listLiveSessionsForTask}, this is
+   * deliberately NOT live-only — a rejected merge or a `worker_stop` RETAINS the worktree + branch (by
+   * design, so the manager can recover/re-task), so an `exited` session can still be physically rooted in
+   * its stamped repo. `checkTaskRepoKeyRebind` (projects/rebind.ts) uses this set to check whether any of
+   * them still holds a worktree on disk or an undeleted branch before allowing a `task.repoKey` retarget.
+   */
+  listWorktreeSessionsForTask(id: string): Session[] {
+    return (this.db.prepare("SELECT * FROM sessions WHERE task_id = ? AND worktree_path IS NOT NULL ORDER BY created_at")
       .all(id) as Row[]).map(toSession);
   }
 
@@ -6138,6 +6156,7 @@ function toSession(r0: unknown): Session {
     taskId: (r.task_id as string) ?? null,
     worktreePath: (r.worktree_path as string) ?? null,
     branch: (r.branch as string) ?? null,
+    repoKey: (r.repo_key as string | null) ?? null,
     gen: (r.gen as number) ?? 0,
     recycledFrom: (r.recycled_from as string) ?? null,
     ctxInputTokens: (r.ctx_input_tokens as number) ?? null,

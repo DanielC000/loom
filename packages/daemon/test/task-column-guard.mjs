@@ -96,10 +96,10 @@ try {
   check("(4) ★ a DEFAULT-board key ('review') is rejected on the custom board (resolved, not hardcoded)", typeof offCustom.error === "string" && !offCustom.id);
 
   // ===================== (5) updateProjectTask UNKNOWN columnKey still rejected (e9256a4) =====================
-  const upBad = updateProjectTask(db, "pDef", valid.id, { columnKey: "nope" });
+  const upBad = await updateProjectTask(db, "pDef", valid.id, { columnKey: "nope" });
   check("(5) update with an UNKNOWN columnKey is still rejected (e9256a4 not regressed)", typeof upBad.error === "string");
   check("(5) the rejected update left the card on its original column", db.getTask(valid.id).columnKey === "review");
-  const upOk = updateProjectTask(db, "pDef", valid.id, { columnKey: "done" });
+  const upOk = await updateProjectTask(db, "pDef", valid.id, { columnKey: "done" });
   check("(5) update with a VALID columnKey moves the card", !upOk.error && db.getTask(valid.id).columnKey === "done");
 
   // ===================== (6)-(7) PLATFORM cross-project task tools honor the SAME guards =====================

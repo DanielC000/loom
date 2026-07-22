@@ -171,12 +171,12 @@ try {
 
   // ── (6)+(7): agent sets its own hold, then clears it ──
   const card1 = createProjectTask(db, "projH", { title: "fix(x): agent-managed card" });
-  const set1 = updateProjectTask(db, "projH", card1.id, { held: true }, { sessionId: AGENT_SESSION_A });
+  const set1 = await updateProjectTask(db, "projH", card1.id, { held: true }, { sessionId: AGENT_SESSION_A });
   check("(6) agent held:true — no error", !set1.error);
   check("(6) agent held:true — heldBy stamps 'agent'", set1.heldBy === "agent");
   check("(6) agent held:true — persisted", db.getTask(card1.id).held === true && db.getTask(card1.id).heldBy === "agent");
 
-  const clear1 = updateProjectTask(db, "projH", card1.id, { held: false }, { sessionId: AGENT_SESSION_A });
+  const clear1 = await updateProjectTask(db, "projH", card1.id, { held: false }, { sessionId: AGENT_SESSION_A });
   check("(7) agent clearing its OWN agent-set hold succeeds — no error", !clear1.error);
   check("(7) agent-set-then-agent-clear — persisted held=false, heldBy=null", db.getTask(card1.id).held === false && (db.getTask(card1.id).heldBy === null || db.getTask(card1.id).heldBy === undefined));
 
@@ -189,7 +189,7 @@ try {
   db.updateTask(card2.id, { held: true, heldBy: "human" }); // stand-in for the REST stamp (Part C proves the real route)
   check("(8) setup: card2 is human-held", db.getTask(card2.id).held === true && db.getTask(card2.id).heldBy === "human");
 
-  const refusedClear = updateProjectTask(db, "projH", card2.id, { held: false }, { sessionId: AGENT_SESSION_B });
+  const refusedClear = await updateProjectTask(db, "projH", card2.id, { held: false }, { sessionId: AGENT_SESSION_B });
   check("(8) agent clearing a HUMAN-set hold is REFUSED — returns an error", typeof refusedClear.error === "string");
   check("(8) the refusal did NOT write — held stays true, heldBy stays 'human'", db.getTask(card2.id).held === true && db.getTask(card2.id).heldBy === "human");
 
@@ -198,16 +198,16 @@ try {
 
   // ── (9): the refusal is a WHOLE-PATCH reject — an accompanying field change is also dropped ──
   const priorityBefore = db.getTask(card2.id).priority;
-  const refusedWithPriority = updateProjectTask(db, "projH", card2.id, { held: false, priority: "p0" }, { sessionId: AGENT_SESSION_B });
+  const refusedWithPriority = await updateProjectTask(db, "projH", card2.id, { held: false, priority: "p0" }, { sessionId: AGENT_SESSION_B });
   check("(9) a held:false + priority patch on a human-held card is ALSO refused", typeof refusedWithPriority.error === "string");
   check("(9) the accompanying priority change was NOT partially applied", db.getTask(card2.id).priority === priorityBefore);
 
   // ── (10): no silent downgrade — re-setting held:true on a human-held card keeps heldBy='human' ──
-  const reset = updateProjectTask(db, "projH", card2.id, { held: true }, { sessionId: AGENT_SESSION_B });
+  const reset = await updateProjectTask(db, "projH", card2.id, { held: true }, { sessionId: AGENT_SESSION_B });
   check("(10) agent re-setting held:true on an already-human-held card — no error", !reset.error);
   check("(10) provenance is NOT downgraded to 'agent'", db.getTask(card2.id).heldBy === "human");
 
-  const stillRefused = updateProjectTask(db, "projH", card2.id, { held: false }, { sessionId: AGENT_SESSION_B });
+  const stillRefused = await updateProjectTask(db, "projH", card2.id, { held: false }, { sessionId: AGENT_SESSION_B });
   check("(10) the card is STILL refused on a subsequent clear (the downgrade gap stays closed)", typeof stillRefused.error === "string");
   check("(10) still human-held in the DB", db.getTask(card2.id).held === true && db.getTask(card2.id).heldBy === "human");
 } finally {
@@ -237,7 +237,7 @@ try {
   // ── (13): cross-check — a REST-created human hold is STILL refused via the agent path ──
   const setResp2 = await app.inject({ method: "POST", url: `/api/tasks/${card3.id}`, payload: { held: true } });
   check("(13) setup: card3 human-held again via REST", setResp2.statusCode === 200 && db.getTask(card3.id).heldBy === "human");
-  const crossCheck = updateProjectTask(db, "projH", card3.id, { held: false }, { sessionId: AGENT_SESSION_A });
+  const crossCheck = await updateProjectTask(db, "projH", card3.id, { held: false }, { sessionId: AGENT_SESSION_A });
   check("(13) the agent path still refuses a REST-created human hold", typeof crossCheck.error === "string");
   check("(13) still held in the DB", db.getTask(card3.id).held === true && db.getTask(card3.id).heldBy === "human");
 
@@ -247,7 +247,7 @@ try {
   const forgeAttempt = await app.inject({ method: "POST", url: `/api/tasks/${card3.id}`, payload: { heldBy: "agent" } });
   check("(14) a bare heldBy:'agent' POST (no held key) — 200 ok (a harmless no-op write)", forgeAttempt.statusCode === 200 && JSON.parse(forgeAttempt.body).ok === true);
   check("(14) provenance was NOT forged — held stays true, heldBy stays 'human'", db.getTask(card3.id).held === true && db.getTask(card3.id).heldBy === "human");
-  const stillRefusedAfterForgeAttempt = updateProjectTask(db, "projH", card3.id, { held: false }, { sessionId: AGENT_SESSION_A });
+  const stillRefusedAfterForgeAttempt = await updateProjectTask(db, "projH", card3.id, { held: false }, { sessionId: AGENT_SESSION_A });
   check("(14) a subsequent agent held:false clear is STILL refused", typeof stillRefusedAfterForgeAttempt.error === "string");
   check("(14) still held in the DB after the refused clear", db.getTask(card3.id).held === true && db.getTask(card3.id).heldBy === "human");
 } finally {
