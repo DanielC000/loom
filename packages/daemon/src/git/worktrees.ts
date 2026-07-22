@@ -2151,7 +2151,8 @@ export function toConventionalSubject(raw: string): string {
  * Merge a worker's branch into the repo's current branch as a SINGLE SQUASH COMMIT — `git merge --squash`
  * stages the combined diff WITHOUT committing, then a plain `git commit` lands it as ONE commit, so each
  * task = one clean commit on main (not a real-commit + a noise merge-commit). Returns the new squash
- * commit's SHA. FAIL-CLOSED.
+ * commit's SHA plus the exact `subject` it was committed with (post-{@link toConventionalSubject}) — so a
+ * caller can echo what actually landed without a separate `git log`. FAIL-CLOSED.
  *
  * The commit message is a clean subject (the task `title`, falling back to the branch name) plus a
  * deterministic `Loom-Worker-Branch: <branch>` trailer — the SAME marker {@link workerDiff} stage 3 and
@@ -2299,7 +2300,7 @@ export async function mergeMainIntoWorktree(
 
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
   const git = simpleGit(repoPath);
   // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
   // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
@@ -2363,5 +2364,5 @@ export async function mergeBranch(
     return { ok: false, reason: `squash commit failed: ${(e as Error).message}` };
   }
   const sha = (await git.raw(["rev-parse", "HEAD"])).trim();
-  return { ok: true, sha };
+  return { ok: true, sha, subject };
 }

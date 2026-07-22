@@ -106,7 +106,7 @@ type GateRejectionDetail = {
   circuitBroken?: boolean;
 };
 
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string };
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
  *  PendingOpRegistry's doc) after {@link SessionService.confirmWorkerMergeTracked} settles it — long
@@ -6803,6 +6803,19 @@ export class SessionService {
   /**
    * Step 1 of the two-step merge gate (#16): show the manager a worker's branch diff. NO merge
    * happens — this is the review the manager cannot skip (there is no worker-side merge tool).
+   *
+   * Card b88704bb: ALSO surfaces the exact prospective squash-commit subject — post-{@link
+   * toConventionalSubject}, byte-for-byte what {@link mergeBranch} will actually commit if this manager
+   * confirms — because until this card the subject was only ever computed LATER, inside
+   * confirmWorkerMerge, after review had already happened; the reviewer never saw the immutable commit
+   * subject they were implicitly approving. Mirrors mergeBranch's own subject derivation (task title's
+   * first line, trimmed) so the preview can never drift from what actually lands. `rawTitle`/
+   * `commitSubject`/`coerced` are present ONLY when this worker has a task with a non-empty title —
+   * a taskless worker (no card) has no title to preview, so these fields are simply ABSENT (never a
+   * fabricated subject derived from the branch name, which is a mergeBranch-internal fallback, not
+   * something surfaced here as if it were a real title). `coerced` is a plain string comparison against
+   * what {@link toConventionalSubject} does to the raw title — NOT a judgment of whether the title is
+   * accurate; see the card for why a heuristic accuracy check is explicitly out of scope.
    */
   async reviewWorkerMerge(
     managerSessionId: string, workerSessionId: string,
@@ -6810,13 +6823,20 @@ export class SessionService {
   ): Promise<{
     filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[];
     patch?: string; patchFile?: string; patchChars?: number; note?: string; warning?: string; hint?: string;
-    behindMain?: number;
+    behindMain?: number; rawTitle?: string; commitSubject?: string; coerced?: boolean;
   }> {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
     const project = this.db.getProject(worker.projectId);
     if (!project) throw new Error("project not found");
+    // Prospective commit subject (card b88704bb) — same derivation mergeBranch uses (task title's first
+    // line, trimmed); absent entirely for a taskless worker rather than fabricated from the branch name.
+    const cardTitle = worker.taskId ? this.db.getTask(worker.taskId)?.title : undefined;
+    const rawTitle = cardTitle ? cardTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
+    const subjectPreview = rawTitle
+      ? { rawTitle, commitSubject: toConventionalSubject(rawTitle), coerced: toConventionalSubject(rawTitle) !== rawTitle }
+      : undefined;
     // Multi-repo epic (49136451) phase 2: this manager-facing diff/review is against ONE worker's ONE
     // worktree — resolve against the SESSION's own stamped repoKey (see Session.repoKey's doc), not
     // project.repoPath, so a manager reviewing a secondary-repo worker's diff sees the actual branch.
@@ -6892,6 +6912,7 @@ export class SessionService {
       ...(warning ? { warning } : {}),
       ...(diff.hint ? { hint: diff.hint } : {}),
       ...(behindMain ? { behindMain } : {}),
+      ...(subjectPreview ?? {}),
     };
   }
 
@@ -7515,7 +7536,12 @@ export class SessionService {
       ? undefined
       : `unverified: no gateCommand is configured for ${targetRepo.key === "primary" ? "this project" : `repo "${targetRepo.key}"`} — the merge was NOT checked by any build/DoD gate`;
     const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;
-    return warning ? { merged: true, opId: thisOpId, warning } : { merged: true, opId: thisOpId };
+    // Echo the exact subject this commit landed with (card b88704bb) — a transcript reader can see what
+    // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
+    // only omits it on !ok/noop, both handled above).
+    return warning
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject };
   }
 
   /**
