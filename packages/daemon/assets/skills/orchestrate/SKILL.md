@@ -322,9 +322,7 @@ mid-report — before sending anything.
 ## The loop
 
 1. **Plan & triage.** Turn the backlog, features, and bugs into a sharp, scoped plan — derived from
-   your living resume doc, the vault, and the repo. **If your project exposes Codescape MCP tools, load
-   `/codescape` and orient/locate through the graph rather than reading the repo cold — structure,
-   coordinates, and reachability, then targeted reads at the coordinates it returns.** Push back on scope creep; protect the finish line.
+   your living resume doc, the vault, and the repo. Push back on scope creep; protect the finish line.
    - **Consult a card's connected Requests before you act on it.** A task can carry connected
      **Requests** (a decision, input, or permission that was raised against it and possibly answered).
      `tasks_get` surfaces a connected-requests summary on the card; read the detail with

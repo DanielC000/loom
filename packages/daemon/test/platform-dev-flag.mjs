@@ -97,6 +97,12 @@ try {
   check("(3) research skill exists in the bundled assets", allSkillDirs.includes("research"));
   check("(3) research is omitted from the ship set", DEV_ONLY_SKILLS.includes("research"));
   check("(3) staged release EXCLUDES the install-specific research skill", !kept.includes("research"));
+  // codescape is a private product end users cannot access (card 187873f9) — its skill/doctrine must
+  // never reach a regular loomctl install even though its runtime is ALSO LOOM_DEV-gated independently
+  // (paths.ts isCodescapeSupervisorEnabled). Kept canonical in the repo (dev/self-host still bundles it).
+  check("(3) codescape skill exists in the bundled assets", allSkillDirs.includes("codescape"));
+  check("(3) codescape is omitted from the ship set (private product)", DEV_ONLY_SKILLS.includes("codescape"));
+  check("(3) staged release EXCLUDES the private-product codescape skill", !kept.includes("codescape"));
   // The user-facing Setup Assistant SHIPS to all users (ungated, core-seed): it is NOT a dev-only
   // platform skill, so it must survive curation. Guard against it ever being added to DEV_ONLY_SKILLS.
   check("(3) Setup Assistant skill exists in the bundled assets", allSkillDirs.includes("setup-assistant"));

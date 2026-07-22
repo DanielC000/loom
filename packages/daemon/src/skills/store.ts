@@ -419,24 +419,34 @@ export function autoFastForwardPristineSkills(): string[] {
 }
 
 /**
- * Store dir names left behind by a Loom bundled-skill RENAME — the old name that seedGlobalSkills()
- * (seed-if-absent) never removes once the new `loom-*` name takes over. Growing this list is how a
- * future rename gets auto-retired too. Deliberately HARDCODED, never derived (e.g. from "no matching
+ * Store dir names left behind by a Loom bundled skill that stopped being bundled FOR AN END-USER
+ * INSTALL — either a RENAME (the old name that seedGlobalSkills()'s seed-if-absent never removes once
+ * the new `loom-*` name takes over) or an UNBUNDLE (a skill removed from the *published* asset set while
+ * staying canonical in the repo/dev build — see codescape below). Growing this list is how a future
+ * rename or unbundle gets auto-retired too. Deliberately HARDCODED, never derived (e.g. from "no matching
  * asset dir") — asset-absence alone can't distinguish a retired bundled skill from a user's own
- * UI-created skill of the same name, and only a name Loom itself shipped and renamed away belongs here.
+ * UI-created skill of the same name, and only a name Loom itself shipped and then renamed/unbundled away
+ * belongs here.
  */
 export const RETIRED_BUNDLED_SKILL_NAMES: readonly string[] = [
   "pickup",       // -> loom-pickup
   "doc-hygiene",  // -> loom-doc-hygiene
   "session-end",  // -> loom-session-end
   "task-start",   // -> loom-task-start
+  // codescape: NOT renamed — unbundled from the PUBLISHED release only (card 187873f9, codescape is a
+  // private product end users can't access). Still canonical in packages/daemon/assets/skills/ (dev/
+  // self-host keeps it bundled — see DEV_ONLY_SKILLS in scripts/curate-release-skills.mjs), so guard (b)
+  // below (bundled.has(name) → skip) means this only ever fires against an end-user install whose OWN
+  // dist/assets genuinely lacks it, never against the owner's dev/self-hosted daemon.
+  "codescape",
 ];
 
 /**
- * Boot-only auto-retire of orphaned store dirs left behind by a bundled-skill rename (card 5ddc2289).
- * seedGlobalSkills() is seed-IF-ABSENT — it adds the new `loom-*` name but never removes the old store
- * dir, so a renamed-away skill lingers forever: injectSkills mirrors the whole store, so every session
- * keeps getting it injected, spending skillListingBudgetFraction on a name nothing references anymore.
+ * Boot-only auto-retire of orphaned store dirs left behind by a bundled-skill rename or unbundle (cards
+ * 5ddc2289, 187873f9). seedGlobalSkills() is seed-IF-ABSENT — it adds a new/renamed name but never
+ * removes an old store dir once its skill stops being bundled, so it lingers forever: injectSkills
+ * mirrors the whole store, so every session keeps getting it injected, spending
+ * skillListingBudgetFraction on a name nothing references anymore.
  *
  * A store dir `name` is retired ONLY when ALL hold:
  *  (a) `name` is in the hardcoded RETIRED_BUNDLED_SKILL_NAMES allowlist above.
