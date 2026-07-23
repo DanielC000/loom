@@ -753,6 +753,51 @@ export async function branchExistsInRepo(repoPath: string, branch: string, deps:
   }
 }
 
+/** Chunk size for {@link deleteBranches}' batched `git branch -D <n1> <n2> ...` calls — a defensive cap
+ *  against a pathological backlog (and, in principle, Windows's CreateProcess argv length limit; a
+ *  realistic `loom/<12-hex>` name is ~17 chars, so 200 of them is nowhere near it). Never hit at today's
+ *  measured 275-branch backlog (card 09f268a5) — this is headroom, not a tuned-for-today number. */
+const DELETE_BRANCHES_CHUNK_SIZE = 200;
+
+/**
+ * Delete MANY branches in as few git invocations as possible — measured for card 09f268a5's 275-branch
+ * backlog at ~14x faster than N sequential {@link deleteBranch} calls (14.1s → 0.99s on this host), because
+ * each `deleteBranch` call is a separate Windows subprocess spawn and spawn cost dominates at this N. A
+ * SEPARATE function from `deleteBranch`, which is left byte-identical — it has other callers (finalizeMerge)
+ * this card must not perturb.
+ *
+ * One batched `git branch -D <n1> <n2> ...` per {@link DELETE_BRANCHES_CHUNK_SIZE}-sized chunk. Git deletes
+ * every branch it CAN in one invocation and exits non-zero if ANY of them failed (checked out elsewhere
+ * since the caller's own `listCheckedOutBranches` read, concurrently removed, a locked ref, …) — so a
+ * naive "the whole chunk succeeded or none of it did" read would (a) undercount `deleted` for branches
+ * that in fact WERE removed, and (b) abandon ~199 good deletions over one bad ref. On a chunk failure this
+ * falls back to per-branch {@link deleteBranch} calls for THAT CHUNK ONLY (idempotent — a branch the failed
+ * batch already removed is a harmless no-op there), verifying each via {@link branchExistsInRepo} so the
+ * returned `deleted` list — and therefore a caller's reclaimed-count — reflects what ACTUALLY happened,
+ * never an assumption. The slow per-branch path only ever runs on the rare failure; the common case keeps
+ * the full batched speedup.
+ */
+export async function deleteBranches(repoPath: string, branches: string[], deps: BoundedGitDeps = {}): Promise<{ deleted: string[] }> {
+  const deleted: string[] = [];
+  for (let i = 0; i < branches.length; i += DELETE_BRANCHES_CHUNK_SIZE) {
+    const chunk = branches.slice(i, i + DELETE_BRANCHES_CHUNK_SIZE);
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    try {
+      await withTimeout(git.raw(["branch", "-D", ...chunk]), timeoutMs, "git branch -D (batch)");
+      deleted.push(...chunk); // git's own exit code 0 means every named branch in THIS chunk is gone
+    } catch (e) {
+      // eslint-disable-next-line no-console
+      console.warn(`[worktree] batched delete of ${chunk.length} branch(es) failed, falling back to ` +
+        `per-branch deletes for this chunk only (one bad ref must not cost the rest): ${(e as Error).message}`);
+      for (const b of chunk) {
+        await deleteBranch(repoPath, b, deps);
+        if (!(await branchExistsInRepo(repoPath, b, deps))) deleted.push(b);
+      }
+    }
+  }
+  return { deleted };
+}
+
 /** Directories a nested-repo scan never descends into — every one is bulk ephemeral build/dep output
  *  that never legitimately contains a nested clone (and can otherwise burn the whole scan budget before
  *  the walk ever reaches a real nested repo sitting alongside it); a worktree's own root `.git` linkage
@@ -1008,6 +1053,95 @@ export async function isBranchMerged(repoPath: string, branch: string, base = "H
   } catch {
     return false;
   }
+}
+
+/**
+ * Resolve the repo's MAINLINE branch name — independent of `HEAD`. `HEAD` is NOT reliably mainline in
+ * this repo: the human-only `git_checkout` writer (`git/writer.ts`) can switch the PRIMARY checkout onto
+ * an arbitrary existing branch, and the owner uses it. Any caller that needs "is this branch merged into
+ * mainline" (not "merged into whatever's currently checked out") must anchor on this, not `HEAD` — see
+ * card 09f268a5, where a `--merged HEAD` sweep would have silently deleted branches merged into a
+ * temporarily-checked-out non-mainline branch instead — an unrecoverable-by-the-user data loss on exactly
+ * the destructive op this exists to make safe.
+ *
+ * Reads the LOCAL `refs/remotes/origin/HEAD` symbolic ref (set at clone time / by `git remote set-head`)
+ * — a pure local ref read, never a network call (unlike `git remote show origin`, which can contact the
+ * remote and hang). FAILS CLOSED to `null` (no guessed fallback — never assume "main") when the ref is
+ * absent or the read errors/times out; every caller MUST treat `null` as "cannot determine mainline, skip
+ * this repo" rather than falling back to `HEAD`.
+ *
+ * KNOWN GAP, not a bug: `refs/remotes/origin/HEAD` is written by `git clone` (or `git remote set-head`),
+ * NEVER by plain `git init` — and Loom's own `project_init` (see `CLAUDE.md`) creates brand-new projects
+ * with `git init`, no remote. Such a repo always resolves `null` here, so a caller like card 09f268a5's
+ * branch-ref sweep skips it FOREVER — a local-only project's `loom/*` branches simply never get
+ * automatically reclaimed. That's the correct, deliberate trade-off (an inert sweep beats a wrong one),
+ * but it must stay VISIBLE to whoever's debugging "why didn't my branches get cleaned up" — a caller
+ * skipping on `null` must log it distinguishably from "swept, nothing to do", not skip silently. DO NOT
+ * "fix" this by falling back to a guessed `"main"` when the ref is missing — that reintroduces the exact
+ * anchor hazard this function exists to close (see card 09f268a5's regression scenario F: a repo whose
+ * primary checkout is parked on a non-`main` branch would then have `--merged` computed against the WRONG
+ * target and silently destroy real, un-merged-into-mainline work).
+ */
+export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const out = await withTimeout(
+      git.raw(["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]),
+      timeoutMs,
+      "git symbolic-ref origin/HEAD",
+    );
+    const ref = out.trim(); // e.g. "origin/main"
+    const branch = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
+    return branch || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Every local `loom/*` branch that's an ancestor of `mainlineBranch` — `git branch --list 'loom/*'
+ * --merged <mainlineBranch>`, the native ancestor check (the same primitive {@link isBranchMerged} uses
+ * per-branch, here as one bulk pass). `mainlineBranch` MUST come from {@link resolveMainlineBranch}, never
+ * a literal or `HEAD` — see its doc. FAILS SAFE to `[]` on any error/timeout: a sweep that can't compute
+ * "which branches are safe" must delete nothing, not guess.
+ */
+export async function listMergedLoomBranches(repoPath: string, mainlineBranch: string, deps: BoundedGitDeps = {}): Promise<string[]> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  try {
+    const out = await withTimeout(
+      git.raw(["branch", "--list", "loom/*", "--merged", mainlineBranch, "--format=%(refname:short)"]),
+      timeoutMs,
+      "git branch --list --merged",
+    );
+    return out.split("\n").map((l) => l.trim()).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Every branch currently checked out in ANY worktree of this repo (the primary checkout, every live
+ * worker, every leftover) — parsed from `git worktree list --porcelain`'s `branch refs/heads/<name>`
+ * lines. This is git's OWN ground truth, independent of any DB session row (a stale/missing session row
+ * can never cause a checked-out branch to look safe to delete). Card 09f268a5's branch-ref sweep uses
+ * this as the final safety gate before deleting a merged `loom/*` branch — a checked-out branch is
+ * skipped even when merged.
+ *
+ * UNLIKE {@link listMergedLoomBranches}, this does NOT fail safe to an empty result on error — an empty
+ * `Set` here would mean "nothing is checked out," which is the UNSAFE direction (it would let a
+ * checked-out branch through). It THROWS instead; the caller must catch and skip the whole repo's sweep
+ * for this pass rather than treat a failed read as "nothing to protect."
+ */
+export async function listCheckedOutBranches(repoPath: string, deps: BoundedGitDeps = {}): Promise<Set<string>> {
+  const { git, timeoutMs } = boundedGit(repoPath, deps);
+  const out = await withTimeout(git.raw(["worktree", "list", "--porcelain"]), timeoutMs, "git worktree list --porcelain");
+  const branches = new Set<string>();
+  for (const line of out.split("\n")) {
+    const m = /^branch (refs\/heads\/.+)$/.exec(line.trim());
+    const ref = m?.[1];
+    if (ref) branches.add(ref.slice("refs/heads/".length));
+  }
+  return branches;
 }
 
 /**

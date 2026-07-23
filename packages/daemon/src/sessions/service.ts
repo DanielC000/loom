@@ -13,7 +13,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
@@ -8644,7 +8644,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -8655,6 +8655,9 @@ export class SessionService {
     let worktreesKept = 0;
     let worktreesNeedsHuman = 0;
     let worktreesStaleRepoKey = 0;
+    let branchesReclaimed = 0;
+    let branchSweepSkippedRepos = 0;
+    let branchSweepNoOrigin = 0;
 
     // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
     // throw internally (so a busy dir won't even abort the per-session finalize), but the try/catch
@@ -8814,6 +8817,83 @@ export class SessionService {
       else if (outcome === "removed") worktreesPruned++;
     }
 
+    // C. Reclaim merged `loom/*` branch refs (card 09f268a5). Pass B (above) intentionally never deletes
+    // a branch, and its own loop only ever revisits a session whose worktree DIR still exists (`if
+    // (!fs.existsSync(worktreePath)) continue`) — once a worktree is gone, by Pass B or any other means
+    // (including from a PRIOR boot, before this pass existed), nothing ever revisits its branch again. A
+    // branch that's fully merged just orphans forever. This pass closes that gap directly and repo-wide,
+    // independent of any session row, so it also naturally reclaims whatever Pass B just freed up above
+    // (its worktree removal makes the branch no longer "checked out," and if merged, this pass deletes it
+    // in the SAME boot) — one shared mechanism for both the existing backlog and all future leftovers,
+    // not a second sweeper.
+    //
+    // Anchored on the repo's actual MAINLINE (`resolveMainlineBranch`), NEVER `HEAD` — the human-only
+    // `git_checkout` writer can leave the PRIMARY repo checked out on an arbitrary branch, and a
+    // `--merged HEAD` sweep would then judge branches against the wrong target and delete real work. Fails
+    // CLOSED (skips the repo) when mainline can't be resolved, same as any other uncertainty in this pass.
+    //
+    // `listCheckedOutBranches` (git's own `git worktree list` truth, independent of the DB) is the final
+    // safety gate: it protects the primary checkout, every live worker, and every one of the unmerged
+    // leftover worktrees this card's investigation found — none of those are `--merged` anyway, but a
+    // branch that's ALSO still checked out (e.g. the primary repo itself, or a just-cut worker with zero
+    // commits yet) is skipped even if it were. No `fs.rm`/directory removal is involved anywhere in this
+    // pass — branch-ref deletion is a small metadata op, structurally outside the bd9fc808 threadpool-leak
+    // hazard class, so it needs none of removeWorktree's killable-process handling.
+    const sweptRepoPaths = new Set<string>();
+    for (const project of this.db.listProjects()) {
+      const repoPaths = [project.repoPath, ...project.repos.map((r) => r.path)].filter((p): p is string => !!p);
+      for (const repoPath of repoPaths) {
+        if (sweptRepoPaths.has(repoPath)) continue; // multiple projects can name the same physical repo
+        sweptRepoPaths.add(repoPath);
+        try {
+          const mainline = await resolveMainlineBranch(repoPath, { timeoutMs: this.gitOpMs });
+          if (!mainline) {
+            // No resolvable origin/HEAD (see resolveMainlineBranch's doc — `git init`-only projects, e.g.
+            // one made via `project_init`, never have this ref, so THIS repo's sweep is inert forever).
+            // Fail closed, but stay VISIBLE about it: counted separately from branchSweepSkippedRepos (a
+            // genuine git error) so an inert-because-no-origin repo is distinguishable in the summary from
+            // a healthy "swept, 0 to do" repo — a silent skip here is exactly the failure shape this card
+            // started from (a gap nobody could see until someone measured the repo directly).
+            branchSweepNoOrigin++;
+            continue;
+          }
+          const merged = await listMergedLoomBranches(repoPath, mainline, { timeoutMs: this.gitOpMs });
+          if (merged.length === 0) continue;
+          const checkedOut = await listCheckedOutBranches(repoPath, { timeoutMs: this.gitOpMs });
+          // Defense-in-depth, KEEP even though `deleteBranches`'/`deleteBranch`'s own `git branch -D`
+          // independently refuses to delete a branch checked out in another worktree: git's refusal is an
+          // implementation detail of `-D` we don't want this sweep's correctness to depend on, and without
+          // this explicit filter a checked-out-but-merged branch would still be ATTEMPTED every boot
+          // (wasted work, a spurious warn, and non-idempotent — see card 09f268a5's test, which proves this
+          // exact case via the reclaim COUNT and idempotency, not branch-survival, precisely because the
+          // git-level refusal already covers survival on its own).
+          const toDelete = merged.filter((branch) => !checkedOut.has(branch));
+          if (toDelete.length > 0) {
+            // Batched (card 09f268a5's measured ~14x win over one-`deleteBranch`-call-per-branch: 14.1s →
+            // 0.99s at 275 branches on this host) — `deleteBranches` falls back to per-branch deletes on a
+            // chunk failure, so `deleted.length` is always the REAL count, never an over/undercount.
+            const { deleted } = await deleteBranches(repoPath, toDelete, { timeoutMs: this.gitOpMs });
+            branchesReclaimed += deleted.length;
+          }
+        } catch (e) {
+          // listCheckedOutBranches (unlike listMergedLoomBranches) THROWS on failure rather than failing
+          // safe to empty — an empty "checked out" set would be the UNSAFE direction. So a failure here
+          // means we cannot tell what's safe: skip this repo's branch sweep entirely for this boot pass,
+          // retried automatically next boot, exactly like every other Pass B uncertainty above.
+          branchSweepSkippedRepos++;
+          // eslint-disable-next-line no-console
+          console.warn(`[reconcile] skipped branch-ref sweep for ${repoPath}: ${(e as Error).message}`);
+        }
+      }
+    }
+    if (branchSweepNoOrigin > 0) {
+      // Distinguishable from a healthy "swept, 0 to reclaim" repo (which logs nothing) AND from
+      // branchSweepSkippedRepos (a genuine git error) — this is neither: it's a repo that will NEVER be
+      // swept until it gets an `origin` remote with `HEAD` set, and that must stay visible, not silent.
+      // eslint-disable-next-line no-console
+      console.warn(`[reconcile] branch-ref sweep permanently inert for ${branchSweepNoOrigin} repo(s) — no 'origin' remote / no resolvable origin/HEAD (e.g. a project_init'd git-init-only repo). Their loom/* branches will never be automatically reclaimed until an origin remote is added and its HEAD is set (git remote add origin <url> && git remote set-head origin -a).`);
+    }
+
     // Surface what's still wedged-but-retryable (armWedgeSweep already fired per-entry above; this is the
     // aggregate boot-level visibility) and what's been given up on entirely — both logged, never silent.
     const stillWedged = this.db.listWedgedWorktrees().filter((e) => !e.needsHuman);
@@ -8838,6 +8918,9 @@ export class SessionService {
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] ${worktreesStaleRepoKey} worktree(s) skipped this boot — their session's stamped repoKey no longer names a registered repo (the registry entry was removed) — retried automatically once a human restores/fixes the registry entry.`);
     }
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey };
+    if (branchesReclaimed > 0) {
+      console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
+    }
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin };
   }
 }
