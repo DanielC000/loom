@@ -15,7 +15,7 @@ import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { detectBarePastePlaceholderTripwire } from "../orchestration/paste-tripwire.js";
+import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -276,6 +276,53 @@ export function nextComposerLen(prevLen: number, data: string): number {
     // other C0 controls (Tab, etc.) — ignore for length
   }
   return len;
+}
+
+/**
+ * Card 0f9268cc: mirrors `nextComposerLen`'s exact parsing model, but tracks the raw-terminal draft's
+ * actual TEXT (not just its length) and reports a genuine SUBMIT — an Enter that frees the box OUTSIDE a
+ * bracketed-paste span — as opposed to Ctrl-C/kill-line/Esc, which discard the draft without producing a
+ * transcript turn. `submitted` is the composed text at the moment of that Enter (null on every other
+ * chunk), which the caller stashes as the raw-channel counterpart of `live.lastPrompt` — see
+ * `Live.lastRawSubmit`'s doc. Deliberately a SEPARATE function/state from `nextComposerLen` rather than a
+ * shared one: `composerLen` is load-bearing for the drain-hold gate and already has its own hermetic test;
+ * this stays purely additive so that existing behavior can't regress.
+ *
+ * Same best-effort caveat as `nextComposerLen`: it can't perfectly mirror Claude's Ink editor, and a
+ * multi-free chunk only reports the FIRST free (matching nextComposerLen's own limitation) — acceptable
+ * because a `submitted` false-negative only means the tripwire misses a detection, never a wrong write.
+ */
+export function nextRawDraftState(prevText: string, data: string): { text: string; submitted: string | null } {
+  if (data === ESC_KEY) return { text: "", submitted: null };
+  let text = prevText;
+  let inPaste = false;
+  for (let i = 0; i < data.length; i++) {
+    const c = data.charCodeAt(i);
+    if (c === 0x1b) {
+      if (data.startsWith(BRACKET_PASTE_START, i)) { inPaste = true; i += BRACKET_PASTE_START.length - 1; continue; }
+      if (data.startsWith(BRACKET_PASTE_END, i)) { inPaste = false; i += BRACKET_PASTE_END.length - 1; continue; }
+      const next = data[i + 1];
+      if (next === "[" || next === "O") {
+        i += 2;
+        while (i < data.length && !/[A-Za-z~]/.test(data[i]!)) i++;
+      } else {
+        i += 1; // a lone/unknown ESC inside a larger chunk — skip just the ESC byte
+      }
+      continue;
+    }
+    if (c === 0x7f || c === 0x08) { text = text.slice(0, -1); continue; } // backspace / DEL
+    if (c === 0x0d || c === 0x0a || c === 0x03 || c === 0x15) {
+      if (!inPaste) {
+        const submitted = (c === 0x0d || c === 0x0a) && text.length > 0 ? text : null;
+        return { text: "", submitted };
+      }
+      if (c === 0x0d || c === 0x0a) text += "\n";
+      continue;
+    }
+    if (c >= 0x20) text += data[i]; // printable → one more draft char
+    // other C0 controls (Tab, etc.) — ignore, same as nextComposerLen
+  }
+  return { text, submitted: null };
 }
 
 /**
@@ -1392,6 +1439,10 @@ interface Live {
                         // HOLDS programmatic delivery so a queued turn can never land ON the human's half-typed
                         // text; reset to 0 by a box-freeing key (Enter/Ctrl-C/Esc/kill-line) or backspace-to-empty.
                         // The PRECISE collision signal (supersedes the old keystroke time-grace). Tracked in writeStdin.
+  // Card 0f9268cc: the TEXT-carrying twin of `composerLen` — same lifecycle (nextRawDraftState mirrors
+  // nextComposerLen's parsing), tracked ONLY so writeStdin can capture the composed text into
+  // `lastRawSubmit` at the moment of a genuine Enter-submit. Never read outside writeStdin.
+  rawDraftText: string;
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   // Card d88163b7 (CR fix): a CALLER-held drain suppression — SUPPRESS drain/submit (mirrors `stopping`,
@@ -1407,6 +1458,16 @@ interface Live {
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
+  // Card 0f9268cc: the raw-terminal-channel counterpart of `lastPrompt`, so the paste-tripwire can see a
+  // paste/long text typed or pasted directly into the terminal panel (/ws/term -> writeStdin), NOT just a
+  // structured submit() turn. `lastPrompt` is set ONLY by submit(); writeStdin never touched it, so a
+  // human-terminal paste-collapse was categorically invisible to the tripwire before this. Set by writeStdin
+  // when a raw Enter (outside a bracketed-paste span) frees a non-empty draft — the text at that instant,
+  // mirroring what submit() captures for the structured path. Cleared (a) by submit() itself, since a
+  // structured submit starting means any earlier raw baseline is now stale/superseded, and (b) after the
+  // Stop/StopFailure chokepoint consumes it, so a leftover value never gets attributed to a LATER turn.
+  // Best-effort by design, same spirit as composerLen/nextComposerLen — see nextRawDraftState.
+  lastRawSubmit: string | null;
   // True once ANY turn has ever started for this session (the first UserPromptSubmit hook observed).
   // Gates the fresh-spawn kickoff guarantee (scheduleKickoffGuarantee) and healIfStuck's short pre-first-
   // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
@@ -2434,6 +2495,7 @@ export class PtyHost {
       busySince: null,
       lastOutputAt: Date.now(),
       composerLen: 0,
+      rawDraftText: "",
       pending: [],
       stopping: false,
       drainHeld: false,
@@ -2442,6 +2504,7 @@ export class PtyHost {
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
       // route (a startup turn is never a companion inbound), so the route fields start null.
       lastPrompt: opts.startupPrompt ?? null,
+      lastRawSubmit: null,
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet (the startup turn is a CLI arg, not submit()) — see submit()'s reset
       submitGeneration: 0,
@@ -2595,8 +2658,8 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0,
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null,
+      lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null, lastRawSubmit: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -2670,8 +2733,8 @@ export class PtyHost {
       logBroken: false,
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0,
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null,
+      lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null, lastRawSubmit: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -3015,13 +3078,51 @@ export class PtyHost {
           const stats = live.engineSessionId ? readContextStats(live.cwd, live.engineSessionId) : null;
           if (stats) this.events.onContextStats(sessionId, stats);
           // Bare-pasted-text-placeholder tripwire (card eef4883c, DETECTION ONLY — see paste-tripwire.ts's
-          // doc for the 8a39f544 background). Compares the SUBMITTED turn (`live.lastPrompt`, the exact
-          // text submit() sent) against the transcript's recorded turn for that same turn (`stats.
-          // lastUserText`, from the SAME single-pass read above — no extra file I/O). A future recurrence
-          // of a submitted paste silently collapsing to a bare placeholder is now LOGGED instead of silent.
-          if (detectBarePastePlaceholderTripwire(live.lastPrompt, stats?.lastUserText)) {
+          // doc for the 8a39f544 background). Compares the SUBMITTED turn against the transcript's
+          // recorded turn for that same turn (`stats.lastUserText`, from the SAME single-pass read above
+          // — no extra file I/O). Card 0f9268cc: prefer `lastRawSubmit` (the raw-terminal channel's
+          // counterpart of `lastPrompt` — see its doc) when set, since a non-null value here can only mean
+          // a raw Enter-submit happened AFTER the last structured submit() cleared it, making it the more
+          // recent — and thus more likely relevant to THIS turn — baseline; fall back to `lastPrompt`
+          // (the structured-submit path, the tripwire's original coverage) otherwise. Consumed (cleared)
+          // right after, win or lose, so a leftover raw baseline never gets attributed to a LATER Stop.
+          const submittedText = live.lastRawSubmit ?? live.lastPrompt;
+          live.lastRawSubmit = null;
+          // A future recurrence of a submitted paste silently collapsing to a bare placeholder is now
+          // LOGGED instead of silent — over EITHER delivery channel.
+          if (detectBarePastePlaceholderTripwire(submittedText, stats?.lastUserText)) {
+            // Card 0f9268cc: one-shot auto-RECOVERY on top of detection. `submittedText` is provably
+            // non-null here (detectBarePastePlaceholderTripwire's own first guard requires it truthy).
+            // ONE combined console.warn (not two) — a caller/test counting "did the tripwire fire" via
+            // warn-count must see exactly one line per detection, recovery or not.
+            //
+            // PREVENTION WAS CONSIDERED AND DECLINED (owner decision) — do not re-litigate without a
+            // reliable repro. A Loom-free bare-`claude` diagnostic (test/_probe-paste-collapse-trigger.mjs,
+            // test/_probe-paste-collapse-production-repeat.mjs) drove 24 real-CLI submissions varying
+            // bracket-paste wrap presence/absence, single/multi-line, and size (120-5000 chars), including
+            // the EXACT production submit() path repeated 15x: 24/24 came back FULL — zero reproductions
+            // in either condition. That means any "feed it differently to avoid the collapse" change is
+            // UNVALIDATABLE (there is no reproducible baseline to show it helps), and it would touch
+            // LOAD-BEARING transport for no demonstrated gain: the chunking here exists because a single
+            // large `pty.write` is TRUNCATED by Windows ConPTY (see writeChunked's doc), and the bracket-
+            // paste wrap protects multi-line text from the CLI's own readline. Trading an unreproducible
+            // rare loss for a reproducible truncation regression is a strictly bad trade. Revisit ONLY if a
+            // reliable repro emerges to validate against.
+            const isRecoveryAttempt = isPasteRecoveryAttempt(submittedText!);
+            const actionNote = isRecoveryAttempt
+              ? "RECOVERY re-injection ALSO collapsed — giving up automatic recovery after one attempt; this needs a human to resend the content manually."
+              : "auto-recovering: re-injecting the lost content as a corrective turn (one-shot — a second collapse on the recovery itself will not retry again).";
             // eslint-disable-next-line no-console
-            console.warn(`[paste-tripwire] ${sessionId} submitted turn resolved to a bare pasted-text placeholder (engineSessionId=${live.engineSessionId ?? "?"}, claudeVersion=${getCachedClaudeVersion() ?? "?"}) — content may have been lost to an upstream CLI paste-collapse race (see card eef4883c / 8a39f544)`);
+            console.warn(`[paste-tripwire] ${sessionId} submitted turn resolved to a bare pasted-text placeholder (engineSessionId=${live.engineSessionId ?? "?"}, claudeVersion=${getCachedClaudeVersion() ?? "?"}) — content may have been lost to an upstream CLI paste-collapse race (see card eef4883c / 8a39f544). ${actionNote}`);
+            if (!isRecoveryAttempt) {
+              // Defer OUTSIDE the M2 synchronous window (see the box above deliverHook's Stop/StopFailure
+              // case) — enqueueStdin's idle-submit path would trip the finalizingTurn guard if called
+              // synchronously from here. A bare setTimeout(0) is a macrotask: it cannot fire until this
+              // whole deliverHook call (through the `finally` below) has returned control to the event
+              // loop, so `finalizingTurn` is guaranteed false by the time this runs.
+              const recoveryText = buildPasteRecoveryText(submittedText!);
+              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent"); }, 0);
+            }
           }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
           // cap. The pty stays alive; we record the resume-at and do NOT drain a new turn into a capped
@@ -3808,6 +3909,12 @@ export class PtyHost {
     // eslint-disable-next-line no-console
     console.log(`[submit-write] ${sessionId} reason=${reason} busyBefore=${live.busy} len=${text.length} head=${JSON.stringify(text.slice(0, 60))}`);
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
+    // Card 0f9268cc: a structured submit() starting supersedes any earlier raw-terminal baseline — the
+    // composer-dirty gate (deferForHumanDraft) already stops this from racing a DIRTY raw draft, but a
+    // raw submit from an EARLIER, already-Stopped turn could otherwise still be sitting here unconsumed
+    // (e.g. its Stop hadn't fired yet, or fired without a readable transcript). Clear it so lastPrompt —
+    // this NEW turn's real baseline — isn't shadowed by stale raw-channel text at the next Stop.
+    live.lastRawSubmit = null;
     // Pin this turn's ORIGINATING route (Loom Companion), SYNCHRONOUSLY — before the async writeChunked, so
     // it's in place the instant the agent processes the turn and can chat_reply. null for every non-companion
     // turn (route undefined). `lastPromptRoute` mirrors `lastPrompt` so a rate-limit replay keeps the route.
@@ -4709,6 +4816,13 @@ export class PtyHost {
       // lands on half-typed text. We NEVER touch the human's bytes — we only HOLD delivery while dirty.
       const wasDirty = live.composerLen > 0;
       live.composerLen = nextComposerLen(live.composerLen, data);
+      // Card 0f9268cc: the text-carrying twin of the composerLen update above — see Live.lastRawSubmit's
+      // doc. A genuine Enter-submit freezes the composed text into lastRawSubmit for the paste-tripwire;
+      // any OTHER free (Ctrl-C/kill-line/Esc/backspace-to-empty) just resets the accumulator, same as
+      // composerLen, with no tripwire baseline captured (nothing will be recorded to the transcript).
+      const draft = nextRawDraftState(live.rawDraftText, data);
+      live.rawDraftText = draft.text;
+      if (draft.submitted !== null) live.lastRawSubmit = draft.submitted;
       // Box-free transition (submitted / cleared / backspaced-to-empty): drain the held queue PROMPTLY
       // — don't wait for the reconcile tick — so a held programmatic turn delivers right after the
       // human frees their box. drainPending is fully guarded (no-op if busy/stopping/empty/not-ready).
