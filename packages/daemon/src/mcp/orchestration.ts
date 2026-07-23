@@ -1632,6 +1632,55 @@ export class OrchestrationMcpRouter {
     );
     registerGateStatus(server, sessions);
 
+    // gate_queue (card fa359824 — Codescape manager escalation 530e59a0): gate_status only ever answers
+    // "what is MY op doing", so a manager with no op of its own to poll (or one whose op has been queued a
+    // long time) had no way to tell healthy contention apart from a leaked slot short of cross-project DB
+    // access no manager surface grants. This is the ONE-read answer: cap + every running/queued gate run.
+    // READ-ONLY — it cannot mutate the cap, cancel, or reorder anything; it only reads the live
+    // GateSemaphore registry (see SessionService.gateQueueForManager's doc for the cross-project scoping:
+    // a row from a DIFFERENT project is named by project + kind + age only, never its task title/branch).
+    // `recentTimeoutStreak` (escalation 4f151331, filed while this card was in flight — a REAL incident: two
+    // concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while its op
+    // still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own belief —
+    // see SessionService.gateQueueForManager's doc for why the two are surfaced side by side, never merged.
+    server.registerTool(
+      "gate_queue",
+      {
+        description:
+          "Read-only snapshot of the WHOLE daemon-global gate queue — the resolved concurrency cap plus " +
+          "every gate run currently `running` or `queued` (merge/deploy/worker-self-check alike), so you can " +
+          "answer 'why is my gate queued, who holds the slot, how deep am I' from ONE read instead of " +
+          "guessing or polling gate_status per-opId. Returns {cap, activeCount, queuedCount, running: " +
+          "GateQueueEntry[], queued: GateQueueEntry[]} — `queued` is already in real admission order (all " +
+          "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
+          "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
+          "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, queuePosition} — " +
+          "`opId` is the SAME id `gate_status(opId)` accepts (full or an unambiguous 8-char prefix), so you " +
+          "can chain into a live per-op read if you want one. An entry belonging to YOUR OWN project ALSO " +
+          "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
+          "DIFFERENT project omits those three fields entirely (never redacted-to-null) — named only by " +
+          "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +
+          "apart from 'this looks leaked' without exposing another project's task/branch identity. " +
+          "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
+          "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
+          "dying, leaving an orphan the registry no longer tracks. So an OWN-project entry with a `branch` " +
+          "ALSO carries `recentTimeoutStreak` (an integer ≥0) — how many consecutive timeouts that branch " +
+          "has recorded, from an INDEPENDENT tracker that survives exactly the eviction the live registry " +
+          "doesn't. A nonzero streak on a 'queued' or 'running' entry is a reason to verify no orphaned " +
+          "process survives from an earlier attempt before treating this worktree as otherwise idle — treat " +
+          "it as a second data point, not a verdict this tool merges into `phase` itself. This tool is cheap " +
+          "(an in-memory read bounded by cap + queue depth, never a real scan) — safe to call on every loop " +
+          "iteration, e.g. right after a run_gate/worker_merge_confirm call comes back `pending` to see the " +
+          "full picture instead of only your own op's state.",
+        inputSchema: {},
+      },
+      async () => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        return ok(sessions.gateQueueForManager(projectId));
+      },
+    );
+
     server.registerTool(
       "daemon_restart",
       {

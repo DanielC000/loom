@@ -43,7 +43,7 @@ import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudg
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
-import { GateSemaphore, type GateDescriptor } from "../orchestration/gate-semaphore.js";
+import { GateSemaphore, type GateDescriptor, type GateSnapshotEntry } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
@@ -66,6 +66,46 @@ function gateWorkerLabel(agentName?: string, taskTitle?: string): string | null 
   const title = taskTitle ? (taskTitle.length > 48 ? `${taskTitle.slice(0, 47)}…` : taskTitle) : undefined;
   if (agentName && title) return `${agentName} · ${title}`;
   return agentName ?? title ?? null;
+}
+
+/** One entry in {@link SessionService.gateQueueForManager}'s result — `taskId`/`branch`/`workerLabel` are
+ *  present ONLY for an entry belonging to the CALLING manager's own project; a cross-project entry omits
+ *  them entirely (never redacted-to-null, so "field absent" always means "not your project", never "this
+ *  gate genuinely has no task"). `opId` is the SAME correlating id `gate_status(opId)` accepts (full or an
+ *  unambiguous 8-char prefix), so a manager can chain from this snapshot into a live per-op status read. */
+export interface GateQueueEntry {
+  opId: string | null;
+  gateType: GateType;
+  projectId: string;
+  projectName: string;
+  /** ISO anchor for the run's admission (running) or enqueue (queued) time. */
+  since: string;
+  elapsedMs: number;
+  /** 1-based position among queued waiters; null for a running entry. */
+  queuePosition: number | null;
+  taskId?: string | null;
+  branch?: string | null;
+  workerLabel?: string | null;
+  /** Escalation 4f151331 — a SECOND, INDEPENDENTLY-derived signal, not the semaphore's own live phase above:
+   *  how many CONSECUTIVE `timedOut` gate results this entry's `branch` has recorded (see
+   *  {@link SessionService.gateTimeoutStreakCount}). `phase`/`queuePosition` reflect only what the
+   *  GateSemaphore registry currently BELIEVES; they cannot see a gate whose process tree wasn't actually
+   *  fully reaped after an earlier timeout on this SAME worktree. A nonzero count here — even below the
+   *  circuit breaker's own trip threshold — means treat "queued"/"running" with suspicion: verify no
+   *  orphaned process survives from a prior attempt before assuming this worktree is otherwise idle. `0`
+   *  means no recent timeout on this branch (the common case); omitted entirely when there's no `branch` to
+   *  key it by (a deploy gate, or a cross-project entry that doesn't carry `branch` at all). */
+  recentTimeoutStreak?: number;
+}
+
+/** {@link SessionService.gateQueueForManager}'s result: the resolved cap plus every live gate run, split
+ *  into running/queued so a manager reads queue depth and admission order without counting entries itself. */
+export interface GateQueueSnapshot {
+  cap: number;
+  activeCount: number;
+  queuedCount: number;
+  running: GateQueueEntry[];
+  queued: GateQueueEntry[];
 }
 
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
@@ -519,6 +559,19 @@ export class SessionService {
    * must give it a clean slate rather than locking the branch out for the rest of the daemon's uptime.
    */
   private readonly gateTimeoutStreak = new Map<string, { count: number; sha: string | null }>();
+  /** Read-only accessor for {@link gateTimeoutStreak} (card fa359824 follow-up, escalation 4f151331) — the
+   *  live registry a `gate_queue` entry is built from only ever reflects what {@link GateSemaphore} BELIEVES
+   *  is running/queued; it cannot see a gate whose `runGateStep` timeout fired but whose process TREE wasn't
+   *  actually fully reaped (the exact incident: a "queued" op whose worktree already had live test fixtures
+   *  from an earlier, already-settled-and-evicted attempt). This streak is the ONE existing signal that
+   *  tracks that risk independently of the semaphore's own bookkeeping — incremented on EVERY `timedOut`
+   *  result (not just once the circuit breaker itself trips at {@link GATE_TIMEOUT_BREAKER_THRESHOLD}), so
+   *  even a single recent timeout on `branch` is visible here well before the breaker would block anything.
+   *  Read-only: never mutates the streak, never influences gating — purely a second, independently-derived
+   *  data point for a caller to weigh ALONGSIDE the semaphore's live phase, never a replacement for it. */
+  gateTimeoutStreakCount(branch: string): number {
+    return this.gateTimeoutStreak.get(branch)?.count ?? 0;
+  }
   /**
    * The worktree stamp {@link runWorkerGate} recorded at the moment its CURRENTLY-RUNNING gate op actually
    * started (card 50c1e0d0 — the result-consumption fix) — keyed the SAME as the op itself
@@ -2167,6 +2220,64 @@ export class SessionService {
       };
     }
     return { state: "not_found", gateType: null, elapsedMs: null };
+  }
+
+  /**
+   * `gate_queue()` (card fa359824) — a read-only, ONE-call answer to "why is my gate queued, who holds
+   * the slot, how deep am I" for a manager, so it never has to guess between healthy contention and a
+   * leaked slot the way Codescape's manager had to (escalation 530e59a0): today `gate_status(opId)` only
+   * answers "what is MY op doing", forcing a manager with no other op to correlate against to fall back to
+   * cross-project DB access no manager surface actually grants. This reads the SAME live GateSemaphore
+   * registry `snapshotGates` reads for the (human-only) Gates page, but is SCOPED for an agent-facing
+   * surface: `snapshotGates` is deliberately unscoped (see its own doc — human loopback REST only, never an
+   * agent MCP tool), so reusing it verbatim here would hand every manager task titles/branch names from
+   * EVERY project, well beyond what the owner's `project_links` cross-project trust boundary (peer_list/
+   * peer_message) actually grants. Here, a row for the CALLING manager's OWN project carries full detail
+   * (taskId/branch/workerLabel); a row from a DIFFERENT project is named only by project + gate kind + age
+   * + queue position — enough to self-diagnose "someone else legitimately holds it" (the card's own
+   * explicit scoping call) without leaking another project's task/branch identity.
+   *
+   * SECOND SOURCE OF TRUTH (escalation 4f151331, filed WHILE this card was in flight): the GateSemaphore
+   * registry `phase`/`queuePosition` above is a BELIEF — what the semaphore thinks is admitted/waiting. A
+   * real incident showed it can diverge from reality: a `runGateStep` timeout can resolve (settle, release
+   * the slot) without its process TREE actually dying, so a NEW op can be legitimately admitted (or shown
+   * "queued", correctly, since it hasn't started) while an ORPHANED process from an earlier, already-evicted
+   * attempt on the SAME worktree is still alive and consuming the box — invisible to this registry, since
+   * that earlier op's entry is long gone. Rather than have this tool silently repeat that blind spot, each
+   * OWN-project entry with a `branch` also carries `recentTimeoutStreak` — {@link gateTimeoutStreakCount},
+   * an INDEPENDENTLY-tracked signal (the existing gate-timeout circuit breaker's own counter) that survives
+   * exactly the eviction this registry doesn't. The two signals are surfaced SIDE BY SIDE, never merged into
+   * one verdict — a nonzero streak doesn't change `phase`, it's a second data point for the caller to weigh.
+   */
+  gateQueueForManager(callerProjectId: string): GateQueueSnapshot {
+    const snap = this.gateSemaphore.snapshot();
+    const cap = resolveConfig({}, this.db.getPlatformConfig()).orchestration.maxConcurrentGates;
+    const toEntry = (e: GateSnapshotEntry): GateQueueEntry => {
+      const project = this.db.getProject(e.projectId);
+      const entry: GateQueueEntry = {
+        opId: e.opId,
+        gateType: e.gateType,
+        projectId: e.projectId,
+        projectName: project?.name ?? e.projectId,
+        since: new Date(e.since).toISOString(),
+        elapsedMs: Date.now() - e.since,
+        queuePosition: e.queuePosition,
+      };
+      if (e.projectId === callerProjectId) {
+        const task = e.taskId ? this.db.getTask(e.taskId) : undefined;
+        const session = this.db.getSession(e.sessionId);
+        const agent = session?.agentId ? this.db.getAgent(session.agentId) : undefined;
+        entry.taskId = e.taskId;
+        entry.branch = e.branch;
+        entry.workerLabel = gateWorkerLabel(agent?.name, task?.title);
+        if (e.branch) entry.recentTimeoutStreak = this.gateTimeoutStreakCount(e.branch);
+      }
+      return entry;
+    };
+    const running: GateQueueEntry[] = [];
+    const queued: GateQueueEntry[] = [];
+    for (const e of snap.entries) (e.phase === "running" ? running : queued).push(toEntry(e));
+    return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued };
   }
 
   /**

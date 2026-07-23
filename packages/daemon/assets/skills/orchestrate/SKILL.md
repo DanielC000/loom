@@ -444,6 +444,21 @@ mid-report — before sending anything.
      alone is not evidence the gate is "wedged" or "flaky, not your code" — check the elapsed time (or a
      `gate_status` read tool, if your platform exposes one) before concluding that, and never hand-roll a
      squash-merge past a gate that hasn't reported a terminal signal.
+   - **Can't tell healthy contention from a leaked slot? Read the whole queue, don't guess.** `gate_status`
+     only ever answers "what is MY op doing" — it has no view of the daemon-wide picture. If your platform
+     exposes a `gate_queue` read tool, call it: ONE read returns the resolved concurrency cap plus every
+     `running`/`queued` gate run (merge/deploy/worker self-check alike), so "who holds the slot, how deep is
+     the queue, is this normal" is answered directly instead of inferred from how long you've waited. A
+     cross-project entry is deliberately named only by project + gate kind + age (never its task title or
+     branch) — enough to see "a different project legitimately holds this" without leaking that project's
+     internals.
+   - **Treat "queued"/"running" as a belief, not a fact — a real incident showed the two can diverge.** A
+     gate timeout can settle (freeing the slot) without its process tree actually dying, so a fresh op can be
+     legitimately admitted (or correctly reported "queued") while an ORPHANED process from an earlier,
+     already-evicted attempt on the SAME worktree is still alive and consuming the box — invisible to
+     `gate_status`/`gate_queue`'s own live registry. If your `gate_queue` entries carry a
+     `recentTimeoutStreak`, a nonzero count on an otherwise-unremarkable entry is a second, independent
+     signal worth checking before trusting that a "queued"/quiet-looking worktree is actually idle.
    - **Know the `[loom:*]` nudge vocabulary Loom pushes at you.** Besides the merge trio
      (`[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]`), you'll see `[loom:worker-idle]`
      (a worker went idle — pick up its report / next step), `[loom:already-merged]` (the branch was

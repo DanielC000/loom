@@ -206,13 +206,15 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   const workerTools = toolNames("worker");
 
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
-  // `run_gate` (card 7f96aa09) and `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
-  // the worker's own call is scoped to its own ops) are DELIBERATE, reviewed exceptions to the /gate/i
-  // sweep below: `run_gate` only EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the
-  // GateSemaphore), and `gate_status` only READS the live GateSemaphore registry by opId — neither ever
-  // sets/configures gateCommand, so the trust boundary this check protects (no agent-writable gateCommand
-  // surface) is untouched by either.
-  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status");
+  // `run_gate` (card 7f96aa09), `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
+  // the worker's own call is scoped to its own ops), and `gate_queue` (card fa359824, MANAGER-ONLY) are
+  // DELIBERATE, reviewed exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's
+  // EXISTING gateCommand (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live
+  // GateSemaphore registry by opId, and `gate_queue` only READS the same live registry's whole
+  // running/queued snapshot (cap/depth/holder) — none of the three ever sets/configures gateCommand, so
+  // the trust boundary this check protects (no agent-writable gateCommand surface) is untouched by any of
+  // them.
+  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",
