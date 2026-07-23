@@ -60,6 +60,43 @@ async function waitForCount(getCount, target, timeoutMs = 5000) {
     await sleep(2);
   }
 }
+/**
+ * Card b64b3726: spin until the real clock has genuinely TICKED PAST `t` (a `Date.now()` value already
+ * observed, e.g. the exact millisecond a write landed) — not a sleep, an actual observation of monotonic
+ * advancement. `Date.now()` has only 1ms resolution, and product code (`fireEnterAndVerify`) captures
+ * `enterWrittenAt` in the SAME synchronous tick as the Enter write itself. `waitForCount` above observes
+ * that write and a caller emitting immediately afterward can complete BOTH the observation and the emit
+ * inside that SAME millisecond — landing `lastOutputAt === enterWrittenAt`, which the product's
+ * intentionally-strict `>` check (Code-Reviewer-endorsed: same-ms is ambiguous, erring toward recovery is
+ * the safe side — do NOT relax it to `>=`) reads as "no output after," flipping scenario (1)'s expected
+ * SUPPRESSED into a flaky RECOVERY. This is a genuinely new lesson for the blind-sleep campaign (cards
+ * 0fa5beef, 595aad10, fea23514, 47a515ff): the earlier computed-deadline version of this file carried tens
+ * of ms of incidental slack that HAPPENED to guarantee a clock tick between write and emit — de-racing it
+ * into `waitForCount` (removing the guessed deadline) removed that accident too, exposing the granularity
+ * assumption the sleep had been silently covering. Removing a blind sleep can un-satisfy an assumption the
+ * sleep was accidentally satisfying — check for that, don't just assume less waiting is strictly safer.
+ */
+async function awaitClockPast(t) {
+  while (Date.now() <= t) await sleep(1);
+}
+/**
+ * Card b64b3726: bounded poll until `predicate()` is true — the SAME observe-don't-guess principle as
+ * `waitForCount`, applied to a busy-state transition instead of a write count. A 50-run loop proving
+ * scenario (1)'s fix (above) surfaced a SEPARATE flake in scenario (2): its `sleepUntil(t0, giveUpAt() +
+ * margin)` blind computed-deadline wait occasionally checked `busy===false` before give-up's chain of
+ * timers (now one longer, with Half 1's bounded settle-poll) had actually finished firing under momentary
+ * host/scheduler jitter — a margin that was comfortable pre-Half-1 stopped being comfortable once one more
+ * chained setTimeout was added to the path it's racing. Padding the margin further repeats the exact
+ * anti-pattern this file's own header already flags (6 prior margin regressions); polling for the ACTUAL
+ * transition removes the race instead of out-guessing it.
+ */
+async function waitUntil(predicate, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (!predicate()) {
+    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
+    await sleep(2);
+  }
+}
 
 const tmpHome = path.join(os.tmpdir(), `loom-giveupfalseneg-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -67,10 +104,19 @@ process.env.LOOM_HOME = tmpHome;
 const ENTER_DELAY = 50;     // mirrors LOOM_SUBMIT_ENTER_DELAY_MS
 const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
+// Card b64b3726 Half 1: the FINAL attempt now waits (bounded, observed) for its own paste-reassert to
+// settle BEFORE writing Enter — see host.ts's REASSERT_SETTLE_POLL_MS/REASSERT_SETTLE_MAX_POLLS. Nothing
+// in scenarios (2)/(3) below emits output during that window, so it always maxes out its bound; giveUpAt()
+// must account for it or `sleepUntil(t0, giveUpAt() + …)` under-shoots the ACTUAL (now-later) give-up point.
+const SETTLE_POLL = 10;
+const SETTLE_MAX_POLLS = 5;
+const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT;
+process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
+process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -80,10 +126,13 @@ const BACKSPACE = "\x7f";
 const fakes = [];
 function makeFakePty() {
   const writes = [];
+  // Card b64b3726: the exact Date.now() of each bare-Enter ("\r") write, in order — lets a scenario spin
+  // past the REAL millisecond a specific attempt's Enter landed (see awaitClockPast) instead of racing it.
+  const enterWriteTimes = [];
   let onDataCb = null;
   const fake = {
     pid: 4242,
-    write: (d) => { writes.push(d); },
+    write: (d) => { writes.push(d); if (d === "\r") enterWriteTimes.push(Date.now()); },
     // UNLIKE this suite's other fakes: actually stores the callback, so a scenario can fire it on demand
     // to simulate real engine output (bumps live.lastOutputAt inside host.ts's own pty.onData handler).
     onData: (cb) => { onDataCb = cb; return { dispose() { onDataCb = null; } }; },
@@ -91,6 +140,7 @@ function makeFakePty() {
     kill: () => {},
     resize: () => {},
     writes,
+    enterWriteTimes,
     emitOutput: (s = ".") => { if (onDataCb) onDataCb(Buffer.from(s, "utf-8")); },
   };
   fakes.push(fake);
@@ -138,11 +188,15 @@ try {
     const r = host.enqueueStdin(SID, TEXT);
     check("(1) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    // Wait for the OBSERVED third `\r` (not a computed deadline — see waitForCount's own doc) and fire the
-    // simulated engine reaction — a spinner tick/redraw — the instant it's seen, so this scenario can never
-    // degenerate into scenario (3) (output landing before the final write) under host scheduling jitter.
+    // Wait for the OBSERVED third `\r` (not a computed deadline — see waitForCount's own doc), THEN spin
+    // until the real clock has genuinely ticked past the EXACT millisecond that write landed in (see
+    // awaitClockPast's doc — Date.now() is only 1ms-resolution and product code captures `enterWrittenAt`
+    // in the same synchronous tick as the write, so emitting "immediately after observing the write" can
+    // land in the SAME millisecond and be read as "no output after", flakily degenerating into scenario
+    // (3)'s outcome under fast/loaded hosts). This makes the ordering a real observation, not a guess.
     await waitForCount(entryCount, MAX_ATTEMPTS);
     check("(1) all attempts written by now", entryCount() === MAX_ATTEMPTS);
+    await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
     fake.emitOutput("spinner-tick-after-final-enter");
 
     // Cross the give-up deadline. Assert give-up was SUPPRESSED: busy stays true, composer untouched.
@@ -175,8 +229,11 @@ try {
     check("(2) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
     // Never fire onData at all (this fake CAN emit output — scenario (1) proves that — so a passing result
-    // here is a real assertion about the discriminator, not an artifact of an inert fake).
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+    // here is a real assertion about the discriminator, not an artifact of an inert fake). Poll for the
+    // ACTUAL busy=false transition (see waitUntil's doc) rather than guessing a deadline — give-up
+    // eventually recovering within a generous bound IS the assertion; a `sleepUntil` here would just be
+    // racing the give-up chain's own timers again.
+    await waitUntil(() => busyLog[SID].at(-1) === false);
     check("(2) all attempts written (bounded retries)", entryCount() === MAX_ATTEMPTS);
     check("(2) GIVE-UP RECOVERY: busy fell back to false — genuine drops are still recovered, unchanged",
       busyLog[SID].at(-1) === false);
@@ -202,7 +259,7 @@ try {
     await sleepUntil(t0, writeAt(1) + 20);
     fake.emitOutput("stale-output-from-an-earlier-attempt-only");
 
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+    await waitUntil(() => busyLog[SID].at(-1) === false); // observe the transition — see waitUntil's doc
     check("(3) all attempts written", entryCount() === MAX_ATTEMPTS);
     check("(3) GIVE-UP RECOVERY still fires: stale pre-final-attempt output does NOT suppress give-up",
       busyLog[SID].at(-1) === false);

@@ -59,6 +59,32 @@ const SUBMIT_VERIFY_TIMEOUT_MS = Number(process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_M
 const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
 
 /**
+ * Card b64b3726: bounded poll for the GIVE-UP attempt's own paste-reassert (`BRACKET_PASTE_START +
+ * BRACKET_PASTE_END`, written by `sendEnterAndVerify` on every `attempt > 1`) to settle BEFORE writing
+ * that attempt's Enter and capturing `enterWrittenAt` — see `awaitReassertSettle`. Mirrors this file's
+ * existing `RESUME_MODE_READ_POLL_MS`/`RESUME_MODE_CHANGE_MAX_POLLS` poll-count convention (observe, don't
+ * guess, but stay bounded).
+ *
+ * SIZED FROM A MEASURED DISTRIBUTION, not guessed (real `claude` engine, card b64b3726 probes — see
+ * `test/_probe-empty-paste-provocation.mjs` for the base finding). The re-assert alone reliably provokes a
+ * deterministic 16-byte TUI response (a keyboard-protocol renegotiation) — but only INTERMITTENTLY at
+ * production's actual retry cadence (~900ms between reasserts): a cadence-matched probe found it lands
+ * inside its own attempt's verify window in ~13-20% of give-ups, not "always" (an earlier, wider-spaced
+ * probe had wrongly suggested "always" — see that finding's own correction note for why probe CADENCE has
+ * to match the thing being measured). When it DOES fire, latency across n=10 pooled real-engine samples was
+ * bimodal: 8/10 (80%) landed in 1.15-7.65ms, 2/10 (20%) landed at 820.96/1367.94ms. `REASSERT_SETTLE_MAX_POLLS`
+ * × `REASSERT_SETTLE_POLL_MS` ≈ 300ms therefore catches the fast majority with wide margin and deliberately
+ * accepts the slow tail as a residual — a slow-arriving response can still land after this bound and cause a
+ * suppress on THIS attempt, same as before this fix. That residual is acceptable ONLY because `healIfStuck`
+ * (card b64b3726 Half 2) backstops the consequence regardless of which vector caused the suppression — if
+ * that backstop is ever removed, this bound needs re-deriving against a fuller sample, not just widened.
+ * If a future re-measurement shows the fast group is no longer the majority, THIS bound is the wrong one to
+ * keep — don't just halve it, re-derive it from a fresh distribution.
+ */
+const REASSERT_SETTLE_POLL_MS = Number(process.env.LOOM_REASSERT_SETTLE_POLL_MS) || 15;
+const REASSERT_SETTLE_MAX_POLLS = Number(process.env.LOOM_REASSERT_SETTLE_MAX_POLLS) || 20;
+
+/**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
  * worker reports and pastes arriving cut off in the receiving session. Split big writes into
  * paced chunks so the console host drains between them. Keystroke-sized writes take one chunk.
@@ -3412,6 +3438,28 @@ export class PtyHost {
    * race the STARTUP_PROMPT_GRACE_MS fallback didn't recover, or an engine that never got past boot),
    * and it should surface via the onBusy→notifyManagerOfIdleWorker path fast rather than sit masked as
    * "busy" for the full 5-minute window. Once a real turn starts, the normal, more generous window applies.
+   *
+   * Card b64b3726: also closes the ORPHANED COMPOSER half of a false give-up suppression. sendEnterAndVerify
+   * can suppress its own give-up recovery (card 71de1f9c) when it reads output after the final Enter write —
+   * but that read can be fooled (our own paste-reassert write provokes a deterministic engine response, or a
+   * viewer's repaint() does), and when it is, `live.enterConfirmed` stays false FOREVER: nothing else can ever
+   * flip it, because nothing can call submit() again (the sole writer of `lastPrompt`/`enterConfirmed=false`)
+   * while `live.busy` stays stuck true — enqueueStdin only submits immediately when `!live.busy`. So a session
+   * that reaches THIS stale-busy branch still carrying `enterConfirmed: false` is exactly a give-up that was
+   * wrongly suppressed (or any other path that leaves an unconfirmed submit stranded) — the OLD version of
+   * this method cleared `busy` but never un-typed the composer, so the stranded injection survived and the
+   * NEXT drainPending submit pasted on top of it (reintroducing the exact concatenation card ee082fbb fixed).
+   * Reuse that SAME mechanism here — do not invent a second clear path: an exact-count Backspace burst
+   * (`live.lastPrompt.length`), gated on `composerLen === 0` (card e1829591 — never touch a real human draft),
+   * with `setBusy(false)` threaded through the burst's own completion (writeChunked's `done` callback) so a
+   * concurrent enqueueStdin can't interleave a new turn's paste into the still-draining backspaces. This is
+   * deliberately UNCONDITIONAL on *why* enterConfirmed is false — robust to vectors nobody has enumerated yet,
+   * not just the two this card investigated.
+   *
+   * A turn that's LEGITIMATELY still confirmed-and-running never reaches this branch at all: UserPromptSubmit
+   * sets `enterConfirmed = true` AND re-arms `busySince` (rising edge) the moment the turn actually starts, so
+   * a merely-slow-to-confirm turn's staleness clock restarts before `staleMs` can elapse — belt-and-suspenders
+   * with the `enterConfirmed` check itself.
    */
   private healIfStuck(live: Live, sessionId: string): void {
     const now = Date.now();
@@ -3422,7 +3470,13 @@ export class PtyHost {
       // sendEnterAndVerify chain for whatever turn this was recognizes it's stale and bails instead of
       // retry-Enter'ing (or give-up→setBusy(false)'ing) into whatever submits next. See submitGeneration.
       live.submitGeneration++;
-      this.setBusy(sessionId, false);
+      if (!live.enterConfirmed && live.composerLen === 0 && live.lastPrompt) {
+        // eslint-disable-next-line no-console
+        console.log(`[heal] ${sessionId} clearing an orphaned give-up injection (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
+        this.writeChunked(sessionId, BACKSPACE.repeat(live.lastPrompt.length), () => this.setBusy(sessionId, false));
+      } else {
+        this.setBusy(sessionId, false);
+      }
     }
   }
 
@@ -3676,11 +3730,49 @@ export class PtyHost {
    * paste truly close and submit with just a small stray tail) is the Lead's live-verification pass — the
    * fake pty this file's own test drives can't model Ink's paste state machine, only that the BYTES this
    * host writes are exactly what's intended.
+   *
+   * Card b64b3726 Half 1: on the FINAL attempt only (`attempt === SUBMIT_MAX_ATTEMPTS`), this re-assert is
+   * itself a confirmed output source INSIDE the give-up branch's own anchor window (see
+   * `REASSERT_SETTLE_POLL_MS`'s doc for the measured evidence) — a Code Reviewer finding on this method's
+   * own suppression logic below. The fix is SEQUENCING, not detection: let the re-assert's response (if
+   * any) land BEFORE writing this attempt's Enter and capturing `enterWrittenAt`, via `awaitReassertSettle`
+   * (bounded, observed not guessed). Intermediate retries (attempt 2/3 here) never consult `lastOutputAt` —
+   * only the give-up branch below does — so they skip straight to `fireEnterAndVerify` unchanged; waiting
+   * there would tax every retry chain for zero discriminating benefit.
    */
   private sendEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
-    if (attempt > 1) live.pty.write(BRACKET_PASTE_START + BRACKET_PASTE_END);
+    if (attempt > 1) {
+      live.pty.write(BRACKET_PASTE_START + BRACKET_PASTE_END);
+      if (attempt === SUBMIT_MAX_ATTEMPTS) {
+        const reassertWrittenAt = Date.now();
+        this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, attempt, gen));
+        return;
+      }
+    }
+    this.fireEnterAndVerify(sessionId, attempt, gen);
+  }
+
+  /**
+   * Bounded, observed wait for the give-up attempt's own paste-reassert to settle before its Enter is
+   * written — see `sendEnterAndVerify`'s doc and `REASSERT_SETTLE_POLL_MS`'s measured-distribution comment
+   * for why this exists and how the bound was sized. Re-checks the SAME bail condition as every other link
+   * in this chain (`!alive || enterConfirmed || submitGeneration !== gen`) on every poll — a superseded or
+   * already-confirmed turn abandons here rather than proceeding to write a now-meaningless Enter.
+   */
+  private awaitReassertSettle(sessionId: string, gen: number, reassertWrittenAt: number, polls: number, onDone: () => void): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
+    if (live.lastOutputAt > reassertWrittenAt || polls >= REASSERT_SETTLE_MAX_POLLS) { onDone(); return; }
+    setTimeout(() => this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, polls + 1, onDone), REASSERT_SETTLE_POLL_MS);
+  }
+
+  /** Write this attempt's Enter and arm its verify-timeout — the second half of `sendEnterAndVerify`,
+   *  split out so the give-up attempt can route through `awaitReassertSettle` first. */
+  private fireEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
     live.pty.write(ENTER);
     // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
     // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.

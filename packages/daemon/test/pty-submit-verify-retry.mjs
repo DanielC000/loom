@@ -58,6 +58,19 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+/** Card b64b3726: bounded poll until `predicate()` is true — used for a state TRANSITION (e.g. busy
+ *  becoming false) instead of a computed-deadline `sleepUntil`, which races the give-up chain's own timers
+ *  under host/scheduler jitter (a real merge-gate run caught exactly this: a comfortable margin pre-Half-1
+ *  stopped being comfortable once Half 1 added one more chained setTimeout to the path being timed — see
+ *  pty-giveup-false-negative.mjs's own `waitUntil` for the full incident). Polling for the actual
+ *  transition removes the race instead of padding the margin again. */
+async function waitUntil(predicate, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (!predicate()) {
+    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
+    await sleep(2);
+  }
+}
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()). Also shrink the
 // verify-retry timing constants (generously, not down to the wire — see the TIMING note above) so this
@@ -70,11 +83,21 @@ process.env.LOOM_HOME = tmpHome;
 const ENTER_DELAY = 50;    // mirrors LOOM_SUBMIT_ENTER_DELAY_MS
 const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS — generous relative to host scheduling jitter
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
+// Card b64b3726 Half 1: the FINAL attempt now waits (bounded, observed) for its own paste-reassert to
+// settle BEFORE writing Enter — see host.ts's REASSERT_SETTLE_POLL_MS/REASSERT_SETTLE_MAX_POLLS. Only
+// scenario (4) below ever lets the chain reach the final attempt unconfirmed (every other scenario
+// confirms/stops before attempt MAX_ATTEMPTS would fire), but writeAt() accounts for it unconditionally so
+// nothing here has to reason about which scenario is calling it.
+const SETTLE_POLL = 10;
+const SETTLE_MAX_POLLS = 5;
+const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
+process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
+process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 /** When the kth Enter attempt (1-indexed) is WRITTEN, relative to the submit() call that started the chain. */
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT;
+const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
@@ -184,8 +207,9 @@ try {
     check("(4) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
     // Never deliver ANY confirming hook. With MAX_ATTEMPTS=3, the give-up decision (after the 3rd write's
-    // own verify window elapses with nothing confirmed) lands at writeAt(3)+VERIFY_TIMEOUT. Wait well past it.
-    await sleepUntil(t0, writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT + VERIFY_TIMEOUT / 2);
+    // own verify window elapses with nothing confirmed) lands at writeAt(3)+VERIFY_TIMEOUT. Poll for the
+    // ACTUAL busy=false transition (see waitUntil's doc) rather than a computed deadline.
+    await waitUntil(() => busyLog[SID].at(-1) === false);
     check("(4) all 3 Enter attempts were written (bounded retries, not infinite)", countOf(ENTER) === MAX_ATTEMPTS);
     check("(4) GIVE-UP RECOVERY: busy fell back to false — the session is NOT left wedged busy=true forever",
       busyLog[SID].at(-1) === false);

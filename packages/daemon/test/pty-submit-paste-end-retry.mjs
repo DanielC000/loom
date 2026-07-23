@@ -42,6 +42,16 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+/** Card b64b3726: bounded poll until `predicate()` is true — used for a state TRANSITION (busy becoming
+ *  false) instead of a computed-deadline `sleepUntil`, which races the give-up chain's own timers under
+ *  host/scheduler jitter — see pty-giveup-false-negative.mjs's `waitUntil` for the incident that found this. */
+async function waitUntil(predicate, timeoutMs = 5000) {
+  const t0 = Date.now();
+  while (!predicate()) {
+    if (Date.now() - t0 > timeoutMs) throw new Error(`waitUntil: timed out after ${timeoutMs}ms`);
+    await sleep(2);
+  }
+}
 
 const tmpHome = path.join(os.tmpdir(), `loom-pasteendretry-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -49,10 +59,18 @@ process.env.LOOM_HOME = tmpHome;
 const ENTER_DELAY = 50;     // mirrors LOOM_SUBMIT_ENTER_DELAY_MS
 const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS — generous relative to host scheduling jitter
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
+// Card b64b3726 Half 1: the FINAL attempt now waits (bounded, observed) for its own paste-reassert to
+// settle BEFORE writing Enter — see host.ts's REASSERT_SETTLE_POLL_MS/REASSERT_SETTLE_MAX_POLLS. The
+// reassert write itself still lands at the OLD (undelayed) point; only the Enter write after it is later.
+const SETTLE_POLL = 10;
+const SETTLE_MAX_POLLS = 5;
+const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT;
+process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
+process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
@@ -145,8 +163,9 @@ try {
     const r = host.enqueueStdin(SID, TEXT);
     check("(c) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    // Never confirm anything — exhaust every attempt (each retry still re-asserting START+END).
-    await sleepUntil(t0, writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT + VERIFY_TIMEOUT / 2);
+    // Never confirm anything — exhaust every attempt (each retry still re-asserting START+END). Poll for
+    // the ACTUAL busy=false transition (see waitUntil's doc) rather than a computed deadline.
+    await waitUntil(() => busyLog[SID].at(-1) === false);
     check("(c) all attempts exhausted (bounded, not infinite)", countOf(ENTER) === MAX_ATTEMPTS);
     check("(c) retries still re-asserted the pair (this fix applies through give-up, not just early retries)",
       countOf(REASSERT) === MAX_ATTEMPTS - 1);

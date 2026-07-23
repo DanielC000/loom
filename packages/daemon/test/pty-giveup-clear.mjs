@@ -39,10 +39,18 @@ process.env.LOOM_HOME = tmpHome;
 const ENTER_DELAY = 50;     // mirrors LOOM_SUBMIT_ENTER_DELAY_MS
 const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
+// Card b64b3726 Half 1: the FINAL attempt now waits (bounded, observed) for its own paste-reassert to
+// settle BEFORE writing Enter. In this fake-pty harness NOTHING ever bumps lastOutputAt on its own (no
+// emitData calls below), so that wait always maxes out its bound — giveUpAt() must account for it.
+const SETTLE_POLL = 10;
+const SETTLE_MAX_POLLS = 5;
+const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT;
+process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
+process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 
 const { PtyHost } = await import("../dist/pty/host.js");
