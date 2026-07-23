@@ -165,8 +165,16 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  `validatedHead` (card 50c1e0d0 — the result-consumption fix) is the worktree `HEAD` this run actually
  *  gated against, stamped at the moment the run started (`null` only if the worktree was unreadable at
  *  that moment) — set on EVERY `ran:true` outcome (pass or fail) so a caller can tell, after the fact,
- *  exactly which commit a `[loom:gate-done]`/`[loom:gate-failed]` result is about. */
-type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null };
+ *  exactly which commit a `[loom:gate-done]`/`[loom:gate-failed]` result is about.
+ *  `durationMs` (card 2d72595c — serve the timing need `run_gate` didn't, so a manager stops reaching for a
+ *  hand-run suite to get one) is `Date.now() - gateStartedAt`: wall-clock from the moment this run was
+ *  ADMITTED past the semaphore to the moment it settled. It EXCLUDES queue wait — a run that sat behind
+ *  another gate isn't penalized for that wait. It does NOT exclude general host/fleet load, and at
+ *  `maxConcurrentGates` >= 2 it does NOT exclude time spent running alongside another CONCURRENTLY-ADMITTED
+ *  gate — this is a real duration under real conditions, not an isolated benchmark; see the `run_gate` tool
+ *  description for the caller-facing wording of that caveat. Set on every `ran:true` outcome, same as
+ *  `validatedHead`. */
+type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null; durationMs?: number };
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
  *  point of card 50c1e0d0, how long `PendingOpRegistry.attach()`'s own retention-window dedupe (see its
@@ -8184,8 +8192,9 @@ export class SessionService {
             await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
           }
           if (gateResult.passed) {
-            evt({ passed: true, durationMs: Date.now() - gateStartedAt });
-            return { ran: true, passed: true, opId, validatedHead: startStamp.head };
+            const durationMs = Date.now() - gateStartedAt;
+            evt({ passed: true, durationMs });
+            return { ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs };
           }
           const finalClass = classifyGateFailure(gateResult);
           const phase = classifyGatePhase(gateResult.failedStep);
@@ -8207,15 +8216,16 @@ export class SessionService {
           // AUDIT ENRICHMENT (CR follow-up): carry the same failure detail the sibling `deploy` event records
           // (exitCode/signal/timedOut/outputTail) PLUS phase/failedStep/failingTest — we already compute all
           // of this for the nudge/return value below, so the durable event shouldn't be a flatter `{passed}`.
+          const failDurationMs = Date.now() - gateStartedAt;
           evt({
             passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
             failingTestReason: failingTestReason ?? null,
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
-            durationMs: Date.now() - gateStartedAt,
+            durationMs: failDurationMs,
             ...(outputTail ? { outputTail } : {}),
           });
           return {
-            ran: true, passed: false, reason: headline, opId, validatedHead: startStamp.head,
+            ran: true, passed: false, reason: headline, opId, validatedHead: startStamp.head, durationMs: failDurationMs,
             gateDetail: {
               phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
               exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,

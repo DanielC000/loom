@@ -459,6 +459,13 @@ mid-report — before sending anything.
      `gate_status`/`gate_queue`'s own live registry. If your `gate_queue` entries carry a
      `recentTimeoutStreak`, a nonzero count on an otherwise-unremarkable entry is a second, independent
      signal worth checking before trusting that a "queued"/quiet-looking worktree is actually idle.
+   - **The gate is a shared, capped, daemon-global resource — not just this project's.** Every project on
+     the daemon queues on the same cap. Directing a worker to hand-run the full suite outside the gate —
+     even for a legitimate need, like getting a trustworthy wall-clock number — is the same opt-out a
+     worker bypassing it unprompted would be: it doesn't queue, so it competes for the host with
+     everything that IS admitted, and it contaminates the very number you asked for. If your gate tool's
+     result carries a duration, that number already reflects real, admitted run time (excluding queue
+     wait) — read it from there instead of asking for a hand-rolled measurement.
    - **Know the `[loom:*]` nudge vocabulary Loom pushes at you.** Besides the merge trio
      (`[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]`), you'll see `[loom:worker-idle]`
      (a worker went idle — pick up its report / next step), `[loom:already-merged]` (the branch was

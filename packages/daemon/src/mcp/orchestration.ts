@@ -763,9 +763,18 @@ export class OrchestrationMcpRouter {
             "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
-            "returns {ran:true, passed, validatedHead, gateDetail?} — `validatedHead` is the worktree commit " +
-            "this run actually gated (compare it to your own HEAD if you're unsure whether a result is about " +
-            "your current code); on a failure, gateDetail carries {phase, failedStep, failingTest, " +
+            "returns {ran:true, passed, validatedHead, durationMs?, gateDetail?} — `validatedHead` is the " +
+            "worktree commit this run actually gated (compare it to your own HEAD if you're unsure whether a " +
+            "result is about your current code). `durationMs` is wall-clock from the moment THIS run was " +
+            "admitted past the semaphore to the moment it settled — this is the trustworthy timing number to " +
+            "reach for instead of hand-running the suite yourself for one (that bypass is exactly what silently " +
+            "opts out of the concurrency cap this tool exists to enforce). Read it precisely: it EXCLUDES queue " +
+            "wait (a run that sat behind another gate isn't penalized for that wait), but it does NOT exclude " +
+            "general host/fleet load, and — if `maxConcurrentGates` is configured above 1 — it does NOT exclude " +
+            "time spent running alongside another concurrently-admitted gate. This is a real duration under " +
+            "real fleet conditions, not an isolated benchmark; don't report it as one. Omitted (undefined) on " +
+            "the circuit-breaker short-circuit path, where no gate actually ran. On a failure, gateDetail " +
+            "carries {phase, failedStep, failingTest, " +
             "failingTestReason, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure " +
             "vs. a flake without re-running blind — failingTest is `undefined` (never a guessed name) only when " +
             "nothing recognizable was found, and failingTestReason then says why. The async [loom:gate-failed] " +

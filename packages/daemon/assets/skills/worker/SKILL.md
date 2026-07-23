@@ -111,6 +111,22 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report
      the missing gate command up, too.
+   - **The gate is a shared, capped, daemon-global resource, not just yours.** Every project sharing it
+     queues on the SAME cap, so what you do with it affects work that has nothing to do with you. Two
+     things follow, and they pull in opposite directions — read both:
+     - **A hand-run FULL suite is an opt-out from the cap, even when someone above you asks for one** —
+       e.g. to get a trustworthy timing number. It doesn't queue, so it just competes for the host with
+       whatever IS properly admitted, and it contaminates the very measurement it was run to get. If the
+       gate tool doesn't yet serve that need, say so up; don't route around it.
+     - **But that is not a blanket ban on running anything yourself.** Match the scope of what you run to
+       what actually reproduces the failure. A single test, run and observed directly while you're
+       developing a fix, is ordinary feedback — it costs nothing shared and doesn't belong on the queue.
+       Reach for the full gate only when the failure is genuinely EMERGENT under full-suite conditions and
+       can't be reproduced any smaller (a load-dependent hang, cross-file interference, a leak that only
+       shows up under real concurrency) — running the full suite just to watch one test fail spends a
+       scarce, queued slot on feedback a narrower run would have given you for free, at the cost of
+       whoever else is waiting behind it. (If your tests run against a build output rather than source,
+       rebuild first — a check against a stale build is meaningless either way.)
 
    **If you do run a build/test command yourself** (that no-gate-command fallback, or another check your
    task names): **run it in the FOREGROUND, commit, then report — in ONE flow.** A blocking command

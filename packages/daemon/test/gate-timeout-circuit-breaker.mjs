@@ -76,6 +76,9 @@ try {
     check("(A) the NEXT call is short-circuited: distinct circuitBroken failure",
       tripped.ok === true && tripped.value.passed === false && tripped.value.gateDetail?.circuitBroken === true && tripped.value.gateDetail?.timedOut === true);
     check("(A) the short-circuited call did NOT invoke the gate runner again", calls === GATE_TIMEOUT_BREAKER_THRESHOLD);
+    // Card 2d72595c: the short-circuit path never actually ran a gate, so it must NOT fabricate a
+    // durationMs — undefined here is the honest signal that no timing exists for this outcome.
+    check("(A) the short-circuited call reports NO durationMs (no gate actually ran)", tripped.value.durationMs === undefined);
 
     const trippedAgain = await sessions.runWorkerGate(workerId);
     check("(A) the breaker STAYS tripped on a subsequent call too (not a one-shot check)", trippedAgain.value.gateDetail?.circuitBroken === true);

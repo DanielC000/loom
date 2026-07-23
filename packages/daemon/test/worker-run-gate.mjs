@@ -410,6 +410,37 @@ try {
     const tailBlock = text.split("--- gate output tail ---")[1] ?? "";
     check("(K) the raw tail block does NOT itself contain the failing test — proving the identity came from the live field, not the tail", !tailBlock.includes("widget renders"));
   }
+  // ── (L) card 2d72595c: run_gate returns a numeric durationMs — wall-clock from admission to settle
+  //        (excludes queue wait) — on BOTH a passing and a failing outcome. This is the timing number a
+  //        manager should read instead of directing a worker to hand-run the suite for one (the second
+  //        of the two observed semaphore-bypass instances this card exists to fix). ────────────────────
+  {
+    const sfx = `l-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-l-${sfx}`);
+    const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    const slowishGate = async () => { await sleep(30); return { passed: true }; };
+    const { stub } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: slowishGate });
+
+    const rPass = await sessions.runWorkerGate(gateWorkerId);
+    check("(L) a PASSING gate returns a numeric durationMs", rPass.settled === true && rPass.ok === true && typeof rPass.value.durationMs === "number");
+    check("(L) that durationMs reflects the actual run time (>= the fake's own sleep)", rPass.value.durationMs >= 30);
+  }
+  {
+    const sfx = `l2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+    const reposDir = path.join(os.tmpdir(), `loom-wg-repos-l2-${sfx}`);
+    const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    const failingGate = async () => {
+      await sleep(20);
+      return { passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL x" };
+    };
+    const { stub } = ptyStub();
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: failingGate });
+
+    const rFail = await sessions.runWorkerGate(gateWorkerId);
+    check("(L) a FAILING gate ALSO returns a numeric durationMs", rFail.settled === true && rFail.ok === true && rFail.value.passed === false && typeof rFail.value.durationMs === "number");
+    check("(L) that durationMs reflects the actual run time (>= the fake's own sleep)", rFail.value.durationMs >= 20);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
