@@ -7,8 +7,22 @@
   // packages/daemon/src/orchestration/restart.ts › deployBuildSteps — so its cache is fully defeated.)
   "globalDependencies": ["pnpm-lock.yaml"],
   "tasks": {
+    // A CACHE HIT restores a task's cached `outputs` files without ever re-running its script — so it
+    // never triggers Vite's own `emptyOutDir` clean, which only fires when `vite build` actually
+    // executes. If `dist/` already holds a DIFFERENT prior build's content-hashed bundle (e.g. from an
+    // earlier real build in this same worktree), a later cache-hit restore layers the restored files on
+    // top instead of replacing them, leaving the stale bundle behind — reproduced live: a real build,
+    // then a cache-hit restore of a different cached state, left both hashes in `dist/assets`
+    // simultaneously. `clean` is declared `cache: false` (always actually runs, never itself a skip) and
+    // sits ahead of `build` in the task graph, so `dist/` is wiped before EITHER a real build or a cache
+    // restore writes into it — the only place this can be fixed, since a restore skips the build script
+    // entirely. Only `@loom/web` defines a `clean` script (its dist is what a served bundle scan checks);
+    // packages without one are a no-op here.
+    "clean": {
+      "cache": false
+    },
     "build": {
-      "dependsOn": ["^build"],
+      "dependsOn": ["^build", "clean"],
       "outputs": ["dist/**"]
     },
     "@loom/daemon#build": {

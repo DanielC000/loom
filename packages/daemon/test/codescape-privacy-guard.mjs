@@ -111,6 +111,13 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
 // `codescape` property key itself out of the bundle, not a string-strip of the built output. This
 // previously carried a TEMPORARY, narrow exception for exactly this gap (bare `codescape:`/`.codescape`
 // object-property occurrences) — now retired; a plain case-insensitive scan is the whole check.
+//
+// Extension list includes `.json` (card 61fa0950): `vite.config.ts` now sets `build.manifest: true`,
+// which emits `dist/.vite/manifest.json` — a NEW shipped file (`build-npm-package.mjs` copies `dist`
+// wholesale into the published package) that maps SOURCE FILE PATHS to output chunks. A source file
+// named after codescape would leak the word into that mapping even with zero codescape imports in the
+// bundle itself — the same "any file under dist reaches an end user" finding that motivated this card's
+// build-npm-package.mjs orphan guard applies here too.
 {
   const webDist = path.join(__dirname, "..", "..", "web", "dist");
   if (!fs.existsSync(webDist)) {
@@ -121,7 +128,7 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
     check("[falsification] scanner catches an injected codescape mention", fakeLeakHit);
 
     // --- The real assertion: scan every served asset in the actual built bundle. ---
-    const distFiles = walkFiles(webDist, /\.(js|html|css|map)$/i);
+    const distFiles = walkFiles(webDist, /\.(js|html|css|map|json)$/i);
     const hits = [];
     for (const file of distFiles) {
       const content = fs.readFileSync(file, "utf8");

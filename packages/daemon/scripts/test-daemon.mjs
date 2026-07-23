@@ -37,6 +37,9 @@ const NOT_HERMETIC = new Set([
   "scheduler-disabled", "usage-limit-detect", "usage-limit-resume", "worker-report", "autonomy-rails",
   "busy-flag", "merge-gate", "board-consistency", "skills-e2e", "profiles-rest",
   "merge-confirm-slow-gate-pending", // ~20s wall-clock (a real 15s gate) + needs a manually-started daemon
+  "web-build-no-orphans", // mutates the REAL packages/web/src/main.tsx + rebuilds the shared packages/web/dist
+  // 2-3x (~5-20s each) to exercise turbo's actual cache — would race codescape-privacy-guard.mjs (which
+  // reads that same dist) if run concurrently. Run manually per its own header comment.
 ]);
 
 const HERMETIC = fs.readdirSync(TEST_DIR)

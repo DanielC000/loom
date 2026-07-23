@@ -61,6 +61,61 @@ for (const [label, p] of [
   }
 }
 
+// 2b. Refuse to ship an ORPHANED web bundle (card 61fa0950): this is the ONE step whose output goes to
+// real end users, with `--no-build` (the release workflow's own invocation — see release.yml) trusting
+// WHATEVER `packages/web/dist` already contains, produced by some earlier command. A turbo cache-hit
+// restore skipping vite's own `emptyOutDir` (now fixed at the turbo.json level, but this guard doesn't
+// rely on that staying true forever) is one way a stale content-hashed bundle can survive alongside the
+// current one; this check catches ANY such orphan regardless of cause, right at the point the bundle is
+// about to be copied into the published package.
+//
+// Ground truth is Vite's own build manifest (`build.manifest: true` in vite.config.ts →
+// dist/.vite/manifest.json), NOT a regex scrape of index.html: index.html only names the entry chunk +
+// its CSS, so scraping it would misfire the moment code-splitting introduces a chunk reached only via a
+// dynamic import() (a lazy route, a vendor split) and never named in index.html itself. The manifest
+// instead lists every entry AND every reachable chunk (walked here via each entry's `imports` +
+// `dynamicImports`), each with its own `file`/`css`/`assets` — the complete, authoritative set of what
+// this build actually intended to emit, regardless of how many import hops away a chunk is.
+{
+  const manifestPath = path.join(webDist, ".vite", "manifest.json");
+  if (!fs.existsSync(manifestPath)) {
+    console.error(
+      `[pack:npm] missing ${manifestPath} — packages/web/vite.config.ts sets build.manifest:true so this ` +
+        `orphan guard has ground truth for what a build legitimately emits; rebuild via \`pnpm build\`.`,
+    );
+    process.exit(1);
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
+  const referenced = new Set();
+  const visited = new Set();
+  const visit = (key) => {
+    if (visited.has(key)) return;
+    visited.add(key);
+    const entry = manifest[key];
+    if (!entry) return;
+    if (entry.file) referenced.add(entry.file);
+    for (const f of entry.css ?? []) referenced.add(f);
+    for (const f of entry.assets ?? []) referenced.add(f);
+    for (const dep of [...(entry.imports ?? []), ...(entry.dynamicImports ?? [])]) visit(dep);
+  };
+  for (const key of Object.keys(manifest)) visit(key);
+
+  const assetsDir = path.join(webDist, "assets");
+  const actual = fs.existsSync(assetsDir) ? fs.readdirSync(assetsDir) : [];
+  const orphans = actual.filter((f) => !referenced.has(path.posix.join("assets", f)));
+  if (orphans.length > 0) {
+    console.error(
+      `[pack:npm] refusing to package an orphaned web bundle — packages/web/dist/assets contains file(s) ` +
+        `not present in dist/.vite/manifest.json's emitted-file set: ${orphans.join(", ")}. This dist was ` +
+        `not cleanly built (rm -rf packages/web/dist and rebuild via \`pnpm build\`, then re-run without ` +
+        `--no-build). If this fires on a build you believe is CORRECT — e.g. a new asset type the manifest ` +
+        `doesn't track — check what actually changed in packages/web's build output before assuming it's ` +
+        `this guard that's wrong.`,
+    );
+    process.exit(1);
+  }
+}
+
 // 3. Canonical version/name/description = the root package.json (the single source of truth that the
 //    daemon's loomVersion() resolves at runtime). Runtime deps come from the daemon's package.json.
 const rootPkg = JSON.parse(fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"));
