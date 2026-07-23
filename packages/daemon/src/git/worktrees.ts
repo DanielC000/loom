@@ -4,6 +4,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
+import { nonInteractiveEnv } from "./writer.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -65,13 +66,20 @@ export interface StaleBaseInfo {
 }
 
 /**
- * Per-git-op ceiling for the BOOT-RECONCILE git ops (removeWorktree / findLandedSquashCommit / deleteBranch).
- * Generous for a real op (sub-second normally), but BOUNDED so a wedged child can't hang the caller.
+ * Default per-git-op ceiling for every {@link boundedGit}/{@link boundedMergeGit} call in this file that
+ * doesn't override it (removeWorktree / findLandedSquashCommit / deleteBranch / mergeBranchLocked /
+ * scanCanonicalReposForMergeResidue / …) — generous for a real op (sub-second normally, and this project's
+ * own local-git-write default in `git/writer.ts`'s `GIT_LOCAL_TIMEOUT_MS` agrees: same 15s, for the same
+ * "local plumbing op, not a network push" reasoning), but BOUNDED so a wedged child can't hang the caller.
  * This is the fix for the boot-outage: a git op on a busy/locked dir (e.g. a directory handle stuck by
  * an unrelated process) HANGS INDEFINITELY — it doesn't throw — and a try/catch only catches throws.
- * boot-reconcile runs these ops during daemon BOOT (Pass A: findLandedSquashCommit → finalizeMerge's
- * removeWorktree + deleteBranch; Pass B: removeWorktree), so one hung op blocked the whole daemon from
- * booting, for hours, on 2026-06-03. Every op in the reconcile path is now bounded by this.
+ * Originally introduced for boot-reconcile (Pass A: findLandedSquashCommit → finalizeMerge's
+ * removeWorktree + deleteBranch; Pass B: removeWorktree), which ran these ops during daemon BOOT, so one
+ * hung op blocked the whole daemon from booting, for hours, on 2026-06-03 — since generalized to every
+ * bounded op in this file (board card 44c28799 added `mergeBranchLocked`'s own ~10 `git.raw` calls: the
+ * squash-merge is local plumbing exactly like the rest, not a slow/legitimately-long-running gate, so the
+ * same 15s ceiling that's generous for a real merge is still tight enough to fail a wedged commit hook
+ * fast instead of wedging the per-repo merge mutex permanently).
  */
 const GIT_OP_TIMEOUT_MS = 15_000;
 
@@ -98,6 +106,24 @@ export interface BoundedGitDeps {
 function boundedGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+}
+
+/**
+ * Same seam as {@link boundedGit} (block-timeout + the `withTimeout` race, both defaulting to
+ * {@link GIT_OP_TIMEOUT_MS}), PLUS `nonInteractiveEnv()` (`GIT_TERMINAL_PROMPT=0` etc.) on the default
+ * factory — matching `git/reader.ts` and `git/writer.ts`'s own convention for a git WRITE. Used only by
+ * {@link mergeBranchLocked} and {@link scanCanonicalReposForMergeResidue}: the squash-merge onto the
+ * canonical repo is this codebase's highest-consequence git write (board card 44c28799), so it gets the
+ * same non-interactive posture as every other writer. Deliberately NOT folded into {@link boundedGit}
+ * itself — that helper backs ~20 other call sites in this file (worktree creation, branch listing,
+ * diffing) that are read-mostly or worktree-scoped; changing their environment behavior is out of scope
+ * here and would need its own verification. `gitFactory`, when supplied (the test seam), is used as-is —
+ * a test injecting a hanging fake doesn't need env scrubbing applied to it.
+ */
+function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<SimpleGit, "raw">; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }).env(nonInteractiveEnv()));
   return { git: makeGit(repoPath, timeoutMs), timeoutMs };
 }
 
@@ -2597,8 +2623,23 @@ function canonicalRepoLockKey(repoPath: string): string {
  * chaining. `prior.then(fn, fn)` runs `fn` once `prior` SETTLES regardless of whether it resolved or
  * rejected, so one caller's failure never poisons or skips the next caller's turn; the chained promise
  * (its outcome ignored via `.catch`) is what the NEXT caller awaits, so callers queue strictly in arrival
- * order. No timeout: `mergeBranch`'s own git calls are already bounded elsewhere (simple-git's block
- * timeout), so a bug here should surface as a wedged merge queue, not silently corrupt content.
+ * order.
+ *
+ * **No timeout HERE, deliberately** (board card 44c28799 — this corrects an EARLIER version of this
+ * comment that claimed `mergeBranch`'s own git calls "are already bounded elsewhere"; they were not, and
+ * that gap is what made this exact function wedge the whole per-repo queue permanently on a hung git
+ * child). The real fix is that {@link mergeBranchLocked} now bounds every one of its own `git.raw` calls
+ * (`boundedMergeGit` + `withTimeout`, matching `git/reader.ts`/`git/writer.ts`), so the `fn` passed in here
+ * is now GUARANTEED to settle within a bounded time on its own — a wedged holder fails its own op instead
+ * of the whole queue, which is exactly the property this lock needs.
+ *
+ * A SEPARATE timeout at THIS level was considered and rejected: racing `fn()`'s completion here would let
+ * the NEXT queued caller start (`prior` resolving) while the ABANDONED `fn()` call may still be actually
+ * running against the shared canonical index in the background (a `withTimeout` race stops the CALLER
+ * from waiting; it does not stop the underlying git child unless its own block-timeout independently
+ * kills it) — reintroducing the exact concurrent-index race this mutex exists to close (see the class doc
+ * above). Bounding the work itself (what `mergeBranchLocked` now does) closes the hang without that risk;
+ * bounding the WAIT for it here would reopen it.
  */
 async function withRepoMergeLock<T>(repoPath: string, fn: () => Promise<T>): Promise<T> {
   const key = canonicalRepoLockKey(repoPath);
@@ -2725,19 +2766,24 @@ export async function mergeMainIntoWorktree(
 }
 
 export async function mergeBranch(
-  repoPath: string, branch: string, taskTitle?: string,
+  repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
   // MUTEX (card e076d2a2): the whole residue-clear→squash→conflict-check→commit sequence below reads and
   // writes the CANONICAL repo's shared git index — serialize it per canonical repo path so a concurrent
   // merge for a DIFFERENT branch of the SAME repo can never interleave with this one. See the lock's own
   // doc above for the exact corruption this closes.
-  return withRepoMergeLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle));
+  return withRepoMergeLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps));
 }
 
 async function mergeBranchLocked(
-  repoPath: string, branch: string, taskTitle?: string,
+  repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
-  const git = simpleGit(repoPath);
+  // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
+  // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
+  // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
+  // fix, `git = simpleGit(repoPath)` here had NEITHER — a hung git child (e.g. a wedged commit hook) never
+  // settled, which (post-e076d2a2) wedged the per-repo merge mutex PERMANENTLY, not just this one op.
+  const { git, timeoutMs } = boundedMergeGit(repoPath, deps);
   // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
   // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
   // --squash stage nothing (the idempotency bug). Gated on a positive signal so a clean canonical repo is
@@ -2746,12 +2792,12 @@ async function mergeBranchLocked(
   // non-zero → throws when there is no in-progress merge) is isolated in its OWN try/catch so its throw
   // can't skip the unmerged probe — unmerged residue WITHOUT a MERGE_HEAD is now auto-recovered up front too.
   try {
-    const unmerged = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
+    const unmerged = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, pre-check)")).trim() !== "";
     let inProgressMerge = false;
     try {
-      inProgressMerge = (await git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"])).trim() !== "";
+      inProgressMerge = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"]), timeoutMs, "git rev-parse MERGE_HEAD (canonical)")).trim() !== "";
     } catch { /* no MERGE_HEAD ⇒ that signal is simply false */ }
-    if (inProgressMerge || unmerged) await git.raw(["reset", "--hard", "HEAD"]);
+    if (inProgressMerge || unmerged) await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, residue clear)");
   } catch { /* ls-files failed (e.g. not a repo / no HEAD) ⇒ no residue to clear */ }
 
   // ── Staged-but-not-unmerged residue (card 9e77050f — a SECOND, non-concurrent trigger for the same
@@ -2784,7 +2830,7 @@ async function mergeBranchLocked(
   // between what this check clears and what the resets below are allowed to assume.
   let dirtyAtEntry: string;
   try {
-    dirtyAtEntry = (await git.raw(["status", "--porcelain", "--untracked-files=no"])).trim();
+    dirtyAtEntry = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (canonical, entry check)")).trim();
   } catch (e) {
     return { ok: false, reason: `failed to inspect canonical repo state before merge: ${(e as Error).message}` };
   }
@@ -2802,7 +2848,7 @@ async function mergeBranchLocked(
 
   let rawError = false;
   try {
-    await git.raw(["merge", "--squash", branch]);
+    await withTimeout(git.raw(["merge", "--squash", branch]), timeoutMs, "git merge --squash (canonical)");
   } catch {
     rawError = true; // a conflict OR a real failure — the explicit checks below decide
   }
@@ -2818,9 +2864,9 @@ async function mergeBranchLocked(
   // here, whatever is dirty now is provably ours (this squash's own output) to discard.
   let conflicted: boolean;
   try {
-    conflicted = (await git.raw(["ls-files", "--unmerged"])).trim() !== "";
+    conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
   } catch (e) {
-    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* best-effort; still fail closed below */ }
+    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, post-squash-probe-failure cleanup)"); } catch { /* best-effort; still fail closed below */ }
     return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}` };
   }
   if (conflicted) {
@@ -2829,7 +2875,7 @@ async function mergeBranchLocked(
     // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
     // rather than trusting the (now false) "untouched" guarantee.
     try {
-      await git.raw(["reset", "--hard", "HEAD"]);
+      await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, conflict cleanup)");
     } catch (e) {
       return { ok: false, conflict: true, reason: `conflict cleanup (reset --hard HEAD) failed — canonical repo may have unmerged residue: ${(e as Error).message}` };
     }
@@ -2844,7 +2890,7 @@ async function mergeBranchLocked(
   // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
   // anything outside it.
   if (rawError) {
-    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset, or already clean */ }
+    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, rawError cleanup)"); } catch { /* nothing to reset, or already clean */ }
     return { ok: false, reason: "git merge --squash failed" };
   }
   // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
@@ -2855,9 +2901,9 @@ async function mergeBranchLocked(
   // precondition observed there licenses this operation too — see that check's own comment).
   let staged: boolean;
   try {
-    staged = (await git.raw(["diff", "--cached", "--name-only"])).trim() !== "";
+    staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
   } catch (e) {
-    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* best-effort; still fail closed below */ }
+    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, staged-probe-failure cleanup)"); } catch { /* best-effort; still fail closed below */ }
     return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}` };
   }
   if (!staged) {
@@ -2865,7 +2911,7 @@ async function mergeBranchLocked(
     // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD
     // AND that commit's content is verified to actually contain the branch's own changes (see
     // findLandedSquashCommit's content-reachability check — trailer presence alone is not proof).
-    const landed = await findLandedSquashCommit(repoPath, branch);
+    const landed = await findLandedSquashCommit(repoPath, branch, "HEAD", deps);
     return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY" };
   }
   // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
@@ -2880,18 +2926,18 @@ async function mergeBranchLocked(
   // THIS commit) rather than blocking a real, already-successful merge.
   let pathSetTrailer = "";
   try {
-    const mergeBaseForPathSet = (await git.raw(["merge-base", "HEAD", branch])).trim();
-    const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch);
+    const mergeBaseForPathSet = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, path-set fingerprint)")).trim();
+    const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch, timeoutMs);
     pathSetTrailer = `\nLoom-Worker-PathSet: ${digest}`;
   } catch { /* best-effort; the commit still lands, just without this trailer */ }
   const message = `${subject}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
   try {
-    await git.raw(["commit", "-m", message]);
+    await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
   } catch (e) {
-    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* leave nothing partial */ }
+    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, commit-failure cleanup)"); } catch { /* leave nothing partial */ }
     return { ok: false, reason: `squash commit failed: ${(e as Error).message}` };
   }
-  const sha = (await git.raw(["rev-parse", "HEAD"])).trim();
+  const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
   return { ok: true, sha, subject };
 }
 
@@ -2910,17 +2956,25 @@ async function mergeBranchLocked(
  * at merge time. A repo that isn't a real git checkout (e.g. a vault-only project's `repoPath`, or a
  * deleted/unreadable directory) is silently skipped, not surfaced as a failure — this is a best-effort
  * courtesy scan, not a boot gate.
+ *
+ * BOUNDED + NON-INTERACTIVE (board card 44c28799, same pass as {@link mergeBranchLocked}): this ran an
+ * unbounded `simpleGit(repoPath)` with no block-timeout — a repo on a busy/locked disk (the same class of
+ * hang that once wedged daemon boot for hours, see {@link GIT_OP_TIMEOUT_MS}'s doc) would hang this loop's
+ * `await` forever, one repo blocking the scan of every repo after it. Fire-and-forget from the caller
+ * (index.ts never awaits this before serving traffic) so the boot-blocking risk was always low, but the
+ * fix is the same one-line convention as everywhere else in this file — no reason to leave a second
+ * unbounded instance behind while fixing the first.
  */
 export async function scanCanonicalReposForMergeResidue(
-  repoPaths: string[],
+  repoPaths: string[], deps: BoundedGitDeps = {},
 ): Promise<{ repoPath: string; status: string }[]> {
   const dirty: { repoPath: string; status: string }[] = [];
   for (const repoPath of new Set(repoPaths)) {
     try {
-      const git = simpleGit(repoPath);
-      const status = (await git.raw(["status", "--porcelain", "--untracked-files=no"])).trim();
+      const { git, timeoutMs } = boundedMergeGit(repoPath, deps);
+      const status = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (canonical, boot residue scan)")).trim();
       if (status !== "") dirty.push({ repoPath, status });
-    } catch { /* not a repo / unreadable / no HEAD yet ⇒ nothing to report */ }
+    } catch { /* not a repo / unreadable / no HEAD yet / timed out ⇒ nothing to report */ }
   }
   return dirty;
 }

@@ -7722,7 +7722,7 @@ export class SessionService {
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
     // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
     const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
-    const merge = await mergeBranch(repoPath, branch, taskTitle);
+    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs });
     if (!merge.ok) {
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       const failReason = merge.conflict ? "conflict" : "merge_failed";
