@@ -103,11 +103,47 @@ try {
 
     // Comfortably longer than SYNC_ATTACH_BUDGET_MS (12s) so BOTH calls degrade to pending, with real
     // margin left before the underlying op actually settles.
-    const slowGate = async () => { await sleep(16_000); return { passed: true }; };
+    //
+    // Bounded gate-entry SIGNAL, not a blind sleep (card 47a515ff — 5th instance of this file's blind-
+    // sleep class in one day): in runWorkerGate, `computeWorktreeGateStamp` is awaited — and its result
+    // stored into `gateStartStamps` — strictly BEFORE `runGateSeq` (this injected `runGate`) is ever
+    // invoked (service.ts ~8003-8004 vs ~8022-8026, the latter inside `gateSemaphore.runExclusive`).
+    // That's a real happens-before in the PRODUCT code, not an assumption we're hoping holds: by the time
+    // `slowGate` below is entered, the worktree stamp is guaranteed already recorded. So resolving a
+    // signal on entry and awaiting THAT — instead of timing how long stamp-recording takes — makes the
+    // ordering exact rather than merely-usually-early-enough.
+    //
+    // A DEFERRED signal, not a rendezvous BARRIER (contrast gate-semaphore-concurrency.mjs scenario (B),
+    // card 595aad10): a barrier proves TWO INDEPENDENT calls genuinely overlap — a symmetric 2-arrival
+    // race where neither side has a natural ordering over the other. Here there is only ONE call whose
+    // OWN internal ordering (stamp-then-invoke) is already happens-before guaranteed by the product code
+    // — there's nothing to race, only a single point to observe. A barrier here would assume a race that
+    // doesn't exist; picking the wrong primitive still "passes" but tests something other than what the
+    // assertion claims.
+    //
+    // Bounded (not unbounded): `slowGate` runs inside `gateSemaphore.runExclusive` — if the semaphore is
+    // ever held elsewhere, entry could be delayed arbitrarily, and an unbounded await would HANG this
+    // test instead of failing it (a hang burns the whole suite's timeout and reports nothing useful).
+    // GATE_ENTRY_BOUND_MS is deliberately generous — it costs nothing on the pass path, which resolves
+    // near-instantly — and the timeout message below names both plausible causes so a red here is
+    // diagnosable, not ambiguous (mirrors 595aad10's own bounded-barrier timeout message).
+    const GATE_ENTRY_BOUND_MS = 8000;
+    let gateEntered;
+    const gateEnteredSignal = new Promise((resolve) => { gateEntered = resolve; });
+    const slowGate = async () => { gateEntered(); await sleep(16_000); return { passed: true }; };
     const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: slowGate });
 
     const p1 = sessions.runWorkerGate(workerId); // don't await — runs in the background
-    await sleep(500); // let run() start and record its worktree stamp
+    const enteredInTime = await Promise.race([
+      gateEnteredSignal.then(() => true),
+      sleep(GATE_ENTRY_BOUND_MS).then(() => false),
+    ]);
+    check(
+      enteredInTime
+        ? "(B) setup: the gate was entered within the bound (the worktree stamp is now guaranteed recorded)"
+        : `(B) setup: the gate was never entered within ${GATE_ENTRY_BOUND_MS}ms — either gate-semaphore contention delayed entry, or the stamp-then-invoke ordering in runWorkerGate has regressed (see service.ts ~8000-8026; GATE_ENTRY_BOUND_MS is deliberately generous, so rule out host load before suspecting the ordering)`,
+      enteredInTime,
+    );
 
     // Simulate "the worker edited the test after starting the gate" — an uncommitted edit to an EXISTING
     // tracked file (the origin finding's exact scenario), no commit.
