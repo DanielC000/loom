@@ -1093,7 +1093,14 @@ export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDe
     const ref = out.trim(); // e.g. "origin/main"
     const branch = ref.startsWith("origin/") ? ref.slice("origin/".length) : ref;
     return branch || null;
-  } catch {
+  } catch (e) {
+    // Card f96b9d7c: this catch used to be silent, so a repo with a genuinely NO resolvable origin/HEAD
+    // (the expected, permanent case) was indistinguishable from a TRANSIENT read failure (a timeout under
+    // boot-time load, a git error) — both just produced `null` with zero log output. Log the real cause
+    // here; the caller still treats both as "skip this repo, fail closed" (unchanged behavior), but the
+    // reason is now visible instead of silently swallowed.
+    // eslint-disable-next-line no-console
+    console.warn(`[git] resolveMainlineBranch failed for ${repoPath}: ${(e as Error).message}`);
     return null;
   }
 }
@@ -1102,10 +1109,18 @@ export async function resolveMainlineBranch(repoPath: string, deps: BoundedGitDe
  * Every local `loom/*` branch that's an ancestor of `mainlineBranch` — `git branch --list 'loom/*'
  * --merged <mainlineBranch>`, the native ancestor check (the same primitive {@link isBranchMerged} uses
  * per-branch, here as one bulk pass). `mainlineBranch` MUST come from {@link resolveMainlineBranch}, never
- * a literal or `HEAD` — see its doc. FAILS SAFE to `[]` on any error/timeout: a sweep that can't compute
- * "which branches are safe" must delete nothing, not guess.
+ * a literal or `HEAD` — see its doc. FAILS SAFE to an empty `branches` array on any error/timeout: a sweep
+ * that can't compute "which branches are safe" must delete nothing, not guess.
+ *
+ * Card f96b9d7c: the caught error is now LOGGED (repoPath + message) before failing safe, and the return
+ * carries a `failed` discriminator — so a caller can tell "the read genuinely found 0 merged branches"
+ * (`failed:false, branches:[]`) apart from "the read errored/timed out, so we don't actually know"
+ * (`failed:true, branches:[]`). Both fail safe to an empty branches array (nothing is ever deleted on
+ * uncertainty), but they used to be the SAME observable event with no log at all — indistinguishable from
+ * a healthy zero-to-reclaim repo. `failed` does not change the safety contract; it only restores
+ * visibility into which of the two silent-before cases actually happened.
  */
-export async function listMergedLoomBranches(repoPath: string, mainlineBranch: string, deps: BoundedGitDeps = {}): Promise<string[]> {
+export async function listMergedLoomBranches(repoPath: string, mainlineBranch: string, deps: BoundedGitDeps = {}): Promise<{ branches: string[]; failed: boolean }> {
   const { git, timeoutMs } = boundedGit(repoPath, deps);
   try {
     const out = await withTimeout(
@@ -1113,9 +1128,11 @@ export async function listMergedLoomBranches(repoPath: string, mainlineBranch: s
       timeoutMs,
       "git branch --list --merged",
     );
-    return out.split("\n").map((l) => l.trim()).filter(Boolean);
-  } catch {
-    return [];
+    return { branches: out.split("\n").map((l) => l.trim()).filter(Boolean), failed: false };
+  } catch (e) {
+    // eslint-disable-next-line no-console
+    console.warn(`[git] listMergedLoomBranches failed for ${repoPath} (mainline '${mainlineBranch}'): ${(e as Error).message} — failing safe to empty (nothing reclaimed this pass for this repo)`);
+    return { branches: [], failed: true };
   }
 }
 

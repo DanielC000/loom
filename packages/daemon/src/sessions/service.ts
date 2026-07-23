@@ -8642,7 +8642,7 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number }> {
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -8656,6 +8656,7 @@ export class SessionService {
     let branchesReclaimed = 0;
     let branchSweepSkippedRepos = 0;
     let branchSweepNoOrigin = 0;
+    let branchSweepFoundZero = 0;
 
     // A. Finish orphaned merges. Best-effort PER SESSION: finalizeMerge now swallows a removeWorktree
     // throw internally (so a busy dir won't even abort the per-session finalize), but the try/catch
@@ -8837,57 +8838,84 @@ export class SessionService {
     // commits yet) is skipped even if it were. No `fs.rm`/directory removal is involved anywhere in this
     // pass — branch-ref deletion is a small metadata op, structurally outside the bd9fc808 threadpool-leak
     // hazard class, so it needs none of removeWorktree's killable-process handling.
+    // Card f96b9d7c (round 2): a manager sampling the log a couple minutes into boot — before Pass C
+    // (which runs AFTER Passes A/B walk every session) has even started — saw no reclaim/no-origin/skip
+    // line and concluded the sweep silently did nothing. That's a FOURTH silent-failure shape none of the
+    // counters above cover: "hasn't run yet" was indistinguishable from "ran and found nothing" and from
+    // "ran and failed". This start-of-pass line closes that gap — it fires the moment Pass C begins, so
+    // its absence now unambiguously means "still waiting on Passes A/B", not "the sweep is broken".
     const sweptRepoPaths = new Set<string>();
     for (const project of this.db.listProjects()) {
-      const repoPaths = [project.repoPath, ...project.repos.map((r) => r.path)].filter((p): p is string => !!p);
-      for (const repoPath of repoPaths) {
-        if (sweptRepoPaths.has(repoPath)) continue; // multiple projects can name the same physical repo
-        sweptRepoPaths.add(repoPath);
-        try {
-          const mainline = await resolveMainlineBranch(repoPath, { timeoutMs: this.gitOpMs });
-          if (!mainline) {
-            // No resolvable origin/HEAD (see resolveMainlineBranch's doc — `git init`-only projects, e.g.
-            // one made via `project_init`, never have this ref, so THIS repo's sweep is inert forever).
-            // Fail closed, but stay VISIBLE about it: counted separately from branchSweepSkippedRepos (a
-            // genuine git error) so an inert-because-no-origin repo is distinguishable in the summary from
-            // a healthy "swept, 0 to do" repo — a silent skip here is exactly the failure shape this card
-            // started from (a gap nobody could see until someone measured the repo directly).
-            branchSweepNoOrigin++;
-            continue;
-          }
-          const merged = await listMergedLoomBranches(repoPath, mainline, { timeoutMs: this.gitOpMs });
-          if (merged.length === 0) continue;
-          const checkedOut = await listCheckedOutBranches(repoPath, { timeoutMs: this.gitOpMs });
-          // Defense-in-depth, KEEP even though `deleteBranches`'/`deleteBranch`'s own `git branch -D`
-          // independently refuses to delete a branch checked out in another worktree: git's refusal is an
-          // implementation detail of `-D` we don't want this sweep's correctness to depend on, and without
-          // this explicit filter a checked-out-but-merged branch would still be ATTEMPTED every boot
-          // (wasted work, a spurious warn, and non-idempotent — see card 09f268a5's test, which proves this
-          // exact case via the reclaim COUNT and idempotency, not branch-survival, precisely because the
-          // git-level refusal already covers survival on its own).
-          const toDelete = merged.filter((branch) => !checkedOut.has(branch));
-          if (toDelete.length > 0) {
-            // Batched (card 09f268a5's measured ~14x win over one-`deleteBranch`-call-per-branch: 14.1s →
-            // 0.99s at 275 branches on this host) — `deleteBranches` falls back to per-branch deletes on a
-            // chunk failure, so `deleted.length` is always the REAL count, never an over/undercount.
-            const { deleted } = await deleteBranches(repoPath, toDelete, { timeoutMs: this.gitOpMs });
-            branchesReclaimed += deleted.length;
-          }
-        } catch (e) {
-          // listCheckedOutBranches (unlike listMergedLoomBranches) THROWS on failure rather than failing
-          // safe to empty — an empty "checked out" set would be the UNSAFE direction. So a failure here
-          // means we cannot tell what's safe: skip this repo's branch sweep entirely for this boot pass,
-          // retried automatically next boot, exactly like every other Pass B uncertainty above.
+      for (const repoPath of [project.repoPath, ...project.repos.map((r) => r.path)]) {
+        if (repoPath) sweptRepoPaths.add(repoPath);
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.log(`[reconcile] branch-ref sweep starting for ${sweptRepoPaths.size} repo(s)`);
+    for (const repoPath of sweptRepoPaths) {
+      try {
+        const mainline = await resolveMainlineBranch(repoPath, { timeoutMs: this.gitOpMs });
+        if (!mainline) {
+          // No resolvable origin/HEAD (see resolveMainlineBranch's doc — `git init`-only projects, e.g.
+          // one made via `project_init`, never have this ref, so THIS repo's sweep is inert forever).
+          // Fail closed, but stay VISIBLE about it: counted separately from branchSweepSkippedRepos (a
+          // genuine git error) so an inert-because-no-origin repo is distinguishable in the summary from
+          // a healthy "swept, 0 to do" repo — a silent skip here is exactly the failure shape this card
+          // started from (a gap nobody could see until someone measured the repo directly).
+          branchSweepNoOrigin++;
+          continue;
+        }
+        // Card f96b9d7c: listMergedLoomBranches now returns a `failed` discriminator instead of only
+        // an empty array, so "the read genuinely found nothing" and "the read errored/timed out" are no
+        // longer the SAME silent event. A `failed` read is a genuine git-level uncertainty — same bucket
+        // as branchSweepSkippedRepos below (skip this repo, retry next boot) — and the underlying `[git]`
+        // warn already logged the cause; a genuinely-zero read is the expected steady state once the
+        // backlog clears, but per this card's incident it must stay LOUD, not silent, so it's logged
+        // per-repo too.
+        const { branches: merged, failed: mergedReadFailed } = await listMergedLoomBranches(repoPath, mainline, { timeoutMs: this.gitOpMs });
+        if (mergedReadFailed) {
           branchSweepSkippedRepos++;
           // eslint-disable-next-line no-console
-          console.warn(`[reconcile] skipped branch-ref sweep for ${repoPath}: ${(e as Error).message}`);
+          console.warn(`[reconcile] skipped branch-ref sweep for ${repoPath}: could not read merged loom/* branches (see the [git] warning above) — retried next boot`);
+          continue;
         }
+        if (merged.length === 0) {
+          branchSweepFoundZero++;
+          // eslint-disable-next-line no-console
+          console.log(`[reconcile] branch-ref sweep for ${repoPath}: read succeeded against mainline '${mainline}', 0 merged loom/* branch(es) found — nothing to reclaim`);
+          continue;
+        }
+        const checkedOut = await listCheckedOutBranches(repoPath, { timeoutMs: this.gitOpMs });
+        // Defense-in-depth, KEEP even though `deleteBranches`'/`deleteBranch`'s own `git branch -D`
+        // independently refuses to delete a branch checked out in another worktree: git's refusal is an
+        // implementation detail of `-D` we don't want this sweep's correctness to depend on, and without
+        // this explicit filter a checked-out-but-merged branch would still be ATTEMPTED every boot
+        // (wasted work, a spurious warn, and non-idempotent — see card 09f268a5's test, which proves this
+        // exact case via the reclaim COUNT and idempotency, not branch-survival, precisely because the
+        // git-level refusal already covers survival on its own).
+        const toDelete = merged.filter((branch) => !checkedOut.has(branch));
+        if (toDelete.length > 0) {
+          // Batched (card 09f268a5's measured ~14x win over one-`deleteBranch`-call-per-branch: 14.1s →
+          // 0.99s at 275 branches on this host) — `deleteBranches` falls back to per-branch deletes on a
+          // chunk failure, so `deleted.length` is always the REAL count, never an over/undercount.
+          const { deleted } = await deleteBranches(repoPath, toDelete, { timeoutMs: this.gitOpMs });
+          branchesReclaimed += deleted.length;
+        }
+      } catch (e) {
+        // listCheckedOutBranches (unlike listMergedLoomBranches) THROWS on failure rather than failing
+        // safe to empty — an empty "checked out" set would be the UNSAFE direction. So a failure here
+        // means we cannot tell what's safe: skip this repo's branch sweep entirely for this boot pass,
+        // retried automatically next boot, exactly like every other Pass B uncertainty above.
+        branchSweepSkippedRepos++;
+        // eslint-disable-next-line no-console
+        console.warn(`[reconcile] skipped branch-ref sweep for ${repoPath}: ${(e as Error).message}`);
       }
     }
     if (branchSweepNoOrigin > 0) {
-      // Distinguishable from a healthy "swept, 0 to reclaim" repo (which logs nothing) AND from
-      // branchSweepSkippedRepos (a genuine git error) — this is neither: it's a repo that will NEVER be
-      // swept until it gets an `origin` remote with `HEAD` set, and that must stay visible, not silent.
+      // Distinguishable from a healthy "swept, 0 to reclaim" repo (branchSweepFoundZero, logged per-repo
+      // above) AND from branchSweepSkippedRepos (a genuine read failure) — this is neither: it's a repo
+      // that will NEVER be swept until it gets an `origin` remote with `HEAD` set, and that must stay
+      // visible, not silent.
       // eslint-disable-next-line no-console
       console.warn(`[reconcile] branch-ref sweep permanently inert for ${branchSweepNoOrigin} repo(s) — no 'origin' remote / no resolvable origin/HEAD (e.g. a project_init'd git-init-only repo). Their loom/* branches will never be automatically reclaimed until an origin remote is added and its HEAD is set (git remote add origin <url> && git remote set-head origin -a).`);
     }
@@ -8919,6 +8947,6 @@ export class SessionService {
     if (branchesReclaimed > 0) {
       console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
     }
-    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin };
+    return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
   }
 }

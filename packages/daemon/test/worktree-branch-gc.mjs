@@ -17,6 +17,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (G) `deleteBranches`' batched-with-fallback contract: in one chunk of branches handed to a SINGLE
 //       `git branch -D` call, one is UNDELETABLE (checked out) — git deletes the others and exits
 //       non-zero. The rest must still be reclaimed AND counted, not abandoned with the bad one.
+// Card f96b9d7c: the sweep deployed and reclaimed ZERO on the first post-deploy boot, logging NOTHING —
+// because listMergedLoomBranches's fail-safe-to-[] catch was silent, making "the git read failed" and
+// "there is nothing to reclaim" the SAME observable event. Proves the fix:
+//   (f96b9d7c-1) a genuine git-read failure now returns {failed:true} AND is logged (was silent `[]`).
+//   (f96b9d7c-2) a genuine zero-to-reclaim read returns {failed:false} — distinguishable from the above.
+//   (f96b9d7c-3) reconcile's own "swept, found zero" outcome (R4, a resolvable-mainline repo with no
+//       loom/* branches) is counted (branchSweepFoundZero) AND logged per-repo, on both the first and the
+//       idempotent second reconcile() call — no longer silent just because the count happens to be zero.
 // Run: 1) build daemon, 2) node test/worktree-branch-gc.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -29,7 +37,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { createWorktree, resolveMainlineBranch, listCheckedOutBranches, deleteBranches } = await import("../dist/git/worktrees.js");
+const { createWorktree, resolveMainlineBranch, listCheckedOutBranches, deleteBranches, listMergedLoomBranches } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -51,6 +59,7 @@ const F = `loom/f-merged-into-other-not-mainline-${sfx}`;
 const R1 = path.join(os.tmpdir(), `loom-bgc-r1-${sfx}`);
 const R2 = path.join(os.tmpdir(), `loom-bgc-r2-${sfx}`);
 const R3 = path.join(os.tmpdir(), `loom-bgc-r3-${sfx}`);
+const R4 = path.join(os.tmpdir(), `loom-bgc-r4-${sfx}`);
 let cWorktree, dWorktree, dBranch, gBadWorktree;
 
 try {
@@ -142,12 +151,40 @@ try {
   check("(G) the 3 good branches are ACTUALLY gone", gGood.every((n) => !branchExists(R3, n)));
   check("(G) the bad branch SURVIVES (still checked out)", branchExists(R3, gBad));
 
+  // --- R4: a resolvable-mainline repo with NO loom/* branches at all — used to prove the reconcile pass's
+  // "genuinely swept, found zero" outcome is now VISIBLE (card f96b9d7c), distinct from a read failure. ---
+  fs.mkdirSync(R4, { recursive: true });
+  fs.writeFileSync(path.join(R4, "README.md"), "# r4\n");
+  execSync(`git init -q && git add . && git ${GIT_ID} commit -q -m init`, { cwd: R4 });
+  git(R4, "branch -M main");
+  git(R4, "symbolic-ref refs/remotes/origin/HEAD refs/remotes/origin/main");
+  db.insertProject({ id: `bgc-p4-${sfx}`, name: "BGC-R4", repoPath: R4, vaultPath: R4, config: {}, createdAt: now, archivedAt: null });
+
   // --- direct primitive checks ---
   check("resolveMainlineBranch resolves 'main' for a repo with a symbolic origin/HEAD", await resolveMainlineBranch(R1) === "main");
   check("resolveMainlineBranch fails CLOSED (null) for a repo with no origin remote", await resolveMainlineBranch(R2) === null);
   let threwOnBadRepo = false;
   try { await listCheckedOutBranches(path.join(os.tmpdir(), `loom-bgc-does-not-exist-${sfx}`)); } catch { threwOnBadRepo = true; }
   check("listCheckedOutBranches THROWS (not fail-safe-empty) when it can't read worktree state", threwOnBadRepo);
+
+  // --- Card f96b9d7c: listMergedLoomBranches must distinguish "read genuinely failed" from "read
+  // succeeded, found zero" — before this fix both were the SAME silent `[]`, indistinguishable from each
+  // other and from a healthy empty result. This is the exact defect the card describes: a repo that
+  // visibly has hundreds of merged refs swept to a silent zero, with no way to tell why. ---
+  const capturedWarnings = [];
+  const origWarn = console.warn;
+  console.warn = (msg) => { capturedWarnings.push(msg); };
+  let failResult;
+  try {
+    failResult = await listMergedLoomBranches(R1, "main", { gitFactory: () => ({ raw: async () => { throw new Error("simulated git read failure"); } }) });
+  } finally {
+    console.warn = origWarn;
+  }
+  check("(f96b9d7c) a genuine git-read failure returns failed:true (still fails safe to an empty array)", failResult.failed === true && Array.isArray(failResult.branches) && failResult.branches.length === 0);
+  check("(f96b9d7c) the failure is LOGGED (previously totally silent — the exact bug the card reports)", capturedWarnings.some((m) => m.includes("listMergedLoomBranches failed") && m.includes("simulated git read failure")));
+
+  const zeroResult = await listMergedLoomBranches(R4, "main");
+  check("(f96b9d7c) a genuine zero-to-reclaim read returns failed:false (distinguishable from the failure case above)", zeroResult.failed === false && zeroResult.branches.length === 0);
 
   // --- sanity: every fixture branch exists before reconcile ---
   check("(pre) A exists", branchExists(R1, A));
@@ -160,8 +197,17 @@ try {
   check("(pre) F is NOT merged into real mainline 'main'", git(R1, "branch --merged main --list " + F) === "");
   check("(pre) R1's primary checkout is parked on 'other', not main", git(R1, "rev-parse --abbrev-ref HEAD") === "other");
 
-  // --- FIRST reconcile ---
-  const r1 = await sessions.reconcileOrchestrationOnBoot();
+  // --- FIRST reconcile --- capture console.log to prove R4's "swept, found zero" outcome is now LOGGED
+  // (card f96b9d7c's core complaint: this used to be the SAME silent event as a read failure).
+  const capturedLogs = [];
+  const origLog = console.log;
+  console.log = (msg) => { capturedLogs.push(msg); origLog(msg); };
+  let r1;
+  try {
+    r1 = await sessions.reconcileOrchestrationOnBoot();
+  } finally {
+    console.log = origLog;
+  }
 
   check("(A) merged branch with no worktree is SWEPT", !branchExists(R1, A));
   check("(B) unmerged branch SURVIVES (has real commits ahead of mainline)", branchExists(R1, B));
@@ -173,6 +219,9 @@ try {
   check("(counts) branchesReclaimed counts exactly the 2 safe deletions (A + D)", r1.branchesReclaimed === 2);
   check("(counts) no repo genuinely errored", r1.branchSweepSkippedRepos === 0);
   check("(counts) R2 (no origin) is counted as permanently-inert, not a genuine error", r1.branchSweepNoOrigin === 1);
+  check("(f96b9d7c) R4 (zero loom/* branches) is counted as a genuine swept-zero, not silently indistinguishable from a failure", r1.branchSweepFoundZero === 1);
+  check("(f96b9d7c) R4's swept-zero outcome is actually LOGGED, not silent", capturedLogs.some((m) => m.includes(R4) && m.includes("0 merged loom/* branch(es) found")));
+  check("(f96b9d7c round 2) a start-of-pass log line fires BEFORE any per-repo outcome — makes \"hasn't run yet\" distinguishable from \"ran and found nothing\"", capturedLogs.some((m) => /branch-ref sweep starting for \d+ repo\(s\)/.test(m)));
 
   // --- SECOND reconcile: idempotent — nothing left to reclaim, survivors still survive, no throw ---
   const r2 = await sessions.reconcileOrchestrationOnBoot();
@@ -181,13 +230,14 @@ try {
   check("(no-op) C still survives", branchExists(R1, C));
   check("(no-op) E still survives", branchExists(R2, E));
   check("(no-op) F still survives", branchExists(R1, F));
+  check("(f96b9d7c, no-op) R4 still counts as a genuine swept-zero on the idempotent second run", r2.branchSweepFoundZero === 1);
 } finally {
   db.close();
   for (const p of [cWorktree, dWorktree, gBadWorktree]) {
     if (!p) continue;
     try { fs.rmSync(p, { recursive: true, force: true }); } catch { /* ignore */ }
   }
-  for (const r of [R1, R2, R3]) fs.rmSync(r, { recursive: true, force: true });
+  for (const r of [R1, R2, R3, R4]) fs.rmSync(r, { recursive: true, force: true });
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
 }
 
