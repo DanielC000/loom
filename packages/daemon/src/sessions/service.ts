@@ -5749,7 +5749,15 @@ export class SessionService {
    * - `parked-gate-stale` — mirrors `parked-background-stale`'s reasoning: a `run_gate` op that's been
    *   RUNNING for `BACKGROUND_PARK_STALE_MINUTES` or more is past this repo's own ~8-10 minute real-gate
    *   runtime — likely wedged rather than genuinely still executing — so classification stops asserting
-   *   "no reply owed" and falls through to this actionable kind instead.
+   *   "no reply owed" and falls through to this actionable kind instead. **Measured from GateSemaphore
+   *   ADMISSION, never from `PendingOpRegistry`'s own `startedAt`** (card 865c528e): the registry stamps
+   *   `startedAt` the moment `run_gate` is CALLED, which for a queued gate (the daemon-global
+   *   `maxConcurrentGates` cap already saturated) can be arbitrarily long before the gate is actually
+   *   admitted and starts running — comparing that against a threshold calibrated to RUN time misclassifies
+   *   an unbounded, perfectly healthy queue wait as a wedged gate. The live `GateSemaphore` registry
+   *   (looked up by the op's own `opId` via `findByOpId`, the same lookup `gate_status` uses) distinguishes
+   *   "queued" (never admitted — this branch never fires, no matter how long the wait) from "running"
+   *   (admitted — `since` IS the admission timestamp, exactly what the threshold is calibrated against).
    * - `stranded` — genuinely finished a turn, never (usefully) reported, and none of the above apply.
    */
   private classifyIdleWorker(workerSessionId: string):
@@ -5785,10 +5793,24 @@ export class SessionService {
     // finishes; the retention window doesn't make a just-settled gate misread as still in progress here.
     const pendingGate = this.pendingOps.peek(`gate:${workerSessionId}`);
     if (pendingGate && pendingGate.state === "running") {
-      const minutesSinceStart = (Date.now() - Date.parse(pendingGate.startedAt)) / 60_000;
-      if (minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES) {
-        return { kind: "parked-gate-stale", minutesSinceStart: Math.round(minutesSinceStart) };
+      // QUEUE-VS-RUN FIX (card 865c528e): `pendingGate.startedAt` is PendingOpRegistry's own bookkeeping —
+      // stamped when `run_gate` was CALLED, i.e. op REGISTRATION, not when the gate was actually ADMITTED
+      // by GateSemaphore. Comparing that against a threshold calibrated to real gate RUNTIME misclassifies
+      // an unbounded, perfectly healthy queue wait (the daemon-global `maxConcurrentGates` cap saturated by
+      // another project's gate) as a wedged gate — verified directly: an op can show `state:"running"` here
+      // while `gate_status` reports the SAME op still `state:"queued"`, zero seconds actually executed. Look
+      // the op up in the LIVE GateSemaphore registry (by its own `opId` — the same lookup `gate_status`
+      // uses) to get the real phase and, for a running gate, its true admission timestamp (`since`).
+      const liveGate = this.gateSemaphore.findByOpId(pendingGate.opId, workerSessionId);
+      if (liveGate.kind === "found" && liveGate.record.phase === "running") {
+        const minutesSinceStart = (Date.now() - liveGate.record.since) / 60_000;
+        if (minutesSinceStart >= BACKGROUND_PARK_STALE_MINUTES) {
+          return { kind: "parked-gate-stale", minutesSinceStart: Math.round(minutesSinceStart) };
+        }
       }
+      // Still QUEUED (never admitted — no matter how long the wait), OR admitted but under the threshold,
+      // OR the live registry lookup missed (the gate settled in the race between the two peeks, or the op
+      // never carried an opId) — none of these is ever a wedged-gate signal, so no nudge fires either way.
       return { kind: "parked-gate" };
     }
 
