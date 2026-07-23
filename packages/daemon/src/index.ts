@@ -805,16 +805,25 @@ async function main(): Promise<void> {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
   });
 
-  // Boot-time canonical-index residue scan (card 9e77050f): the merge-time refusal in mergeBranchLocked
-  // already makes the corruption this guards against impossible on its own (a residue-bearing repo now
-  // fails its next merge closed instead of silently absorbing it) — this is purely an early-warning
-  // courtesy, shrinking "someone notices" from "next merge attempt" to "next boot". READ-ONLY, never
-  // resets anything (same ambiguity as the merge-time check: this can't tell a dead squash's leftover
-  // stage apart from a human's own WIP in that checkout), and best-effort like the reconcile kick above —
-  // never gates boot.
+  // Boot-time canonical-index residue scan (card 9e77050f, narrowed by card 06b5c47f): the merge-time
+  // refusal in mergeBranchLocked already makes the corruption this guards against impossible on its own
+  // (a staged-residue-bearing repo now fails its next merge closed instead of silently absorbing it) —
+  // this is purely an early-warning courtesy, shrinking "someone notices" from "next merge attempt" to
+  // "next boot". READ-ONLY, never resets anything (same ambiguity as the merge-time check: this can't
+  // tell a dead squash's leftover stage apart from a human's own WIP in that checkout), and best-effort
+  // like the reconcile kick above — never gates boot. Worded differently for staged vs. unstaged-only
+  // dirt (card 06b5c47f) since only staged content is a genuine residue suspicion / will block a merge —
+  // an earlier version of this message called BOTH "possible stale merge residue" and asserted the next
+  // merge would refuse, which was simply false for unstaged dirt (measured 4-for-4 false positives) and
+  // gave a user staring at a submodule gitlink (` M some/submodule` — a normal steady state for a repo
+  // with submodules, not residue) no way to guess what was being asked of them.
   void scanCanonicalReposForMergeResidue(db.listProjects().map((p) => p.repoPath)).then((dirty) => {
     for (const d of dirty) {
-      console.warn(`[boot] canonical repo has uncommitted tracked changes at ${d.repoPath} — possible stale merge residue (card 9e77050f); the next merge attempt against it will refuse rather than risk absorbing it, but a human should inspect \`git status\`/\`git diff\` there:\n${d.status}`);
+      if (d.staged) {
+        console.warn(`[boot] canonical repo has STAGED uncommitted changes at ${d.repoPath} — possible stale merge residue (card 9e77050f); the next merge attempt against it WILL refuse rather than risk absorbing it, a human should inspect \`git status\`/\`git diff --cached\` there:\n${d.status}`);
+      } else {
+        console.warn(`[boot] canonical repo has unstaged tracked changes at ${d.repoPath} — this is ordinary uncommitted work-in-progress in the canonical checkout, NOT staged, so it will NOT block the next merge attempt; no action needed unless it's unexpected (a common benign cause: a submodule whose checked-out commit is ahead of its recorded pointer, which shows up here but is normal steady state, not residue):\n${d.status}`);
+      }
     }
   }).catch((err) => {
     console.warn(`[boot] canonical-repo merge-residue scan failed (continuing boot): ${(err as Error).message}`);

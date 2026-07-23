@@ -2807,43 +2807,98 @@ async function mergeBranchLocked(
   // setting MERGE_HEAD and WITHOUT any unmerged entry — the one state the clear above cannot see, because by
   // the time we get here it has already handled every AFFIRMATIVE in-progress-merge signal there is.
   //
-  // Whatever is dirty at this point is therefore either (a) that dead squash's own leftover stage, or (b) a
-  // human's own uncommitted work-in-progress in THIS SAME canonical checkout (this repo self-hosts from it —
+  // Whatever is STAGED at this point is therefore either (a) that dead squash's own leftover stage, or (b) a
+  // human's own staged work-in-progress in THIS SAME canonical checkout (this repo self-hosts from it —
   // there is no worktree isolation here the way there is for a worker). Git state alone cannot distinguish
-  // (a) from (b), and `reset --hard` would destroy (b) — a self-inflicted version of the exact "silently
-  // destroy real work" failure this whole function exists to prevent. So on ANY dirty TRACKED state — staged
-  // or unstaged; untracked files are deliberately excluded, since `reset --hard` never touches them and so
-  // they're not at risk here — we REFUSE LOUDLY instead of guessing. This is a false NOT-merged, not a false
-  // landed: `ok:false` is what every other defensive path in this function already returns on ambiguity, and
-  // it's a safe, idempotent retry once a human resolves the canonical checkout by hand — never a silent
-  // absorption of someone else's content under our own subject/trailer.
+  // (a) from (b) — so on ANY staged tracked state we REFUSE LOUDLY instead of guessing. This is a false
+  // NOT-merged, not a false landed: `ok:false` is what every other defensive path in this function already
+  // returns on ambiguity, and it's a safe, idempotent retry once a human resolves the canonical checkout by
+  // hand — never a silent absorption of someone else's content under our own subject/trailer.
   //
-  // Placement matters: this runs AFTER the MERGE_HEAD/unmerged clear above (so it only fires on residue that
-  // survived it — that block keeps its existing shipped auto-clear behavior unchanged, out of scope here) and
-  // BEFORE `--squash` runs. That ordering makes every `reset --hard` BELOW this point in this function
-  // provably safe — but ONLY because the probe's SCOPE matches what `reset --hard` actually touches. A
-  // precondition only licenses the operation over the state it actually observed: an index-only probe
-  // (`diff --cached`) would license index-only conclusions, not "the working tree is safe to reset" — that
-  // mismatch is exactly how the pre-fix code (and an earlier draft of this fix) stayed vulnerable to
-  // discarding a human's UNSTAGED edits even after correctly refusing on staged ones. `git status --porcelain`
-  // covers staged AND unstaged tracked state — the same blast radius `reset --hard` has — so there is no gap
-  // between what this check clears and what the resets below are allowed to assume.
-  let dirtyAtEntry: string;
+  // ⚠️ This precondition is deliberately SCOPED TO THE INDEX (card 06b5c47f, correcting an earlier draft of
+  // this fix that refused on ANY dirty tracked state — staged OR unstaged). Only staged content can actually
+  // produce the corruption this guard exists to prevent: `--squash` commits the INDEX, so unstaged
+  // working-tree edits are never committed by it and can never end up under this branch's subject/trailer.
+  // The earlier broad check refused 4-for-4 on real canonical repos whose only dirt was UNSTAGED (ordinary
+  // WIP, or a submodule gitlink whose checked-out commit sits ahead of its recorded pointer — a normal
+  // steady state for a repo with submodules, not residue, and NOT something a human can necessarily clear),
+  // which could block a legitimately-configured repo's merges PERMANENTLY. So the MERGE refusal below keys
+  // on the index alone (`diff --cached`).
+  //
+  // That narrowing does NOT license every `reset --hard` further down in this function — those have a
+  // WIDER blast radius (staged AND unstaged tracked state), so they get their OWN separate guard,
+  // `hadUnstagedDirtAtEntry` (computed right after this check, from the same broad `git status --porcelain`
+  // the old single check used), which skips the reset instead of running it whenever unstaged dirt predates
+  // this merge attempt. A precondition only licenses the operation over the state it actually observed — an
+  // index-only probe licenses index-only conclusions, not "the working tree is safe to reset". See
+  // `resetOrSkip`'s own doc below for how that guard stays scoped to what `reset --hard` actually touches.
+  let stagedAtEntry: string;
   try {
-    dirtyAtEntry = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (canonical, entry check)")).trim();
+    stagedAtEntry = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, entry check)")).trim();
   } catch (e) {
-    return { ok: false, reason: `failed to inspect canonical repo state before merge: ${(e as Error).message}` };
+    return { ok: false, reason: `failed to inspect canonical repo staged state before merge: ${(e as Error).message}` };
   }
-  if (dirtyAtEntry !== "") {
+  if (stagedAtEntry !== "") {
     // The text below is the ONLY part of this refusal a caller (a manager, mid-fleet, who has never read
-    // card 9e77050f) actually sees — so it has to make the required action unmistakable on its own, not
-    // rely on this comment. It must say, explicitly: this is not the branch's fault (retrying does
-    // nothing); a HUMAN has to act on the canonical checkout, their call how; and the refusal itself is
-    // deliberate, not a bug — auto-clearing was rejected precisely because it could destroy real work.
+    // card 9e77050f/06b5c47f) actually sees — so it has to make the required action unmistakable on its
+    // own, not rely on this comment. It must say, explicitly: this is not the branch's fault (retrying
+    // does nothing); a HUMAN has to act on the canonical checkout, their call how; and the refusal itself
+    // is deliberate, not a bug — auto-clearing was rejected precisely because it could destroy real work.
     return {
       ok: false,
-      reason: `MERGE REFUSED — the canonical repo has uncommitted changes that predate this merge and are unrelated to branch '${branch}'. This is NOT a problem with '${branch}' or its code: retrying this merge (or any other) against this repo will refuse again identically until a HUMAN resolves the canonical checkout by hand — inspect \`git status\`/\`git diff\` there, then commit, stash, or discard whatever is dirty (your call which). This refusal is DELIBERATE, not a bug: the dirty state may be a daemon-restart-interrupted squash, or it may be someone's real uncommitted work, and Loom cannot tell the two apart from git state alone — auto-clearing it (e.g. \`git reset --hard\`) risks silently destroying that work, so it refuses instead. Once the canonical repo is clean, merges resume normally with no further action needed. Dirty state:\n${dirtyAtEntry}`,
+      reason: `MERGE REFUSED — the canonical repo has STAGED, uncommitted changes that predate this merge and are unrelated to branch '${branch}'. This is NOT a problem with '${branch}' or its code: retrying this merge (or any other) against this repo will refuse again identically until a HUMAN resolves the canonical checkout by hand — inspect \`git status\`/\`git diff --cached\` there, then commit, unstage, or discard whatever is staged (your call which). This refusal is DELIBERATE, not a bug: the staged state may be a daemon-restart-interrupted squash (a \`--squash\` commits the INDEX, which is exactly what can corrupt a merge), or it may be someone's real staged work, and Loom cannot tell the two apart from git state alone — auto-clearing it (e.g. \`git reset --hard\`) risks silently destroying that work, so it refuses instead. (Unstaged tracked changes elsewhere in the checkout — ordinary WIP, or a submodule whose checked-out commit differs from its recorded pointer — do NOT block a merge; only staged content does.) Once the canonical repo's index is clean, merges resume normally with no further action needed. Staged state:\n${stagedAtEntry}`,
     };
+  }
+  // Broad probe (staged AND unstaged tracked state — untracked files excluded, same rationale as always:
+  // `reset --hard` never touches them, so they're not at risk). This does NOT gate the merge — only
+  // `hadUnstagedDirtAtEntry` derived from it, which every `reset --hard` cleanup call below consults via
+  // `resetOrSkip` before running, so a human's pre-existing unstaged edits (or a submodule gitlink) are
+  // never silently discarded by a cleanup path this merge attempt triggers.
+  let statusAtEntry: string;
+  try {
+    statusAtEntry = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (canonical, entry check)")).trim();
+  } catch (e) {
+    return { ok: false, reason: `failed to inspect canonical repo working-tree state before merge: ${(e as Error).message}` };
+  }
+  const hadUnstagedDirtAtEntry = statusAtEntry !== "";
+  // Every `reset --hard HEAD` below this point in this function discards BOTH staged and unstaged tracked
+  // state — a wider blast radius than the staged-only entry check above proved safe. `resetOrSkip` is the
+  // guard scoped to that wider radius: when unstaged dirt predated this merge attempt, it SKIPS the reset
+  // (leaving whatever's on disk untouched) instead of risking a human's pre-existing unstaged edits, and
+  // reports why. What it leaves behind on skip is provably safe to leave: since the entry check above
+  // already proved the index was clean, and git itself refuses to let `--squash` silently overwrite
+  // unstaged local modifications (it errors instead), anything staged from this point on is this squash's
+  // OWN output — which the STAGED entry check above will refuse on loudly, not silently absorb, the next
+  // time a merge is attempted against this repo.
+  //
+  // ⚠️ REJECTED ALTERNATIVE (card 06b5c47f): a MIXED reset (`git reset HEAD`, no `--hard`) looks like a
+  // strictly better move here — it clears the staged residue without touching the working tree, so it
+  // reads as "auto-recover AND protect the human's edits" instead of "skip and make a human clean up".
+  // It is not. `--squash` applies its diff to the WORKING TREE as well as the index (this is a real merge,
+  // just uncommitted) — a mixed reset only unstages that diff, it does not undo it. The squash's output
+  // would keep sitting in the canonical working tree as unstaged noise, indistinguishable from ordinary
+  // WIP. That state is QUIETER than what this function ships, not safer: `diff --cached` would come back
+  // empty, so the NEXT merge attempt would proceed (not refuse) and `--squash` a new branch on top of a
+  // tree that already silently carries a previous branch's abandoned changes — trading a loud, correct
+  // refusal for a silent, ambiguous working tree. Silent-and-ambiguous around this exact function is what
+  // cost a reviewed p1 (see the file-level corruption-history doc above); this function does not
+  // reintroduce that shape to buy a nicer-looking auto-recovery.
+  //
+  // One real consequence of skipping instead: a genuine squash CONFLICT that lands on top of pre-existing
+  // unstaged dirt leaves the canonical repo needing HUMAN cleanup (conflict markers + the unstaged dirt,
+  // both left in place) rather than auto-resolving. That is the same `9e77050f` stance — refuse loudly,
+  // a human resolves — now correctly SCOPED to cases that are actually dangerous instead of firing on
+  // ordinary WIP. It is deliberate, not a regression.
+  async function resetOrSkip(context: string): Promise<string | null> {
+    if (hadUnstagedDirtAtEntry) {
+      return `skipped automatic cleanup (${context}) because the canonical repo already had unstaged tracked changes before this merge attempt — resetting would risk discarding them; a human must resolve the canonical checkout by hand, and the next merge attempt will refuse loudly on any staged residue this left behind`;
+    }
+    try {
+      await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, `git reset --hard (canonical, ${context})`);
+      return null;
+    } catch (e) {
+      return `reset --hard (${context}) failed — canonical repo may have residue: ${(e as Error).message}`;
+    }
   }
 
   let rawError = false;
@@ -2866,19 +2921,16 @@ async function mergeBranchLocked(
   try {
     conflicted = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, post-squash)")).trim() !== "";
   } catch (e) {
-    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, post-squash-probe-failure cleanup)"); } catch { /* best-effort; still fail closed below */ }
-    return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}` };
+    const cleanupIssue = await resetOrSkip("post-squash-probe-failure cleanup");
+    return { ok: false, reason: `failed to inspect canonical index for conflicts after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
   }
   if (conflicted) {
     // The cleanup that's supposed to leave the canonical repo UNTOUCHED can ITSELF fail (busy index lock,
     // read-only tree); swallowing it would assert a clean "conflict" while the repo is left with unmerged/
     // partial-index residue. SURFACE it via `reason` so the caller knows the canonical repo needs recovery
     // rather than trusting the (now false) "untouched" guarantee.
-    try {
-      await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, conflict cleanup)");
-    } catch (e) {
-      return { ok: false, conflict: true, reason: `conflict cleanup (reset --hard HEAD) failed — canonical repo may have unmerged residue: ${(e as Error).message}` };
-    }
+    const cleanupIssue = await resetOrSkip("conflict cleanup");
+    if (cleanupIssue) return { ok: false, conflict: true, reason: cleanupIssue };
     return { ok: false, conflict: true };
   }
   // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
@@ -2890,8 +2942,8 @@ async function mergeBranchLocked(
   // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
   // anything outside it.
   if (rawError) {
-    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, rawError cleanup)"); } catch { /* nothing to reset, or already clean */ }
-    return { ok: false, reason: "git merge --squash failed" };
+    const cleanupIssue = await resetOrSkip("rawError cleanup");
+    return { ok: false, reason: cleanupIssue ? `git merge --squash failed (${cleanupIssue})` : "git merge --squash failed" };
   }
   // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
   // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
@@ -2903,8 +2955,8 @@ async function mergeBranchLocked(
   try {
     staged = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, staged check)")).trim() !== "";
   } catch (e) {
-    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, staged-probe-failure cleanup)"); } catch { /* best-effort; still fail closed below */ }
-    return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}` };
+    const cleanupIssue = await resetOrSkip("staged-probe-failure cleanup");
+    return { ok: false, reason: `failed to inspect canonical index staged diff after squash: ${(e as Error).message}${cleanupIssue ? ` (${cleanupIssue})` : ""}` };
   }
   if (!staged) {
     // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
@@ -2934,28 +2986,32 @@ async function mergeBranchLocked(
   try {
     await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
   } catch (e) {
-    try { await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, commit-failure cleanup)"); } catch { /* leave nothing partial */ }
-    return { ok: false, reason: `squash commit failed: ${(e as Error).message}` };
+    const cleanupIssue = await resetOrSkip("commit-failure cleanup");
+    return { ok: false, reason: cleanupIssue ? `squash commit failed: ${(e as Error).message} (${cleanupIssue})` : `squash commit failed: ${(e as Error).message}` };
   }
   const sha = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, post-commit)")).trim();
   return { ok: true, sha, subject };
 }
 
 /**
- * Boot-time companion to the entry check in {@link mergeBranchLocked} (card 9e77050f): READ-ONLY, scans
- * each given canonical repo path for the same residue class the merge-time check refuses on (dirty
- * tracked state — staged and/or unstaged; untracked files excluded, same rationale — nothing here is at
- * risk from a `reset --hard` no one is going to run). This does NOT close a hole by itself — the
- * merge-time refusal already makes the corruption impossible on its own, since a residue-bearing repo now
- * fails its NEXT merge attempt closed instead of silently absorbing it. This exists only to shrink the
- * detection window: without it, residue left by a daemon dying mid-merge sits unnoticed until someone
- * happens to attempt a merge against that repo; with it, a boot-time scan surfaces it the moment the
- * daemon comes back up. NEVER resets, NEVER blocks boot, NEVER throws — same reasoning as the merge-time
- * check for why it only reports: this can't tell a dead squash's leftover stage apart from a human's own
- * work-in-progress in that checkout either, so touching it here would be exactly as unsafe as touching it
- * at merge time. A repo that isn't a real git checkout (e.g. a vault-only project's `repoPath`, or a
- * deleted/unreadable directory) is silently skipped, not surfaced as a failure — this is a best-effort
- * courtesy scan, not a boot gate.
+ * Boot-time companion to the entry check in {@link mergeBranchLocked} (card 9e77050f, narrowed by card
+ * 06b5c47f): READ-ONLY, scans each given canonical repo path for dirty tracked state — staged and/or
+ * unstaged; untracked files excluded, same rationale as the merge-time check — nothing here is at risk
+ * from a `reset --hard` no one is going to run). Reports BOTH kinds, but the caller is expected to word
+ * them differently (see `staged` on each result): only STAGED content is the residue class the merge-time
+ * check actually refuses on — unstaged-only dirt (ordinary WIP, or a submodule gitlink whose checked-out
+ * commit sits ahead of its recorded pointer, a normal steady state for a repo with submodules) will NOT
+ * block the next merge attempt. This does NOT close a hole by itself — the merge-time refusal already
+ * makes the corruption impossible on its own, since a staged-residue-bearing repo now fails its NEXT merge
+ * attempt closed instead of silently absorbing it. This exists only to shrink the detection window:
+ * without it, residue left by a daemon dying mid-merge sits unnoticed until someone happens to attempt a
+ * merge against that repo; with it, a boot-time scan surfaces it the moment the daemon comes back up.
+ * NEVER resets, NEVER blocks boot, NEVER throws — same reasoning as the merge-time check for why it only
+ * reports: this can't tell a dead squash's leftover stage apart from a human's own work-in-progress in
+ * that checkout either, so touching it here would be exactly as unsafe as touching it at merge time. A
+ * repo that isn't a real git checkout (e.g. a vault-only project's `repoPath`, or a deleted/unreadable
+ * directory) is silently skipped, not surfaced as a failure — this is a best-effort courtesy scan, not a
+ * boot gate.
  *
  * BOUNDED + NON-INTERACTIVE (board card 44c28799, same pass as {@link mergeBranchLocked}): this ran an
  * unbounded `simpleGit(repoPath)` with no block-timeout — a repo on a busy/locked disk (the same class of
@@ -2967,13 +3023,15 @@ async function mergeBranchLocked(
  */
 export async function scanCanonicalReposForMergeResidue(
   repoPaths: string[], deps: BoundedGitDeps = {},
-): Promise<{ repoPath: string; status: string }[]> {
-  const dirty: { repoPath: string; status: string }[] = [];
+): Promise<{ repoPath: string; status: string; staged: boolean }[]> {
+  const dirty: { repoPath: string; status: string; staged: boolean }[] = [];
   for (const repoPath of new Set(repoPaths)) {
     try {
       const { git, timeoutMs } = boundedMergeGit(repoPath, deps);
       const status = (await withTimeout(git.raw(["status", "--porcelain", "--untracked-files=no"]), timeoutMs, "git status (canonical, boot residue scan)")).trim();
-      if (status !== "") dirty.push({ repoPath, status });
+      if (status === "") continue;
+      const stagedStatus = (await withTimeout(git.raw(["diff", "--cached", "--name-only"]), timeoutMs, "git diff --cached (canonical, boot residue scan)")).trim();
+      dirty.push({ repoPath, status, staged: stagedStatus !== "" });
     } catch { /* not a repo / unreadable / no HEAD yet / timed out ⇒ nothing to report */ }
   }
   return dirty;
