@@ -66,7 +66,7 @@ export class AuditMcpRouter {
 
     // --- cross-project reads (the audit input). FACTORED into the shared helper so the end-user Auditor's
     // loom-user-audit surface reuses the EXACT same two reads (mcp/transcript-read.ts) — behavior unchanged. ---
-    registerTranscriptReadTools(server, db);
+    registerTranscriptReadTools(server, db, { callerSessionId: auditorSessionId });
 
     // --- least-privilege, READ-ONLY repo tools (repo_read_file / repo_grep / repo_glob) over the Loom SOURCE
     // tree — code-awareness for the 7-lens gap-hunt (a transcript-only auditor is blind to silent code gaps).

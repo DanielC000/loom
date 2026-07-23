@@ -13,7 +13,7 @@ import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
-import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
+import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
 import { CapQueueRejectedError } from "../orchestration/cap-queue.js";
 import { nextFireAt } from "../orchestration/cron.js";
@@ -1050,20 +1050,26 @@ export class OrchestrationMcpRouter {
       {
         description:
           "Read one of your workers' transcript as clean ordered turns. PAGINATION: a large transcript " +
-          "would overflow the tool-result cap (and spill to an unreadable 1-line temp file), so reads are " +
-          "bounded to ONE page — the SAME envelope the auditor's transcript_read uses. With NO paging arg " +
-          "a transcript that fits one page returns the bare turns array; otherwise — or " +
-          "whenever you pass offset/limit/turnRange — it returns a page envelope {turns, totalTurns, " +
-          "offset, returned, nextOffset}. Page deterministically by calling again with offset:nextOffset " +
-          "until nextOffset is null (covers the whole transcript, no gaps/overlaps). `lastN` is a SEPARATE " +
-          "backward-compat shortcut for 'just the last N turns': it takes PRECEDENCE over offset/limit/ " +
-          "turnRange (pass one style or the other, not both) and always returns the bare last-N array — " +
-          "but is ALSO bounded to the same page char budget, so a large `lastN` may return fewer than N " +
-          "turns (always the MOST RECENT ones). A long offset->nextOffset walk is capped in aggregate " +
-          "too: past ~10 pages, a page comes back with nextOffset:null and truncated:true even though " +
-          "more remains — switch to a targeted turnRange read instead of continuing to loop. An unknown " +
-          "param name (e.g. a guessed `tailLines`) is REJECTED naming the bad key + the real ones above, " +
-          "instead of being silently ignored.",
+          "would overflow the tool-result cap, so reads are bounded to ONE page — the SAME envelope the " +
+          "auditor's transcript_read uses. With NO paging arg a transcript that fits one page returns the " +
+          "bare turns array; otherwise — or whenever you pass offset/limit/turnRange — it returns a page " +
+          "envelope {turns, totalTurns, offset, returned, nextOffset}. Page deterministically by calling " +
+          "again with offset:nextOffset until nextOffset is null (covers the whole transcript, no gaps/ " +
+          "overlaps). `lastN` is a SEPARATE backward-compat shortcut for 'just the last N turns': it takes " +
+          "PRECEDENCE over offset/limit/turnRange (pass one style or the other, not both) and always " +
+          "returns the bare last-N array — but is ALSO bounded to the same page char budget, so a large " +
+          "`lastN` may return fewer than N turns (always the MOST RECENT ones). A long offset->nextOffset " +
+          "walk is capped in aggregate too: past ~10 pages, a page comes back with nextOffset:null and " +
+          "truncated:true even though more remains — switch to a targeted turnRange read instead of " +
+          "continuing to loop. An unknown param name (e.g. a guessed `tailLines`) is REJECTED naming the " +
+          "bad key + the real ones above, instead of being silently ignored. OVERSIZED TURN: even within " +
+          "one page, a SINGLE turn can itself be too large to inline safely (e.g. a batch of several " +
+          "browser_snapshot calls landing in one message) — when that happens `turns` is REPLACED by " +
+          "{turnsFile, turnsChars, note} pointing at a scratch file instead (any page envelope fields " +
+          "stay inline). The file is PLAIN TEXT (not JSON) — one '=== turn N [role] ===' section per " +
+          "turn, real line breaks, UTF-8 — so a tool result's own multi-line content (e.g. YAML) is " +
+          "genuinely grep-able and Read-pageable (offset/limit are LINE-based there). Re-call with a " +
+          "narrower turnRange/limit/lastN to try to get it back inline instead.",
         inputSchema: strictShape({
           workerSessionId: z.string(),
           lastN: z.number().optional(),
@@ -1076,12 +1082,17 @@ export class OrchestrationMcpRouter {
         const w = ensureWorkerLinked(workerSessionId, "worker_transcript");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
-        if (typeof lastN === "number" && lastN > 0) return ok(lastNTurns(turns, lastN));
+        if (typeof lastN === "number" && lastN > 0) {
+          return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-lastN`, lastNTurns(turns, lastN), null));
+        }
         const page = pageTranscript(turns, { offset, limit, turnRange });
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
-        if (!explicit && page.offset === 0 && page.nextOffset === null) return ok(page.turns);
+        if (!explicit && page.offset === 0 && page.nextOffset === null) {
+          return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-0`, page.turns, null));
+        }
         const bounded = w.engineSessionId ? applyAggregateWalkCap(w.engineSessionId, page.offset, page) : page;
-        return ok(bounded);
+        const { turns: boundedTurns, ...meta } = bounded;
+        return ok(spillableTurnsResponse(managerSessionId, `${workerSessionId}-${bounded.offset}`, boundedTurns, meta));
       },
     );
 

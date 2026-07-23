@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LOOM_HOME } from "../paths.js";
+import { spillTextIfLarge } from "../spill.js";
 
 export interface TranscriptTurn {
   role: "user" | "assistant" | "tool_result";
@@ -348,6 +349,60 @@ export function applyAggregateWalkCap(walkKey: string, requestedOffset: number, 
   }
   walkState.set(walkKey, { consumed, expectedOffset: page.nextOffset });
   return page;
+}
+
+// ──────────────────────────────────────────────────────────────────────────────────────────────
+// Turns-response SPILL — a page/lastN/bare-array result can still overflow the tool-result cap even
+// though `pageTranscript` bounds page SIZE, because it always includes >=1 turn regardless of that
+// turn's own size (a single message can legitimately carry many/large tool_result blocks — e.g. a
+// batch of browser_snapshot calls). Card 605988ab: `worker_transcript`/`transcript_read` previously
+// handed such a page straight to `JSON.stringify`, which escapes every real newline INSIDE a turn's
+// own text (a tool_result body is already rendered, human-readable, often multi-line — e.g.
+// browser_snapshot's YAML) into a literal two-char `\n`, collapsing the whole response into one
+// unpageable line once the host engine's own overflow-spill kicks in. `spillableTurnsResponse` below
+// generalizes the proactive-own-spill pattern `SessionService.spillMergePatch` established for
+// worker_merge's fullDiff to this surface.
+// ──────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Render turns as plain, human-readable text — NOT `JSON.stringify`, which would re-escape a tool
+ * result's own real line breaks into a literal `\n`. Each turn gets a one-line marker header (so a
+ * spilled file stays attributable and grep-able turn-by-turn) followed by its text VERBATIM, real
+ * newlines intact — "unwrapping" a YAML-shaped tool_result (e.g. browser_snapshot) for free, since
+ * `TranscriptTurn.text` is already the rendered, unescaped string by the time it reaches here.
+ */
+function renderTurnsAsText(turns: TranscriptTurn[]): string {
+  return turns.map((t, i) => `=== turn ${i} [${t.role}] ===\n${t.text}`).join("\n\n");
+}
+
+/**
+ * Format a turns-bearing MCP response for `sessionId` (the RECIPIENT — the manager/auditor that will
+ * read this result, not the transcript's own owner), spilling to that session's scratch dir when the
+ * rendered turns would overflow {@link TRANSCRIPT_PAGE_CHAR_BUDGET} — the SAME budget `pageTranscript`/
+ * `lastNTurns` already bound a page to, so a normal multi-turn page they've already kept within budget
+ * never spills; only the genuine ">=1 turn forced past budget" edge case (a single oversized turn, or a
+ * `lastN` selection dominated by one) does. `key` should be deterministic per (target transcript, page)
+ * so repeated pulls overwrite rather than accumulate.
+ *
+ * BELOW the cap: byte-identical to before — `envelope` (if any) with the real `turns` array attached,
+ * or the bare `turns` array itself when `envelope` is null.
+ * ABOVE the cap: `turns` is replaced by `{turnsFile, turnsChars, note}` pointing at a plain-text scratch
+ * file (real per-turn line breaks, explicit UTF-8) instead — grep/Read-pageable, unlike the JSON string
+ * it replaces. Any envelope metadata (totalTurns/offset/returned/nextOffset/…) stays inline either way.
+ */
+export function spillableTurnsResponse(
+  sessionId: string, key: string, turns: TranscriptTurn[], envelope: Record<string, unknown> | null,
+): unknown {
+  const spill = spillTextIfLarge(sessionId, "transcript-spills", key, renderTurnsAsText(turns), TRANSCRIPT_PAGE_CHAR_BUDGET);
+  if (spill.inline) return envelope ? { ...envelope, turns } : turns;
+  const note =
+    `Turns are ${spill.chars} chars — too large to inline safely, so they were written to ${spill.file} as ` +
+    "plain text (one turn per \"=== turn N [role] ===\" section, real line breaks, UTF-8) — a tool result's " +
+    "own multi-line content (e.g. a browser_snapshot's YAML) survives verbatim. Page it with Read (offset/limit " +
+    "are LINE-based) or grep it for a keyword / turn marker. Re-call with a narrower turnRange/limit/lastN to " +
+    "inline fewer turns instead.";
+  const pointer = { turnsFile: spill.file, turnsChars: spill.chars, note };
+  return envelope ? { ...envelope, ...pointer } : pointer;
 }
 
 // ──────────────────────────────────────────────────────────────────────────────────────────────

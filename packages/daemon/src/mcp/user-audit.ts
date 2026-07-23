@@ -83,7 +83,7 @@ export class WorkspaceAuditMcpRouter {
     // list_sessions/transcript_read (mcp/transcript-read.ts), reused, not copy-pasted. This surface DOES
     // register agent_prompt_read (below) — name it in list_sessions' shared description (the dev Auditor's
     // call site omits this, since loom-audit has no agent_prompt_read tool). ---
-    registerTranscriptReadTools(server, db, { agentPromptToolName: "agent_prompt_read" });
+    registerTranscriptReadTools(server, db, { callerSessionId: auditorSessionId, agentPromptToolName: "agent_prompt_read" });
 
     // --- READ: own-project source (repo_read_file / repo_grep / repo_glob), scoped PER CALL by a
     // caller-supplied projectId resolved SERVER-SIDE to that project's OWN repoPath — never another
