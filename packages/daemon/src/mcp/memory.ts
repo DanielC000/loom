@@ -48,16 +48,21 @@ export interface MemoryWriteTooLong {
 }
 
 /**
- * UPSERT by `key` (owner decision #2: always-update, hard-overwrite v1) — a second write to the same key
- * overwrites the note in place, so a changed fact updates rather than piling a contradictory duplicate.
- * Enforces the per-project bounded-store cap (`memory.maxNotes`, resolveConfig) on every write; pinned
- * notes are exempt (see `evictProjectMemoryOverCap` in db.ts).
+ * UPSERT by `key` (owner decision #2: always-update in place) — a second write to the same key updates
+ * the note rather than piling a contradictory duplicate. Enforces the per-project bounded-store cap
+ * (`memory.maxNotes`, resolveConfig) on every write; pinned notes are exempt (see
+ * `evictProjectMemoryOverCap` in db.ts).
  *
  * Card a5f98bb4 (Lore audit F3): updating an EXISTING key requires `baseVersion` to match the row's
  * current `version` (a monotonic counter, NOT the `updatedAt` timestamp — a coarse/colliding clock could
  * let two distinct writes share a timestamp and defeat a timestamp-based check) — a racing/stale write is
  * REJECTED with the current note attached (`conflict`) instead of silently clobbering it. A brand-new key
  * needs no base. See {@link Db.upsertProjectMemoryChecked} for the full rationale.
+ *
+ * Card 249004c3: an update is a true PATCH, not a hard overwrite — `title`/`pinned`/`tags` the caller
+ * OMITS from `input` are left unchanged on the stored row (only `text` + the version bump apply); passing
+ * one explicitly (incl. `pinned:false`/`tags:[]`) still writes it verbatim. See
+ * {@link Db.upsertProjectMemory} for the COALESCE mechanics that implement this.
  */
 export function writeProjectMemory(
   db: Db,

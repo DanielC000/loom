@@ -301,6 +301,47 @@ try {
     const forgetAgain = forgetProjectMemory(db, mcpProj, "note-1");
     check("(mcp) memory_forget on an already-missing key is idempotent", forgetAgain.deleted === false);
 
+    // ===================== card 249004c3: memory_write on an EXISTING key is a true PATCH =====================
+    // The bug: text + baseVersion but pinned/tags OMITTED silently reset the note to pinned:false, tags:[]
+    // instead of preserving what was already stored. Caught live on Codescape's `gate-health-two-false-red-classes`
+    // note (pinned, 5 tags) — a content-only update silently un-pinned it and wiped every tag.
+    {
+      const patchProj = "proj-mcp-patch";
+      db.insertProject({ id: patchProj, name: "Patch Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+
+      const created = writeProjectMemory(db, patchProj, {
+        key: "gate-health", text: "original text", title: "Gate Health", pinned: true, tags: ["a", "b", "c"],
+      });
+      check("(patch) setup: brand-new note lands pinned + tagged", !("error" in created) && created.pinned === true && created.tags.length === 3);
+
+      // THE FIX: a content-only update (text + baseVersion, pinned/tags/title all OMITTED) must PRESERVE
+      // the existing pinned/tags/title, not reset them to false/[]/"".
+      const contentOnly = writeProjectMemory(db, patchProj, { key: "gate-health", text: "updated text only", baseVersion: created.version });
+      check("(patch) content-only update survives (not a conflict/error)", !("error" in contentOnly) && !("conflict" in contentOnly));
+      check("(patch) content-only update PRESERVES pinned:true", "pinned" in contentOnly && contentOnly.pinned === true);
+      check("(patch) content-only update PRESERVES all 3 tags", !!contentOnly.tags && contentOnly.tags.length === 3 &&
+        ["a", "b", "c"].every((t) => contentOnly.tags.includes(t)));
+      check("(patch) content-only update PRESERVES title", contentOnly.title === "Gate Health");
+      check("(patch) content-only update DID change text (proves this isn't a total no-op)", contentOnly.text === "updated text only");
+      check("(patch) content-only update still bumps version normally", contentOnly.version === created.version + 1);
+
+      // Deliberate clear: explicit pinned:false still unpins (the escape hatch stays reachable).
+      const clearPinned = writeProjectMemory(db, patchProj, { key: "gate-health", text: contentOnly.text, pinned: false, baseVersion: contentOnly.version });
+      check("(patch) explicit pinned:false still clears the pin", !("error" in clearPinned) && clearPinned.pinned === false);
+      check("(patch) explicit pinned:false leaves tags untouched (still omitted from this call)", clearPinned.tags.length === 3);
+
+      // Deliberate clear: explicit tags:[] still empties tags.
+      const clearTags = writeProjectMemory(db, patchProj, { key: "gate-health", text: clearPinned.text, tags: [], baseVersion: clearPinned.version });
+      check("(patch) explicit tags:[] still clears the tags", !("error" in clearTags) && clearTags.tags.length === 0);
+      check("(patch) explicit tags:[] leaves pinned untouched (still false from the prior write)", clearTags.pinned === false);
+
+      // Create path unchanged: a brand-new key with pinned/tags omitted still defaults exactly as before —
+      // there's no "existing row" to preserve, so COALESCE falls through to the same false/[] defaults.
+      const freshDefault = writeProjectMemory(db, patchProj, { key: "fresh-defaults", text: "brand new note" });
+      check("(patch) a brand-new key with pinned omitted still defaults to pinned:false", !("error" in freshDefault) && freshDefault.pinned === false);
+      check("(patch) a brand-new key with tags omitted still defaults to tags:[]", freshDefault.tags.length === 0);
+    }
+
     // The blind upsert (upsertProjectMemory) — used ONLY by the e2e test-seed route (gateway/server.ts),
     // which has no reader to race against — is UNCHANGED and unaffected by the guard above.
     const seedProj = "proj-mcp-seed";

@@ -4858,19 +4858,28 @@ export class Db {
     maxNotes: number,
   ): ProjectMemoryEntry {
     const now = new Date().toISOString();
+    // PATCH semantics on update (card 249004c3): title/pinned/tags each bind as SQL NULL when the caller
+    // omits them, and COALESCE against the pre-existing row's own column in the ON CONFLICT branch — an
+    // omitted field survives an update untouched instead of resetting to a default. A brand-new row has
+    // no existing value to fall back to, so the INSERT branch's COALESCE lands on the same "" / false / []
+    // defaults the old unconditional bind used — the create path is byte-identical either way. An
+    // EXPLICIT clear (pinned:false, tags:[], or title:"") still binds a concrete non-null value, so
+    // COALESCE takes it as-is — the escape hatch stays reachable.
     this.db.prepare(
       `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, created_at, updated_at, last_retrieved_at, retrieval_count, version)
-       VALUES (@id, @projectId, @key, @title, @text, @pinned, @tags, @now, @now, NULL, 0, 1)
+       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @now, @now, NULL, 0, 1)
        ON CONFLICT(project_id, key) DO UPDATE SET
-         title = @title, text = @text, pinned = @pinned, tags = @tags, updated_at = @now, version = version + 1`,
+         title = COALESCE(@title, title), text = @text,
+         pinned = COALESCE(@pinned, pinned), tags = COALESCE(@tags, tags),
+         updated_at = @now, version = version + 1`,
     ).run({
       id: randomUUID(),
       projectId,
       key: input.key,
-      title: input.title ?? "",
+      title: input.title ?? null,
       text: input.text,
-      pinned: input.pinned ? 1 : 0,
-      tags: JSON.stringify(input.tags ?? []),
+      pinned: input.pinned === undefined ? null : (input.pinned ? 1 : 0),
+      tags: input.tags === undefined ? null : JSON.stringify(input.tags),
       now,
     });
     this.evictProjectMemoryOverCap(projectId, maxNotes);

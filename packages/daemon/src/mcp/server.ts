@@ -197,12 +197,17 @@ export class TaskMcpRouter {
           "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
           "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground); a too-long write " +
           "is rejected with `bytesOver` + the current note (if any) so you can trim without re-fetching. " +
+          "UPDATING AN EXISTING KEY IS A TRUE PATCH: `title`/`pinned`/`tags` you OMIT are left UNCHANGED " +
+          "from the stored note, never reset to a default — pass only `key`+`text`+`baseVersion` to edit " +
+          "the body alone. To deliberately CLEAR a field, pass it explicitly (`pinned:false` unpins, " +
+          "`tags:[]` empties the tag list) — that still takes effect; only OMITTING the field preserves it. " +
+          "The response echoes the resulting `pinned`/`tags`/`title` so you can see the outcome. " +
           "UPDATING A NOTE THAT ALREADY EXISTS REQUIRES `baseVersion` — the `version` you last read for " +
           "this key (from memory_read, memory_list, or a prior memory_write's response; NOT its `updatedAt` " +
           "timestamp). Omitting it, or passing a stale one, is REJECTED with `conflict:true` and `current` " +
           "(the note as it stands right now) instead of silently overwriting someone else's write — re-read, " +
           "merge your change into `current.text`, and retry with `baseVersion: current.version`. A brand-new " +
-          "key needs no base.",
+          "key needs no base, and omitted `title`/`pinned`/`tags` default to \"\"/false/[] on create.",
         inputSchema: {
           key: z.string(),
           text: z.string(),
