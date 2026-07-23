@@ -49,6 +49,27 @@ function pasteSettleExtraMs(textLength: number): number {
 }
 
 /**
+ * Card 1bd1f045: cheap, non-cryptographic 32-bit FNV-1a content fingerprint for the `[pty-write]` write-
+ * sequence log (see `ptyWrite`). O(n) over a SINGLE write call's data — bounded at PTY_WRITE_CHUNK_BYTES
+ * for a chunk (a few KB, never the full 15KB+ turn), so it stays cheap on the hot path. Not collision-
+ * proof and doesn't need to be: two `[pty-write]` records sharing (len, hash) at distinct `seq` on the
+ * same session is a duplicate CANDIDATE for a human/script to correlate, not a courtroom proof — an
+ * accidental collision between two genuinely DIFFERENT writes on the same session is astronomically
+ * unlikely for real terminal-write content at this volume. Chosen over a head/tail excerpt (this card's
+ * first draft) purely for size: fixed 8 hex chars regardless of payload length, versus ~80-90 bytes of
+ * quoted excerpt — material at 17 write sites logging on every session's hot path against a rotating,
+ * forensically-relied-on daemon-output.log (see ptyWrite's doc for the measured before/after).
+ */
+function fnv1a32(s: string): string {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
+  }
+  return (h >>> 0).toString(16).padStart(8, "0");
+}
+
+/**
  * How long to wait for `UserPromptSubmit` (or a Stop/StopFailure, either of which proves a turn ran)
  * to confirm a written Enter actually registered, before re-sending it. Bounds the verify-and-retry
  * loop in `sendEnterAndVerify`. Env-overridable so tests can shrink it instead of waiting real seconds.
@@ -1389,6 +1410,13 @@ interface Live {
   // every submit() call; a stale reference from an already-confirmed/superseded turn is harmless because
   // the give-up branch itself bails on `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
   giveUpOrigin: QueuedMessage[] | null;
+  // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
+  // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
+  // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
+  // content signature at distinct seq) rather than reading as plausible traffic — discriminating whether
+  // the daemon itself double-wrote (card 9ed20572) or something below it replayed already-consumed bytes
+  // (card 3ce3fa39). Observation-only counter; never read for control flow.
+  writeSeq: number;
   // Loom Companion (multi-channel reply routing): the ORIGINATING chat route of the IN-FLIGHT turn, or null
   // when the turn wasn't formed from a companion inbound / proactive-home submit. Set SYNCHRONOUSLY in
   // submit() (both the idle-submit and drain paths), read by getActiveTurnOrigin when the companion's
@@ -2379,6 +2407,7 @@ export class PtyHost {
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet (the startup turn is a CLI arg, not submit()) — see submit()'s reset
       submitGeneration: 0,
+      writeSeq: 0,
       giveUpOrigin: null,
       activeTurnRoute: null,
       lastPromptRoute: null,
@@ -2424,7 +2453,7 @@ export class PtyHost {
           live.bootScan = "";
           // eslint-disable-next-line no-console
           console.log(`[pty] ${opts.sessionId} dismissing plugin-MCP enable-prompt (Esc = reject all)`);
-          setTimeout(() => { if (live.alive) live.pty.write(ESC_KEY); }, 300);
+          setTimeout(() => { if (live.alive) this.ptyWrite(opts.sessionId, live, ESC_KEY, "esc-mcp-dismiss"); }, 300);
         }
       }
       // Resuming a large/old session shows a "resume from summary / as-is" gate BEFORE SessionStart
@@ -2532,6 +2561,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      writeSeq: 0,
       giveUpOrigin: null,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
@@ -2605,6 +2635,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      writeSeq: 0,
       giveUpOrigin: null,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
@@ -3660,6 +3691,43 @@ export class PtyHost {
    * a bounded verify/retry schedule until `UserPromptSubmit` (or a Stop, proving a turn ran) confirms
    * it, or gives up and recovers busy so the session doesn't wedge.
    */
+  /**
+   * Card 1bd1f045: the byte/call-sequence log for the ACTUAL `pty.write()` call — called INLINE at every
+   * real write site (never a layer above them), so it records what genuinely reached node-pty, not what
+   * the daemon merely composed/handed down. That distinction matters: `[submit-write]` (submit()'s own
+   * pre-write log) was overclaimed as proof the write path is clean and retracted twice — everything from
+   * here down was, until this card, completely uninstrumented in both directions (see 3ce3fa39).
+   *
+   * Discriminates the two surviving hypotheses for that card's mid-token splice: if the daemon itself
+   * double-emits (e.g. `writeChunked`'s `done` callback firing more than once, unguarded by
+   * `submitGeneration` — card 9ed20572), TWO `[pty-write]` records with the same content signature at
+   * distinct `seq` appear here. If the daemon writes exactly once and corruption still appears at the
+   * receiving end, this log shows a single clean record and the fault is BELOW the daemon (ConPTY/
+   * node-pty/Windows). Either outcome is a real result.
+   *
+   * `seq` is the load-bearing field: a monotonic per-session counter (Live.writeSeq) that makes a
+   * duplicated or out-of-order emission visible AS a sequence anomaly rather than plausible traffic.
+   *
+   * RECORD SIZE (card review, 2026-07-23): a head+tail excerpt was the first cut but measured at ~100-150
+   * bytes/record — at 17 call sites, some firing per-chunk on every 15KB+ payload, that risked shrinking
+   * daemon-output.log's rotation window (the SAME forensic corpus 3ce3fa39/9ed20572 depend on) faster than
+   * it fills today, which would make a rare recurrence HARDER to catch, not easier. `fnv1a32` replaces the
+   * excerpt with a fixed 8-hex-char content fingerprint — every field the card's DoD names (sessionId, seq,
+   * submitGeneration, len, a cheap hash) stays, nothing load-bearing for duplicate/replay detection is
+   * dropped, and the record shrinks by roughly half regardless of chunk size. `tag` names WHICH call site
+   * wrote (bracket-start/chunk/bracket-end/enter/…) so a reader doesn't have to infer it from content.
+   *
+   * OBSERVATION ONLY: this is a passthrough. It must never alter what's written, its outcome, or its
+   * timing relative to a bare `live.pty.write(data)` call — do not add anything here that could change
+   * write behaviour.
+   */
+  private ptyWrite(sessionId: string, live: Live, data: string, tag: string): void {
+    const seq = ++live.writeSeq;
+    // eslint-disable-next-line no-console
+    console.log(`[pty-write] ${sessionId} seq=${seq} tag=${tag} gen=${live.submitGeneration} len=${data.length} h=${fnv1a32(data)}`);
+    live.pty.write(data);
+  }
+
   private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
@@ -3715,13 +3783,13 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
-    live.pty.write(BRACKET_PASTE_START);
+    this.ptyWrite(sessionId, live, BRACKET_PASTE_START, "bracket-start");
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
     this.writeChunked(sessionId, text, () => {
       const l = this.live.get(sessionId);
       if (!l?.alive) return;
-      l.pty.write(BRACKET_PASTE_END);
+      this.ptyWrite(sessionId, l, BRACKET_PASTE_END, "bracket-end");
       const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
       setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
     });
@@ -3827,7 +3895,7 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return;
     if (attempt > 1) {
-      live.pty.write(BRACKET_PASTE_START + BRACKET_PASTE_END);
+      this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
       if (attempt === SUBMIT_MAX_ATTEMPTS) {
         const reassertWrittenAt = Date.now();
         this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, attempt, gen));
@@ -3881,7 +3949,7 @@ export class PtyHost {
   private fireEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.enterConfirmed || live.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
-    live.pty.write(ENTER);
+    this.ptyWrite(sessionId, live, ENTER, "enter");
     // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
     // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.
     const enterWrittenAt = Date.now();
@@ -4239,7 +4307,7 @@ export class PtyHost {
       if (action === "done") { finish("reached", cur); return; }
       if (action === "giveup") { finish("press-cap", cur); return; }
       presses++;
-      live.pty.write(SHIFT_TAB);
+      this.ptyWrite(sessionId, live, SHIFT_TAB, "shift-tab");
       setTimeout(() => awaitChange(cur, 0), RESUME_MODE_READ_POLL_MS);
     };
     // After a press, poll until the footer reads a definite mode DIFFERENT from `prev` (the press
@@ -4296,7 +4364,7 @@ export class PtyHost {
   private resolveResumeGate(sessionId: string): void {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.resumeGateHandled) return;
-    live.pty.write(DOWN_ARROW);
+    this.ptyWrite(sessionId, live, DOWN_ARROW, "resume-gate-down");
     this.awaitResumeGateConfirm(sessionId, 0, false);
   }
 
@@ -4314,7 +4382,7 @@ export class PtyHost {
         live.resumeGateScan = "";
         // eslint-disable-next-line no-console
         console.log(`[pty] ${sessionId} resume-summary gate CONFIRMED on "Resume full session as-is" after ${polls} poll(s)${upCorrected ? " (following a defensive Up-correction)" : ""} — Enter`);
-        live.pty.write(ENTER);
+        this.ptyWrite(sessionId, live, ENTER, "resume-gate-enter");
         return;
       }
       if (cursor === "3" && !upCorrected) {
@@ -4322,7 +4390,7 @@ export class PtyHost {
         // path. Correct with exactly ONE Up (not a Down retry) and keep polling; never confirm/Enter here.
         // eslint-disable-next-line no-console
         console.error(`[pty] ${sessionId} resume-summary gate cursor unexpectedly on option 3 ("Don't ask me again") — correcting with a single Up (never confirming on 3)`);
-        live.pty.write(UP_ARROW);
+        this.ptyWrite(sessionId, live, UP_ARROW, "resume-gate-up");
         this.awaitResumeGateConfirm(sessionId, 0, true);
         return;
       }
@@ -4347,7 +4415,7 @@ export class PtyHost {
       live.resumeGateScan = "";
       // eslint-disable-next-line no-console
       console.error(`[pty] ${sessionId} resume-summary gate cursor NEVER confirmed on option 2 after ${polls} poll(s) — sending Enter anyway (best effort; may resume from a summary)`);
-      live.pty.write(ENTER);
+      this.ptyWrite(sessionId, live, ENTER, "resume-gate-enter-giveup");
     }, RESUME_GATE_POLL_MS);
   }
 
@@ -4579,7 +4647,7 @@ export class PtyHost {
     const step = (): void => {
       const l = this.live.get(sessionId);
       if (!l?.alive) return;
-      l.pty.write(text.slice(i, i + PTY_WRITE_CHUNK_BYTES));
+      this.ptyWrite(sessionId, l, text.slice(i, i + PTY_WRITE_CHUNK_BYTES), "chunk");
       i += PTY_WRITE_CHUNK_BYTES;
       if (i >= text.length) { done?.(); return; }
       setTimeout(step, PTY_WRITE_CHUNK_DELAY_MS);
@@ -4589,7 +4657,7 @@ export class PtyHost {
 
   repaint(sessionId: string): void {
     const live = this.live.get(sessionId);
-    if (live?.alive) live.pty.write("\x0c"); // Ctrl-L
+    if (live?.alive) this.ptyWrite(sessionId, live, "\x0c", "repaint-ctrl-l"); // Ctrl-L
   }
 
   stop(sessionId: string, mode: StopMode): void {
@@ -4615,8 +4683,8 @@ export class PtyHost {
     // the whole story (it exits here; the escalation below is a no-op). A BUSY/mid-turn session instead
     // has its turn INTERRUPTED by the two Ctrl-Cs and stays alive at an idle prompt (no Stop hook fires,
     // so busy stays stale) — escalateGracefulStop is what then drives it deterministically to exit.
-    live.pty.write("\x03");
-    setTimeout(() => { if (live.alive) live.pty.write("\x03"); }, GRACEFUL_STOP_GAP_MS);
+    this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c");
+    setTimeout(() => { if (live.alive) this.ptyWrite(sessionId, live, "\x03", "stop-ctrl-c"); }, GRACEFUL_STOP_GAP_MS);
     this.escalateGracefulStop(sessionId, live);
   }
 
@@ -4638,8 +4706,8 @@ export class PtyHost {
       if (!live.alive) return; // idle session already exited on the first sequence — nothing to escalate
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} graceful stop: still live after interrupt — re-sending exit sequence`);
-      live.pty.write("\x03");
-      setTimeout(() => { if (live.alive) live.pty.write("\x03"); }, GRACEFUL_STOP_GAP_MS);
+      this.ptyWrite(sessionId, live, "\x03", "stop-escalate-ctrl-c");
+      setTimeout(() => { if (live.alive) this.ptyWrite(sessionId, live, "\x03", "stop-escalate-ctrl-c"); }, GRACEFUL_STOP_GAP_MS);
     }, GRACEFUL_STOP_RETRY_MS);
     // Stage 3: a turn that ignores Ctrl-C entirely must still die — bounded hard-kill escalation.
     setTimeout(() => {
@@ -4682,7 +4750,7 @@ export class PtyHost {
     // give-up→setBusy(false)'s into the cancelled prompt or whatever the redirect submits next). See
     // Live.submitGeneration.
     live.submitGeneration++;
-    live.pty.write(ESC_KEY); // single Esc: cancel the in-flight generation, return to the idle prompt
+    this.ptyWrite(sessionId, live, ESC_KEY, "redirect-esc"); // single Esc: cancel the in-flight generation, return to the idle prompt
     // eslint-disable-next-line no-console
     console.log(`[pty] ${sessionId} redirect: Esc sent — settling for ${REDIRECT_SETTLE_MS}ms`);
     setTimeout(() => {
