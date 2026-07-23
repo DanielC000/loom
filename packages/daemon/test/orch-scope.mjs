@@ -62,16 +62,23 @@ const M = await connect("M");
 // 1) the manager's tool surface (read tools + lifecycle/messaging/recycle/merge-gate actions).
 const toolList = (await M.listTools()).tools;
 const tools = toolList.map((t) => t.name).sort();
-// the worker_* coordination surface (incl. worker_redirect, the "land it NOW" turn-interrupt escalation)
-// + my_context (own-occupancy self-assessment, any role) + the manager self-management tools
-// (daemon_restart self-deploy, served_status for post-restart deploy verification, end_me self-scoped
-// terminal exit — card 3b015fc7, idle_report for the asleep-at-the-wheel watcher, inbox_pull fast-drain,
-// recycle_me for context-recycle) + the manager self-service management surface (agent_list read-only
-// directory, agent_get single-record read, agent_assign_profile/agent_update, agent_delete/profile_delete
-// (own-project + shared-profile-safe DELETE, task 2c9b2960), project_update/project_archive,
-// schedule_create/schedule_update — Task 3de74275) + platform_escalate (the one upward channel to the
-// Platform Lead). Keep in sync as the manager-MCP surface grows.
-const expected = "agent_assign_profile,agent_delete,agent_get,agent_list,agent_update,daemon_restart,end_me,idle_report,inbox_pull,my_context,platform_escalate,profile_delete,project_archive,project_update,recycle_me,schedule_create,schedule_update,served_status,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_redirect,worker_set_mode,worker_spawn,worker_status,worker_stop,worker_transcript";
+// the worker_* coordination surface (incl. worker_redirect, the "land it NOW" turn-interrupt escalation,
+// and worker_relink, card fc243a43's re-attach-a-stranded-worker repair tool) + my_context (own-occupancy
+// self-assessment, any role) + gate_status (card fc243a43, the read-only own-op-scoped complement to a
+// worker's run_gate — also surfaced to the manager) + gate_queue (card fa359824, the whole-daemon
+// read-only gate-queue snapshot — cap + every running/queued gate run — so a manager can tell healthy
+// contention apart from a leaked slot in one read instead of guessing) + the manager self-management
+// tools (daemon_restart self-deploy, served_status for post-restart deploy verification, end_me
+// self-scoped terminal exit — card 3b015fc7, idle_report for the asleep-at-the-wheel watcher, inbox_pull
+// fast-drain, recycle_me for context-recycle) + the manager self-service management surface (agent_list
+// read-only directory, agent_get single-record read, agent_assign_profile/agent_update,
+// agent_delete/profile_delete (own-project + shared-profile-safe DELETE, task 2c9b2960),
+// project_update/project_archive, schedule_create/schedule_update — Task 3de74275) + the board-column
+// management trio (board_column_create/delete/rename) + the owner decision-inbox surface
+// (question_ask/question_cancel/question_resolve/question_pull, card 988bb585 + its requests_list
+// follow-up) + escalation_status (the dedupe-aware complement to platform_escalate) + platform_escalate
+// (the one upward channel to the Platform Lead). Keep in sync as the manager-MCP surface grows.
+const expected = "agent_assign_profile,agent_delete,agent_get,agent_list,agent_update,board_column_create,board_column_delete,board_column_rename,daemon_restart,end_me,escalation_status,gate_queue,gate_status,idle_report,inbox_pull,my_context,platform_escalate,profile_delete,project_archive,project_update,question_ask,question_cancel,question_pull,question_resolve,recycle_me,requests_list,schedule_create,schedule_update,served_status,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_redirect,worker_relink,worker_set_mode,worker_spawn,worker_status,worker_stop,worker_transcript";
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
 
 // 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,

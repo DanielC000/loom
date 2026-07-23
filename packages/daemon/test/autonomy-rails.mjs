@@ -94,7 +94,7 @@ try {
   // === PAUSE (deterministic) — pause refuses worker_spawn; resume lifts it ===
   await post("/api/orchestration/pause", {}); // scope defaults to "global"
   const MP = await connect(P.mgr);
-  const pRes = parse(await MP.callTool({ name: "worker_spawn", arguments: { taskId: P.task, kickoffPrompt: "noop — must be refused before any spawn" } }));
+  const pRes = parse(await MP.callTool({ name: "worker_spawn", arguments: { taskId: P.task, agentId: P.agent, kickoffPrompt: "noop — must be refused before any spawn" } }));
   check("PAUSE: worker_spawn refused while paused — ok({error}) ~ /paus/i", typeof pRes.error === "string" && /paus/i.test(pRes.error));
   await MP.close();
   await post("/api/orchestration/resume", {}); // scope defaults to "global"
@@ -103,7 +103,7 @@ try {
 
   // === CAP (deterministic) — at the cap, worker_spawn is refused before any real spawn ===
   const MC = await connect(C.mgr);
-  const cRes = parse(await MC.callTool({ name: "worker_spawn", arguments: { taskId: C.task, kickoffPrompt: "noop — must be refused at the cap" } }));
+  const cRes = parse(await MC.callTool({ name: "worker_spawn", arguments: { taskId: C.task, agentId: C.agent, kickoffPrompt: "noop — must be refused at the cap" } }));
   check("CAP: worker_spawn refused at cap — ok({error}) ~ /cap|concurren/i", typeof cRes.error === "string" && /cap|concurren/i.test(cRes.error));
   check("CAP: refusal mentions the cap value (2)", /\b2\b/.test(cRes.error ?? ""));
   await MC.close();
@@ -112,7 +112,7 @@ try {
   const MK = await connect(K.mgr);
   spawned = parse(await MK.callTool({
     name: "worker_spawn",
-    arguments: { taskId: K.task, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." },
+    arguments: { taskId: K.task, agentId: K.agent, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." },
   }));
   check("KILL: real worker spawned (under cap, not paused)", !!spawned.workerSessionId && !!spawned.worktreePath);
   let w = null;
@@ -122,17 +122,25 @@ try {
   }
   check("KILL: worker reached processState 'live'", !!w && w.processState === "live");
 
+  // Sanity-check the negative case FIRST (still live → 404) so a later 200 actually proves something —
+  // card b37750a4: an exited session auto-archives and leaves /api/sessions entirely, so "exited" is
+  // observed via the by-id archived-sessions route below, not a re-poll of /api/sessions.
+  const preKillCheck = await fetch(`${BASE}/api/archived-sessions/${spawned.workerSessionId}`);
+  check("archived-sessions 404s while the worker is still live", preKillCheck.status === 404);
+
   // /kill hard-stops every live worker (the real one + the CAP phantom rows, which have no pty so
   // their stop is a no-op) → the count may exceed 1; the DoD is "stopped >= 1".
   const killRes = await (await post("/api/orchestration/kill")).json();
   check("KILL: POST /kill → { stopped } >= 1", typeof killRes.stopped === "number" && killRes.stopped >= 1);
 
-  let exited = false;
-  for (let i = 0; i < 30 && !exited; i++) {
+  let archivedRow = null;
+  for (let i = 0; i < 30 && !archivedRow; i++) {
     await sleep(1000);
-    exited = (await get("/api/sessions")).find((s) => s.id === spawned.workerSessionId)?.processState === "exited";
+    const r = await fetch(`${BASE}/api/archived-sessions/${spawned.workerSessionId}`);
+    if (r.status === 200) archivedRow = await r.json();
   }
-  check("KILL: the real worker reached processState 'exited'", exited);
+  // The 200 alone only proves ARCHIVED, not EXITED — assert processState explicitly.
+  check("KILL: the real worker reached processState 'exited' (archived-sessions row)", archivedRow?.processState === "exited");
 
   const status2 = await get("/api/orchestration/status");
   check("KILL: global pause latched after kill (GET /status includes 'global')", status2.pausedScopes.includes("global"));

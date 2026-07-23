@@ -72,7 +72,7 @@ try {
   const M = await connect(mgrId);
   spawned = parse(await M.callTool({
     name: "worker_spawn",
-    arguments: { taskId, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." },
+    arguments: { taskId, agentId, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." },
   }));
   check("worker spawned", !!spawned.workerSessionId && fs.existsSync(spawned.worktreePath));
 

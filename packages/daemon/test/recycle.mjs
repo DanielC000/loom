@@ -68,13 +68,19 @@ async function connect(sessionId) {
 let spawned = null, recycled = null;
 try {
   const M = await connect(mgrId);
-  spawned = parse(await M.callTool({ name: "worker_spawn", arguments: { taskId, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." } }));
+  spawned = parse(await M.callTool({ name: "worker_spawn", arguments: { taskId, agentId, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." } }));
   check("worker spawned", !!spawned.workerSessionId && fs.existsSync(spawned.worktreePath));
 
   // Wait until the old worker is idle (engine id + busy false), then recycle it.
   let idle = false;
   for (let i = 0; i < 90 && !idle; i++) { await sleep(1000); const s = await findSession(spawned.workerSessionId); idle = !!(s?.engineSessionId && s.busy === false); }
   check("old worker reached idle before recycle", idle);
+
+  // Sanity-check the negative case FIRST (still live → 404) so a later 200 actually proves something —
+  // card b37750a4: an exited session auto-archives and leaves /api/sessions entirely, so "exited" is
+  // observed via the by-id archived-sessions route below, not a re-check of findSession.
+  const preRecycleCheck = await fetch(`${BASE}/api/archived-sessions/${spawned.workerSessionId}`);
+  check("archived-sessions 404s while the old worker is still live", preRecycleCheck.status === 404);
 
   recycled = parse(await M.callTool({ name: "worker_recycle", arguments: { workerSessionId: spawned.workerSessionId, handoffSummary: `${marker}: continue building the widget; decided X; next do Y.` } }));
   check("worker_recycle returns a NEW worker id, gen 1, recycledFrom = old",
@@ -85,8 +91,15 @@ try {
     fresh && fresh.role === "worker" && fresh.parentSessionId === mgrId && fresh.gen === 1 && fresh.recycledFrom === spawned.workerSessionId);
   check("new worker REUSES the same worktree + branch + task (code state kept)",
     fresh && fresh.worktreePath === spawned.worktreePath && fresh.branch === spawned.branch && fresh.taskId === taskId);
-  const old = await findSession(spawned.workerSessionId);
-  check("old worker is now processState 'exited'", old?.processState === "exited");
+
+  let oldArchived = null;
+  for (let i = 0; i < 30 && !oldArchived; i++) {
+    await sleep(1000);
+    const r = await fetch(`${BASE}/api/archived-sessions/${spawned.workerSessionId}`);
+    if (r.status === 200) oldArchived = await r.json();
+  }
+  // The 200 alone only proves ARCHIVED, not EXITED — assert processState explicitly.
+  check("old worker is now processState 'exited' (archived-sessions row)", oldArchived?.processState === "exited");
   check("worktree still exists on disk (retained, not removed)", fs.existsSync(spawned.worktreePath));
 
   // Handoff seeded: the fresh worker's FIRST user turn is the framed handoff (contains the marker).

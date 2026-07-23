@@ -137,6 +137,12 @@ const pass = results.filter((r) => r.ok).length;
 const failed = results.filter((r) => !r.ok);
 
 console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed. (pool size ${POOL_SIZE})`);
+// Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
+// is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
+// (pass or fail) means the exclusion itself can never again go unnoticed, without paying the cost of
+// actually booting a live daemon here. Run one manually: `node dist/index.js` (some need extra env —
+// see the file's own header), then `node test/<name>.mjs` from packages/daemon.
+console.log(`ℹ NOT_HERMETIC (excluded from this gate — needs a live daemon and/or real claude; run manually, see each file's header): ${[...NOT_HERMETIC].sort().join(", ")}`);
 if (failed.length) {
   console.log("FAILURES:");
   // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual

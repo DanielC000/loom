@@ -75,7 +75,7 @@ try {
   // worker_spawn → creates worktree, spawns a real worker, moves the task.
   spawned = parse(await M.callTool({
     name: "worker_spawn",
-    arguments: { taskId, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." },
+    arguments: { taskId, agentId, kickoffPrompt: "Respond with exactly the word READY and nothing else, then stop. Use no tools." },
   }));
   check("worker_spawn returns workerSessionId + branch + worktreePath",
     !!spawned.workerSessionId && !!spawned.branch && !!spawned.worktreePath);
@@ -108,17 +108,27 @@ try {
   }
   check("worker booted and ran its kickoff turn (engine id captured, then idle)", !!idle);
 
+  // Card b37750a4: a session auto-archives the instant its pty exits (and leaves the "live" rail
+  // entirely — GET /api/sessions no longer surfaces it), so "exited" is now observed via the by-id
+  // archived-sessions route, not a poll of /api/sessions. Sanity-check the negative case FIRST (the
+  // route 404s while the worker is still live) so a later 200 actually proves something.
+  const preStopCheck = await fetch(`${BASE}/api/archived-sessions/${spawned.workerSessionId}`);
+  check("archived-sessions 404s while the worker is still live", preStopCheck.status === 404);
+
   // worker_stop with mode 'hard' (pty.kill) → DETERMINISTIC exit (~0.5s). Graceful (Ctrl-C ×2)
   // does NOT reliably exit an idle v2.1.150 worker; the graceful→bounded-wait→hard escalation
   // is tracked separately (lands before #15's recycle relies on a clean graceful close).
   const stopRes = parse(await M.callTool({ name: "worker_stop", arguments: { workerSessionId: spawned.workerSessionId, mode: "hard" } }));
   check("worker_stop returns { stopped: true }", stopRes.stopped === true);
-  let exited = false;
-  for (let i = 0; i < 30 && !exited; i++) {
+  let archivedRow = null;
+  for (let i = 0; i < 30 && !archivedRow; i++) {
     await sleep(1000);
-    exited = (await get("/api/sessions")).find((s) => s.id === spawned.workerSessionId)?.processState === "exited";
+    const r = await fetch(`${BASE}/api/archived-sessions/${spawned.workerSessionId}`);
+    if (r.status === 200) archivedRow = await r.json();
   }
-  check("worker_stop(hard) stops the worker (processState → exited)", exited);
+  // The 200 alone only proves ARCHIVED, not EXITED — assert processState explicitly (never collapse
+  // the two: a session can in principle be archived without having reached 'exited').
+  check("worker_stop(hard) stops the worker (archived-sessions row: processState 'exited')", archivedRow?.processState === "exited");
 
   await M.close();
 } finally {

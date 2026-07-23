@@ -87,7 +87,7 @@ const hadTrust = (p) => { try { return trustKey(p) in (JSON.parse(fs.readFileSyn
 const wtAHadTrust = hadTrust(wtA), wtBHadTrust = hadTrust(wtB);
 
 const kickoff = (tag) =>
-  `Create a file named done-${tag}.txt containing exactly the text done. Then commit it with git by running: git add -A && git commit -m done. Then call the worker_report tool with status "done" and summary "DONE-${tag}". Use no other tools and do nothing else.`;
+  `Create a file named done-${tag}.txt containing exactly the text done. Then commit it with git by running: git add done-${tag}.txt && git commit -m done. Then call the worker_report tool with status "done" and summary "DONE-${tag}". Use no other tools and do nothing else.`;
 
 async function connect(sessionId) {
   const client = new Client({ name: "orchestration-e2e-test", version: "0" });
@@ -101,8 +101,8 @@ try {
 
   // === 2. PARALLEL SPAWN — fire both worker_spawn CONCURRENTLY (the parallel-spawn race test) ===
   const [rA, rB] = await Promise.all([
-    M.callTool({ name: "worker_spawn", arguments: { taskId: taskA, kickoffPrompt: kickoff("A") } }),
-    M.callTool({ name: "worker_spawn", arguments: { taskId: taskB, kickoffPrompt: kickoff("B") } }),
+    M.callTool({ name: "worker_spawn", arguments: { taskId: taskA, agentId, kickoffPrompt: kickoff("A") } }),
+    M.callTool({ name: "worker_spawn", arguments: { taskId: taskB, agentId, kickoffPrompt: kickoff("B") } }),
   ]);
   spawnA = parse(rA); spawnB = parse(rB);
   check(`PARALLEL: both worker_spawn succeeded (no spawn-race error) — A:${spawnA.error ?? "ok"} B:${spawnB.error ?? "ok"}`,
@@ -126,7 +126,7 @@ try {
   check("REPORT: both workers committed + called worker_report(done) → both tasks 'review'", bothReview);
 
   // === 4. MERGE ONE (taskA): review the diff, then confirm → merged, worktree gone, task done ===
-  const diffA = parse(await M.callTool({ name: "worker_merge", arguments: { workerSessionId: spawnA.workerSessionId } }));
+  const diffA = parse(await M.callTool({ name: "worker_merge", arguments: { workerSessionId: spawnA.workerSessionId, fullDiff: true } }));
   check("MERGE: worker_merge diff lists done-A.txt (no merge yet)", diffA.filesChanged >= 1 && diffA.patch.includes("done-A.txt"));
   const confA = parse(await M.callTool({ name: "worker_merge_confirm", arguments: { workerSessionId: spawnA.workerSessionId } }));
   if (confA.merged !== true) console.log("    confA =", JSON.stringify(confA));
@@ -136,15 +136,26 @@ try {
   check("MERGE: taskA moved to 'done'", (await taskCol(taskA)) === "done");
 
   // === 5. RECYCLE THE OTHER (taskB): fresh worker, gen+1, SAME worktree/branch/task; old exited ===
+  // Sanity-check the negative case FIRST (still live → 404) so a later 200 actually proves something —
+  // card b37750a4: an exited session auto-archives and leaves /api/sessions entirely, so "exited" is
+  // observed via the by-id archived-sessions route below, not a re-poll of /api/sessions.
+  const preRecycleCheck = await fetch(`${BASE}/api/archived-sessions/${spawnB.workerSessionId}`);
+  check("archived-sessions 404s while workerB is still live", preRecycleCheck.status === 404);
+
   recycled = parse(await M.callTool({ name: "worker_recycle", arguments: { workerSessionId: spawnB.workerSessionId, handoffSummary: "E2E-HANDOFF: continue" } }));
   check("RECYCLE: returns a fresh worker, gen 1, recycledFrom = old B",
     !!recycled.newWorkerSessionId && recycled.newWorkerSessionId !== spawnB.workerSessionId && recycled.gen === 1 && recycled.recycledFrom === spawnB.workerSessionId);
   const fresh = await findSession(recycled.newWorkerSessionId);
   check("RECYCLE: fresh worker REUSES B's worktree + branch + task (code state kept)",
     fresh && fresh.worktreePath === spawnB.worktreePath && fresh.branch === spawnB.branch && fresh.taskId === taskB && fresh.parentSessionId === mgrId);
-  let oldBExited = false;
-  for (let i = 0; i < 30 && !oldBExited; i++) { await sleep(500); oldBExited = (await findSession(spawnB.workerSessionId))?.processState === "exited"; }
-  check("RECYCLE: old workerB is now 'exited'", oldBExited);
+  let oldBArchived = null;
+  for (let i = 0; i < 30 && !oldBArchived; i++) {
+    await sleep(500);
+    const r = await fetch(`${BASE}/api/archived-sessions/${spawnB.workerSessionId}`);
+    if (r.status === 200) oldBArchived = await r.json();
+  }
+  // The 200 alone only proves ARCHIVED, not EXITED — assert processState explicitly.
+  check("RECYCLE: old workerB is now 'exited' (archived-sessions row)", oldBArchived?.processState === "exited");
 
   // RECYCLE handoff CARRIES INTENT: the fresh worker's first user turn IS the framed handoff
   // (contains the summary). This guards R1 — a transcript-encoding bug once let recycle "succeed"
@@ -161,11 +172,19 @@ try {
   check("RECYCLE: the handoff reached the fresh worker's first user turn (intent carried)", handoffSeeded);
 
   // === 6. KILL — global kill stops the live worker(s) and latches the global pause ===
+  const preKillCheck = await fetch(`${BASE}/api/archived-sessions/${recycled.newWorkerSessionId}`);
+  check("archived-sessions 404s while the recycled worker is still live", preKillCheck.status === 404);
+
   const killRes = await (await post("/api/orchestration/kill")).json();
   check("KILL: POST /kill → { stopped } >= 1", typeof killRes.stopped === "number" && killRes.stopped >= 1);
-  let freshExited = false;
-  for (let i = 0; i < 30 && !freshExited; i++) { await sleep(1000); freshExited = (await findSession(recycled.newWorkerSessionId))?.processState === "exited"; }
-  check("KILL: the live (recycled) worker reached 'exited'", freshExited);
+  let freshArchived = null;
+  for (let i = 0; i < 30 && !freshArchived; i++) {
+    await sleep(1000);
+    const r = await fetch(`${BASE}/api/archived-sessions/${recycled.newWorkerSessionId}`);
+    if (r.status === 200) freshArchived = await r.json();
+  }
+  // The 200 alone only proves ARCHIVED, not EXITED — assert processState explicitly.
+  check("KILL: the live (recycled) worker reached 'exited' (archived-sessions row)", freshArchived?.processState === "exited");
   const status = await get("/api/orchestration/status");
   check("KILL: global pause latched after kill", status.pausedScopes.includes("global"));
 

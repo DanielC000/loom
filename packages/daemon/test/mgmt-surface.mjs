@@ -110,25 +110,32 @@ check("project_update: REJECTS an unknown config key (e.g. alertWebhook)", typeo
 const restGate = await patchJson("/api/projects/projM/config", { config: { orchestration: { gateCommand: "pnpm build && pnpm test" } } });
 check("trust-boundary: REST PATCH still accepts gateCommand (human path)", restGate.status === 200 && !restGate.body.error);
 
-// 4) project_archive — projArch disappears from the active project list; rows retained.
-check("project_archive: projArch is present before archiving", (await get("/api/projects")).some((p) => p.id === "projArch"));
-const arch = await call(M, "project_archive", { projectId: "projArch" });
-check("project_archive: succeeds", arch.archived === true && !arch.error);
-check("project_archive: projArch no longer in the active list", !(await get("/api/projects")).some((p) => p.id === "projArch"));
-check("project_archive: a missing project is rejected", (await call(M, "project_archive", { projectId: "nope" })).error === "project not found");
-
-// 5) schedule_create — valid cron schedule appears via REST; invalid cron + missing agent rejected.
+// 4) schedule_create — valid cron schedule appears via REST; invalid cron + missing agent rejected.
 const sched = await call(M, "schedule_create", { agentId: "tM", cron: "0 9 * * *" });
 check("schedule_create: returns a schedule with an id + computed nextFireAt", !!sched.id && !!sched.nextFireAt && !sched.error);
 check("schedule_create: the schedule appears via GET /api/schedules", (await get("/api/schedules")).some((s) => s.id === sched.id));
 check("schedule_create: an invalid cron expression is rejected", (await call(M, "schedule_create", { agentId: "tM", cron: "not a cron" })).error === "invalid cron expression");
 check("schedule_create: a missing agent is rejected", (await call(M, "schedule_create", { agentId: "nope", cron: "0 9 * * *" })).error === "agent not found");
 
-// 6) schedule_update — toggle enabled + change cron (recomputes nextFireAt); invalid cron rejected.
+// 5) schedule_update — toggle enabled + change cron (recomputes nextFireAt); invalid cron rejected.
 const su = await call(M, "schedule_update", { scheduleId: sched.id, enabled: false, cron: "30 8 * * *" });
 check("schedule_update: applies enabled=false + new cron", su.enabled === false && su.cron === "30 8 * * *" && !su.error);
 check("schedule_update: an invalid cron is rejected", (await call(M, "schedule_update", { scheduleId: sched.id, cron: "bogus" })).error === "invalid cron expression");
 check("schedule_update: a missing schedule is rejected", (await call(M, "schedule_update", { scheduleId: "nope", enabled: true })).error === "schedule not found");
+
+// 6) project_archive — own-project-scope trust boundary (commit 6008062, business-rule coverage lives
+//    in mgr-own-project-scope.mjs, which calls the service directly). This proves the SAME boundary
+//    holds over the REAL wire — the MCP tool actually returns an {error} shape instead of throwing raw
+//    — plus the end-to-end success path. Runs LAST for M: archiving M's own project (projM) would break
+//    every earlier check above that references projM/tM, so this can't run any earlier.
+check("project_archive: projArch (a DIFFERENT project) is present before the rejected attempt", (await get("/api/projects")).some((p) => p.id === "projArch"));
+const archForeign = await call(M, "project_archive", { projectId: "projArch" });
+check("project_archive: a projectId outside M's own project is REJECTED (trust boundary)",
+  typeof archForeign.error === "string" && /outside your project/.test(archForeign.error));
+check("project_archive: the rejected attempt left projArch un-archived", (await get("/api/projects")).some((p) => p.id === "projArch"));
+const archOwn = await call(M, "project_archive", { projectId: "projM" });
+check("project_archive: M's OWN project succeeds", archOwn.archived === true && !archOwn.error);
+check("project_archive: projM no longer in the active list", !(await get("/api/projects")).some((p) => p.id === "projM"));
 
 await M.close();
 

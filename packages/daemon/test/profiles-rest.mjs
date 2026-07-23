@@ -12,7 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -20,6 +20,13 @@ const BASE = `http://127.0.0.1:${PORT}`;
 const ownDaemon = !process.env.LOOM_HOME; // if the operator pre-set LOOM_HOME we reuse their daemon
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.tmpdir(), `loom-prest-${Date.now()}-${process.pid}`);
 fs.mkdirSync(LOOM_HOME, { recursive: true });
+
+// POST /api/projects validates repoPath is a real git repo — LOOM_HOME itself isn't one, so the
+// agent-assignment section below needs its own throwaway repo dir.
+const REPO_DIR = path.join(os.tmpdir(), `loom-prest-repo-${Date.now()}-${process.pid}`);
+fs.mkdirSync(REPO_DIR, { recursive: true });
+fs.writeFileSync(path.join(REPO_DIR, "README.md"), "# profiles-rest test\n");
+execSync(`git init -q && git add . && git -c user.email=prest@loom -c user.name=prest commit -q -m init`, { cwd: REPO_DIR });
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -99,9 +106,9 @@ try {
   check("DELETE on an already-gone id is idempotent (ok)", (await json("DELETE", `/api/profiles/${id}`)).status === 200);
 
   // ===================== Agent profile assignment via POST /api/agents/:id =====================
-  // Need a project + agent. Create them via REST (project requires a real-ish path; vault browser/git
-  // aren't touched here, so any existing dir works — use LOOM_HOME).
-  const proj = await json("POST", "/api/projects", { name: "RestProj", repoPath: LOOM_HOME, vaultPath: LOOM_HOME });
+  // Need a project + agent. Create them via REST (repoPath must be a real git repo — REPO_DIR above;
+  // vault browser/git aren't touched here, so vaultPath can stay LOOM_HOME).
+  const proj = await json("POST", "/api/projects", { name: "RestProj", repoPath: REPO_DIR, vaultPath: LOOM_HOME });
   check("setup: project created", proj.status === 201 && !!proj.body.id);
   const agent = await json("POST", `/api/projects/${proj.body.id}/agents`, { name: "AssignAgent" });
   check("setup: agent created, profile-less", agent.status === 201 && agent.body.profileId === null);
@@ -124,6 +131,7 @@ try {
 } finally {
   if (daemon) { try { daemon.kill(); } catch { /* ignore */ } }
   if (ownDaemon) { try { fs.rmSync(LOOM_HOME, { recursive: true, force: true }); } catch { /* best-effort (WAL handle) */ } }
+  try { fs.rmSync(REPO_DIR, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0

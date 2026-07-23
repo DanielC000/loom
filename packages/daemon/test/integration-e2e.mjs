@@ -14,6 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { PLATFORM_DEFAULTS } from "@loom/shared";
 import { writeJsonAtomic } from "../dist/pty/claude-config.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
@@ -56,7 +57,8 @@ try {
   const t1 = await post(`/api/projects/${P.id}/tasks`, { title: "T1" });
   await post(`/api/tasks/${t1.id}`, { columnKey: "in_progress" });
   const board = await get(`/api/projects/${P.id}/board`);
-  check("2. board has 6 resolved columns", board.columns.length === 6);
+  check(`2. board has ${PLATFORM_DEFAULTS.kanbanColumns.length} resolved columns (the platform default)`,
+    board.columns.length === PLATFORM_DEFAULTS.kanbanColumns.length);
   check("2. card T1 moved to in_progress", board.tasks.find((t) => t.id === t1.id)?.columnKey === "in_progress");
 
   // 3. spawn -> live session + engine id (the live terminal)

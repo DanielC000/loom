@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawn } from "node:child_process";
+import { spawn, execSync } from "node:child_process";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PORT = Number(process.env.LOOM_PORT) || 4318 + (process.pid % 900); // non-4317, low-collision
@@ -25,9 +25,12 @@ const ownDaemon = !process.env.LOOM_HOME; // if the operator pre-set LOOM_HOME w
 const LOOM_HOME = process.env.LOOM_HOME || path.join(os.tmpdir(), `loom-board-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(LOOM_HOME, { recursive: true });
 
-// The project's repo/vault dir — separate from LOOM_HOME; also the spawned agent's cwd.
+// The project's repo/vault dir — separate from LOOM_HOME; also the spawned agent's cwd. POST
+// /api/projects validates repoPath is a real git repo, so this must be git-init'd.
 const dir = path.join(os.tmpdir(), `loom-board-${Date.now()}`);
 fs.mkdirSync(dir, { recursive: true });
+fs.writeFileSync(path.join(dir, "README.md"), "# board-consistency test\n");
+execSync(`git init -q && git add . && git -c user.email=board@loom -c user.name=board commit -q -m init`, { cwd: dir });
 
 const PROMPT =
   "You are in an automated test. Do EXACTLY this and nothing else: " +
