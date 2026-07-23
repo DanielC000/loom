@@ -879,7 +879,11 @@ async function main(): Promise<void> {
   // v1 has NO runtime registration: a project whose `codescape.enabled` flips ON after this boot is not
   // picked up until the NEXT daemon restart (see the log at the config-PATCH site in gateway/server.ts) —
   // a real gap, not silently papered over, and intentionally NOT solved here (that's a deferred v2 feature).
-  void codescapeSupervisor.start(codescapeBootRepoPaths(db.listProjects())).catch((err) => {
+  // Card b8de5876: thread the DB-persisted `integrations.codescape.path` override into the boot gate —
+  // index.ts is the ONE place in this call chain with DB access, so it's the only caller that CAN resolve
+  // it. Without this, `start()` only ever saw env/bare-PATH, disagreeing with the per-spawn seam
+  // (`pty/host.ts`, which already threads this same value) within the same boot.
+  void codescapeSupervisor.start(codescapeBootRepoPaths(db.listProjects()), resolveCodescapeIntegrationPath(db.getPlatformConfig())).catch((err) => {
     console.warn(`[boot] codescape supervisor failed to start (continuing boot): ${(err as Error).message}`);
   });
 

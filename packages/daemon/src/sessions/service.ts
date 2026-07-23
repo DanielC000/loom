@@ -3,7 +3,7 @@ import path from "node:path";
 import { randomUUID, createHash } from "node:crypto";
 import { Ajv } from "ajv";
 import {
-  resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig,
+  resolveConfig, resolveProfile, columnKeyForRole, DEFAULT_TASK_PRIORITY, resolveCodescapeConfig, resolveCodescapeIntegrationPath,
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
@@ -8231,8 +8231,10 @@ export class SessionService {
    * (`/mcp/<codescapeId>/<worktreeId>`, see `pty/host.ts` `codescapeHttpMcpServer`) 404s honestly instead
    * of silently mismatching, and so a later {@link fireCodescapeDrop} has something real to deregister.
    * Fire-and-forget: called synchronously (not awaited by the caller) so a Codescape hiccup can never
-   * delay a worker spawn. Gated on `isCodescapeEnabled(codescapeEnabled)` (folds in `isLoomDev()`) AND a non-null
-   * `worktreeId` (null for a taskless spawn — no stable id to register under; that worker's MCP mount
+   * delay a worker spawn. Gated on `isCodescapeEnabled(codescapeEnabled, dbPath)` (folds in `isLoomDev()`
+   * AND the DB-persisted `integrations.codescape.path`, card b8de5876 — read LIVE off `this.db
+   * .getPlatformConfig()` here, like the boot gate and the per-spawn seam, so all three agree) AND a
+   * non-null `worktreeId` (null for a taskless spawn — no stable id to register under; that worker's MCP mount
    * simply degrades to the bare project route, see `buildMcpServers`). `repoPath` is the project's MAIN
    * checkout (not the new worker's own worktree) — codescape indexes ONE graph per project regardless of
    * which repo a task targets (see `fireCodescapeReingest`'s identical note). Resolves codescape's OWN
@@ -8243,7 +8245,7 @@ export class SessionService {
    * doc history).
    */
   private fireCodescapeRegisterWorktree(projectId: string, codescapeEnabled: boolean, repoPath: string, worktreeId: string | null, worktreePath: string, baseRef: string): void {
-    if (!isCodescapeEnabled(codescapeEnabled) || !worktreeId || !this.codescape) return;
+    if (!isCodescapeEnabled(codescapeEnabled, resolveCodescapeIntegrationPath(this.db.getPlatformConfig())) || !worktreeId || !this.codescape) return;
     const codescapeProjectId = this.codescape.resolveProjectId(repoPath);
     if (!codescapeProjectId) {
       console.warn(`[codescape] register-worktree skipped for project ${projectId}: no codescape manifest entry for ${repoPath} (not yet ingested?)`);
@@ -8284,7 +8286,7 @@ export class SessionService {
     try {
       const project = this.db.getProject(projectId);
       if (!project) return;
-      if (!isCodescapeEnabled(resolveCodescapeConfig(project.config).enabled) || !this.codescape) return;
+      if (!isCodescapeEnabled(resolveCodescapeConfig(project.config).enabled, resolveCodescapeIntegrationPath(this.db.getPlatformConfig())) || !this.codescape) return;
       const codescapeProjectId = this.codescape.resolveProjectId(project.repoPath);
       if (!codescapeProjectId) {
         console.warn(`[codescape] reingest skipped for project ${projectId}: no codescape manifest entry for ${project.repoPath} (not yet ingested?)`);
@@ -8315,7 +8317,7 @@ export class SessionService {
     try {
       const project = this.db.getProject(ctx.projectId);
       if (!project) return;
-      if (!isCodescapeEnabled(resolveCodescapeConfig(project.config).enabled)) return;
+      if (!isCodescapeEnabled(resolveCodescapeConfig(project.config).enabled, resolveCodescapeIntegrationPath(this.db.getPlatformConfig()))) return;
       const worktreeId = ctx.worktreeId;
       const codescapeProjectId = this.codescape.resolveProjectId(project.repoPath);
       if (!codescapeProjectId) {

@@ -100,6 +100,55 @@ process.env.LOOM_DEV = "1";
 check("(gate) isCodescapeSupervisorEnabled() is TRUE once LOOM_DEV=1 AND the fixture CLI is resolvable",
   isLoomDev() === true && isCodescapeSupervisorEnabled() === true);
 
+// ===================== (dbPath) card b8de5876: the boot gate must honor a DB-persisted path with NO =====
+// ===================== global CLI/env var configured — the exact bug: boot's start() used to call ========
+// ===================== isCodescapeSupervisorEnabled()/resolveCodescapeBin() with NO dbPath at all, so a ===
+// ===================== host configured ONLY via `integrations.codescape.path` (no LOOM_CODESCAPE_BIN, no ==
+// ===================== global install) logged "codescape off" at boot forever, while the per-spawn seam ==
+// ===================== (pty/host.ts) — which DID thread the DB path — went on to conclude "enabled", =====
+// ===================== disagreeing within the same boot. This section proves dbPath ALONE (env unset) ====
+// ===================== both satisfies the gate AND is what start()/spawnServe() actually spawn with. ======
+{
+  const savedBin = process.env.LOOM_CODESCAPE_BIN;
+  delete process.env.LOOM_CODESCAPE_BIN;
+
+  check("(dbPath) with no dbPath and no env var, the gate is FALSE (no global CLI on this host)",
+    isCodescapeSupervisorEnabled() === false);
+  check("(dbPath) isCodescapeSupervisorEnabled(fixtureCli) is TRUE — a DB path ALONE satisfies the gate, no env var needed",
+    isCodescapeSupervisorEnabled(fixtureCli) === true);
+
+  const dbPathHomeDir = path.join(tmpHome, "dbpath-home");
+  const dbPathCallsFile = path.join(dbPathHomeDir, "fake-codescape-calls.jsonl");
+  const readDbPathCalls = () => fs.existsSync(dbPathCallsFile)
+    ? fs.readFileSync(dbPathCallsFile, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l))
+    : [];
+  const dbPathSup = new CodescapeSupervisor({ homeDir: dbPathHomeDir, ingestTimeoutMs: 15_000 });
+  // The regression: `start()` used to take only `repoPaths` — a caller passing a 2nd arg here would have
+  // had it silently ignored, `isCodescapeSupervisorEnabled()` would run with NO dbPath, see no env var and
+  // no global "codescape" on PATH, and never spawn at all (this exact assertion block fails RED against
+  // the pre-fix code — verified by temporarily reverting supervisor.ts's `start`/`ingest`/`spawnServe`).
+  await dbPathSup.start(["/fake/repo/dbpath"], fixtureCli);
+  for (let i = 0; i < 50 && readDbPathCalls().length < 2; i++) await sleep(50);
+  const dbPathCalls = readDbPathCalls();
+  check("(dbPath) start(repoPaths, dbPath) with ONLY a dbPath (no env var) actually ingests+spawns serve",
+    dbPathCalls.length === 2 && dbPathCalls[0]?.cmd === "ingest" && dbPathCalls[1]?.cmd === "serve");
+  check("(dbPath) getPort() is live — the DB-path-only configuration reached spawnServe, not just the gate check",
+    typeof dbPathSup.getPort() === "number" && dbPathSup.getPort() > 0);
+
+  // Restart-on-death must ALSO keep using the remembered dbPath (spawnServe runs off a setTimeout, long
+  // after start()'s own call stack returned) — kill the child and confirm the respawn still uses the
+  // fixture CLI, not a silent fallback to bare "codescape" (which would fail the enablement gate entirely
+  // were it re-checked, but spawnServe doesn't re-check — it would just try to spawn the wrong binary).
+  const dbPathPidBefore = dbPathSup.getPid();
+  process.kill(dbPathPidBefore);
+  for (let i = 0; i < 100 && readDbPathCalls().length < 3; i++) await sleep(50);
+  check("(dbPath) restart-on-death respawns using the SAME remembered dbPath (a 3rd 'serve' call recorded, new pid)",
+    readDbPathCalls().length === 3 && readDbPathCalls()[2]?.cmd === "serve" && dbPathSup.getPid() !== dbPathPidBefore);
+
+  dbPathSup.stop();
+  process.env.LOOM_CODESCAPE_BIN = savedBin;
+}
+
 // ===================== (a) REAL-SPAWN: ingest-then-serve, shared cwd =====================
 const homeDir = path.join(tmpHome, "codescape-home");
 const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");

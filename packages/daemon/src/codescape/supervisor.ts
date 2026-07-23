@@ -202,6 +202,18 @@ export class CodescapeSupervisor {
   private readonly reingestTimeoutMs: number;
   private readonly negativeCacheTtlMs: number;
 
+  /**
+   * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
+   * and remembered for the lifetime of this instance — {@link ingest}, {@link spawnServe} (including a
+   * later restart-on-death, which runs long after `start()`'s own call stack has returned), and every
+   * `isCodescapeSupervisorEnabled`/`resolveCodescapeBin`/`codescapeBinCandidate` check this class makes
+   * all read it from here, so the boot gate and the actual spawn agree on the SAME candidate instead of
+   * the gate checking one path and the spawn silently trying another. `undefined` when `start()` was
+   * called with no dbPath (or never called at all) — every resolver already treats that as "fall back to
+   * `LOOM_CODESCAPE_BIN` / the bare PATH name", unchanged from before this field existed.
+   */
+  private codescapePath: string | undefined;
+
   private port: number | null = null;
   /** True once `serve` has actually been spawned and hasn't since exited/errored. Distinct from `port`
    *  (which is reserved up-front and reused across a restart-on-death) — getPort() gates on this. */
@@ -268,7 +280,7 @@ export class CodescapeSupervisor {
    * of `start()`'s own bootstrap loop.
    */
   async ingest(repoPath: string): Promise<CodescapeIngestResult> {
-    if (!isCodescapeSupervisorEnabled()) {
+    if (!isCodescapeSupervisorEnabled(this.codescapePath)) {
       // Silent skip (no warn — the "missing" reason here is the gate itself, not a real failure). CR
       // fix: ingest() is public and callable
       // independently of start() (C2/C3's "onboard a newly-enabled project" path) — it must NEVER create
@@ -277,7 +289,7 @@ export class CodescapeSupervisor {
       return { ok: false, outcome: "failed", errorTail: "codescape supervisor is disabled (needs isLoomDev() + a codescape CLI detected on the host)" };
     }
     fs.mkdirSync(this.homeDir, { recursive: true });
-    const { command, args } = resolveCodescapeBin();
+    const { command, args } = resolveCodescapeBin(this.codescapePath);
     const r = await runBounded(command, [...args, "ingest", repoPath], this.homeDir, this.ingestTimeoutMs);
     if (!r.ok) {
       console.warn(`[codescape] ingest ${repoPath} ${r.timedOut ? "timed out" : `failed (exit ${r.code})`}${r.output ? ` — ${r.output}` : ""}`);
@@ -292,16 +304,28 @@ export class CodescapeSupervisor {
    * see the CWD CONTRACT note above), reserves a loopback port, then spawns + supervises `serve`. Async,
    * best-effort: an ingest failure is logged and does NOT abort the boot — serve still starts (an empty
    * or stale project index there is a Codescape-side concern, not a reason to leave serve down).
+   *
+   * `dbPath` (card b8de5876): the DB-persisted `integrations.codescape.path` override, when the caller
+   * has DB access (index.ts boot does; this class itself has none). Remembered on {@link codescapePath}
+   * for the REST of this instance's life — not just this call — so the enablement check here, the actual
+   * `ingest`/`serve` spawn (this call AND every later restart-on-death spawn, which runs long after this
+   * call has returned), and the boot log line all resolve the SAME candidate. Before this, `start()` only
+   * ever checked env/bare-PATH, so a host configured via the DB path alone (no global install) logged
+   * "codescape off" here while the per-spawn seam (`pty/host.ts`) — which DID thread the DB path — went on
+   * to conclude "enabled", disagreeing within the same boot and leaving the feature unactivatable.
    */
-  async start(repoPaths: string[] = []): Promise<void> {
+  async start(repoPaths: string[] = [], dbPath?: string): Promise<void> {
     if (this.starting || this.child) return;
-    if (!isCodescapeSupervisorEnabled()) {
+    this.codescapePath = dbPath;
+    if (!isCodescapeSupervisorEnabled(dbPath)) {
       // isLoomDev()-gated: a regular (non-dev) end user never sees a reference to this unshipped,
       // LOOM_DEV-only feature at every boot — only a LOOM_DEV=1 dev build gets the resolved-decision line,
       // and host-local console output is never a user-facing leak (card 503a30a0: the RESOLVED decision +
       // its REASON, not a bare on/off — this is what would have made the 2026-07 four-day freeze visible
-      // on day one instead of silently persisting across 12+ boots).
-      if (isLoomDev()) console.log(`[boot] codescape off (no codescape CLI detected — checked "${codescapeBinCandidate()}"; not installed on this host)`);
+      // on day one instead of silently persisting across 12+ boots). `codescapeBinCandidate(dbPath)` here
+      // (card b8de5876) so the logged candidate is the ACTUAL one just checked, not a stale env/bare-PATH
+      // guess that silently ignores a configured DB path.
+      if (isLoomDev()) console.log(`[boot] codescape off (no codescape CLI detected — checked "${codescapeBinCandidate(dbPath)}"; not installed on this host)`);
       return;
     }
     this.starting = true;
@@ -314,7 +338,7 @@ export class CodescapeSupervisor {
       if (this.port == null) this.port = await pickLoopbackPort();
       this.restartAttempts = 0;
       this.spawnServe();
-      console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate()}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
+      console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
       // Card 088afc94 P4 follow-up: codescape's `POST /project` dynamic registration (confirmed merged/
       // live, commit 669548e) is now the SANCTIONED id-resolution path. Register every project
       // UNCONDITIONALLY, every boot — idempotent by contract (the subprocess ingest loop just above
@@ -372,7 +396,11 @@ export class CodescapeSupervisor {
    */
   private spawnServe(): void {
     if (this.stopped || this.port == null) return;
-    const { command, args: baseArgs } = resolveCodescapeBin();
+    // Card b8de5876: `this.codescapePath` (set once by `start()`, not re-derived here) so a restart-on-
+    // death spawn — which runs from a `setTimeout`, long after `start()`'s own call stack returned — still
+    // resolves the SAME dbPath-first candidate the boot gate just checked, instead of silently falling
+    // back to env/bare-PATH on every restart.
+    const { command, args: baseArgs } = resolveCodescapeBin(this.codescapePath);
     const args = [...baseArgs, "serve", "--port", String(this.port)];
     let child: ChildProcess;
     try {
