@@ -42,11 +42,21 @@ const MAX_ATTEMPTS = 3;      // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
 const SETTLE_POLL = 10;      // mirrors LOOM_REASSERT_SETTLE_POLL_MS
 const SETTLE_MAX_POLLS = 5;  // mirrors LOOM_REASSERT_SETTLE_MAX_POLLS
 const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
+// Card 441499ee: after the verify-timeout elapses with no confirmation, GIVE-UP now takes ONE more short,
+// bounded, OBSERVED wait for `enterConfirmed` (awaitGiveUpConfirmSettle) before actually committing to
+// RECOVERY — nothing in this fake pty ever fires a confirming HOOK (only raw `emitData`, which this file's
+// own probe response is NOT a hook), so that wait always maxes out its bound too; the final deadline below
+// must account for it.
+const CONFIRM_SETTLE_POLL = 10;
+const CONFIRM_SETTLE_MAX_POLLS = 5;
+const CONFIRM_SETTLE_BOUND = CONFIRM_SETTLE_POLL * CONFIRM_SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
 // The FINAL attempt's own re-assert is written at this (pre-settle-wait) point — same as every attempt's
 // write point pre-Half-1. Its Enter, post-Half-1, is written only after the settle wait resolves.
 const reassertWriteAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT;
@@ -114,8 +124,9 @@ try {
   fake.emitData("\x1b[<u\x1b[>1u\x1b[>4;2m"); // the probe-observed provoked-response shape; only its timing matters here
 
   // Give-up (if it were going to fire suppressed OR recovered) is now anchored at
-  // reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT — wait comfortably past that.
-  await sleepUntil(t0, reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT + VERIFY_TIMEOUT / 2);
+  // reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT, PLUS the new post-give-up
+  // confirm-settle wait (card 441499ee) before RECOVERY actually commits — wait comfortably past all of it.
+  await sleepUntil(t0, reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT + CONFIRM_SETTLE_BOUND + VERIFY_TIMEOUT / 2);
 
   check("ABSORBED: the settle-window response did NOT cause a suppression — busy recovered to false",
     busyLog[SID].at(-1) === false);

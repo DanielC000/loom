@@ -32,10 +32,19 @@ process.env.LOOM_HOME = tmpHome;
 const ENTER_DELAY = 50;
 const VERIFY_TIMEOUT = 600;
 const MAX_ATTEMPTS = 1; // the degenerate config under test — give-up fires at attempt===1, no re-assert ever ran
+// Card 441499ee: after the verify-timeout elapses with no confirmation, GIVE-UP now takes ONE more short,
+// bounded, OBSERVED wait for `enterConfirmed` (awaitGiveUpConfirmSettle) before actually committing to
+// RECOVERY — nothing in this fake pty ever fires a confirming hook, so that wait always maxes out its
+// bound; giveUpAt() must account for it.
+const CONFIRM_SETTLE_POLL = 10;
+const CONFIRM_SETTLE_MAX_POLLS = 5;
+const CONFIRM_SETTLE_BOUND = CONFIRM_SETTLE_POLL * CONFIRM_SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
-const giveUpAt = () => ENTER_DELAY + VERIFY_TIMEOUT;
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
+const giveUpAt = () => ENTER_DELAY + VERIFY_TIMEOUT + CONFIRM_SETTLE_BOUND;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 

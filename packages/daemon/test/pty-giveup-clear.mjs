@@ -45,13 +45,22 @@ const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
 const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
 const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
+// Card 441499ee: after the verify-timeout elapses with no confirmation, GIVE-UP now takes ONE more short,
+// bounded, OBSERVED wait for `enterConfirmed` (awaitGiveUpConfirmSettle) before actually committing to
+// RECOVERY — nothing in this fake pty ever fires a confirming hook, so that wait always maxes out its
+// bound too, exactly like SETTLE_BOUND above. giveUpAt() must account for it.
+const CONFIRM_SETTLE_POLL = 10;
+const CONFIRM_SETTLE_MAX_POLLS = 5;
+const CONFIRM_SETTLE_BOUND = CONFIRM_SETTLE_POLL * CONFIRM_SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
+process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
 const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
-const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
+const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT + CONFIRM_SETTLE_BOUND;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 

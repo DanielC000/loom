@@ -59,6 +59,16 @@ const SUBMIT_VERIFY_TIMEOUT_MS = Number(process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_M
 const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
 
 /**
+ * Card 441499ee: how many times a single message may be put back on `live.pending` after a GIVE-UP
+ * RECOVERY before it's dropped for real (with a loud log) instead of requeued again. Requeueing converts
+ * a silent drop into delayed delivery, but an UNBOUNDED requeue would let a message that keeps hitting a
+ * structurally-broken session (not just a transient contention burst) loop forever — worse than the
+ * original drop. One requeue is enough to ride out a contention-driven burst (give-ups cluster where the
+ * daemon is already busy, per the measurement on this same card) without risking an infinite retry loop.
+ */
+const GIVE_UP_REQUEUE_LIMIT = Number(process.env.LOOM_GIVE_UP_REQUEUE_LIMIT) || 1;
+
+/**
  * Card b64b3726: bounded poll for the GIVE-UP attempt's own paste-reassert (`BRACKET_PASTE_START +
  * BRACKET_PASTE_END`, written by `sendEnterAndVerify` on every `attempt > 1`) to settle BEFORE writing
  * that attempt's Enter and capturing `enterWrittenAt` — see `awaitReassertSettle`. Mirrors this file's
@@ -83,6 +93,29 @@ const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
  */
 const REASSERT_SETTLE_POLL_MS = Number(process.env.LOOM_REASSERT_SETTLE_POLL_MS) || 15;
 const REASSERT_SETTLE_MAX_POLLS = Number(process.env.LOOM_REASSERT_SETTLE_MAX_POLLS) || 20;
+
+/**
+ * Card 441499ee (hardening against the give-up discriminator's own measured false-negative rate — card
+ * 04de8bbf, n=84: ~86% of give-ups that reach this point are followed by a confirming hook, i.e. the turn
+ * actually started; only ~14% are genuine drops). A SHORT, bounded, OBSERVED wait for `enterConfirmed` to
+ * flip true, inserted right where the output-based discriminator has ALREADY failed to suppress a give-up
+ * — see `awaitGiveUpConfirmSettle`. Modeled on `REASSERT_SETTLE_POLL_MS`/`_MAX_POLLS`'s own shape and
+ * accept-a-residual philosophy, but kept as an INDEPENDENT constant pair: that one is sized against a
+ * measured LOCAL terminal-protocol renegotiation latency (a completely different, much faster mechanism
+ * than an actual hook round-trip), so reusing it here would smuggle in an unmeasured assumption.
+ *
+ * DELIBERATELY NOT sized to cover the full hook-confirmation latency distribution — give-ups are
+ * CONTENTION-DRIVEN BURSTS (see SUBMIT_VERIFY_TIMEOUT_MS's own REJECTED ALTERNATIVE note), so a bound wide
+ * enough to reliably catch a contention-delayed hook would have to keep growing to chase wherever fleet
+ * contention peaks next — the exact anti-pattern this project has reverted twice (cards 595aad10,
+ * fea23514). This is a SHORT last-chance check that only claims to catch the FASTEST-confirming subset of
+ * the 86% for free (zero requeue, zero purge race, ever, for those); anything slower still falls through to
+ * GIVE-UP RECOVERY's existing requeue, with `purgeConfirmedGiveUpRequeue` as the defense-in-depth for a
+ * confirmation that arrives later still, before the requeued entry has actually drained. Closing the gap
+ * further needs the discriminator itself fixed (04de8bbf), not a bigger constant here.
+ */
+const GIVE_UP_CONFIRM_SETTLE_POLL_MS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS) || 15;
+const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) || 20;
 
 /**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
@@ -1193,7 +1226,21 @@ export type QueuedMessageKind = "warning" | "agent";
  * produces N queued nudges but only the FIRST pull is productive; the rest would otherwise drain as
  * separate turns and each find nothing left to pull.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null };
+/**
+ * `giveUpRequeues` (card 441499ee) OPTIONALLY counts how many times THIS EXACT message has already been
+ * put back on `live.pending` after a submit give-up (see `fireEnterAndVerify`'s GIVE-UP RECOVERY branch
+ * and `GIVE_UP_REQUEUE_LIMIT`) — undefined/0 for every message that has never given up. Identity-scoped
+ * to the message object itself (never inferred from matching text), so two legitimately identical
+ * messages are counted independently and a message that keeps giving up can't requeue forever.
+ *
+ * `giveUpGen` (card 441499ee, hardening against a false-negative give-up) tags a requeued entry with the
+ * `submitGeneration` its ORIGINAL (failed) submit ran under. The give-up discriminator can itself be
+ * wrong — a confirming hook can arrive AFTER give-up already fired, proving the original turn actually
+ * started (see `purgeConfirmedGiveUpRequeue`) — so this is the correlation a late confirmation uses to
+ * find and purge the now-redundant requeued copy before it can ever drain and double-deliver the same
+ * text. undefined for every entry that was never requeued.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -1333,6 +1380,15 @@ interface Live {
   // `sendEnterAndVerify` chain captures the generation it was scheduled under and bails the instant the
   // live value no longer matches, regardless of what `enterConfirmed` currently reads.
   submitGeneration: number;
+  // Card 441499ee: the exact QueuedMessage entry/entries this IN-FLIGHT submit()'s text came from — set
+  // in submit(), read ONLY by `fireEnterAndVerify`'s GIVE-UP RECOVERY branch so a give-up can put the
+  // ORIGINAL message(s) back on `live.pending` (identity-preserved, never re-derived from text) instead of
+  // discarding them after the caller was already told `delivered:true`. null for the two direct submit()
+  // callers that don't originate from enqueueStdin (resumeAfterRateLimit's replay, scheduleKickoffGuarantee)
+  // — a give-up there has no origin to restore, same as before this card. Overwritten (not appended) by
+  // every submit() call; a stale reference from an already-confirmed/superseded turn is harmless because
+  // the give-up branch itself bails on `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
+  giveUpOrigin: QueuedMessage[] | null;
   // Loom Companion (multi-channel reply routing): the ORIGINATING chat route of the IN-FLIGHT turn, or null
   // when the turn wasn't formed from a companion inbound / proactive-home submit. Set SYNCHRONOUSLY in
   // submit() (both the idle-submit and drain paths), read by getActiveTurnOrigin when the companion's
@@ -2323,6 +2379,7 @@ export class PtyHost {
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet (the startup turn is a CLI arg, not submit()) — see submit()'s reset
       submitGeneration: 0,
+      giveUpOrigin: null,
       activeTurnRoute: null,
       lastPromptRoute: null,
       activeTurnOwnerText: null,
@@ -2475,6 +2532,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      giveUpOrigin: null,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -2547,6 +2605,7 @@ export class PtyHost {
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
+      giveUpOrigin: null,
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -2842,6 +2901,7 @@ export class PtyHost {
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
+        this.purgeConfirmedGiveUpRequeue(sessionId, live); // card 441499ee — see the method doc
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
       case "Stop":
@@ -2860,6 +2920,7 @@ export class PtyHost {
         // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
         // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
         live.enterConfirmed = true;
+        this.purgeConfirmedGiveUpRequeue(sessionId, live); // card 441499ee — see the method doc; before any early park-break below on purpose
         this.finalizingTurn = true;
         try {
           this.setBusy(sessionId, false, "stop-hook"); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
@@ -3002,7 +3063,13 @@ export class PtyHost {
       if (this.finalizingTurn) {
         throw new Error("M2 invariant violated: enqueueStdin reached the idle-submit path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
       }
-      this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate");
+      // Card 441499ee: this text was never pushed to `live.pending` (it's going out immediately), so if
+      // its submit later GIVES UP, there is nothing else recording what it was. Hand submit() a
+      // synthesized origin entry (fresh id — this message was never queued before) carrying every field a
+      // held entry would have, so a give-up can restore it onto `live.pending` by identity instead of
+      // discarding it after this call already returns `delivered:true`.
+      this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate",
+        [{ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId }]);
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -3549,7 +3616,7 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(0, n); // the leading same-route (+ same-kind, unless toggled) run
     }
-    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain"); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route)
+    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -3593,9 +3660,14 @@ export class PtyHost {
    * a bounded verify/retry schedule until `UserPromptSubmit` (or a Stop, proving a turn ran) confirms
    * it, or gives up and recovers busy so the session doesn't wedge.
    */
-  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue"): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
+    // Card 441499ee: remember the ORIGINAL queued message(s) this turn's text came from — see
+    // `Live.giveUpOrigin`'s doc. `origin` is undefined for the two direct submit() callers that don't
+    // originate from enqueueStdin (rate-limit replay, kickoff guarantee), so this stays byte-identical
+    // (null) for them, exactly like every other per-turn field this change didn't touch.
+    live.giveUpOrigin = origin ?? null;
     // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): `reason` names WHICH of the
     // four call sites is writing this turn — the two queue-mediated ones ("immediate"/"drain", both already
     // busy-gated) and the two DIRECT-write bypasses (resumeAfterRateLimit's "rate-limit-replay", and
@@ -3779,6 +3851,31 @@ export class PtyHost {
     setTimeout(() => this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, polls + 1, onDone), REASSERT_SETTLE_POLL_MS);
   }
 
+  /**
+   * Card 441499ee: bounded, OBSERVED wait for `enterConfirmed` to flip true — see
+   * `GIVE_UP_CONFIRM_SETTLE_POLL_MS`'s doc for why this is short and deliberately does not try to cover
+   * the full hook-confirmation latency distribution. Called from the GIVE-UP branch of `fireEnterAndVerify`
+   * the instant the OUTPUT discriminator (`lastOutputAt`) has already failed to suppress it — this is a
+   * SEPARATE, independent check against a DIFFERENT signal (the hook-set `enterConfirmed`, not inferred
+   * output), not a change to that discriminator's own logic.
+   *
+   * UNLIKE `awaitReassertSettle`, the caller needs to know WHY this settled — `confirmed:true` (a hook
+   * arrived; treat exactly like GIVE-UP SUPPRESSED, do nothing else) vs `confirmed:false` (the bound
+   * elapsed with no confirmation; proceed to GIVE-UP RECOVERY) lead to entirely different actions — so
+   * `onSettled` takes that boolean. Mirrors `awaitReassertSettle`'s bail-silently-without-calling-back
+   * shape for the dead/superseded case: if this generation is no longer live or has been superseded by a
+   * newer submit(), there is nothing of THIS generation's left to confirm or recover, so it simply stops
+   * (the newer submit's own give-up chain, if it ever needs one, runs this same check fresh under its own
+   * generation).
+   */
+  private awaitGiveUpConfirmSettle(sessionId: string, gen: number, polls: number, onSettled: (confirmed: boolean) => void): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive || live.submitGeneration !== gen) return; // stale/dead — this generation is moot, nothing to confirm or recover
+    if (live.enterConfirmed) { onSettled(true); return; }
+    if (polls >= GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) { onSettled(false); return; }
+    setTimeout(() => this.awaitGiveUpConfirmSettle(sessionId, gen, polls + 1, onSettled), GIVE_UP_CONFIRM_SETTLE_POLL_MS);
+  }
+
   /** Write this attempt's Enter and arm its verify-timeout — the second half of `sendEnterAndVerify`,
    *  split out so the give-up attempt can route through `awaitReassertSettle` first. */
   private fireEnterAndVerify(sessionId: string, attempt: number, gen: number): void {
@@ -3835,43 +3932,151 @@ export class PtyHost {
           console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); leaving busy=true for the real Stop/UserPromptSubmit to finalize`);
           return;
         }
-        // eslint-disable-next-line no-console
-        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge`);
-        // card ee082fbb: clear the stranded injection — ONLY when the composer holds nothing but it (no
-        // human draft started during the failed retries; see the class doc above for the composerLen===0
-        // safety reasoning and the real-claude findings behind exact-backspace as the clear mechanism).
-        //
-        // `attempt > 1` (always true at give-up in production — SUBMIT_MAX_ATTEMPTS defaults to 4) is a
-        // CHEAP proxy for "the paste bracket is closed": THIS attempt's own `if (attempt > 1)` re-assert
-        // above already wrote a fresh START+END pair immediately before ITS Enter (card 97558183's
-        // documented behavior — idle → true no-op, still-open → closes it with a small stray tail), so by
-        // the time this verify-timeout elapses a paste-close was already attempted for this exact attempt.
-        // Skip the clear (fall back to the pre-fix stray-text behavior) when that never happened — a
-        // degenerate SUBMIT_MAX_ATTEMPTS=1 (env-only, never true in production) reaches give-up at
-        // attempt===1 with NO re-assert ever sent, so paste-open is unverified there; sending raw `\x7f`
-        // bytes into a genuinely-still-open paste would fold them in AS PASTE CONTENT (composer becomes
-        // `lastPrompt + backspaces` — strictly worse than the documented pre-fix concatenation). Residual
-        // risk even when attempt>1: that SAME re-assert write could itself also drop (a second, independent
-        // ConPTY drop stacked on the original Enter drop) — not mitigated further here; a paste-markers-
-        // then-Backspace sequence was outside the real-claude probe's validated scope (only START+END+Enter
-        // was probed), so we don't stack another unverified re-assert on top of the burst.
-        if (l.composerLen === 0 && l.lastPrompt && attempt > 1) {
+        // Card 441499ee (hardening — card 04de8bbf measured ~86% of give-ups reaching THIS point are
+        // followed by a confirming hook, i.e. the OUTPUT discriminator above just missed a turn that
+        // actually started): before committing to GIVE-UP RECOVERY — which requeues the text — give
+        // `enterConfirmed` one short, bounded, OBSERVED last chance to flip true. This is a SEPARATE check
+        // against a DIFFERENT signal than the discriminator above (the hook itself, not inferred output);
+        // it does not change that discriminator's own logic. See `awaitGiveUpConfirmSettle`'s doc for why
+        // this is short and does not try to cover the full hook-latency distribution — `purgeConfirmedGiveUpRequeue`
+        // remains the defense-in-depth for a confirmation that arrives after this window closes.
+        this.awaitGiveUpConfirmSettle(sessionId, gen, 0, (confirmed) => {
+          if (confirmed) {
+            // eslint-disable-next-line no-console
+            console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — a confirming hook arrived during the post-give-up settle wait (turn actually started; the output discriminator missed it, but the hook proves it); leaving busy/composer untouched`);
+            return;
+          }
+          const l2 = this.live.get(sessionId);
+          if (!l2?.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
           // eslint-disable-next-line no-console
-          console.log(`[submit] ${sessionId} clearing the stranded give-up injection (${l.lastPrompt.length} chars, composer otherwise empty)`);
-          // Thread setBusy(false) through the burst's OWN completion, not fired alongside it: writeChunked
-          // is only synchronous for text ≤ PTY_WRITE_CHUNK_BYTES — a large lastPrompt (a worker report /
-          // manager direction routinely exceeds it) becomes N chunks across event-loop ticks, and busy
-          // gates enqueueStdin's immediate-submit path (~this.enqueueStdin's `!live.busy` check). Clearing
-          // busy before the burst finishes would reopen that gate mid-burst: an inbound message landing in
-          // the window would submit a NEW turn whose own BRACKET_PASTE_START+chunks interleave with our
-          // still-draining backspaces on the pty's FIFO — a silent, corrupted/truncated turn. submit() itself
-          // follows this same discipline (its own post-write Enter is gated behind writeChunked's `done`).
-          this.writeChunked(sessionId, BACKSPACE.repeat(l.lastPrompt.length), () => this.setBusy(sessionId, false, "give-up-recovery-cleared"));
-        } else {
-          this.setBusy(sessionId, false, "give-up-recovery");
-        }
+          console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge`);
+          // card ee082fbb: clear the stranded injection — ONLY when the composer holds nothing but it (no
+          // human draft started during the failed retries; see the class doc above for the composerLen===0
+          // safety reasoning and the real-claude findings behind exact-backspace as the clear mechanism).
+          //
+          // `attempt > 1` (always true at give-up in production — SUBMIT_MAX_ATTEMPTS defaults to 4) is a
+          // CHEAP proxy for "the paste bracket is closed": THIS attempt's own `if (attempt > 1)` re-assert
+          // above already wrote a fresh START+END pair immediately before ITS Enter (card 97558183's
+          // documented behavior — idle → true no-op, still-open → closes it with a small stray tail), so by
+          // the time this verify-timeout elapses a paste-close was already attempted for this exact attempt.
+          // Skip the clear (fall back to the pre-fix stray-text behavior) when that never happened — a
+          // degenerate SUBMIT_MAX_ATTEMPTS=1 (env-only, never true in production) reaches give-up at
+          // attempt===1 with NO re-assert ever sent, so paste-open is unverified there; sending raw `\x7f`
+          // bytes into a genuinely-still-open paste would fold them in AS PASTE CONTENT (composer becomes
+          // `lastPrompt + backspaces` — strictly worse than the documented pre-fix concatenation). Residual
+          // risk even when attempt>1: that SAME re-assert write could itself also drop (a second, independent
+          // ConPTY drop stacked on the original Enter drop) — not mitigated further here; a paste-markers-
+          // then-Backspace sequence was outside the real-claude probe's validated scope (only START+END+Enter
+          // was probed), so we don't stack another unverified re-assert on top of the burst.
+          if (l2.composerLen === 0 && l2.lastPrompt && attempt > 1) {
+            // eslint-disable-next-line no-console
+            console.log(`[submit] ${sessionId} clearing the stranded give-up injection (${l2.lastPrompt.length} chars, composer otherwise empty)`);
+            // Thread setBusy(false) through the burst's OWN completion, not fired alongside it: writeChunked
+            // is only synchronous for text ≤ PTY_WRITE_CHUNK_BYTES — a large lastPrompt (a worker report /
+            // manager direction routinely exceeds it) becomes N chunks across event-loop ticks, and busy
+            // gates enqueueStdin's immediate-submit path (~this.enqueueStdin's `!live.busy` check). Clearing
+            // busy before the burst finishes would reopen that gate mid-burst: an inbound message landing in
+            // the window would submit a NEW turn whose own BRACKET_PASTE_START+chunks interleave with our
+            // still-draining backspaces on the pty's FIFO — a silent, corrupted/truncated turn. submit() itself
+            // follows this same discipline (its own post-write Enter is gated behind writeChunked's `done`).
+            this.writeChunked(sessionId, BACKSPACE.repeat(l2.lastPrompt.length), () => {
+              this.setBusy(sessionId, false, "give-up-recovery-cleared");
+              this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
+            });
+          } else {
+            this.setBusy(sessionId, false, "give-up-recovery");
+            this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
+          }
+        });
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
+  }
+
+  /**
+   * Card 441499ee: the second half of GIVE-UP RECOVERY — called AFTER `setBusy(false)` has actually
+   * landed (threaded through the backspace-clear's own completion when there is one, exactly like
+   * `setBusy` itself, so a still-draining clear burst can't be raced by a promoted turn). Restores
+   * `live.giveUpOrigin` (the exact message(s) this failed submit came from — see that field's doc) onto
+   * the FRONT of `live.pending` — converting the silent loss into delayed-but-real delivery on the NEXT
+   * natural drain trigger (a Stop hook for some other turn, the box-free transition, or the ~10s reconcile
+   * tick, which already exists precisely to drain anything a session's own Stop hook can't reach — see
+   * `reconcile()`). Deliberately does NOT force an immediate `drainPending` itself: give-up already has no
+   * live turn to interleave with, so the ordinary drain triggers are sufficient, and forcing one here would
+   * make EVERY give-up (even a lone, otherwise-idle session) immediately re-arm busy and retry a second
+   * full attempt cycle in place — which is exactly the behavior the sibling give-up tests
+   * (pty-giveup-clear.mjs, pty-giveup-clear-single-attempt.mjs, pty-giveup-false-negative.mjs) correctly
+   * assert does NOT happen for their own (single-cycle) scenarios. `unshift` (not push) preserves FIFO
+   * order relative to anything that queued WHILE this message was stuck retrying: that message was
+   * logically first, so it goes back in front of newer arrivals — and because `live.busy` stayed true for
+   * this session's entire failed-retry window, nothing else could have started running, so this can never
+   * jump ahead of or interleave with an actual in-flight turn.
+   *
+   * BOUNDED by `GIVE_UP_REQUEUE_LIMIT`: a message already at its requeue budget is dropped for real here
+   * (loudly logged) instead of requeued again — a message that keeps giving up and requeuing forever
+   * would be worse than the original silent drop. `giveUpRequeues` is tracked per MESSAGE OBJECT/id, never
+   * inferred from matching text, so two legitimately identical messages are bounded independently.
+   *
+   * SAFETY AGAINST A FALSE-NEGATIVE GIVE-UP (card 04de8bbf's neighbourhood — production measurement found
+   * GIVE-UP RECOVERY firing while the turn actually HAD started, zero SUPPRESSED in that sample): the
+   * discriminator deciding RECOVERY-vs-SUPPRESSED can itself be wrong, so a requeued entry stamps
+   * `giveUpGen: gen` — the generation its failed submit ran under — precisely so `purgeConfirmedGiveUpRequeue`
+   * can find and drop it the instant a confirming hook proves that generation's turn actually ran, instead
+   * of letting it drain later as a silent duplicate of a message that already landed.
+   */
+  private requeueGiveUpOrigin(sessionId: string, gen: number): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return;
+    const origin = live.giveUpOrigin;
+    live.giveUpOrigin = null;
+    if (!origin || origin.length === 0) return;
+    const kept: QueuedMessage[] = [];
+    for (const m of origin) {
+      const requeues = (m.giveUpRequeues ?? 0) + 1;
+      if (requeues > GIVE_UP_REQUEUE_LIMIT) {
+        // eslint-disable-next-line no-console
+        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — dropping for real instead of requeuing again`);
+        continue;
+      }
+      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen });
+    }
+    if (kept.length > 0) {
+      live.pending.unshift(...kept);
+      // eslint-disable-next-line no-console
+      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending — will drain on the next Stop/reconcile`);
+    }
+  }
+
+  /**
+   * Card 441499ee: safety net for a FALSE-NEGATIVE give-up — production measurement (the card's own
+   * neighbourhood, card 04de8bbf) found GIVE-UP RECOVERY firing while the turn had actually started (zero
+   * SUPPRESSED in that sample), meaning the discriminator that decides RECOVERY-vs-SUPPRESSED can itself
+   * be wrong. If RECOVERY already requeued a duplicate copy of that turn's text (see
+   * `requeueGiveUpOrigin`'s `giveUpGen` tag) and were left to drain later, it would silently re-submit a
+   * message whose original ALREADY landed — converting a fixed silent-drop bug into a NEW silent-duplicate
+   * bug. `UserPromptSubmit` and `Stop`/`StopFailure` are the two hooks that PROVE a turn actually ran
+   * (this file's own long-standing convention — either is definitive even if the other was lost), so both
+   * call this the instant they fire: any still-pending entry tagged with the CURRENT `submitGeneration` is
+   * for the turn that JUST proved it started, so it's purged before it can ever be delivered.
+   *
+   * Correlation works because `submitGeneration` only advances inside `submit()` — if nothing has
+   * resubmitted for this session since the failed attempt gave up, `live.submitGeneration` at hook-arrival
+   * time is STILL that same attempt's generation, so this needs no extra bookkeeping beyond the tag already
+   * on the entry. Narrower residual (out of THIS card's scope, tracked by 04de8bbf): if a reconcile tick
+   * beats a merely-late hook to the punch and resubmits the requeued entry FIRST (bumping the generation
+   * before the confirmation arrives), this purge no longer finds anything to remove — the entry is already
+   * out being resubmitted under its own new generation. That ordering needs the discriminator itself fixed,
+   * not a bigger purge window; this closes the far more common case where the hook (even late) still beats
+   * the next drain trigger.
+   */
+  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live): void {
+    const gen = live.submitGeneration;
+    for (let i = live.pending.length - 1; i >= 0; i--) {
+      if (live.pending[i]!.giveUpGen === gen) {
+        const [dropped] = live.pending.splice(i, 1);
+        // eslint-disable-next-line no-console
+        console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative — a confirming hook proves the original turn actually started; purged the requeued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
+      }
+    }
   }
 
   /**
