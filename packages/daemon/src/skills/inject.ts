@@ -140,7 +140,9 @@ function appendObsidianFragment(skillDir: string, fragment: string): void {
  *    is fatal on Windows: worktree removal (git/worktrees.ts removeWorktree's recursive-rm backstop)
  *    follows the junction and deletes the STORE's SKILL.md contents, nuking ~/.loom/skills for every
  *    later session. A copy is deleted with the worktree without ever reaching the store.
- *  - Hides the injected skills from git via .git/info/exclude (local only; never edits a tracked .gitignore).
+ *  - Hides the injected skills from git via the shared .git/info/exclude (local only; never edits a tracked
+ *    .gitignore) — resolved through to the main repo's common dir even when `cwd` is a linked worktree, so a
+ *    worker session hides its own injected skills instead of relying on the manager having synced them.
  *
  * `obsidianEnabled` (per session, from `opts.sessionEnv?.LOOM_OBSIDIAN_AUTOSTART === "1"` at the spawn
  * seam): when TRUE, the Obsidian "vault preflight" fragment is appended to the injected loom-pickup/
@@ -234,10 +236,39 @@ export function injectSkills(cwd: string, sessionId: string, subset?: string[] |
   if (failed.length) throw new Error(`injectSkills: failed to deliver ${failed.length} skill(s) to ${targetDir}: ${failed.join(", ")}`);
 }
 
-/** Append local git-ignore patterns for the injected skill dirs + manifest (only for a real .git dir). */
+/**
+ * Resolve the git dir that `info/exclude` actually lives in for `cwd` — the repo's own `.git` when it's a
+ * real directory, or, for a linked WORKTREE (where `.git` is a file), the shared common dir the worktree
+ * points back at. `info/exclude` is not one of the handful of files git keeps per-worktree (HEAD, index,
+ * logs/HEAD, …) — it lives in the common dir and git resolves it there for every linked worktree too, so a
+ * write here takes effect for `git status` in the worktree immediately, no per-worktree copy needed.
+ * Resolution mirrors what `git rev-parse --git-common-dir` does: the worktree's `.git` file contains
+ * `gitdir: <repo>/.git/worktrees/<id>`, and that private dir carries a `commondir` file (relative or
+ * absolute) pointing at the shared common dir. Returns null if anything along the way is missing/unreadable
+ * (no `.git`, a malformed worktree pointer, …) — the caller then no-ops, same as the old behavior.
+ */
+function resolveGitCommonDir(cwd: string): string | null {
+  const gitPath = path.join(cwd, ".git");
+  let stat: fs.Stats;
+  try { stat = fs.statSync(gitPath); } catch { return null; } // no .git at all
+  if (stat.isDirectory()) return gitPath; // the main repo (or a bare .git dir) — no indirection needed
+  let pointer: string;
+  try { pointer = fs.readFileSync(gitPath, "utf8"); } catch { return null; }
+  const m = pointer.match(/^gitdir:\s*(.+?)\s*$/m);
+  if (!m || !m[1]) return null; // not the worktree `.git` file shape we expect
+  const privateDir = path.resolve(cwd, m[1]);
+  let commondirRaw: string;
+  try { commondirRaw = fs.readFileSync(path.join(privateDir, "commondir"), "utf8").trim(); }
+  catch { return null; } // no commondir file — can't reliably locate the shared dir
+  return path.resolve(privateDir, commondirRaw);
+}
+
+/** Append local git-ignore patterns for the injected skill dirs + manifest — resolving through a linked
+ *  worktree to the shared common dir (see resolveGitCommonDir) so a worktree-cwd session (every worker)
+ *  hides its injected skills too, not just a repoPath-cwd session (manager/platform/setup/auditor). */
 function hideFromGit(cwd: string, entries: string[]): void {
-  const gitDir = path.join(cwd, ".git");
-  try { if (!fs.statSync(gitDir).isDirectory()) return; } catch { return; } // no .git, or a worktree (.git is a file)
+  const gitDir = resolveGitCommonDir(cwd);
+  if (!gitDir) return; // no .git resolvable — nothing to hide from
   const infoDir = path.join(gitDir, "info");
   try { fs.mkdirSync(infoDir, { recursive: true }); } catch { /* ignore */ }
   const excludePath = path.join(infoDir, "exclude");
