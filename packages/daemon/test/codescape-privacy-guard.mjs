@@ -37,7 +37,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-/** Recursively collect files under `dir` whose name matches `extRe`. */
+/** Recursively collect files under `dir`, optionally filtered to names matching `extRe`. Omit `extRe` to collect every file. */
 function walkFiles(dir, extRe) {
   const out = [];
   const walk = (d) => {
@@ -45,7 +45,7 @@ function walkFiles(dir, extRe) {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const full = path.join(d, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (extRe.test(entry.name)) out.push(full);
+      else if (!extRe || extRe.test(entry.name)) out.push(full);
     }
   };
   walk(dir);
@@ -56,11 +56,22 @@ function walkFiles(dir, extRe) {
 // SECTION A — core (always-shipped) skill doctrine must never mention codescape.
 // =====================================================================================================
 
-/** Scan every .md file under `skillRootDir` for a case-insensitive "codescape" mention, line-numbered. */
+// Strict (fatal) UTF-8 decoding — a skill dir ships more than Markdown (scripts/, references/, …, per
+// card 75a0755d) and a codescape mention can hide in any of them, not just .md. A file that isn't valid
+// UTF-8 is treated as binary/non-text and skipped rather than crashing the scan.
+const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
+
+/** Scan every shipped text file under `skillRootDir` for a case-insensitive "codescape" mention, line-numbered. */
 function scanSkillDirForCodescapeMentions(skillRootDir) {
   const hits = [];
-  for (const file of walkFiles(skillRootDir, /\.md$/i)) {
-    const lines = fs.readFileSync(file, "utf8").split("\n");
+  for (const file of walkFiles(skillRootDir)) {
+    let text;
+    try {
+      text = utf8Decoder.decode(fs.readFileSync(file));
+    } catch {
+      continue; // not valid UTF-8 — not a text file this guard can meaningfully scan
+    }
+    const lines = text.split("\n");
     lines.forEach((line, i) => {
       if (/codescape/i.test(line)) hits.push({ file, line: i + 1, text: line.trim() });
     });
@@ -80,10 +91,27 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
   const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codescape-guard-"));
   try {
     fs.mkdirSync(path.join(fakeRoot, "references"), { recursive: true });
+    fs.mkdirSync(path.join(fakeRoot, "scripts"), { recursive: true });
     fs.writeFileSync(path.join(fakeRoot, "SKILL.md"), "# fake skill\n\nNormal line.\nMentions Codescape by name here.\n");
     fs.writeFileSync(path.join(fakeRoot, "references", "notes.md"), "nothing to see\n");
+    // Non-.md fixture: a skill's scripts/ ships to end users too (card 75a0755d) — this is the case
+    // this card is about, so the falsification must inject here, not only in a .md file.
+    fs.writeFileSync(path.join(fakeRoot, "scripts", "helper.mjs"), "// setup\nconst thing = 1;\n// a Codescape mention buried in a script comment\n");
+    // A non-UTF-8 (binary) file must be skipped, not crash the scan.
+    fs.writeFileSync(path.join(fakeRoot, "scripts", "opaque.bin"), Buffer.from([0xff, 0xfe, 0x00, 0xff, 0xd8, 0xff]));
+
+    const mdFileHit = { file: path.join(fakeRoot, "SKILL.md"), line: 4 };
+    const nonMdFileHit = { file: path.join(fakeRoot, "scripts", "helper.mjs"), line: 3 };
     const fakeHits = scanSkillDirForCodescapeMentions(fakeRoot);
-    check("[falsification] scanner catches an injected codescape mention", fakeHits.length === 1 && fakeHits[0].line === 4 && fakeHits[0].file === path.join(fakeRoot, "SKILL.md"));
+    check(
+      "[falsification] scanner catches an injected codescape mention in a .md file",
+      fakeHits.some((h) => h.file === mdFileHit.file && h.line === mdFileHit.line)
+    );
+    check(
+      "[falsification] scanner catches an injected codescape mention in a non-.md file",
+      fakeHits.some((h) => h.file === nonMdFileHit.file && h.line === nonMdFileHit.line)
+    );
+    check("[falsification] scanner skips a non-UTF-8 file instead of crashing", fakeHits.length === 2);
   } finally {
     fs.rmSync(fakeRoot, { recursive: true, force: true });
   }
