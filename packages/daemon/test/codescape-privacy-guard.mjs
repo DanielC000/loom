@@ -140,32 +140,77 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
 // previously carried a TEMPORARY, narrow exception for exactly this gap (bare `codescape:`/`.codescape`
 // object-property occurrences) — now retired; a plain case-insensitive scan is the whole check.
 //
-// Extension list includes `.json` (card 61fa0950): `vite.config.ts` now sets `build.manifest: true`,
-// which emits `dist/.vite/manifest.json` — a NEW shipped file (`build-npm-package.mjs` copies `dist`
-// wholesale into the published package) that maps SOURCE FILE PATHS to output chunks. A source file
-// named after codescape would leak the word into that mapping even with zero codescape imports in the
-// bundle itself — the same "any file under dist reaches an end user" finding that motivated this card's
-// build-npm-package.mjs orphan guard applies here too.
+// DENYLIST, not allowlist (card 50827766) — WHY: an extension ALLOWLIST inverts this guard's safe
+// default. A file type nobody thought to list is silently unmonitored and the guard still reports PASS —
+// it can't tell "scanned and clean" from "never looked". That's exactly how `.json` went unscanned for
+// this guard's entire existence until card `61fa0950` (commit `64c4895`) had to notice and add it by
+// hand after `vite.config.ts`'s `build.manifest: true` started emitting `dist/.vite/manifest.json` (a
+// shipped file mapping SOURCE FILE PATHS to output chunks — a codescape-named source file would leak
+// into that mapping even with zero codescape imports in the bundle itself). A denylist means a NEW text
+// type defaults to *scanned*, not *ignored*. Skip ONLY genuinely-binary asset types a Vite build can
+// emit, each named because it cannot carry a meaningful text string: raster/icon images (`png`, `jpe?g`,
+// `gif`, `ico`, `webp`, `bmp`, `avif`), and font binaries (`woff2?`, `ttf`, `eot`, `otf`). Notably `svg`
+// is NOT skipped — it's XML/text and a published package ships `favicon.svg`. Tradeoff, stated so the
+// next person doesn't quietly narrow this back to an allowlist: scanning every non-binary file costs a
+// little gate runtime, and a binary type that happens to contain the literal byte sequence would
+// false-positive — both acceptable for a guard whose failure mode is a confidentiality leak, where fail
+// loud beats fail silent.
+const BINARY_ASSET_EXT_RE = /\.(png|jpe?g|gif|ico|webp|bmp|avif|woff2?|ttf|eot|otf)$/i;
+
+/**
+ * Scan every non-binary file under `distRoot` for a case-insensitive "codescape" mention. This is the
+ * SAME predicate + coverage the built web bundle check below applies — reuse this (don't hand-roll a
+ * fresh extension list) for any other "does this built/published output leak codescape" check, including
+ * a manual published-tarball re-audit (the kind run for card `ffe0a82d`, against downloaded npm tarballs)
+ * so that audit and this guard can never again silently disagree about what "clean" means.
+ */
+function scanDistForCodescapeMentions(distRoot) {
+  const hits = [];
+  for (const file of walkFiles(distRoot)) {
+    if (BINARY_ASSET_EXT_RE.test(file)) continue;
+    const content = fs.readFileSync(file, "utf8");
+    if (/codescape/i.test(content)) hits.push(file);
+  }
+  return hits;
+}
+
 {
   const webDist = path.join(__dirname, "..", "..", "web", "dist");
   if (!fs.existsSync(webDist)) {
     check("(B) packages/web/dist exists (run `pnpm build` first — web bundle scan needs real build output)", false);
   } else {
-    // --- Falsification FIRST — prove the scanner can actually catch a leak before trusting its "clean" result. ---
-    const fakeLeakHit = /codescape/i.test('const x="Codescape rocks";');
-    check("[falsification] scanner catches an injected codescape mention", fakeLeakHit);
+    // --- Falsification FIRST — prove the scanner can actually catch a leak before trusting its "clean"
+    // result, specifically in a file type that was NEVER in the old allowlist (`.svg` — a real shipped
+    // file, `favicon.svg`), and prove the binary skip-list is genuinely a skip, not just "doesn't match
+    // by luck": a fake binary asset carries the literal byte sequence but must NOT be reported. ---
+    const fakeDist = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codescape-bundle-guard-"));
+    try {
+      fs.writeFileSync(path.join(fakeDist, "index.js"), 'const x = 1;\n');
+      fs.writeFileSync(path.join(fakeDist, "favicon.svg"), "<svg><!-- Codescape mark --></svg>\n");
+      fs.writeFileSync(
+        path.join(fakeDist, "logo.png"),
+        Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("Codescape", "utf8")])
+      );
+      const fakeHits = scanDistForCodescapeMentions(fakeDist);
+      check(
+        "[falsification] scanner catches a codescape mention in a type never previously allowlisted (.svg)",
+        fakeHits.includes(path.join(fakeDist, "favicon.svg"))
+      );
+      check(
+        "[falsification] scanner skips a denylisted binary type even though it carries the byte sequence (.png)",
+        !fakeHits.includes(path.join(fakeDist, "logo.png"))
+      );
+    } finally {
+      fs.rmSync(fakeDist, { recursive: true, force: true });
+    }
 
     // --- The real assertion: scan every served asset in the actual built bundle. ---
-    const distFiles = walkFiles(webDist, /\.(js|html|css|map|json)$/i);
-    const hits = [];
-    for (const file of distFiles) {
-      const content = fs.readFileSync(file, "utf8");
-      if (/codescape/i.test(content)) hits.push(file);
-    }
+    const hits = scanDistForCodescapeMentions(webDist);
+    const scannedCount = walkFiles(webDist).filter((f) => !BINARY_ASSET_EXT_RE.test(f)).length;
     if (hits.length > 0) {
       for (const f of hits) console.log(`  LEAK  ${f}: contains a codescape-named string`);
     }
-    check(`(B) built web bundle carries no codescape-named string anywhere (${distFiles.length} files scanned)`, hits.length === 0);
+    check(`(B) built web bundle carries no codescape-named string anywhere (${scannedCount} files scanned)`, hits.length === 0);
   }
 }
 
