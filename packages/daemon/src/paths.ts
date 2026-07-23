@@ -286,14 +286,17 @@ export function isCodescapeSupervisorEnabled(dbPath?: string): boolean {
 /**
  * Card C2 (updated 503a30a0): whether a SPECIFIC project should get the per-session Codescape MCP wired
  * in. Combines the daemon-wide supervisor gate ({@link isCodescapeSupervisorEnabled}, now host-CLI-
- * presence-based) with the per-project opt-in (`ResolvedConfig.codescape.enabled`, LEAD RULING:
- * per-project, NOT per-profile) — a project can only opt in to what the daemon has already detected as
- * available. Flipping the project flag alone on a non-dev build (or on a host with no codescape CLI)
- * wires nothing. Shared with C3 (the worktree lifecycle hooks), which gates its own ingest/register/drop
- * calls the same way. `dbPath` forwards straight to {@link isCodescapeSupervisorEnabled}.
+ * presence-based) with the per-project opt-in (card 3bd8ef17: `resolveCodescapeConfig(project.config)
+ * .enabled` — NOT `ResolvedConfig.codescape`, which no longer exists; see that resolver's own doc for
+ * why) — a project can only opt in to what the daemon has already detected as available. Flipping the
+ * project flag alone on a non-dev build (or on a host with no codescape CLI) wires nothing. Shared with
+ * C3 (the worktree lifecycle hooks), which gates its own ingest/register/drop calls the same way. `dbPath`
+ * forwards straight to {@link isCodescapeSupervisorEnabled}. `codescapeEnabled` is the CALLER's already-
+ * resolved boolean (via `resolveCodescapeConfig`), not a config object — keeps this file free of the
+ * `codescape` property-key literal, matching card 3bd8ef17's shared-config split.
  */
-export function isCodescapeEnabled(config: { codescape: { enabled: boolean } }, dbPath?: string): boolean {
-  return isCodescapeSupervisorEnabled(dbPath) && config.codescape.enabled;
+export function isCodescapeEnabled(codescapeEnabled: boolean, dbPath?: string): boolean {
+  return isCodescapeSupervisorEnabled(dbPath) && codescapeEnabled;
 }
 
 /**

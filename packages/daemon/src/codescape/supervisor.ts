@@ -2,7 +2,7 @@ import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { spawn, type ChildProcess } from "node:child_process";
-import { resolveConfig, type ProjectConfigOverride } from "@loom/shared";
+import { resolveCodescapeConfig, type ProjectConfigOverride } from "@loom/shared";
 import { CODESCAPE_HOME_DIR, isCodescapeSupervisorEnabled, isLoomDev, resolveCodescapeBin, codescapeBinCandidate } from "../paths.js";
 import { resolveCodescapeProjectId } from "./manifest.js";
 
@@ -190,7 +190,7 @@ export interface CodescapeBootProject {
  * pure, project-only filter — hermetically testable with plain objects, no live git/db/supervisor.
  */
 export function codescapeBootRepoPaths(projects: CodescapeBootProject[]): string[] {
-  return projects.filter((p) => resolveConfig(p.config).codescape.enabled).map((p) => p.repoPath);
+  return projects.filter((p) => resolveCodescapeConfig(p.config).enabled).map((p) => p.repoPath);
 }
 
 export class CodescapeSupervisor {

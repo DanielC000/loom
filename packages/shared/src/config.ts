@@ -142,11 +142,36 @@ export interface PythonConfig {
  * `isLoomDev()` AND a codescape CLI actually detected present on the host — a private internal tool, never
  * a hand-set env toggle) — this flag alone never wires anything on a regular `loomctl` build (no host on a
  * vanilla install ever has the CLI). Benign on/off boolean (no host-launch capability of its own — it only
- * conditionally mounts an HTTP MCP entry pointing at the ALREADY-running daemon-owned supervisor), so it
- * stays agent-settable, mirroring `docLint`.
+ * conditionally mounts an HTTP MCP entry pointing at the ALREADY-running daemon-owned supervisor).
+ *
+ * Type-only here (card 3bd8ef17): the runtime default+merge for this shape lives in
+ * `resolveCodescapeConfig` below, deliberately OUTSIDE `ResolvedConfig`/`resolveConfig()` — that function
+ * is what `packages/web` calls client-side (Settings/ColumnManager/Companion effective-value hints), and
+ * `PLATFORM_DEFAULTS`'s literal keys ship verbatim into the built browser bundle whenever they're part of
+ * that object. Codescape is a PRIVATE product end-user agents must never learn exists (project memory
+ * `codescape-is-private-no-user-visible-surface`) — packages/web MUST NEVER import `resolveCodescapeConfig`
+ * or `resolveCodescapeIntegrationPath`.
  */
 export interface CodescapeConfig {
   enabled: boolean;
+}
+
+/**
+ * DAEMON-ONLY resolver for the per-project `codescape.enabled` opt-in (see `CodescapeConfig`'s doc for
+ * why this is deliberately NOT folded into `resolveConfig()`). `override` is the project's raw
+ * config-override object (the same value a caller would otherwise pass to `resolveConfig()`) — reading
+ * `codescape` off it directly here, rather than off a `ResolvedConfig` result, is what keeps the
+ * `codescape` property key out of any code path `packages/web` pulls in. Mirrors `resolveConfig()`'s own
+ * `??` default-merge discipline. `packages/web` must never import this.
+ *
+ * Typed as `unknown` (not `ProjectConfigOverride`, which deliberately no longer declares `codescape` —
+ * see above): any caller's real `ProjectConfigOverride`-typed variable is still accepted unchanged
+ * (anything is assignable to `unknown`), while the raw shape read inside stays independent of that
+ * type's declared fields.
+ */
+export function resolveCodescapeConfig(override?: unknown): CodescapeConfig {
+  const raw = override as { codescape?: Partial<CodescapeConfig> } | undefined;
+  return { enabled: raw?.codescape?.enabled ?? false };
 }
 
 /**
@@ -554,15 +579,14 @@ export interface CodescapeIntegrationConfig {
 }
 
 /**
- * Daemon-global optional host-tool integration paths (Codescape, …) — HOST-MACHINE facts,
- * not per-project. Each named key is its own resolver's concern; this is deliberately a fixed, named
- * shape (like `obsidian`/`python`/`codescape` above), NOT a generic `Record<string,...>`, so it keeps the
- * same `.strict()` typo-guard every other config domain gets — adding a future tool means adding a new
- * named key here + its own resolver, exactly like every other integration in this file. Default `{}` per
- * tool (no DB path set) — see PLATFORM_DEFAULTS.platform.integrations.
+ * DAEMON-ONLY resolver for the daemon-global `integrations.codescape.path` override — same reasoning as
+ * `resolveCodescapeConfig` above (kept out of `PlatformConfig`/`resolveConfig()` so the literal key never
+ * reaches the browser bundle `packages/web` pulls `resolveConfig()` into). `packages/web` must never
+ * import this. Typed as `unknown` for the same reason as `resolveCodescapeConfig`'s param — see its doc.
  */
-export interface IntegrationsConfig {
-  codescape: CodescapeIntegrationConfig;
+export function resolveCodescapeIntegrationPath(platformOverride?: unknown): string | undefined {
+  const raw = platformOverride as { integrations?: { codescape?: CodescapeIntegrationConfig } } | undefined;
+  return raw?.integrations?.codescape?.path;
 }
 
 /**
@@ -577,8 +601,9 @@ export interface PlatformConfig {
   timeouts: TimeoutConfig;
   /** P2 authenticated-request bounds + per-connection rate guard. See ConnectionsGuardConfig. */
   connections: ConnectionsGuardConfig;
-  /** Host-tool integration paths (Codescape, …). See IntegrationsConfig. */
-  integrations: IntegrationsConfig;
+  // NOTE: no `integrations` key here (card 3bd8ef17) — same reasoning as `ResolvedConfig`'s dropped
+  // `codescape` field just above: `PlatformConfig` flows through `resolveConfig()`, which `packages/web`
+  // calls client-side, so any field here ships into the browser bundle. See `resolveCodescapeIntegrationPath`.
   /**
    * Message-delivery behavior toggle (owner-directed, 2026-07-03): when a recipient is busy and
    * inbound messages queue, should an AGENT/human-authored message (a manager→worker direction, a
@@ -712,8 +737,12 @@ export interface ResolvedConfig {
    * (flags doc-hygiene anti-patterns on .md vault writes). Default true; set false to disable.
    */
   docLint: boolean;
-  /** Codescape fleet-daemon MCP wiring, per-project opt-in (card C2). Default false — see CodescapeConfig. */
-  codescape: CodescapeConfig;
+  // NOTE: no `codescape` key here (card 3bd8ef17) — deliberately NOT part of `ResolvedConfig`/
+  // `resolveConfig()`, which `packages/web` calls client-side (Settings/ColumnManager/Companion effective-
+  // value hints) and which therefore ships whatever `PLATFORM_DEFAULTS` contains into the browser bundle.
+  // Codescape is a PRIVATE product end-user agents must never learn exists (project memory
+  // `codescape-is-private-no-user-visible-surface`) — see `resolveCodescapeConfig` below, the DAEMON-ONLY
+  // equivalent that `packages/web` must never import.
   /** Obsidian auto-start (self-healing vault tooling). Default OFF — see ObsidianConfig. */
   obsidian: ObsidianConfig;
   /** Python tooling (shared Loom-managed venv). Only `interpreterPath` is configurable — see PythonConfig. */
@@ -756,8 +785,10 @@ export interface ProjectConfigOverride {
   // NOTE: no `platform` key either — platform tuning is daemon-GLOBAL (one shared daemon), supplied as
   // resolveConfig's SEPARATE 2nd arg (PlatformConfigOverride), never nested in a per-project override.
   docLint?: boolean;
-  /** See ResolvedConfig.codescape. */
-  codescape?: Partial<CodescapeConfig>;
+  // NOTE: no `codescape` key here either (card 3bd8ef17) — see `resolveCodescapeConfig`'s doc. The DB
+  // still persists an agent-set `codescape.enabled` on the project's raw config JSON (mcp/platform.ts's
+  // `projectConfigOverrideSchema` validates it independently of this type); `resolveCodescapeConfig`
+  // reads it straight off that raw object, never through this typed interface.
   obsidian?: Partial<ObsidianConfig>;
   python?: Partial<PythonConfig>;
   /** See ResolvedConfig.memory. */
@@ -799,8 +830,10 @@ export interface PlatformConfigOverride {
   gateRetry?: Partial<GateRetryConfig>;
   /** See PlatformConfig.connections. */
   connections?: Partial<ConnectionsGuardConfig>;
-  /** See PlatformConfig.integrations. Deep-partial: setting one tool's path leaves the other untouched. */
-  integrations?: { codescape?: CodescapeIntegrationConfig };
+  // NOTE: no `integrations` key here (card 3bd8ef17) — see `resolveCodescapeIntegrationPath`'s doc. The
+  // DB still persists a human-set `integrations.codescape.path` on the platform config JSON
+  // (mcp/platform.ts's `platformConfigOverrideSchema` validates it independently of this type);
+  // `resolveCodescapeIntegrationPath` reads it straight off that raw object, never through this interface.
   /** See PlatformConfig.coalesceAgentMessages. */
   coalesceAgentMessages?: boolean;
   /** See PlatformConfig.companionVoiceEnabled. */
@@ -942,9 +975,8 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     timeouts: { gitOpMs: 15000, gitLocalMs: 15000, gitPushMs: 45000, provisionMs: 180000, busyStaleMs: 300000, runMs: 600000 },
     // P2 authenticated-request bounds: 20s timeout, 1MB response cap, 30 req/5min per connection.
     connections: { requestTimeoutMs: 20000, maxResponseBytes: 1000000, rateLimitMax: 30, rateLimitWindowMs: 300000 },
-    // No DB path set for either tool by default — each resolver falls back to its own LOOM_*_BIN env var
-    // (card 8dc5ebb9). Byte-identical-when-absent: an empty override here changes nothing vs. today.
-    integrations: { codescape: {} },
+    // NOTE: no `integrations` key here (card 3bd8ef17) — deliberately kept off `PLATFORM_DEFAULTS`, which
+    // `packages/web` pulls into the browser bundle via `resolveConfig()`. See `resolveCodescapeIntegrationPath`.
     // Default false = deliver agent/human messages one-per-turn (the 2026-07-03 owner-directed fix).
     coalesceAgentMessages: false,
     // Default OFF (COMPANION_VOICE_ENABLED_DEFAULT) — companion voice provisioning is explicit opt-in.
@@ -960,7 +992,9 @@ export const PLATFORM_DEFAULTS: ResolvedConfig = {
     rateLimit: { perIpPerMin: 120, perTokenPerMin: 120, authFailLockout: { maxAttempts: 5, windowMs: 600000, lockoutMs: 900000 } },
   },
   docLint: true, // Pillar D vault-lint hook on by default
-  codescape: { enabled: false }, // opt-in Codescape MCP wiring (card C2) — off by default
+  // NOTE: no `codescape` key here (card 3bd8ef17) — deliberately kept off `PLATFORM_DEFAULTS`/
+  // `ResolvedConfig`, which `packages/web` pulls into the browser bundle via `resolveConfig()`. The
+  // per-project opt-in defaults to off via `resolveCodescapeConfig`'s own `?? false`, not this object.
   // Obsidian auto-start OFF by default: opt-in per project (a daemon-launched GUI process is deliberate).
   obsidian: { autoStart: false },
   // Python: no base-interpreter override by default — the daemon discovers python3/python/`py -3` on PATH.
@@ -1252,9 +1286,8 @@ function resolvePlatform(po: PlatformConfigOverride | undefined): PlatformConfig
       rateLimitMax: po?.connections?.rateLimitMax ?? d.connections.rateLimitMax,
       rateLimitWindowMs: po?.connections?.rateLimitWindowMs ?? d.connections.rateLimitWindowMs,
     },
-    integrations: {
-      codescape: { path: po?.integrations?.codescape?.path ?? d.integrations.codescape.path },
-    },
+    // NOTE: no `integrations` key here (card 3bd8ef17) — `resolvePlatform` feeds `ResolvedConfig.platform`,
+    // which `resolveConfig()` returns to `packages/web` too. See `resolveCodescapeIntegrationPath`.
     coalesceAgentMessages: po?.coalesceAgentMessages ?? d.coalesceAgentMessages,
     companionVoiceEnabled: po?.companionVoiceEnabled ?? d.companionVoiceEnabled,
     operatorEnabled: po?.operatorEnabled ?? d.operatorEnabled,
@@ -1442,7 +1475,8 @@ export function resolveConfig(
     // Daemon-global (no per-project layer): global override (2nd arg) ?? default. See RemoteAccessConfig.
     remoteAccess: resolveRemoteAccess(platformOverride),
     docLint: override.docLint ?? d.docLint,
-    codescape: { enabled: override.codescape?.enabled ?? d.codescape.enabled },
+    // NOTE: no `codescape` key here (card 3bd8ef17) — this return value IS `ResolvedConfig`, which
+    // `packages/web` gets back from `resolveConfig()` too. See `resolveCodescapeConfig`.
     obsidian,
     python,
     // Clamped to MEMORY_CONFIG_MAX (bounds hardening): an accidental memory_write-in-a-loop or a

@@ -2,7 +2,7 @@ import path from "node:path";
 import fs from "node:fs";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { resolveConfig } from "@loom/shared";
+import { resolveConfig, resolveCodescapeIntegrationPath } from "@loom/shared";
 import { ensureDirs, PORT, LOOM_HOME, LOGS_DIR, isUsagePollerSuppressed } from "./paths.js";
 import { installCrashHandlers } from "./crashlog.js";
 import { writeShutdownMarker, readAndClearShutdownMarker } from "./shutdown-marker.js";
@@ -400,10 +400,7 @@ async function main(): Promise<void> {
     resolveConnectionSecret: (connectionId: string, projectId?: string) => resolveScopedConnectionSecret(db, connectionId, projectId),
     // Card 8dc5ebb9: DB-first host-tool integration paths — read LIVE per-spawn (like the capability
     // catalog above), never boot-bound, so a Settings change reaches the very next new session.
-    getIntegrationPaths: () => {
-      const i = db.getPlatformConfig().integrations;
-      return { codescape: i?.codescape?.path };
-    },
+    getIntegrationPaths: () => ({ codescape: resolveCodescapeIntegrationPath(db.getPlatformConfig()) }),
     // Card 088afc94 (P4 wiring): read access to the codescape supervisor's live port + its bound
     // resolveProjectId (cache-then-manifest), for buildMcpServers to resolve a per-session
     // streamable-HTTP MCP mount. `codescapeSupervisor` is declared BELOW this constructor call — safe

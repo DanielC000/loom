@@ -1,4 +1,4 @@
-import type { PlatformConfigOverride } from "@loom/shared";
+import { resolveCodescapeIntegrationPath, type PlatformConfigOverride } from "@loom/shared";
 import { codescapeBinCandidate, hostToolBinExists, isLoomDev } from "../paths.js";
 
 /**
@@ -30,7 +30,7 @@ export interface IntegrationStatus {
 }
 
 function detectCodescape(override: PlatformConfigOverride): IntegrationStatus {
-  const dbPath = override.integrations?.codescape?.path;
+  const dbPath = resolveCodescapeIntegrationPath(override);
   const envPath = process.env.LOOM_CODESCAPE_BIN;
   const path = dbPath?.trim() || envPath || null;
   const source: IntegrationSource = dbPath?.trim() ? "db" : envPath ? "env" : "none";

@@ -31,7 +31,7 @@ process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45317";
 requireHermeticEnv();
 
-const { resolveConfig } = await import("@loom/shared");
+const { resolveConfig, resolveCodescapeIntegrationPath } = await import("@loom/shared");
 // dist imports happen AFTER LOOM_HOME is set (paths.ts reads it at module-eval time).
 const { Db } = await import("../dist/db.js");
 const { validatePlatformConfigOverride, validatePlatformConfigPatch, validateProjectConfigOverride } = await import("../dist/mcp/platform.js");
@@ -420,12 +420,12 @@ const dbFile = path.join(TMP, "loom.db");
 
 // ============================ (14) host-tool integrations (card 8dc5ebb9) ============================
 {
-  // --- resolvePlatform: default + override precedence ---
-  check("(14) default resolveConfig(undefined).platform.integrations ⇒ codescape present, no path set",
-    resolveConfig(undefined).platform.integrations.codescape.path === undefined);
-  const withCs = resolveConfig(undefined, { integrations: { codescape: { path: "/abs/cs" } } });
-  check("(14) a global integrations.codescape.path override reaches resolved.platform.integrations",
-    withCs.platform.integrations.codescape.path === "/abs/cs");
+  // --- resolveCodescapeIntegrationPath (card 3bd8ef17: NOT resolveConfig()/PlatformConfig anymore — see
+  // that resolver's own doc for why: PlatformConfig flows into packages/web's browser bundle) ---
+  check("(14) default resolveCodescapeIntegrationPath(undefined) ⇒ no path set",
+    resolveCodescapeIntegrationPath(undefined) === undefined);
+  check("(14) a global integrations.codescape.path override reaches resolveCodescapeIntegrationPath",
+    resolveCodescapeIntegrationPath({ integrations: { codescape: { path: "/abs/cs" } } }) === "/abs/cs");
 
   // --- validatePlatformConfigOverride: accept / reject ---
   check("(14) {integrations:{}} accepted", validatePlatformConfigOverride({ integrations: {} }).ok === true);
@@ -470,8 +470,8 @@ const dbFile = path.join(TMP, "loom.db");
       const override = db2.getPlatformConfig();
       check("(14) pre-migration blob (no `integrations` key) reads back untouched", override.watchers?.wakeMs === 45000 && override.integrations === undefined);
       const resolved = resolveConfig(undefined, override);
-      check("(14) resolveConfig against a pre-migration override defaults integrations cleanly (no throw)",
-        resolved.platform.integrations.codescape.path === undefined);
+      check("(14) resolveCodescapeIntegrationPath against a pre-migration override defaults cleanly (no throw)",
+        resolveCodescapeIntegrationPath(override) === undefined);
       check("(14) resolveConfig against a pre-migration override still resolves its OWN fields correctly",
         resolved.platform.watchers.wakeMs === 45000 && resolved.platform.coalesceAgentMessages === true);
     } finally {

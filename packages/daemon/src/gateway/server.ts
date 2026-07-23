@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -3917,7 +3917,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Codescape v1 has no runtime registration (see codescape/supervisor.ts's CWD CONTRACT doc): serve
     // only ever sees the projects boot-ingested it. Flipping codescape.enabled ON here won't ingest this
     // project until the next daemon restart — log it so the gap isn't silent.
-    if (v.value.codescape?.enabled && !resolveConfig(existing.config).codescape.enabled) {
+    if (resolveCodescapeConfig(v.value).enabled && !resolveCodescapeConfig(existing.config).enabled) {
       console.log(`[codescape] project ${id} codescape.enabled set — a daemon restart is required to ingest this project (v1)`);
     }
     return deps.db.getProject(id);

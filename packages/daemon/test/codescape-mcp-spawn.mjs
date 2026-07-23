@@ -15,9 +15,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // stdio-snapshot fallback when serve is down — a clean skip, logged, never a stale/absent mount.
 //
 // Proves the DoD:
-//   (helpers) shared/src/config.ts's `codescape.enabled` resolves default-false / per-project-override
-//       through resolveConfig; paths.ts's `isCodescapeEnabled` combines the daemon-wide supervisor gate
-//       with the per-project flag.
+//   (helpers) shared/src/config.ts's `resolveCodescapeConfig` resolves default-false / per-project-override
+//       (card 3bd8ef17: deliberately NOT folded into resolveConfig()/ResolvedConfig — see that function's
+//       own doc for why); paths.ts's `isCodescapeEnabled` combines the daemon-wide supervisor gate with
+//       the per-project flag (now a plain boolean, not a config object — same card).
 //   (resolver) `codescapeHttpMcpServer` returns null when serve isn't up (port null) or codescape's
 //       manifest has no entry for the repo yet (clean-skip, never a fallback), and a real
 //       `{type:"http", url}` entry — bare `/mcp/<codescapeId>` project route, or `/mcp/<codescapeId>/
@@ -84,7 +85,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled, resolveCodescapeBin, codescapeBinCandidate, hostToolBinExists, resolveHostToolBin } = await import("../dist/paths.js");
 const { resolveCodescapeProjectId } = await import("../dist/codescape/manifest.js");
-const { resolveConfig } = await import("@loom/shared");
+const { resolveCodescapeConfig } = await import("@loom/shared");
 
 // Manifest helper (mirrors codescape-manifest.mjs's writeManifest) — codescape's OWN plain-JSON
 // project-id registry, read back by resolveCodescapeProjectId. Hand-written here rather than driven
@@ -96,11 +97,11 @@ function writeManifest(homeDir, entries) {
   fs.writeFileSync(p, JSON.stringify({ version: 1, projects: entries }));
 }
 
-// ===================== shared config: codescape.enabled default-false / per-project override =====================
-check("(config) default resolveConfig(undefined) ⇒ codescape.enabled === false", resolveConfig(undefined).codescape.enabled === false);
-check("(config) resolveConfig({}) ⇒ codescape.enabled === false", resolveConfig({}).codescape.enabled === false);
-check("(config) resolveConfig({codescape:{enabled:true}}) ⇒ true", resolveConfig({ codescape: { enabled: true } }).codescape.enabled === true);
-check("(config) resolveConfig({codescape:{enabled:false}}) ⇒ false", resolveConfig({ codescape: { enabled: false } }).codescape.enabled === false);
+// ===================== shared config: resolveCodescapeConfig default-false / per-project override =====================
+check("(config) default resolveCodescapeConfig(undefined) ⇒ enabled === false", resolveCodescapeConfig(undefined).enabled === false);
+check("(config) resolveCodescapeConfig({}) ⇒ enabled === false", resolveCodescapeConfig({}).enabled === false);
+check("(config) resolveCodescapeConfig({codescape:{enabled:true}}) ⇒ true", resolveCodescapeConfig({ codescape: { enabled: true } }).enabled === true);
+check("(config) resolveCodescapeConfig({codescape:{enabled:false}}) ⇒ false", resolveCodescapeConfig({ codescape: { enabled: false } }).enabled === false);
 
 // ===================== isCodescapeEnabled: daemon-wide supervisor gate AND the per-project flag =====================
 // Card 503a30a0: the daemon-wide gate is now HOST-CLI-PRESENCE-based — isLoomDev() AND a codescape binary
@@ -111,19 +112,19 @@ check("(config) resolveConfig({codescape:{enabled:false}}) ⇒ false", resolveCo
 check("(gate) isLoomDev() is FALSE by default (LOOM_DEV unset)", isLoomDev() === false);
 check("(gate) isCodescapeSupervisorEnabled() is FALSE by default (LOOM_DEV off, even though the fixture CLI exists)", isCodescapeSupervisorEnabled() === false);
 check("(gate) isCodescapeEnabled: LOOM_DEV off + project enabled ⇒ still false (daemon-wide gate wins)",
-  isCodescapeEnabled({ codescape: { enabled: true } }) === false);
+  isCodescapeEnabled(true) === false);
 process.env.LOOM_DEV = "1";
 {
   const savedBin = process.env.LOOM_CODESCAPE_BIN;
   delete process.env.LOOM_CODESCAPE_BIN;
   check("(gate) LOOM_DEV=1 but no codescape CLI resolvable at all ⇒ isCodescapeEnabled still false",
-    isCodescapeEnabled({ codescape: { enabled: true } }) === false);
+    isCodescapeEnabled(true) === false);
   process.env.LOOM_CODESCAPE_BIN = savedBin;
 }
 check("(gate) LOOM_DEV=1 + the fixture CLI resolvable (LOOM_CODESCAPE_BIN) + project enabled ⇒ true",
-  isCodescapeEnabled({ codescape: { enabled: true } }) === true);
+  isCodescapeEnabled(true) === true);
 check("(gate) daemon-wide gate on but project NOT enabled ⇒ false",
-  isCodescapeEnabled({ codescape: { enabled: false } }) === false);
+  isCodescapeEnabled(false) === false);
 check("(gate) dbPath param: an explicit nonexistent dbPath overrides LOOM_CODESCAPE_BIN and resolves not-detected",
   isCodescapeSupervisorEnabled(path.join(tmpHome, "no-such-codescape-binary")) === false);
 check("(gate) dbPath param: an explicit REAL dbPath wins and resolves detected",
