@@ -7,6 +7,7 @@
 import type {
   ButtonHTMLAttributes,
   CSSProperties,
+  HTMLAttributes,
   InputHTMLAttributes,
   ReactNode,
   SelectHTMLAttributes,
@@ -16,21 +17,25 @@ import { color, font, radius, tone, type Tone } from "../../theme";
 
 // ── Panel ────────────────────────────────────────────────────────────────────
 // Bordered surface. `selected` swaps to a phosphor border + faint inner glow.
-export function Panel({
-  children, selected, grid, onClick, title, style,
-}: {
+// Forwards any other native div prop (data-*, aria-*, id, ...) via `rest` — an
+// unrecognized/misspelled prop still fails loudly at compile time (excess-property
+// check on the declared members), it's only real DOM attributes that pass through.
+type PanelProps = Omit<HTMLAttributes<HTMLDivElement>, "children"> & {
   children: ReactNode;
   selected?: boolean;
   grid?: boolean;
-  onClick?: () => void;
-  title?: string;
-  style?: CSSProperties;
-}) {
+};
+
+export function Panel({
+  children, selected, grid, onClick, title, style, className, ...rest
+}: PanelProps) {
+  const classes = [grid ? "loom-grid" : null, className].filter(Boolean).join(" ");
   return (
     <div
+      {...rest}
       onClick={onClick}
       title={title}
-      className={grid ? "loom-grid" : undefined}
+      className={classes || undefined}
       style={{
         background: color.panel,
         border: `1px solid ${selected ? color.phosphor : color.border}`,
