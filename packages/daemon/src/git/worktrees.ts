@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { simpleGit, type SimpleGit } from "simple-git";
 import { WORKTREES_DIR } from "../paths.js";
 import { nonInteractiveEnv } from "./writer.js";
+import { withCanonicalIndexLock } from "./repo-lock.js";
 
 export interface WorktreeInfo {
   worktreePath: string;
@@ -2681,70 +2682,13 @@ export function toConventionalSubject(raw: string): string {
  */
 export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
 
-// ── Per-repo merge mutex (board card e076d2a2 — CRITICAL silent data loss) ─────────────────────────
+// ── Canonical-repo index mutex ───────────────────────────────────────────────────────────────────────
 //
-// `mergeBranch` stages + commits directly against the CANONICAL repo's shared git index at `repoPath`, a
-// process-wide, un-namespaced resource. Two concurrent `mergeBranch` calls for the SAME repo (reachable
-// once `orchestration.maxConcurrentGates` >= 2) race on that ONE index: one op's own `git merge --squash`
-// can fail (e.g. `.git/index.lock` contention with the OTHER op's concurrent squash) while the other op's
-// now-staged-but-uncommitted diff is still sitting in the index; the residue-clear at the top of
-// `mergeBranch` never fires for this (it only resets on an AFFIRMATIVE `ls-files --unmerged`/`MERGE_HEAD`
-// signal, neither of which a normal concurrent `--squash` sets), so the failing op's own `staged` check
-// reads TRUE off the OTHER op's leftover stage and blindly commits it under ITS OWN subject/trailer —
-// reproduced against real, unmodified git + this exact code (see test/merge-repo-mutex.mjs): a commit
-// bearing branch A's subject+trailer but containing ONLY branch B's diff, on the FIRST concurrent attempt,
-// no artificial delays needed. This mutex makes `mergeBranch`'s whole
-// residue-clear→squash→conflict-check→commit sequence atomic PER REPO, closing that race at the source.
-//
-// In-process, keyed by the repo's CANONICALIZED path — mirrors `projects/repos.ts`'s own aliasing guard:
-// two spellings of the same physical directory (different casing/separators, or a registry entry vs.
-// `repoPath` itself) must serialize together, not slip past each other. Cross-repo calls are NEVER
-// blocked — the incident's own scope finding stands: the index is per-repo, so unrelated repos merging
-// concurrently is safe and untouched by this lock. No eviction needed: entries are bounded by the number
-// of distinct repos a daemon touches (small, unlike the branch-keyed diff cache), never by task/branch
-// volume, so leaving settled entries in the map is not a leak.
-const repoMergeLocks = new Map<string, Promise<unknown>>();
-
-function canonicalRepoLockKey(repoPath: string): string {
-  let real: string;
-  try {
-    real = fs.realpathSync.native(repoPath);
-  } catch {
-    real = path.resolve(repoPath); // repo may not exist yet on disk in a test/edge case — best effort
-  }
-  return process.platform === "win32" ? real.toLowerCase() : real;
-}
-
-/**
- * Serialize `fn` against every other in-flight caller for the SAME canonical repo path — FIFO via promise
- * chaining. `prior.then(fn, fn)` runs `fn` once `prior` SETTLES regardless of whether it resolved or
- * rejected, so one caller's failure never poisons or skips the next caller's turn; the chained promise
- * (its outcome ignored via `.catch`) is what the NEXT caller awaits, so callers queue strictly in arrival
- * order.
- *
- * **No timeout HERE, deliberately** (board card 44c28799 — this corrects an EARLIER version of this
- * comment that claimed `mergeBranch`'s own git calls "are already bounded elsewhere"; they were not, and
- * that gap is what made this exact function wedge the whole per-repo queue permanently on a hung git
- * child). The real fix is that {@link mergeBranchLocked} now bounds every one of its own `git.raw` calls
- * (`boundedMergeGit` + `withTimeout`, matching `git/reader.ts`/`git/writer.ts`), so the `fn` passed in here
- * is now GUARANTEED to settle within a bounded time on its own — a wedged holder fails its own op instead
- * of the whole queue, which is exactly the property this lock needs.
- *
- * A SEPARATE timeout at THIS level was considered and rejected: racing `fn()`'s completion here would let
- * the NEXT queued caller start (`prior` resolving) while the ABANDONED `fn()` call may still be actually
- * running against the shared canonical index in the background (a `withTimeout` race stops the CALLER
- * from waiting; it does not stop the underlying git child unless its own block-timeout independently
- * kills it) — reintroducing the exact concurrent-index race this mutex exists to close (see the class doc
- * above). Bounding the work itself (what `mergeBranchLocked` now does) closes the hang without that risk;
- * bounding the WAIT for it here would reopen it.
- */
-async function withRepoMergeLock<T>(repoPath: string, fn: () => Promise<T>): Promise<T> {
-  const key = canonicalRepoLockKey(repoPath);
-  const prior = repoMergeLocks.get(key) ?? Promise.resolve();
-  const run = prior.then(fn, fn);
-  repoMergeLocks.set(key, run.catch(() => { /* only used to sequence the NEXT caller; outcome irrelevant here */ }));
-  return run;
-}
+// `mergeBranchLocked` below stages + commits directly against the CANONICAL repo's shared git index — a
+// process-wide, un-namespaced resource that `GitWriter.commit`/`checkout`/`createBranch` (git/writer.ts)
+// can ALSO write to (the human-only REST git surface and the LOOM_DEV-gated Platform Lead tools). Both are admitted
+// through the SAME `withCanonicalIndexLock` (git/repo-lock.ts — see that module for the full incident
+// history, the "no timeout here" reasoning, and the non-reentrancy trace for this exact function).
 
 /**
  * Merge canonical main's CURRENT tip (`repoPath`'s HEAD) INTO the worker's worktree, IN the worktree —
@@ -2865,11 +2809,12 @@ export async function mergeMainIntoWorktree(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {},
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
-  // MUTEX (card e076d2a2): the whole residue-clear→squash→conflict-check→commit sequence below reads and
-  // writes the CANONICAL repo's shared git index — serialize it per canonical repo path so a concurrent
-  // merge for a DIFFERENT branch of the SAME repo can never interleave with this one. See the lock's own
-  // doc above for the exact corruption this closes.
-  return withRepoMergeLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps));
+  // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
+  // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
+  // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
+  // GitWriter.commit/checkout/createBranch against the same repo, can never interleave with this one. See
+  // the lock's own doc (git/repo-lock.ts) for the exact corruption this closes.
+  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps));
 }
 
 async function mergeBranchLocked(

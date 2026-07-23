@@ -8,6 +8,7 @@ import {
   DEFAULT_MAX_VAULT_FILE_BYTES,
   humanBytes,
 } from "../vault/versioner.js";
+import { withCanonicalIndexLock } from "./repo-lock.js";
 
 // The WRITE side of the project git view — sibling to reader.ts (which stays read-only introspection).
 // Like the vault writer (vault/writer.ts) and gateCommand, git writes are a TRUST-BOUNDARY surface:
@@ -262,35 +263,60 @@ export class GitWriter {
     }
   }
 
-  /** Switch to an EXISTING local branch. Fails (structured) on an unknown branch or a dirty tree that
-   *  would be overwritten — git's own message is surfaced for the UI. */
+  /**
+   * Switch to an EXISTING local branch. Fails (structured) on an unknown branch or a dirty tree that
+   * would be overwritten — git's own message is surfaced for the UI.
+   *
+   * **Admitted through {@link withCanonicalIndexLock} (card e41dbb58):** a checkout mutates the SAME
+   * canonical working tree/index `mergeBranchLocked` (git/worktrees.ts) squash-merges against — without
+   * this, a checkout interleaved mid-merge could switch branches out from under an in-progress squash, or
+   * itself get silently clobbered by one. See that lock's own doc for the full corruption history and why
+   * this is safe from deadlock (this method never runs while a merge already holds the lock, because
+   * nothing on the merge path calls into `GitWriter`).
+   */
   async checkout(branch: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!branch?.trim()) return { ok: false, error: "branch name required" };
-    return this.withVaultPauseLease(async () => {
-      try {
-        const git = this.git(this.localMs);
-        await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
-        const current = (await git.branchLocal()).current;
-        return { ok: true, branch: current };
-      } catch (e) {
-        return { ok: false, error: gitError(e) };
-      }
-    });
+    return this.withVaultPauseLease(() =>
+      withCanonicalIndexLock(this.repoPath, async () => {
+        try {
+          const git = this.git(this.localMs);
+          await withTimeout(git.checkout(branch.trim()), this.localMs, "git checkout");
+          const current = (await git.branchLocal()).current;
+          return { ok: true, branch: current };
+        } catch (e) {
+          return { ok: false, error: gitError(e) };
+        }
+      }),
+    );
   }
 
-  /** Create a NEW local branch off the current HEAD and switch to it (`checkout -b`). Fails (structured)
-   *  if the branch already exists or the name is invalid. Does NOT touch any remote. */
+  /**
+   * Create a NEW local branch off the current HEAD and switch to it (`checkout -b`). Fails (structured)
+   * if the branch already exists or the name is invalid. Does NOT touch any remote.
+   *
+   * **Admitted through {@link withCanonicalIndexLock} (card e41dbb58):** `checkout -b` moves canonical
+   * HEAD to a brand-new branch ref pointing at the SAME commit — git raises no conflict even with a
+   * staged-but-uncommitted diff sitting in the index (verified directly: `git checkout -b` carries staged
+   * content forward onto the new branch unchanged). If this landed mid-merge — after `mergeBranchLocked`
+   * (git/worktrees.ts) has staged its squash but before its own `git commit` runs — the squash would
+   * commit onto the FRESHLY-CREATED branch instead of the mainline: the mainline branch silently never
+   * receives the work, while `mergeBranchLocked` still reads `git rev-parse HEAD` and reports
+   * `{ok:true, sha, subject}` — a false success pointing at a sha that isn't even reachable from the
+   * branch it thinks it merged onto. Same corruption family as `commit()`/`checkout()` above.
+   */
   async createBranch(name: string): Promise<GitWriteResult<{ branch: string }>> {
     if (!name?.trim()) return { ok: false, error: "branch name required" };
-    return this.withVaultPauseLease(async () => {
-      try {
-        const git = this.git(this.localMs);
-        await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
-        return { ok: true, branch: name.trim() };
-      } catch (e) {
-        return { ok: false, error: gitError(e) };
-      }
-    });
+    return this.withVaultPauseLease(() =>
+      withCanonicalIndexLock(this.repoPath, async () => {
+        try {
+          const git = this.git(this.localMs);
+          await withTimeout(git.checkoutLocalBranch(name.trim()), this.localMs, "git checkout -b");
+          return { ok: true, branch: name.trim() };
+        } catch (e) {
+          return { ok: false, error: gitError(e) };
+        }
+      }),
+    );
   }
 
   /**
@@ -313,6 +339,13 @@ export class GitWriter {
    * `opts.maxFileBytes` overrides the shared default — a TEST seam only (mirrors `commitVault`'s own
    * `opts.maxFileBytes`: writing a real ~95MB fixture per test run would be slow and wasteful). Every
    * real caller omits it and gets {@link DEFAULT_MAX_VAULT_FILE_BYTES}.
+   *
+   * **Admitted through {@link withCanonicalIndexLock} (card e41dbb58):** `git add -A` + `git commit`
+   * stage and commit whatever is CURRENTLY in the canonical repo's shared index/working tree — the SAME
+   * resource `mergeBranchLocked` (git/worktrees.ts) squash-merges against. Before this, a commit()
+   * interleaved with an in-progress merge could land the merge's own staged squash under THIS message
+   * with no `Loom-Worker-Branch` trailer (see `test/merge-writer-index-lock.mjs` for the reproduction).
+   * The lock makes this call queue behind an in-flight merge (or vice versa) instead of racing it.
    */
   async commit(
     message: string,
@@ -320,22 +353,24 @@ export class GitWriter {
   ): Promise<GitWriteResult<{ hash: string; warning?: string }>> {
     if (!message?.trim()) return { ok: false, error: "commit message required" };
     const maxFileBytes = opts?.maxFileBytes ?? DEFAULT_MAX_VAULT_FILE_BYTES;
-    return this.withVaultPauseLease(async () => {
-      try {
-        const git = this.git(this.localMs);
-        // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
-        const status = await withTimeout(git.status(), this.localMs, "git status");
-        if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
-        await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
-        const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
-        const warning = this.oversizedStagedWarning(staged.files, maxFileBytes);
-        const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
-        const hash = res.commit || (await git.revparse(["HEAD"])).trim();
-        return warning ? { ok: true, hash, warning } : { ok: true, hash };
-      } catch (e) {
-        return { ok: false, error: gitError(e) };
-      }
-    });
+    return this.withVaultPauseLease(() =>
+      withCanonicalIndexLock(this.repoPath, async () => {
+        try {
+          const git = this.git(this.localMs);
+          // Nothing staged AND nothing to stage → don't even attempt the commit (git would exit 1).
+          const status = await withTimeout(git.status(), this.localMs, "git status");
+          if (status.isClean()) return { ok: false, error: "nothing to commit (working tree clean)" };
+          await withTimeout(git.raw(["add", "-A"]), this.localMs, "git add -A");
+          const staged = await withTimeout(git.status(), this.localMs, "git status (post-add)");
+          const warning = this.oversizedStagedWarning(staged.files, maxFileBytes);
+          const res = await withTimeout(git.commit(message.trim()), this.localMs, "git commit");
+          const hash = res.commit || (await git.revparse(["HEAD"])).trim();
+          return warning ? { ok: true, hash, warning } : { ok: true, hash };
+        } catch (e) {
+          return { ok: false, error: gitError(e) };
+        }
+      }),
+    );
   }
 
   /** A human-readable warning naming any staged (non-deletion) file over `maxFileBytes`, or `undefined`
