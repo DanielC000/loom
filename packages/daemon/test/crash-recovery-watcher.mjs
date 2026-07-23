@@ -403,7 +403,43 @@ function cleanup(e) {
   cleanup(e);
 }
 
+// ============================ (12) O(N) → O(triggered) CANDIDATE DERIVATION (card bf0b902c) ============
+// The watcher used to iterate db.listResumeCandidates() — EVERY resumable session in the fleet — calling
+// listEventsForWorker (an unindexed full-table SCAN pre-fix) on each just to check whether it ever had a
+// trigger. On a real fleet (2559 sessions) that was ~8s of synchronous event-loop blocking per 60s tick.
+// It now derives its candidate set from ONE indexed query over the trigger kinds FIRST, so
+// listEventsForWorker is called only for sessions that actually ever recorded one. Prove that directly by
+// counting calls: a fixture with many resumable-but-never-died sessions plus a FEW that did must issue
+// listEventsForWorker calls bounded by the triggered count, not the fleet size — the old code would have
+// called it once per resumable session regardless.
+{
+  const e = makeEnv();
+  const N = 60; // a fixture-sized fleet; large enough that an O(N) regression is unmistakable against 3.
+  for (let i = 0; i < N; i++) {
+    seedSession(e, `crw12-${i}`, { role: i % 2 === 0 ? "manager" : "worker", parentSessionId: i % 2 === 0 ? null : "crw12-mgr" });
+  }
+  seedSession(e, "crw12-mgr", { role: "manager", processState: "live" }); // parent for the odd (worker) ones
+  // Only 3 of the N ever record a recovery trigger.
+  die(e, "crw12-0", NOW);
+  die(e, "crw12-1", NOW);
+  die(e, "crw12-2", NOW);
+
+  let calls = 0;
+  const origListEventsForWorker = e.db.listEventsForWorker.bind(e.db);
+  e.db.listEventsForWorker = (id) => { calls++; return origListEventsForWorker(id); };
+
+  e.watcher.tick(at(100));
+
+  check(`(12) listEventsForWorker is called ONLY for the triggered sessions (3), not the whole fleet (${N})`,
+    calls === 3);
+  check("(12) the 3 triggered sessions are still correctly auto-resumed (behavior unchanged, just cheaper)",
+    e.resumes.includes("crw12-0") && e.resumes.includes("crw12-1") && e.resumes.includes("crw12-2") && e.resumes.length === 3);
+  check(`(12) the other ${N - 3} never-died sessions were never touched (no resume attempt)`,
+    evKinds(e, "crw12-3", "session_resume_attempt").length === 0 && evKinds(e, "crw12-59", "session_resume_attempt").length === 0);
+  cleanup(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional."
+  ? "\n✅ ALL PASS — CrashRecoveryWatcher records session_died ONLY for an UNEXPECTED death of a resumable coordination/work session (intended stops + out-of-scope roles untouched); bounded-auto-resumes a dead session, CAPS attempts at crashRecoveryMaxAttempts and ESCALATES (one session_recovery_abandoned + a [loom:crash-loop] lastError) instead of looping past the cap; resets the counter on a stable, still-live resume; and is silent when disabled(0) / human-paused / superseded. zod accepts crashRecoveryMaxAttempts (negatives rejected). An `assistant` (Companion) death is now equally recoverable — recorded, auto-resumed, and nudged. A resumed manager/platform's continuation nudge is now STAKE-AWARE (card c9e51581): silent with zero stake, full when it has a live worker, stranded board work, an unconsumed answer, or was resumed via a worker_report_undelivered trigger — worker/assistant nudges stay unconditional. Its per-tick candidate set is now derived from ONE indexed trigger-kind query (bf0b902c) — listEventsForWorker is called only for sessions that ever actually recorded a trigger, not every resumable session in the fleet."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -216,10 +216,20 @@ export class CrashRecoveryWatcher {
       });
     };
 
-    // listResumeCandidates: every session with a captured engine id that isn't `dead` — includes LIVE ones
-    // (needed for the stable-resume reset) and EXITED ones (the resume targets). A normal session that
-    // never died short-circuits below (no `session_died`), so the scan stays cheap.
-    for (const s of db.listResumeCandidates()) {
+    // Candidate set (bf0b902c): derive it from ONE indexed query over the trigger kinds
+    // (idx_orch_events_kind) instead of scanning db.listResumeCandidates() (every resumable session in
+    // the fleet — 2500+ on a real install). A session that never died/orphaned can NEVER pass the
+    // `lastTrigger` check below regardless — the OLD comment here claimed that short-circuit "stays
+    // cheap", but it ran only AFTER listEventsForWorker had already paid a full unindexed table scan +
+    // sort (the actual bug: 2558 candidates × ~3.2ms = ~8.2s of synchronous event-loop blocking per tick,
+    // every 60s). Asking "which sessions ever recorded a trigger" FIRST (typically a handful, not
+    // thousands) and only THEN pulling each one's full history is both correct (same end result — a
+    // session with no trigger event was always going to be skipped) and cheap by construction, not by an
+    // ordering claim that turned out false.
+    for (const id of db.listWorkerSessionIdsWithEventKind([...RECOVERY_TRIGGER_KINDS])) {
+      const s = db.getSession(id);
+      if (!s) continue;                                                   // session since hard-deleted
+      if (!s.engineSessionId || s.resumability === "dead") continue;      // no longer a resume candidate
       if (!s.role || !RECOVERABLE_ROLES.includes(s.role)) continue;       // plain / run / auditor → not ours
       if (db.hasSuccessor(s.id)) continue;                                // superseded by a recycle successor → intended
 
@@ -233,7 +243,7 @@ export class CrashRecoveryWatcher {
 
       const events = db.listEventsForWorker(s.id);                       // chronological (ts, rowid)
       const lastTrigger = lastTriggerOf(events);                         // session_died OR worker_report_undelivered
-      if (!lastTrigger) continue;                                        // never died / never orphaned → not our concern
+      if (!lastTrigger) continue;                                        // defensive only — id came from a trigger-kind query, so this can't actually miss
 
       const lastRecovered = lastOfKind(events, "session_recovered");
       // RESOLVED: a recovery recorded at/after the latest trigger closed the episode (counter already reset).
@@ -327,9 +337,9 @@ export class CrashRecoveryWatcher {
           // liveWorkersResumed = the manager's CURRENT live worker count — this path has no "resume set"
           // list like Path A/B (it resumes ONE dead session per candidate), so "workers resumed alongside
           // it" doesn't exist; the natural analog is "does it have live workers to re-check right now".
-          // KNOWN, ACCEPTED gap: if this manager AND one of its workers crash-die in the SAME tick,
-          // db.listResumeCandidates()'s iteration order isn't guaranteed, so this query can undercount if
-          // the manager is processed before its worker's own resume (later in this same tick) lands — the
+          // KNOWN, ACCEPTED gap: if this manager AND one of its workers crash-die in the SAME tick, this
+          // tick's candidate iteration order isn't guaranteed, so this query can undercount if the manager
+          // is processed before its worker's own resume (later in this same tick) lands — the
           // manager would then resume silently for this ONE tick. Not a correctness bug: the worker still
           // recovers independently via its own `session_died` trigger, and the manager learns about it
           // shortly after via worker_list / the worker's own report — accepted rather than adding

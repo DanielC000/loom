@@ -1070,6 +1070,24 @@ CREATE INDEX IF NOT EXISTS idx_companion_reminders_session ON companion_reminder
 CREATE INDEX IF NOT EXISTS idx_sessions_agent ON sessions(agent_id, last_activity DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id, column_key, position);
 CREATE INDEX IF NOT EXISTS idx_orch_events_mgr ON orchestration_events(manager_session_id, ts);
+-- worker_session_id, ts, kind are all ORIGINAL columns on this table (present since its very first
+-- CREATE TABLE, unlike a later ALTER-added column) — so, like idx_orch_events_mgr above, these two are
+-- plain CREATE INDEX IF NOT EXISTS additions that apply to every existing DB the moment exec(SCHEMA) runs
+-- on boot; no ALTER TABLE / migrateXxx() step is needed for them (card bf0b902c).
+-- idx_orch_events_worker: listEventsForWorker's WHERE worker_session_id = ? ORDER BY ts, rowid (~20 call
+-- sites, incl. the crash-recovery watcher's per-candidate read and boot-reconcile) was a full SCAN of
+-- every orchestration_events row plus a temp B-tree sort — measured 3.2-3.4ms/query on a 17.8k-row table,
+-- and multiplied across every crash-recovery candidate every 60s that alone blocked the event loop for
+-- seconds at a time (better-sqlite3 is synchronous). This index makes it an indexed SEARCH; sqlite's
+-- implicit trailing rowid on every index entry also already satisfies the ORDER BY ts, rowid tie-break,
+-- so no separate sort step is needed either.
+-- idx_orch_events_kind: backs Db.listWorkerSessionIdsWithEventKind's WHERE kind IN (...) query — the crash-
+-- recovery watcher's ONE indexed query to derive its candidate set (sessions that have EVER recorded a
+-- session_died/worker_report_undelivered trigger) instead of walking every resumable session in the fleet
+-- to find out which ones even have one (scope item 2 of bf0b902c). worker_session_id trailing makes the
+-- DISTINCT projection index-only (no row lookups against the table itself).
+CREATE INDEX IF NOT EXISTS idx_orch_events_worker ON orchestration_events(worker_session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_orch_events_kind ON orchestration_events(kind, worker_session_id);
 -- Shared project memory (card 2fd9abf9): a project-scoped durable knowledge store any worker/manager can
 -- write to (memory_write), retrieved by FTS5 and injected into every kickoff (pinned always + top-K
 -- related-on-match), so fleet-shared decisions/facts survive across sessions instead of living only in
@@ -4721,6 +4739,23 @@ export class Db {
   listEventsForWorker(workerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare("SELECT * FROM orchestration_events WHERE worker_session_id = ? ORDER BY ts, rowid")
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
+   * DISTINCT worker_session_id values that have EVER recorded an event of one of the given kinds — ONE
+   * indexed query (idx_orch_events_kind) in place of walking every candidate session's own full event
+   * history just to learn whether it has one. Card bf0b902c: the crash-recovery watcher's per-tick
+   * candidate set used to be db.listResumeCandidates() (every resumable session in the fleet — 2000+ on a
+   * real fleet), each paying a listEventsForWorker call before it could even check "did this ever have a
+   * trigger". This turns that into "which sessions ever had one" first (typically a handful — 11 of 1963
+   * resumable sessions on a real snapshot), THEN listEventsForWorker only for those. `kinds` are trusted
+   * internal enum values (OrchestrationEventKind), not user input — interpolated the same way
+   * listScheduleHistory's kindList already does.
+   */
+  listWorkerSessionIdsWithEventKind(kinds: readonly string[]): string[] {
+    const kindList = kinds.map((k) => `'${k}'`).join(",");
+    return (this.db.prepare(
+      `SELECT DISTINCT worker_session_id AS id FROM orchestration_events WHERE kind IN (${kindList}) AND worker_session_id IS NOT NULL`,
+    ).all() as { id: string }[]).map((r) => r.id);
   }
   /**
    * EVERY orchestration event that TOUCHES a session — it appears as the manager OR the worker. The
