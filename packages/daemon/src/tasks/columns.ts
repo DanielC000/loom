@@ -327,18 +327,33 @@ export function currentColumns(db: Db, projectId: string): KanbanColumn[] {
  * follow to defaultLanding, NOT to the renamed column. The PUT /columns editor is the rename-FOLLOWING path;
  * this surface only guarantees no orphan. Returns {ok:false} on an unknown project or an empty board, with
  * the stored config left UNCHANGED.
+ *
+ * `actor` (card a0cafef2) identifies WHO is making this write — every one of the four config-PATCH surfaces
+ * (the human REST PATCH, the Platform Lead's + Setup Assistant's project_configure/project_update, and the
+ * manager's project_update) routes through this ONE chokepoint, so recording the change history HERE means
+ * every writer gets truthful attribution for free instead of four separate call sites each having to
+ * remember to record it. See `ProjectConfigHistoryEntry`'s doc for the actor-string convention — never
+ * hardcode "human" (unlike platform_config's single human-only writer, three of these four are agents).
+ * The "after" value recorded is the project's ACTUAL persisted config post-write (re-read fresh, not
+ * reconstructed from `next`), so it's correct on both the blind path and the re-key path (which persists
+ * via two separate writes — the non-column keys, then applyBoardColumnLayout's own kanbanColumns write).
  */
 export function setProjectConfigSafe(
-  db: Db, projectId: string, next: ProjectConfigOverride,
+  db: Db, projectId: string, next: ProjectConfigOverride, actor: string,
 ): { ok: true } | { ok: false; error: string } {
   const project = db.getProject(projectId);
   if (!project) return { ok: false, error: "project not found" };
+  const before = project.config;
+  const recordAndOk = (): { ok: true } => {
+    db.recordProjectConfigChange(projectId, before, db.getProject(projectId)?.config ?? next, actor);
+    return { ok: true };
+  };
   const current = resolveConfig(project.config).kanbanColumns;
   const desired = resolveConfig(next).kanbanColumns;
   const curKeys = new Set(current.map((c) => c.key));
   const nextKeys = new Set(desired.map((c) => c.key));
   const keySetChanged = curKeys.size !== nextKeys.size || [...nextKeys].some((k) => !curKeys.has(k));
-  if (!keySetChanged) { db.setProjectConfig(projectId, next); return { ok: true }; } // no orphan possible → blind path
+  if (!keySetChanged) { db.setProjectConfig(projectId, next); return recordAndOk(); } // no orphan possible → blind path
   // An empty board would orphan EVERY card with no landing target — reject (the blind path would silently
   // store it and break the board). Mirrors planColumnLayout's ≥1-column floor.
   if (!desired.length) return { ok: false, error: "a board must keep at least one column" };
@@ -353,5 +368,5 @@ export function setProjectConfigSafe(
   delete rest.kanbanColumns;
   db.setProjectConfig(projectId, rest);
   db.applyBoardColumnLayout(projectId, desired, rekeys, defaultLandingKey);
-  return { ok: true };
+  return recordAndOk();
 }

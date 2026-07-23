@@ -6747,7 +6747,9 @@ export class SessionService {
       // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned cards
       // to the landing lane instead of orphaning them on a non-existent column; a non-column patch stays
       // byte-identical to the blind path. (tasks/columns.ts — mirrors the platform/REST config-PATCH path.)
-      const wrote = setProjectConfigSafe(this.db, projectId, v.value);
+      // actor (card a0cafef2): this is an AGENT-facing surface (the manager's own project_update) —
+      // hardcoding "human" would be a false attribution, so the caller's own session id is threaded through.
+      const wrote = setProjectConfigSafe(this.db, projectId, v.value, `manager:${managerSessionId}`);
       if (!wrote.ok) throw new Error(wrote.error);
     }
     this.db.updateProject(projectId, { name: patch.name, vaultPath: patch.vaultPath });

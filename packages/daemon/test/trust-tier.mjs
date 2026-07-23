@@ -107,6 +107,7 @@ const ALL_ROUTES = [
   ["GET", "/api/projects"], ["POST", "/api/projects"], ["DELETE", "/api/projects/:id"], ["PATCH", "/api/projects/:id"],
   ["GET", "/api/projects/:id/agents"], ["POST", "/api/projects/:id/agents"], ["GET", "/api/projects/:id/archive"],
   ["GET", "/api/projects/:id/board"], ["PUT", "/api/projects/:id/columns"], ["PATCH", "/api/projects/:id/config"],
+  ["GET", "/api/projects/:id/config/history"],
   ["POST", "/api/projects/:id/git/branch"], ["GET", "/api/projects/:id/git/branches"],
   ["POST", "/api/projects/:id/git/checkout"], ["POST", "/api/projects/:id/git/commit"],
   ["GET", "/api/projects/:id/git/log"], ["POST", "/api/projects/:id/git/push"],

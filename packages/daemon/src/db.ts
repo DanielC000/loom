@@ -41,7 +41,7 @@ import type {
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
-  RepoRegistryEntry, PlatformConfigHistoryEntry,
+  RepoRegistryEntry, PlatformConfigHistoryEntry, ProjectConfigHistoryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio } from "@loom/shared";
@@ -640,6 +640,25 @@ CREATE TABLE IF NOT EXISTS platform_config_history (
   created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_platform_config_history_created_at ON platform_config_history(created_at);
+-- Bounded PER-PROJECT change history for a project's config override (card a0cafef2, sibling of
+-- platform_config_history above): projects.config_json only ever shows the LATEST value, so a change can't
+-- be attributed to a key, an actor, or a prior value. Each row is ONE write, scoped to project_id: the
+-- top-level keys that changed, their prior + resulting values, the TRUTHFUL actor the write surface
+-- threads through (project config has THREE agent-facing writers alongside the one human REST PATCH — see
+-- ProjectConfigHistoryEntry's doc — so, unlike platform_config_history, "human" is never hardcoded here),
+-- and a timestamp. A ring buffer PER PROJECT capped at PROJECT_CONFIG_HISTORY_LIMIT rows, pruned on every
+-- insert (see recordProjectConfigChange) — this must never grow unbounded, and a busy project can never
+-- evict a quiet project's history. Additive: CREATE TABLE IF NOT EXISTS, like platform_config_history.
+CREATE TABLE IF NOT EXISTS project_config_history (
+  id TEXT PRIMARY KEY,
+  project_id TEXT NOT NULL REFERENCES projects(id),
+  changed_keys TEXT NOT NULL,
+  prior_json TEXT NOT NULL,
+  next_json TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_project_config_history_project_created ON project_config_history(project_id, created_at);
 -- Setup Assistant E1-6: a tiny daemon-GLOBAL key/value store for one-time boot markers (today: the
 -- first-run setup auto-launch flag). NOT per-project — daemon-wide, like platform_config. Brand-new
 -- table ⇒ this CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER), exactly like
@@ -1183,6 +1202,16 @@ const MAX_COMPANION_MESSAGES = 200;
  * a generous span (mirrors MAX_COMPANION_MESSAGES's own reasoning) without ever needing real retention.
  */
 const PLATFORM_CONFIG_HISTORY_LIMIT = 200;
+
+/**
+ * The bounded-growth cap for `project_config_history` (card a0cafef2, sibling of
+ * PLATFORM_CONFIG_HISTORY_LIMIT): the most recent rows kept, PER PROJECT (the ring eviction below is
+ * scoped `WHERE project_id = ?`, unlike the platform table's single daemon-global ring) — so one busy
+ * project's config churn can never evict a quiet project's history. `recordProjectConfigChange` prunes
+ * anything older on every insert. 200 rows of a handful of infrequently-touched project-level config
+ * fields per project is a generous span, mirroring PLATFORM_CONFIG_HISTORY_LIMIT's own reasoning.
+ */
+const PROJECT_CONFIG_HISTORY_LIMIT = 200;
 
 /**
  * The bounded-growth cap for conversation history (card 85f62475): the most recent N conversations retained
@@ -2165,6 +2194,70 @@ export class Db {
   /** Replace a project's config override (Pillar C project_configure / PATCH config). */
   setProjectConfig(id: string, config: ProjectConfigOverride): void {
     this.db.prepare("UPDATE projects SET config_json = ? WHERE id = ?").run(JSON.stringify(config), id);
+  }
+  /**
+   * Record ONE project-config write into its bounded, PER-PROJECT change history (card a0cafef2, sibling
+   * of `recordPlatformConfigChange`) — the top-level keys that actually differ between `before` and `after`
+   * (JSON-compared, so a same-value resubmit of an untouched sibling never counts as a change), each
+   * changed key's prior + resulting value, the actor the caller identifies, and a timestamp. A write where
+   * nothing actually differs (every key JSON-equal) records NOTHING — there is no change to attribute.
+   * Callers pass `before`/`after` as the project's config immediately before/after the write this call is
+   * recording (`setProjectConfigSafe` is the single chokepoint that does this for every writer).
+   *
+   * `actor` must be THREADED FROM THE CALLER, never hardcoded — project config (unlike platform_config) has
+   * THREE agent-facing writers alongside the one human REST PATCH; hardcoding "human" here would falsely
+   * attribute an agent's write. See `ProjectConfigHistoryEntry`'s doc for the actor-string convention.
+   */
+  recordProjectConfigChange(projectId: string, before: ProjectConfigOverride, after: ProjectConfigOverride, actor: string): void {
+    const b = (before ?? {}) as Record<string, unknown>;
+    const a = (after ?? {}) as Record<string, unknown>;
+    const changedKeys: string[] = [];
+    const prior: Record<string, unknown> = {};
+    const next: Record<string, unknown> = {};
+    for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+      if (JSON.stringify(b[key]) === JSON.stringify(a[key])) continue;
+      changedKeys.push(key);
+      if (b[key] !== undefined) prior[key] = b[key];
+      if (a[key] !== undefined) next[key] = a[key];
+    }
+    if (changedKeys.length === 0) return;
+    changedKeys.sort();
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO project_config_history (id, project_id, changed_keys, prior_json, next_json, actor, created_at)
+         VALUES (@id, @projectId, @changedKeys, @priorJson, @nextJson, @actor, @createdAt)`,
+      ).run({
+        id: randomUUID(),
+        projectId,
+        changedKeys: JSON.stringify(changedKeys),
+        priorJson: JSON.stringify(prior),
+        nextJson: JSON.stringify(next),
+        actor,
+        createdAt: new Date().toISOString(),
+      });
+      // Ring buffer PER PROJECT: keep only the PROJECT_CONFIG_HISTORY_LIMIT most recent rows FOR THIS
+      // PROJECT, pruned on every insert (mirrors recordPlatformConfigChange's ring-buffer-on-insert
+      // pattern, scoped by project_id so this can never grow unbounded per-project OR cross-project).
+      this.db.prepare(
+        `DELETE FROM project_config_history WHERE project_id = ? AND id NOT IN (
+           SELECT id FROM project_config_history WHERE project_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?
+         )`,
+      ).run(projectId, projectId, PROJECT_CONFIG_HISTORY_LIMIT);
+    })();
+  }
+  /** One project's config change history, newest first, capped at PROJECT_CONFIG_HISTORY_LIMIT rows. */
+  listProjectConfigHistory(projectId: string, limit = PROJECT_CONFIG_HISTORY_LIMIT): ProjectConfigHistoryEntry[] {
+    const rows = this.db.prepare(
+      "SELECT id, changed_keys, prior_json, next_json, actor, created_at FROM project_config_history WHERE project_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+    ).all(projectId, Math.max(1, Math.min(limit, PROJECT_CONFIG_HISTORY_LIMIT))) as Row[];
+    return rows.map((r) => ({
+      id: r.id as string,
+      changedKeys: JSON.parse(r.changed_keys as string) as string[],
+      prior: JSON.parse(r.prior_json as string) as Record<string, unknown>,
+      next: JSON.parse(r.next_json as string) as Record<string, unknown>,
+      actor: r.actor as string,
+      createdAt: r.created_at as string,
+    }));
   }
   /** Soft-remove a project: stamp archived_at so listProjects() hides it (rows + sessions kept). */
   archiveProject(id: string): void {

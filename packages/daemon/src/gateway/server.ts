@@ -3912,7 +3912,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/renames
     // a column re-keys the affected cards to the landing lane instead of ORPHANING them on a non-existent
     // column. A non-column patch stays byte-identical to the blind path. (tasks/columns.ts.)
-    const wrote = setProjectConfigSafe(deps.db, id, v.value);
+    // "human" is honest here (card a0cafef2), not a placeholder: this REST PATCH is a human-only surface —
+    // no agent MCP tool calls it (they route through the platform/setup/manager project_configure/
+    // project_update tools below, each threading its OWN actor).
+    const wrote = setProjectConfigSafe(deps.db, id, v.value, "human");
     if (!wrote.ok) return reply.code(400).send({ error: wrote.error });
     // Codescape v1 has no runtime registration (see codescape/supervisor.ts's CWD CONTRACT doc): serve
     // only ever sees the projects boot-ingested it. Flipping codescape.enabled ON here won't ingest this
@@ -3921,6 +3924,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       console.log(`[codescape] project ${id} codescape.enabled set — a daemon restart is required to ingest this project (v1)`);
     }
     return deps.db.getProject(id);
+  });
+
+  // Read-only bounded change history for ONE project's config override (card a0cafef2, sibling of
+  // GET /api/platform/config/history). Tier-0 (loopback-only, human-only), deliberately NOT promoted to
+  // Tier-1 like the sibling project reads (board/tasks/agents/memory) above: unlike those, a project's
+  // config can carry gateCommand (host-RCE) and alertWebhook (data-exfil) — this history exposes PRIOR
+  // values of those same fields, so it inherits the config-PATCH route's own trust posture, not the
+  // read-only project-data routes' looser one.
+  app.get("/api/projects/:id/config/history", async (req, reply) => {
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.getProject(id)) return reply.code(404).send({ error: "project not found" });
+    return { entries: deps.db.listProjectConfigHistory(id) };
   });
 
   // Atomic safe board-column layout change (task B) — the editor's mutation (card C), NOT the blind

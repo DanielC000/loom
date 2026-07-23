@@ -796,6 +796,27 @@ export interface ProjectConfigOverride {
 }
 
 /**
+ * One bounded entry in a project's `project_config_history` change history (card a0cafef2, sibling of
+ * `PlatformConfigHistoryEntry`/db1e3503): the top-level keys that changed in a single write, their prior +
+ * resulting values (JSON-comparable, scoped to just the changed keys — not a full-blob snapshot), and when.
+ * UNLIKE `PlatformConfigHistoryEntry`, `actor` here can NEVER be hardcoded "human" — project config has
+ * THREE agent-facing writers (the Platform Lead's + Setup Assistant's `project_configure`/`project_update`,
+ * and the manager's own `project_update`) alongside the one human REST PATCH, so a truthful actor is
+ * threaded from each caller (e.g. "human", "platform:<sessionId>", "setup:<sessionId>",
+ * "manager:<sessionId>") — see `setProjectConfigSafe`, the single chokepoint all four writers route
+ * through. `Db.listProjectConfigHistory` returns these newest-first, per project, capped to a bounded ring
+ * buffer — see `Db.recordProjectConfigChange`.
+ */
+export interface ProjectConfigHistoryEntry {
+  id: string;
+  changedKeys: string[];
+  prior: Record<string, unknown>;
+  next: Record<string, unknown>;
+  actor: string;
+  createdAt: string;
+}
+
+/**
  * Daemon-global platform override — the SEPARATE 2nd arg to `resolveConfig`, NOT part of a per-project
  * override. Deep-partial of PlatformConfig: each sub-group optional, each field within it optional, so
  * the human can tune one number and inherit the rest. The daemon loads this from its SQLite singleton

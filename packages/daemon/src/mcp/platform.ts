@@ -971,7 +971,9 @@ export class PlatformMcpRouter {
         // Route through the SAFE writer (not a blind setProjectConfig): a kanbanColumns change that drops/
         // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
         // non-existent column. A non-column patch stays byte-identical to the blind path. (columns.ts.)
-        const wrote = setProjectConfigSafe(db, resolvedProjectId, merged);
+        // actor (card a0cafef2): this is an AGENT-facing surface (the elevated Platform Lead) — hardcoding
+        // "human" would be a false attribution, so the caller's own session id is threaded through.
+        const wrote = setProjectConfigSafe(db, resolvedProjectId, merged, callerSessionId ? `platform:${callerSessionId}` : "platform");
         if (!wrote.ok) return ok({ error: wrote.error });
         return ok({ ok: true, projectId: resolvedProjectId, config: db.getProject(resolvedProjectId)?.config ?? merged });
       },

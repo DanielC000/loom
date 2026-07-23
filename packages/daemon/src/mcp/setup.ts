@@ -268,7 +268,9 @@ export class SetupMcpRouter {
         // renames a column re-keys the affected cards to the landing lane instead of ORPHANING them on a
         // non-existent column. A non-column / same-key-set patch stays byte-identical to the blind path.
         // (tasks/columns.ts — mirrors the Lead's project_configure + the REST PATCH.)
-        const wrote = setProjectConfigSafe(db, resolvedProjectId, merged);
+        // actor (card a0cafef2): this is an AGENT-facing surface (the Setup Assistant / "Platform"
+        // operator, ships to ALL users) — hardcoding "human" would be a false attribution.
+        const wrote = setProjectConfigSafe(db, resolvedProjectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
         if (!wrote.ok) return ok({ error: wrote.error });
         return ok({ ok: true, projectId: resolvedProjectId, config: db.getProject(resolvedProjectId)?.config ?? merged });
       },
@@ -299,7 +301,8 @@ export class SetupMcpRouter {
           // unchanged: a human-only key is a rejected unknown above and never reaches the merge; the merged
           // whole isn't re-validated (a preserved pre-existing human key would falsely fail the agent validator).
           const merged = mergeConfigOverride(project.config, v.value);
-          const wrote = setProjectConfigSafe(db, projectId, merged);
+          // actor (card a0cafef2): agent-facing surface, same reasoning as project_configure above.
+          const wrote = setProjectConfigSafe(db, projectId, merged, callerSessionId ? `setup:${callerSessionId}` : "setup");
           if (!wrote.ok) return ok({ error: wrote.error });
         }
         if (vaultPath !== undefined) vaultPath = expandTilde(vaultPath);
