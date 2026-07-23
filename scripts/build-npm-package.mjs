@@ -27,7 +27,26 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { curateSkillDirs, DEV_ONLY_SKILLS } from "./curate-release-skills.mjs";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+export const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// The exact set of build-output directories this script copies into the published npm tarball —
+// the single source of truth for "what does a `loomctl` install actually ship". A consumer that needs
+// to know what ships (e.g. the codescape-privacy-guard's dist scan, packages/daemon/test/
+// codescape-privacy-guard.mjs) imports THIS, rather than hand-maintaining a second copy of these paths
+// that can silently drift the next time the package layout changes.
+export const PACKAGED_ROOTS = {
+  daemonDist: path.join(repoRoot, "packages/daemon/dist"),
+  webDist: path.join(repoRoot, "packages/web/dist"),
+  sharedDist: path.join(repoRoot, "packages/shared/dist"),
+  daemonAssets: path.join(repoRoot, "packages/daemon/assets"),
+};
+
+// Everything below is the actual packaging side effects (build/verify/stage/pack) — guarded so this
+// module can be IMPORTED (for PACKAGED_ROOTS above) without running any of it. Only fires when this
+// file is executed directly (`node scripts/build-npm-package.mjs`), never on import.
+const isMain = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isMain) {
+
 const args = process.argv.slice(2);
 const noBuild = args.includes("--no-build");
 const noPack = args.includes("--no-pack");
@@ -45,10 +64,7 @@ function run(cmd, cmdArgs, opts = {}) {
 if (!noBuild) { log("building workspace (pnpm build) …"); run("pnpm", ["build"]); }
 
 // 2. Verify the built inputs exist.
-const daemonDist = path.join(repoRoot, "packages/daemon/dist");
-const webDist = path.join(repoRoot, "packages/web/dist");
-const sharedDist = path.join(repoRoot, "packages/shared/dist");
-const daemonAssets = path.join(repoRoot, "packages/daemon/assets");
+const { daemonDist, webDist, sharedDist, daemonAssets } = PACKAGED_ROOTS;
 for (const [label, p] of [
   ["daemon dist", path.join(daemonDist, "index.js")],
   ["web dist", path.join(webDist, "index.html")],
@@ -211,3 +227,5 @@ if (noPack) {
   run("npm", ["pack", "--pack-destination", repoRoot], { cwd: stage });
   log(`done → ${path.join(repoRoot, `loomctl-${pkg.version}.tgz`)}`);
 }
+
+} // isMain
