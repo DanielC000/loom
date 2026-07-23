@@ -77,8 +77,13 @@ function sh(command, cwd, extraEnv) {
 // as a follow-up; see the worker report for a sketch.
 const OUTPUT_LOG = createRotatingLog({
   basePath: path.join(LOOM_HOME, "logs", "daemon-output.log"),
-  maxBytes: 5 * 1024 * 1024, // 5MB per file
-  maxFiles: 3, // live file + 2 rotated slots — bounded at ~15MB total, never grows unbounded
+  // Raised 5MB/3 files -> 10MB/6 files (card 74ab5274): the 1bd1f045 [pty-write] instrumentation
+  // multiplies line count ~5-19x per message, and the live post-deploy rate — measured directly off
+  // this file against a busy 4-worker fleet — was ~1.16MiB/hour (20.3KB/min). The old 15MB bound gave
+  // only ~13h of retained forensic window at that rate; this bound gives ~52h, comfortably past a
+  // notice-to-investigation delay that can run well beyond 30min.
+  maxBytes: 10 * 1024 * 1024, // 10MB per file
+  maxFiles: 6, // live file + 5 rotated slots — bounded at ~60MB total, never grows unbounded
 });
 const REPORTS_DIR = path.join(LOOM_HOME, "reports");
 
