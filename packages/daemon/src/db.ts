@@ -4694,9 +4694,18 @@ export class Db {
     return !!this.db.prepare("SELECT 1 FROM sessions WHERE recycled_from = ? LIMIT 1").get(sessionId);
   }
   /** The session (if any) whose `recycled_from` points at `sessionId` — the FORWARD counterpart to
-   *  `hasSuccessor`'s boolean check, returning the actual successor row so a caller can walk the chain. */
+   *  `hasSuccessor`'s boolean check, returning the actual successor row so a caller can walk the chain.
+   *  At most one row should ever share a `recycled_from` (the recycleWorker/recycleManager/
+   *  recyclePlatformLead `hasSuccessor` guards, card 386178a8, exist to keep that true) — but this ORDER
+   *  BY makes the pick deterministic ("newest wins") as defense-in-depth for any lineage that forked
+   *  before those guards existed, or any path that bypasses them. `created_at` (ISO-8601, sorts
+   *  lexicographically = chronologically) is the primary key; `rowid DESC` is a TOTAL-order tiebreak for
+   *  two successors minted in the same millisecond, where `created_at` alone would tie and leave the pick
+   *  nondeterministic again. */
   getSuccessor(sessionId: string): Session | undefined {
-    const r = this.db.prepare("SELECT * FROM sessions WHERE recycled_from = ? LIMIT 1").get(sessionId) as Row | undefined;
+    const r = this.db.prepare(
+      "SELECT * FROM sessions WHERE recycled_from = ? ORDER BY created_at DESC, rowid DESC LIMIT 1",
+    ).get(sessionId) as Row | undefined;
     return r ? toSession(r) : undefined;
   }
   /**

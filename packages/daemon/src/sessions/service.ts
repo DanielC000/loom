@@ -6100,6 +6100,14 @@ export class SessionService {
     // below) and seed an empty successor — destroying the only carrier of intent. Reject up front, so the
     // old worker stays alive and the manager can re-issue a real handoff (mirrors recycleManager).
     if (!handoffSummary || !handoffSummary.trim()) throw new Error("handoffSummary must not be blank");
+    // IDEMPOTENCY / anti-double-recycle: a worker may be recycled at MOST once. A SECOND worker_recycle
+    // on the same predecessor (e.g. a stale cached id, a duplicate/retried tool call) would retire the
+    // already-exited predecessor again and spawn a SECOND successor for the SAME lineage — worse, the
+    // sibling sweep below (retireSiblingSessionsForTask) would forcibly retire the REAL live successor as
+    // a "stray sibling" before minting a third row. Refuse if a successor already exists (mirrors
+    // recyclePlatformLead's identical guard, card 386178a8). The whole pre-spawn block runs synchronously,
+    // so this check + the retire/spawn below are one atomic guard on the event loop.
+    if (this.db.hasSuccessor(workerSessionId)) throw new Error("this worker has already been recycled — its successor is live");
     const worktreePath = old.worktreePath ?? old.cwd; // worker cwd === its worktree
     const branch = old.branch ?? null;
     const taskId = old.taskId ?? null;
@@ -6283,6 +6291,15 @@ export class SessionService {
     // and (via the deferred stop below) retire the predecessor — losing the handoff entirely. Reject up
     // front so the predecessor stays live and the manager can re-issue a real continuation.
     if (!continuationPrompt || !continuationPrompt.trim()) throw new Error("continuationPrompt must not be blank");
+    // IDEMPOTENCY / anti-double-recycle: a manager may be recycled at MOST once. recycle_me is self-scoped
+    // (the target is always the caller's own session) and the predecessor's pty isn't hard-stopped until a
+    // deferred 3s timeout below — a SECOND recycle_me call in that window (e.g. a double tool-call in one
+    // turn, a client-side retry) would spawn a SECOND successor for the SAME lineage. Refuse if a successor
+    // already exists (mirrors recyclePlatformLead's identical guard — recyclePlatformLead's own doc names
+    // this exact threat; recycleManager, which it explicitly mirrors, never got the guard, card 386178a8).
+    // The whole pre-spawn block runs synchronously, so this check + the retire/spawn below are one atomic
+    // guard on the event loop.
+    if (this.db.hasSuccessor(oldManagerId)) throw new Error("this manager has already been recycled — its successor is live");
     const agent = this.db.getAgent(old.agentId);
     const project = this.db.getProject(old.projectId);
     if (!project) throw new Error("project not found");
