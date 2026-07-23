@@ -1188,7 +1188,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_stop",
       {
-        description: "Stop one of your workers (graceful Ctrl-C by default, or hard kill). The worktree is retained. Pass EITHER workerSessionId (a real, already-spawned worker) OR opId (a `cap-queued` placeholder row from worker_list — an intent that was recorded but never actually spawned because the concurrency cap was full) — exactly one is required. The opId path withdraws the queued intent instead of stopping a pty (there's no pty yet): it returns `{cancelled:true}` if a matching queued entry was found and removed, or `{cancelled:false}` if not (already auto-fired once a slot freed, already TTL-reaped, or the opId was wrong) — that's a normal outcome, not an error, so check the flag rather than assuming success. A queued entry otherwise auto-fires on its own once a concurrency slot frees (no daemon restart needed) — cancel it BEFORE that happens if you no longer want it.",
+        description: "ENDS one of your workers' sessions (graceful Ctrl-C by default, or hard kill) — this is TERMINAL, not a pause: the session is over and cannot resume mid-turn. If what you actually want is to HOLD it — pause it, make it stop what it's doing and wait for you, without ending it — use `worker_redirect` instead; this tool cannot do that. The worktree is retained. Pass EITHER workerSessionId (a real, already-spawned worker) OR opId (a `cap-queued` placeholder row from worker_list — an intent that was recorded but never actually spawned because the concurrency cap was full) — exactly one is required. The opId path withdraws the queued intent instead of stopping a pty (there's no pty yet): it returns `{cancelled:true}` if a matching queued entry was found and removed, or `{cancelled:false}` if not (already auto-fired once a slot freed, already TTL-reaped, or the opId was wrong) — that's a normal outcome, not an error, so check the flag rather than assuming success. A queued entry otherwise auto-fires on its own once a concurrency slot frees (no daemon restart needed) — cancel it BEFORE that happens if you no longer want it.",
         inputSchema: { workerSessionId: z.string().optional(), opId: z.string().optional(), mode: z.enum(["graceful", "hard"]).optional() },
       },
       async ({ workerSessionId, opId, mode }) => {
@@ -1260,14 +1260,20 @@ export class OrchestrationMcpRouter {
       "worker_redirect",
       {
         description:
-          "FORCEFULLY redirect one of your workers — the \"land it NOW\" steer. This ENDS the worker's " +
-          "CURRENT turn immediately and REPLACES its entire pending direction with this ONE instruction, " +
-          "delivered as its next turn. Use it ONLY when you must change course NOW and cannot wait for the " +
-          "worker to finish. CONTRAST with worker_message, " +
+          "This is the HOLD tool — reach for it whenever your intent is hold · pause · stop what you're " +
+          "doing · wait for me · don't do X · abandon that approach, or any other \"change course NOW\" " +
+          "steer, including telling a worker to simply STOP and wait. It is NOT the same as `worker_stop` " +
+          "(which ENDS the session outright) — this one interrupts the worker's CURRENT turn and REPLACES " +
+          "its entire pending direction with this ONE instruction, delivered as its next turn, while the " +
+          "session stays alive for you to resume it once you've decided what's next. Before you use it: " +
+          "VERIFY WHAT THE WORKER IS ACTUALLY BUILDING before you hold/stop it — check its real state " +
+          "(e.g. its working tree via `git status`, not just a busy flag or your own tool-call log), since " +
+          "a control-plane signal alone can misread what's actually in flight, and an unnecessary hold can " +
+          "abandon or clobber correct in-progress work. CONTRAST with worker_message, " +
           "which is ADDITIVE and NON-interrupting (it queues behind the current turn, delivered ALONE as its " +
           "own turn by default — coalesced with other pending messages into one turn only if the human has " +
-          "turned on the legacy daemon-global `coalesceAgentMessages` setting); prefer worker_message unless " +
-          "you truly need to interrupt. " +
+          "turned on the legacy daemon-global `coalesceAgentMessages` setting); prefer worker_message for " +
+          "ordinary, non-urgent direction and reach for this tool only when you truly need to interrupt now. " +
           "CAUTION: the interrupt may land MID-EDIT, leaving the worker's working tree partly changed — so " +
           "phrase `text` so the worker FIRST reconciles/inspects its working tree (e.g. `git status`, finish " +
           "or revert the half-done edit) BEFORE acting on the new direction. Any messages that were queued for " +

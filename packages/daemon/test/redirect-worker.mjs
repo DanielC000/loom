@@ -20,6 +20,17 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// Capture [orchestration] log lines emitted by deliverRedirect (card 7acee6d4 tertiary: before this,
+// confirming a redirect had actually happened required a direct read-only query against
+// orchestration_events; now it must also be answerable from the daemon's own console log).
+const orchLogs = [];
+const realConsoleLog = console.log;
+console.log = (...args) => {
+  const s = args.map(String).join(" ");
+  if (s.startsWith("[orchestration]")) orchLogs.push(s);
+  realConsoleLog(...args);
+};
+
 // Hermetic LOOM_HOME BEFORE importing db.js (paths.ts reads it at import time).
 const tmpHome = path.join(os.tmpdir(), `loom-redirw-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -106,7 +117,9 @@ try {
     check("(2) setup: the old direction is HELD (busy worker) + persisted", pre.delivered === false);
     check("(2) setup: 1 undelivered durable message before the redirect", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD DIRECTION")));
 
+    orchLogs.length = 0;
     const r = sessions.redirectWorker(mgr, wkr, "STOP — reconcile your tree, then build feature Y instead");
+    check("(3) LOGGED: the redirect is visible from the console log alone (delivered + superseded count), no DB query needed", orchLogs.some((l) => l.includes(wkr) && l.includes("delivered=false") && l.includes("superseded=1")));
     check("(2) FLUSH: the superseded OLD direction is no longer in the worker's live queue", !pty.getPending(wkr).some((t) => t.includes("OLD DIRECTION")));
     check("(2) SUPERSEDE: the old durable record is RESOLVED (no longer undelivered)", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("OLD DIRECTION")));
     const resolved = db.listEventsForWorker(wkr).filter((e) => e.kind === "session_message_delivered" && e.detail?.reason === "superseded");
@@ -138,6 +151,7 @@ try {
 
   db.close();
 } finally {
+  console.log = realConsoleLog;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 

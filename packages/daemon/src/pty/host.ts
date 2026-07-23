@@ -4332,7 +4332,11 @@ export class PtyHost {
    */
   interruptForRedirect(sessionId: string): void {
     const live = this.live.get(sessionId);
-    if (!live?.alive || live.stopping || !live.ready || !live.busy) return; // nothing in flight to interrupt
+    if (!live?.alive || live.stopping || !live.ready || !live.busy) {
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} redirect: Esc NOT sent (nothing in flight to interrupt — alive=${!!live?.alive} stopping=${live?.stopping} ready=${live?.ready} busy=${live?.busy})`);
+      return; // nothing in flight to interrupt
+    }
     const busySinceAtInterrupt = live.busySince; // snapshot: a NEW turn (re-armed busy) updates this
     // We are deliberately abandoning this turn's Enter — bump the generation so a still-pending
     // sendEnterAndVerify chain for it recognizes it's stale and bails (never retry-Enters or
@@ -4340,14 +4344,30 @@ export class PtyHost {
     // Live.submitGeneration.
     live.submitGeneration++;
     live.pty.write(ESC_KEY); // single Esc: cancel the in-flight generation, return to the idle prompt
+    // eslint-disable-next-line no-console
+    console.log(`[pty] ${sessionId} redirect: Esc sent — settling for ${REDIRECT_SETTLE_MS}ms`);
     setTimeout(() => {
       const l = this.live.get(sessionId);
-      if (!l?.alive || l.stopping || !l.ready) return; // died / a real stop won / never readied → drop the self-clear
-      if (!l.busy) return;                              // a real Stop already cleared it (and drained) — nothing to heal
-      if (l.busySince !== busySinceAtInterrupt) return; // a NEW turn started since the Esc — do NOT clobber its busy
+      if (!l?.alive || l.stopping || !l.ready) {
+        // eslint-disable-next-line no-console
+        console.log(`[pty] ${sessionId} redirect: settle bailed (died / a real stop won / never readied)`);
+        return; // died / a real stop won / never readied → drop the self-clear
+      }
+      if (!l.busy) {
+        // eslint-disable-next-line no-console
+        console.log(`[pty] ${sessionId} redirect: settle no-op (a real Stop already cleared busy and drained)`);
+        return; // a real Stop already cleared it (and drained) — nothing to heal
+      }
+      if (l.busySince !== busySinceAtInterrupt) {
+        // eslint-disable-next-line no-console
+        console.log(`[pty] ${sessionId} redirect: settle bailed (a NEW turn started since the Esc — not clobbering it)`);
+        return; // a NEW turn started since the Esc — do NOT clobber its busy
+      }
       // No Stop hook fired on the Esc-cancel → clear the stale busy OURSELVES and drain the redirect in the
       // SAME tick (the M2 window: strictly no await between setBusy(false) and drainPending), mirroring the
       // Stop branch. finalizingTurn arms the same tripwire so a future async leak here is caught loudly.
+      // eslint-disable-next-line no-console
+      console.log(`[pty] ${sessionId} redirect: settled — clearing stale busy and draining the redirect now`);
       this.finalizingTurn = true;
       try {
         this.setBusy(sessionId, false);

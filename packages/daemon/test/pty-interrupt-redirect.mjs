@@ -19,6 +19,18 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Capture [pty] log lines emitted by interruptForRedirect (card 7acee6d4 tertiary: before this, "did the
+// interrupt fire, and did it settle?" required a direct DB query — now it must be answerable from the
+// daemon's own console log alone). Only lines with the `[pty]` prefix are captured; PASS/FAIL check()
+// output still prints normally via the real console.log.
+const ptyLogs = [];
+const realConsoleLog = console.log;
+console.log = (...args) => {
+  const s = args.map(String).join(" ");
+  if (s.startsWith("[pty]")) ptyLogs.push(s);
+  realConsoleLog(...args);
+};
+
 // Hermetic LOOM_HOME + a TINY settle, set BEFORE importing host.js (paths.ts + the REDIRECT_SETTLE_MS
 // const are read at import time).
 const tmpHome = path.join(os.tmpdir(), `loom-redirect-${Date.now()}-${process.pid}`);
@@ -94,10 +106,12 @@ try {
 
   // INTERRUPT: a single Esc cancels the in-flight turn. busy stays true (no Stop hook fires on an Esc).
   const escBefore = countOf(ESC);
+  ptyLogs.length = 0;
   host.interruptForRedirect(SID);
   check("interrupt: wrote a single Esc (\\x1b) to cancel the in-flight turn", countOf(ESC) === escBefore + 1);
   check("interrupt: busy NOT cleared synchronously (no Stop hook yet)", lastBusy() === true);
   check("interrupt: redirect still HELD immediately after (settle hasn't fired)", countOf(REDIRECT) === 0);
+  check("interrupt: logged the Esc write (answerable from logs alone, no DB query)", ptyLogs.some((l) => l.includes(SID) && l.includes("Esc sent")));
 
   // After the bounded settle: busy is self-cleared (no Stop hook needed) and the redirect DRAINS as one
   // submit — note the drain RE-ARMS busy for the redirect turn, so the self-clear shows as a busy=false
@@ -108,6 +122,7 @@ try {
   check("after settle: the freshly-enqueued redirect DRAINED (written once)", countOf(REDIRECT) === 1);
   check("after settle: busy re-armed for the redirect turn (drain submitted it)", lastBusy() === true);
   check("after settle: the FIFO is empty (redirect was the only entry)", host.getPending(SID).length === 0);
+  check("after settle: logged that the interrupt settled and drained (did it fire AND settle — from logs alone)", ptyLogs.some((l) => l.includes(SID) && l.includes("settled")));
 
   // The redirect turn is now in flight (drain re-armed busy via submit). A SECOND settle-drain must not
   // double-submit (idempotent) — there's nothing more to drain.
@@ -148,13 +163,16 @@ try {
   const fake3 = fakes[fakes.length - 1];
   host.deliverHook(SID3, { hook_event_name: "SessionStart" }); // ready + IDLE (no in-flight turn)
   const escIdleBefore = fake3.writes.join("").split(ESC).length - 1;
+  ptyLogs.length = 0;
   host.interruptForRedirect(SID3); // idle (busy=false) → nothing to interrupt
   check("idle: interruptForRedirect is a no-op (no Esc — nothing in flight to cancel)", (fake3.writes.join("").split(ESC).length - 1) === escIdleBefore);
+  check("idle: logged that the Esc was NOT sent (nothing in flight) — the no-op is visible from logs too", ptyLogs.some((l) => l.includes(SID3) && l.includes("Esc NOT sent")));
   // Dead session: also a no-op (no throw).
   let threw = false;
   try { host.interruptForRedirect("no-such-session"); } catch { threw = true; }
   check("unknown session: interruptForRedirect is a safe no-op (no throw)", threw === false);
 } finally {
+  console.log = realConsoleLog;
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 

@@ -4277,6 +4277,11 @@ export class SessionService {
       managerSessionId: opts.eventManagerId, workerSessionId: target.id, taskId: target.taskId ?? null, kind: "redirect_worker",
       detail: { delivered: r.delivered, superseded: flushed.length, queuedMsgId: r.delivered ? undefined : r.msgId, ...opts.extraDetail },
     });
+    // Surface this on the daemon's own console log too (card 7acee6d4) — before this, confirming a
+    // redirect had actually happened required a direct read-only query against orchestration_events;
+    // now "did the interrupt fire" is answerable from the log stream alone.
+    // eslint-disable-next-line no-console
+    console.log(`[orchestration] redirect_worker ${target.id}: delivered=${r.delivered} superseded=${flushed.length}${r.delivered ? "" : " (interrupt requested)"}`);
     return r;
   }
 

@@ -270,12 +270,24 @@ base brief directly, rather than papering over it in every kickoff.)
 it queues behind the worker's current turn and lands at the next natural turn boundary — use it for
 ordinary direction, clarifying answers, and anything that isn't urgent. `worker_redirect` is the
 escalation: it ENDS the worker's current turn immediately and replaces its entire pending queue with
-your one instruction, delivered next. Reach for `worker_redirect` — not `worker_message` — the moment
-you've spotted the worker building the wrong thing and need it to change course NOW; waiting for a long
-turn to end on `worker_message` alone risks the worker committing a whole implement→build→test cycle on
-a design you've already superseded. Because the interrupt can land mid-edit, phrase the redirect so the
-worker FIRST reconciles its working tree (`git status`; finish or revert the half-done edit) before
-acting on the new direction.
+your one instruction, delivered next — and the session STAYS ALIVE, unlike `worker_stop` (which ends
+it outright). **Bright line: any hold / pause / stop-what-you're-doing / wait-for-me / abandon-that /
+"don't do X" instruction ⇒ `worker_redirect`, never `worker_message`.** A queued `worker_message` only
+lands at the next natural turn boundary — which may be a long implement→build→test cycle away — so
+using it for a "stop now" intent can let the worker run right past the point you needed it to hold.
+Also reach for `worker_redirect` the moment you've spotted the worker building the wrong thing and need
+it to change course NOW, for the same reason. Because the interrupt can land mid-edit, phrase the
+redirect so the worker FIRST reconciles its working tree (`git status`; finish or revert the half-done
+edit) before acting on the new direction.
+
+**Before you redirect/hold a worker to stop it, VERIFY WHAT IT'S ACTUALLY BUILDING — the working tree
+is authoritative, the event log is not.** A busy flag, a tool-call log, or your own read of what the
+worker "must" be doing is a CONTROL-PLANE signal, not ground truth — it can be stale or simply wrong
+about what's actually in the worktree right now. Before you hold or stop a worker because you believe
+it's building the wrong thing, check the real state directly (its actual diff/`git status`, its recent
+commits, its transcript) rather than acting on an inference. A better affordance for holding a worker,
+used without this check, just makes it easier to destroy correct in-progress work on a false premise —
+strictly worse than the friction it replaces. Verify first, then redirect.
 
 **Drive a worker's permission mode with `worker_set_mode`.** Beyond messaging, you can set the worker's
 permission posture to fit the task — valid values for a worker are `acceptEdits` / `auto`: open a trusted,
