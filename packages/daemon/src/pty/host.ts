@@ -2424,7 +2424,7 @@ export class PtyHost {
     // A new session runs its startup-prompt turn immediately. Set busy optimistically so
     // GET /api/sessions is correct within the ~250ms before the UserPromptSubmit hook lands;
     // the hook then re-asserts the same value (idempotent). Resume injects no prompt, so no set.
-    if (opts.startupPrompt) this.setBusy(opts.sessionId, true);
+    if (opts.startupPrompt) this.setBusy(opts.sessionId, true, "spawn-startup-prompt");
 
     // Readiness fallback: if SessionStart never arrives (a missed hook), don't strand a queued boot
     // injection forever — mark ready after a grace so it still drains. Bounded; a no-op if already ready.
@@ -2842,7 +2842,7 @@ export class PtyHost {
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
-        this.setBusy(sessionId, true); // rising edge — fires for the startup-prompt arg and injected prompts alike
+        this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
       case "Stop":
       case "StopFailure": {
@@ -2862,7 +2862,7 @@ export class PtyHost {
         live.enterConfirmed = true;
         this.finalizingTurn = true;
         try {
-          this.setBusy(sessionId, false); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
+          this.setBusy(sessionId, false, "stop-hook"); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
           // Companion injection-guard Primitive A: CLEAR the just-ended turn's attested owner text here —
           // unlike activeTurnRoute (which persists until the next submit() overwrites it), owner text must
           // never survive past the turn it attests, so a later non-owner-authored turn can't inherit it. A
@@ -3002,7 +3002,7 @@ export class PtyHost {
       if (this.finalizingTurn) {
         throw new Error("M2 invariant violated: enqueueStdin reached the idle-submit path mid turn-finalize — an `await` leaked between setBusy(false) and drainPending in deliverHook (host.ts).");
       }
-      this.submit(sessionId, text, route, ownerText, proactive, senderId);
+      this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate");
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -3473,9 +3473,9 @@ export class PtyHost {
       if (!live.enterConfirmed && live.composerLen === 0 && live.lastPrompt) {
         // eslint-disable-next-line no-console
         console.log(`[heal] ${sessionId} clearing an orphaned give-up injection (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
-        this.writeChunked(sessionId, BACKSPACE.repeat(live.lastPrompt.length), () => this.setBusy(sessionId, false));
+        this.writeChunked(sessionId, BACKSPACE.repeat(live.lastPrompt.length), () => this.setBusy(sessionId, false, "heal-if-stuck-clear"));
       } else {
-        this.setBusy(sessionId, false);
+        this.setBusy(sessionId, false, "heal-if-stuck-stale");
       }
     }
   }
@@ -3549,7 +3549,7 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(0, n); // the leading same-route (+ same-kind, unless toggled) run
     }
-    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route)
+    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain"); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route)
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -3593,9 +3593,20 @@ export class PtyHost {
    * a bounded verify/retry schedule until `UserPromptSubmit` (or a Stop, proving a turn ran) confirms
    * it, or gives up and recovers busy so the session doesn't wedge.
    */
-  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null): void {
+  private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue"): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
+    // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): `reason` names WHICH of the
+    // four call sites is writing this turn — the two queue-mediated ones ("immediate"/"drain", both already
+    // busy-gated) and the two DIRECT-write bypasses (resumeAfterRateLimit's "rate-limit-replay", and
+    // scheduleKickoffGuarantee's "kickoff-guarantee") that write to the pty WITHOUT going through
+    // drainPending's queue. `busyBefore` is the alarm signal: a write landing while the daemon already
+    // believes the session is busy means either a real double-turn race, or (more likely, per the a3814193
+    // incident) that `live.busy` had already gone stale via one of the out-of-band clears (see the `[busy]`
+    // log this same instrumentation adds to setBusy) — this line is what lets a future recurrence be
+    // diagnosed straight from daemon-output.log instead of requiring an engine-transcript cross-reference.
+    // eslint-disable-next-line no-console
+    console.log(`[submit-write] ${sessionId} reason=${reason} busyBefore=${live.busy} len=${text.length} head=${JSON.stringify(text.slice(0, 60))}`);
     live.lastPrompt = text; // remember the in-flight turn so a usage-cap kill is recoverable (§19c-b)
     // Pin this turn's ORIGINATING route (Loom Companion), SYNCHRONOUSLY — before the async writeChunked, so
     // it's in place the instant the agent processes the turn and can chat_reply. null for every non-companion
@@ -3642,7 +3653,7 @@ export class PtyHost {
       const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
       setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
     });
-    this.setBusy(sessionId, true); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
+    this.setBusy(sessionId, true, reason); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
   }
 
   /**
@@ -3855,9 +3866,9 @@ export class PtyHost {
           // the window would submit a NEW turn whose own BRACKET_PASTE_START+chunks interleave with our
           // still-draining backspaces on the pty's FIFO — a silent, corrupted/truncated turn. submit() itself
           // follows this same discipline (its own post-write Enter is gated behind writeChunked's `done`).
-          this.writeChunked(sessionId, BACKSPACE.repeat(l.lastPrompt.length), () => this.setBusy(sessionId, false));
+          this.writeChunked(sessionId, BACKSPACE.repeat(l.lastPrompt.length), () => this.setBusy(sessionId, false, "give-up-recovery-cleared"));
         } else {
-          this.setBusy(sessionId, false);
+          this.setBusy(sessionId, false, "give-up-recovery");
         }
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
@@ -3899,6 +3910,15 @@ export class PtyHost {
   resumeAfterRateLimit(sessionId: string): boolean {
     const live = this.live.get(sessionId);
     if (!live?.alive) return false;
+    // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): log EVERY invocation,
+    // including the branch that ends up doing nothing (lastPrompt null, or busy true) — that silent-skip
+    // branch previously left NO trace at all, which is exactly the gap that made the a3814193 incident's
+    // caller unconfirmable from the daemon log alone. `wasRateLimited` records whether this call's own
+    // precondition (the session was actually parked) held BEFORE we unconditionally clear it below — a
+    // call arriving with `wasRateLimited=false` is the exact "caller invoked this on a session that was
+    // never actually parked" hazard this function's own doc comment already names.
+    // eslint-disable-next-line no-console
+    console.log(`[rate-limit-resume] ${sessionId} invoked wasRateLimited=${live.rateLimited} busy=${live.busy} lastPromptLen=${live.lastPrompt?.length ?? 0}`);
     // UNPARK: drop the suppress flag FIRST so the re-submitted turn (and the post-resume Stop drain of the
     // held queue) can proceed. submit() re-arms busy, so the reconcile drain stays no-op until that turn ends.
     live.rateLimited = false;
@@ -3912,18 +3932,30 @@ export class PtyHost {
       if (blocked) {
         this.enqueueStdin(sessionId, live.lastPrompt, "system", undefined, live.lastPromptRoute ?? undefined, "agent", undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
       } else {
-        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId);
+        this.submit(sessionId, live.lastPrompt, live.lastPromptRoute ?? undefined, live.lastPromptOwnerText ?? undefined, live.lastPromptProactive, live.lastPromptSenderId, "rate-limit-replay");
       }
     }
     return true;
   }
 
-  /** Persist + broadcast the turn-in-flight flag, and track it locally. Idempotent. */
-  private setBusy(sessionId: string, busy: boolean): void {
+  /**
+   * Persist + broadcast the turn-in-flight flag, and track it locally. Idempotent.
+   *
+   * `reason` (card 1f74080a instrumentation, DIAGNOSTIC ONLY — no control-flow change) tags WHICH of the
+   * several call sites flipped busy, so a future "duplicate delivery" incident can reconstruct the exact
+   * busy-window from `[busy]` log lines alone instead of requiring an engine-transcript dig (the ONLY
+   * reason the a3814193 incident's mechanism took two people and a JSONL cross-reference to pin down).
+   * Every call site below is updated to pass one; there is deliberately no default, so a future new call
+   * site can't silently go unlabeled.
+   */
+  private setBusy(sessionId: string, busy: boolean, reason: string): void {
     const live = this.live.get(sessionId);
     if (!live) return;
+    const prevBusySince = live.busySince;
     live.busy = busy;
     live.busySince = busy ? Date.now() : null; // track the rising edge for the stuck-busy heal
+    // eslint-disable-next-line no-console
+    console.log(`[busy] ${sessionId} -> ${busy ? "true" : "false"} (${reason})${!busy && prevBusySince != null ? ` afterMs=${Date.now() - prevBusySince}` : ""}`);
     this.events.onBusy(sessionId, busy);
     this.broadcastControl(live, { type: "busy", busy });
   }
@@ -4196,7 +4228,7 @@ export class PtyHost {
       }
       // eslint-disable-next-line no-console
       console.log(`[pty] ${sessionId} startup-prompt grace elapsed with no turn started — force-submitting the kickoff`);
-      this.submit(sessionId, kickoff);
+      this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee");
     }, STARTUP_PROMPT_GRACE_MS);
   }
 
@@ -4301,6 +4333,16 @@ export class PtyHost {
 
   writeStdin(sessionId: string, data: string): void {
     const live = this.live.get(sessionId);
+    // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): this is the ONE write path
+    // with NO busy gate at all (by design — a real human must always be able to type) and the ONLY caller
+    // is the gateway's raw websocket `{type:"stdin"}` relay (an attached client), so anything landing here
+    // is either a genuine keystroke or something upstream mistakenly relaying non-human bytes through the
+    // human channel. Threshold-gated (>20 chars) so this doesn't become a per-keystroke firehose — a lone
+    // key is a handful of bytes; a pasted paragraph (the shape a stray report replay would take) is not.
+    if (live && data.length > 20) {
+      // eslint-disable-next-line no-console
+      console.log(`[stdin-write] ${sessionId} busy=${live.busy} len=${data.length} head=${JSON.stringify(data.slice(0, 60))}`);
+    }
     // Write the human's bytes to the pty FIRST — they must stay AHEAD of any held programmatic turn in
     // the pty's FIFO input stream. A box-freeing key (e.g. Enter) is a tiny chunk written synchronously
     // here, so the subsequent drain below submits its paste strictly behind that Enter → claude processes
@@ -4462,7 +4504,7 @@ export class PtyHost {
       console.log(`[pty] ${sessionId} redirect: settled — clearing stale busy and draining the redirect now`);
       this.finalizingTurn = true;
       try {
-        this.setBusy(sessionId, false);
+        this.setBusy(sessionId, false, "interrupt-for-redirect-settle");
         this.drainPending(sessionId);
       } finally {
         this.finalizingTurn = false;
