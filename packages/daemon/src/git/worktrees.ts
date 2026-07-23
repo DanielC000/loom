@@ -1786,6 +1786,94 @@ async function branchContentLandedInCommit(
   }
 }
 
+/** The `Loom-Worker-PathSet:` trailer {@link mergeBranchLocked} stamps — see {@link changedPathSetDigest}. */
+const LOOM_WORKER_PATHSET_TRAILER = /^Loom-Worker-PathSet:\s*(\S+)/m;
+
+/**
+ * Deterministic digest (sha256) over the SORTED set of paths changed between `base` and `ref` — `git diff
+ * --name-only`, `--no-renames` so a rename is counted as its two raw paths rather than resolved through
+ * git's own rename-detection heuristic (keeps the digest independent of that heuristic ever changing),
+ * newline-joined after sorting so traversal order never matters.
+ *
+ * WHY A PATH SET AND NOT A CONTENT HASH (card f621f185 — the deleted-branch residual of e076d2a2's
+ * content-reachability check): the obvious next move — hash the branch's changed (path, blob-sha) pairs
+ * and verify it later from `sha^..sha` alone (no branch ref needed, so it'd survive both branch deletion
+ * AND `git gc`) — was PROTOTYPED and FALSIFIED against real git before landing here. It breaks on an
+ * entirely HONEST merge: if main advances (after the branch was cut) with a non-conflicting edit to a file
+ * the branch ALSO touches, the pre-image blob at that path differs between `mergeBase..branch` (recorded
+ * at merge time) and `sha^..sha` (recomputed later, where `sha^` is main's ADVANCED tip, not the branch's
+ * original fork point) — and the post-image blob is a 3-way-merged blend of both sides' edits, matching
+ * neither side's own post-image either. Both compares disagree on a commit that landed PERFECTLY correctly,
+ * which would fail closed (safe) but silently flip an honestly-merged task's board `merged` field to
+ * null/unverified going forward — worse than the gap it closes on exactly the busiest, most-contended
+ * files. Reproduced and confirmed dead in that exact shape before this function was written.
+ *
+ * The touched PATH SET does not have this failure mode: a non-conflicting edit to a shared file does not
+ * change WHICH paths the squash's own diff touches on either side of the compare (the file was already
+ * going to appear in both diffs regardless of whose edit is in it), so it stays stable under concurrent
+ * main movement. The tradeoff this accepts (an explicit, narrower residual than the content-hash idea):
+ * two DIFFERENT branches that happen to touch the exact same set of paths would not be told apart by this
+ * check alone. That is deliberately judged acceptable — the incident this card responds to (`fb1dbb2`)
+ * had completely disjoint path sets (`db.ts`/`gateway/server.ts` landed under a trailer claiming a `pty`
+ * change), which a path-set digest catches cleanly, and Loom's own "one logical change per task" doctrine
+ * makes two unrelated tasks sharing an identical touched-path set an unlikely coincidence rather than the
+ * common case a content hash would otherwise need to guard against.
+ *
+ * A second, narrower false-negative (fails closed, so safe, just worth naming so a future reader doesn't
+ * mistake it for a bug): if main independently lands the IDENTICAL change to a path the branch also
+ * touches (not just a non-conflicting edit to the SAME file, but the exact same resulting content at that
+ * path), that path drops OUT of the squash's own `sha^..sha` diff entirely — a no-op — while it remains in
+ * the digest recorded at merge time from `mergeBase..branch`. The two path sets then genuinely differ, an
+ * honest merge mismatches, and the caller falls through to null/a redundant merge attempt. Rare (main and
+ * the branch would have to land the exact same bytes independently), never unsafe.
+ */
+async function changedPathSetDigest(
+  git: Pick<SimpleGit, "raw">, base: string, ref: string, timeoutMs?: number,
+): Promise<string> {
+  const args = ["diff", "--name-only", "--no-renames", `${base}..${ref}`];
+  const raw = timeoutMs === undefined
+    ? await git.raw(args)
+    : await withTimeout(git.raw(args), timeoutMs, "git diff --name-only (path-set fingerprint)");
+  const paths = raw.split("\n").map((s) => s.trim()).filter(Boolean).sort();
+  return createHash("sha256").update(paths.join("\n")).digest("hex");
+}
+
+/**
+ * Verifies a squash commit's persisted `Loom-Worker-PathSet` claim purely from the commit's OWN ancestry —
+ * `sha` and its parent `sha^`, both permanently reachable from HEAD once landed, so unlike a branch-tip
+ * check this needs no branch ref and survives `git gc` indefinitely (empirically confirmed: a genuine
+ * match still holds after `git branch -D` + `git reflog expire --expire=now --all` + `git gc --prune=now`;
+ * see test/merge-pathset-deleted-branch.mjs). FAILS CLOSED, same asymmetry as {@link
+ * branchContentLandedInCommit}: any git error, or the digests genuinely disagreeing, returns `false` —
+ * NOT VERIFIED — never resolve ambiguity to `true`. A false `false` costs one redundant, idempotent merge
+ * attempt; a false `true` is the exact silent-data-loss bug this whole check exists to close.
+ *
+ * ⚠️ WHAT A `true` HERE ACTUALLY PROVES, AND WHAT IT DOESN'T: only that the landed commit touched the SAME
+ * SET OF FILES the trailer declares — NOT that it carries the same CONTENT (see {@link
+ * changedPathSetDigest}'s doc for why a content check doesn't survive a concurrent main advance, which is
+ * why this is a path-set and not a content hash). Two DIFFERENT branches whose diffs happen to touch the
+ * exact same path set produce IDENTICAL digests, and a content swap between them would pass this check.
+ * That is not a hypothetical on this repo specifically: cards cluster hard on a handful of hot files (e.g.
+ * `pty/host.ts`), so two concurrently-worked branches confined to the same one or two hot files are a
+ * realistic, not exotic, way to hit this. Accepted deliberately (see the doc above) because it strictly
+ * dominates the pre-f621f185 answer (trailer presence alone, no path check at all) and never introduces a
+ * false positive it wouldn't already have produced — but a caller must not read a `true` here as "content
+ * verified" the way {@link branchContentLandedInCommit}'s `true` (the branch-PRESENT path) actually is.
+ */
+async function verifyPersistedPathSet(
+  git: Pick<SimpleGit, "raw">, timeoutMs: number, sha: string, expectedDigest: string,
+): Promise<boolean> {
+  try {
+    const parent = (await withTimeout(
+      git.raw(["rev-parse", `${sha}^`]), timeoutMs, "git rev-parse (path-set verify parent)",
+    )).trim();
+    const actual = await changedPathSetDigest(git, parent, sha, timeoutMs);
+    return actual === expectedDigest;
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Find the SQUASH-merge commit for `branch` reachable from `base` (default HEAD), identified by the
  * deterministic `Loom-Worker-Branch: <branch>` trailer {@link mergeBranch} writes. Returns the commit SHA,
@@ -1801,21 +1889,25 @@ async function branchContentLandedInCommit(
  * squash), whereas a re-cut branch DESCENDS FROM the prior squash (merge-base == the squash). Ancestry is
  * tested via merge-base equality — raw resolves it cleanly; we avoid `--is-ancestor`, whose exit-1 raw
  * misreads (see {@link isBranchMerged}). Branch gone ⇒ the trailer commit IS the landed diff (workerDiff
- * stage 3), returned directly — see below for why content-verification is skipped in that case.
+ * stage 3), returned directly, subject to the path-set verification below.
  *
- * CONTENT-VERIFIED while the branch ref is still live (card e076d2a2): trailer presence alone is a CLAIM,
- * not proof (see {@link branchContentLandedInCommit}). This check only runs when `branchPresent` — the
- * dangerous call sites (confirmWorkerMerge's pre-merge check and `mergeBranch`'s own noop classification)
- * ALWAYS run before the branch is deleted, so this is exactly where a false "landed" would trigger the
- * incident's irreversible actions (branch deletion, worker retirement, done-flip). When the branch is
- * ALREADY GONE (workerDiff's historical-diff reconstruction, or a retry landing after a PRIOR call already
- * finalized this exact worker), there is no live branch ref left to diff against — those call sites are
- * either read-only display or re-confirmations of a state a prior, already-verified call produced, so
- * skipping the check there does not reopen the incident's data-loss path.
+ * VERIFIED in BOTH cases, by TWO DIFFERENT MEANS with two different strengths (card e076d2a2 for the
+ * branch-present mode; card f621f185 for the branch-gone mode — read both docs, they prove different
+ * things). While `branchPresent`, verified via {@link branchContentLandedInCommit} — an actual CONTENT
+ * check (byte-for-byte, not just which files) — exactly as before, UNCHANGED, no regression to that path.
+ * Once the branch is GONE, verified instead via the persisted `Loom-Worker-PathSet` trailer (see {@link
+ * verifyPersistedPathSet}) — self-contained in the commit itself, so unlike a branch-tip-based check it
+ * needs no branch ref and survives `git gc` indefinitely, but it ONLY proves the landed commit touched the
+ * same set of FILES the trailer declares, not the same content — see verifyPersistedPathSet's own doc for
+ * exactly what that does and doesn't rule out. A commit that predates this fix carries no such trailer; for
+ * THOSE only, this degrades to the pre-f621f185 trailer-presence-only answer (logged, never silent) since a
+ * trailer can't be retroactively added to already-landed history.
  *
- * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
- * reconcile ops; ANY error/timeout returns null (treated as NOT-landed) — the SAFE default, since Pass A
- * then KEEPS the worktree rather than finalizing on a bad signal. Injectable via {@link BoundedGitDeps}.
+ * FAILS SAFE in both branches, same asymmetry throughout this file: ANY error/timeout, or the verification
+ * genuinely disagreeing, returns null (treated as NOT-landed) — never resolve ambiguity to a landed claim.
+ * A false null just costs Pass A keeping the worktree / a caller retrying an idempotent merge; a false
+ * landed sha is the exact silent-data-loss bug both cards exist to close. Injectable via {@link
+ * BoundedGitDeps}.
  */
 export async function findLandedSquashCommit(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
@@ -1826,11 +1918,16 @@ export async function findLandedSquashCommit(
     // or a vault-only/moved-repo project's repoPath breaks the fail-safe-null contract instead of resolving
     // to null.
     const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const sha = (await withTimeout(
-      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H", "--max-count=1"]),
+    // %x1f-separated sha+body in ONE call (mirrors scanMergedCommitMap) — the body carries the
+    // Loom-Worker-PathSet trailer this function needs once the branch is gone (below).
+    const out = await withTimeout(
+      git.raw(["log", base, "-F", `--grep=Loom-Worker-Branch: ${branch}`, "--format=%H%x1f%B", "--max-count=1"]),
       timeoutMs, "git log --grep trailer",
-    )).trim();
+    );
+    const sepIdx = out.indexOf("\x1f");
+    const sha = (sepIdx === -1 ? out : out.slice(0, sepIdx)).trim();
     if (!sha) return null;
+    const body = sepIdx === -1 ? "" : out.slice(sepIdx + 1);
     const branchPresent = (await withTimeout(
       git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
     )).trim() !== "";
@@ -1843,6 +1940,16 @@ export async function findLandedSquashCommit(
       if (mergeBase === sha) return null;
       // Content-reachability: a trailer match is not proof (see branchContentLandedInCommit's doc).
       if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
+    } else {
+      // Branch gone (card f621f185): verify against the persisted path-set trailer if this commit has one.
+      const pathSetMatch = body.match(LOOM_WORKER_PATHSET_TRAILER);
+      if (pathSetMatch) {
+        if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSetMatch[1]!))) return null;
+      } else {
+        // eslint-disable-next-line no-console
+        console.info(`[git] findLandedSquashCommit: ${branch} is gone and its landed commit ${sha.slice(0, 7)} ` +
+          "predates the Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone (card f621f185)");
+      }
     }
     return sha;
   } catch {
@@ -2126,19 +2233,29 @@ const MERGED_MAP_RECORD_SEP = "\x1e";
 const LOOM_WORKER_BRANCH_TRAILER = /^Loom-Worker-Branch:\s*(\S+)/m;
 
 /**
+ * Internal (never exposed — {@link getTaskMergedInfo}'s public return stays the plain {@link
+ * MergedCommitInfo} shape) per-branch map entry: the landed commit's persisted `Loom-Worker-PathSet`
+ * digest, if this commit carries one (card f621f185), else `null` for pre-fix history.
+ */
+interface MergedMapEntry extends MergedCommitInfo {
+  pathSetDigest: string | null;
+}
+
+/**
  * One bounded `git log` pass over `base`'s history (default HEAD), extracting every commit's
- * `Loom-Worker-Branch: <branch>` trailer into a `branch -> {sha, date}` map — the batch-friendly
- * sibling of {@link findLandedSquashCommit}'s single-branch `--grep`. Building ONE map per repo
- * (cached by {@link getMergedCommitMapCached}) and looking a task's branch up in it is an O(1) map read
- * per task instead of one git subprocess per task, which is what bounds a `list_all_tasks` page's cost
- * regardless of how many cards it returns. First occurrence per branch wins (log is reverse-chronological,
- * so that's the MOST RECENT landing — matches findLandedSquashCommit's `--max-count=1` semantics).
+ * `Loom-Worker-Branch: <branch>` trailer (plus its `Loom-Worker-PathSet` trailer, if present) into a
+ * `branch -> {sha, date, pathSetDigest}` map — the batch-friendly sibling of {@link
+ * findLandedSquashCommit}'s single-branch `--grep`. Building ONE map per repo (cached by {@link
+ * getMergedCommitMapCached}) and looking a task's branch up in it is an O(1) map read per task instead of
+ * one git subprocess per task, which is what bounds a `list_all_tasks` page's cost regardless of how many
+ * cards it returns. First occurrence per branch wins (log is reverse-chronological, so that's the MOST
+ * RECENT landing — matches findLandedSquashCommit's `--max-count=1` semantics).
  * FAILS SAFE: any error/timeout returns an EMPTY map (every lookup then misses -> null), never throws.
  */
 async function scanMergedCommitMap(
   repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
-): Promise<Map<string, MergedCommitInfo>> {
-  const map = new Map<string, MergedCommitInfo>();
+): Promise<Map<string, MergedMapEntry>> {
+  const map = new Map<string, MergedMapEntry>();
   try {
     // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent baseDir
     // (GitConstructError) — this must be INSIDE the try, not before it, or a vault-only/moved-repo
@@ -2160,10 +2277,27 @@ async function scanMergedCommitMap(
       const trailer = body.match(LOOM_WORKER_BRANCH_TRAILER);
       if (!sha || !trailer) continue;
       const branch = trailer[1]!;
-      if (!map.has(branch)) map.set(branch, { sha, date }); // first hit = most recent (reverse-chron)
+      const pathSetTrailer = body.match(LOOM_WORKER_PATHSET_TRAILER);
+      if (!map.has(branch)) map.set(branch, { sha, date, pathSetDigest: pathSetTrailer ? pathSetTrailer[1]! : null }); // first hit = most recent (reverse-chron)
     }
   } catch {
     return map; // fail safe: empty map -> every lookup misses -> caller treats as not-(yet)-landed
+  }
+  // Log the pre-fix-history count ONCE PER SCAN, not per lookup: getTaskMergedInfo runs per TASK on every
+  // polled board read (up to 100 rows/page), and essentially every card merged before this fix lacks the
+  // trailer — a per-lookup log line would flood the daemon log on a path polled continuously by the web UI
+  // (worsens board-8dd1dd1c-class log-retention pressure). This scan is already cache-gated (rebuilt only
+  // on a HEAD move, not per poll), so logging here reports "how many landed branches in this repo predate
+  // Loom-Worker-PathSet" at the natural once-per-actual-scan cadence instead — still never silent, just not
+  // per row. findLandedSquashCommit's OWN log (a decision path — merge/reconcile, not a polled read) is
+  // unaffected and stays per-call.
+  let preFixCount = 0;
+  for (const entry of map.values()) if (entry.pathSetDigest === null) preFixCount++;
+  if (preFixCount > 0) {
+    // eslint-disable-next-line no-console
+    console.info(`[git] scanMergedCommitMap: ${preFixCount} landed branch(es) in ${repoPath} predate the ` +
+      "Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone for those once their branch " +
+      "is gone, until re-merged (card f621f185)");
   }
   return map;
 }
@@ -2174,7 +2308,7 @@ const MERGED_MAP_CACHE_MAX_ENTRIES = 100;
 
 interface MergedMapCacheEntry {
   headSha: string;
-  map: Map<string, MergedCommitInfo>;
+  map: Map<string, MergedMapEntry>;
 }
 
 const mergedMapCache = new Map<string, MergedMapCacheEntry>();
@@ -2242,7 +2376,7 @@ function getOrStartMergedMapScan(repoPath: string, deps: BoundedGitDeps): Promis
  */
 async function getMergedCommitMapCached(
   repoPath: string, deps: BoundedGitDeps = {},
-): Promise<Map<string, MergedCommitInfo>> {
+): Promise<Map<string, MergedMapEntry>> {
   const entry = await getOrStartMergedMapScan(repoPath, deps);
   return entry.map;
 }
@@ -2263,14 +2397,24 @@ async function getMergedCommitMapCached(
  * "never merged" — that distinction matters because this exists specifically to replace stale-handoff
  * claims with ground truth, and a false-confident null would just move the same failure elsewhere.
  *
- * CONTENT-VERIFIED while the branch ref is still live (card e076d2a2, same rationale + same limitation as
- * {@link findLandedSquashCommit}'s own content check): `scanMergedCommitMap` keys on the trailer alone
- * (NOT the subject — a prior read of this incident's `merged:{sha}` false positive as a "subject match"
- * doesn't hold up against this code), so it is exposed to the identical claim-vs-proof gap. Verified here
- * ONLY when `branchPresent` — by the time a branch is deleted (the common case for a task whose merge is
- * old news), there is no live ref left to diff against, so a false trailer match surviving past deletion
- * is NOT closed by this check; closing that fully would need persisting the branch's own tip sha before
- * deletion, out of scope for this fix.
+ * VERIFIED regardless of whether the branch ref is still live, but by TWO DIFFERENT MEANS of two different
+ * strengths — same split as {@link findLandedSquashCommit} (card e076d2a2 for the live-branch mode, card
+ * f621f185 for the branch-gone mode): `scanMergedCommitMap` keys on the trailer alone (NOT the subject — a
+ * prior read of this incident's `merged:{sha}` false positive as a "subject match" doesn't hold up against
+ * this code), so it is exposed to the identical claim-vs-proof gap either way. While `branchPresent`,
+ * verified via {@link branchContentLandedInCommit} — an actual CONTENT check. Once the branch is gone,
+ * verified via the persisted `Loom-Worker-PathSet` trailer ({@link verifyPersistedPathSet}) carried on the
+ * map entry — self-contained in the landed commit itself, so it needs no live ref and survives `git gc`,
+ * but (see that function's own doc) it only proves the same FILES landed, not the same CONTENT — two
+ * different branches confined to the same file(s) (real on this repo: cards cluster on hot files like
+ * `pty/host.ts`) would share a digest. Strictly still better than the pre-f621f185 answer (no path check at
+ * all) and never a false positive it wouldn't already have produced, but a `null`-avoiding `true` here is
+ * weaker evidence in the branch-gone mode than in the branch-present mode — don't read the two the same
+ * way. A commit that predates this
+ * fix carries no such trailer; for those only, this degrades to the pre-f621f185 trailer-presence-only
+ * answer, since a trailer can't be retroactively added to already-landed history. That degradation is
+ * logged, but NOT here — this runs per TASK on every polled board read, so {@link scanMergedCommitMap}
+ * logs the pre-fix count once per actual map scan instead (see its own comment for why).
  */
 export async function getTaskMergedInfo(
   repoPath: string, taskId: string, deps: BoundedGitDeps = {},
@@ -2294,7 +2438,14 @@ export async function getTaskMergedInfo(
       )).trim();
       if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
       if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
+    } else if (hit.pathSetDigest) {
+      // Branch gone (card f621f185): verify against the persisted path-set trailer.
+      if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest))) return null;
     }
+    // else: pre-fix history (no path-set trailer) — degrades to the trailer-presence-only answer below.
+    // Deliberately NOT logged HERE: this runs per TASK on every polled board read (up to 100 rows/page),
+    // so a per-lookup line would flood the daemon log. scanMergedCommitMap logs the same fact ONCE PER
+    // ACTUAL SCAN instead (cache-gated, rebuilt only on a HEAD move) — see its own comment.
   } catch {
     return null; // fail safe
   }
@@ -2639,7 +2790,20 @@ async function mergeBranchLocked(
   // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
   const rawSubject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;
   const subject = toConventionalSubject(rawSubject);
-  const message = `${subject}\n\nLoom-Worker-Branch: ${branch}\n`;
+  // Stamp a second trailer (card f621f185): the branch's own touched-path-set digest, computed HERE from
+  // the branch ref directly (HEAD hasn't moved yet — `--squash` never advances it) so it reflects what the
+  // branch itself actually changed, independent of whatever ended up staged. This is what lets a LATER
+  // determination verify a landed commit purely from its own ancestry (sha^..sha) once the branch ref is
+  // gone — see changedPathSetDigest's doc for why a full content hash doesn't work here and a path-set does.
+  // Best-effort: a capture failure just omits the trailer (falls back to the pre-fix degraded behavior for
+  // THIS commit) rather than blocking a real, already-successful merge.
+  let pathSetTrailer = "";
+  try {
+    const mergeBaseForPathSet = (await git.raw(["merge-base", "HEAD", branch])).trim();
+    const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch);
+    pathSetTrailer = `\nLoom-Worker-PathSet: ${digest}`;
+  } catch { /* best-effort; the commit still lands, just without this trailer */ }
+  const message = `${subject}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
   try {
     await git.raw(["commit", "-m", message]);
   } catch (e) {
