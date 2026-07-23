@@ -5,6 +5,7 @@
 // SYNC_ATTACH_BUDGET_MS (12s).
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/pending-ops-registry.mjs
 import { PendingOpRegistry } from "../dist/orchestration/pending-ops.js";
+import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -77,13 +78,20 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 }
 
 // --- a FAILED slow op is retrievable via a later call, NOT a perpetual placeholder ---
+// WORKED EXAMPLE (card 0fa5beef): this block used to assert `reg.peek("k5") === undefined` right after a
+// blind `await sleep(40)` — a guess that slowFail's own `sleep(30)` would have finished by then, with only
+// a ~10ms margin over the op's real duration. That's the exact shape that has already redded four real
+// merge gates on this project under host load. Converted to `waitUntil`: it polls for the actual eviction
+// instead of racing a guessed deadline. Forced this exact block to FAIL deterministically pre-conversion
+// (by making slowFail's own delay exceed the old sleep(40) budget) before making this change, and
+// confirmed the SAME forced delay still passes post-conversion (see card 0fa5beef's worker_report).
 {
   const reg = new PendingOpRegistry();
   let calls = 0;
   const slowFail = async () => { calls++; await sleep(30); throw new Error("boom"); };
   const r1 = await reg.attach("k5", "spawn", "mgr1", 10, slowFail);
   check("(failed slow) still running past the short wait budget", r1.settled === false);
-  await sleep(40); // let it fail for real
+  await waitUntil(() => reg.peek("k5") === undefined, { label: "k5 evicted after its slow failure settles" });
   check("(failed slow) once failed, it is EVICTED — not stuck showing 'running' forever", reg.peek("k5") === undefined);
   const r2 = await reg.attach("k5", "spawn", "mgr1", 100, slowFail); // "re-call" after the fact — ample budget to observe ITS OWN settle
   check("(failed slow) a later call sees NO tracked entry (not a stuck pending) and re-runs for a fresh answer", r2.settled === true && r2.ok === false);

@@ -21,6 +21,12 @@
 //   • Live-BASE tests (they fetch a running daemon — the prod-killers):
 //         import { requireHermeticEnv } from "./_guard.mjs";
 //         requireHermeticEnv({ port: true }); // FIRST executable line — aborts on bare env
+//
+// TIMING ASSERTIONS: never sample timing-dependent state right after a blind `sleep(N)` and assert
+// against it — that's a guess about how long some other async operation takes, and it passes on an idle
+// host and fails under load (card 0fa5beef — four real merge gates redded by exactly this shape in one
+// day). Poll for the real state instead: see `./_wait.mjs` (`waitUntil`/`deferred`) for the shared
+// helper and the full writeup of the anti-pattern and its two corollaries.
 import os from "node:os";
 import path from "node:path";
 
