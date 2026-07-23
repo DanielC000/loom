@@ -1,4 +1,4 @@
-// Hermetic regression test for card b64b3726 Half 2 (pty/host.ts healIfStuck).
+// Hermetic regression test for card b64b3726 Half 2 + card 2c3c4aff (pty/host.ts healIfStuck).
 //
 // Code Reviewer finding on 71de1f9c's branch: give-up recovery (card ee082fbb's exact-Backspace composer
 // clear) can be SUPPRESSED by output that lands after the final Enter write WITHOUT the Enter having
@@ -6,17 +6,25 @@
 // test/_probe-empty-paste-provocation.mjs), and a viewer's repaint() (Ctrl-L) can too. When that happens,
 // `live.enterConfirmed` stays false FOREVER (nothing can flip it: the only writer, submit(), only runs
 // when `!live.busy`, and busy is stuck true) — so the session is a genuine give-up that was wrongly
-// suppressed. Pre-fix, `healIfStuck`'s stale-busy self-heal clears `busy` but never un-types the
-// composer, so the stranded injection survives and the NEXT drainPending submit pastes on top of it —
+// suppressed. Pre-b64b3726, `healIfStuck`'s stale-busy self-heal cleared `busy` but never un-typed the
+// composer, so the stranded injection survived and the NEXT drainPending submit pasted on top of it —
 // reintroducing the exact concatenation card ee082fbb fixed.
+//
+// Card 2c3c4aff: b64b3726 completed the CLEAR but not the RESTORE — the backspace burst un-typed the text
+// from the composer, but the text itself was silently DISCARDED (never put back on `live.pending`), unlike
+// the normal give-up path (card 441499ee), which restores the original QueuedMessage(s) via
+// `requeueGiveUpOrigin`. This suite now also proves the RESTORE half: post-fix, the cleared text reappears
+// in `live.pending` (identity-preserved) and is genuinely re-delivered on the next drain — never just
+// vanishes with the composer clear.
 //
 // This test forces that false-suppress DETERMINISTICALLY (no reliance on real engine timing): a fake pty
 // that can synthetically fire an output chunk lets us make `lastOutputAt > enterWrittenAt` true for the
 // FINAL Enter attempt without ever confirming the turn, exactly modelling the suppressed case. It then
 // proves (1) pre-fix the composer is left stranded (busy clears, backspaces === 0) and (2) post-fix
-// `healIfStuck` completes the clear (busy clears, backspaces === lastPrompt.length) — plus the most
-// important non-regression case: a session that legitimately went on to submit (a late but real
-// UserPromptSubmit before the stale window elapses) must NEVER be heal-cleared.
+// `healIfStuck` completes the clear (busy clears, backspaces === lastPrompt.length) AND restores the text
+// to `live.pending` for a real re-delivery — plus the most important non-regression case: a session that
+// legitimately went on to submit (a late but real UserPromptSubmit before the stale window elapses) must
+// NEVER be heal-cleared.
 //
 // Card b64b3726 Half 1 (sendEnterAndVerify's own reassert-settle sequencing) ABSORBS the FAST case of the
 // false-suppress vector this test used to exercise — a response landing DURING the pre-Enter settle wait no
@@ -38,6 +46,16 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+
+// Capture `[submit] <sessionId> ...` log lines (card 2c3c4aff's restore fires the SAME
+// "GIVE-UP RECOVERY: re-queued" line the normal give-up path does) so the restore can be verified by WHICH
+// branch actually fired, not just inferred from write counts. Still forwards to the real console.
+const submitLog = [];
+const realConsoleLog = console.log.bind(console);
+const realConsoleError = console.error.bind(console);
+console.log = (...args) => { if (typeof args[0] === "string" && args[0].startsWith("[submit]")) submitLog.push(args[0]); realConsoleLog(...args); };
+console.error = (...args) => { if (typeof args[0] === "string" && args[0].startsWith("[submit]")) submitLog.push(args[0]); realConsoleError(...args); };
+const requeueLinesFor = (sid) => submitLog.filter((l) => l.startsWith(`[submit] ${sid} `) && l.includes("GIVE-UP RECOVERY: re-queued"));
 
 const tmpHome = path.join(os.tmpdir(), `loom-healclear-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -137,14 +155,28 @@ try {
       backspaceCount() === 0);
 
     // Now let healIfStuck's stale-busy window elapse and drive the periodic heal directly — mirrors
-    // index.ts's real setInterval-wired reconcile().
+    // index.ts's real setInterval-wired reconcile(). NOTE: reconcile() calls healIfStuck() then
+    // drainPending() for the SAME session in the SAME pass — for a short burst like TEXT here,
+    // writeChunked's completion (and so the restore-and-requeue below) resolves synchronously within this
+    // one reconcile() call, so the restored message is ALREADY re-drained (busy re-armed, pending empty
+    // again) by the time reconcile() returns. That cascade is itself proof the restore is real and live —
+    // a discarded message could never re-arm busy or write TEXT a second time.
+    const bodyOccurrences = () => fake.writes.join("").split(TEXT).length - 1;
+    const beforeHeal = bodyOccurrences();
     await sleepUntil(t0, giveUpAt() + FIRST_TURN_STALE + FIRST_TURN_STALE / 2);
     host.reconcile();
-    await sleep(50); // writeChunked's done callback fires on the next tick for a short burst
-    check("(1) healIfStuck eventually recovers busy (the stale-busy self-heal still fires)",
-      busyLog[SID].at(-1) === false);
     check(`(1) COMPLETED BACKSTOP: healIfStuck wrote exactly ${TEXT.length} backspaces to clear the orphaned injection`,
       backspaceCount() === TEXT.length);
+
+    // Card 2c3c4aff: THE FIX — the cleared text must not simply vanish. `requeueGiveUpOrigin` fired (the
+    // SAME mechanism the normal give-up path uses) and the restored entry was genuinely re-delivered to
+    // the pty a SECOND time, rather than being discarded after the composer clear.
+    check("(1) THE FIX: healIfStuck's clear triggered the SAME give-up restore the normal path uses",
+      requeueLinesFor(SID).length === 1);
+    check("(1) THE RESTORE IS LIVE: the restored text was actually re-submitted to the pty a second time",
+      bodyOccurrences() === beforeHeal + 1); // beforeHeal already counts the original (suppressed) submit; +1 is the restore-redrain
+    check("(1) busy re-armed from the restore's own redrain (proves it wasn't just queued and forgotten)",
+      busyLog[SID].at(-1) === true);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -174,12 +206,20 @@ try {
     await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
     check("(2) GIVE-UP SUPPRESSED on turn 2 too", busyLog[SID].at(-1) === true);
 
+    // Same reconcile()-cascade note as scenario (1): heal + restore-and-redrain both resolve inside this
+    // one reconcile() call for a short burst like SECOND_TEXT.
+    const bodyOccurrences2 = () => fake.writes.join("").split(SECOND_TEXT).length - 1;
+    const beforeHeal2 = bodyOccurrences2();
     await sleepUntil(t0, giveUpAt() + BUSY_STALE_MS + BUSY_STALE_MS / 2);
     host.reconcile();
-    await sleep(50);
-    check("(2) healIfStuck (busyStaleMs path) eventually recovers busy", busyLog[SID].at(-1) === false);
     check(`(2) COMPLETED BACKSTOP on the busyStaleMs path too: exactly ${SECOND_TEXT.length} backspaces written`,
       backspaceCount() === SECOND_TEXT.length);
+
+    // Card 2c3c4aff: the restore fires on the busyStaleMs path too — not just the FIRST_TURN_STALE_MS path.
+    check("(2) THE FIX applies on the busyStaleMs path too: the give-up restore mechanism fired",
+      requeueLinesFor(SID).length === 1);
+    check("(2) THE RESTORE IS LIVE on the busyStaleMs path too: re-submitted to the pty a second time",
+      bodyOccurrences2() === beforeHeal2 + 1);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -227,6 +267,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — healIfStuck completes the give-up backstop (clears an orphaned composer left by a false suppression, on both the first-turn and later-turn stale paths) without ever touching a session that legitimately went on to submit."
+  ? "\n✅ ALL PASS — healIfStuck completes the give-up backstop (clears an orphaned composer left by a false suppression AND restores the cleared text to pending for real redelivery, on both the first-turn and later-turn stale paths) without ever touching a session that legitimately went on to submit."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

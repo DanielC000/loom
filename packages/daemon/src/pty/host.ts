@@ -3711,12 +3711,22 @@ export class PtyHost {
    * sets `enterConfirmed = true` AND re-arms `busySince` (rising edge) the moment the turn actually starts, so
    * a merely-slow-to-confirm turn's staleness clock restarts before `staleMs` can elapse — belt-and-suspenders
    * with the `enterConfirmed` check itself.
+   *
+   * Card 2c3c4aff: b64b3726 completed the CLEAR but not the RESTORE — the backspace burst un-typed the
+   * stranded injection from the composer, but the text itself (still held in `live.giveUpOrigin`, set by
+   * the original submit() and never consumed because this out-of-band path never reached
+   * `requeueGiveUpOrigin`) was silently discarded, with no signal. This path now restores it onto
+   * `live.pending` the SAME way card 441499ee's normal give-up recovery does — see `requeueGiveUpOrigin`.
    */
   private healIfStuck(live: Live, sessionId: string): void {
     const now = Date.now();
     const staleMs = live.firstTurnStarted ? this.busyStaleMs : FIRST_TURN_STALE_MS;
     if (live.busy && live.busySince != null
       && now - live.busySince > staleMs && now - live.lastOutputAt > staleMs) {
+      // Card 2c3c4aff: capture the generation THIS stranded submit ran under BEFORE the bump below — it's
+      // the same value `requeueGiveUpOrigin` needs to tag the restored entry with (mirrors the `gen` a
+      // normal give-up captures at submit() time; see fireEnterAndVerify's GIVE-UP RECOVERY branch).
+      const gen = live.submitGeneration;
       // An OUT-OF-BAND busy clear (no Stop hook involved) — bump submitGeneration so a still-pending
       // sendEnterAndVerify chain for whatever turn this was recognizes it's stale and bails instead of
       // retry-Enter'ing (or give-up→setBusy(false)'ing) into whatever submits next. See submitGeneration.
@@ -3724,7 +3734,16 @@ export class PtyHost {
       if (!live.enterConfirmed && live.composerLen === 0 && live.lastPrompt) {
         // eslint-disable-next-line no-console
         console.log(`[heal] ${sessionId} clearing an orphaned give-up injection (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
-        this.writeChunked(sessionId, BACKSPACE.repeat(live.lastPrompt.length), () => this.setBusy(sessionId, false, "heal-if-stuck-clear"));
+        // Card 2c3c4aff: this out-of-band clear is exactly a give-up that never reached
+        // fireEnterAndVerify's own GIVE-UP RECOVERY branch (e.g. wrongly SUPPRESSED) — `live.giveUpOrigin`
+        // still holds the original QueuedMessage(s) this stranded text came from (nothing could have
+        // overwritten it: submit() is the sole writer and it never ran again while busy stayed stuck true).
+        // Restore it via the SAME identity-preserving mechanism card 441499ee hardened the normal give-up
+        // path with, instead of silently discarding the cleared text.
+        this.writeChunked(sessionId, BACKSPACE.repeat(live.lastPrompt.length), () => {
+          this.setBusy(sessionId, false, "heal-if-stuck-clear");
+          this.requeueGiveUpOrigin(sessionId, gen);
+        });
       } else {
         this.setBusy(sessionId, false, "heal-if-stuck-stale");
       }
