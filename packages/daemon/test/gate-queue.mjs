@@ -36,6 +36,24 @@ import { execSync } from "node:child_process";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Card 39196378 CR follow-up: `runWorkerGate` now takes a SECOND real git-stamp read (`admitStamp`)
+// AFTER admission but BEFORE the injected `runGate`/fakeGate is ever invoked (service.ts's admitted
+// `fn` callback: `admitStamp = await computeWorktreeGateStamp(...); return runGateSeq(...)`). Admission
+// itself (the registry recording an entry as "running") happens synchronously inside the semaphore's own
+// `acquire()`, so it does NOT wait on that stamp — but the fakeGate closure below (which stands in for
+// `runGateSeq`) DOES, and on a loaded/Windows host that stamp read can outlast a fixed sleep. A release
+// function (`release1`/`release2`) is only assigned once fakeGate actually runs, so calling it before
+// that assignment throws `TypeError: ... is not a function` (the exact failure this closed — a real
+// regression from that change, not a flake: 537/538 hermetic tests passed, only this file's fixed-delay
+// assumption broke). Poll for the assignment instead of assuming a fixed delay covers it.
+async function waitUntilInvoked(getRelease, label, timeoutMs = 5000, intervalMs = 25) {
+  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
+  while (performance.now() - start < timeoutMs) {
+    if (typeof getRelease() === "function") return;
+    await sleep(intervalMs);
+  }
+  throw new Error(`${label}: the gate runner was not invoked within ${timeoutMs}ms (admission recorded, but the post-admission admitStamp/runGate call never landed — genuinely wedged, not just slow)`);
+}
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gq-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -119,12 +137,16 @@ function makeRepo(repo) {
     check("(unit) from P2's own view, its queued entry carries full detail", foreign.queued[0].taskId === t2 && foreign.queued[0].workerLabel === "dev-2 · Foreign project task title — must never leak");
     check("(unit) from P2's own view, P1's running entry is redacted", !("taskId" in foreign.running[0]) && !("branch" in foreign.running[0]));
 
+    await waitUntilInvoked(() => release1, "(unit) w1's fakeGate");
     release1({ passed: true });
-    await sleep(200); // let the handoff settle: w1's entry clears, w2 gets admitted
+    await sleep(200); // let the handoff settle: w1's entry clears, w2 gets admitted (registry admission
+    // is synchronous inside acquire() — it does NOT wait on w2's own post-admission admitStamp read, so
+    // this sleep only needs to cover the handoff itself, not fakeGate's invocation)
     const afterHandoff = sessions.gateQueueForManager(P1);
     check("(unit, handoff) after release, exactly 1 running (the FORMER queued entry) + 0 queued — never a moment with 2 running",
       afterHandoff.running.length === 1 && afterHandoff.queued.length === 0 && afterHandoff.running[0].projectId === P2);
 
+    await waitUntilInvoked(() => release2, "(unit) w2's fakeGate");
     release2({ passed: true });
     await sleep(200);
     const afterAll = sessions.gateQueueForManager(P1);
@@ -186,6 +208,11 @@ function makeRepo(repo) {
     check("(e2e, MCP) gate_queue IS registered on the manager's own MCP surface", Object.keys(mgr.server._registeredTools).includes("gate_queue"));
 
     const p1 = sessions.runWorkerGate(w1).catch(() => {});
+    // Two real git-stamp reads now straddle admission, not one: `startStamp` (fire, BEFORE this call even
+    // queues) precedes admission as before, and `admitStamp` (card 39196378) is taken AFTER admission but
+    // BEFORE the fakeGate below is ever invoked. This sleep only needs to outlast the FIRST (registry
+    // admission is synchronous inside acquire() and doesn't wait on the second) — `waitUntilInvoked` below
+    // is what actually waits out the second, since a fixed sleep can't safely bound a real git call.
     await sleep(500); // let w1's gate genuinely get admitted (real git-stamp work precedes admission)
     const p2 = sessions.runWorkerGate(w2).catch(() => {}); // different project, SAME daemon-global cap
     await sleep(500); // let w2 register as queued
@@ -197,11 +224,13 @@ function makeRepo(repo) {
     check("(e2e, MCP) gate_queue: the queued entry is P2's FOREIGN op, redacted (project named, task/branch omitted)",
       snap.queued[0].projectId === P2 && snap.queued[0].projectName === "MCP Foreign" && !("taskId" in snap.queued[0]) && !("workerLabel" in snap.queued[0]));
 
+    await waitUntilInvoked(() => release1, "(e2e, MCP) w1's fakeGate");
     release1({ passed: true });
-    await sleep(200);
+    await sleep(200); // handoff settle only — see the admission-vs-invocation note above
     const afterHandoff = await mgr.call("gate_queue");
     check("(e2e, MCP) after handoff: exactly 1 running (now P2's, redacted) + 0 queued", afterHandoff.running.length === 1 && afterHandoff.queued.length === 0 && afterHandoff.running[0].projectId === P2 && !("taskId" in afterHandoff.running[0]));
 
+    await waitUntilInvoked(() => release2, "(e2e, MCP) w2's fakeGate");
     release2({ passed: true });
     await sleep(200);
     const afterAll = await mgr.call("gate_queue");
@@ -276,6 +305,11 @@ function makeRepo(repo) {
     check("(unit, streak) a fresh op on the SAME branch is live (running, since nothing else contends for the slot)", snap.running.length === 1 && snap.running[0].branch === wt.branch);
     check("(unit, streak) that entry carries recentTimeoutStreak:1 — the second, independent signal", snap.running[0].recentTimeoutStreak === 1);
 
+    // Same latent-fragile shape as the two blocks above (card 39196378 CR follow-up): admission (what
+    // `snap` just checked) is synchronous and doesn't wait on the post-admission admitStamp read, but
+    // `fakeGate` itself — and therefore `releaseSecond`'s assignment — does. Don't assume the 1000ms
+    // above (generous, but still fixed) also covers this.
+    await waitUntilInvoked(() => releaseSecond, "(unit, streak) the second call's fakeGate");
     releaseSecond({ passed: true });
     await sleep(200);
     const afterPass = sessions.gateQueueForManager(P);

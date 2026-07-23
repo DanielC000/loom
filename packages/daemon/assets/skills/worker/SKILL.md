@@ -111,6 +111,20 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report
      the missing gate command up, too.
+   - **A green is only ever a green for the tree it ran on — check WHICH tree, on a pass as much as on a
+     failure.** A queued gate can sit behind another for a long time on a busy fleet, easily long enough
+     to keep working and commit more while it waits. The reported validated sha is stamped when the run
+     was ISSUED, before it's even admitted past the queue — not when the build/test command actually
+     starts. The settled result states plainly whether that sha is still your branch HEAD — read that
+     field even on a pass, don't reason about it yourself. And don't read it as one blanket "stale ⇒ bad"
+     signal: it's worded differently for two distinct shapes, so a genuine warning doesn't get trained
+     out by a benign one. A tree that moved during the QUEUE WAIT — before the command was ever admitted
+     — was still fully present in what actually got built and tested once it started; the reported sha
+     just understates it, so that green still stands. A tree that moved WHILE the command was already
+     RUNNING is a different, riskier case: the run may have read an inconsistent mix of old and new
+     files, so treat that result as unverified for your current code. The message itself tells you which
+     shape you're looking at — don't guess from the sha alone. Same family as the step-1-diffstat merge
+     rule: verify the artifact, not the signal.
    - **The gate is a shared, capped, daemon-global resource, not just yours.** Every project sharing it
      queues on the SAME cap, so what you do with it affects work that has nothing to do with you. Two
      things follow, and they pull in opposite directions — read both:

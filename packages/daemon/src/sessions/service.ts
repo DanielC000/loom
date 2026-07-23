@@ -173,8 +173,15 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  `maxConcurrentGates` >= 2 it does NOT exclude time spent running alongside another CONCURRENTLY-ADMITTED
  *  gate — this is a real duration under real conditions, not an isolated benchmark; see the `run_gate` tool
  *  description for the caller-facing wording of that caveat. Set on every `ran:true` outcome, same as
- *  `validatedHead`. */
-type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null; durationMs?: number };
+ *  `validatedHead`.
+ *  `headCurrent`/`headWarning` (card 39196378 — the queued-gate-validates-a-stale-tree trap, a confirmed
+ *  live incident on a peer daemon) make a SETTLED result state plainly whether `validatedHead` is STILL the
+ *  branch HEAD, computed once at settle time via {@link SessionService.describeGateHeadCurrency} — see its
+ *  doc for the benign-vs-concerning wording split. `headCurrent:true` means nothing moved; `false` always
+ *  comes with a `headWarning` explaining which of the two shapes it is. Set on every `ran:true` outcome,
+ *  same as `validatedHead` — EXCEPT the circuit-breaker short-circuit path (no gate actually ran, no stamp
+ *  taken, so neither field is set, same as `validatedHead`/`durationMs` there). */
+type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string };
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
  *  point of card 50c1e0d0, how long `PendingOpRegistry.attach()`'s own retention-window dedupe (see its
@@ -7231,6 +7238,78 @@ export class SessionService {
   }
 
   /**
+   * Card 39196378 — the "queued gate validates fire-time, not run-time" trap (a confirmed live incident
+   * on a peer daemon): `run_gate`'s `validatedHead` is stamped at the moment a run STARTS (`startStamp`,
+   * captured before this run is even admitted past the gate semaphore — a cap-1 queue routinely runs
+   * 30+ minutes, easily long enough for the SAME worker to keep committing in the meantime). A caller who
+   * reads a GREEN result and assumes it covers whatever is on the branch NOW — without checking whether
+   * `validatedHead` is still the branch HEAD — can act on a false signal.
+   *
+   * VERIFIED MECHANISM (do not restate this claim from the card alone — it was checked against this
+   * exact code, since an earlier draft of this doc mis-stated it): the actual build/test child process
+   * does NOT start at fire time. `runWorkerGate` computes `startStamp` and only THEN calls {@link
+   * GateSemaphore.runExclusive}, which `await`s `acquire()` — the queue — before ever invoking its `fn`
+   * (gate-semaphore.ts `runExclusive`: `await this.acquire(...); ...; return await fn(...)`). Once
+   * admitted, `fn` calls `runGateSequential` → `runGateStep`, which `spawn(command, { cwd, shell: true,
+   * ... })`s directly against the worktree path (gate-runner.ts, no checkout/stash/snapshot anywhere in
+   * that file) — i.e. against whatever is PHYSICALLY on disk at that later moment. So a commit that
+   * lands during the QUEUE WAIT (before admission) is fully present in what the gate actually builds and
+   * tests; only the fire-time LABEL fails to say so. A commit landing WHILE the gate is already spawned
+   * and running is a genuinely different, riskier case — the running process may read a torn mix of old
+   * and new files.
+   *
+   * This is why the check below takes THREE stamps, not two: `startStamp` (fire, before the queue),
+   * `admitStamp` (the moment `fn` actually runs, i.e. right before the child process is spawned — see the
+   * `runExclusive` call site below), and `settleStamp` (right after the run settles). Comparing
+   * start→admit vs admit→settle is what separates "the label is stale but the tested tree matches current
+   * HEAD" from "the worktree moved WHILE the gate was literally executing." A cruder start-vs-settle-only
+   * comparison (an earlier version of this fix) could not tell those apart and would warn identically for
+   * both — which is exactly the "cries wolf on the benign case" failure mode the card warned against.
+   *
+   * Deliberately NOT a fix to snapshot semantics — this reports on reality, it does not change what gets
+   * tested (see the card: re-snapshotting at admission would silently change what a queued gate validates
+   * and invalidate the `attachedToInFlight`/`staleAgainstWorktree` contract elsewhere in this file). The
+   * extra `admitStamp` read is READ-ONLY diagnostics, exactly like `startStamp`/`settleStamp` — it never
+   * feeds back into what `runGateSequential` executes against.
+   *
+   * Three outcomes, worded differently so a genuine warning doesn't get trained out by a benign one:
+   *  - CURRENT: `startStamp` === `settleStamp` (transitively === `admitStamp`) — nothing moved. No warning.
+   *  - RELABELED (benign): the worktree moved between `startStamp` and `admitStamp` (during the QUEUE
+   *    WAIT) but NOT between `admitStamp` and `settleStamp` — the gate's own execution window saw a
+   *    single stable tree, and that tree is what's still on the branch now. `validatedHead` merely
+   *    understates what got covered; the content was tested.
+   *  - RACY (concerning): the worktree moved between `admitStamp` and `settleStamp` — something changed
+   *    WHILE the gate command was actually running. This run's coverage of the current tree is genuinely
+   *    unverified, not just mislabeled.
+   *  - UNKNOWN (fail toward "not current"): any stamp's `head` is unreadable (a git error/timeout) —
+   *    mirrors {@link gateStampsDiffer}'s own fail-safe direction: an unreadable comparison never gets to
+   *    assert "unchanged".
+   */
+  private describeGateHeadCurrency(
+    startStamp: WorktreeGateStamp, admitStamp: WorktreeGateStamp, settleStamp: WorktreeGateStamp,
+  ): { headCurrent: boolean; headWarning?: string } {
+    if (startStamp.head === null || admitStamp.head === null || settleStamp.head === null) {
+      return {
+        headCurrent: false,
+        headWarning: "could not confirm the worktree's HEAD at one or more checkpoints (a git read failed) — treat this result's currency as UNKNOWN, not as confirmed-current.",
+      };
+    }
+    if (!gateStampsDiffer(startStamp, settleStamp)) return { headCurrent: true };
+    const nowHead = settleStamp.head.slice(0, 8);
+    if (gateStampsDiffer(admitStamp, settleStamp)) {
+      return {
+        headCurrent: false,
+        headWarning: `the worktree changed WHILE this gate was actively running (branch HEAD is now ${nowHead}) — this run's own execution window did not see a single stable tree, so what it tested may be an inconsistent mix of old and new files. Treat this result as UNVERIFIED for your current code.`,
+      };
+    }
+    const validated = startStamp.head.slice(0, 8);
+    return {
+      headCurrent: false,
+      headWarning: `validatedHead (${validated}) is a STALE LABEL, not a stale RESULT — the worktree changed after this run was issued but BEFORE it was admitted past the queue, and the gate command itself only starts at admission, against whatever's on disk then. That matches branch HEAD (now ${nowHead}), so this run's content likely DOES cover your current code — the reported sha just understates what was actually built and tested.`,
+    };
+  }
+
+  /**
    * Best-effort worktree-path-scoped process sweep for a worker being stopped (card 3564fd1e — the reap
    * gap: `stopWorker`/`killAllWorkers` used to do nothing beyond `pty.stop()`, which only kills the
    * worker's own pty tree — Job Object on Windows / node-pty's own containment on POSIX — plus, on exit,
@@ -7986,12 +8065,14 @@ export class SessionService {
    *      KNOWN BOUNDARY (Code Review, card 50c1e0d0 hardening — intentionally NOT re-checked here, mirroring
    *      the merge-op retention precedent, which also never re-validates its own cache hit): this cached path
    *      is served straight out of `PendingOpRegistry` — it never re-derives `staleAgainstWorktree`, so it
-   *      carries only `validatedHead` (a caller CAN detect a HEAD change by comparing it to their own HEAD),
-   *      not a fresh dirty-state comparison. A caller who made an UNCOMMITTED edit since the cached run
-   *      started and re-calls within the grace window sees a cached `{passed, validatedHead:<unchanged>}`
-   *      with NO staleness signal — footgun #2 stays closed for the MID-FLIGHT branch above, not this settled
-   *      one. In practice this only matters for a fast (<`SYNC_ATTACH_BUDGET_MS`) `gateCommand`: Loom's own
-   *      ~8-minute gate always degrades to the covered in-flight path first.
+   *      carries only what was computed ONCE at the original settle (`validatedHead`, plus `headCurrent`/
+   *      `headWarning` — card 39196378, a caller CAN detect a HEAD change by comparing `validatedHead` to
+   *      their own HEAD even without re-deriving it), not a fresh dirty-state comparison taken NOW. A caller
+   *      who made an UNCOMMITTED edit since the cached run started and re-calls within the grace window sees
+   *      a cached `{passed, validatedHead:<unchanged>, headCurrent:<as of original settle>}` with NO fresh
+   *      staleness signal for that NEW edit — footgun #2 stays closed for the MID-FLIGHT branch above, not
+   *      this settled one. In practice this only matters for a fast (<`SYNC_ATTACH_BUDGET_MS`) `gateCommand`:
+   *      Loom's own ~8-minute gate always degrades to the covered in-flight path first.
    *
    *      Deliberately not fixed by ALSO stamping+comparing on the cached path: that would mean re-running
    *      `computeWorktreeGateStamp` on every cache hit just to potentially discard it, adding a git round-trip
@@ -8159,6 +8240,13 @@ export class SessionService {
           // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
           const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId };
           let gateStartedAt = 0;
+          // ADMISSION STAMP (card 39196378, verified-mechanism revision): taken as the FIRST thing inside
+          // `fn`, before `runGateSeq` is ever called — i.e. at the exact moment this run is admitted past
+          // the semaphore, strictly before the build/test child process is spawned against the worktree.
+          // See describeGateHeadCurrency's doc for why this third checkpoint (vs. only start+settle)
+          // matters: it's what separates "moved during the queue wait" (the gate's execution still saw a
+          // single stable, current tree) from "moved while the gate was actually running" (genuinely racy).
+          let admitStamp: WorktreeGateStamp | undefined;
           try {
             // "low" priority (card 24642c3d) — a worker's own DoD self-check must never head-of-line-block
             // a higher-priority merge/deploy gate queued behind it; it keeps the (already-existing) full
@@ -8167,7 +8255,11 @@ export class SessionService {
             // above, which this function deliberately does not share).
             gateResult = await this.gateSemaphore.runExclusive(
               gateCap, gateDescriptor,
-              (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE); },
+              async (startedAt) => {
+                gateStartedAt = startedAt;
+                admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE);
+              },
               "low",
             );
           } catch (err) {
@@ -8191,10 +8283,18 @@ export class SessionService {
             }
             await this.recordGateTimeoutOutcome(worker.branch, worktreePath, !!gateResult.failedTimedOut);
           }
+          // HEAD-CURRENCY CHECK (card 39196378): a FRESH stamp taken right NOW, at settle — compared
+          // against `startStamp` (fire time) AND `admitStamp` (admission time, always set by this point:
+          // the only path that skips it is the `catch` above, which rethrows and never reaches here) — is
+          // what turns "is my green still for the current branch tip?" from something a caller has to
+          // reason about into something the result states outright. See describeGateHeadCurrency's own
+          // doc for why three checkpoints, and the resulting wording split.
+          const settleStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+          const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp);
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
-            evt({ passed: true, durationMs });
-            return { ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs };
+            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent });
+            return { ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs, ...headCurrency };
           }
           const finalClass = classifyGateFailure(gateResult);
           const phase = classifyGatePhase(gateResult.failedStep);
@@ -8221,11 +8321,12 @@ export class SessionService {
             passed: false, phase: phase ?? null, failedStep: gateResult.failedStep ?? null, failingTest: failingTest ?? null,
             failingTestReason: failingTestReason ?? null,
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
-            durationMs: failDurationMs,
+            durationMs: failDurationMs, headCurrent: headCurrency.headCurrent,
             ...(outputTail ? { outputTail } : {}),
           });
           return {
             ran: true, passed: false, reason: headline, opId, validatedHead: startStamp.head, durationMs: failDurationMs,
+            ...headCurrency,
             gateDetail: {
               phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
               exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
@@ -8242,6 +8343,10 @@ export class SessionService {
         // row for reconcileOrphanedGateOps to find at the next boot.
         this.db.clearPendingGateOp(opId);
         const headSuffix = outcome.ok && outcome.value.validatedHead ? ` (validated ${outcome.value.validatedHead.slice(0, 8)})` : "";
+        // Card 39196378: the nudge is the ONLY thing a worker ever sees for an async-settled gate (same
+        // reasoning as the gateDetail mirroring below) — so a HEAD-currency warning belongs in the TEXT,
+        // not just the sync return value a worker never gets to read for this settle path.
+        const currencyNote = outcome.ok && outcome.value.headWarning ? ` ⚠ ${outcome.value.headWarning}` : "";
         // Card 55cba5c5: this nudge is the ONLY thing a worker ever sees for an async-settled gate — a
         // worker's tool set has no fetch-by-opId to go back for the sync gateDetail object afterwards. It
         // used to embed ONLY the raw stderr tail; mirror confirmWorkerMerge's own `detailBits` format here
@@ -8265,8 +8370,8 @@ export class SessionService {
         ].filter(Boolean).join("; ") : "";
         const msg = outcome.ok
           ? (outcome.value.passed
-            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}.`
-            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}`)
+            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}.${currencyNote}`
+            : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${currencyNote}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in workerSessionId's
         // recycle lineage at settle time — a worker can worker_recycle mid-gate exactly like a manager can

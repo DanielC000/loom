@@ -763,23 +763,35 @@ export class OrchestrationMcpRouter {
             "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
-            "returns {ran:true, passed, validatedHead, durationMs?, gateDetail?} — `validatedHead` is the " +
-            "worktree commit this run actually gated (compare it to your own HEAD if you're unsure whether a " +
-            "result is about your current code). `durationMs` is wall-clock from the moment THIS run was " +
+            "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, gateDetail?} — " +
+            "`validatedHead` is stamped when this run was ISSUED, before it's even admitted past the queue — " +
+            "NOT when the build/test command actually starts. Read `headCurrent` on EVERY settled result, pass " +
+            "or fail, not just on a failure: `true` means `validatedHead` is still your branch HEAD as of " +
+            "settle time — nothing to check. `false` always comes with `headWarning` explaining WHICH of two " +
+            "shapes it is, and they call for DIFFERENT responses: a tree that moved during the QUEUE WAIT " +
+            "(before the command was admitted) was still fully present in what actually got built and tested — " +
+            "the reported sha just understates it, trust the result; a tree that moved WHILE the command was " +
+            "already RUNNING is genuinely unverified — the run may have read an inconsistent mix of old and " +
+            "new files, don't trust it for your current code. `headWarning`'s own wording tells you which one " +
+            "you're looking at — don't guess from `validatedHead` alone. `durationMs` is wall-clock from the moment THIS run was " +
             "admitted past the semaphore to the moment it settled — this is the trustworthy timing number to " +
             "reach for instead of hand-running the suite yourself for one (that bypass is exactly what silently " +
             "opts out of the concurrency cap this tool exists to enforce). Read it precisely: it EXCLUDES queue " +
             "wait (a run that sat behind another gate isn't penalized for that wait), but it does NOT exclude " +
             "general host/fleet load, and — if `maxConcurrentGates` is configured above 1 — it does NOT exclude " +
             "time spent running alongside another concurrently-admitted gate. This is a real duration under " +
-            "real fleet conditions, not an isolated benchmark; don't report it as one. Omitted (undefined) on " +
-            "the circuit-breaker short-circuit path, where no gate actually ran. On a failure, gateDetail " +
+            "real fleet conditions, not an isolated benchmark; don't report it as one. `durationMs`, " +
+            "`headCurrent`, and `headWarning` are all omitted (undefined) on the circuit-breaker short-circuit " +
+            "path, where no gate actually ran. On a failure, gateDetail " +
             "carries {phase, failedStep, failingTest, " +
             "failingTestReason, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure " +
             "vs. a flake without re-running blind — failingTest is `undefined` (never a guessed name) only when " +
             "nothing recognizable was found, and failingTestReason then says why. The async [loom:gate-failed] " +
             "nudge (see below) carries this SAME phase/failedStep/failingTest detail in its own text, not just a " +
-            "raw stderr tail — you don't need the sync result in hand to get the diagnosis. CLIENT-TIMEOUT " +
+            "raw stderr tail — you don't need the sync result in hand to get the diagnosis. Both the " +
+            "[loom:gate-done] AND [loom:gate-failed] nudges also inline `headWarning` when it's set, so an " +
+            "async-settled gate's HEAD-currency signal reaches you the same way the sync result does. " +
+            "CLIENT-TIMEOUT " +
             "RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
             "result inline (stamped with a correlation `opId`); a genuinely slow one (a real multi-minute test " +
             "suite) instead returns {opId, status:\"pending\", attachedToInFlight, staleAgainstWorktree}. " +
