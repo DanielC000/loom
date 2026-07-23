@@ -10,7 +10,7 @@ import {
   type GatesActive, type GateRun, type GateType,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
-import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason } from "../pty/host.js";
+import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
@@ -241,6 +241,16 @@ function nestedRepoBlockWarning(block: { paths: string[]; truncated: boolean }):
  */
 type WorkerSettableMode = "acceptEdits" | "auto" | "plan";
 const WORKER_SETTABLE_MODES: ReadonlySet<string> = new Set<WorkerSettableMode>(["acceptEdits", "auto", "plan"]);
+
+/**
+ * `redirectWorker`/`redirectSessionAsCompanion`'s return shape (card `13e32e1d`) — {@link EnqueueResult}
+ * plus the unconditional `msgId`, with `landsAt` widened to also allow `"after-interrupt"` and an
+ * additive `interrupting` flag. `deliverRedirect` overrides a HELD result's `landsAt`/`interrupting`
+ * rather than passing `enqueueDurableMessage`'s plain `"next-turn-boundary"` straight through: a redirect's
+ * `delivered:false` means "held, AND the Esc interrupt is firing now", the OPPOSITE of what a plain
+ * `messageWorker` hold means, so the two must read differently at the call site, not identically.
+ */
+type RedirectResult = Omit<EnqueueResult, "landsAt"> & { msgId: string; landsAt?: "next-turn-boundary" | "after-interrupt"; interrupting?: boolean };
 
 /**
  * PL Auditor finding #10: slugify an agent name for the worker_spawn `agentId` name/slug path — lowercase,
@@ -4277,10 +4287,13 @@ export class SessionService {
   /**
    * Send a framed message to one of a manager's workers (parent-scoped). Submitted as a turn
    * when the worker is idle, or queued FIFO (busy-gated) and drained on the worker's next Stop.
+   * A `delivered:false` result reports honestly via `enqueueDurableMessage`'s additive fields
+   * (see {@link EnqueueResult}, plus `msgId`) — a held message is a SUCCESS (`queued:true`, will land
+   * at `landsAt`), distinct from `reason:"session-dead"` (a real drop).
    */
   messageWorker(
     managerSessionId: string, workerSessionId: string, text: string,
-  ): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
+  ): EnqueueResult & { msgId: string } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const framed = `[loom:from-manager]\n${text}`;
@@ -4314,12 +4327,13 @@ export class SessionService {
    *       interrupt's settle timer, so the message is always in the queue before the settle-drain fires (if it
    *       were idle there's no turn to cancel, so we skip the Esc and the redirect already went out as a turn).
    *
-   * Returns the enqueue status ({delivered, position?}). Throws "not your worker" for a non-child (mirrors
-   * messageWorker/stopWorker's parent gate).
+   * Returns the enqueue status ({delivered, position?, ...}) — see {@link deliverRedirect} for why a HELD
+   * redirect's additive fields read differently from messageWorker's. Throws "not your worker" for a
+   * non-child (mirrors messageWorker/stopWorker's parent gate).
    */
   redirectWorker(
     managerSessionId: string, workerSessionId: string, text: string,
-  ): { delivered: boolean; position?: number } {
+  ): RedirectResult {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     return this.deliverRedirect(worker, text, {
@@ -4343,7 +4357,7 @@ export class SessionService {
    * mechanical wrappers for the stop/resume halves of the same lever. Throws ONLY if the target session is
    * UNKNOWN.
    */
-  redirectSessionAsCompanion(sessionId: string, text: string, senderSessionId?: string): { delivered: boolean; position?: number } {
+  redirectSessionAsCompanion(sessionId: string, text: string, senderSessionId?: string): RedirectResult {
     const target = this.db.getSession(sessionId);
     if (!target) throw new Error("session not found");
     return this.deliverRedirect(target, text, {
@@ -4379,12 +4393,18 @@ export class SessionService {
    *       settle-drain fires (if it were idle there's no turn to cancel, so we skip the Esc and the
    *       redirect already went out as a turn).
    *
-   * Returns the enqueue status ({delivered, position?}).
+   * Returns the enqueue status ({delivered, position?, ...}). On the HELD path (delivered:false) this
+   * does NOT reuse `enqueueDurableMessage`'s `queued:true, landsAt:"next-turn-boundary"` fields verbatim —
+   * doing so would recreate the exact confusion this card exists to fix, just moved sideways: worker_message
+   * and worker_redirect would then report an IDENTICAL-looking `{delivered:false, queued:true,
+   * landsAt:"next-turn-boundary"}` for two outcomes that are NOT the same thing (a plain FIFO hold vs. a
+   * hold that is about to have its current turn interrupted with an Esc). So a HELD redirect overrides
+   * `landsAt` to `"after-interrupt"` and adds `interrupting:true` — additive, `delivered` still unchanged.
    */
   private deliverRedirect(
     target: Session, text: string,
     opts: { tag: string; enqueueSender: string; eventManagerId: string; extraDetail?: Record<string, unknown> },
-  ): { delivered: boolean; position?: number } {
+  ): RedirectResult {
     // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands.
     const flushed = this.pty.flushPending(target.id);
     for (const m of flushed) {
@@ -4393,10 +4413,11 @@ export class SessionService {
     // (b) ENQUEUE the authoritative redirect (durable-tracked like messageWorker). Distinctly framed so the
     // receiver knows this REPLACED its pending direction and may have interrupted it mid-edit.
     const framed = `[${opts.tag}]\n${text}`;
-    const r = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null });
+    const r0 = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null });
     // (c) Interrupt ONLY when the redirect was HELD (the target was busy). For an idle target the redirect
     // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
     // cancel that very turn.
+    const r: RedirectResult = r0.delivered ? r0 : { ...r0, landsAt: "after-interrupt", interrupting: true };
     if (!r.delivered) this.pty.interruptForRedirect(target.id);
     // `queuedMsgId` links this event to its OWN sibling session_message_queued record (card 02621025) —
     // present only on the held path, since an immediate delivery (r.delivered) never persists one. Without
@@ -4506,7 +4527,7 @@ export class SessionService {
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
-  ): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason; msgId: string } {
+  ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event

@@ -1273,7 +1273,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_message",
       {
-        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). On `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting).",
+        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = went out as a turn now); on `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting). A `\"held\"` result is a SUCCESS, not a failure — it ALSO carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based queue position), `busyForMs` (how long the worker has been mid-turn, when known), and `msgId` (to correlate with a later durable record), so you can read the outcome as the honest queue-and-will-land it is instead of inferring that from a bare `false`.",
         inputSchema: { workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() },
       },
       async ({ workerSessionId, text, message }) => {
@@ -1311,6 +1311,11 @@ export class OrchestrationMcpRouter {
           "or revert the half-done edit) BEFORE acting on the new direction. Any messages that were queued for " +
           "the worker are discarded (superseded by this one). Returns {delivered} — true if it went out as a " +
           "turn immediately (worker was idle), false if queued to land right after the interrupt clears. " +
+          "UNLIKE worker_message, a `delivered:false` here does NOT mean a plain FIFO hold: it carries " +
+          "`interrupting:true` and `landsAt:\"after-interrupt\"` (not `worker_message`'s `\"next-turn-boundary\"`) " +
+          "— the worker was busy, its current turn is being cut short with an Esc right now, and this redirect " +
+          "lands the instant that settles. Also carries `position`, `busyForMs`, and `msgId` like worker_message. " +
+          "An idle worker (delivered:true) had nothing to interrupt — no Esc fires. " +
           "`text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if " +
           "both, text wins).",
         inputSchema: { workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() },

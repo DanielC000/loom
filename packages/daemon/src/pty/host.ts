@@ -1276,6 +1276,31 @@ export type QueuedMessage = { id: string; text: string; source: QueueSource; onD
  */
 export type EnqueueDeliveryReason = "session-dead" | "held";
 /**
+ * `enqueueStdin`'s full return shape (card `13e32e1d`, phase 2 of `7acee6d4`). `delivered` NEVER changes
+ * meaning — callers and tests read it as-is (delivered now vs not-yet). The problem this type fixes is
+ * that a `held` outcome (a SUCCESSFUL, durable enqueue — it WILL land) used to report through `delivered:
+ * false` ALONE, reading identically to an actual drop. These fields are ADDITIVE, present ALONGSIDE
+ * `delivered`/`reason`, and only meaningful on the `held` path:
+ *   - `queued: true` — this text is durably recorded and WILL be delivered; this is success, not failure.
+ *     `queued: false` on the `session-dead` path makes the negative explicit too, instead of leaving it to
+ *     be inferred from the absence of the field.
+ *   - `landsAt: "next-turn-boundary"` — WHEN it lands: at the recipient's next Stop/turn-boundary drain
+ *     (or the reconcile tick), not "eventually" or "if you're lucky". Silent about this before this card.
+ *   - `busyForMs` — how long the recipient has been mid-turn as of this call (undefined when the hold
+ *     isn't due to busy — e.g. not-ready/composer-dirty/rate-limited), so a caller can tell "queued behind
+ *     a long-running turn" from "queued behind one that just started".
+ * `position` and `msgId` are unchanged in meaning (msgId is added by the higher-level durable-message
+ * wrapper in sessions/service.ts, not by enqueueStdin itself — see `enqueueDurableMessage`).
+ */
+export type EnqueueResult = {
+  delivered: boolean;
+  position?: number;
+  reason?: EnqueueDeliveryReason;
+  queued?: boolean;
+  landsAt?: "next-turn-boundary";
+  busyForMs?: number;
+};
+/**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
  * idle/context/busy-stuck watchdogs, restart/boot continuation notes, rate-limit/usage nudges,
  * memory-recall injection — see `QueuedMessageKind`). An `"agent"`-kind entry (a worker report, a
@@ -3054,6 +3079,10 @@ export class PtyHost {
    * carries `reason` (see EnqueueDeliveryReason) so a caller can tell a dead-drop (`"session-dead"` —
    * no live pty, nothing will ever deliver this) apart from a hold (`"held"` — queued FIFO, will
    * deliver at the next turn boundary); both used to read as the same bare `{delivered:false}`.
+   * On the `"held"` path this ALSO carries `queued:true`, `landsAt:"next-turn-boundary"`, and
+   * `busyForMs` (see {@link EnqueueResult}) — a held enqueue is a SUCCESS (the text is durably queued
+   * and WILL be delivered), and these fields report that honestly instead of leaving a reader to infer
+   * it from `delivered:false` alone. `delivered` itself is UNCHANGED — additive fields only.
    *
    * `source` defaults to 'system' so EVERY existing programmatic caller (worker reports, idle/context/
    * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
@@ -3078,9 +3107,11 @@ export class PtyHost {
    * `true`, so their fired turn's `getActiveTurnIsProactive` reads true and the companion's chat_reply can
    * tag its outbound frame + persisted history row for the web chat's amber event-line render.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null): { delivered: boolean; position?: number; reason?: EnqueueDeliveryReason } {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null): EnqueueResult {
     const live = this.live.get(sessionId);
-    if (!live?.alive) return { delivered: false, reason: "session-dead" };
+    // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
+    // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
+    if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false };
     // Shape guard (card 78a16dc5) — see the doc comments on both checks for why NEITHER tier drops: a
     // dropped "warning"-kind entry is a real stall hazard (the async run_gate failure nudge can legitimately
     // contain a lone surrogate — see sanitizeLoneSurrogates' doc comment), so this only ever sanitizes or
@@ -3133,7 +3164,12 @@ export class PtyHost {
     // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
     // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
     live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId });
-    return { delivered: false, position: live.pending.length, reason: "held" };
+    // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
+    // WILL be delivered at the next turn boundary), instead of leaving a `delivered:false` reader to
+    // wonder whether it's a drop. `busyForMs` is only meaningful while the hold is actually busy-caused
+    // (not-ready/composer-dirty/rate-limited holds have no busy-since edge to measure from).
+    const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
+    return { delivered: false, position: live.pending.length, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs };
   }
 
   /**

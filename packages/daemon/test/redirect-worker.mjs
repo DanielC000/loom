@@ -131,6 +131,13 @@ try {
     check("(4) LANDS: the busy worker was interrupted (held redirect ⇒ interrupt fires)", pty.interrupts.includes(wkr));
     check("(4) LANDS: the authoritative redirect reached the worker, distinctly framed", pty.delivered.some((d) => d.id === wkr && d.text.startsWith("[loom:from-manager:redirect]") && d.text.includes("feature Y")));
     check("(4) LANDS: redirectWorker returned the enqueue status (was held ⇒ delivered:false)", r.delivered === false);
+    // Card 13e32e1d: a HELD redirect must NOT read like a plain worker_message hold — it carries
+    // `interrupting:true` + `landsAt:"after-interrupt"`, distinct from messageWorker's plain
+    // `landsAt:"next-turn-boundary"`, since `delivered:false` means something DIFFERENT here (an Esc is
+    // firing now, not just "queued FIFO").
+    check("(4) HONEST FIELDS: a held redirect reports interrupting:true", r.interrupting === true);
+    check("(4) HONEST FIELDS: a held redirect's landsAt is 'after-interrupt', NOT the plain hold wording", r.landsAt === "after-interrupt");
+    check("(4) HONEST FIELDS: a held redirect still carries a msgId", typeof r.msgId === "string" && r.msgId.length > 0);
   }
 
   // ===================== (4b) IDLE worker: redirect submitted immediately, NO interrupt =====================
@@ -147,6 +154,7 @@ try {
     check("(4b) idle worker: NOT interrupted (no in-flight turn to cancel)", !pty.interrupts.includes(wkr));
     check("(4b) idle worker: the redirect still reached it, framed", pty.delivered.some((d) => d.id === wkr && d.text.startsWith("[loom:from-manager:redirect]")));
     check("(4b) idle worker: a redirect_worker event was still recorded", db.listEventsForWorker(wkr).some((e) => e.kind === "redirect_worker"));
+    check("(4b) HONEST FIELDS: an immediate (delivered:true) redirect does NOT claim it's interrupting", !r.interrupting);
   }
 
   db.close();
