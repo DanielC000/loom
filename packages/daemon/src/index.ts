@@ -61,6 +61,7 @@ import { InAppChannel, IN_APP_CHANNEL } from "./companion/in-app.js";
 import { reviveCompanionSessionAtBoot, withCompanionSelfHeal } from "./companion/revive.js";
 import { loomVersion, umbrellaRootDir, isPackagedInstall } from "./version.js";
 import { UpdateCheckWatcher, readUpdateChannel } from "./update/check.js";
+import { scanCanonicalReposForMergeResidue } from "./git/worktrees.js";
 
 async function main(): Promise<void> {
   // Top-level fatal-exit crash handler FIRST — so an uncaught exception / unhandled rejection / stray
@@ -796,6 +797,21 @@ async function main(): Promise<void> {
     }
   }).catch((err) => {
     console.warn(`[boot] orchestration reconcile failed (continuing boot): ${(err as Error).message}`);
+  });
+
+  // Boot-time canonical-index residue scan (card 9e77050f): the merge-time refusal in mergeBranchLocked
+  // already makes the corruption this guards against impossible on its own (a residue-bearing repo now
+  // fails its next merge closed instead of silently absorbing it) — this is purely an early-warning
+  // courtesy, shrinking "someone notices" from "next merge attempt" to "next boot". READ-ONLY, never
+  // resets anything (same ambiguity as the merge-time check: this can't tell a dead squash's leftover
+  // stage apart from a human's own WIP in that checkout), and best-effort like the reconcile kick above —
+  // never gates boot.
+  void scanCanonicalReposForMergeResidue(db.listProjects().map((p) => p.repoPath)).then((dirty) => {
+    for (const d of dirty) {
+      console.warn(`[boot] canonical repo has uncommitted tracked changes at ${d.repoPath} — possible stale merge residue (card 9e77050f); the next merge attempt against it will refuse rather than risk absorbing it, but a human should inspect \`git status\`/\`git diff\` there:\n${d.status}`);
+    }
+  }).catch((err) => {
+    console.warn(`[boot] canonical-repo merge-residue scan failed (continuing boot): ${(err as Error).message}`);
   });
 
   // Boot-revive (bug 4cc7826d, companion/revive.ts): revive each bound session BEFORE the controller wires
