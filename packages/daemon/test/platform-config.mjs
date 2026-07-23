@@ -1320,10 +1320,121 @@ clearWatcherEnvs();
   }
 }
 
+// ============================ (24) platform_config CHANGE HISTORY (card db1e3503) ============================
+// The singleton `platform_config` row only ever shows the LATEST value — no actor, no prior value, no
+// change history, and because every key shares the SAME row, `updated_at` can't even tell you WHICH key
+// changed. Db.recordPlatformConfigChange/listPlatformConfigHistory close that gap: bounded (ring buffer),
+// small (top-level keys only, not a full audit system), honest about actor (only "human" is ever recorded
+// — see the REST PATCH call site's own comment: no agent MCP tool anywhere writes platform_config).
+{
+  const histDbFile = path.join(TMP, "history.db");
+  const db = new Db(histDbFile);
+  try {
+    // A no-op write (before === after) records NOTHING — there is no change to attribute.
+    db.recordPlatformConfigChange({ watchers: { wakeMs: 1000 } }, { watchers: { wakeMs: 1000 } }, "human");
+    check("(24) identical before/after records nothing", db.listPlatformConfigHistory().length === 0);
+
+    // A real change records ONE entry: the changed key, its prior + resulting value, actor, timestamp.
+    db.recordPlatformConfigChange({}, { maxConcurrentGates: 2 }, "human");
+    const h1 = db.listPlatformConfigHistory();
+    check("(24) one entry recorded", h1.length === 1);
+    check("(24) changedKeys names the changed top-level key", JSON.stringify(h1[0].changedKeys) === JSON.stringify(["maxConcurrentGates"]));
+    check("(24) prior value recorded (absent → omitted, not fabricated)", h1[0].prior.maxConcurrentGates === undefined);
+    check("(24) next (resulting) value recorded", h1[0].next.maxConcurrentGates === 2);
+    check("(24) actor recorded", h1[0].actor === "human");
+    check("(24) timestamp recorded", typeof h1[0].createdAt === "string" && h1[0].createdAt.length > 0);
+
+    // A second change to the SAME key: the recorded prior value is the OLD value, not re-derived/fabricated.
+    db.recordPlatformConfigChange({ maxConcurrentGates: 2 }, { maxConcurrentGates: 5 }, "human");
+    const h2 = db.listPlatformConfigHistory();
+    check("(24) two entries now, newest first", h2.length === 2 && h2[0].next.maxConcurrentGates === 5 && h2[0].prior.maxConcurrentGates === 2);
+    check("(24) the OLDER entry is unchanged (not mutated in place)", h2[1].next.maxConcurrentGates === 2);
+
+    // Only the keys that ACTUALLY changed are named — an untouched sibling never shows up as "changed".
+    db.recordPlatformConfigChange(
+      { maxConcurrentGates: 5, coalesceAgentMessages: true },
+      { maxConcurrentGates: 5, coalesceAgentMessages: false },
+      "human",
+    );
+    const h3 = db.listPlatformConfigHistory();
+    check("(24) only the actually-differing key is named", JSON.stringify(h3[0].changedKeys) === JSON.stringify(["coalesceAgentMessages"]));
+
+    // A multi-key write in one PATCH records ALL changed keys in ONE entry, sorted (deterministic reads).
+    db.recordPlatformConfigChange({}, { schedulerEnabled: true, operatorEnabled: true }, "human");
+    const h4 = db.listPlatformConfigHistory();
+    check("(24) a multi-key write records one entry naming both keys, sorted",
+      JSON.stringify(h4[0].changedKeys) === JSON.stringify(["operatorEnabled", "schedulerEnabled"]));
+
+    // Ring buffer: the history NEVER grows unbounded. Drive it well past the cap with distinct changes and
+    // confirm the row count stays capped, and the newest write survives the prune.
+    for (let i = 0; i < 210; i++) {
+      db.recordPlatformConfigChange({ usageSampleRetentionDays: i }, { usageSampleRetentionDays: i + 1 }, "human");
+    }
+    const capped = new Database(histDbFile, { readonly: true }).prepare("SELECT COUNT(*) AS c FROM platform_config_history").get().c;
+    check("(24) ring buffer caps the row count at exactly the limit (bounded, not unlimited growth)", capped === 200);
+    const newest = db.listPlatformConfigHistory(1);
+    check("(24) the most recent write survives the prune", newest[0].next.usageSampleRetentionDays === 210);
+  } finally {
+    db.close();
+  }
+}
+
+// ============================ (25) REST PATCH records history end-to-end (card db1e3503) ============================
+{
+  const restHistFile = path.join(TMP, "history-rest.db");
+  const db = new Db(restHistFile);
+  const stub = {};
+  const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, control: stub, usageStatus: stub });
+  try {
+    // Fresh store → no history yet.
+    const empty = await app.inject({ method: "GET", url: "/api/platform/config/history" });
+    check("(25) GET history 200 on a fresh store", empty.statusCode === 200 && empty.json().entries.length === 0);
+
+    // A real PATCH records an entry attributing the change to "human" (the only write surface — see the
+    // REST PATCH handler's own comment) with prior/next values and a timestamp.
+    const patch = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentGates: 2 } });
+    check("(25) PATCH → 200", patch.statusCode === 200);
+    const after1 = await app.inject({ method: "GET", url: "/api/platform/config/history" });
+    const entries1 = after1.json().entries;
+    check("(25) PATCH recorded exactly one history entry", entries1.length === 1);
+    check("(25) entry names the changed key", JSON.stringify(entries1[0].changedKeys) === JSON.stringify(["maxConcurrentGates"]));
+    check("(25) entry's next value matches what was persisted", entries1[0].next.maxConcurrentGates === 2);
+    check("(25) entry attributes the human REST write surface", entries1[0].actor === "human");
+
+    // A PATCH that resubmits the SAME value (no actual change) records nothing new.
+    const noop = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentGates: 2 } });
+    check("(25) no-op PATCH (same value) → 200", noop.statusCode === 200);
+    const after2 = await app.inject({ method: "GET", url: "/api/platform/config/history" });
+    check("(25) no-op PATCH records nothing new", after2.json().entries.length === 1);
+
+    // A REJECTED (400) PATCH must never record a phantom change.
+    const bad = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentGates: 999 } });
+    check("(25) out-of-range PATCH → 400", bad.statusCode === 400);
+    const after3 = await app.inject({ method: "GET", url: "/api/platform/config/history" });
+    check("(25) a rejected PATCH records no history entry", after3.json().entries.length === 1);
+
+    // A follow-up change is prepended (newest first).
+    const patch2 = await app.inject({ method: "PATCH", url: "/api/platform/config", payload: { maxConcurrentGates: 7 } });
+    check("(25) second PATCH → 200", patch2.statusCode === 200);
+    const after4 = await app.inject({ method: "GET", url: "/api/platform/config/history" });
+    const entries4 = after4.json().entries;
+    check("(25) newest entry first", entries4.length === 2 && entries4[0].next.maxConcurrentGates === 7 && entries4[0].prior.maxConcurrentGates === 2);
+
+    // Existing read paths are UNCHANGED — GET /api/platform/config still returns the sparse override
+    // object, no history leaking into it (card db1e3503's DoD: "existing read paths unchanged").
+    const cfgGet = await app.inject({ method: "GET", url: "/api/platform/config" });
+    check("(25) GET /api/platform/config shape is unchanged (no history field)",
+      cfgGet.json().override.maxConcurrentGates === 7 && cfgGet.json().history === undefined);
+  } finally {
+    try { await app.close(); } catch { /* ignore */ }
+    db.close();
+  }
+}
+
 // cleanup the temp LOOM_HOME (best-effort; retry for the WAL handle on Windows)
 for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field; and (sweep G4/G5/G6) `backup` is now a 4th deep-partial group in DEEP_MERGE_GROUPS (mirroring rateLimit/watchers/timeouts end-to-end: resolveConfig fast-path + full-merge two-path symmetry, intervalMinutes' env-then-default fallback, validator bounds 0-1440/1-500, PATCH whole-group + per-field null, deep-merge-not-wipe on a single-field PATCH) and resolveBackupConfig(platformOverride) — the exact function index.ts/sessions/service.ts call — now actually threads a passed override through, fixing the pre-migration-boot-vs-post-Db-open split (the boot snapshot call site structurally can't consult it; every other call site now does; `usageSampleIntervalMs`/`usageSampleRetentionDays` are proven to now ACTUALLY consult `platformOverride` on both resolveConfig paths — the exact doc/code mismatch this sweep fixes (their own field docs already claimed this before the fix; resolveConfig silently never read it) — with validator bounds 60000-3600000 / 1-3650 and full PATCH round-trip coverage; and `updateCheckIntervalMs` is a NEW daemon-global scalar mirroring backup.intervalMinutes's override-then-env-then-default precedence (incl. env-0-treated-as-unset), validator bounds 1h-24h, and full PATCH round-trip coverage; and (sweep G3) `gateRetry` is a NEW deep-partial group whose override lives top-level (like `backup`) but resolves onto `orchestration.gateRetry` (like `maxConcurrentGates`) — proven correctly wired on BOTH resolveConfig paths, override-beats-env-beats-default for both fields (incl. an explicit env settleMs:0 surviving, unlike the old `||` module const it replaces), validator bounds (enabled bool, settleMs 0-60000), and full PATCH round-trip coverage incl. deep-merge-not-wipe on a single-field PATCH and whole-group clear."
+  ? "\n✅ ALL PASS — resolveConfig resolves the daemon-global `platform` group (global > LOOM_* env > default; watcher floor-clamp; explicit-0 discipline; deep-partial) AND the two new per-project timeouts; validatePlatformConfigOverride bounds every numeric per the BOUNDS table (incl. watcher 5s floor + rate-limit 1m/24h edges) with .strict() unknown-key + field-named reasons; the SQLite store round-trips, upserts a singleton row, and falls back to {} on garbage JSON; GET/PATCH /api/platform/config (app.inject) validate → 400-or-persist and reflect the override + resolved.platform; a false→true operatorEnabled PATCH seeds the Elevated Operator agent immediately (idempotent — no double-seed on a repeat true→true PATCH); a single-field PATCH shallow-merges onto the persisted config instead of replacing it, leaving untouched sibling fields byte-identical; (card 8dc5ebb9) host-tool integrations: resolvePlatform/validatePlatformConfigOverride/the SQLite store all handle the `integrations` key, a genuine pre-migration blob (no `integrations` key at all) boot-reads cleanly with no throw, the existing PATCH surface persists it without a separate write endpoint, and GET /api/integrations' REAL (unmocked) detectIntegrations() correctly reports not-found/detected across not-configured, misconfigured, and real-binary (Codescape) cases; and (card fd55ac8a, widened by ba9ccd75) the clear-to-inherit sentinel: validatePlatformConfigPatch accepts `null` on exactly the 7 clearable keys (the 4 scalar toggles + the 3 ms-keyed groups) AND on any individual field nested inside a submitted rateLimit/watchers/timeouts group, rejects it everywhere else, a set→null→save round-trip actually DELETES the key from the persisted override (reverting resolveConfig to the platform default) while an omitted sibling stays byte-identical, clearing an already-absent key is a harmless no-op, and a non-numeric maxConcurrentGates entry still 400s instead of colliding with the null sentinel; and (card ba9ccd75) the PATCH handler DEEP-merges rateLimit/watchers/timeouts field by field instead of replacing the group wholesale — a PATCH touching one field (e.g. exhaustedThresholdPct) leaves every OMITTED sibling in that group byte-identical (the exact regression this card fixes — proven failing on pre-fix main), a per-field `null` clears just that field, whole-group `null` still clears the entire group unchanged, and the REACHABLE garbage-input wire shape a fixed Settings.tsx now sends (the original string, when Number()*unit is non-finite) still 400s and never clobbers the persisted field — the CR-caught guard the widened per-field-nullable schema would otherwise have silently swallowed as a false clear; and (card 52ab5d45) maxConcurrentManagers is now a daemon-global PlatformConfigOverride key mirroring maxConcurrentGates end-to-end — resolveConfig folds the platform override into resolved.orchestration.maxConcurrentManagers while a stale per-project value is ignored (neither sets it alone nor overrides the platform value), the validator bounds 1-100 whole-number, and the PATCH clear-sentinel/shallow-merge/non-numeric-still-400s behavior round-trips exactly like maxConcurrentGates; and (sweep G2) maxConcurrentAuditors is a NEW daemon-global PlatformConfigOverride key mirroring maxConcurrentManagers's shape end-to-end (resolveConfig fast path + full merge, validator bounds 1-50 whole-number, PATCH clear-sentinel/shallow-merge/non-numeric-still-400s) — EXCEPT it never had a per-project predecessor, so a per-project orchestration.maxConcurrentAuditors is a rejected unknown key rather than an accepted-but-inert backward-compat field; and (sweep G4/G5/G6) `backup` is now a 4th deep-partial group in DEEP_MERGE_GROUPS (mirroring rateLimit/watchers/timeouts end-to-end: resolveConfig fast-path + full-merge two-path symmetry, intervalMinutes' env-then-default fallback, validator bounds 0-1440/1-500, PATCH whole-group + per-field null, deep-merge-not-wipe on a single-field PATCH) and resolveBackupConfig(platformOverride) — the exact function index.ts/sessions/service.ts call — now actually threads a passed override through, fixing the pre-migration-boot-vs-post-Db-open split (the boot snapshot call site structurally can't consult it; every other call site now does; `usageSampleIntervalMs`/`usageSampleRetentionDays` are proven to now ACTUALLY consult `platformOverride` on both resolveConfig paths — the exact doc/code mismatch this sweep fixes (their own field docs already claimed this before the fix; resolveConfig silently never read it) — with validator bounds 60000-3600000 / 1-3650 and full PATCH round-trip coverage; and `updateCheckIntervalMs` is a NEW daemon-global scalar mirroring backup.intervalMinutes's override-then-env-then-default precedence (incl. env-0-treated-as-unset), validator bounds 1h-24h, and full PATCH round-trip coverage; and (sweep G3) `gateRetry` is a NEW deep-partial group whose override lives top-level (like `backup`) but resolves onto `orchestration.gateRetry` (like `maxConcurrentGates`) — proven correctly wired on BOTH resolveConfig paths, override-beats-env-beats-default for both fields (incl. an explicit env settleMs:0 surviving, unlike the old `||` module const it replaces), validator bounds (enabled bool, settleMs 0-60000), and full PATCH round-trip coverage incl. deep-merge-not-wipe on a single-field PATCH and whole-group clear; and (card db1e3503) the bounded platform_config CHANGE HISTORY: recordPlatformConfigChange records one entry per write naming only the top-level keys that actually differ (an untouched sibling never appears) with each key's prior + resulting value, actor, and a timestamp, a genuine no-op (before===after) records nothing, entries are newest-first and never mutated in place, a ring buffer prunes the oldest rows once past PLATFORM_CONFIG_HISTORY_LIMIT so the table provably never grows unbounded, and the REST PATCH handler wires it end-to-end (a real PATCH records an entry attributed to \"human\" — platform_config's only write surface — a resubmitted-same-value PATCH records nothing new, a REJECTED 400 PATCH never records a phantom change, and GET /api/platform/config's existing shape stays byte-identical with no history field leaking in)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -41,7 +41,7 @@ import type {
   ConnectionAuthScheme, CapabilityGrant, CapabilityProvisionKind,
   ProjectLink, ProjectMemoryEntry,
   GateHistoryPage, GateHistoryRow, GateOutcome, GateType,
-  RepoRegistryEntry,
+  RepoRegistryEntry, PlatformConfigHistoryEntry,
 } from "@loom/shared";
 import type { CapabilityDefRow } from "./capabilities/registry.js";
 import { isOwnerHeldTaskTitle, describeCron, cacheHitRatio } from "@loom/shared";
@@ -624,6 +624,22 @@ CREATE TABLE IF NOT EXISTS platform_config (
   override_json TEXT NOT NULL DEFAULT '{}',
   updated_at TEXT NOT NULL
 );
+-- Bounded CHANGE HISTORY for platform_config (card db1e3503): the singleton row above only ever shows the
+-- LATEST value, sharing one updated_at across every key, so a change can't be attributed to a key, an
+-- actor, or a prior value. Each row is ONE write: the top-level keys that changed, their prior + resulting
+-- values (scoped to just those keys), the actor where the write surface knows one, and when. A ring
+-- buffer capped at PLATFORM_CONFIG_HISTORY_LIMIT rows, pruned on every insert (see
+-- recordPlatformConfigChange) — this must never grow unbounded. Additive: CREATE TABLE IF NOT EXISTS, like
+-- platform_config itself.
+CREATE TABLE IF NOT EXISTS platform_config_history (
+  id TEXT PRIMARY KEY,
+  changed_keys TEXT NOT NULL,
+  prior_json TEXT NOT NULL,
+  next_json TEXT NOT NULL,
+  actor TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_platform_config_history_created_at ON platform_config_history(created_at);
 -- Setup Assistant E1-6: a tiny daemon-GLOBAL key/value store for one-time boot markers (today: the
 -- first-run setup auto-launch flag). NOT per-project — daemon-wide, like platform_config. Brand-new
 -- table ⇒ this CREATE TABLE IF NOT EXISTS is itself the additive migration (no ALTER), exactly like
@@ -1141,6 +1157,14 @@ const WORKTREE_WEDGED_KEY = "worktree_wedged";
  * insert, so the table is a ring buffer and can never grow unbounded across a long-lived companion.
  */
 const MAX_COMPANION_MESSAGES = 200;
+
+/**
+ * The bounded-growth cap for `platform_config_history` (card db1e3503): the most recent rows kept.
+ * `recordPlatformConfigChange` prunes anything older on every insert, so the table is a ring buffer and
+ * can never grow unbounded. 200 rows of a handful of infrequently-touched daemon-global tuning fields is
+ * a generous span (mirrors MAX_COMPANION_MESSAGES's own reasoning) without ever needing real retention.
+ */
+const PLATFORM_CONFIG_HISTORY_LIMIT = 200;
 
 /**
  * The bounded-growth cap for conversation history (card 85f62475): the most recent N conversations retained
@@ -2205,6 +2229,64 @@ export class Db {
       `INSERT INTO platform_config (id, override_json, updated_at) VALUES (1, @json, @updatedAt)
        ON CONFLICT(id) DO UPDATE SET override_json = @json, updated_at = @updatedAt`,
     ).run({ json: JSON.stringify(override ?? {}), updatedAt: new Date().toISOString() });
+  }
+  /**
+   * Record ONE platform_config write into its bounded change history (card db1e3503) — the top-level
+   * keys that actually differ between `before` and `after` (JSON-compared, so a same-value resubmit of an
+   * untouched sibling never counts as a change), each changed key's prior + resulting value, the actor the
+   * caller identifies (the write surface passes it — "human" today, since the human REST PATCH is
+   * platform_config's only write surface), and a timestamp. A write where nothing actually differs (every
+   * key JSON-equal) records NOTHING — there is no change to attribute. Callers pass `before` as whatever
+   * `getPlatformConfig()` returned BEFORE the write this call is recording.
+   */
+  recordPlatformConfigChange(before: PlatformConfigOverride, after: PlatformConfigOverride, actor: string): void {
+    const b = (before ?? {}) as Record<string, unknown>;
+    const a = (after ?? {}) as Record<string, unknown>;
+    const changedKeys: string[] = [];
+    const prior: Record<string, unknown> = {};
+    const next: Record<string, unknown> = {};
+    for (const key of new Set([...Object.keys(b), ...Object.keys(a)])) {
+      if (JSON.stringify(b[key]) === JSON.stringify(a[key])) continue;
+      changedKeys.push(key);
+      if (b[key] !== undefined) prior[key] = b[key];
+      if (a[key] !== undefined) next[key] = a[key];
+    }
+    if (changedKeys.length === 0) return;
+    changedKeys.sort();
+    this.db.transaction(() => {
+      this.db.prepare(
+        `INSERT INTO platform_config_history (id, changed_keys, prior_json, next_json, actor, created_at)
+         VALUES (@id, @changedKeys, @priorJson, @nextJson, @actor, @createdAt)`,
+      ).run({
+        id: randomUUID(),
+        changedKeys: JSON.stringify(changedKeys),
+        priorJson: JSON.stringify(prior),
+        nextJson: JSON.stringify(next),
+        actor,
+        createdAt: new Date().toISOString(),
+      });
+      // Ring buffer: keep only the PLATFORM_CONFIG_HISTORY_LIMIT most recent rows, pruned on every insert
+      // (mirrors insertCompanionMessage's ring-buffer-on-insert pattern) so this can never grow unbounded.
+      this.db.prepare(
+        `DELETE FROM platform_config_history WHERE id NOT IN (
+           SELECT id FROM platform_config_history ORDER BY created_at DESC, rowid DESC LIMIT ?
+         )`,
+      ).run(PLATFORM_CONFIG_HISTORY_LIMIT);
+    })();
+  }
+  /** The platform_config change history, newest first, capped at PLATFORM_CONFIG_HISTORY_LIMIT rows. */
+  listPlatformConfigHistory(limit = PLATFORM_CONFIG_HISTORY_LIMIT): PlatformConfigHistoryEntry[] {
+    const rows = this.db.prepare(
+      "SELECT id, changed_keys, prior_json, next_json, actor, created_at FROM platform_config_history ORDER BY created_at DESC, rowid DESC LIMIT ?",
+    ).all(Math.max(1, Math.min(limit, PLATFORM_CONFIG_HISTORY_LIMIT))) as Row[];
+    return rows.map((r) => ({
+      id: r.id as string,
+      changedKeys: JSON.parse(r.changed_keys as string) as string[],
+      prior: JSON.parse(r.prior_json as string) as Record<string, unknown>,
+      next: JSON.parse(r.next_json as string) as Record<string, unknown>,
+      actor: r.actor as string,
+      createdAt: r.created_at as string,
+    }));
   }
 
   // --- app_meta (daemon-GLOBAL key/value; one-time boot markers like the first-run setup auto-launch) ---

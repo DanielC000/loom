@@ -889,6 +889,22 @@ export interface PlatformConfigOverride {
   updateCheckIntervalMs?: number;
 }
 
+/**
+ * One bounded entry in `platform_config`'s change history (card db1e3503): the top-level keys that
+ * changed in a single write, their prior + resulting values (JSON-comparable, scoped to just the changed
+ * keys — not a full-blob snapshot), who wrote it where the write surface knows ("human" today — the human
+ * REST PATCH is `platform_config`'s only write surface), and when. `Db.listPlatformConfigHistory` returns
+ * these newest-first, capped to a bounded ring buffer — see `Db.recordPlatformConfigChange`.
+ */
+export interface PlatformConfigHistoryEntry {
+  id: string;
+  changedKeys: string[];
+  prior: Record<string, unknown>;
+  next: Record<string, unknown>;
+  actor: string;
+  createdAt: string;
+}
+
 /** Every field of `T` individually nullable — the per-field clear sentinel a `PlatformConfigPatch`
  *  ms-keyed group accepts (card ba9ccd75): `null` on one field clears just that field, omitting a
  *  field leaves it alone, distinct from the WHOLE-GROUP `null` (below) that clears the entire group. */

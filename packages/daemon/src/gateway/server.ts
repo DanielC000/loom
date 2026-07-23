@@ -3969,7 +3969,8 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // A per-field `null` inside the group (accepted by platformConfigPatchSchema's nullable field
     // variants) deletes just that field; whole-group `null` still deletes the whole group unchanged.
     const DEEP_MERGE_GROUPS = new Set(["rateLimit", "watchers", "timeouts", "backup", "gateRetry"]);
-    const merged: Record<string, unknown> = { ...deps.db.getPlatformConfig() };
+    const before = deps.db.getPlatformConfig();
+    const merged: Record<string, unknown> = { ...before };
     for (const [key, val] of Object.entries(v.value)) {
       if (val === null) {
         delete merged[key];
@@ -4001,6 +4002,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (!mv.ok) return reply.code(400).send({ error: `invalid platform config: ${mv.error}` });
     const wasOperatorEnabled = isOperatorEnabled(deps.db);
     deps.db.setPlatformConfig(mv.value);
+    // card db1e3503: record who/when/what changed. "human" is honest, not a placeholder — this PATCH is
+    // platform_config's ONLY write surface (see platformConfigOverrideSchema's doc: no agent MCP tool
+    // anywhere calls db.setPlatformConfig), so every write through here really is a human REST caller.
+    // A no-op PATCH (nothing actually differed from `before`) records nothing — see the method's own doc.
+    deps.db.recordPlatformConfigChange(before, mv.value, "human");
     // Bucket 2b follow-up: a false→true flip should surface the bundled "Elevated Operator" convenience
     // agent immediately, not just on the next boot seed (seedOperatorAgent is itself flag-gated + idempotent
     // seed-if-absent-by-name, so this is a safe no-op on every other transition). Best-effort — a seed
@@ -4014,6 +4020,11 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       }
     }
     return { ok: true, override: mv.value };
+  });
+  // Read-only bounded change history for platform_config (card db1e3503) — newest first. Same trust tier
+  // as the GET/PATCH above: HUMAN-only unauthed loopback, no agent MCP surface.
+  app.get("/api/platform/config/history", async () => {
+    return { entries: deps.db.listPlatformConfigHistory() };
   });
 
   // --- Host-tool integrations (card 8dc5ebb9): live detect/validate. HUMAN-only loopback REST, NOT an

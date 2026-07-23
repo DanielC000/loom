@@ -95,7 +95,7 @@ const ALL_ROUTES = [
   ["POST", "/api/keys/:keyId/kill"], ["POST", "/api/keys/:keyId/rotate"],
   ["GET", "/api/orchestration/events"], ["POST", "/api/orchestration/kill"],
   ["POST", "/api/orchestration/pause"], ["POST", "/api/orchestration/resume"], ["GET", "/api/orchestration/status"],
-  ["GET", "/api/platform/config"], ["PATCH", "/api/platform/config"], ["GET", "/api/platform/home"],
+  ["GET", "/api/platform/config"], ["PATCH", "/api/platform/config"], ["GET", "/api/platform/config/history"], ["GET", "/api/platform/home"],
   ["GET", "/api/poll-jobs"], ["POST", "/api/poll-jobs"], ["DELETE", "/api/poll-jobs/:id"], ["POST", "/api/poll-jobs/:id"],
   ["GET", "/api/preset-prompt-suggestions"], ["POST", "/api/preset-prompt-suggestions"],
   ["POST", "/api/preset-prompt-suggestions/:id/adopt"], ["POST", "/api/preset-prompt-suggestions/:id/dismiss"],
