@@ -1934,9 +1934,17 @@ async function verifyPersistedPathSet(
  * A false null just costs Pass A keeping the worktree / a caller retrying an idempotent merge; a false
  * landed sha is the exact silent-data-loss bug both cards exist to close. Injectable via {@link
  * BoundedGitDeps}.
+ *
+ * `onPreFixTrailerNotice`, when supplied, REPLACES the branch-gone-pre-pathset `console.info` below with a
+ * callback instead — for a caller that invokes this in a loop (boot-reconcile Pass A's fallback path,
+ * card 6ee48e4d) and wants to aggregate that notice ONCE PER PASS (mirroring how {@link
+ * scanMergedCommitMap} already logs its own pre-fix-history count once per scan, not once per row)
+ * instead of flooding the log per call. Omitted (the default, every other call site), this logs exactly
+ * as before — no behavior change for a single decision-path caller.
  */
 export async function findLandedSquashCommit(
   repoPath: string, branch: string, base = "HEAD", deps: BoundedGitDeps = {},
+  onPreFixTrailerNotice?: (branch: string, sha: string) => void,
 ): Promise<string | null> {
   try {
     // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent repoPath
@@ -1971,6 +1979,8 @@ export async function findLandedSquashCommit(
       const pathSetMatch = body.match(LOOM_WORKER_PATHSET_TRAILER);
       if (pathSetMatch) {
         if (!(await verifyPersistedPathSet(git, timeoutMs, sha, pathSetMatch[1]!))) return null;
+      } else if (onPreFixTrailerNotice) {
+        onPreFixTrailerNotice(branch, sha);
       } else {
         // eslint-disable-next-line no-console
         console.info(`[git] findLandedSquashCommit: ${branch} is gone and its landed commit ${sha.slice(0, 7)} ` +
@@ -2259,12 +2269,27 @@ const MERGED_MAP_RECORD_SEP = "\x1e";
 const LOOM_WORKER_BRANCH_TRAILER = /^Loom-Worker-Branch:\s*(\S+)/m;
 
 /**
- * Internal (never exposed — {@link getTaskMergedInfo}'s public return stays the plain {@link
- * MergedCommitInfo} shape) per-branch map entry: the landed commit's persisted `Loom-Worker-PathSet`
- * digest, if this commit carries one (card f621f185), else `null` for pre-fix history.
+ * Per-branch map entry: the landed commit's persisted `Loom-Worker-PathSet` digest, if this commit
+ * carries one (card f621f185), else `null` for pre-fix history. Exported (card 6ee48e4d) only because
+ * it's structurally part of {@link MergedCommitScan}, itself exported for {@link getMergedCommitMapCached}
+ * — {@link getTaskMergedInfo}'s own public return stays the plain {@link MergedCommitInfo} shape.
  */
-interface MergedMapEntry extends MergedCommitInfo {
+export interface MergedMapEntry extends MergedCommitInfo {
   pathSetDigest: string | null;
+}
+
+/**
+ * {@link scanMergedCommitMap}'s result, PLUS whether the scan was truncated by {@link
+ * MERGED_LOOKUP_SCAN_LIMIT} — card 6ee48e4d. `truncated: false` means the scan saw FEWER commits than
+ * the limit, i.e. it read `base`'s ENTIRE history: a `map` miss is then AUTHORITATIVE (the branch has no
+ * `Loom-Worker-Branch` trailer anywhere reachable from `base`), not merely "not found in this window".
+ * `truncated: true` covers both a genuine limit-hit AND any scan failure/timeout (the existing fail-safe
+ * empty map) — a caller that wants to treat a miss as authoritative must check this flag first; treating
+ * every miss as authoritative without it would silently narrow full-history detection.
+ */
+export interface MergedCommitScan {
+  map: Map<string, MergedMapEntry>;
+  truncated: boolean;
 }
 
 /**
@@ -2276,12 +2301,27 @@ interface MergedMapEntry extends MergedCommitInfo {
  * one git subprocess per task, which is what bounds a `list_all_tasks` page's cost regardless of how many
  * cards it returns. First occurrence per branch wins (log is reverse-chronological, so that's the MOST
  * RECENT landing — matches findLandedSquashCommit's `--max-count=1` semantics).
- * FAILS SAFE: any error/timeout returns an EMPTY map (every lookup then misses -> null), never throws.
+ *
+ * ALSO reports whether the scan was truncated (see {@link MergedCommitScan}) — the discriminator boot-
+ * reconcile Pass A needs to tell "this branch never landed" (a complete scan, genuine miss) apart from
+ * "this branch might have landed outside the window" (a truncated scan, inconclusive miss): two states
+ * that used to share one signature (an empty `Map.get` result), the same collapse this card already fixed
+ * once for map-hit-vs-miss itself. Truncation is detected from data the scan already computed — no new git
+ * call: `git log -n LIMIT` returns AT MOST `LIMIT` commits, so seeing EXACTLY `LIMIT` non-blank records
+ * means more history may exist beyond what was read; seeing fewer means `base`'s full history fit inside
+ * the window. Counts EVERY commit record the scan saw, not just trailer matches — the vast majority of
+ * commits carry no trailer at all, so counting only hits would never reach the limit and would falsely
+ * report "complete" on a genuinely truncated scan.
+ *
+ * FAILS SAFE: any error/timeout returns an EMPTY map with `truncated: true` (every lookup then misses AND
+ * is marked inconclusive -> a caller applying the authoritative-miss optimization must fall back, exactly
+ * as if the scan had genuinely hit the limit) — never throws.
  */
 async function scanMergedCommitMap(
   repoPath: string, base = "HEAD", deps: BoundedGitDeps = {},
-): Promise<Map<string, MergedMapEntry>> {
+): Promise<MergedCommitScan> {
   const map = new Map<string, MergedMapEntry>();
+  let recordCount = 0;
   try {
     // boundedGit's simpleGit(repoPath, ...) constructor throws SYNCHRONOUSLY for a nonexistent baseDir
     // (GitConstructError) — this must be INSIDE the try, not before it, or a vault-only/moved-repo
@@ -2294,6 +2334,7 @@ async function scanMergedCommitMap(
     );
     for (const record of out.split(MERGED_MAP_RECORD_SEP)) {
       if (!record.trim()) continue;
+      recordCount++;
       const sep1 = record.indexOf(MERGED_MAP_FIELD_SEP);
       const sep2 = record.indexOf(MERGED_MAP_FIELD_SEP, sep1 + 1);
       if (sep1 === -1 || sep2 === -1) continue;
@@ -2307,7 +2348,7 @@ async function scanMergedCommitMap(
       if (!map.has(branch)) map.set(branch, { sha, date, pathSetDigest: pathSetTrailer ? pathSetTrailer[1]! : null }); // first hit = most recent (reverse-chron)
     }
   } catch {
-    return map; // fail safe: empty map -> every lookup misses -> caller treats as not-(yet)-landed
+    return { map, truncated: true }; // fail safe: empty map + inconclusive -> every lookup misses AND must fall back
   }
   // Log the pre-fix-history count ONCE PER SCAN, not per lookup: getTaskMergedInfo runs per TASK on every
   // polled board read (up to 100 rows/page), and essentially every card merged before this fix lacks the
@@ -2325,7 +2366,7 @@ async function scanMergedCommitMap(
       "Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone for those once their branch " +
       "is gone, until re-merged (card f621f185)");
   }
-  return map;
+  return { map, truncated: recordCount >= MERGED_LOOKUP_SCAN_LIMIT };
 }
 
 /** Keyed per REPO (not per branch/task like {@link diffCache}), so its entry count is bounded by the
@@ -2335,6 +2376,7 @@ const MERGED_MAP_CACHE_MAX_ENTRIES = 100;
 interface MergedMapCacheEntry {
   headSha: string;
   map: Map<string, MergedMapEntry>;
+  truncated: boolean;
 }
 
 const mergedMapCache = new Map<string, MergedMapCacheEntry>();
@@ -2372,8 +2414,8 @@ function getOrStartMergedMapScan(repoPath: string, deps: BoundedGitDeps): Promis
         mergedMapCache.set(repoPath, cached); // move to the Map's end (most-recently-used)
         return cached;
       }
-      const map = await scanMergedCommitMap(repoPath, "HEAD", deps);
-      const entry: MergedMapCacheEntry = { headSha, map };
+      const { map, truncated } = await scanMergedCommitMap(repoPath, "HEAD", deps);
+      const entry: MergedMapCacheEntry = { headSha, map, truncated };
       mergedMapCache.delete(repoPath);
       mergedMapCache.set(repoPath, entry);
       while (mergedMapCache.size > MERGED_MAP_CACHE_MAX_ENTRIES) {
@@ -2393,18 +2435,94 @@ function getOrStartMergedMapScan(repoPath: string, deps: BoundedGitDeps): Promis
 }
 
 /**
- * Cached wrapper around {@link scanMergedCommitMap}: reuses the map across repeat reads of the same
- * repo state, keyed on the canonical repo's current HEAD sha (fs-only, no subprocess — the SAME
- * freshness-key idiom as {@link getWorkerDiffCached}'s `diffCache`). A merge landing on main advances
- * HEAD, which invalidates the cache on the VERY NEXT read — a just-merged task resolves as soon as
- * HEAD moves, never stale. Concurrent callers on a cold/stale entry are deduped onto ONE scan by
- * {@link getOrStartMergedMapScan} — see its comment for why that dedup has to be synchronous.
+ * Cached wrapper around {@link scanMergedCommitMap}: reuses the map (and its `truncated` flag — see
+ * {@link MergedCommitScan}) across repeat reads of the same repo state, keyed on the canonical repo's
+ * current HEAD sha (fs-only, no subprocess — the SAME freshness-key idiom as {@link getWorkerDiffCached}'s
+ * `diffCache`). A merge landing on main advances HEAD, which invalidates the cache on the VERY NEXT read
+ * — a just-merged task resolves as soon as HEAD moves, never stale. Concurrent callers on a cold/stale
+ * entry are deduped onto ONE scan by {@link getOrStartMergedMapScan} — see its comment for why that dedup
+ * has to be synchronous.
  */
-async function getMergedCommitMapCached(
+export async function getMergedCommitMapCached(
   repoPath: string, deps: BoundedGitDeps = {},
-): Promise<Map<string, MergedMapEntry>> {
+): Promise<MergedCommitScan> {
   const entry = await getOrStartMergedMapScan(repoPath, deps);
-  return entry.map;
+  return { map: entry.map, truncated: entry.truncated };
+}
+
+/**
+ * Shared verification body for a {@link scanMergedCommitMap} entry, factored out of {@link
+ * getTaskMergedInfo} so {@link findLandedSquashCommitViaMap} (boot-reconcile Pass A's batch path, card
+ * 6ee48e4d) can apply the IDENTICAL re-task-ancestry-guard + content/path-set check a map hit needs,
+ * rather than a second hand-copied verification with its own chance to drift from this one. Same
+ * fail-safe contract as every verification in this file: any error, or the checks genuinely disagreeing,
+ * returns null (NOT landed) — never resolve ambiguity to `hit.sha`.
+ */
+async function resolveMergedCommitMapHit(
+  repoPath: string, branch: string, hit: MergedMapEntry, deps: BoundedGitDeps,
+): Promise<string | null> {
+  try {
+    // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
+    // OWN `branch --list` check exactly) — NOT the shared branchExists() helper, whose bare `simpleGit()`
+    // has no block-timeout and no withTimeout race.
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const branchPresent = (await withTimeout(
+      git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
+    )).trim() !== "";
+    if (branchPresent) {
+      const mergeBase = (await withTimeout(
+        git.raw(["merge-base", hit.sha, branch]), timeoutMs, "git merge-base",
+      )).trim();
+      if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
+      if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
+    } else if (hit.pathSetDigest) {
+      // Branch gone (card f621f185): verify against the persisted path-set trailer.
+      if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest))) return null;
+    }
+    // else: pre-fix history (no path-set trailer) — degrades to the trailer-presence-only answer.
+    // Deliberately NOT logged here for either caller: scanMergedCommitMap already logs the pre-fix count
+    // once per actual scan (cache-gated, rebuilt only on a HEAD move) — see its own comment.
+    return hit.sha;
+  } catch {
+    return null; // fail safe
+  }
+}
+
+/**
+ * Batch-primitive sibling of {@link findLandedSquashCommit} for a caller that wants to look `branch` up
+ * against the shared {@link getMergedCommitMapCached} map (ONE bounded `git log` pass per repo, cached
+ * and reused across every branch checked against it) instead of paying its own single-branch `--grep`
+ * walk. Exists for boot-reconcile Pass A (card 6ee48e4d), which used to call findLandedSquashCommit once
+ * PER historical worker session — up to thousands of sequential git subprocess spawns per boot.
+ *
+ * Returns `{ hit: true, sha }` when `branch` HAS an entry in the map — `sha` is the verified landed
+ * commit (via {@link resolveMergedCommitMapHit}, the SAME re-task-guard + content/path-set check
+ * findLandedSquashCommit itself applies), or `null` if that entry fails verification (mirrors
+ * findLandedSquashCommit's own fail-safe null exactly, just reached via a shared map lookup instead of a
+ * fresh grep — NOT a weaker answer).
+ *
+ * Returns `{ hit: false, scanComplete }` when `branch` has NO entry in the map — and `scanComplete` is
+ * the discriminator a caller NEEDS before treating that miss as "not landed" (card 6ee48e4d): a plain
+ * miss used to conflate two different states behind one signature — "genuinely never landed" vs "landed
+ * outside the {@link MERGED_LOOKUP_SCAN_LIMIT} scan window" — which meant every miss had to be treated as
+ * the weaker, inconclusive case. `scanComplete: true` (the scan read `base`'s ENTIRE history — see {@link
+ * MergedCommitScan}) makes the miss AUTHORITATIVE: no fallback needed, `branch` provably has no
+ * `Loom-Worker-Branch` trailer anywhere reachable from `base`. `scanComplete: false` (the scan was
+ * truncated by the limit, OR errored/timed out — same fail-safe direction) means the miss is genuinely
+ * inconclusive; a caller that needs the FULL-HISTORY guarantee (the ONLY guarantee findLandedSquashCommit
+ * itself makes) MUST fall back to calling findLandedSquashCommit directly in that case — silently treating
+ * every miss as authoritative would narrow detection to the scan window and let an old-enough landed
+ * worker's worktree/branch linger forever undetected. See boot-reconcile Pass A for the canonical caller
+ * shape (branch on `scanComplete`, not on `hit` alone).
+ */
+export async function findLandedSquashCommitViaMap(
+  repoPath: string, branch: string, deps: BoundedGitDeps = {},
+): Promise<{ hit: true; sha: string | null } | { hit: false; scanComplete: boolean }> {
+  const { map, truncated } = await getMergedCommitMapCached(repoPath, deps);
+  const entry = map.get(branch);
+  if (!entry) return { hit: false, scanComplete: !truncated };
+  const sha = await resolveMergedCommitMapHit(repoPath, branch, entry, deps);
+  return { hit: true, sha };
 }
 
 /**
@@ -2446,36 +2564,15 @@ export async function getTaskMergedInfo(
   repoPath: string, taskId: string, deps: BoundedGitDeps = {},
 ): Promise<MergedCommitInfo | null> {
   const branch = `loom/${taskKey(taskId)}`;
-  const map = await getMergedCommitMapCached(repoPath, deps);
+  const { map } = await getMergedCommitMapCached(repoPath, deps);
   const hit = map.get(branch);
   if (!hit) return null;
-  try {
-    // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
-    // OWN `branch --list` check exactly) — NOT the shared branchExists() helper, whose bare `simpleGit()`
-    // has no block-timeout and no withTimeout race, so a hung `git branch --list` would hang this whole
-    // (awaited-inside-a-tool-handler) function despite the catch-all below never seeing it throw.
-    const { git, timeoutMs } = boundedGit(repoPath, deps);
-    const branchPresent = (await withTimeout(
-      git.raw(["branch", "--list", branch]), timeoutMs, "git branch --list",
-    )).trim() !== "";
-    if (branchPresent) {
-      const mergeBase = (await withTimeout(
-        git.raw(["merge-base", hit.sha, branch]), timeoutMs, "git merge-base",
-      )).trim();
-      if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
-      if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
-    } else if (hit.pathSetDigest) {
-      // Branch gone (card f621f185): verify against the persisted path-set trailer.
-      if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest))) return null;
-    }
-    // else: pre-fix history (no path-set trailer) — degrades to the trailer-presence-only answer below.
-    // Deliberately NOT logged HERE: this runs per TASK on every polled board read (up to 100 rows/page),
-    // so a per-lookup line would flood the daemon log. scanMergedCommitMap logs the same fact ONCE PER
-    // ACTUAL SCAN instead (cache-gated, rebuilt only on a HEAD move) — see its own comment.
-  } catch {
-    return null; // fail safe
-  }
-  return { sha: hit.sha.slice(0, 7), date: hit.date };
+  // Verification delegated to {@link resolveMergedCommitMapHit} (card 6ee48e4d factored this out of a
+  // hand-inlined copy here so boot-reconcile Pass A's {@link findLandedSquashCommitViaMap} shares the
+  // IDENTICAL re-task-guard + content/path-set check) — behaviour-identical to the version this replaces.
+  const sha = await resolveMergedCommitMapHit(repoPath, branch, hit, deps);
+  if (!sha) return null;
+  return { sha: sha.slice(0, 7), date: hit.date };
 }
 
 /** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos. */

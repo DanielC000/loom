@@ -13,7 +13,7 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
@@ -8957,7 +8957,10 @@ export class SessionService {
    *     the branch here — any committed work stays on it and createWorktree re-attaches a fresh
    *     worktree to it on a re-task.
    */
-  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set()): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
+  // `gitDeps` (card 6ee48e4d): test-only seam for Pass A's git ops, defaulting to {} so every production
+  // call site (index.ts's boot call) is unaffected — a test can inject a counting/stubbed `gitFactory` to
+  // prove Pass A's early-out never spawns git for an already-finalized worker.
+  async reconcileOrchestrationOnBoot(protectedSessionIds: Set<string> = new Set(), gitDeps: BoundedGitDeps = {}): Promise<{ mergesFinished: number; mergesFailed: number; staleMergesResolved: number; worktreesPruned: number; worktreesKept: number; worktreesNeedsHuman: number; worktreesStillWedged: number; worktreesStaleRepoKey: number; branchesReclaimed: number; branchSweepSkippedRepos: number; branchSweepNoOrigin: number; branchSweepFoundZero: number }> {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
@@ -8979,6 +8982,34 @@ export class SessionService {
     // session from every past run at boot — one throw must not abort the whole reconcile (or, since
     // merging this branch self-restarts the dev daemon, crash-loop the boot). So a failed session is
     // warned, counted, and skipped; the next boot retries it.
+    //
+    // PERFORMANCE (card 6ee48e4d): this pass used to call findLandedSquashCommit — an UNCAPPED
+    // full-history `git log --grep` — once per historical worker, including long-retired/archived ones:
+    // 2041 sequential git subprocess spawns on a real boot, minutes of stall. Three fixes, in order below:
+    //  1. The cheap `alreadyFinalized`/`worktreeOnDisk` early-out (a DB read + an fs.existsSync, no git
+    //     subprocess at all) now runs BEFORE the squash lookup, not after — an already-reconciled worker
+    //     whose worktree is gone never pays for a git spawn. Provably behaviour-identical to the old
+    //     order: in BOTH orders such a worker's iteration ends in `continue`, and findLandedSquashCommit
+    //     has no side effect but its own (now-aggregated, see below) log line — reordering relative to it
+    //     changes nothing observable. (repoKey resolution stays BEFORE this early-out, unchanged from
+    //     before, so a stale repoKey is still counted/warned exactly as it was pre-fix.) On this repo's own
+    //     measured shape this alone removes ~1789 of the 2041 spawns (the already-finalized population).
+    //  2. The residual sessions (no recorded merge_done, or worktree still on disk) look their branch up
+    //     in the batch {@link findLandedSquashCommitViaMap} map — ONE bounded `git log` pass per REPO,
+    //     shared/cached across every session checked against it — instead of a fresh single-branch walk
+    //     each.
+    //  3. A map MISS is NOT automatically "fall back and walk full history" — that would still cost ~1
+    //     full-history spawn per residual session, since the residual population is overwhelmingly
+    //     not-yet-landed workers (no `Loom-Worker-Branch` trailer anywhere, which is WHY they're not
+    //     already-finalized) and therefore misses the map every time. `viaMap.scanComplete` tells a
+    //     "genuinely never landed" miss (the batch scan read the repo's ENTIRE history — authoritative,
+    //     skip the fallback) apart from "possibly landed outside the scan window" (the scan was truncated
+    //     or failed — inconclusive, fall back exactly as before). This is what collapses the residual ~250
+    //     sessions from ~250 full-history spawns down toward the ONE shared batch scan on a repo whose
+    //     history fits inside MERGED_LOOKUP_SCAN_LIMIT (this repo: 1470 commits vs a 5000 limit) — a repo
+    //     bigger than the limit degrades gracefully back to per-session fallback walks, unchanged from
+    //     before this fix, never a false "not landed".
+    let preFixTrailerNoticeCount = 0; // aggregated across this whole pass — see findLandedSquashCommit's onPreFixTrailerNotice param
     for (const s of all) {
       if (s.role !== "worker" || !s.branch || !s.taskId) continue;
       if (protectedSessionIds.has(s.id)) continue; // about to be resumed (restart-intent) — leave it intact
@@ -8993,6 +9024,17 @@ export class SessionService {
         // other per-session failure this pass already tolerates). WRITE/RECOVERY path, but reconcile's
         // existing catch-and-count IS the degrade here, not a silent swallow — mergesFailed still counts it.
         const repoPath = resolveRepoByKey(project, s.repoKey).path;
+        const worktreePath = s.worktreePath ?? s.cwd;
+        const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
+        // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
+        // a human can freely move a merged card OFF the terminal column afterward (e.g. into a review lane)
+        // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
+        // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
+        // the finalizeMerge guard above) forcing the column back to terminal each time.
+        const alreadyFinalized = this.db.listEventsForWorker(s.id).some((e) => e.kind === "merge_done");
+        // CHEAP EARLY-OUT, moved ahead of the (potentially expensive) squash lookup below — see the perf
+        // comment above this loop.
+        if (alreadyFinalized && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         // SQUASH detection (the CRUX): the worker branch is NOT in main's ancestry, so the old
         // isBranchMerged is always false and worktreeHasWork (branch-ahead) cannot tell a landed-squash
         // orphan from a live worker. findLandedSquashCommit keys on the deterministic `Loom-Worker-Branch`
@@ -9003,17 +9045,21 @@ export class SessionService {
         // dir via worktreeHasWork.) We deliberately do NOT re-apply the worktreeHasWork guard here — under
         // squash a confirmed-landed branch is STILL ahead-of-base, so that guard would wrongly KEEP a real
         // orphan; the trailer (with its re-task guard) is the correct, deterministic signal.
-        const landedSha = await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs });
+        // The map miss/hit discriminator ALONE isn't enough: a miss with `scanComplete: true` (the batch
+        // scan read this repo's ENTIRE history — see findLandedSquashCommitViaMap's doc) is authoritative
+        // — this branch provably has no Loom-Worker-Branch trailer anywhere, so the fallback grep would
+        // just re-walk the same history and re-confirm null. Skipping it there is what turns the residual
+        // ~250 not-yet-landed sessions (the population that misses the map, since they have no trailer at
+        // all) from ~250 full-history git spawns into zero. Only `scanComplete: false` (scan truncated by
+        // MERGED_LOOKUP_SCAN_LIMIT, or errored/timed out — same fail-safe direction) falls back to the
+        // uncapped single-branch walk, so full-history detection is never silently narrowed.
+        const viaMap = await findLandedSquashCommitViaMap(repoPath, s.branch, { timeoutMs: this.gitOpMs, ...gitDeps });
+        const landedSha = viaMap.hit
+          ? viaMap.sha
+          : viaMap.scanComplete
+            ? null
+            : await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { preFixTrailerNoticeCount++; });
         if (!landedSha) continue;
-        const worktreePath = s.worktreePath ?? s.cwd;
-        const worktreeOnDisk = !!worktreePath && fs.existsSync(worktreePath);
-        // "Already reconciled" is an EVENT signal (a recorded merge_done), not the task's CURRENT column —
-        // a human can freely move a merged card OFF the terminal column afterward (e.g. into a review lane)
-        // without that meaning "the merge needs re-finishing." Keying this off columnKey used to make
-        // exactly that manual move look unreconciled on every future boot, re-running finalizeMerge and (pre
-        // the finalizeMerge guard above) forcing the column back to terminal each time.
-        const alreadyFinalized = this.db.listEventsForWorker(s.id).some((e) => e.kind === "merge_done");
-        if (alreadyFinalized && !worktreeOnDisk) continue; // already fully reconciled — nothing to finish
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
           worktreePath, branch: s.branch, repoPath, projectId: project.id,
@@ -9025,6 +9071,14 @@ export class SessionService {
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] could not finish merge for worker ${s.id} (branch ${s.branch}): ${(e as Error).message}`);
       }
+    }
+    // Aggregated ONCE per pass, not per session (card 6ee48e4d) — mirrors scanMergedCommitMap's own
+    // once-per-scan log for the identical fact, so a boot with many pre-fix-trailer landings can't flood
+    // the log the way the old per-call console.info did.
+    if (preFixTrailerNoticeCount > 0) {
+      // eslint-disable-next-line no-console
+      console.info(`[reconcile] ${preFixTrailerNoticeCount} worker(s) had a landed squash predating the ` +
+        "Loom-Worker-PathSet trailer — trusted Loom-Worker-Branch presence alone (card f621f185)");
     }
 
     // A2. Resolve branch-gone dangling merges from the EVENT trail (the residual PRE-squash-era shape
