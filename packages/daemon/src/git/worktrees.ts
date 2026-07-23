@@ -1746,6 +1746,47 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
 }
 
 /**
+ * Content-reachability check (board card e076d2a2, item 2): does `sha`'s tree ACTUALLY contain `branch`'s
+ * own changes, not merely carry its trailer text? Under the squash+commit race the per-repo mutex above
+ * now closes, a commit can bear one branch's `Loom-Worker-Branch` trailer while its content belongs to a
+ * DIFFERENT branch entirely (reproduced against real git — see test/merge-content-reachability.mjs) — a
+ * `--grep` trailer match alone is a CLAIM, not proof. This verifies the claim: diff the branch's OWN
+ * changed files (relative to its merge-base with `sha`) between `sha`'s tree and the branch tip's tree —
+ * zero difference over EXACTLY that path set proves `sha` carries the branch's content verbatim.
+ *
+ * FAILS CLOSED, deliberately the OPPOSITE default from `findLandedSquashCommit`'s own fail-safe: any git
+ * ERROR, or the two trees genuinely differing on the branch's own paths, returns `false` — NOT VERIFIED —
+ * so the caller falls through to attempting a real merge instead of trusting an unproven "landed" claim. A
+ * false `false` just costs a redundant (safe, idempotent) merge attempt; a false `true` is the exact
+ * silent-data-loss bug this card exists to close, so ambiguity must never resolve to `true`.
+ *
+ * OUTPUT-based, NOT exit-code based (mirrors `mergeBranch`'s own `staged`/`conflicted` checks — see
+ * {@link isBranchMerged}'s doc): simple-git's `raw()` does NOT reliably reject on a command whose nonzero
+ * exit is a normal BOOLEAN signal rather than a real failure (`--is-ancestor`, `diff --quiet`) — a first
+ * version of this check used `git diff --quiet`'s exit code and silently always resolved `true`, the exact
+ * false-positive this function exists to prevent. `git diff --name-only` has no such ambiguity: any output
+ * at all means a real difference.
+ */
+async function branchContentLandedInCommit(
+  repoPath: string, branch: string, sha: string, mergeBase: string, deps: BoundedGitDeps,
+): Promise<boolean> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const changedFiles = (await withTimeout(
+      git.raw(["diff", "--name-only", `${mergeBase}..${branch}`]), timeoutMs, "git diff --name-only (content check)",
+    )).trim();
+    if (!changedFiles) return true; // branch has no changes of its own relative to its fork point — vacuously landed
+    const files = changedFiles.split("\n").filter(Boolean);
+    const diffOutput = (await withTimeout(
+      git.raw(["diff", "--name-only", sha, branch, "--", ...files]), timeoutMs, "git diff --name-only (content check, candidate vs branch)",
+    )).trim();
+    return diffOutput === ""; // no output ⇒ zero difference on any of the branch's own paths ⇒ content matches
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Find the SQUASH-merge commit for `branch` reachable from `base` (default HEAD), identified by the
  * deterministic `Loom-Worker-Branch: <branch>` trailer {@link mergeBranch} writes. Returns the commit SHA,
  * or null if no such commit is in `base`'s history. This REPLACES the `Merge branch '<branch>'` grep
@@ -1760,7 +1801,17 @@ async function branchExists(repoPath: string, branch: string): Promise<boolean> 
  * squash), whereas a re-cut branch DESCENDS FROM the prior squash (merge-base == the squash). Ancestry is
  * tested via merge-base equality — raw resolves it cleanly; we avoid `--is-ancestor`, whose exit-1 raw
  * misreads (see {@link isBranchMerged}). Branch gone ⇒ the trailer commit IS the landed diff (workerDiff
- * stage 3), returned directly.
+ * stage 3), returned directly — see below for why content-verification is skipped in that case.
+ *
+ * CONTENT-VERIFIED while the branch ref is still live (card e076d2a2): trailer presence alone is a CLAIM,
+ * not proof (see {@link branchContentLandedInCommit}). This check only runs when `branchPresent` — the
+ * dangerous call sites (confirmWorkerMerge's pre-merge check and `mergeBranch`'s own noop classification)
+ * ALWAYS run before the branch is deleted, so this is exactly where a false "landed" would trigger the
+ * incident's irreversible actions (branch deletion, worker retirement, done-flip). When the branch is
+ * ALREADY GONE (workerDiff's historical-diff reconstruction, or a retry landing after a PRIOR call already
+ * finalized this exact worker), there is no live branch ref left to diff against — those call sites are
+ * either read-only display or re-confirmations of a state a prior, already-verified call produced, so
+ * skipping the check there does not reopen the incident's data-loss path.
  *
  * FAILS SAFE: every op is bounded by the same block-timeout + {@link withTimeout} guard as the other
  * reconcile ops; ANY error/timeout returns null (treated as NOT-landed) — the SAFE default, since Pass A
@@ -1790,6 +1841,8 @@ export async function findLandedSquashCommit(
         git.raw(["merge-base", sha, branch]), timeoutMs, "git merge-base",
       )).trim();
       if (mergeBase === sha) return null;
+      // Content-reachability: a trailer match is not proof (see branchContentLandedInCommit's doc).
+      if (!(await branchContentLandedInCommit(repoPath, branch, sha, mergeBase, deps))) return null;
     }
     return sha;
   } catch {
@@ -2209,6 +2262,15 @@ async function getMergedCommitMapCached(
  * (fail-safe). Treat `null` as "not proven merged (within this window)", NEVER as an authoritative
  * "never merged" — that distinction matters because this exists specifically to replace stale-handoff
  * claims with ground truth, and a false-confident null would just move the same failure elsewhere.
+ *
+ * CONTENT-VERIFIED while the branch ref is still live (card e076d2a2, same rationale + same limitation as
+ * {@link findLandedSquashCommit}'s own content check): `scanMergedCommitMap` keys on the trailer alone
+ * (NOT the subject — a prior read of this incident's `merged:{sha}` false positive as a "subject match"
+ * doesn't hold up against this code), so it is exposed to the identical claim-vs-proof gap. Verified here
+ * ONLY when `branchPresent` — by the time a branch is deleted (the common case for a task whose merge is
+ * old news), there is no live ref left to diff against, so a false trailer match surviving past deletion
+ * is NOT closed by this check; closing that fully would need persisting the branch's own tip sha before
+ * deletion, out of scope for this fix.
  */
 export async function getTaskMergedInfo(
   repoPath: string, taskId: string, deps: BoundedGitDeps = {},
@@ -2231,6 +2293,7 @@ export async function getTaskMergedInfo(
         git.raw(["merge-base", hit.sha, branch]), timeoutMs, "git merge-base",
       )).trim();
       if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
+      if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
     }
   } catch {
     return null; // fail safe
@@ -2332,6 +2395,56 @@ export function toConventionalSubject(raw: string): string {
  * so the caller can tell "already done" from "real no-op". A real squash failure still fails closed.
  */
 export type MergeEmptyKind = "ALREADY_MERGED" | "STAGE_EMPTY_RETRY";
+
+// ── Per-repo merge mutex (board card e076d2a2 — CRITICAL silent data loss) ─────────────────────────
+//
+// `mergeBranch` stages + commits directly against the CANONICAL repo's shared git index at `repoPath`, a
+// process-wide, un-namespaced resource. Two concurrent `mergeBranch` calls for the SAME repo (reachable
+// once `orchestration.maxConcurrentGates` >= 2) race on that ONE index: one op's own `git merge --squash`
+// can fail (e.g. `.git/index.lock` contention with the OTHER op's concurrent squash) while the other op's
+// now-staged-but-uncommitted diff is still sitting in the index; the residue-clear at the top of
+// `mergeBranch` never fires for this (it only resets on an AFFIRMATIVE `ls-files --unmerged`/`MERGE_HEAD`
+// signal, neither of which a normal concurrent `--squash` sets), so the failing op's own `staged` check
+// reads TRUE off the OTHER op's leftover stage and blindly commits it under ITS OWN subject/trailer —
+// reproduced against real, unmodified git + this exact code (see test/merge-repo-mutex.mjs): a commit
+// bearing branch A's subject+trailer but containing ONLY branch B's diff, on the FIRST concurrent attempt,
+// no artificial delays needed. This mutex makes `mergeBranch`'s whole
+// residue-clear→squash→conflict-check→commit sequence atomic PER REPO, closing that race at the source.
+//
+// In-process, keyed by the repo's CANONICALIZED path — mirrors `projects/repos.ts`'s own aliasing guard:
+// two spellings of the same physical directory (different casing/separators, or a registry entry vs.
+// `repoPath` itself) must serialize together, not slip past each other. Cross-repo calls are NEVER
+// blocked — the incident's own scope finding stands: the index is per-repo, so unrelated repos merging
+// concurrently is safe and untouched by this lock. No eviction needed: entries are bounded by the number
+// of distinct repos a daemon touches (small, unlike the branch-keyed diff cache), never by task/branch
+// volume, so leaving settled entries in the map is not a leak.
+const repoMergeLocks = new Map<string, Promise<unknown>>();
+
+function canonicalRepoLockKey(repoPath: string): string {
+  let real: string;
+  try {
+    real = fs.realpathSync.native(repoPath);
+  } catch {
+    real = path.resolve(repoPath); // repo may not exist yet on disk in a test/edge case — best effort
+  }
+  return process.platform === "win32" ? real.toLowerCase() : real;
+}
+
+/**
+ * Serialize `fn` against every other in-flight caller for the SAME canonical repo path — FIFO via promise
+ * chaining. `prior.then(fn, fn)` runs `fn` once `prior` SETTLES regardless of whether it resolved or
+ * rejected, so one caller's failure never poisons or skips the next caller's turn; the chained promise
+ * (its outcome ignored via `.catch`) is what the NEXT caller awaits, so callers queue strictly in arrival
+ * order. No timeout: `mergeBranch`'s own git calls are already bounded elsewhere (simple-git's block
+ * timeout), so a bug here should surface as a wedged merge queue, not silently corrupt content.
+ */
+async function withRepoMergeLock<T>(repoPath: string, fn: () => Promise<T>): Promise<T> {
+  const key = canonicalRepoLockKey(repoPath);
+  const prior = repoMergeLocks.get(key) ?? Promise.resolve();
+  const run = prior.then(fn, fn);
+  repoMergeLocks.set(key, run.catch(() => { /* only used to sequence the NEXT caller; outcome irrelevant here */ }));
+  return run;
+}
 
 /**
  * Merge canonical main's CURRENT tip (`repoPath`'s HEAD) INTO the worker's worktree, IN the worktree —
@@ -2452,6 +2565,16 @@ export async function mergeMainIntoWorktree(
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
+  // MUTEX (card e076d2a2): the whole residue-clear→squash→conflict-check→commit sequence below reads and
+  // writes the CANONICAL repo's shared git index — serialize it per canonical repo path so a concurrent
+  // merge for a DIFFERENT branch of the SAME repo can never interleave with this one. See the lock's own
+  // doc above for the exact corruption this closes.
+  return withRepoMergeLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle));
+}
+
+async function mergeBranchLocked(
+  repoPath: string, branch: string, taskTitle?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
   const git = simpleGit(repoPath);
   // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
   // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
@@ -2490,17 +2613,26 @@ export async function mergeBranch(
     }
     return { ok: false, conflict: true };
   }
-  // No conflict. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code handling is
-  // unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
+  // DEFENSE IN DEPTH (card e076d2a2, item 4): a `rawError` from our OWN `git merge --squash` means OUR
+  // squash never definitively landed — whatever IS (or isn't) currently staged cannot be trusted as OURS.
+  // Under the race the mutex above now closes, that "something staged" could be a DIFFERENT concurrent
+  // op's leftover, and the old code below this point would have blindly committed it under THIS branch's
+  // subject/trailer (the exact incident: a commit bearing one branch's trailer, another's content) — fail
+  // loud UNCONDITIONALLY on rawError, never fall through to "well, something's staged, ship it." The mutex
+  // is the primary fix (no concurrent op can leave leftover stage here anymore); this is the backstop for
+  // anything outside it.
+  if (rawError) {
+    try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset, or already clean */ }
+    return { ok: false, reason: "git merge --squash failed" };
+  }
+  // No conflict, no rawError. Did --squash stage anything? (Output-based, NOT exit-code: raw's exit-code
+  // handling is unreliable — see isBranchMerged.) Empty after the residue-clear above is a GENUINE empty index.
   const staged = (await git.raw(["diff", "--cached", "--name-only"])).trim() !== "";
   if (!staged) {
-    // A rawError with nothing staged AFTER the clean retry is a real merge failure → fail closed.
-    if (rawError) {
-      try { await git.raw(["reset", "--hard", "HEAD"]); } catch { /* nothing to reset */ }
-      return { ok: false, reason: "git merge --squash failed (nothing staged)" };
-    }
     // Clean no-op: classify so the caller can distinguish "already merged" from "no diff to merge". The
-    // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD.
+    // branch's commits are "already in main" iff a prior squash carrying its trailer is reachable from HEAD
+    // AND that commit's content is verified to actually contain the branch's own changes (see
+    // findLandedSquashCommit's content-reachability check — trailer presence alone is not proof).
     const landed = await findLandedSquashCommit(repoPath, branch);
     return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY" };
   }
