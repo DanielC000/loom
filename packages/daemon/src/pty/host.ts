@@ -52,10 +52,11 @@ function pasteSettleExtraMs(textLength: number): number {
  * Card 1bd1f045: cheap, non-cryptographic 32-bit FNV-1a content fingerprint for the `[pty-write]` write-
  * sequence log (see `ptyWrite`). O(n) over a SINGLE write call's data — bounded at PTY_WRITE_CHUNK_BYTES
  * for a chunk (a few KB, never the full 15KB+ turn), so it stays cheap on the hot path. Not collision-
- * proof and doesn't need to be: two `[pty-write]` records sharing (len, hash) at distinct `seq` on the
- * same session is a duplicate CANDIDATE for a human/script to correlate, not a courtroom proof — an
- * accidental collision between two genuinely DIFFERENT writes on the same session is astronomically
- * unlikely for real terminal-write content at this volume. Chosen over a head/tail excerpt (this card's
+ * proof and doesn't need to be: on `tag=chunk` records, two `[pty-write]` entries sharing (len, hash) at
+ * distinct `seq` WITHIN THE SAME `gen` is a duplicate CANDIDATE for a human/script to correlate, not a
+ * courtroom proof. A pair spanning DIFFERENT `gen` values is a by-design re-write (give-up requeue/retry/
+ * re-drain — see `purgeConfirmedGiveUpRequeue`), not a double-emission — see `ptyWrite`'s doc for the two
+ * traps this discriminator missed until corrected 2026-07-23. Chosen over a head/tail excerpt (this card's
  * first draft) purely for size: fixed 8 hex chars regardless of payload length, versus ~80-90 bytes of
  * quoted excerpt — material at 17 write sites logging on every session's hot path against a rotating,
  * forensically-relied-on daemon-output.log (see ptyWrite's doc for the measured before/after).
@@ -1410,6 +1411,18 @@ interface Live {
   // every submit() call; a stale reference from an already-confirmed/superseded turn is harmless because
   // the give-up branch itself bails on `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
   giveUpOrigin: QueuedMessage[] | null;
+  // Card 09e655d5: FIFO of generations that GIVE-UP RECOVERY requeued and which may still receive a late
+  // confirming hook — pushed in `requeueGiveUpOrigin`, consulted (never `submitGeneration`) by
+  // `purgeConfirmedGiveUpRequeue` to decide WHICH generation a hook confirms. `submitGeneration` alone is
+  // only a proxy for "which turn just proved it started": it breaks the instant a SECOND generation has
+  // also given up (and so also advanced `submitGeneration`) before the FIRST's late hook arrives — that
+  // hook would then misattribute to the CURRENT generation instead of the one it actually confirms. The
+  // queue's FRONT is always the OLDEST still-ambiguous generation (real turns run serially through the one
+  // pty stream, so hooks resolve in the same order their generations were submitted); see
+  // `purgeConfirmedGiveUpRequeue`'s doc for why only `Stop`/`StopFailure` advances past it. Empty for every
+  // session with no outstanding give-up ambiguity — i.e. almost always — so the common path stays a single
+  // length check.
+  giveUpConfirmQueue: number[];
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
   // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
@@ -2409,6 +2422,7 @@ export class PtyHost {
       submitGeneration: 0,
       writeSeq: 0,
       giveUpOrigin: null,
+      giveUpConfirmQueue: [],
       activeTurnRoute: null,
       lastPromptRoute: null,
       activeTurnOwnerText: null,
@@ -2563,6 +2577,7 @@ export class PtyHost {
       submitGeneration: 0,
       writeSeq: 0,
       giveUpOrigin: null,
+      giveUpConfirmQueue: [],
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -2637,6 +2652,7 @@ export class PtyHost {
       submitGeneration: 0,
       writeSeq: 0,
       giveUpOrigin: null,
+      giveUpConfirmQueue: [],
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -2932,7 +2948,7 @@ export class PtyHost {
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
-        this.purgeConfirmedGiveUpRequeue(sessionId, live); // card 441499ee — see the method doc
+        this.purgeConfirmedGiveUpRequeue(sessionId, live, false); // card 441499ee/09e655d5 — see the method doc; UserPromptSubmit purges without advancing the queue
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
       case "Stop":
@@ -2951,7 +2967,7 @@ export class PtyHost {
         // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
         // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
         live.enterConfirmed = true;
-        this.purgeConfirmedGiveUpRequeue(sessionId, live); // card 441499ee — see the method doc; before any early park-break below on purpose
+        this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; before any early park-break below on purpose; Stop/StopFailure advances the queue past its front
         this.finalizingTurn = true;
         try {
           this.setBusy(sessionId, false, "stop-hook"); // falling edge — exactly one Stop per end-of-turn (no per-tool-use)
@@ -3700,10 +3716,18 @@ export class PtyHost {
    *
    * Discriminates the two surviving hypotheses for that card's mid-token splice: if the daemon itself
    * double-emits (e.g. `writeChunked`'s `done` callback firing more than once, unguarded by
-   * `submitGeneration` — card 9ed20572), TWO `[pty-write]` records with the same content signature at
-   * distinct `seq` appear here. If the daemon writes exactly once and corruption still appears at the
-   * receiving end, this log shows a single clean record and the fault is BELOW the daemon (ConPTY/
-   * node-pty/Windows). Either outcome is a real result.
+   * `submitGeneration` — card 9ed20572), TWO `[pty-write]` records on `tag=chunk` share the same content
+   * signature (len, hash) at distinct `seq` WITHIN THE SAME `gen`. If the daemon writes exactly once and
+   * corruption still appears at the receiving end, this log shows a single clean record and the fault is
+   * BELOW the daemon (ConPTY/node-pty/Windows). Either outcome is a real result.
+   *
+   * CORRECTED 2026-07-23 (manager measurement, 583 live records): the discriminator above is unusable
+   * without the `tag=chunk`+`gen` restrictions — fixed control sequences (enter/bracket-start/bracket-end)
+   * are byte-identical by construction and matched repeatedly on healthy traffic, and a by-design re-write
+   * (give-up requeue/retry/re-drain — see `purgeConfirmedGiveUpRequeue`) crosses a `gen` boundary rather
+   * than duplicating within one. Two traps: `seq` resets across a daemon restart (de-duplicate per boot,
+   * never across one), and the give-up clear burst reuses the `chunk` tag and can share a message body's
+   * `len` (only the hash differs) — never filter by length alone.
    *
    * `seq` is the load-bearing field: a monotonic per-session counter (Live.writeSeq) that makes a
    * duplicated or out-of-order emission visible AS a sequence anomaly rather than plausible traffic.
@@ -4089,7 +4113,10 @@ export class PtyHost {
    * discriminator deciding RECOVERY-vs-SUPPRESSED can itself be wrong, so a requeued entry stamps
    * `giveUpGen: gen` — the generation its failed submit ran under — precisely so `purgeConfirmedGiveUpRequeue`
    * can find and drop it the instant a confirming hook proves that generation's turn actually ran, instead
-   * of letting it drain later as a silent duplicate of a message that already landed.
+   * of letting it drain later as a silent duplicate of a message that already landed. Card 09e655d5: `gen`
+   * is ALSO pushed onto `live.giveUpConfirmQueue` (only when something was actually kept/requeued — a
+   * budget-exhausted drop has nothing left to purge later) — that queue, not `live.submitGeneration`, is
+   * what `purgeConfirmedGiveUpRequeue` correlates a late hook against; see its doc for why.
    */
   private requeueGiveUpOrigin(sessionId: string, gen: number): void {
     const live = this.live.get(sessionId);
@@ -4109,6 +4136,7 @@ export class PtyHost {
     }
     if (kept.length > 0) {
       live.pending.unshift(...kept);
+      live.giveUpConfirmQueue.push(gen);
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending — will drain on the next Stop/reconcile`);
     }
@@ -4123,28 +4151,47 @@ export class PtyHost {
    * message whose original ALREADY landed — converting a fixed silent-drop bug into a NEW silent-duplicate
    * bug. `UserPromptSubmit` and `Stop`/`StopFailure` are the two hooks that PROVE a turn actually ran
    * (this file's own long-standing convention — either is definitive even if the other was lost), so both
-   * call this the instant they fire: any still-pending entry tagged with the CURRENT `submitGeneration` is
-   * for the turn that JUST proved it started, so it's purged before it can ever be delivered.
+   * call this the instant they fire.
    *
-   * Correlation works because `submitGeneration` only advances inside `submit()` — if nothing has
-   * resubmitted for this session since the failed attempt gave up, `live.submitGeneration` at hook-arrival
-   * time is STILL that same attempt's generation, so this needs no extra bookkeeping beyond the tag already
-   * on the entry. Narrower residual (out of THIS card's scope, tracked by 04de8bbf): if a reconcile tick
+   * Card 09e655d5 (fixing a gap in the 441499ee safety net): a hook carries NO generation of its own, so
+   * WHICH generation it confirms has to be derived. The original approach compared a pending entry's
+   * `giveUpGen` against the CURRENT `live.submitGeneration` — correct only while nothing has resubmitted
+   * since the failed attempt gave up, which breaks the instant a SECOND generation has ALSO given up (and
+   * so ALSO advanced `submitGeneration`) before the FIRST generation's late hook arrives: that hook would
+   * misattribute to the CURRENT (second) generation and purge the WRONG requeued entry, leaving the
+   * actually-redundant one to double-deliver.
+   *
+   * THE FIX: `live.giveUpConfirmQueue` (pushed in `requeueGiveUpOrigin`) tracks every generation that gave
+   * up and is still awaiting a possible late confirmation, OLDEST first. A hook always correlates to the
+   * QUEUE FRONT, never the live generation — the front is reliably the oldest still-ambiguous generation
+   * because real turns run serially through the one pty stream, so confirming hooks resolve in the same
+   * order their generations were submitted (a second generation's Enter can only actually reach the engine
+   * after the first's turn — if it was a false negative — has finished running). `UserPromptSubmit` purges
+   * the front's matching entry but does NOT advance the queue: it fires first for a real turn, and leaving
+   * the front unchanged means a still-outstanding `Stop` for that SAME real turn is a safe no-op instead of
+   * misattributing to whatever generation is next in the queue. Only `Stop`/`StopFailure` — the definitive,
+   * one-per-real-turn end signal — advances past the front, purging first (covering the case where
+   * `UserPromptSubmit` for it was itself lost, per this file's "either hook is definitive" convention).
+   *
+   * Residual (unchanged from before this card, out of scope, tracked by 04de8bbf): if a reconcile tick
    * beats a merely-late hook to the punch and resubmits the requeued entry FIRST (bumping the generation
-   * before the confirmation arrives), this purge no longer finds anything to remove — the entry is already
-   * out being resubmitted under its own new generation. That ordering needs the discriminator itself fixed,
-   * not a bigger purge window; this closes the far more common case where the hook (even late) still beats
-   * the next drain trigger.
+   * before the confirmation arrives), this purge no longer finds anything to remove for that generation —
+   * the entry is already out being resubmitted under its own new generation. That ordering needs the
+   * discriminator itself fixed, not a bigger purge window.
    */
-  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live): void {
-    const gen = live.submitGeneration;
+  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean): void {
+    if (live.giveUpConfirmQueue.length === 0) return;
+    const gen = live.giveUpConfirmQueue[0]!;
     for (let i = live.pending.length - 1; i >= 0; i--) {
       if (live.pending[i]!.giveUpGen === gen) {
         const [dropped] = live.pending.splice(i, 1);
         // eslint-disable-next-line no-console
-        console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative — a confirming hook proves the original turn actually started; purged the requeued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
+        console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative — a confirming hook proves generation ${gen}'s turn actually started; purged the requeued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
       }
     }
+    // Stop/StopFailure definitively closes this generation's ambiguity window — advance past it so the
+    // NEXT hook (if any) correlates against whatever generation gave up after this one, not this one again.
+    if (turnEnded) live.giveUpConfirmQueue.shift();
   }
 
   /**
