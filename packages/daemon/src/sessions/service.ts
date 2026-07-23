@@ -2132,15 +2132,23 @@ export class SessionService {
     // a slot; `startedAt` (admission time) drives the audit event's real run-time `durationMs` (excl. queue wait).
     const deployDescriptor: GateDescriptor = { gateType: "deploy", projectId: project.id, sessionId: managerSessionId };
     let deployStartedAt = 0;
+    // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the full
+    // rationale — the semaphore's own active count at admission, carried onto the audit event below.
+    let deployConcurrentAtStart = 0;
     const result = await this.gateSemaphore.runExclusive(
       orchestration.maxConcurrentGates, deployDescriptor,
-      (startedAt) => { deployStartedAt = startedAt; return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs); },
+      (startedAt) => {
+        deployStartedAt = startedAt;
+        deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs);
+      },
       "high",
     );
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
         reason, ok: result.passed, durationMs: Date.now() - deployStartedAt,
+        gateCap: orchestration.maxConcurrentGates, concurrentGates: deployConcurrentAtStart,
         ...(result.passed ? {} : {
           exitCode: result.failedStatus ?? null,
           signal: result.failedSignal ?? null,
@@ -7598,8 +7606,27 @@ export class SessionService {
       // priority (card 24642c3d) — see the host-load-guard doc above.
       const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId };
       let gateStartedAt = 0;
-      let gateResult = await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => { gateStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs); }, "high");
-      evt("build_gate", { passed: gateResult.passed, durationMs: Date.now() - gateStartedAt });
+      // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the semaphore's own active-run count at the instant
+      // THIS run was admitted (i.e. including itself) — read inside the `fn` callback so it reflects
+      // admission, not settle (by settle, a released slot could already read low again). Carried onto
+      // every audit event below so a red (or a byte-identical-tree pass/fail pair) can be attributed to
+      // the concurrency it actually ran under, instead of that context being unrecoverable after the fact.
+      //
+      // WHY THIS EXISTS, CONCRETELY: the card was filed because a peer project's ONE confirmed CLASS 3
+      // gate failure (process death, no failing test) was permanently unattributable — op f954fb86 failed
+      // on a tree op 8c7f078e had just passed minutes earlier, and NOTHING recorded what cap or how many
+      // concurrent gates were in force during either run. That question is unanswerable in hindsight no
+      // matter how hard anyone re-reads the surviving output. `gateCap`/`concurrentGates` below are the
+      // fix: cheap to carry on every event, and the ONLY way the *next* such pair is attributable instead
+      // of another permanent mystery. Do not prune these as noise — they look unused right up until the
+      // one investigation that needs them, at which point there is no way to backfill them retroactively.
+      let concurrentAtStart = 0;
+      let gateResult = await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => {
+        gateStartedAt = startedAt;
+        concurrentAtStart = this.gateSemaphore.snapshot().active;
+        return runGateSeq(gate, worktreePath, gateTimeoutMs);
+      }, "high");
+      evt("build_gate", { passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart });
       if (gateResult.failedTimedOut) {
         // POST-TIMEOUT SWEEP (card 3564fd1e): gate-runner's own tree-kill already reaps everything still
         // parented under the killed shell — this is the SAME worktree-path-scoped backstop the pre-gate
@@ -7630,10 +7657,14 @@ export class SessionService {
         let retryStartedAt = 0;
         gateResult = await this.gateSemaphore.runExclusive(
           gateCap, gateDescriptor,
-          (startedAt) => { retryStartedAt = startedAt; return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false); },
+          (startedAt) => {
+            retryStartedAt = startedAt;
+            concurrentAtStart = this.gateSemaphore.snapshot().active;
+            return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false);
+          },
           "high",
         );
-        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt });
+        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart });
         if (gateResult.failedTimedOut) {
           try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
         }
@@ -7696,6 +7727,11 @@ export class SessionService {
           phase ? `phase: ${phase}` : undefined,
           killNote,
           gateRetried ? `retried once (settled ${orchestration.gateRetry.settleMs}ms)` : undefined,
+          // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the cap in force + how many gates were admitted
+          // together with this run — the exact context a byte-identical-tree pass/fail pair (a real
+          // incident: op f954fb86 failed where op 8c7f078e had just passed) needs to be attributable to
+          // its concurrency neighbourhood instead of an unexplained code-defect hunt.
+          `cap=${gateCap} concurrent=${concurrentAtStart}`,
           failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
@@ -7704,6 +7740,7 @@ export class SessionService {
           reason: "gate", phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           killClass: finalClass, retried: gateRetried,
+          gateCap, concurrentGates: concurrentAtStart,
           ...(suppressed ? { suppressed: true } : {}),
         });
         return {
@@ -8240,6 +8277,11 @@ export class SessionService {
           // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
           const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId };
           let gateStartedAt = 0;
+          // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the
+          // full rationale — the semaphore's own active count at admission, carried onto every audit event
+          // below so a failure (or a byte-identical-tree pass/fail pair) is attributable to the concurrency
+          // it actually ran under.
+          let concurrentAtStart = 0;
           // ADMISSION STAMP (card 39196378, verified-mechanism revision): taken as the FIRST thing inside
           // `fn`, before `runGateSeq` is ever called — i.e. at the exact moment this run is admitted past
           // the semaphore, strictly before the build/test child process is spawned against the worktree.
@@ -8257,6 +8299,7 @@ export class SessionService {
               gateCap, gateDescriptor,
               async (startedAt) => {
                 gateStartedAt = startedAt;
+                concurrentAtStart = this.gateSemaphore.snapshot().active;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
                 return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE);
               },
@@ -8268,7 +8311,7 @@ export class SessionService {
             // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
             // caller (PendingOpRegistry.attach) already turns a rejection into a normal {ok:false} outcome —
             // this audit write adds a durable record, it does not change that error-handling behavior.
-            evt({ passed: false, error: err instanceof Error ? err.message : String(err), ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
+            evt({ passed: false, error: err instanceof Error ? err.message : String(err), gateCap, concurrentGates: concurrentAtStart, ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
             throw err;
           }
           if (worker.branch) {
@@ -8293,7 +8336,7 @@ export class SessionService {
           const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp);
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
-            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent });
+            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart });
             return { ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs, ...headCurrency };
           }
           const finalClass = classifyGateFailure(gateResult);
@@ -8322,6 +8365,7 @@ export class SessionService {
             failingTestReason: failingTestReason ?? null,
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
             durationMs: failDurationMs, headCurrent: headCurrency.headCurrent,
+            gateCap, concurrentGates: concurrentAtStart,
             ...(outputTail ? { outputTail } : {}),
           });
           return {

@@ -208,6 +208,12 @@ async function main(): Promise<void> {
   const platformOverride = db.getPlatformConfig();
   const resolved = resolveConfig(undefined, platformOverride);
   const { watchers, timeouts } = resolved.platform;
+  // Card 424ed9a8: the resolved gate-semaphore cap directly determines whether the concurrent-squash-
+  // merge corruption trigger is even reachable (cap 1 makes it structurally impossible) and is the
+  // single biggest lever on host load — yet it was never logged anywhere, at boot or on change, making
+  // an incident question about "was cap >= 2 during this window" permanently unanswerable. One line, so
+  // the value in force at least at boot is never again unrecoverable.
+  console.log(`[boot] gate semaphore cap=${resolved.orchestration.maxConcurrentGates}`);
   // Pre-warm the shared markitdown venv if any profile opts into documentConversion, so the FIRST such
   // session usually finds the MCP already warm instead of hitting the provision-on-first-spawn cold-skip
   // window. Best-effort + fully off the event loop (delegates to the async background kick) — must NEVER

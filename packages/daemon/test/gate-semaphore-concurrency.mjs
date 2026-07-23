@@ -122,6 +122,53 @@ const worktrees = [];
   }
 }
 
+// ── Cap-transition logging (card 424ed9a8): `orchestration.maxConcurrentGates` is a daemon-global,
+// safety-critical setting (cap>=1 is what makes the concurrent-squash-merge corruption trigger
+// reachable at all) that was never logged anywhere — neither at boot nor on change — making an
+// incident question like "was the cap >= 2 during this window" permanently unanswerable. Proves the
+// semaphore itself logs `[gate] maxConcurrentGates <old> -> <new>` the moment it observes a DIFFERENT
+// `cap` passed to `runExclusive` (the actual adoption point — not wherever config happens to be
+// written), and stays silent when the cap is unchanged (including the very first call, where there is
+// no "old" value to report).
+{
+  const sem = new GateSemaphore();
+  const desc = { gateType: "worker", projectId: "p", sessionId: "s" };
+  const originalLog = console.log;
+  // Spy ONLY around the `runExclusive` call itself, restoring the real console.log before every `check()`
+  // — `check()` calls `console.log` too, so leaving the spy on across a `check()` would silently swallow
+  // its own PASS/FAIL line instead of ever reporting a real failure.
+  const withSpy = async (cap) => {
+    const logs = [];
+    console.log = (...args) => { logs.push(args.join(" ")); };
+    try {
+      await sem.runExclusive(cap, desc, async () => "ok");
+    } finally {
+      console.log = originalLog;
+    }
+    return logs;
+  };
+  try {
+    let logs = await withSpy(1);
+    check("(transition) the FIRST call (no prior observed cap) logs nothing — not a transition from nothing", logs.length === 0);
+
+    logs = await withSpy(1);
+    check("(transition) a repeated, UNCHANGED cap logs nothing", logs.length === 0);
+
+    logs = await withSpy(2);
+    check("(transition) cap 1 -> 2 logs the transition with the correct old/new values",
+      logs.some((l) => l.includes("[gate] maxConcurrentGates 1 -> 2")));
+
+    logs = await withSpy(2);
+    check("(transition) after adopting 2, an unchanged repeat logs nothing again", logs.length === 0);
+
+    logs = await withSpy(5);
+    check("(transition) a SECOND distinct change (2 -> 5) logs correctly (not a one-shot latch)",
+      logs.some((l) => l.includes("[gate] maxConcurrentGates 2 -> 5")));
+  } finally {
+    console.log = originalLog;
+  }
+}
+
 // ── Pure unit check: priority-aware queue ordering (card 24642c3d — a low-priority worker run_gate
 //    self-check must not head-of-line-block a higher-priority merge/deploy gate queued behind it) ────
 {

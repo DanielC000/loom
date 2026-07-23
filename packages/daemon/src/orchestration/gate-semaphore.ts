@@ -110,6 +110,12 @@ export class GateSemaphore {
   // queued entries by (priority, enqueuedAt) to match the real admission order below.
   private readonly registry = new Map<string, RegistryEntry>();
   private seq = 0;
+  // Card 424ed9a8: the last `cap` value this semaphore actually observed a caller pass, so a change in
+  // the daemon-global `orchestration.maxConcurrentGates` (resolved fresh by every call site) is logged
+  // the moment the semaphore itself sees the new value — not merely when config is written, which is a
+  // DIFFERENT (and previously unrecorded) moment. `undefined` until the first `runExclusive` call, so
+  // boot's own initial cap never logs a spurious "transition" from nothing.
+  private lastKnownCap: number | undefined;
 
   /** Acquire a slot under `cap`, queueing (awaiting) if it's already saturated — onto the `"high"` or
    *  `"low"` tier per `priority`. On admission stamps the entry's `startedAt` so the registry can
@@ -159,6 +165,15 @@ export class GateSemaphore {
   async runExclusive<T>(
     cap: number, descriptor: GateDescriptor, fn: (startedAt: number) => Promise<T>, priority: GatePriority = "high",
   ): Promise<T> {
+    // TRANSITION LOG (card 424ed9a8): fires exactly when THIS semaphore observes `cap` change from what
+    // it last saw — i.e. what a gate run actually adopted, not merely what was written to config (those
+    // can differ: a write with no gate call in between never shows up here, and that's correct — nothing
+    // ever ADOPTED it). Skipped on the very first call (`lastKnownCap` still undefined) so boot's initial
+    // cap is a plain fact, not a transition from nothing.
+    if (this.lastKnownCap !== undefined && this.lastKnownCap !== cap) {
+      console.log(`[gate] maxConcurrentGates ${this.lastKnownCap} -> ${cap}`);
+    }
+    this.lastKnownCap = cap;
     const entry: RegistryEntry = { id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null };
     this.registry.set(entry.id, entry);
     let acquired = false;
