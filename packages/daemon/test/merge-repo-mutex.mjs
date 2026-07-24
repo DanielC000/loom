@@ -74,6 +74,8 @@ try {
   for (let t = 0; t < TRIALS; t++) {
     const sfx = `${Date.now()}-${t}-${Math.random().toString(36).slice(2, 7)}`;
     const repo = makeTrialRepo(sfx);
+    const mainlineBase = git(repo, "rev-parse HEAD"); // pre-merge tip both branches forked from — the
+    // <mergeBase>..<branch> endpoint the Loom-Worker-PathSet digest itself is computed from at merge time.
     makeWorktree(repo, "loom/branch-a", "file-a.txt", `a-content-${sfx}\n`, sfx);
     makeWorktree(repo, "loom/branch-b", "file-b.txt", `b-content-${sfx}\n`, sfx);
 
@@ -105,6 +107,21 @@ try {
       // — so compare directly against that branch's own tip content, not just presence of the path.
       const branchTipContent = execSync(`git show ${branch}:${expectedFile}`, { cwd: repo }).toString();
       check(`[trial ${t}] commit ${sha.slice(0, 7)}'s ${expectedFile} content MATCHES branch ${branch}'s own tip (not swapped)`, ownContent === branchTipContent);
+      // ── CONFINEMENT (card 9f776570): the two checks above only assert the trailer's OWN file is present
+      //    and correct — a commit carrying its own file AND a FOREIGN one (the zero-concurrency corruption
+      //    reproduced in card 9e77050f) passes both of them. Assert the landed commit's diff path set is
+      //    EXACTLY the branch's own changed-file set — the same property the Loom-Worker-PathSet digest
+      //    encodes (mergeBase..branch), checked here against the commit's own diffstat.
+      const commitPaths = execSync(`git show --stat --format= ${sha}`, { cwd: repo }).toString()
+        .split("\n")
+        .map((line) => { const m = line.match(/^\s*(.+?)\s*\|\s*\d/); return m ? m[1] : null; })
+        .filter(Boolean)
+        .sort();
+      const branchPaths = git(repo, `diff --name-only --no-renames ${mainlineBase}..${branch}`)
+        .split("\n").map((s) => s.trim()).filter(Boolean).sort();
+      check(`[trial ${t}] commit ${sha.slice(0, 7)}'s diff is CONFINED to ${branch}'s own path set ` +
+        `${JSON.stringify(branchPaths)} (got ${JSON.stringify(commitPaths)}, no foreign file)`,
+        JSON.stringify(commitPaths) === JSON.stringify(branchPaths));
     }
     check(`[trial ${t}] both trailer commits were found and checked`, trailerCommitsChecked === 2);
 

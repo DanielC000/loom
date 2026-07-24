@@ -2081,7 +2081,7 @@ export async function findLandedSquashCommit(
       } else {
         // eslint-disable-next-line no-console
         console.info(`[git] findLandedSquashCommit: ${branch} is gone and its landed commit ${sha.slice(0, 7)} ` +
-          "predates the Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone (card f621f185)");
+          "carries no Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone (card f621f185)");
       }
     }
     return sha;
@@ -2459,7 +2459,7 @@ async function scanMergedCommitMap(
   for (const entry of map.values()) if (entry.pathSetDigest === null) preFixCount++;
   if (preFixCount > 0) {
     // eslint-disable-next-line no-console
-    console.info(`[git] scanMergedCommitMap: ${preFixCount} landed branch(es) in ${repoPath} predate the ` +
+    console.info(`[git] scanMergedCommitMap: ${preFixCount} landed branch(es) in ${repoPath} carry no ` +
       "Loom-Worker-PathSet trailer — trusting Loom-Worker-Branch presence alone for those once their branch " +
       "is gone, until re-merged (card f621f185)");
   }
@@ -3147,7 +3147,15 @@ async function mergeBranchLocked(
     const mergeBaseForPathSet = (await withTimeout(git.raw(["merge-base", "HEAD", branch]), timeoutMs, "git merge-base (canonical, path-set fingerprint)")).trim();
     const digest = await changedPathSetDigest(git, mergeBaseForPathSet, branch, timeoutMs);
     pathSetTrailer = `\nLoom-Worker-PathSet: ${digest}`;
-  } catch { /* best-effort; the commit still lands, just without this trailer */ }
+  } catch (e) {
+    // Best-effort; the commit still lands, just without this trailer — but this IS a real degradation of a
+    // brand-new, live commit (not a legacy artifact), so it must be logged here, at the moment it happens —
+    // findLandedSquashCommit/scanMergedCommitMap only ever see the trailer's ABSENCE later and can't tell a
+    // capture failure apart from genuinely predating the trailer (card 9f776570).
+    // eslint-disable-next-line no-console
+    console.warn(`[git] mergeBranchLocked: Loom-Worker-PathSet capture failed for ${branch} — commit lands ` +
+      `without the trailer: ${(e as Error).message}`);
+  }
   const message = `${subject}\n\nLoom-Worker-Branch: ${branch}${pathSetTrailer}\n`;
   try {
     await withTimeout(git.raw(["commit", "-m", message]), timeoutMs, "git commit (canonical, squash-merge)");
