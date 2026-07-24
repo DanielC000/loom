@@ -1757,6 +1757,36 @@ export interface PtyHostEvents {
   /** Persist measured engine-context occupancy, refreshed at each turn boundary (Stop). */
   onContextStats(sessionId: string, stats: ContextStats): void;
   /**
+   * Card 343441bd: a real worker turn just completed — bump the persisted turn counter (staleDirective's
+   * "opportunities to act" clock). Fired EXACTLY ONCE per GENUINE Stop/StopFailure completion, from inside
+   * that case's try block, immediately before `drainPending` — deliberately NOT at the `setBusy(false,
+   * "stop-hook")` falling edge itself, and deliberately NOT from any of the other FIVE setBusy(false)
+   * sites in this file:
+   *   - `healIfStuck`'s two sites and `sendEnterAndVerify`'s give-up-recovery two — a submit that was
+   *     NEVER CONFIRMED to have started; the worker had no real opportunity to act, so counting them would
+   *     inflate turnsSinceDelivery for non-opportunities and could FALSE-FIRE the no-false-alarm-critical
+   *     staleDirective signal.
+   *   - `interruptForRedirect`'s settle site — a real turn that WAS running, cut short by a manager's own
+   *     `worker_redirect`; skipping it only UNDER-counts, which can make staleDirective fire later or not
+   *     at all, never earlier/falsely, so it's safe to exclude.
+   *   - the two usage-cap PARK `break`s inside the Stop/StopFailure case itself (the §19c rate-limit
+   *     StopFailure park, and the weekly-cap text-sentinel park) — a capped/parked turn is EQUALLY a
+   *     non-opportunity (the worker never got to act; a rate-limited worker is a different signal, owned
+   *     by the rate-limit park), so the call site sits AFTER both breaks, not at the setBusy(false) edge
+   *     they also pass through. Every OTHER path between that edge and drainPending (a failed/successful
+   *     context-stats read, the paste-placeholder tripwire) falls through to the call site, so it still
+   *     fires for every turn that reaches drain — never zero, never twice.
+   * A future edit must NOT wire this to any of those five setBusy(false) sites, and must NOT move it back
+   * above the two park breaks — doing either reintroduces exactly the false-alarm risk this scoping was
+   * designed to avoid. A wedged/stuck worker is a DIFFERENT signal, owned by the busy-stuck watchdog.
+   *
+   * OPTIONAL (unlike its siblings above) so the many existing test doubles that construct a `PtyHostEvents`
+   * object (often `class SeamHost extends PtyHost`, the real class, across ~150 daemon tests) don't all
+   * need updating just to add a no-op for a callback their scenario never exercises — the call site below
+   * uses `?.`. Production (index.ts) always wires a real implementation.
+   */
+  onTurnCompleted?(sessionId: string): void;
+  /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
    */
@@ -3260,6 +3290,17 @@ export class PtyHost {
             this.events.onRateLimited(sessionId, until, { message: `usage limit — resumes ${until}` });
             break;
           }
+          // Card 343441bd: bump the completed-turn counter HERE, immediately before drain — NOT up at the
+          // setBusy(false) falling edge above. Both usage-cap PARKS (§19c rate-limit StopFailure, the
+          // weekly-cap text sentinel) `break` OUT of this try block before reaching this point: a capped/
+          // parked turn is a NON-opportunity for the worker to act (same reason give-up-recovery's
+          // setBusy(false) sites are excluded — see onTurnCompleted's own doc), so counting it would
+          // inflate turnsSinceDelivery for an opportunity that never happened and could FALSE-FIRE the
+          // no-false-alarm-critical staleDirective signal. Every OTHER path between the falling edge and
+          // here (a failed/successful context-stats read, the paste-placeholder tripwire detect/recover)
+          // falls through to this exact line — so this is still the one chokepoint every GENUINE turn
+          // completion passes through exactly once; only the two park breaks are excluded, on purpose.
+          this.events.onTurnCompleted?.(sessionId);
           // The turn ended → safe to write. Drain ONE queued message (FIFO), re-arming busy so the
           // next Stop releases the next: strict per-session serialization. Writing only at the turn
           // boundary is what keeps a running turn from being corrupted by a mid-turn write.

@@ -636,6 +636,13 @@ export interface Session {
   recycledFrom?: string | null;     // the prior-generation session id this was recycled from
   ctxInputTokens?: number | null;   // measured engine context occupancy (last-assistant usage)
   ctxTurns?: number | null;
+  /**
+   * Count of COMPLETED worker turns — bumped ONCE per real Stop/StopFailure (the daemon's `onTurnCompleted`
+   * callback), never on the other setBusy(false) sites (a stuck/wedged/never-started submit). Distinct
+   * from `ctxTurns`, which is a context-WINDOW-occupancy meter, not a turn-sequence counter. Powers the
+   * staleDirective projection (card 343441bd) — 0 on every session that predates it.
+   */
+  turnSeq?: number;
   ctxUpdatedAt?: string | null;
   /** Engine model id from the transcript (e.g. "claude-opus-4-8"); sizes the ctx meters. */
   model?: string | null;

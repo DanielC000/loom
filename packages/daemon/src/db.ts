@@ -400,7 +400,12 @@ CREATE TABLE IF NOT EXISTS sessions (
   -- with an unchanged digest can skip re-enqueueing it EVEN ACROSS a daemon restart. Added to existing DBs
   -- via the idempotent migration below.
   last_project_memory_digest TEXT,
-  last_companion_memory_digest TEXT
+  last_companion_memory_digest TEXT,
+  -- Card 343441bd: count of COMPLETED worker turns (the Stop/StopFailure setBusy(false) edge ONLY — see
+  -- PtyHostEvents.onTurnCompleted's doc for why the other setBusy(false) sites are deliberately excluded).
+  -- Used to detect a manager directive that ages past N real turns with no worker_report — see the
+  -- staleDirective projection in mcp/orchestration.ts. Legacy rows backfill to 0 (no completed turns known).
+  turn_seq INTEGER NOT NULL DEFAULT 0
 );
 -- Append-only orchestration audit trail (manager↔worker timeline; UI timeline in #18).
 -- seq (attention-push watcher fix, CR-caught): the sqlite rowid is NOT a safe tail-poll cursor for this
@@ -1357,6 +1362,9 @@ const SESSION_ADDED_COLUMNS: Record<string, string> = {
   // NULL = "nothing delivered yet", which correctly triggers a real (not redundant) inject on first use.
   last_project_memory_digest: "TEXT",
   last_companion_memory_digest: "TEXT",
+  // Card 343441bd: completed-worker-turn counter — see the CREATE TABLE comment above. NOT NULL + constant
+  // DEFAULT is legal on ALTER TABLE ADD COLUMN, so legacy rows backfill to 0.
+  turn_seq: "INTEGER NOT NULL DEFAULT 0",
 };
 
 /** Columns added to `projects` after phase-1; applied to existing DBs by migrateProjects(). */
@@ -4423,6 +4431,16 @@ export class Db {
     this.notifySessionChanged(id);
   }
   /**
+   * Card 343441bd: bump the completed-worker-turn counter — called EXACTLY ONCE per real Stop/StopFailure
+   * (see PtyHostEvents.onTurnCompleted). Deliberately its own tiny UPDATE (not folded into
+   * setContextCounters, which is conditional on a successful transcript read) so it fires unconditionally
+   * for every genuine turn completion, independent of whether context-stats happened to read cleanly.
+   */
+  incrementTurnSeq(id: string): void {
+    this.db.prepare("UPDATE sessions SET turn_seq = turn_seq + 1 WHERE id = ?").run(id);
+    this.notifySessionChanged(id);
+  }
+  /**
    * §19c usage-limit park: stamp when the session may resume (null clears the park) and the
    * human-readable lastError. Bumps last_activity so the UI shows parked-not-dead. Persisted, so
    * the resume-at survives a daemon restart (#19c-b re-arms the wake from it).
@@ -6526,6 +6544,7 @@ function toSession(r0: unknown): Session {
     recycledFrom: (r.recycled_from as string) ?? null,
     ctxInputTokens: (r.ctx_input_tokens as number) ?? null,
     ctxTurns: (r.ctx_turns as number) ?? null,
+    turnSeq: (r.turn_seq as number) ?? 0,
     ctxUpdatedAt: (r.ctx_updated_at as string) ?? null,
     model: (r.model as string) ?? null,
     rateLimitedUntil: (r.rate_limited_until as string) ?? null,

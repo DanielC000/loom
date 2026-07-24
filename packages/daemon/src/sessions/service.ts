@@ -4364,9 +4364,16 @@ export class SessionService {
     // Durable-tracked: if the worker is busy the message is HELD in its FIFO and persisted as
     // `session_message_queued` so a sender death / daemon restart can't drop it (card 2ca18433).
     const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null });
+    // Card 343441bd: `msgId` (always minted — see enqueueDurableMessage's doc) lets the staleDirective
+    // projection find THIS directive later. `turnSeqAtDelivery` is stamped HERE only on the immediate-
+    // delivery path (r.delivered — the worker was idle, so send time IS delivery time; `worker.turnSeq`
+    // was already read above and submit() itself never touches turn_seq, so it's still current). The
+    // held path stamps it later, at ACTUAL delivery, in `resolveQueuedMessage` — never here, and never at
+    // enqueue, since a held message hasn't reached the worker yet.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
+      detail: r.delivered ? { msgId: r.msgId, turnSeqAtDelivery: worker.turnSeq ?? 0 } : { msgId: r.msgId },
     });
     return r;
   }
@@ -4624,10 +4631,20 @@ export class SessionService {
   private resolveQueuedMessage(msgId: string, opts: { recipientId?: string; reason?: string } = {}): void {
     try {
       if (this.db.isQueuedMessageDelivered(msgId)) return; // already resolved — idempotent no-op
+      // Card 343441bd: this fires the instant a HELD message is actually handed to the recipient
+      // (drainPending/consumePending's onDeliver, or the boot re-drive) — the correct stamp point for
+      // `turnSeqAtDelivery` on the held path (mirrors messageWorker's immediate-path stamp; NEVER at
+      // enqueue). Only stamped on a genuine delivery (`!opts.reason`) — a "superseded"/"obsolete"
+      // resolution never actually delivered the text, so it has no real delivery turn to record.
+      const detail: Record<string, unknown> = opts.reason ? { msgId, reason: opts.reason } : { msgId };
+      if (!opts.reason && opts.recipientId) {
+        const recipient = this.db.getSession(opts.recipientId);
+        if (recipient) detail.turnSeqAtDelivery = recipient.turnSeq ?? 0;
+      }
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: "", workerSessionId: opts.recipientId ?? null, taskId: null,
-        kind: "session_message_delivered", detail: opts.reason ? { msgId, reason: opts.reason } : { msgId },
+        kind: "session_message_delivered", detail,
       });
     } catch { /* delivery-marking must never disturb the host drain or boot */ }
   }
