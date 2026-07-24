@@ -5047,6 +5047,25 @@ export class Db {
     const r = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     return r ? toTask(r) : undefined;
   }
+  /**
+   * Batched branch → task-title mapping for the Git tab's worker-branch enrichment (card e03b7ee4):
+   * every branch this project has EVER spawned a worker session on, joined out to its task's title in
+   * ONE query — not a per-branch lookup, so labelling a whole branch list costs one round trip
+   * regardless of how many `loom/*` branches it contains. A branch with no session row at all (hand-
+   * created), or whose task was since deleted (INNER JOIN drops it), is simply absent from the map.
+   * Later rows win on a duplicate branch (a recycled worker's new session row shares its predecessor's
+   * branch) — harmless, since a branch is deterministic per task, so every row for it agrees anyway.
+   */
+  getWorkerBranchTaskMap(projectId: string): Map<string, { taskId: string; taskTitle: string }> {
+    const map = new Map<string, { taskId: string; taskTitle: string }>();
+    const rows = this.db.prepare(
+      `SELECT s.branch AS branch, t.id AS taskId, t.title AS taskTitle
+       FROM sessions s JOIN tasks t ON t.id = s.task_id
+       WHERE s.project_id = ? AND s.branch IS NOT NULL`,
+    ).all(projectId) as { branch: string; taskId: string; taskTitle: string }[];
+    for (const r of rows) map.set(r.branch, { taskId: r.taskId, taskTitle: r.taskTitle });
+    return map;
+  }
   insertTask(t: Task): void {
     this.db.prepare(
       `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key)

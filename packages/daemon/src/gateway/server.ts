@@ -50,7 +50,7 @@ import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
-import { getWorkerDiffCached } from "../git/worktrees.js";
+import { getWorkerDiffCached, resolveWorkerBranchInfo } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
 import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
@@ -3556,7 +3556,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });
     try {
-      return await new GitReader(p.repoPath).branches();
+      const result = await new GitReader(p.repoPath).branches();
+      // Card e03b7ee4 — additive enrichment: `current`/`all` stay byte-identical for existing
+      // consumers; `worker` is a parallel array covering only `loom/*` worker branches, each carrying
+      // its resolved card title (batched, one query for the whole project) + git-derived merged flag
+      // (reusing the SAME cached merged-commit map getTaskMergedInfo itself reads — no per-branch git
+      // call). UI consumption is a separate follow-up.
+      const loomBranches = result.all.filter((b) => b.startsWith("loom/"));
+      const taskMap = deps.db.getWorkerBranchTaskMap(p.id);
+      const worker = await resolveWorkerBranchInfo(p.repoPath, loomBranches, taskMap);
+      return { ...result, worker };
     } catch (e) {
       return reply.code(500).send({ error: gitError(e) });
     }

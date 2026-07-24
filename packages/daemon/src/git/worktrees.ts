@@ -2655,6 +2655,43 @@ export async function findLandedSquashCommitViaMap(
   return { hit: true, sha: resolved?.sha ?? null };
 }
 
+/** One entry of the Git tab's worker-branch enrichment — see {@link resolveWorkerBranchInfo}. */
+export interface WorkerBranchInfo {
+  branch: string;
+  /** The branch's task title, from a batched DB lookup (`Db.getWorkerBranchTaskMap`) — `null` when no
+   *  task mapping exists (a hand-created branch, or one whose task was since deleted). */
+  taskTitle: string | null;
+  /** This branch's git-derived ship state — `true` only for a VERIFIED landed squash (never a guess). */
+  merged: boolean;
+}
+
+/**
+ * Enrich a project's git branches with their resolved task title + merged flag for the Git tab's
+ * branches endpoint (card e03b7ee4, follow-up to a044b33b). `taskMap` is the caller's already-batched
+ * branch → task lookup (one query for the whole project, `Db.getWorkerBranchTaskMap`) — this function
+ * makes no DB call itself.
+ *
+ * The merged flag REUSES {@link findLandedSquashCommitViaMap} — same cached {@link
+ * getMergedCommitMapCached} map {@link getTaskMergedInfo} itself reads, so labelling N branches costs
+ * ONE bounded `git log` scan per repo (shared + cache-gated on repo HEAD, same as every other caller of
+ * that map), not one git subprocess per branch. Never throws: both the map scan and the per-hit
+ * verification it delegates to are fail-safe (see their own docs), so a git error degrades every
+ * affected branch to `merged: false` rather than failing this whole enrichment.
+ */
+export async function resolveWorkerBranchInfo(
+  repoPath: string, branches: string[], taskMap: Map<string, { taskId: string; taskTitle: string }>,
+  deps: BoundedGitDeps = {},
+): Promise<WorkerBranchInfo[]> {
+  return Promise.all(branches.map(async (branch) => {
+    const result = await findLandedSquashCommitViaMap(repoPath, branch, deps);
+    return {
+      branch,
+      taskTitle: taskMap.get(branch)?.taskTitle ?? null,
+      merged: result.hit && result.sha !== null,
+    };
+  }));
+}
+
 /**
  * Is `taskId` merged + shipped on `repoPath`'s main line? Resolves the task's DETERMINISTIC branch
  * (`loom/<taskKey(taskId)>`) and looks it up in the cached {@link getMergedCommitMapCached} map — keyed
