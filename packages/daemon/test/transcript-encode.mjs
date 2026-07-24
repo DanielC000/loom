@@ -10,7 +10,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Each char that isn't [a-zA-Z0-9] → '-' (matches observed Claude dirs like
-// C--Users-danie-AppData-Local-Temp-claude-tmp-as4TmS96wx-... and ...-immo-trend-data).
+// C--Users-alex-AppData-Local-Temp-claude-tmp-as4TmS96wx-... and ...-immo-trend-data).
 const expect = (cwd) => path.resolve(cwd).replace(/[^a-zA-Z0-9]/g, "-");
 
 // The R1 bug: a DOT in the path (a real ~/.loom worktree, or a mktemp `tmp.xxxx`) must encode to '-'.

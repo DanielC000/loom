@@ -57,10 +57,11 @@ const claudeFile = path.join(claudeDir, `${engineId}.jsonl`);
 
 try {
   // ════════ A. PATCH rename / vaultPath (happy path) + /config still independent ════════
+  const newVaultPath = path.join(os.tmpdir(), "new-vault");
   db.insertProject(mkProject("pEdit"));
-  const renamed = await app.inject({ method: "PATCH", url: "/api/projects/pEdit", payload: { name: "Renamed", vaultPath: "D:/new/vault" } });
+  const renamed = await app.inject({ method: "PATCH", url: "/api/projects/pEdit", payload: { name: "Renamed", vaultPath: newVaultPath } });
   check("A: PATCH 200", renamed.statusCode === 200);
-  check("A: rename + vaultPath written", db.getProject("pEdit").name === "Renamed" && db.getProject("pEdit").vaultPath === "D:/new/vault");
+  check("A: rename + vaultPath written", db.getProject("pEdit").name === "Renamed" && db.getProject("pEdit").vaultPath === newVaultPath);
   const blankName = await app.inject({ method: "PATCH", url: "/api/projects/pEdit", payload: { name: "   " } });
   check("A: blank name → 400", blankName.statusCode === 400);
   const missing = await app.inject({ method: "PATCH", url: "/api/projects/nope", payload: { name: "x" } });

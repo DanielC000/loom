@@ -289,8 +289,9 @@ try {
   check("session_stop: 404 on an unknown session", (await call("session_stop", { sessionId: "ghost" })).error === "session not found");
 
   // ===================== (a) PROJECT update + (d) archive (reserved refused) =====================
-  const projUpd = await call("project_update", { projectId: "pOrd", name: "Ordinary-2", vaultPath: "C:/tmp/ord2" });
-  check("project_update: updates name + vaultPath", projUpd.name === "Ordinary-2" && projUpd.vaultPath === "C:/tmp/ord2" && !projUpd.error);
+  const newVaultPath = path.join(os.tmpdir(), "ord2");
+  const projUpd = await call("project_update", { projectId: "pOrd", name: "Ordinary-2", vaultPath: newVaultPath });
+  check("project_update: updates name + vaultPath", projUpd.name === "Ordinary-2" && projUpd.vaultPath === newVaultPath && !projUpd.error);
   check("project_update: persists to the Db", db.getProject("pOrd")?.name === "Ordinary-2");
   check("project_update: 404 on an unknown project", (await call("project_update", { projectId: "ghost", name: "x" })).error === "project not found");
 

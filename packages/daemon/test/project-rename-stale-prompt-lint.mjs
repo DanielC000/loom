@@ -26,6 +26,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execSync } from "node:child_process";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -51,7 +52,15 @@ const { lintStalePromptsOnProjectChange } = await import("../dist/projects/promp
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
-const OLD_REPO_PATH = "C:\\Users\\danie\\Documents\\GitHub\\Invest";
+const OLD_REPO_PATH = path.join(os.tmpdir(), "loom-stale-prompt-fixture", "Invest");
+
+// (4) below rebinds repoPath through the real checkRepoRebind guard (isGitRepo), which requires an
+// EXISTING git repo — unlike OLD_REPO_PATH above (an inert DB-seeded string), newRepo must be a real
+// temp git repo (same mkRepo pattern as project-rebind.mjs).
+const newRepo = path.join(os.tmpdir(), `loom-stale-prompt-newrepo-${Date.now()}-${process.pid}`);
+fs.mkdirSync(newRepo, { recursive: true });
+fs.writeFileSync(path.join(newRepo, "README.md"), "# Seismo\n");
+execSync(`git init -q && git add . && git -c user.email=t@loom -c user.name=t commit -q -m init`, { cwd: newRepo });
 
 const now = new Date().toISOString();
 const db = new Db();
@@ -141,7 +150,6 @@ try {
   check("(3) a superset rename does not false-positive on the old name as a substring of the new one", !supersetRename.staleStartupPrompts.some((w) => w.agentId === "agentD"));
 
   // (4) repoPath change: agentA's prompt still contains the OLD repoPath verbatim.
-  const newRepo = "C:\\Users\\danie\\Documents\\GitHub\\Seismo";
   const rebound = await plat.call("project_update", { projectId: "pProj", repoPath: newRepo });
   check("(4) repoPath rebind persisted", rebound.repoPath === newRepo && !rebound.error);
   const reboundIds = rebound.staleStartupPrompts.map((w) => w.agentId);
@@ -161,7 +169,7 @@ try {
   check("(7) the shared lint used by REST PATCH agrees with project_update's own result", JSON.stringify(sharedResult.map((w) => w.agentId).sort()) === JSON.stringify(reboundIds.sort()));
 } finally {
   db.close();
-  try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  for (const d of [tmpHome, newRepo]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort */ } }
 }
 
 console.log(failures === 0

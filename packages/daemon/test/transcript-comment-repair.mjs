@@ -22,7 +22,7 @@ const grepHunk = [
   "--",
   "40-/** Every recognized command name lives in this table. */",
   "41-\\** Every recognized command name lives in this OTHER table.",
-  "42-const p = \"C:\\Users\\danie\\file.ts\"; // a real mid-line backslash — must NOT be touched",
+  "42-const p = \"C:\\Users\\alex\\file.ts\"; // a real mid-line backslash — must NOT be touched",
 ].join("\n");
 
 const engineSessionId = "11111111-2222-3333-4444-555555555555";
@@ -43,7 +43,7 @@ withEngineTranscriptFixture(
     check("mangled leading `/**` is restored", text.includes("/** Every recognized command name lives in this OTHER table."));
     check("no residual bare backslash before the second 'Every'", !text.includes("\\** Every recognized command name lives in this OTHER"));
     check("an already-clean `//` line is untouched (no false positive)", text.includes("/** Every recognized command name lives in this table. */"));
-    check("a genuine mid-line Windows-path backslash is left alone", text.includes('"C:\\Users\\danie\\file.ts"'));
+    check("a genuine mid-line Windows-path backslash is left alone", text.includes('"C:\\Users\\alex\\file.ts"'));
   },
 );
 
