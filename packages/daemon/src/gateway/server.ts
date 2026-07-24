@@ -6,7 +6,7 @@ import websocket from "@fastify/websocket";
 import fastifyStatic from "@fastify/static";
 import type { WebSocket } from "ws";
 import type { TerminalInput, ShellTerminal, Project, Agent, Task, ProjectConfigOverride, Schedule, ApiKey, ApiKeyCaps, ApiKeyStatus, GatewayTokenStatus, UsageHistory, SessionUsageHistory, ScheduleHistoryPage, CompanionRoute, UsageSample, AgentRun, RunStatus, Session, SessionRole, ProcessState, Wake, PollJob, EventTrigger, EventTriggerEventKind, WebhookSourceType, OrchestrationEventKind, QuestionType, PermissionScope, PermissionAnswer, ProvisionTarget, ServerFleetMessage, ClientFleetMessage, RepoRegistryEntry } from "@loom/shared";
-import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
+import { resolveConfig, resolveCodescapeConfig, columnKeyForRole, describeCron, PERMISSION_ANSWERS, PERMISSION_SCOPES, EVENT_TRIGGER_EVENT_KINDS, WEBHOOK_SOURCE_TYPES, SESSION_ROLES } from "@loom/shared";
 import { FleetHub } from "./fleet-hub.js";
 import { resolveWebDistDir, isLoomDev, PORT, expandTilde } from "../paths.js";
 import { loomVersion, isPackagedInstall } from "../version.js";
@@ -2888,10 +2888,12 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
           options: q.options ?? null, recommendation: q.recommendation ?? null, taskId: q.taskId ?? null,
           permissionAction: q.permissionAction ?? null, permissionScope: q.permissionScope ?? null,
           permissionExpiresAt: q.permissionExpiresAt ?? null, credentialEnvVar: q.credentialEnvVar ?? null,
-          // provisionConnectionId/provisionBindingState are answer-time-only (see the seed body type's own
-          // comment above) — always the pre-answer defaults here; insertQuestion itself only ever binds
-          // provisionTarget at insert time regardless.
+          // provisionConnectionId/provisionBindingState and decidedScope/decidedExpiresAt are ALL
+          // answer-time-only (see the seed body type's own comment above) — always the pre-answer defaults
+          // here; insertQuestion itself never writes any of them regardless of what's passed. A spec that
+          // needs an already-decided permission row seeds pending, then answers it via the real REST route.
           provisionTarget: q.provisionTarget ?? null, provisionConnectionId: null, provisionBindingState: "none",
+          decidedScope: null, decidedExpiresAt: null,
           state, chosenOption: q.chosenOption ?? null, note: q.note ?? null,
           createdAt: q.createdAt ?? now,
           answeredAt: q.answeredAt ?? (state === "answered" || state === "consumed" ? now : null),
@@ -4834,14 +4836,29 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         provision,
       });
     } else if (question.type === "permission") {
-      const body = (req.body ?? {}) as { decision?: string; note?: string };
+      // `scope`/`expiresAt` (fix(mcp): persist and surface permission scope/expiry) are the human's ACTUAL
+      // answer-time grant — distinct from question.permissionScope/permissionExpiresAt (the asking
+      // manager's unenforced ask-time REQUEST, never touched here). The web UI computes `expiresAt` as an
+      // ABSOLUTE ISO timestamp from its relative-duration picker (24h/7d/30d) at submit time — this route
+      // never interprets a relative duration itself. Only persisted on `decision:"authorize"`: a "deny"
+      // grants nothing, so there is no scope/expiry to record (both stay null on the row either way).
+      const body = (req.body ?? {}) as { decision?: string; note?: string; scope?: PermissionScope; expiresAt?: string };
       const isPermissionAnswer = (v: string | undefined): v is PermissionAnswer =>
         (PERMISSION_ANSWERS as readonly string[]).includes(v ?? "");
       if (!isPermissionAnswer(body.decision)) {
         return reply.code(400).send({ error: `decision must be one of: ${PERMISSION_ANSWERS.join(", ")}` });
       }
+      if (body.scope !== undefined && !(PERMISSION_SCOPES as readonly string[]).includes(body.scope)) {
+        return reply.code(400).send({ error: `scope must be one of: ${PERMISSION_SCOPES.join(", ")}` });
+      }
+      if (body.expiresAt !== undefined && Number.isNaN(Date.parse(body.expiresAt))) {
+        return reply.code(400).send({ error: "expiresAt must be a valid ISO date string" });
+      }
       const note = typeof body.note === "string" ? body.note : null;
-      updated = deps.db.answerQuestion(id, { chosenOption: body.decision, note, answeredAt });
+      const isAuthorize = body.decision === PERMISSION_ANSWERS[0];
+      const decidedScope = isAuthorize ? (body.scope ?? "once") : null;
+      const decidedExpiresAt = isAuthorize && decidedScope === "standing" ? (body.expiresAt ?? null) : null;
+      updated = deps.db.answerQuestion(id, { chosenOption: body.decision, note, answeredAt, decidedScope, decidedExpiresAt });
     } else {
       // 'decision' / 'input' — today's exact validation, byte-identical for existing callers.
       const body = (req.body ?? {}) as { chosenOption?: string | null; note?: string };

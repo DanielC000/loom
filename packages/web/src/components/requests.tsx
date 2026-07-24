@@ -515,21 +515,25 @@ function InputControl({ q }: { q: QuestionInboxItem }) {
   );
 }
 
-// permission — Authorize / Deny + a scope picker (once / standing) with an optional expiry (standing only)
-// + an optional note. The answer route only carries {decision, note}; the human's scope/expiry choice is
-// folded into the note (Loom does not enforce the requested scope — it's the manager's to read), so the
-// grant lifetime is never silently dropped.
+// permission — Authorize / Deny + a scope picker (once / standing) with an optional expiry (standing
+// only) + an optional note. The human's chosen scope/expiry (fix(mcp): persist and surface permission
+// scope/expiry) is sent STRUCTURALLY to the answer route (never folded into `note` text) — `expiry` here
+// is a relative duration CODE from the picker below; `expiresAtIso` converts it to an ABSOLUTE timestamp
+// at submit time, since "24h" only means something relative to the moment of decision. ADVISORY ONLY:
+// Loom persists + surfaces this grant (and derives a read-time `lapsed` flag once it's past) but does not
+// itself enforce or re-check it — a manager must read the grant and honor it.
+const PERMISSION_EXPIRY_MS: Record<string, number> = { "24h": 24 * 60 * 60 * 1000, "7d": 7 * 24 * 60 * 60 * 1000, "30d": 30 * 24 * 60 * 60 * 1000 };
 function PermissionControl({ q }: { q: QuestionInboxItem }) {
   const [scope, setScope] = useState<PermissionScope>(q.permissionScope ?? "once");
   const [expiry, setExpiry] = useState<string>("");
   const [note, setNote] = useState("");
-  const composeNote = (): string | undefined => {
-    const scopeText = scope === "standing" ? `scope: standing${expiry ? ` until ${expiry}` : ""}` : "scope: once";
-    const parts = [scopeText, note.trim()].filter(Boolean);
-    return parts.join(" · ") || undefined;
+  const expiresAtIso = (): string | undefined => {
+    if (scope !== "standing" || !expiry) return undefined;
+    const ms = PERMISSION_EXPIRY_MS[expiry];
+    return ms ? new Date(Date.now() + ms).toISOString() : undefined;
   };
-  const authorize = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "authorize", composeNote()));
-  const deny = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "deny", note.trim() || undefined));
+  const authorize = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "authorize", { scope, expiresAt: expiresAtIso(), note: note.trim() || undefined }));
+  const deny = useAnswerMutation(q.id, () => api.answerPermissionQuestion(q.id, "deny", { note: note.trim() || undefined }));
   const pending = authorize.isPending || deny.isPending;
   const kv = (label: string, value: string) => (
     <div style={{ display: "flex", gap: 10, fontFamily: font.mono, fontSize: 13 }}>

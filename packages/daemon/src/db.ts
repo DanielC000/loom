@@ -1043,8 +1043,12 @@ CREATE TABLE IF NOT EXISTS questions (
   recommendation TEXT,
   task_id TEXT,                            -- soft link to tasks(id) — deliberately no FK, see doc above
   permission_action TEXT,
-  permission_scope TEXT,                   -- 'once' | 'standing', 'permission' type only
+  permission_scope TEXT,                   -- 'once' | 'standing', 'permission' type only (ASK-TIME hint)
   permission_expires_at TEXT,
+  decided_scope TEXT,                      -- 'once' | 'standing', the human's ANSWER-TIME grant; set only
+                                            -- on decision='authorize' (fix(mcp): persist/surface scope+expiry)
+  decided_expires_at TEXT,                 -- absolute ISO expiry paired with decided_scope; advisory only —
+                                            -- see Question.decidedExpiresAt's doc
   credential_env_var TEXT,
   secret_blob TEXT,                        -- envelope ciphertext (v1:iv:tag:ct), 'credential' type only —
                                             -- NEVER mapped into the Question object (see toQuestion)
@@ -1532,6 +1536,12 @@ const QUESTION_ADDED_COLUMNS: Record<string, string> = {
   permission_action: "TEXT",
   permission_scope: "TEXT",
   permission_expires_at: "TEXT",
+  // The human's ANSWER-TIME grant (fix(mcp): persist/surface permission scope+expiry) — nullable like
+  // every other added column here; a legacy row (answered before this card) simply reads null for both,
+  // which the read side (questionAnswerByType) must treat as "no structured grant recorded" — never a
+  // false lapsed:true (see its own doc).
+  decided_scope: "TEXT",
+  decided_expires_at: "TEXT",
   credential_env_var: "TEXT",
   secret_blob: "TEXT",
   // Credential auto-provisioning v1 (card 193de09e). provision_target is the ask-time JSON
@@ -5608,13 +5618,23 @@ export class Db {
    * `answerCredentialQuestion` instead. This is a load-bearing backstop, not defensive dead code: it's
    * what guarantees the plaintext secret can never land in the plain chosen_option/note columns via a
    * caller that (by mistake or otherwise) reuses this generic path for a credential ask.
+   *
+   * `decidedScope`/`decidedExpiresAt` (fix(mcp): persist/surface permission scope+expiry) are the human's
+   * ACTUAL answer-time grant for a `type:"permission"` ask — optional and BOTH default to `null` so every
+   * existing caller (decision/input answers, or a pre-this-card test/client that never passes them) is
+   * byte-identical to before. The gateway route only ever passes them for a permission ask, and only when
+   * `chosenOption === "authorize"` (a "deny" has no grant to record) — this method itself does not enforce
+   * that; it's a dumb column write, same posture as every other field here.
    */
-  answerQuestion(id: string, patch: { chosenOption: string | null; note: string | null; answeredAt: string }): Question | undefined {
+  answerQuestion(
+    id: string,
+    patch: { chosenOption: string | null; note: string | null; answeredAt: string; decidedScope?: PermissionScope | null; decidedExpiresAt?: string | null },
+  ): Question | undefined {
     const existing = this.getQuestion(id);
     if (!existing || existing.state !== "pending" || existing.type === "credential") return undefined;
     this.db.prepare(
-      "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ? WHERE id = ?",
-    ).run(patch.chosenOption, patch.note, patch.answeredAt, id);
+      "UPDATE questions SET state = 'answered', chosen_option = ?, note = ?, answered_at = ?, decided_scope = ?, decided_expires_at = ? WHERE id = ?",
+    ).run(patch.chosenOption, patch.note, patch.answeredAt, patch.decidedScope ?? null, patch.decidedExpiresAt ?? null, id);
     return this.getQuestion(id);
   }
   /**
@@ -6784,6 +6804,8 @@ function toQuestion(r0: unknown): Question {
     permissionAction: (r.permission_action as string | null) ?? null,
     permissionScope: (r.permission_scope as PermissionScope | null) ?? null,
     permissionExpiresAt: (r.permission_expires_at as string | null) ?? null,
+    decidedScope: (r.decided_scope as PermissionScope | null) ?? null,
+    decidedExpiresAt: (r.decided_expires_at as string | null) ?? null,
     credentialEnvVar: (r.credential_env_var as string | null) ?? null,
     provisionTarget: r.provision_target ? (JSON.parse(r.provision_target as string) as ProvisionTarget) : null,
     provisionConnectionId: (r.provision_connection_id as string | null) ?? null,

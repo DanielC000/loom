@@ -1985,7 +1985,8 @@ export type QuestionType = (typeof QUESTION_TYPES)[number];
 
 /** A `permission` request's requested grant lifetime: `once` (this action only) or `standing` (keep
  *  authorizing this class of action going forward) — the human's answer may grant a narrower scope than
- *  requested; Loom does not enforce the requested scope, it's a hint shown alongside the ask. */
+ *  requested; Loom does not enforce the requested scope, it's a hint shown alongside the ask. The human's
+ *  ACTUAL chosen scope is a separate field, `Question.decidedScope` — see its own doc. */
 export const PERMISSION_SCOPES = ["once", "standing"] as const;
 export type PermissionScope = (typeof PERMISSION_SCOPES)[number];
 
@@ -2048,6 +2049,20 @@ export interface Question {
   permissionScope: PermissionScope | null;
   /** `type:"permission"` ask-time payload — an optional ISO expiry for the requested grant. Null for every other type. */
   permissionExpiresAt: string | null;
+  /** `type:"permission"` ANSWER-time payload (fix(mcp): persist/surface permission scope+expiry) — the
+   *  human's ACTUAL chosen grant lifetime, distinct from `permissionScope` (the asking manager's
+   *  ask-time REQUEST, unenforced). Set by the human-only answer boundary ONLY when the decision is
+   *  `"authorize"` — a `"deny"` grants nothing, so there is no scope to record. Null until answered, null
+   *  on a `"deny"`, and null for every non-"permission" type or a row answered before this field existed
+   *  (an old row's grant lifetime was never captured structurally — see `decidedExpiresAt`). */
+  decidedScope: PermissionScope | null;
+  /** `type:"permission"` ANSWER-time payload, paired with `decidedScope` — the human's chosen grant's
+   *  ABSOLUTE ISO expiry (computed at answer time from the UI's relative-duration picker), or null for a
+   *  no-expiry / "once" grant. Same authorize-only / null-until-answered rules as `decidedScope`.
+   *  ADVISORY ONLY: Loom derives a read-time `lapsed` flag from this (see `questionAnswerByType`) but
+   *  never itself revokes, blocks, or re-checks a grant against it — the asking manager must read
+   *  `lapsed` and honor it. */
+  decidedExpiresAt: string | null;
   /** `type:"credential"` ask-time payload — the env var / config key name the agent expects the secret
    *  under once granted (a display hint, not itself wired to injection — see Question's own doc). Null for
    *  every other type. */

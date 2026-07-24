@@ -143,9 +143,15 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
     blocker with no clean options is title+body only.)
   - **`input`** — a freeform answer you need (a domain, a brief, a value), with no fixed options.
   - **`permission`** — proactively ask to be authorized for an irreversible/outward/spend action:
-    `action` (REQUIRED) describes it, optional `scope` (`"once"`/`"standing"`) + `expiresAt`. It's an
+    `action` (REQUIRED) describes it, optional `scope` (`"once"`/`"standing"`) + `expiresAt` are your
+    REQUEST — the human may grant a different scope/expiry, or none. It's an
     ask/answer channel, **not a second gate** — filing it blocks nothing, so if the action must WAIT on
-    the answer, hold it yourself and don't act until you `question_pull` an approval.
+    the answer, hold it yourself and don't act until you `question_pull` an approval. **ADVISORY ONLY:**
+    `question_pull`/`task_request_get` surface the human's ACTUAL decided `{scope, expiresAt, lapsed}` —
+    Loom persists it and derives `lapsed` at read time (true once `expiresAt` is past), but never itself
+    enforces, blocks, or revokes a standing grant. You must re-check `lapsed` yourself before treating an
+    old "standing" answer as still live — this matters most across a `worker_recycle`/manager-recycle,
+    where a successor otherwise inherits a belief instead of the actual grant state.
   - **`credential`** — ask for a secret under a **never-echo** model: you will NEVER receive the
     plaintext, only an ack that it's been provisioned (optionally under the `envVar` you name) — use the
     secret via your environment/config, never expect it back in the tool result.

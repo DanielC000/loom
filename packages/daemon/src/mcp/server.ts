@@ -115,7 +115,12 @@ export class TaskMcpRouter {
         description:
           "Read ONE Request connected to a task, IN FULL: {id,type,title,body,options,recommendation," +
           "state,taskId,createdAt,answeredAt} plus its answer by type — `chosenOption`+`note` for " +
-          "\"decision\"/\"input\", `approved`+`note` for \"permission\" (all null until answered), `ack` " +
+          "\"decision\"/\"input\", `approved`+`note`+`scope`+`expiresAt`+`lapsed` for \"permission\" (all " +
+          "null/false until answered) — `scope`/`expiresAt` are the human's ACTUAL decided grant (distinct " +
+          "from the ask-time REQUESTED scope/expiry), and `lapsed` is a read-time-derived flag, true only " +
+          "once `expiresAt` is set AND in the past. ADVISORY ONLY — Loom persists + surfaces this grant but " +
+          "never itself enforces, blocks, or revokes it; a recycled successor should re-read this rather " +
+          "than trust a predecessor's belief about a prior 'standing' grant. `ack` " +
           "ONLY (never the secret) for \"credential\" (null until provided). NON-CONSUMING: unlike " +
           "question_pull, reading this never flips the request's state — re-readable across turns/agents. " +
           "`id` is the request id (from tasks_get's `requests.items`/task_requests_list). Optional `taskId` " +

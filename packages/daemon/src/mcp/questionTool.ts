@@ -130,6 +130,10 @@ export function buildQuestionAsk(
       permissionAction: type === "permission" ? (input.action as string) : null,
       permissionScope: type === "permission" ? (input.scope ?? null) : null,
       permissionExpiresAt: type === "permission" ? (input.expiresAt ?? null) : null,
+      // decidedScope/decidedExpiresAt (fix(mcp): persist/surface permission scope+expiry) are an
+      // ANSWER-time payload only — always null at ask time, written later by answerQuestion.
+      decidedScope: null,
+      decidedExpiresAt: null,
       credentialEnvVar: type === "credential" ? (input.envVar ?? null) : null,
       provisionTarget: type === "credential" ? (input.provisionTo ?? null) : null,
       provisionConnectionId: null,
@@ -183,20 +187,45 @@ function credentialAck(q: Question): string {
 }
 
 /**
+ * Derive a permission answer's structured grant fields (fix(mcp): persist and surface permission
+ * scope/expiry) — `{scope, expiresAt, lapsed}` — from the human's ANSWER-TIME `decidedScope`/
+ * `decidedExpiresAt`, never the ask-time `permissionScope`/`permissionExpiresAt` hint (a separate,
+ * unenforced REQUEST the asking manager made — see both fields' own doc on `Question`). Shared by
+ * `questionPullItem` and `questionAnswerByType` so the two read surfaces can never drift.
+ *
+ * NULL-SAFE for a row answered before this card shipped (both `decided*` fields null — they were never
+ * captured at all): surfaces `{scope:null, expiresAt:null, lapsed:false}` — an absent grant record is
+ * never mistaken for an expired one. `lapsed` is a READ-TIME-derived boolean ONLY (`decidedExpiresAt` is
+ * set AND in the past) — a "once" or no-expiry grant (`decidedExpiresAt: null`) is `lapsed:false`, not a
+ * null-comparison artifact. ADVISORY ONLY: this is a display signal — Loom never itself revokes, blocks,
+ * or re-checks a live grant against it; the asking (or a recycled successor) manager must read `lapsed`
+ * and honor it, same posture as `provisionTo`'s "stating intent only."
+ */
+function permissionGrant(q: Question): { scope: PermissionScope | null; expiresAt: string | null; lapsed: boolean } {
+  return {
+    scope: q.decidedScope,
+    expiresAt: q.decidedExpiresAt,
+    lapsed: q.decidedExpiresAt !== null && new Date(q.decidedExpiresAt).getTime() < Date.now(),
+  };
+}
+
+/**
  * Shape ONE pulled-and-consumed `Question` into `question_pull`'s agent-facing payload (card 695ebab0),
  * branching by `type`. A "credential" answer NEVER surfaces a secret here — there is none to surface: the
  * `Question` object itself never carries it (db.ts's `toQuestion` deliberately never maps `secret_blob`)
  * — the agent only ever gets an ack. A "permission" answer surfaces `approved` (derived from
  * `chosenOption`) instead of a raw option string, since the REST answer route constrains a permission's
  * `chosenOption` to exactly one of `PERMISSION_ANSWERS` — the SAME shared const this derivation compares
- * against, so the write-side validation and this read-side derivation can never drift apart.
+ * against, so the write-side validation and this read-side derivation can never drift apart. It also
+ * surfaces the human's structured `{scope, expiresAt, lapsed}` grant (`permissionGrant` above) so a
+ * recycled successor manager can re-check the actual decided grant instead of inheriting a belief.
  */
 export function questionPullItem(q: Question): Record<string, unknown> {
   if (q.type === "credential") {
     return { questionId: q.id, title: q.title, type: q.type, ack: credentialAck(q) };
   }
   if (q.type === "permission") {
-    return { questionId: q.id, title: q.title, type: q.type, approved: q.chosenOption === PERMISSION_ANSWERS[0], note: q.note };
+    return { questionId: q.id, title: q.title, type: q.type, approved: q.chosenOption === PERMISSION_ANSWERS[0], note: q.note, ...permissionGrant(q) };
   }
   return { questionId: q.id, title: q.title, type: q.type, chosenOption: q.chosenOption, note: q.note };
 }
@@ -212,7 +241,8 @@ export function questionPullItem(q: Question): Record<string, unknown> {
  * fabricate a "provided and stored securely" ack for a secret that was never given). Same credential
  * never-echo guarantee as `questionPullItem` — see `credentialAck`. Exported so both non-consuming read
  * surfaces (task-scoped and cross-project audit) share this ONE branching implementation instead of
- * drifting apart.
+ * drifting apart. The permission branch also surfaces `permissionGrant`'s structured `{scope, expiresAt,
+ * lapsed}` — null-safe on an unanswered/legacy row exactly like `permissionGrant` itself.
  */
 export function questionAnswerByType(q: Question): Record<string, unknown> {
   const hasAnswer = q.state === "answered" || q.state === "consumed";
@@ -220,7 +250,7 @@ export function questionAnswerByType(q: Question): Record<string, unknown> {
     return { ack: hasAnswer ? credentialAck(q) : null };
   }
   if (q.type === "permission") {
-    return { approved: hasAnswer ? q.chosenOption === PERMISSION_ANSWERS[0] : null, note: q.note };
+    return { approved: hasAnswer ? q.chosenOption === PERMISSION_ANSWERS[0] : null, note: q.note, ...permissionGrant(q) };
   }
   return { chosenOption: q.chosenOption, note: q.note };
 }

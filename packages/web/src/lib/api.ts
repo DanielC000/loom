@@ -1,4 +1,4 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, PermissionScope, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -601,14 +601,18 @@ export const api = {
   question: (id: string) => getErr<QuestionInboxItem>(`/api/questions/${encodeURIComponent(id)}`),
   // The answer route (POST /api/questions/:id/answer) branches its body SHAPE by the question's `type`
   // server-side (see gateway/server.ts): decision/input → {chosenOption?,note?}; permission →
-  // {decision,note?}; credential → {secret} (NEVER-ECHO — the plaintext is envelope-encrypted at that one
-  // write boundary and never returned). Three typed clients so each caller sends exactly its type's body;
-  // all surface the route's `{ error }` verbatim via postErr. The response is always the bare Question
-  // (which, for credential, never carries the secret).
+  // {decision,scope?,expiresAt?,note?} — `scope`/`expiresAt` (fix(mcp): persist and surface permission
+  // scope/expiry) are the human's ACTUAL chosen grant, persisted structurally server-side (never folded
+  // into `note`); `expiresAt`, if given, MUST be an absolute ISO timestamp — this client computes it from
+  // the UI's relative-duration picker at submit time, the route never interprets a relative duration
+  // itself; credential → {secret} (NEVER-ECHO — the plaintext is envelope-encrypted at that one write
+  // boundary and never returned). Three typed clients so each caller sends exactly its type's body; all
+  // surface the route's `{ error }` verbatim via postErr. The response is always the bare Question (which,
+  // for credential, never carries the secret).
   answerQuestion: (id: string, body: { chosenOption?: string | null; note?: string }) =>
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, body),
-  answerPermissionQuestion: (id: string, decision: PermissionAnswer, note?: string) =>
-    postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, { decision, note }),
+  answerPermissionQuestion: (id: string, decision: PermissionAnswer, opts?: { scope?: PermissionScope; expiresAt?: string; note?: string }) =>
+    postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, { decision, ...opts }),
   answerCredentialQuestion: (id: string, secret: string) =>
     postErr<Question>(`/api/questions/${encodeURIComponent(id)}/answer`, { secret }),
   // Human dismiss (POST /api/questions/:id/dismiss) — the missing exit from a moot/superseded PENDING

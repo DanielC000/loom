@@ -1997,7 +1997,12 @@ export class PlatformMcpRouter {
           "`action` (REQUIRED) describes it, `scope` (\"once\"|\"standing\", optional) is the requested " +
           "grant lifetime, `expiresAt` (optional ISO timestamp) is a requested expiry — this is an " +
           "ask/answer channel, not a second gate: it does not itself block anything, so if the action " +
-          "must actually WAIT on the answer, hold it yourself. \"credential\" — ask for a secret (API " +
+          "must actually WAIT on the answer, hold it yourself. These are your ASK-TIME REQUEST only — the " +
+          "human may grant a different scope/expiry, or none; see question_pull's permission-entry shape " +
+          "for what was actually decided. ADVISORY ONLY: Loom persists + surfaces the decided grant (and " +
+          "flags it once its expiry has passed) but never itself enforces, blocks, or revokes it — you " +
+          "must read the answer and honor it yourself (this tool's `provisionTo`, below, is the same " +
+          "STATES-INTENT-ONLY posture for credentials). \"credential\" — ask for a secret (API " +
           "key/token) under a NEVER-ECHO model: you will NEVER receive the plaintext, only an ack once " +
           "it's provided; `envVar` (optional) names the env var/config key you'd like it stored under. " +
           "It is NOT auto-injected into any session — wiring it in is a separate, human-only step " +
@@ -2042,7 +2047,12 @@ export class PlatformMcpRouter {
           "Pull (return AND consume) every ANSWERED request you've asked via question_ask — your " +
           "requests-inbox pickup. Each entry carries {questionId, title, type, ...}: a \"decision\"/" +
           "\"input\" entry has {chosenOption, note} (chosenOption is one of the options you offered, or " +
-          "null); a \"permission\" entry has {approved, note}; a \"credential\" entry has {ack} — NEVER " +
+          "null); a \"permission\" entry has {approved, note, scope, expiresAt, lapsed} — `scope`/" +
+          "`expiresAt` are the human's ACTUAL decided grant (null/null if they never chose one, e.g. an " +
+          "older answer, or a denial), and `lapsed` is true only once `expiresAt` is set AND in the past. " +
+          "ADVISORY ONLY: this is a display signal for YOU to check — Loom itself never enforces, blocks, " +
+          "or revokes a standing grant, so re-read `lapsed` (e.g. after a recycle) rather than assuming a " +
+          "prior 'standing' answer still holds; a \"credential\" entry has {ack} — NEVER " +
           "the secret itself. Pulling consumes them in one shot (flips them to 'consumed') so they won't " +
           "be returned again — call this when you reach the point the request was blocking, or after the " +
           "push nudge tells you one was answered. Returns {questions: [...]} (empty if none are answered " +

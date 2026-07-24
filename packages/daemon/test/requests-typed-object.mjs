@@ -9,7 +9,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (A) type:"decision" — byte-identical to today (backward compat: an ask with no `type` defaults to it).
 //   (B) type:"input" — freeform-text, no options, round-trips on note alone.
 //   (C) type:"permission" — REQUIRES `action`; ask-time payload (action/scope/expiresAt) persists;
-//       answers as chosenOption ∈ {"authorize","deny"}; questionPullItem surfaces {approved, note}.
+//       answers as chosenOption ∈ {"authorize","deny"}; questionPullItem surfaces {approved, note}, plus
+//       (fix(mcp): persist and surface permission scope/expiry) the human's ANSWER-time decidedScope/
+//       decidedExpiresAt — distinct from the ask-time hint — as {scope, expiresAt, lapsed}: a future
+//       expiry surfaces lapsed:false, a past expiry surfaces lapsed:true, and a row with no decided grant
+//       at all (pre-this-card / a "deny") surfaces {scope:null, expiresAt:null, lapsed:false} — never a
+//       crash, never a false lapsed. questionAnswerByType (task_request_get/audit's shared shaper)
+//       surfaces the identical fields for the non-consuming read path.
 //   (D) type:"credential" — THE NEVER-ECHO PROPERTY: the plaintext secret is asserted to NEVER appear in
 //       (1) the question_pull-shaped payload (questionPullItem), (2) the bare Question object returned by
 //       any db.ts read (getQuestion/pullAnsweredQuestionsForAgent/listOpenQuestions), or (3) JSON.stringify
@@ -37,7 +43,7 @@ const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
-const { buildQuestionAsk, questionPullItem } = await import("../dist/mcp/questionTool.js");
+const { buildQuestionAsk, questionPullItem, questionAnswerByType } = await import("../dist/mcp/questionTool.js");
 const { encryptSecret, decryptSecret } = await import("../dist/keys/envelope.js");
 const { PERMISSION_ANSWERS } = await import("@loom/shared");
 
@@ -90,20 +96,58 @@ try {
     check("(C) buildQuestionAsk builds a valid permission ask", "question" in built);
     const q = built.question;
     check("(C) the ask-time payload persists on the built Question", q.permissionAction === "force-push origin/main" && q.permissionScope === "once" && q.permissionExpiresAt === "2026-08-01T00:00:00.000Z");
+    check("(C) decidedScope/decidedExpiresAt are null at ask time — an ANSWER-time payload only", q.decidedScope === null && q.decidedExpiresAt === null);
     db.insertQuestion(q);
     // The REST route only ever writes chosenOption ∈ PERMISSION_ANSWERS ("authorize"/"deny") for a
-    // permission — simulate that, using the SAME shared const the route + questionPullItem both use.
-    db.answerQuestion(q.id, { chosenOption: PERMISSION_ANSWERS[0], note: "go ahead, ping me after", answeredAt: new Date().toISOString() });
+    // permission — simulate an "authorize, standing, expires in the future" answer exactly as the gateway
+    // route now composes it (fix(mcp): persist and surface permission scope/expiry — the human's ACTUAL
+    // decided grant, distinct from the ask-time scope/expiresAt hint above).
+    const futureExpiry = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+    db.answerQuestion(q.id, {
+      chosenOption: PERMISSION_ANSWERS[0], note: "go ahead, ping me after", answeredAt: new Date().toISOString(),
+      decidedScope: "standing", decidedExpiresAt: futureExpiry,
+    });
     const pulled = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
     const item = questionPullItem(pulled[0]);
     check("(C) questionPullItem surfaces {approved:true, note}, not a raw chosenOption string", item.type === "permission" && item.approved === true && item.note === "go ahead, ping me after");
+    check("(C) questionPullItem surfaces the human's ACTUAL decided scope, not the ask-time hint", item.scope === "standing");
+    check("(C) questionPullItem surfaces the decided expiresAt verbatim", item.expiresAt === futureExpiry);
+    check("(C) a FUTURE expiry surfaces lapsed:false", item.lapsed === false);
+    // task_request_get's non-consuming shaper (questionAnswerByType) must surface the identical grant.
+    const reread = db.getQuestion(q.id);
+    const answerShape = questionAnswerByType(reread);
+    check("(C) questionAnswerByType (task_request_get's shaper) surfaces the same {scope, expiresAt, lapsed}", answerShape.scope === "standing" && answerShape.expiresAt === futureExpiry && answerShape.lapsed === false);
 
-    // A denied permission ask.
+    // A denied permission ask — nothing was granted, so decidedScope/decidedExpiresAt must stay null.
     const built2 = buildQuestionAsk({ type: "permission", title: "Delete the staging DB?", body: "cleanup", action: "drop database staging" }, { sessionId: mgrId, projectId: projId });
     db.insertQuestion(built2.question);
     db.answerQuestion(built2.question.id, { chosenOption: PERMISSION_ANSWERS[1], note: null, answeredAt: new Date().toISOString() });
     const pulled2 = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
-    check("(C) a denied permission surfaces approved:false", questionPullItem(pulled2[0]).approved === false);
+    const deniedItem = questionPullItem(pulled2[0]);
+    check("(C) a denied permission surfaces approved:false", deniedItem.approved === false);
+    check("(C) a denied permission has no grant to surface — {scope:null, expiresAt:null, lapsed:false}", deniedItem.scope === null && deniedItem.expiresAt === null && deniedItem.lapsed === false);
+
+    // A PAST expiry (a standing grant that has since lapsed) surfaces lapsed:true.
+    const built3 = buildQuestionAsk({ type: "permission", title: "Rotate the deploy key?", body: "quarterly rotation", action: "rotate deploy key" }, { sessionId: mgrId, projectId: projId });
+    db.insertQuestion(built3.question);
+    const pastExpiry = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    db.answerQuestion(built3.question.id, {
+      chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString(),
+      decidedScope: "standing", decidedExpiresAt: pastExpiry,
+    });
+    const pulled3 = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
+    const lapsedItem = questionPullItem(pulled3[0]);
+    check("(C) a PAST expiry surfaces lapsed:true — advisory only, nothing is auto-revoked", lapsedItem.approved === true && lapsedItem.lapsed === true);
+
+    // An OLD-FORMAT row (fix(mcp): NULL-safety guardrail) — an authorize answered exactly as pre-this-card
+    // code would (never passing decidedScope/decidedExpiresAt at all): must surface cleanly, never crash,
+    // and never mislabel the missing grant record as lapsed.
+    const built4 = buildQuestionAsk({ type: "permission", title: "Restart the worker?", body: "legacy answer path", action: "restart worker" }, { sessionId: mgrId, projectId: projId });
+    db.insertQuestion(built4.question);
+    db.answerQuestion(built4.question.id, { chosenOption: PERMISSION_ANSWERS[0], note: null, answeredAt: new Date().toISOString() });
+    const pulled4 = db.pullAnsweredQuestionsForAgent(agentId, new Date().toISOString());
+    const legacyItem = questionPullItem(pulled4[0]);
+    check("(C) a legacy (pre-card) authorized row with no decided grant surfaces {scope:null, expiresAt:null, lapsed:false}, never lapsed:true", legacyItem.approved === true && legacyItem.scope === null && legacyItem.expiresAt === null && legacyItem.lapsed === false);
   }
 
   // ===== (D) type:"credential" — THE NEVER-ECHO PROPERTY =====
@@ -190,6 +234,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Requests-object generalization (card 695ebab0) round-trips ask→answer→pull for all four types (decision/input/permission/credential) via the shared buildQuestionAsk/questionPullItem helpers both mcp surfaces call; a permission ask requires `action`; and the credential NEVER-ECHO property holds end-to-end — the plaintext secret is provably absent from every agent-reachable payload and from the bare Question object at every read path, appearing ONLY as a decryptable envelope ciphertext in the db-internal secret_blob column. The two type-mismatch backstops (answerQuestion refusing credential, answerCredentialQuestion refusing everything else) both hold."
+  ? "\n✅ ALL PASS — the Requests-object generalization (card 695ebab0) round-trips ask→answer→pull for all four types (decision/input/permission/credential) via the shared buildQuestionAsk/questionPullItem helpers both mcp surfaces call; a permission ask requires `action`; and the credential NEVER-ECHO property holds end-to-end — the plaintext secret is provably absent from every agent-reachable payload and from the bare Question object at every read path, appearing ONLY as a decryptable envelope ciphertext in the db-internal secret_blob column. The two type-mismatch backstops (answerQuestion refusing credential, answerCredentialQuestion refusing everything else) both hold. fix(mcp): persist and surface permission scope/expiry — a permission's ANSWER-time decidedScope/decidedExpiresAt (distinct from the ask-time hint) persists on the row and surfaces as {scope, expiresAt, lapsed} via both questionPullItem and questionAnswerByType; lapsed is read-time-derived (future→false, past→true) and a legacy/no-grant row (denied, or answered before this card) surfaces {null,null,false} cleanly, never a crash or a false lapsed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

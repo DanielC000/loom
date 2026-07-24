@@ -92,7 +92,10 @@ export class AuditMcpRouter {
           "task_request_get's non-consuming guarantee). Returns {items, total, returned, offset, hasMore}: " +
           "`items` per row is {id, projectId, sessionId, agentId, taskId, type, title, state, createdAt, " +
           "answeredAt, consumedAt} plus an answer summary by type — chosenOption/note for decision|input, " +
-          "approved/note for permission, ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
+          "approved/note/scope/expiresAt/lapsed for permission (scope/expiresAt are the human's ACTUAL " +
+          "decided grant, distinct from the ask-time requested scope/expiry; lapsed is read-time-derived, " +
+          "true only once expiresAt is set AND past — advisory only, Loom never itself enforces/revokes " +
+          "it), ack ONLY for credential (NEVER the secret — mirrors question_pull's " +
           "never-echo shape; a pending row's answer fields read null rather than a misleading false-ish " +
           "value). `total` is the FULL matching count and `hasMore` tells you whether `items` was truncated " +
           "— never assume `items` is everything without checking it. Filters (all optional, AND'd): " +
