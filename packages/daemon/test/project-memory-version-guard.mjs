@@ -19,8 +19,26 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
+import ts from "typescript";
+
+// Find a class method's REAL body text by its actual syntax-tree extent (card fdf93d3a's pattern) —
+// never a fixed character window, which is sensitive to unrelated text growth (e.g. an added comment)
+// near the call site rather than the property it claims to verify.
+function classMethodBodyText(srcText, srcPath, methodName) {
+  const sourceFile = ts.createSourceFile(srcPath, srcText, ts.ScriptTarget.Latest, /* setParentNodes */ true);
+  let found;
+  const visit = (node) => {
+    if (!found && ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === methodName && node.body) {
+      found = node.body;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found ? found.getText(sourceFile) : null;
+}
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -88,15 +106,15 @@ try {
 
   // ===== structural backstop: the guard's comparison must be version-based BY CONSTRUCTION, not by
   // accident of this test's specific inputs — grep the compiled guard for the actual comparison. =====
-  const dbSrc = fs.readFileSync(new URL("../dist/db.js", import.meta.url), "utf8");
-  // Anchor on the METHOD DEFINITION's exact signature, not the first hit (which is the earlier {@link
-  // upsertProjectMemoryChecked} in upsertProjectMemory's own doc comment) — that earlier hit's window
-  // would land entirely inside a JSDoc block and never reach the real comparison.
-  const defIdx = dbSrc.indexOf("upsertProjectMemoryChecked(projectId, input, maxNotes, baseVersion)");
-  const guardBody = dbSrc.slice(defIdx, defIdx + 600);
-  check("(structural) upsertProjectMemoryChecked compares on `.version`", /existing\.version\s*!==\s*baseVersion/.test(guardBody));
+  const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "db.js");
+  const dbSrc = fs.readFileSync(dbPath, "utf8");
+  // The AST lookup finds the actual MethodDeclaration by name — never the earlier {@link
+  // upsertProjectMemoryChecked} mention inside upsertProjectMemory's own doc comment, which isn't a
+  // method declaration at all — so no anchor-ambiguity to work around.
+  const guardBody = classMethodBodyText(dbSrc, dbPath, "upsertProjectMemoryChecked");
+  check("(structural) upsertProjectMemoryChecked compares on `.version`", guardBody !== null && /existing\.version\s*!==\s*baseVersion/.test(guardBody));
   check("(structural) upsertProjectMemoryChecked's compare-and-set does NOT reference `.updatedAt` at all (no timestamp CAS hole to regress into)",
-    !/existing\.updatedAt/.test(guardBody));
+    guardBody !== null && !/existing\.updatedAt/.test(guardBody));
 } finally {
   try { db?.close(); } catch { /* ignore */ }
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }

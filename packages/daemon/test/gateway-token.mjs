@@ -21,6 +21,23 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import Database from "better-sqlite3";
+import ts from "typescript";
+
+// Find a class method's REAL body text by its actual syntax-tree extent (card fdf93d3a's pattern) —
+// never a fixed character window, which is sensitive to unrelated text growth (e.g. an added comment)
+// near the call site rather than the property it claims to verify.
+function classMethodBodyText(srcText, srcPath, methodName) {
+  const sourceFile = ts.createSourceFile(srcPath, srcText, ts.ScriptTarget.Latest, /* setParentNodes */ true);
+  let found;
+  const visit = (node) => {
+    if (!found && ts.isMethodDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === methodName && node.body) {
+      found = node.body;
+    }
+    if (!found) ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found ? found.getText(sourceFile) : null;
+}
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -84,10 +101,10 @@ try {
   // Structural constant-time proof: the compiled authenticateGatewayToken body calls the shared,
   // timingSafeEqual-backed verifySecret — never a raw string compare of the secret/hash.
   {
-    const dbSrc = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "db.js"), "utf8");
-    const fnStart = dbSrc.indexOf("authenticateGatewayToken(token)");
-    const fnBody = dbSrc.slice(fnStart, fnStart + 600);
-    check("(B) authenticateGatewayToken verifies via the shared constant-time verifySecret", /verifySecret\(/.test(fnBody));
+    const dbPath = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "dist", "db.js");
+    const dbSrc = fs.readFileSync(dbPath, "utf8");
+    const fnBody = classMethodBodyText(dbSrc, dbPath, "authenticateGatewayToken");
+    check("(B) authenticateGatewayToken verifies via the shared constant-time verifySecret", fnBody !== null && /verifySecret\(/.test(fnBody));
   }
 
   // ===================== (C) rotate invalidates the old secret =====================
