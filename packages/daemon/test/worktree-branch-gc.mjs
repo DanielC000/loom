@@ -223,6 +223,18 @@ try {
   check("(f96b9d7c) R4's swept-zero outcome is actually LOGGED, not silent", capturedLogs.some((m) => m.includes(R4) && m.includes("0 merged loom/* branch(es) found")));
   check("(f96b9d7c round 2) a start-of-pass log line fires BEFORE any per-repo outcome — makes \"hasn't run yet\" distinguishable from \"ran and found nothing\"", capturedLogs.some((m) => /branch-ref sweep starting for \d+ repo\(s\)/.test(m)));
 
+  // --- Card 298dd506: the RECLAIM outcome (read OK, N>0 merged, branches actually deleted) is the one
+  // terminating outcome that mutates state, and it used to be the only one of the five with NO per-repo
+  // log line — loud no-op, silent destructive action. R1 reclaims A + D's branch (2 deletions) while C
+  // (also merged, but checked out) is skipped — so this one assertion also proves the skipped-count is
+  // reported, not just the deleted-count. ---
+  const reclaimLine = capturedLogs.find((m) => m.includes(R1) && m.includes("deleted:"));
+  check("(298dd506) the reclaim path emits a per-repo line naming the repo (was silent)", reclaimLine !== undefined);
+  check("(298dd506) the reclaim line names the resolved mainline", reclaimLine?.includes("mainline 'main'") ?? false);
+  check("(298dd506) the reclaim line reports the real deleted count (2: A + D's branch)", reclaimLine?.includes("2 deleted") ?? false);
+  check("(298dd506) the reclaim line reports 1 skipped as checked-out-elsewhere (C)", reclaimLine?.includes("1 skipped (checked out elsewhere)") ?? false);
+  check("(298dd506) the reclaim line names the actual deleted branches (bounded sample)", (reclaimLine?.includes(A) && reclaimLine?.includes(dBranch)) ?? false);
+
   // --- SECOND reconcile: idempotent — nothing left to reclaim, survivors still survive, no throw ---
   const r2 = await sessions.reconcileOrchestrationOnBoot();
   check("(no-op) second run reclaims 0 more branches (idempotent)", r2.branchesReclaimed === 0);

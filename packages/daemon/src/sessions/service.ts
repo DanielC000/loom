@@ -9574,6 +9574,22 @@ export class SessionService {
           // chunk failure, so `deleted.length` is always the REAL count, never an over/undercount.
           const { deleted } = await deleteBranches(repoPath, toDelete, { timeoutMs: this.gitOpMs });
           branchesReclaimed += deleted.length;
+          if (deleted.length > 0) {
+            // Card 298dd506: this is the ONE terminating outcome of the five below that actually mutates
+            // state (deletes branch refs), and until now it was the only one with NO per-repo log line —
+            // the no-op (branchSweepFoundZero above) was loud, the destructive action was silent. Symmetric
+            // with that zero-found line: same "read succeeded against mainline" prefix, same per-repo shape,
+            // so both are grep-able the same way. Bounded (card f96b9d7c's 323-refs-in-one-pass boot is the
+            // reason): name every branch when the list is short, else a fixed-size sample + a remainder
+            // count, matching the DENY-GLOB precedent above.
+            const skippedCheckedOut = merged.length - toDelete.length;
+            const BRANCH_SAMPLE = 10;
+            const branchList = deleted.length <= BRANCH_SAMPLE
+              ? deleted.join(", ")
+              : `${deleted.slice(0, BRANCH_SAMPLE).join(", ")}, +${deleted.length - BRANCH_SAMPLE} more`;
+            // eslint-disable-next-line no-console
+            console.log(`[reconcile] branch-ref sweep for ${repoPath}: read succeeded against mainline '${mainline}', ${merged.length} merged loom/* branch(es) found, ${skippedCheckedOut} skipped (checked out elsewhere), ${deleted.length} deleted: ${branchList}`);
+          }
         }
       } catch (e) {
         // listCheckedOutBranches (unlike listMergedLoomBranches) THROWS on failure rather than failing
