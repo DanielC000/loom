@@ -178,6 +178,9 @@ try {
   check("(2) the watcher resumed the manager's held turn (pty.resumeAfterRateLimit called)",
     watcherResumedIds.includes("mgr1"));
 
+  // Default poll budget (tries:50 * delayMs:20 = 1000ms). Not widened reflexively: worker-spawn-cap-queue.mjs's
+  // own auto-fire wait (same real-worktree + fake-pty spawn shape) uses this identical default successfully, so
+  // 1s is adequate for what this spawn actually costs — a poll timeout here points at host contention, not budget.
   const fired = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskB && w.processState === "live"));
   check("(2) taskB auto-fires on the limit-clear alone — NO unrelated worker exit happened after the park", fired);
   check("(3) exactly ONE cap-queue drain call happened after the park — caused by the watcher's resume hook",
@@ -185,7 +188,11 @@ try {
 
   list = await call("worker_list");
   const liveB = list.find((w) => w.taskId === taskB && w.processState === "live");
-  if (liveB) worktrees.push(db.getSession(liveB.workerSessionId)?.worktreePath);
+  // Assert BEFORE any dereference: a poll-timeout above (host contention) must name itself as the cause,
+  // not cascade into a TypeError on liveB.workerSessionId three checks and several sections later.
+  check("(2) taskB came live within the poll budget (root cause of any FAIL below)", !!liveB);
+  if (!liveB) throw new Error("taskB never reached processState:\"live\" within the poll budget — aborting; every remaining check in this file depends on a live taskB worker");
+  worktrees.push(db.getSession(liveB.workerSessionId)?.worktreePath);
   check("(2) no cap-queued placeholder remains", !list.some((w) => w.processState === "cap-queued"));
   // spawnWorker flips processState:"live" BEFORE it's fully done (M5 ordering — a still-outstanding
   // `await findShippedCardMatch` git check runs after, only THEN releasing the in-flight taskId claim).
