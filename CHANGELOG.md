@@ -4,6 +4,36 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+## [0.25.0] — 2026-07-24
+
+**A multi-repo, merge-integrity, and reliability release.** Projects can now register and route work across **multiple repositories**; a deep **git-integrity hardening pass** closes a class of concurrent-squash-merge corruption and a daemon-wide event-loop **freeze**; **permission-request scope/expiry** is persisted structurally; managers gain **gate-queue observability**; and the **vault-optional** onboarding story is completed end-to-end.
+
+### Added
+- **Multi-repo projects.** A project can register additional writable repositories and route each board card to a specific repo via `repoKey` — threaded through worktree creation, the merge gate, and per-repo ship-state, with a registry editor, a card repo-picker, a per-repo merged badge, and manager/worker prompt surfacing (phases 1–3). Live manager sessions are notified when a project's repo registry changes.
+- **Gate-queue observability for managers.** A `gate_queue` read exposes the daemon-global concurrency cap plus every running/queued gate run (holder, depth, age); `gate_status` is exposed on the worker surface scoped to the caller's own ops; `run_gate` returns its real admitted duration; and the resolved gate cap is logged at boot and on change.
+- **A discoverable "hold the worker" tool.** `worker_redirect` interrupts a worker's current turn and replaces its pending direction with one authoritative instruction — the escalation above the additive `worker_message`.
+- **Platform + orchestration reads.** Batch board ops (multi-id move + batch body read) and config/events/prompt-search reads on the platform surface; an owner-facing non-manager (thought-partner) session gains a narrow `notify_lead` relay; a memory note annotates its linked-request live state at recall.
+- **Skill per-file customization.** Bundled skills support a per-file diff and non-destructive resolve beyond `SKILL.md`, and fast-forward `reference/` files for pristine skills.
+
+### Changed
+- **Permission-request scope/expiry is persisted structurally** — the human's scope/expiry choice travels as structured `scope`/`expiresAt` fields to the answer route (and is surfaced) instead of being folded into a free-text note; the chat-composer answer path is aligned with the inbox path.
+- **`memory_write` is a true PATCH** — an update targets an existing key with a read-first `baseVersion`, and recall injection is deduped per engine-session.
+- **Manager/worker orchestration hardening** — the prospective squash-commit subject is surfaced (and coercion warned) at the merge review step; a gate-failed notification carries structured `gateDetail`; pending-op settle nudges route to the current lineage owner after recycle; a gate-parked worker is auto-classified from the pending-op registry.
+
+### Fixed
+- **Merge/git integrity.** Squash merges are serialized per-repo through a canonical-index lock and verify landed content; a merge is refused over staged canonical-index residue (never absorbing another card's work); `GitWriter` writes route through the same lock (closing a `createBranch`/`checkout` race that could divert a squash); merged `loom/*` branch refs are reclaimed on boot; `mergeBranch`'s git is bounded so a hung call can't wedge merges; the merged-state content check works even after a worker branch is deleted.
+- **Daemon-wide freeze.** A crash-recovery watcher scanned every session's worker events on an unindexed full-scan every 60s, blocking the event loop; worker events are now indexed and only triggered sessions are scanned, and boot skips git for finalized workers. A manager's context counter no longer freezes (which had defeated the recycle nudge).
+- **pty submit reliability.** A given-up `submit()` re-queues instead of dropping the text; give-up recovery is suppressed when the turn demonstrably started; upstream paste-collapse content loss is detected and recovered (any long turn, not just pastes); a late give-up confirmation can no longer purge the wrong requeued message across generations.
+- **Vault is genuinely optional, end-to-end.** A vault can be unbound (`PATCH /api/projects/:id` accepts an empty `vaultPath`); vault-only detection no longer over-refuses unbind on legacy repo-bound projects; git-log endpoints no longer 500 on a commitless repo (the state `project_init` leaves a new user in).
+- **The owner's `held` brake is protected from agent-side clearing.**
+- **Companion delivery** — per-recipient alert-class filtering, re-delivery suppression, delta mode, and bounded proactive send.
+- **Web.** `Panel` and its `components/ui` siblings forward unrecognized DOM props to their root node instead of silently dropping them.
+- **Vault auto-committer** — an oversized-blob guard, push-failure surfacing, and a pause lease.
+- **Linux/CI robustness.** Hermetic daemon tests and the e2e suite no longer hardcode Windows paths or depend on ambient host state; `worker_transcript`/`transcript_read` return grep-able multi-line JSON; a literal NUL in `service.ts` that truncated ripgrep is removed (with a gate lint).
+
+### Internal
+- A large test de-racing + doctrine-currency sweep across the daemon suite and bundled skills (question_resolve, retitle-before-merge, owner-gate memory voice, outward-action gate precedence); rarely-used operational recipes split out of the boot-injected `/orchestrate` + `/worker` skills into references.
+
 ## [0.24.0] — 2026-07-21
 
 **A configurability, companion-reach, and onboarding release.** A sweep makes hardcoded operational limits **user-adjustable** end-to-end (schema → Settings UI); the Companion gains an owner-granted **git commit+push lever** and an all-project **lead mode**; a new **Gates** page and **schedule run-history** add fleet observability; and two **onboarding blockers** are fixed — a project can now be created **without a vault**, and user-supplied paths **expand a leading `~`**.
