@@ -14,7 +14,7 @@ import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, Enqueue
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
@@ -7256,10 +7256,25 @@ export class SessionService {
     if (!project) throw new Error("project not found");
     // Prospective commit subject (card b88704bb) — same derivation mergeBranch uses (task title's first
     // line, trimmed); absent entirely for a taskless worker rather than fabricated from the branch name.
-    const cardTitle = worker.taskId ? this.db.getTask(worker.taskId)?.title : undefined;
-    const rawTitle = cardTitle ? cardTitle.trim().split(/\r?\n/)[0]!.trim() : undefined;
+    // FAIL SAFE (card cf60a32a): a missing/unreadable task must never break this review, so getTask's
+    // result is optional-chained throughout and the retraction check below is its own try/catch.
+    let card: { title: string; body: string } | undefined;
+    try { card = worker.taskId ? this.db.getTask(worker.taskId) : undefined; } catch { /* treat as no task */ }
+    const rawTitle = card?.title ? card.title.trim().split(/\r?\n/)[0]!.trim() : undefined;
     const subjectPreview = rawTitle
       ? { rawTitle, commitSubject: toConventionalSubject(rawTitle), coerced: toConventionalSubject(rawTitle) !== rawTitle }
+      : undefined;
+    // RETRACTED-PREMISE backstop (card cf60a32a — the mechanical half of `0fa32321`): a 4th warn-never-block
+    // sibling, distinct from `coerced` above — `coerced` is blind to a title that's ALREADY valid
+    // Conventional form (e.g. `fix(x): …`) whose BODY was since retracted, since toConventionalSubject is a
+    // no-op passthrough on that title. This keys on body-vs-title CONTENT, not subject-form coercion. See
+    // matchRetractedPremiseTitle for the narrow, explicit-marker-only matching rule.
+    let retractedPremiseMarker: string | null = null;
+    try {
+      if (rawTitle) retractedPremiseMarker = matchRetractedPremiseTitle(rawTitle, card?.body ?? "");
+    } catch { /* fail safe: no warning, no throw */ }
+    const retractedPremiseWarning = retractedPremiseMarker
+      ? `RETRACTED-PREMISE: this card's body carries a retraction marker ("${retractedPremiseMarker}") but its title still claims \`fix(…)\` — retitle before confirming (title = squash subject).`
       : undefined;
     // Multi-repo epic (49136451) phase 2: this manager-facing diff/review is against ONE worker's ONE
     // worktree — resolve against the SESSION's own stamped repoKey (see Session.repoKey's doc), not
@@ -7297,7 +7312,7 @@ export class SessionService {
     const denyGlobWarning = deniedAdds.length > 0
       ? `DENY-GLOB: branch adds ${deniedAdds.length} file(s) under a project-configured deny path (${(project.denyGlobs ?? []).join(", ")}): ${deniedAdds.slice(0, 10).join(", ")}${deniedAdds.length > 10 ? `, +${deniedAdds.length - 10} more` : ""}. This commonly means a mockup or other deliverable landed in the code repo instead of the vault. Not a hard block — confirming will merge it as-is; verify that's intended before proceeding.`
       : undefined;
-    const warning = [strandedWarning, staleWarning, denyGlobWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    const warning = [strandedWarning, staleWarning, denyGlobWarning, retractedPremiseWarning].filter((w): w is string => !!w).join(" ") || undefined;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "merge_request",

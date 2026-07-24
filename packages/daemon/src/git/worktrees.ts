@@ -1812,6 +1812,39 @@ export function matchAddedDenyGlobs(files: DiffstatFile[], denyGlobs: string[]):
   return files.filter((f) => f.status === "A" && regexes.some((re) => re.test(f.file))).map((f) => f.file);
 }
 
+/**
+ * Deliberately worded markers a human writes to declare a card's premise dead — NOT a bare "retract",
+ * which reads as casual prose ("let's retract that comment") rather than a deliberate declaration. Each
+ * phrase below is the kind of explicit label the `/orchestrate` retitle doctrine itself uses (e.g.
+ * "premise retracted, not a bug") — kept narrow on purpose (card cf60a32a): a heuristic here is only
+ * acceptable because it keys on wording a human chose to write, never on inferred intent.
+ */
+const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
+  { label: "retracted", re: /\bretracted\b/i },
+  { label: "won't-do", re: /\bwon'?t-do\b/i },
+  { label: "not a bug", re: /\bnot a bug\b/i },
+];
+
+/**
+ * The retraction-vs-title merge-review warning's matching primitive (card cf60a32a — the mechanical half
+ * of `0fa32321`; doctrine half merged as `514da7cf`). A card's BODY can be retracted after its TITLE was
+ * already written (and already valid Conventional form, so `toConventionalSubject`/`coerced` — card
+ * `b88704bb` — is a no-op passthrough and stays blind to this case entirely). Card title = squash-commit
+ * subject on this project, so an un-retitled `fix(…)` merging over a retracted premise stamps a fix for a
+ * bug that never existed into permanent mainline history.
+ *
+ * Returns the matched marker label when the TITLE still starts with the literal `fix(` (lowercase, this
+ * project's Conventional Commits type casing) AND the BODY contains one of {@link RETRACTION_MARKER_RES}
+ * — else `null`. PURE (no I/O), so trivially unit-tested; mirrors {@link matchAddedDenyGlobs}'s shape.
+ */
+export function matchRetractedPremiseTitle(title: string, body: string): string | null {
+  if (!title.trim().startsWith("fix(")) return null;
+  for (const { label, re } of RETRACTION_MARKER_RES) {
+    if (re.test(body)) return label;
+  }
+  return null;
+}
+
 export interface WorkerDiff {
   filesChanged: number;
   insertions: number;
