@@ -5,6 +5,7 @@
 // Interaction states (button hover, field focus) live as .loom-* classes in global.css.
 
 import type {
+  AnchorHTMLAttributes,
   ButtonHTMLAttributes,
   CSSProperties,
   HTMLAttributes,
@@ -108,24 +109,31 @@ export function Select({ style, className, children, ...rest }: SelectHTMLAttrib
 }
 
 // ── Status: Dot / StatusPill / Badge ───────────────────────────────────────────
-// `glow` adds a CRT halo — use it for live/busy states.
-export function Dot({ tone: t, glow, title }: { tone: Tone; glow?: boolean; title?: string }) {
+// `glow` adds a CRT halo — use it for live/busy states. All three forward unrecognized DOM props
+// (data-*, aria-*, id, ...) to their root span via `rest`, same pattern as Panel.
+type DotProps = { tone: Tone; glow?: boolean; title?: string } & Omit<HTMLAttributes<HTMLSpanElement>, "title">;
+
+export function Dot({ tone: t, glow, title, style, ...rest }: DotProps) {
   const c = tone[t];
   return (
     <span
+      {...rest}
       title={title}
       style={{
         width: 8, height: 8, borderRadius: 8, background: c, display: "inline-block",
         ...(glow ? { boxShadow: `0 0 6px ${c}` } : null),
+        ...style,
       }}
     />
   );
 }
 
 // Dot + uppercase mono label, e.g. "● IDLE".
-export function StatusPill({ tone: t, label, glow }: { tone: Tone; label: string; glow?: boolean }) {
+type StatusPillProps = { tone: Tone; label: string; glow?: boolean } & HTMLAttributes<HTMLSpanElement>;
+
+export function StatusPill({ tone: t, label, glow, style, ...rest }: StatusPillProps) {
   return (
-    <span style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: tone[t], textTransform: "uppercase", letterSpacing: "0.06em" }}>
+    <span {...rest} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontFamily: font.mono, fontSize: 11, color: tone[t], textTransform: "uppercase", letterSpacing: "0.06em", ...style }}>
       <Dot tone={t} glow={glow} />
       {label}
     </span>
@@ -133,10 +141,12 @@ export function StatusPill({ tone: t, label, glow }: { tone: Tone; label: string
 }
 
 // Bordered status pill, e.g. RUNNING / PAUSED.
-export function Badge({ tone: t, children }: { tone: Tone; children: ReactNode }) {
+type BadgeProps = { tone: Tone; children: ReactNode } & HTMLAttributes<HTMLSpanElement>;
+
+export function Badge({ tone: t, children, style, ...rest }: BadgeProps) {
   const c = tone[t];
   return (
-    <span style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", padding: "2px 8px", border: `1px solid ${c}`, borderRadius: radius.sm, color: c }}>
+    <span {...rest} style={{ fontFamily: font.mono, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", padding: "2px 8px", border: `1px solid ${c}`, borderRadius: radius.sm, color: c, ...style }}>
       {children}
     </span>
   );
@@ -148,9 +158,13 @@ export function Badge({ tone: t, children }: { tone: Tone; children: ReactNode }
 // per column in board order, tinted by that column's accentColor (a preset's accentColor == its
 // role color); a column with no accent falls to a neutral hairline-grey dot. aria-hidden — the
 // adjacent label/description text already names the lanes, so the dots are pure decoration.
-export function PresetAccentDots({ accents, title }: { accents: (string | undefined)[]; title?: string }) {
+// Forwards unrecognized DOM props (data-*, id, ...) to root; `aria-hidden` is pinned decorative — it's
+// applied AFTER `rest` spreads, so it always wins over anything a caller passes in rest.
+type PresetAccentDotsProps = { accents: (string | undefined)[]; title?: string } & Omit<HTMLAttributes<HTMLSpanElement>, "title">;
+
+export function PresetAccentDots({ accents, title, style, ...rest }: PresetAccentDotsProps) {
   return (
-    <span aria-hidden title={title} style={{ display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0 }}>
+    <span {...rest} aria-hidden title={title} style={{ display: "inline-flex", alignItems: "center", gap: 3, flexShrink: 0, ...style }}>
       {accents.map((a, i) => (
         <span key={i} style={{ width: 8, height: 8, borderRadius: 8, flexShrink: 0, background: a ?? color.border }} />
       ))}
@@ -159,10 +173,12 @@ export function PresetAccentDots({ accents, title }: { accents: (string | undefi
 }
 
 // ── Chip ───────────────────────────────────────────────────────────────────────
-// Inline metadata, e.g. `branch loom/8f3a`, `ctx 56,200`.
-export function Chip({ label, value, tone: t }: { label?: string; value: ReactNode; tone?: Tone }) {
+// Inline metadata, e.g. `branch loom/8f3a`, `ctx 56,200`. Forwards unrecognized DOM props to root.
+type ChipProps = { label?: string; value: ReactNode; tone?: Tone } & HTMLAttributes<HTMLSpanElement>;
+
+export function Chip({ label, value, tone: t, style, ...rest }: ChipProps) {
   return (
-    <span style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: 11, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 6px", minWidth: 0, maxWidth: "100%" }}>
+    <span {...rest} style={{ display: "inline-flex", gap: 4, alignItems: "baseline", fontFamily: font.mono, fontSize: 11, border: `1px solid ${color.border}`, borderRadius: radius.sm, padding: "1px 6px", minWidth: 0, maxWidth: "100%", ...style }}>
       {label && <span style={{ color: color.textMuted, flexShrink: 0 }}>{label}</span>}
       <span style={{ color: t ? tone[t] : color.text, minWidth: 0, overflowWrap: "anywhere" }}>{value}</span>
     </span>
@@ -170,9 +186,12 @@ export function Chip({ label, value, tone: t }: { label?: string; value: ReactNo
 }
 
 // ── SectionLabel ─────────────────────────────────────────────────────────────
-export function SectionLabel({ children, style }: { children: ReactNode; style?: CSSProperties }) {
+// Forwards unrecognized DOM props to root.
+type SectionLabelProps = { children: ReactNode } & HTMLAttributes<HTMLDivElement>;
+
+export function SectionLabel({ children, style, ...rest }: SectionLabelProps) {
   return (
-    <div style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim, margin: "4px 0 8px", ...style }}>
+    <div {...rest} style={{ fontFamily: font.head, fontSize: 11, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.1em", color: color.textDim, margin: "4px 0 8px", ...style }}>
       {children}
     </div>
   );
@@ -191,9 +210,21 @@ export function Meter({ value, max, tone: t = "phosphor", width = 80 }: { value:
 
 // ── NavTab ───────────────────────────────────────────────────────────────────
 // Uppercase mono nav item; active tab gets a phosphor underline (.loom-navtab in global.css).
-export function NavTab({ to, end, children }: { to: string; end?: boolean; children: ReactNode }) {
+// NavLink renders a single <a> and forwards anchor attributes itself, so `rest` (data-*, aria-*, id,
+// style, ...) passes straight to it; `className` is merged with the active-state class, not clobbered.
+type NavTabProps = { to: string; end?: boolean; children: ReactNode; className?: string } & Omit<
+  AnchorHTMLAttributes<HTMLAnchorElement>,
+  "href" | "children" | "className"
+>;
+
+export function NavTab({ to, end, children, className, ...rest }: NavTabProps) {
   return (
-    <NavLink to={to} end={end} className={({ isActive }) => `loom-navtab${isActive ? " is-active" : ""}`}>
+    <NavLink
+      {...rest}
+      to={to}
+      end={end}
+      className={({ isActive }) => [`loom-navtab${isActive ? " is-active" : ""}`, className].filter(Boolean).join(" ")}
+    >
       {children}
     </NavLink>
   );
@@ -203,17 +234,18 @@ export function NavTab({ to, end, children }: { to: string; end?: boolean; child
 // A compact single-choice toggle (mono, uppercase) — the one primitive for the small "swap which body
 // mounts" switches, e.g. Runs' Runs|Keys and Actors' Profiles|Skills. The active segment fills with
 // phosphorDim + phosphor text; the rest read dim. Keyed generically so any string-union tab set fits.
-export function Segmented<T extends string>({
-  value, onChange, items, ariaLabel, style,
-}: {
+type SegmentedProps<T extends string> = {
   value: T;
   onChange: (value: T) => void;
   items: { key: T; label: string }[];
   ariaLabel?: string;
-  style?: CSSProperties;
-}) {
+} & Omit<HTMLAttributes<HTMLDivElement>, "role" | "onChange" | "aria-label">;
+
+export function Segmented<T extends string>({
+  value, onChange, items, ariaLabel, style, ...rest
+}: SegmentedProps<T>) {
   return (
-    <div role="tablist" aria-label={ariaLabel}
+    <div {...rest} role="tablist" aria-label={ariaLabel}
       style={{ display: "inline-flex", gap: 0, border: `1px solid ${color.border}`, borderRadius: radius.base, overflow: "hidden", alignSelf: "flex-start", ...style }}>
       {items.map((it) => {
         const active = value === it.key;
