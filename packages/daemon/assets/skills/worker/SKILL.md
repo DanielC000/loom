@@ -99,6 +99,15 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something else while still
      parked on this same gate may get reaped too — if you still need it once the nudge lands,
      re-schedule it then.
+   - **Once you've kicked off `run_gate`, treat your worktree's build output as OWNED by the gate until
+     it settles — no wiping it, no manual rebuild, no clearing incremental-build state.** The gate runs
+     IN your own worktree, compiling and importing from the very build artifacts you might reasonably be
+     tempted to clear to debug something; the park-and-wait feel makes the worktree *seem* idle while you
+     wait, but it isn't. Move the ground under a running gate and it can read half-updated artifacts and
+     fail with an error that looks like a real test failure but is collateral from what you touched. If
+     you need to rebuild to debug, do it BEFORE you kick off the gate, or wait for the gate to settle
+     first — and SUSPECT a gate failure that arrives right after you touched build artifacts as collateral
+     before you believe it.
    - **If you're unsure whether a long park means "still queued" or "actually stuck," CHECK before you
      act — don't blind-fire `run_gate` again to find out.** `run_gate` returned an `opId`; pass that same
      `opId` to `gate_status` (also on your tool list) to read its LIVE state — `queued`/`running` plus
