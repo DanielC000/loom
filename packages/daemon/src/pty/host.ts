@@ -5025,12 +5025,16 @@ export class PtyHost {
    */
   private writeChunked(sessionId: string, text: string, done?: () => void): void {
     const live = this.live.get(sessionId);
-    if (!live?.alive) return;
+    // Card 9ed20572: `done` must fire on EVERY exit path, including this not-alive one — a caller
+    // (healIfStuck's give-up clear) threads `setBusy(false)` through it, and a skipped `done` here
+    // would leave `busy` stuck forever if the session was already dead when the burst was scheduled.
+    if (!live?.alive) { done?.(); return; }
     if (text.length === 0) { done?.(); return; }
     let i = 0;
     const step = (): void => {
       const l = this.live.get(sessionId);
-      if (!l?.alive) return;
+      // Same guarantee as above: the session died mid-burst — still fire `done` exactly once.
+      if (!l?.alive) { done?.(); return; }
       this.ptyWrite(sessionId, l, text.slice(i, i + PTY_WRITE_CHUNK_BYTES), "chunk");
       i += PTY_WRITE_CHUNK_BYTES;
       if (i >= text.length) { done?.(); return; }
