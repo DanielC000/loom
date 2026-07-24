@@ -1670,13 +1670,35 @@ export class PlatformMcpRouter {
           "PROVEN merged (never merged, landed outside the scan window, or a git read failure), never an " +
           "authoritative 'never merged' — verify against this before relaying a predecessor's stale " +
           "'unbuilt'/'won't-do' claim about this card as fact. Read-only. Error if unknown or an ambiguous " +
-          "prefix (the error names the candidate ids).",
-        inputSchema: { projectId: z.string(), taskId: z.string() },
+          "prefix (the error names the candidate ids).\n" +
+          "BATCH READ (card 1105c2c8): pass `taskIds` (up to 200) instead of `taskId` to read MANY cards' " +
+          "full bodies in one call — the fix for an audit wave's per-card project_task_get round-trips. " +
+          "Exactly one of `taskId`/`taskIds` is required; passing both or neither is an error. Mirrors " +
+          "agent_clone_batch's convention EXACTLY: each id is resolved and read INDEPENDENTLY (its own " +
+          "prefix resolution, its own not-found/ambiguous handling) — a bad id surfaces its own `{taskId, " +
+          "error}` and does NOT block the others; nothing is transactional, and the overall call still " +
+          "returns ok even when some entries carry an error. Returns one result per id, in the given " +
+          "order: `{taskId, task}` (the full TaskWithRequests row) on success, `{taskId, error}` on " +
+          "failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare row, not wrapped.",
+        inputSchema: {
+          projectId: z.string(),
+          taskId: z.string().optional(),
+          taskIds: z.array(z.string()).min(1).max(200).optional(),
+        },
       },
-      async ({ projectId, taskId }) => {
+      async ({ projectId, taskId, taskIds }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok(await getProjectTask(db, project.id, taskId));
+        if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
+        if (taskId && taskIds) return ok({ error: "pass either taskId or taskIds, not both" });
+        if (taskIds) {
+          const results = await Promise.all(taskIds.map(async (id) => {
+            const res = await getProjectTask(db, project.id, id);
+            return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
+          }));
+          return ok(results);
+        }
+        return ok(await getProjectTask(db, project.id, taskId!));
       },
     );
 
@@ -1704,10 +1726,25 @@ export class PlatformMcpRouter {
           "and get the full updated Task row back. A taskId not on the named project " +
           "resolves to not-found. projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors " +
           "project_get). Error if the project is unknown or an ambiguous prefix " +
-          "(the error names the candidate ids).",
+          "(the error names the candidate ids).\n" +
+          "BATCH MOVE (card 1105c2c8): pass `taskIds` (up to 200) instead of `taskId` to apply the SAME " +
+          "patch to MANY cards in one call — the fix for an audit wave's per-card sequential moves (e.g. " +
+          "15 cards dispatched→done, one columnKey each). Exactly one of `taskId`/`taskIds` is required; " +
+          "passing both or neither is an error. `title`/`body` are REJECTED alongside `taskIds` (whole call " +
+          "rejected, nothing written) — applying one literal title/body string identically across many " +
+          "different cards is never intentional; edit those one card at a time via `taskId`. Every other " +
+          "field (columnKey/position/priority/held/deferred/repoKey) IS batchable. Mirrors agent_clone_batch's " +
+          "convention EXACTLY: each id is resolved and updated INDEPENDENTLY through this SAME backing path " +
+          "— its own prefix resolution, its own column-existence/held-clear/repoKey-authority guards — so a " +
+          "bad id (unknown, ambiguous, wrong project, a refused held-clear) surfaces its own `{taskId, " +
+          "error}` and does NOT block the other ids; nothing is transactional, and the overall call still " +
+          "returns ok even when some entries carry an error. Returns one result per id, in the given order: " +
+          "`{taskId, task}` (the ack/full row updateProjectTask would return) on success, `{taskId, error}` " +
+          "on failure. The single-`taskId` path is BYTE-IDENTICAL to today — same bare ack/row, not wrapped.",
         inputSchema: {
           projectId: z.string(),
-          taskId: z.string(),
+          taskId: z.string().optional(),
+          taskIds: z.array(z.string()).min(1).max(200).optional(),
           title: z.string().optional(),
           body: z.string().optional(),
           columnKey: z.string().optional(),
@@ -1720,16 +1757,29 @@ export class PlatformMcpRouter {
       },
       // Spread only the keys the caller PROVIDED (zod omits absent optionals) — mirrors the in-project
       // tasks_update `{ id, ...patch }`, so an undefined value never clobbers an unspecified field.
-      async ({ projectId, taskId, ...patch }) => {
+      async ({ projectId, taskId, taskIds, ...patch }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
+        if (!taskId && !taskIds) return ok({ error: "either taskId or taskIds is required" });
+        if (taskId && taskIds) return ok({ error: "pass either taskId or taskIds, not both" });
         // held-clear guard (card 9b0373c0): updateProjectTask enforces this identically here — the Lead
         // gets NO exemption (owner decision) even though it's the human-driven cross-project operator; a
         // human-set hold is refused just like it is via tasks_update, only the human REST/UI path clears it.
         // role: "platform" literal — this whole router is gated to role==="platform" (resolveRole above),
         // so a caller that reaches this handler at all is ALWAYS a platform session; this satisfies
         // updateProjectTask's repoKey authority guard (manager/platform only) the same way question_ask does.
-        return ok(await updateProjectTask(db, project.id, taskId, patch, callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined));
+        const actor = callerSessionId ? { sessionId: callerSessionId, role: "platform" } : undefined;
+        if (taskIds) {
+          if (patch.title !== undefined || patch.body !== undefined) {
+            return ok({ error: "taskIds batch move does not support title/body — apply those one card at a time via taskId" });
+          }
+          const results = await Promise.all(taskIds.map(async (id) => {
+            const res = await updateProjectTask(db, project.id, id, patch, actor);
+            return "error" in res ? { taskId: id, error: res.error } : { taskId: id, task: res };
+          }));
+          return ok(results);
+        }
+        return ok(await updateProjectTask(db, project.id, taskId!, patch, actor));
       },
     );
 

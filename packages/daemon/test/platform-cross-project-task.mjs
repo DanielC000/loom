@@ -165,6 +165,82 @@ try {
   const goodIn = await updateProjectTask(db, "pTarget", card.id, { columnKey: "review" });
   check("(4) a valid in-project move is accepted (review exists on the default board)", goodIn.columnKey === "review" && !goodIn.error);
 
+  // ===================== (4b) BATCH move + batch read (card 1105c2c8) =====================
+  // agent_clone_batch's convention: independent per-id apply, non-transactional, one result per id
+  // in the given order — {taskId, task} success / {taskId, error} failure, single-id path unchanged.
+  const b1 = await call("project_task_create", { projectId: "pTarget", title: "batch card 1", body: "b1", columnKey: "backlog" });
+  const b2 = await call("project_task_create", { projectId: "pTarget", title: "batch card 2", body: "b2", columnKey: "backlog" });
+  const b3 = await call("project_task_create", { projectId: "pTarget", title: "batch card 3", body: "b3", columnKey: "backlog" });
+
+  // Happy path: one call, one columnKey, three ids.
+  const batchMove = await call("project_task_update", { projectId: "pTarget", taskIds: [b1.id, b2.id, b3.id], columnKey: "in_progress" });
+  check("(4b) batch move returns one result per id, in order",
+    Array.isArray(batchMove) && batchMove.length === 3 &&
+    batchMove.every((r, i) => r.taskId === [b1.id, b2.id, b3.id][i] && !r.error && r.task.columnKey === "in_progress"));
+  check("(4b) batch move actually persisted the column on all three",
+    db.getTask(b1.id).columnKey === "in_progress" && db.getTask(b2.id).columnKey === "in_progress" && db.getTask(b3.id).columnKey === "in_progress");
+
+  // Partial failure: a bad id (unknown, but long enough to prefix-resolve as "none") among good ones —
+  // the good ones still apply, the bad one surfaces its own {taskId, error}; nothing is transactional.
+  const ghostId = "00000000-0000-0000-0000-000000000000";
+  const batchPartial = await call("project_task_update", { projectId: "pTarget", taskIds: [b1.id, ghostId, b2.id], priority: "p0" });
+  check("(4b) batch partial-failure: good ids still applied",
+    db.getTask(b1.id).priority === "p0" && db.getTask(b2.id).priority === "p0");
+  check("(4b) batch partial-failure: the bad id surfaces its own {taskId, error}, doesn't block others",
+    batchPartial.find((r) => r.taskId === ghostId)?.error !== undefined &&
+    batchPartial.find((r) => r.taskId === b1.id)?.error === undefined &&
+    batchPartial.find((r) => r.taskId === b2.id)?.error === undefined);
+
+  // Prefix resolution works PER-ID inside a batch (mirrors the single-id path's id-prefix resolution).
+  const b1Prefix = b1.id.slice(0, 8);
+  const batchPrefix = await call("project_task_update", { projectId: "pTarget", taskIds: [b1Prefix], deferred: true });
+  check("(4b) batch move resolves an 8-char id-prefix per-id", batchPrefix[0].taskId === b1Prefix && !batchPrefix[0].error);
+  check("(4b) the prefix-resolved batch move persisted", db.getTask(b1.id).deferred === true);
+
+  // title/body are rejected alongside taskIds — whole call rejected, nothing written.
+  const beforeTitle = db.getTask(b1.id).title;
+  const batchTitleRejected = await call("project_task_update", { projectId: "pTarget", taskIds: [b1.id, b2.id], title: "same title for all" });
+  check("(4b) taskIds + title is rejected", /title\/body/.test(batchTitleRejected.error || ""));
+  check("(4b) the rejected batch title write touched nothing", db.getTask(b1.id).title === beforeTitle);
+  const batchBodyRejected = await call("project_task_update", { projectId: "pTarget", taskIds: [b1.id, b2.id], body: "same body for all" });
+  check("(4b) taskIds + body is rejected", /title\/body/.test(batchBodyRejected.error || ""));
+
+  // exactly-one-of taskId/taskIds validation, on both update and get.
+  check("(4b) project_task_update: neither taskId nor taskIds is an error",
+    /taskId or taskIds/.test((await call("project_task_update", { projectId: "pTarget", priority: "p1" })).error || ""));
+  check("(4b) project_task_update: both taskId and taskIds is an error",
+    /not both/.test((await call("project_task_update", { projectId: "pTarget", taskId: b1.id, taskIds: [b2.id], priority: "p1" })).error || ""));
+
+  // Batch READ happy path — full bodies back, one result per id, in order.
+  const batchRead = await call("project_task_get", { projectId: "pTarget", taskIds: [b1.id, b2.id, b3.id] });
+  check("(4b) batch read returns one full-body result per id, in order",
+    Array.isArray(batchRead) && batchRead.length === 3 &&
+    batchRead[0].taskId === b1.id && batchRead[0].task.body === "b1" &&
+    batchRead[1].taskId === b2.id && batchRead[1].task.body === "b2" &&
+    batchRead[2].taskId === b3.id && batchRead[2].task.body === "b3");
+
+  // Batch read partial failure: good ids still return full bodies, the bad id surfaces its own error.
+  const batchReadPartial = await call("project_task_get", { projectId: "pTarget", taskIds: [b1.id, ghostId] });
+  check("(4b) batch read partial-failure: good id still returns its body",
+    batchReadPartial.find((r) => r.taskId === b1.id)?.task?.body === "b1");
+  check("(4b) batch read partial-failure: the bad id surfaces its own {taskId, error}",
+    batchReadPartial.find((r) => r.taskId === ghostId)?.error !== undefined);
+
+  // Prefix resolution works PER-ID inside a batch read too.
+  const batchReadPrefix = await call("project_task_get", { projectId: "pTarget", taskIds: [b1Prefix] });
+  check("(4b) batch read resolves an 8-char id-prefix per-id", batchReadPrefix[0].taskId === b1Prefix && batchReadPrefix[0].task.body === "b1");
+
+  check("(4b) project_task_get: neither taskId nor taskIds is an error",
+    /taskId or taskIds/.test((await call("project_task_get", { projectId: "pTarget" })).error || ""));
+  check("(4b) project_task_get: both taskId and taskIds is an error",
+    /not both/.test((await call("project_task_get", { projectId: "pTarget", taskId: b1.id, taskIds: [b2.id] })).error || ""));
+
+  // Single-id path stays BYTE-IDENTICAL — bare row, not wrapped in a one-element array.
+  const singleRead = await call("project_task_get", { projectId: "pTarget", taskId: b1.id });
+  check("(4b) single-taskId project_task_get returns the bare row, not an array", !Array.isArray(singleRead) && singleRead.id === b1.id);
+  const singleMove = await call("project_task_update", { projectId: "pTarget", taskId: b1.id, priority: "p3" });
+  check("(4b) single-taskId project_task_update returns the bare ack/row, not an array", !Array.isArray(singleMove) && singleMove.priority === "p3");
+
   // list_all_tasks aggregates across projects; projectId narrows; done excluded; summary drops body.
   const doneCard = await call("project_task_create", { projectId: "pTarget", title: "done card", columnKey: "done" });
   const agg = await call("list_all_tasks", {});
