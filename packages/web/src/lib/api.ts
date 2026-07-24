@@ -1,4 +1,4 @@
-import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage } from "@loom/shared";
+import type { Project, RepoRegistryEntry, Agent, AgentListItem, AgentId, SessionRole, Session, Task, BoardTask, SessionListItem, ArchivedSessionListItem, ArchivedSessionsPage, ScheduleHistoryPage, VaultEntry, KanbanColumn, ColumnRole, OrchestrationEvent, Wake, SkillSummary, Profile, ProfileSummary, ProfileMergeResult, ProfileFieldMerge, Schedule, ShellTerminal, ProjectConfigOverride, PlatformConfig, PlatformConfigOverride, PlatformConfigPatch, RemoteAccessConfig, UsageLimitsStatus, UsageHistory, SessionUsageHistory, AgentRun, RunEvent, ApiKey, ApiKeyCaps, ApiKeyStatus, PresetPrompt, PresetPromptSuggestion, AuditTimeline, AuditDiff, AuditScope, CompanionConfigMasked, CompanionBinding, CompanionAllowedSender, CompanionCapabilityGrant, CompanionCoGrantWarning, CompanionConversationSummary, CompanionMessage, ConnectionMetadata, ConnectionAuthScheme, OAuthProviderSlug, CapabilitySummary, CapabilityProvisionKind, PollJob, Question, QuestionInboxItem, PendingBinding, PermissionAnswer, ProjectLink, EventTrigger, EventTriggerEventKind, ProjectMemoryEntry, GatesActive, GateHistoryPage, StalePromptWarning } from "@loom/shared";
 // Type-only — the durable in-app chat history row shape, owned by the chat panel's transport module. Erased
 // at build (no runtime import of that module into the api client), and no cycle (companionChat imports nothing here).
 import type { CompanionHistoryRow } from "./companionChat";
@@ -203,10 +203,14 @@ export interface LiveWorktreeSession { sessionId: string; branch: string | null;
 // liveSessions[] the daemon returned alongside `{ error }` — so the UI lists them, not just the message.
 export interface ProjectPatchError extends Error { liveSessions?: LiveWorktreeSession[]; }
 
+// A successful project PATCH/project_update, PLUS the rename/repoPath-change stale-prompt lint (card
+// 0597e092) — ADDITIVE on the stored Project shape, never persisted on it. Always present, possibly [].
+export type ProjectPatchResult = Project & { staleStartupPrompts: StalePromptWarning[] };
+
 // PATCH /api/projects/:id (the human STRUCTURAL path — name / vaultPath / repoPath rebind). Surfaces the
 // server's `{ error }` body verbatim (non-repo / non-empty validation) AND attaches the live-worktree
 // refusal's `liveSessions[]` to the thrown Error so the rebind UI can list the sessions to stop.
-async function patchProject(url: string, body: unknown): Promise<Project> {
+async function patchProject(url: string, body: unknown): Promise<ProjectPatchResult> {
   const r = await fetch(url, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   if (!r.ok) {
     let msg = `${url} -> ${r.status}`;
@@ -220,7 +224,7 @@ async function patchProject(url: string, body: unknown): Promise<Project> {
     if (liveSessions) e.liveSessions = liveSessions;
     throw e;
   }
-  return r.json() as Promise<Project>;
+  return r.json() as Promise<ProjectPatchResult>;
 }
 
 // PATCH that surfaces the server's JSON `{ error }` body as the thrown message — the config schema is

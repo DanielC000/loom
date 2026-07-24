@@ -52,6 +52,7 @@ import { GitWriter, gitError } from "../git/writer.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { getWorkerDiffCached } from "../git/worktrees.js";
 import { checkRepoRebind, checkLiveWorktreeSessions, checkTaskRepoKeyRebind } from "../projects/rebind.js";
+import { lintStalePromptsOnProjectChange } from "../projects/prompt-lint.js";
 import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { validateReferenceRepos } from "../projects/reference-repos.js";
 import { validateDenyGlobs } from "../projects/deny-globs.js";
@@ -3817,8 +3818,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       if (!check.ok) return reply.code(400).send({ error: `repoPath/vaultPath rebind conflicts with the existing repos registry: ${check.error}` });
       repos = check.value;
     }
+    const namePatch = b.name === undefined ? undefined : (b.name as string).trim();
     deps.db.updateProject(id, {
-      name: b.name === undefined ? undefined : (b.name as string).trim(),
+      name: namePatch,
       vaultPath,
       repoPath,
       referenceRepos,
@@ -3826,6 +3828,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       denyGlobs,
       repos,
     });
+    // STALE-PROMPT LINT (card 0597e092): `p` is the PRE-update row (fetched at the top of this handler,
+    // before the write above), so this compares old-vs-new correctly. Read BEFORE the notify block below
+    // so a rename note and a stale-prompt warning are computed from the exact same write.
+    const staleStartupPrompts = lintStalePromptsOnProjectChange(deps.db, id, p, { name: namePatch, repoPath, vaultPath });
     // NOTIFY live manager/platform sessions of a REAL repos registry change (card 540a3281): the write
     // above already succeeded — this is a best-effort FYI, never allowed to turn a successful PATCH into
     // an error. `resolveSettleNudgeTarget`-style lineage resolution is deliberately NOT used here (unlike
@@ -3849,7 +3855,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         try { deps.pty.enqueueStdin(lead.id, leadNote); } catch { /* Lead not live — best-effort */ }
       }
     }
-    return deps.db.getProject(id);
+    // staleStartupPrompts is ADDITIVE on this response — always present (possibly []), never a field on
+    // the stored Project itself; a rename/repoPath-change lint result, not project state.
+    return { ...deps.db.getProject(id)!, staleStartupPrompts };
   });
 
   // Soft-remove (archive) a project — hides it from the project list; rows/sessions are retained.

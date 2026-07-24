@@ -1,9 +1,9 @@
 import { useState, useEffect, useMemo, type ReactNode } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type RepoRegistryEntry } from "@loom/shared";
+import { COLUMN_PRESETS, DEFAULT_COLUMN_PRESET_ID, presetById, presetToDesired, type Agent, type Project, type RepoRegistryEntry, type StalePromptWarning } from "@loom/shared";
 import { api } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
-import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Chip, Dot, PresetAccentDots, StaleStartupPromptWarning } from "../components/ui";
 import { color, font, radius } from "../theme";
 import { roleDisplay, roleColor } from "../lib/roleDisplay";
 import type { SessionRole } from "@loom/shared";
@@ -211,7 +211,8 @@ export default function Projects() {
                 onSave={(patch) => updateProject.mutate({ id: selectedProject.id, patch })}
                 onArchive={() => archiveProject.mutate(selectedProject.id)}
                 onDelete={() => deleteProject.mutate(selectedProject.id)}
-                saving={updateProject.isPending} archiving={archiveProject.isPending} deleting={deleteProject.isPending} />
+                saving={updateProject.isPending} archiving={archiveProject.isPending} deleting={deleteProject.isPending}
+                staleStartupPrompts={updateProject.isSuccess ? updateProject.data?.staleStartupPrompts : undefined} />
             </Panel>
 
             <Panel style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -370,9 +371,10 @@ function EmptyPane({ project }: { project: boolean }) {
 // DISABLED while the project has a live session (the server blocks them too — "stop the fleet first").
 // Reserved/system projects never reach here (they're excluded from the project list this renders from).
 function ProjectManage(
-  { project, liveCount, onSave, onArchive, onDelete, saving, archiving, deleting }:
+  { project, liveCount, onSave, onArchive, onDelete, saving, archiving, deleting, staleStartupPrompts }:
   { project: Project; liveCount: number; onSave: (patch: { name?: string; vaultPath?: string }) => void;
-    onArchive: () => void; onDelete: () => void; saving: boolean; archiving: boolean; deleting: boolean },
+    onArchive: () => void; onDelete: () => void; saving: boolean; archiving: boolean; deleting: boolean;
+    staleStartupPrompts?: StalePromptWarning[] },
 ) {
   const [open, setOpen] = useState(false);
   const [name, setName] = useState(project.name);
@@ -418,6 +420,9 @@ function ProjectManage(
           )}
           <Button variant="primary" disabled={!dirty || saving}
             onClick={() => onSave({ name: name.trim(), vaultPath: vaultTrim })}>{saving ? "Saving…" : "Save changes"}</Button>
+          {/* Stale-prompt lint (card 0597e092): the save SUCCEEDED, but a rename/vaultPath change left an
+              agent's startupPrompt still naming the OLD value. WARN-only — nothing was auto-edited. */}
+          <StaleStartupPromptWarning warnings={staleStartupPrompts} />
           <ReferenceReposEditor project={project} />
           <RepoRegistryEditor project={project} />
           <Button disabled={live || archiving} title={liveTitle}

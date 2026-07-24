@@ -13,6 +13,7 @@ import type {
   SelectHTMLAttributes,
 } from "react";
 import { NavLink } from "react-router-dom";
+import type { StalePromptWarning } from "@loom/shared";
 import { color, font, radius, tone, type Tone } from "../../theme";
 
 // ── Panel ────────────────────────────────────────────────────────────────────
@@ -228,6 +229,30 @@ export function Segmented<T extends string>({
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ── StaleStartupPromptWarning ──────────────────────────────────────────────────
+// The project rename/repoPath-change stale-prompt lint (card 0597e092) — shared by both the repoPath
+// rebind (Settings.tsx) and the name/vaultPath save (Projects.tsx), the two writes that can trigger it.
+// WARN-only: names which agents' startupPrompts still reference a value the just-completed save changed
+// away from. Nothing is auto-edited — renders nothing when there's nothing to warn about.
+export function StaleStartupPromptWarning({ warnings }: { warnings: StalePromptWarning[] | undefined }) {
+  if (!warnings || warnings.length === 0) return null;
+  return (
+    <div style={{ marginTop: 10, padding: 10, background: color.panel2, border: `1px solid ${color.amber}`, borderRadius: 6 }}>
+      <span style={{ fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+        these agent startup prompts still reference the OLD value — edit them manually if that's a problem:
+      </span>
+      <ul style={{ margin: "6px 0 0", paddingLeft: 18, color: color.text, fontFamily: font.mono, fontSize: 12, lineHeight: 1.6 }}>
+        {warnings.map((w) => (
+          <li key={w.agentId}>
+            <span style={{ color: color.text }}>{w.agentName}</span>
+            <span style={{ color: color.textMuted }}> · stale {w.staleFields.join(", ")}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }

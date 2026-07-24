@@ -21,7 +21,7 @@ import {
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAllAgents } from "../lib/useAllAgents";
-import { Panel, Button, Input, Select, SectionLabel, Badge, Chip } from "../components/ui";
+import { Panel, Button, Input, Select, SectionLabel, Badge, Chip, StaleStartupPromptWarning } from "../components/ui";
 import { ColumnManager } from "../components/ColumnManager";
 import { color, font } from "../theme";
 
@@ -192,6 +192,11 @@ function RepoPathEditor({ project }: { project: Project }) {
           </ul>
         </div>
       )}
+
+      {/* Stale-prompt lint (card 0597e092): the rebind SUCCEEDED, but an agent's startupPrompt still
+          names the OLD repoPath. WARN-only — nothing was auto-edited; the human fixes it in the Agent
+          editor if it matters. */}
+      <StaleStartupPromptWarning warnings={save.isSuccess ? save.data?.staleStartupPrompts : undefined} />
     </Panel>
   );
 }

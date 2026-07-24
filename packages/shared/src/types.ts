@@ -138,6 +138,20 @@ export interface AgentListItem extends Agent {
 }
 
 /**
+ * A stale self-orientation reference the project-rename/repoPath-change lint (card 0597e092) found in
+ * one agent's `startupPrompt` — it still names the OLD project name and/or an OLD path after a rename.
+ * WARN-only: the lint never edits the prompt (least surprise; a content fix is a deliberate human/Lead
+ * decision, not a mechanical rewrite). `staleFields` names which of the CHANGED fields on this write the
+ * prompt still references — a prompt can be stale on more than one at once (e.g. both `name` and
+ * `repoPath` changed in the same edit).
+ */
+export interface StalePromptWarning {
+  agentId: AgentId;
+  agentName: string;
+  staleFields: Array<"name" | "repoPath" | "vaultPath">;
+}
+
+/**
  * A **Profile** — a reusable, platform-level (cross-project) "rig": the role, model, permission
  * delta, skill-subset, and icon a session adopts. Agents reference one via `profileId`, and
  * `resolveProfile` (sibling of `resolveConfig`) resolves agent + profile into the effective spawn
