@@ -158,34 +158,51 @@ try {
       }
     }
 
-    // (B1) setup project_create: smuggled noGateByDesign is IGNORED — created project stays false.
-    const c1 = await setup.call("project_create", { name: "SetupCreated", repoPath: primary, noGateByDesign: true });
-    check("(B1) setup project_create smuggled noGateByDesign → created project has false (not persisted)", c1.noGateByDesign === false);
-    check("(B1) confirmed in the Db too", db.getProject(c1.id)?.noGateByDesign === false);
+    // card cb369c9d: every project-write tool's inputSchema is now a strictShape() — an undeclared
+    // top-level key like the smuggled noGateByDesign below HARD-REJECTS (isError, naming the bad key)
+    // instead of the pre-strictShape behavior of being silently stripped while the rest of the call
+    // still succeeded. That's a STRONGER version of this trust boundary: the agent can no longer even
+    // complete a call that names noGateByDesign, let alone have it take effect.
+    const rejects = (res, badKey) => res.isError === true && typeof res.content?.[0]?.text === "string" && res.content[0].text.includes(badKey);
+
+    // (B1) setup project_create: smuggled noGateByDesign is HARD-REJECTED — no project is created at all.
+    const beforeB1 = db.listProjects().length;
+    const c1 = await setup.client.callTool({ name: "project_create", arguments: { name: "SetupCreated", repoPath: primary, noGateByDesign: true } });
+    check("(B1) setup project_create smuggled noGateByDesign → hard-rejected", rejects(c1, "noGateByDesign"));
+    check("(B1) no project was created for the rejected call", db.listProjects().length === beforeB1);
 
     // (B2) platform (elevated) project_create: same guarantee.
-    const c2 = await plat.call("project_create", { name: "PlatCreated", repoPath: primary, noGateByDesign: true });
-    check("(B2) platform project_create smuggled noGateByDesign → created project has false (not persisted)", c2.noGateByDesign === false);
-    check("(B2) confirmed in the Db too", db.getProject(c2.id)?.noGateByDesign === false);
+    const beforeB2 = db.listProjects().length;
+    const c2 = await plat.client.callTool({ name: "project_create", arguments: { name: "PlatCreated", repoPath: primary, noGateByDesign: true } });
+    check("(B2) platform project_create smuggled noGateByDesign → hard-rejected", rejects(c2, "noGateByDesign"));
+    check("(B2) no project was created for the rejected call", db.listProjects().length === beforeB2);
 
-    // (B3) setup project_init: smuggled noGateByDesign is IGNORED on the sanctioned-dir bootstrap path too.
-    const i1 = await setup.call("project_init", { name: "SetupInit", kind: "vault", noGateByDesign: true });
-    check("(B3) setup project_init smuggled noGateByDesign → created project has false (not persisted)", !i1.error && i1.noGateByDesign === false);
+    // (B3) setup project_init: smuggled noGateByDesign is HARD-REJECTED on the sanctioned-dir bootstrap path too.
+    const beforeB3 = db.listProjects().length;
+    const i1 = await setup.client.callTool({ name: "project_init", arguments: { name: "SetupInit", kind: "vault", noGateByDesign: true } });
+    check("(B3) setup project_init smuggled noGateByDesign → hard-rejected", rejects(i1, "noGateByDesign"));
+    check("(B3) no project was created for the rejected call", db.listProjects().length === beforeB3);
 
     // (B4) platform (elevated) project_init: same guarantee.
-    const i2 = await plat.call("project_init", { name: "PlatInit", kind: "vault", noGateByDesign: true });
-    check("(B4) platform project_init smuggled noGateByDesign → created project has false (not persisted)", !i2.error && i2.noGateByDesign === false);
+    const beforeB4 = db.listProjects().length;
+    const i2 = await plat.client.callTool({ name: "project_init", arguments: { name: "PlatInit", kind: "vault", noGateByDesign: true } });
+    check("(B4) platform project_init smuggled noGateByDesign → hard-rejected", rejects(i2, "noGateByDesign"));
+    check("(B4) no project was created for the rejected call", db.listProjects().length === beforeB4);
 
-    // (B5) setup project_update: smuggled noGateByDesign on an EXISTING project is IGNORED.
-    await setup.call("project_update", { projectId: "pExisting", name: "SetupRenamed", noGateByDesign: true });
-    check("(B5) setup project_update smuggled noGateByDesign leaves the Db value UNCHANGED", db.getProject("pExisting")?.noGateByDesign === false);
-    check("(B5) the structural field it DOES own still applied", db.getProject("pExisting")?.name === "SetupRenamed");
+    // (B5) setup project_update: smuggled noGateByDesign is HARD-REJECTED — the WHOLE call fails, so even
+    // the legitimate `name` field it also carried is NOT applied (unlike the old silently-stripped
+    // behavior, where the rest of the call still went through).
+    const u1 = await setup.client.callTool({ name: "project_update", arguments: { projectId: "pExisting", name: "SetupRenamed", noGateByDesign: true } });
+    check("(B5) setup project_update smuggled noGateByDesign → hard-rejected", rejects(u1, "noGateByDesign"));
+    check("(B5) noGateByDesign leaves the Db value UNCHANGED", db.getProject("pExisting")?.noGateByDesign === false);
+    check("(B5) the whole call was rejected — name was NOT applied either", db.getProject("pExisting")?.name === "Existing");
 
     // (B6) platform (elevated) project_update: same guarantee — even the MOST privileged agent surface
     // can never introduce noGateByDesign.
-    await plat.call("project_update", { projectId: "pExisting", name: "PlatRenamed", noGateByDesign: true });
-    check("(B6) platform project_update smuggled noGateByDesign leaves the Db value UNCHANGED", db.getProject("pExisting")?.noGateByDesign === false);
-    check("(B6) the structural field it DOES own still applied", db.getProject("pExisting")?.name === "PlatRenamed");
+    const u2 = await plat.client.callTool({ name: "project_update", arguments: { projectId: "pExisting", name: "PlatRenamed", noGateByDesign: true } });
+    check("(B6) platform project_update smuggled noGateByDesign → hard-rejected", rejects(u2, "noGateByDesign"));
+    check("(B6) noGateByDesign leaves the Db value UNCHANGED", db.getProject("pExisting")?.noGateByDesign === false);
+    check("(B6) the whole call was rejected — name was NOT applied either", db.getProject("pExisting")?.name === "Existing");
 
     await setup.client.close();
     await plat.client.close();

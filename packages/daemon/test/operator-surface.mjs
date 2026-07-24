@@ -19,7 +19,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      403s when the flag is off and spawns when it's on; both setup's and platform's session_spawn
 //      refuse role "operator".
 //   D. Own-workspace confinement: every writer tool's schema carries NO projectId argument at all (an
-//      extra projectId in the call args is inert — the write always targets the CALLER's own project);
+//      extra projectId in the call args is HARD-REJECTED under strictShape — card cb369c9d — so the
+//      write can never even attempt to target anything but the CALLER's own project);
 //      git_checkout/create_branch/commit/push round-trip against a REAL repo + a REAL local remote;
 //      vault_write confines to the caller's OWN vaultPath and rejects a traversal path.
 //   E. Forbidden set absent: the registered tool list carries none of session_message/session_stop/
@@ -260,14 +261,16 @@ try {
   const realBranch = execSync("git rev-parse --abbrev-ref HEAD", { cwd: repo }).toString().trim();
   check("(D) git_create_branch: the REAL repo is actually on the new branch", realBranch === "feature-op");
 
-  // An extra, unrelated `projectId` in the args is INERT — the write STILL targets P1 (never P2/otherRepo).
-  const branchWithFakeProjectId = await call("git_create_branch", { name: "feature-ignored-arg", projectId: "P2" });
-  check("(D) git_create_branch: an extra projectId in the call args does NOT redirect the write",
-    branchWithFakeProjectId.ok === true);
+  // card cb369c9d: an extra, unrelated `projectId` in the args is now HARD-REJECTED (isError, naming
+  // projectId) — a STRONGER confinement guarantee than the old "inert, write still targets P1" behavior,
+  // since the caller can no longer even attempt to name a different target project.
+  const branchWithFakeProjectId = await client.callTool({ name: "git_create_branch", arguments: { name: "feature-ignored-arg", projectId: "P2" } });
+  check("(D) git_create_branch: an extra projectId in the call args is HARD-REJECTED",
+    branchWithFakeProjectId.isError === true && typeof branchWithFakeProjectId.content?.[0]?.text === "string" && branchWithFakeProjectId.content[0].text.includes("projectId"));
   const p2Branches = execSync("git branch", { cwd: otherRepo }).toString();
   check("(D) confinement proof: P2's (otherRepo) branch list is UNCHANGED — the write never touched it", !p2Branches.includes("feature-ignored-arg"));
-  const p1HasIt = execSync("git branch", { cwd: repo }).toString();
-  check("(D) confinement proof: P1's (the caller's own repo) branch list DOES have it", p1HasIt.includes("feature-ignored-arg"));
+  const p1HasItNot = execSync("git branch", { cwd: repo }).toString();
+  check("(D) confinement proof: P1's (the caller's own repo) branch list does NOT have it either — the whole call was rejected", !p1HasItNot.includes("feature-ignored-arg"));
 
   const checkoutRes = await call("git_checkout", { branch: "feature-op" });
   check("(D) git_checkout: switches to an existing local branch", checkoutRes.ok === true && checkoutRes.branch === "feature-op");
@@ -338,6 +341,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Bucket 2b Elevated Operator surface is fail-closed by default (flag off ⇒ 404, byte-identical spawn for every pre-existing role), gated LIVE (not boot-memoized) once on, cannot self-elevate (setupRoleError rejects it, setup/platform session_spawn refuse it, the REST spawn 403s while off), is own-workspace-confined (no projectId argument anywhere, an extra one is inert, git checkout/create-branch/commit/push + vault_write round-trip against the caller's own project only, traversal rejected), carries none of the forbidden cross-project/config-set/self-improvement tools, reuses GitWriter/writeVaultFile verbatim with no new writer of its own, and the config plumbing resolves/defaults correctly with the per-project validator unchanged."
+  ? "\n✅ ALL PASS — the Bucket 2b Elevated Operator surface is fail-closed by default (flag off ⇒ 404, byte-identical spawn for every pre-existing role), gated LIVE (not boot-memoized) once on, cannot self-elevate (setupRoleError rejects it, setup/platform session_spawn refuse it, the REST spawn 403s while off), is own-workspace-confined (no projectId argument anywhere, an extra one is hard-rejected, git checkout/create-branch/commit/push + vault_write round-trip against the caller's own project only, traversal rejected), carries none of the forbidden cross-project/config-set/self-improvement tools, reuses GitWriter/writeVaultFile verbatim with no new writer of its own, and the config plumbing resolves/defaults correctly with the per-project validator unchanged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

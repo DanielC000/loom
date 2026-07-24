@@ -22,6 +22,7 @@ import { skillListData, skillWriteData } from "./skillTools.js";
 import { getByIdPrefix } from "../id-prefix.js";
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { spawnableRoleError } from "./spawnable-role.js";
+import { strictShape } from "./arg-alias.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -121,12 +122,12 @@ export class SetupMcpRouter {
       "project_create",
       {
         description: "Bind a Loom project to an EXISTING path (use project_init to create one from nothing). Give repoPath to bind a CODE project — it MUST exist and be a git repository (rejected otherwise); vaultPath is OPTIONAL for a code project (an Obsidian vault for design docs) — omit it for a project with no vault bound (never defaulted to repoPath, which would make the auto-committer watch the code repo itself). OMIT repoPath and give vaultPath to set up a VAULT-ONLY (research/notes) project whose folder need NOT be a git repo — vaultPath must be an existing directory, and repoPath binds to it too. Optional config is validated against the AGENT project-config schema — orchestration.gateCommand (host-RCE) and alertWebhook (exfil) are REJECTED unknown keys, so the setup assistant can never set them.",
-        inputSchema: {
+        inputSchema: strictShape({
           name: z.string(),
           repoPath: z.string().optional(),
           vaultPath: z.string().optional(),
           config: z.object({}).passthrough().optional(),
-        },
+        }),
       },
       async ({ name, repoPath, vaultPath, config }) => {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
@@ -196,12 +197,12 @@ export class SetupMcpRouter {
       "project_init",
       {
         description: "Create a BRAND-NEW project from scratch for a user with NO existing repo or folder. Loom creates a fresh directory under its sanctioned workspace base (inside LOOM_HOME) and binds the project to it — you canNOT point this at an arbitrary host path. The directory name is derived from `name` (or pass an explicit `dirName`); both are confined to the sanctioned base and traversal/escape is rejected. kind \"git\" (default) runs `git init` so the project is a code repo ready for workers; kind \"vault\" leaves it a plain notes/research folder (no git). repoPath and vaultPath both bind to the created directory. To bind an EXISTING repo or notes folder instead, use project_create. Optional config is validated against the AGENT schema (gateCommand/alertWebhook rejected).",
-        inputSchema: {
+        inputSchema: strictShape({
           name: z.string(),
           kind: z.enum(["git", "vault"]).optional(),
           dirName: z.string().optional(),
           config: z.object({}).passthrough().optional(),
-        },
+        }),
       },
       async ({ name, kind, dirName, config }) => {
         const v = config === undefined ? { ok: true as const, value: {} as ProjectConfigOverride } : validateAgentProjectConfigOverride(config);
@@ -237,10 +238,10 @@ export class SetupMcpRouter {
       "project_configure",
       {
         description: "PATCH a project's config override: the given keys are DEEP-MERGED into the project's EXISTING override (a single-key change preserves your other overrides — it does NOT clobber them; arrays like kanbanColumns and scalars replace, nested objects merge). projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Validated against the AGENT project-config schema (NOT the elevated platform validator); resolveConfig merges the result over the platform defaults. Settable top-level keys: kanbanColumns (the board's column layout — array of {key,label,role?}), permission, pty, sessionEnv, orchestration, docLint, obsidian. The human-only orchestration.gateCommand (host-RCE) and alertWebhook (data-exfil), obsidian.path/python (host-launch) — and any unknown key — are REJECTED and the stored config is left unchanged.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string(),
           config: z.object({}).passthrough(),
-        },
+        }),
       },
       async ({ projectId, config }) => {
         // Accepts a full id OR an unambiguous 8-char id-prefix (mirrors project_get / list_all_agents) —
@@ -281,12 +282,12 @@ export class SetupMcpRouter {
       "project_update",
       {
         description: "Structural edit of a project by id — name and/or vaultPath, and/or its config override (omitted fields left as-is). repoPath, referenceRepos, repos (the writable multi-repo registry), and denyGlobs are not editable here (human-only, via the REST/UI). config (when given) is validated against the AGENT project-config schema, so orchestration.gateCommand and alertWebhook — and unknown keys — are REJECTED. 404 if the project is unknown. Returns the updated project.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string(),
           name: z.string().optional(),
           vaultPath: z.string().optional(),
           config: z.object({}).passthrough().optional(),
-        },
+        }),
       },
       async ({ projectId, name, vaultPath, config }) => {
         const project = db.getProject(projectId);
@@ -326,7 +327,7 @@ export class SetupMcpRouter {
       "project_archive",
       {
         description: "Soft-archive a project by id (hidden from the active list; rows + sessions retained — reversible). REFUSES a reserved/system project so you can never archive the workspace's own home. 404 if unknown.",
-        inputSchema: { projectId: z.string() },
+        inputSchema: strictShape({ projectId: z.string() }),
       },
       async ({ projectId }) => {
         const p = db.getProject(projectId);
@@ -342,12 +343,12 @@ export class SetupMcpRouter {
       "agent_create",
       {
         description: "Create an agent in a project. The startupPrompt is injected as the first turn when a session starts in this agent. Optionally assign an EXISTING (human/assistant-authored) profileId as the agent's rig — assignment only (use profile_create to mint a new one); a non-existent profileId is rejected.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string(),
           name: z.string(),
           startupPrompt: z.string().optional(),
           profileId: z.string().optional(),
-        },
+        }),
       },
       async ({ projectId, name, startupPrompt, profileId }) => {
         if (!db.getProject(projectId)) return ok({ error: "project not found" });
@@ -380,12 +381,12 @@ export class SetupMcpRouter {
       {
         description:
           "Edit an existing agent by id (cross-project) so you can action workspace-improvement cards directly — amend its startupPrompt / rename it / (re)assign its profile — instead of handing the user text to paste. PATCH semantics: only the keys you pass are applied (omitted keys left as-is); profileId:null CLEARS the assignment (the agent falls back to the plain backstop). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get). 404 if the agent id is unknown; error if the prefix is ambiguous (names the candidate ids). Edits apply to the agent's NEXT new session. LEAST-PRIVILEGE: the human-only endpoint/ioSchema flags are NOT settable here, and you may NOT assign a profile whose role is platform/auditor/workspace-auditor (a setup operator can never elevate an agent — that's human-only).",
-        inputSchema: {
+        inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
           startupPrompt: z.string().optional(),
           profileId: z.string().nullable().optional(),
-        },
+        }),
       },
       async (rawArgs) => {
         const { agentId } = rawArgs as { agentId: string };
@@ -426,7 +427,7 @@ export class SetupMcpRouter {
         description:
           "List the available workflow templates: each has a name, description, and a roster summary " +
           "(name + bound profile name) of the agents it stands up. Read-only, no secrets, no writes.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () =>
         ok(
@@ -448,10 +449,10 @@ export class SetupMcpRouter {
           "Fail-closed: an unknown templateName, an unknown projectId, an unknown profileName, or a " +
           "template whose agent resolves to an elevated profile role (platform/auditor/workspace-auditor) " +
           "are all rejected and nothing is written.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string(),
           templateName: z.string(),
-        },
+        }),
       },
       async ({ projectId, templateName }) => {
         // Same project-scope guard as project_configure/project_update/agent_create: resolve by exact id
@@ -477,7 +478,7 @@ export class SetupMcpRouter {
       "profile_create",
       {
         description: "Create a Profile (rig: role + permission allowDelta + skills subset + model + icon + browserTesting + documentConversion + restrictedTools + noCommit). role may be manager|worker|setup or omitted ONLY — an elevated \"platform\"/\"auditor\" role is rejected here (human-only). `connections`/`capabilities`/`vaultWrite` are ALSO rejected here — human-only via the Profiles UI/REST: `connections` grants access to real external secrets, `capabilities` can launch a host process / inject an MCP server, and `vaultWrite` grants confined write access into a project's vault. Otherwise validated by the SAME strict validator as POST /api/profiles; an unknown/invalid field is rejected and nothing is created.",
-        inputSchema: { profile: z.object({}).passthrough() },
+        inputSchema: strictShape({ profile: z.object({}).passthrough() }),
       },
       async ({ profile }) => {
         const forbiddenErr = agentProfileKeyError(profile);
@@ -496,7 +497,7 @@ export class SetupMcpRouter {
       "profile_update",
       {
         description: "Edit an existing Profile by id: the patch is merged over the current profile, then re-validated by the same strict validator as PUT /api/profiles/:id (so a partial patch still passes). The RESULTING role may be manager|worker|setup or null ONLY — a patch that yields an elevated \"platform\"/\"auditor\" role is rejected (human-only). The patch may not touch `connections`/`capabilities`/`vaultWrite` (authenticated-egress grants / registry-capability grants / the confined vault-write grant — all human-only, via the Profiles UI/REST); a profile that already has one of these set keeps it across an unrelated patch. 404 if the id is unknown; an invalid result is rejected and the stored profile is left unchanged.",
-        inputSchema: { profileId: z.string(), patch: z.object({}).passthrough() },
+        inputSchema: strictShape({ profileId: z.string(), patch: z.object({}).passthrough() }),
       },
       async ({ profileId, patch }) => {
         const existing = db.getProfile(profileId);
@@ -524,7 +525,7 @@ export class SetupMcpRouter {
       "profile_assign",
       {
         description: "Assign an EXISTING profile to an agent (explicit agentId + profileId). Both the agent and the profile must already exist (404 otherwise). agentId accepts the full id OR an unambiguous 8-char id-prefix (same resolution as agent_get); error if ambiguous (names the candidate ids). Assignment only — it never mints a profile (use profile_create).",
-        inputSchema: { agentId: z.string(), profileId: z.string() },
+        inputSchema: strictShape({ agentId: z.string(), profileId: z.string() }),
       },
       async ({ agentId, profileId }) => {
         const agent = getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent");
@@ -546,7 +547,7 @@ export class SetupMcpRouter {
       "list_all_projects",
       {
         description: "List every live project across the platform, INCLUDING reserved/system homes. Excludes archived projects. Returns project rows.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => ok(db.listAllProjects()),
     );
@@ -555,12 +556,12 @@ export class SetupMcpRouter {
       "list_all_agents",
       {
         description: "List agents across the platform. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. With no filter, aggregates the agents of every live project. DEFAULT returns a lightweight SUMMARY per agent (id, projectId, name, position, profileId, endpoint) so the aggregate stays bounded; the heavy startupPrompt + ioSchema are DROPPED. Pass full:true for whole agent rows. Summary reads are capped at " + DEFAULT_AGENT_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare agents array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {agents, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string().optional(),
           full: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
-        },
+        }),
       },
       async ({ projectId, full, limit, offset }) => {
         // projectId resolves EXACTLY like the sibling cross-project reads (project_get/list_all_sessions) —
@@ -597,13 +598,13 @@ export class SetupMcpRouter {
       "list_all_sessions",
       {
         description: "List sessions across the platform (archived excluded), each enriched with its project + agent name. state (default \"live\") filters by PROCESS lifecycle: \"live\" = non-exited sessions only (the bounded default — finished but un-archived sessions are dropped so the feed doesn't grow without limit); \"exited\" = terminated sessions only (history); \"all\" = both. Optional projectId narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); an unknown/ambiguous id is an EXPLICIT error, never a silent []. DEFAULT returns a lightweight SUMMARY per session so the list stays bounded; pass full:true for whole session records. Optional limit/offset paginate (rows ordered by last activity, newest first); summary reads are capped at " + DEFAULT_SESSION_SUMMARY_CAP + " rows by default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, returns the bare sessions array (today's shape, unchanged) — otherwise, or whenever you pass offset/limit explicitly, it returns a page envelope {sessions, total, returned, offset, nextOffset}, the SAME shape session_transcript uses: total is the true matching-row count, nextOffset is offset+returned while more remains, else null. Page deterministically by calling again with offset:nextOffset until it is null — a capped read is thus self-evidently partial, never mistake a bare array at the cap for 'that's everything'.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string().optional(),
           state: z.enum(["live", "exited", "all"]).optional(),
           full: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
-        },
+        }),
       },
       async ({ projectId, state, full, limit, offset }) => {
         // projectId resolves EXACTLY like the sibling cross-project reads (project_get) — full id OR
@@ -641,7 +642,7 @@ export class SetupMcpRouter {
       "agent_get",
       {
         description: "Read ONE agent by id — the FULL record incl. its startupPrompt and profileId (the list_all_agents summary drops startupPrompt). Accepts the full id OR an unambiguous 8-char id-prefix (the short id shown in the UI). Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
-        inputSchema: { agentId: z.string() },
+        inputSchema: strictShape({ agentId: z.string() }),
       },
       async ({ agentId }) =>
         ok(getByIdPrefix(agentId, (id) => db.getAgent(id), () => db.listAllProjects().flatMap((p) => db.listAgents(p.id)), "agent")),
@@ -651,7 +652,7 @@ export class SetupMcpRouter {
       "profile_get",
       {
         description: "Read ONE profile (rig) by id — the FULL record (role, permission allowDelta, skills subset, model, icon, browserTesting, documentConversion, restrictedTools, noCommit). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
-        inputSchema: { profileId: z.string() },
+        inputSchema: strictShape({ profileId: z.string() }),
       },
       async ({ profileId }) =>
         ok(getByIdPrefix(profileId, (id) => db.getProfile(id), () => db.listProfiles(), "profile")),
@@ -661,7 +662,7 @@ export class SetupMcpRouter {
       "project_get",
       {
         description: "Read ONE project by id — the FULL record incl. its config override (so you can see what's set before a project_configure PATCH). Accepts the full id OR an unambiguous 8-char id-prefix. Read-only. Error if the id is unknown or an ambiguous prefix (the error names the candidate ids).",
-        inputSchema: { projectId: z.string() },
+        inputSchema: strictShape({ projectId: z.string() }),
       },
       async ({ projectId }) =>
         ok(getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project")),
@@ -677,7 +678,7 @@ export class SetupMcpRouter {
       {
         description:
           "Spawn a session into a project by explicit projectId + agentId. role MUST be \"manager\" or \"plain\" ONLY: \"manager\" gets the orchestration surface; \"plain\" is a vanilla role-null session (even on a profile agent). NEVER spawns a \"platform\", \"auditor\", \"setup\", or \"operator\" session (no self-elevation) and NEVER a \"worker\" (a worker needs a manager parent + task — a manager's orchestration job). Any other role value is rejected.",
-        inputSchema: { projectId: z.string(), agentId: z.string(), role: z.string() },
+        inputSchema: strictShape({ projectId: z.string(), agentId: z.string(), role: z.string() }),
       },
       async ({ projectId, agentId, role }) => {
         // HARD INVARIANT: only manager|plain may be minted here. Reject platform/auditor/setup/operator
@@ -707,7 +708,7 @@ export class SetupMcpRouter {
           "into your next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops " +
           "(Ctrl-C×2, clean, resumable — the row lands on Archive) and this tool's own reply is delivered " +
           "before your pty dies.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         if (!callerSessionId) return ok({ error: "no caller session" });
@@ -734,7 +735,7 @@ export class SetupMcpRouter {
       {
         description:
           "List the skills in the user's skill store. Each entry has name, description, bundled (a Loom-shipped skill — read-only on this surface) and editable (= !bundled). USER (editable) skills ALSO include their full SKILL.md `content` so you can edit them in place; a bundled skill's content is omitted here (edit those via the Skills UI). Read-only.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => ok(skillListData()),
     );
@@ -746,11 +747,11 @@ export class SetupMcpRouter {
           "Create or update a skill in the USER skill store (~/.loom/skills). The editable unit is the skill's SKILL.md (frontmatter name/description + body); the full `content` you pass REPLACES it. name must be a kebab slug (a-z, 0-9, -, ≤64 chars). Edits apply to new sessions on next spawn.\n" +
           "BOUNDED TO USER SKILLS: this REJECTS any name that is a Loom-bundled/shipped skill (e.g. worker, orchestrate, setup-assistant, the platform-* dev skills) — it can NEVER modify the bundled/dev skill set. Use the Skills UI to edit a bundled skill.\n" +
           "CONFIRM-FIRST (load-bearing): NEVER call this without first showing the user the skill name + content and getting their explicit confirmation. Pass confirm:true to attest you have done so; a missing/false confirm is rejected and nothing is written.",
-        inputSchema: {
+        inputSchema: strictShape({
           name: z.string(),
           content: z.string(),
           confirm: z.boolean().optional(),
-        },
+        }),
       },
       // Shared handler (mcp/skillTools.ts) with allowBundledAsset:FALSE — the load-bearing setup bound:
       // USER store ONLY, a bundled name is REJECTED. Same validated logic the Lead's loom-platform

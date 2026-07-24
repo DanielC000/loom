@@ -150,10 +150,17 @@ try {
   const setupTools = (await setup.client.listTools()).tools;
   const setupPu = setupTools.find((t) => t.name === "project_update")?.inputSchema?.properties ?? {};
   check("(4) loom-setup project_update inputSchema has NO repoPath (human-only by design)", !("repoPath" in setupPu));
-  // Even if a caller smuggles repoPath, zod strips the unknown arg → repoPath is NOT changed.
+  // card cb369c9d: project_update's inputSchema is now a strictShape() — a smuggled repoPath (an
+  // undeclared key on this surface) HARD-REJECTS the WHOLE call (isError, naming repoPath) instead of
+  // the pre-strictShape behavior of zod silently stripping just the unknown key while the rest of the
+  // call (the `name` rename) still went through.
   const before = db.getProject("pProj").repoPath;
-  await setup.call("project_update", { projectId: "pProj", name: "Setup-rename", repoPath: repoA });
-  check("(4) a repoPath passed to loom-setup project_update is IGNORED (repoPath unchanged)", db.getProject("pProj").repoPath === before);
+  const beforeName = db.getProject("pProj").name;
+  const smuggled = await setup.client.callTool({ name: "project_update", arguments: { projectId: "pProj", name: "Setup-rename", repoPath: repoA } });
+  check("(4) a repoPath passed to loom-setup project_update is HARD-REJECTED",
+    smuggled.isError === true && typeof smuggled.content?.[0]?.text === "string" && smuggled.content[0].text.includes("repoPath"));
+  check("(4) repoPath unchanged", db.getProject("pProj").repoPath === before);
+  check("(4) the whole call was rejected — name was NOT applied either", db.getProject("pProj").name === beforeName);
   await setup.client.close();
 } finally {
   db.close();

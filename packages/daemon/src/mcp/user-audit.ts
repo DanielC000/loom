@@ -8,6 +8,7 @@ import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerScopedRepoReadTools, type ScopedRootResolution } from "./repo-read.js";
 import { skillListData } from "./skillTools.js";
 import { readSkill, isValidSkillName } from "../skills/store.js";
+import { strictShape } from "./arg-alias.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -111,7 +112,7 @@ export class WorkspaceAuditMcpRouter {
           "duplicate \"add another rule\" finding for a rule the prompt already states. Pass the `agentId` " +
           "from list_sessions (full:true, or the summary's `agentId`). Returns {id, projectId, name, " +
           "startupPrompt} or {error} if the id is unknown. Read-only.",
-        inputSchema: { agentId: z.string() },
+        inputSchema: strictShape({ agentId: z.string() }),
       },
       async ({ agentId }) => {
         const a = db.getAgent(agentId);
@@ -131,7 +132,7 @@ export class WorkspaceAuditMcpRouter {
           "has name, description, bundled (a Loom-shipped skill) and editable (= !bundled). USER (editable) " +
           "skills also include their full SKILL.md `content`; for a BUNDLED skill's full text use skill_read. " +
           "Read-only — use it to ground a skill critique in what is actually installed.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         try { return ok(skillListData()); }
@@ -146,7 +147,7 @@ export class WorkspaceAuditMcpRouter {
           "suggestion verifies against the actual skill body instead of inferring it from a transcript — " +
           "avoiding a duplicate finding for guidance the skill already gives. Returns {name, content} or " +
           "{error} if the name is invalid / not found. Read-only.",
-        inputSchema: { name: z.string() },
+        inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         if (!isValidSkillName(name)) return ok({ error: "invalid skill name" });
@@ -173,11 +174,11 @@ export class WorkspaceAuditMcpRouter {
           "deliveryStatus is `delivered-live`/`queued` if the operator is live, else `boarded` (the card " +
           "sits on the now-visible home board) — or {error} if the home is unexpectedly absent (safe; " +
           "nothing is written).",
-        inputSchema: {
+        inputSchema: strictShape({
           title: z.string(),
           detail: z.string(),
           severity: z.enum(["low", "medium", "high", "critical"]).optional(),
-        },
+        }),
       },
       async ({ title, detail, severity }) => {
         try {
@@ -202,11 +203,11 @@ export class WorkspaceAuditMcpRouter {
           "this 5× across 3 sessions\"). DEDUPED: suggesting a prompt that already exists as a preset OR " +
           "was already suggested is a no-op (returns {deduped:true,reason}) — do NOT re-nag. Returns " +
           "{created:true,id} on a genuinely-novel suggestion.",
-        inputSchema: {
+        inputSchema: strictShape({
           label: z.string(),
           prompt: z.string(),
           rationale: z.string().optional(),
-        },
+        }),
       },
       async ({ label, prompt, rationale }) => {
         try {
@@ -235,9 +236,9 @@ export class WorkspaceAuditMcpRouter {
           "Returns {deliveryStatus}: `delivered-live`/`queued` if the operator is live, else `boarded` (no " +
           "live operator — your cards already sit on the home board for them to find). The cards are the " +
           "durable record; this nudge never loses anything.",
-        inputSchema: {
+        inputSchema: strictShape({
           count: z.number().int().positive().optional(),
-        },
+        }),
       },
       async ({ count }) => {
         try {
@@ -262,7 +263,7 @@ export class WorkspaceAuditMcpRouter {
           "next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, " +
           "clean, resumable — the row lands on Archive) and this tool's own reply is delivered before your " +
           "pty dies.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         try {

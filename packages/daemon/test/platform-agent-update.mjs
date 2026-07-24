@@ -128,11 +128,17 @@ try {
     directOmit.ok === true && "name" in directOmit.patch && !("startupPrompt" in directOmit.patch) && !("profileId" in directOmit.patch));
 
   // ===================== (4) endpoint/ioSchema NOT settable via MCP (human-REST-only) =====================
-  // The inputSchema lacks endpoint/ioSchema; the handler passes allowEndpointFlags:false. Even if the keys
-  // are smuggled into the call args, they never become a patch — the stored endpoint flag stays false.
-  await call("agent_update", { agentId: "agentA", name: "Renamed3", endpoint: true, ioSchema: { hacked: true } });
+  // card cb369c9d: agent_update's inputSchema is now a strictShape() — the inputSchema lacks endpoint/
+  // ioSchema, so smuggling those keys into the call args HARD-REJECTS the WHOLE call (isError, naming
+  // the bad keys) instead of the pre-strictShape behavior of zod silently stripping them while the rest
+  // of the patch (the `name` rename) still went through.
+  const beforeName = db.getAgent("agentA").name;
+  const smuggled = await client.callTool({ name: "agent_update", arguments: { agentId: "agentA", name: "Renamed3", endpoint: true, ioSchema: { hacked: true } } });
+  check("(4) MCP agent_update with smuggled endpoint/ioSchema is HARD-REJECTED",
+    smuggled.isError === true && typeof smuggled.content?.[0]?.text === "string" &&
+    smuggled.content[0].text.includes("endpoint") && smuggled.content[0].text.includes("ioSchema"));
   const after = db.getAgent("agentA");
-  check("(4) MCP agent_update applied its allowed field (name)", after.name === "Renamed3");
+  check("(4) the whole call was rejected — name was NOT applied either", after.name === beforeName);
   check("(4) MCP agent_update did NOT flip the human-only endpoint flag", after.endpoint === false && after.ioSchema === null);
 
   await client.close();

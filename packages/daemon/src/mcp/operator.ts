@@ -7,6 +7,7 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import { GitWriter } from "../git/writer.js";
 import { writeVaultFile } from "../vault/writer.js";
+import { strictShape } from "./arg-alias.js";
 
 // Same envelope as the task / orchestration / platform / setup MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -106,7 +107,7 @@ export class OperatorMcpRouter {
       "git_checkout",
       {
         description: "Switch YOUR OWN project's repo to an EXISTING local branch (reuses the bounded, non-interactive human git-write path). No projectId — always your own project. Returns { ok:true, branch } or { ok:false, error } (unknown branch / dirty tree).",
-        inputSchema: { branch: z.string() },
+        inputSchema: strictShape({ branch: z.string() }),
       },
       async ({ branch }) => {
         const p = ownProject();
@@ -120,7 +121,7 @@ export class OperatorMcpRouter {
       "git_create_branch",
       {
         description: "Create a NEW local branch off the current HEAD and switch to it (checkout -b), in YOUR OWN project's repo. Does NOT touch any remote. No projectId — always your own project. Returns { ok:true, branch } or { ok:false, error } (branch already exists / invalid name).",
-        inputSchema: { name: z.string() },
+        inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const p = ownProject();
@@ -134,7 +135,7 @@ export class OperatorMcpRouter {
       "git_commit",
       {
         description: "Stage ALL changes (add -A) and commit YOUR OWN project's repo with the given message — plain commit under the repo's configured identity (no -c overrides, no Co-Authored-By trailer). No projectId — always your own project. A clean tree is an EXPECTED no-op failure ('nothing to commit'). Returns { ok:true, hash } or { ok:false, error }.",
-        inputSchema: { message: z.string() },
+        inputSchema: strictShape({ message: z.string() }),
       },
       async ({ message }) => {
         const p = ownProject();
@@ -148,7 +149,7 @@ export class OperatorMcpRouter {
       "git_push",
       {
         description: "Push YOUR OWN project's current branch to its remote — the one genuinely-outward op. Reuses GitWriter.push() VERBATIM: a plain `git push`, retried as `git push -u origin <branch>` ONLY when the branch has no upstream; any other failure (unreachable/auth/rejected) is surfaced unchanged. Bounded + non-interactive so a credential-needing remote FAILS FAST rather than hanging. No force-push via this tool (see the router's HONEST CAVEAT doc — this does not constrain the session's own shell). No projectId — always your own project. Returns { ok:true, branch } or { ok:false, error }.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         const p = ownProject();
@@ -164,7 +165,7 @@ export class OperatorMcpRouter {
       "vault_write",
       {
         description: "Write (create or overwrite) a UTF-8 text file under YOUR OWN project's vault, then commit it through the vault auto-committer (reuses vault/writer.ts writeVaultFile — its mandatory path-traversal guard confines the write to the vault root). No projectId — always your own project. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path escape, 'is-dir', 'error').",
-        inputSchema: { path: z.string(), content: z.string() },
+        inputSchema: strictShape({ path: z.string(), content: z.string() }),
       },
       async ({ path: relPath, content }) => {
         const p = ownProject();
@@ -180,7 +181,7 @@ export class OperatorMcpRouter {
       "my_project",
       {
         description: "Read YOUR OWN project — the FULL record (name, repoPath, vaultPath, config override). No argument: always resolves to the project this operator session was spawned into. Read-only.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         const p = ownProject();
@@ -201,7 +202,7 @@ export class OperatorMcpRouter {
           "into your next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops " +
           "(Ctrl-C×2, clean, resumable — the row lands on Archive) and this tool's own reply is delivered " +
           "before your pty dies.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         if (!callerSessionId) return ok({ error: "no caller session" });

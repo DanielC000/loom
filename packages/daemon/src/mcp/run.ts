@@ -4,6 +4,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { z } from "zod";
 import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
+import { strictShape } from "./arg-alias.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -47,7 +48,7 @@ export class RunMcpRouter {
           "call submit_result again (this is the only way to finish). On success the run is recorded + " +
           "completed and your session is torn down — do NOT keep working after it accepts. With no schema, " +
           "any JSON/text is accepted.",
-        inputSchema: { result: z.any() },
+        inputSchema: strictShape({ result: z.any() }),
       },
       async ({ result }) => {
         try {

@@ -13,9 +13,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       transcript_read]; NONE of the elevated/structural/dev-only tools (no git/vault/config/spawn/message/
 //       host/escalate/archive/audit_file_finding). The two shared READS work (factored from audit.ts).
 //   (c) WRITE A (audit_suggest_improvement) — files to the USER'S OWN reserved "Platform" setup home `inbox`
-//       with an `[Auditor]` prefix; NEVER the dev "Loom Platform" home; IGNORES a caller-supplied projectId
-//       (server-resolved); refuses a non-workspace-auditor caller; SAFE (returns {error}, no crash, no task)
-//       when the reserved home is absent.
+//       with an `[Auditor]` prefix; NEVER the dev "Loom Platform" home (the target is always SERVER-
+//       resolved — the schema has no projectId field at all, so a caller-supplied projectId now HARD-
+//       REJECTS under strictShape (card cb369c9d) rather than the pre-strictShape behavior of being
+//       silently stripped and ignored); refuses a non-workspace-auditor caller; SAFE (returns {error}, no
+//       crash, no task) when the reserved home is absent.
 //   (d) WRITE B (preset_suggestion_suggest) — reuses db.suggestPresetPrompt; a duplicate is a no-op.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/user-audit-surface.mjs
@@ -290,18 +292,30 @@ try {
   // ============ (c) WRITE A — audit_suggest_improvement → the USER'S OWN home inbox ============
   const setupBefore = db.listTasks("pSetup").length;
   const homeBefore = db.listTasks("pHome").length;
-  // Pass an ADVERSARIAL projectId — it must be IGNORED (the target is server-resolved; the schema has no
-  // projectId field, so it is silently dropped and the card still lands in the user's own home).
-  const sug = await call("audit_suggest_improvement", { title: "Save the repeated /deploy prompt as a preset", detail: "User retyped it 5×.", severity: "medium", projectId: "pHome" });
+  // A legitimate call (title/detail/severity — the tool's ONLY declared params) must land on the
+  // user's own reserved setup home, never the dev "Loom Platform" home, WITHOUT the caller ever being
+  // able to name a target project at all (the schema has no projectId field).
+  const sug = await call("audit_suggest_improvement", { title: "Save the repeated /deploy prompt as a preset", detail: "User retyped it 5×.", severity: "medium" });
   check("(c) audit_suggest_improvement: returns the created task id + the user's reserved 'Platform' setup-home projectId (pSetup)", !!sug.taskId && sug.projectId === "pSetup" && !sug.error);
   const filed = db.getTask(sug.taskId);
   check("(c) audit_suggest_improvement: a card landed on the 'Platform' setup-home INBOX with an [Auditor] prefix",
     db.listTasks("pSetup").length === setupBefore + 1 && filed && filed.projectId === "pSetup" && filed.columnKey === "inbox" && /^\[Auditor\] /.test(filed.title));
   check("(c) audit_suggest_improvement: body mirrors the auditFileFinding shape ('Filed by your Auditor' + severity + evidence)",
     filed && /Filed by your Auditor/.test(filed.body) && /medium/.test(filed.body) && /retyped it 5/.test(filed.body));
-  check("(c) audit_suggest_improvement: NEVER targets the dev 'Loom Platform' home (pHome got NOTHING — caller projectId IGNORED)",
+  check("(c) audit_suggest_improvement: NEVER targets the dev 'Loom Platform' home (pHome got NOTHING)",
     db.listTasks("pHome").length === homeBefore);
   check("(c) audit_suggest_improvement: a workspace_audit_suggestion event was recorded", db.listEvents("WSA").some((e) => e.kind === "workspace_audit_suggestion"));
+
+  // card cb369c9d: an ADVERSARIAL projectId (an undeclared key) is now HARD-REJECTED by the strict
+  // schema — a stronger guarantee than the old "silently stripped and ignored" behavior, since the
+  // caller can no longer even attempt to name a target project.
+  const adversarial = await client.callTool({ name: "audit_suggest_improvement", arguments: { title: "T", detail: "D", severity: "low", projectId: "pHome" } });
+  check("(c) audit_suggest_improvement({...,projectId}) — hard-rejected (isError), not silently run with projectId dropped",
+    adversarial.isError === true);
+  check("(c) audit_suggest_improvement rejection names the bad param `projectId`",
+    typeof adversarial.content?.[0]?.text === "string" && adversarial.content[0].text.includes("projectId"));
+  check("(c) audit_suggest_improvement({...,projectId}) never filed a card for the rejected call",
+    db.listTasks("pSetup").length === setupBefore + 1);
 
   // ============ (d) WRITE B — preset_suggestion_suggest reuses the store + dedupe ============
   const created = await call("preset_suggestion_suggest", { label: "Deploy", prompt: "deploy to staging and watch the logs", rationale: "typed 5× across 3 sessions" });

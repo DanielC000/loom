@@ -209,34 +209,51 @@ try {
       }
     }
 
-    // (B1) setup project_create: smuggled referenceRepos is IGNORED — created project stays [].
-    const c1 = await setup.call("project_create", { name: "SetupCreated", repoPath: primary, referenceRepos: [refA] });
-    check("(B1) setup project_create smuggled referenceRepos → created project has [] (not persisted)", Array.isArray(c1.referenceRepos) && c1.referenceRepos.length === 0);
-    check("(B1) confirmed in the Db too", db.getProject(c1.id)?.referenceRepos?.length === 0);
+    // card cb369c9d: every project-write tool's inputSchema is now a strictShape() — an undeclared
+    // top-level key like the smuggled referenceRepos below HARD-REJECTS (isError, naming the bad key)
+    // instead of the pre-strictShape behavior of being silently stripped while the rest of the call
+    // still succeeded. That's a STRONGER version of this trust boundary: the agent can no longer even
+    // complete a call that names referenceRepos, let alone have it take effect.
+    const rejects = (res, badKey) => res.isError === true && typeof res.content?.[0]?.text === "string" && res.content[0].text.includes(badKey);
+
+    // (B1) setup project_create: smuggled referenceRepos is HARD-REJECTED — no project is created at all.
+    const beforeB1 = db.listProjects().length;
+    const c1 = await setup.client.callTool({ name: "project_create", arguments: { name: "SetupCreated", repoPath: primary, referenceRepos: [refA] } });
+    check("(B1) setup project_create smuggled referenceRepos → hard-rejected", rejects(c1, "referenceRepos"));
+    check("(B1) no project was created for the rejected call", db.listProjects().length === beforeB1);
 
     // (B2) platform (elevated) project_create: same guarantee.
-    const c2 = await plat.call("project_create", { name: "PlatCreated", repoPath: primary, referenceRepos: [refA] });
-    check("(B2) platform project_create smuggled referenceRepos → created project has [] (not persisted)", Array.isArray(c2.referenceRepos) && c2.referenceRepos.length === 0);
-    check("(B2) confirmed in the Db too", db.getProject(c2.id)?.referenceRepos?.length === 0);
+    const beforeB2 = db.listProjects().length;
+    const c2 = await plat.client.callTool({ name: "project_create", arguments: { name: "PlatCreated", repoPath: primary, referenceRepos: [refA] } });
+    check("(B2) platform project_create smuggled referenceRepos → hard-rejected", rejects(c2, "referenceRepos"));
+    check("(B2) no project was created for the rejected call", db.listProjects().length === beforeB2);
 
-    // (B3) setup project_init: smuggled referenceRepos is IGNORED on the sanctioned-dir bootstrap path too.
-    const i1 = await setup.call("project_init", { name: "SetupInit", referenceRepos: [refA] });
-    check("(B3) setup project_init smuggled referenceRepos → created project has [] (not persisted)", !i1.error && Array.isArray(i1.referenceRepos) && i1.referenceRepos.length === 0);
+    // (B3) setup project_init: smuggled referenceRepos is HARD-REJECTED on the sanctioned-dir bootstrap path too.
+    const beforeB3 = db.listProjects().length;
+    const i1 = await setup.client.callTool({ name: "project_init", arguments: { name: "SetupInit", referenceRepos: [refA] } });
+    check("(B3) setup project_init smuggled referenceRepos → hard-rejected", rejects(i1, "referenceRepos"));
+    check("(B3) no project was created for the rejected call", db.listProjects().length === beforeB3);
 
     // (B4) platform (elevated) project_init: same guarantee.
-    const i2 = await plat.call("project_init", { name: "PlatInit", referenceRepos: [refA] });
-    check("(B4) platform project_init smuggled referenceRepos → created project has [] (not persisted)", !i2.error && Array.isArray(i2.referenceRepos) && i2.referenceRepos.length === 0);
+    const beforeB4 = db.listProjects().length;
+    const i2 = await plat.client.callTool({ name: "project_init", arguments: { name: "PlatInit", referenceRepos: [refA] } });
+    check("(B4) platform project_init smuggled referenceRepos → hard-rejected", rejects(i2, "referenceRepos"));
+    check("(B4) no project was created for the rejected call", db.listProjects().length === beforeB4);
 
-    // (B5) setup project_update: smuggled referenceRepos on an EXISTING project is IGNORED.
-    await setup.call("project_update", { projectId: "pExisting", name: "SetupRenamed", referenceRepos: [refB] });
-    check("(B5) setup project_update smuggled referenceRepos leaves the Db value UNCHANGED", db.getProject("pExisting")?.referenceRepos?.length === 0);
-    check("(B5) the structural field it DOES own still applied", db.getProject("pExisting")?.name === "SetupRenamed");
+    // (B5) setup project_update: smuggled referenceRepos is HARD-REJECTED — the WHOLE call fails, so even
+    // the legitimate `name` field it also carried is NOT applied (unlike the old silently-stripped
+    // behavior, where the rest of the call still went through).
+    const u1 = await setup.client.callTool({ name: "project_update", arguments: { projectId: "pExisting", name: "SetupRenamed", referenceRepos: [refB] } });
+    check("(B5) setup project_update smuggled referenceRepos → hard-rejected", rejects(u1, "referenceRepos"));
+    check("(B5) referenceRepos leaves the Db value UNCHANGED", db.getProject("pExisting")?.referenceRepos?.length === 0);
+    check("(B5) the whole call was rejected — name was NOT applied either", db.getProject("pExisting")?.name === "Existing");
 
     // (B6) platform (elevated) project_update: same guarantee — even the MOST privileged agent surface
     // can never introduce referenceRepos.
-    await plat.call("project_update", { projectId: "pExisting", name: "PlatRenamed", referenceRepos: [refB] });
-    check("(B6) platform project_update smuggled referenceRepos leaves the Db value UNCHANGED", db.getProject("pExisting")?.referenceRepos?.length === 0);
-    check("(B6) the structural field it DOES own still applied", db.getProject("pExisting")?.name === "PlatRenamed");
+    const u2 = await plat.client.callTool({ name: "project_update", arguments: { projectId: "pExisting", name: "PlatRenamed", referenceRepos: [refB] } });
+    check("(B6) platform project_update smuggled referenceRepos → hard-rejected", rejects(u2, "referenceRepos"));
+    check("(B6) referenceRepos leaves the Db value UNCHANGED", db.getProject("pExisting")?.referenceRepos?.length === 0);
+    check("(B6) the whole call was rejected — name was NOT applied either", db.getProject("pExisting")?.name === "Existing");
 
     await setup.client.close();
     await plat.client.close();

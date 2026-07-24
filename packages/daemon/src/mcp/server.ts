@@ -12,7 +12,7 @@ import {
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
 import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
-import { resolveAlias } from "./arg-alias.js";
+import { resolveAlias, strictShape } from "./arg-alias.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -65,7 +65,7 @@ export class TaskMcpRouter {
       {
         description:
           "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt,merged}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. `merged` is this card's git-derived ship state — {sha,date} of its squash-merge commit on this project's repo if one is found, else null; null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), not an authoritative 'never merged' — treat a predecessor's 'unbuilt'/'won't-do' claim as suspect if merged is non-null. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
-        inputSchema: {
+        inputSchema: strictShape({
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
           includeBody: z.boolean().optional(),
@@ -74,7 +74,7 @@ export class TaskMcpRouter {
           titleContains: z.string().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
-        },
+        }),
       },
       // Backstop the read with a default cap (caller-applied, the agentView/sessionView pattern) so an
       // includeBody read on a board with hundreds of cards can't overflow the tool-result cap.
@@ -84,7 +84,7 @@ export class TaskMcpRouter {
       "tasks_get",
       {
         description: "Read ONE full task (title + body) by id; project-scoped. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool uses) — pass either one (if both, id wins). An optional `projectId` is tolerated but ignored — this tool is already scoped to the caller's own project. Also returns a `requests` summary ({total, answered, pending, cancelled, items:[{id,type,title,state}]}) of any Requests connected to this task (soft-linked via taskId at question_ask time) — a task you're working may already carry a prior owner decision you'd otherwise miss; read one in full via task_request_get, or list them all via task_requests_list. Also returns `merged` — this card's git-derived ship state ({sha,date} of its squash-merge commit on this project's repo, else null). null means NOT PROVEN merged, never an authoritative 'never merged' — don't trust a stale handoff claiming this card is unbuilt without checking this first.",
-        inputSchema: { id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() },
+        inputSchema: strictShape({ id: z.string().optional(), taskId: z.string().optional(), projectId: z.string().optional() }),
       },
       async ({ id, taskId }) => {
         const resolvedId = id ?? taskId;
@@ -102,7 +102,7 @@ export class TaskMcpRouter {
           "reference you can call again later or from a different agent/turn and still see the same " +
           "requests. Use task_request_get(id) for the full body/options/recommendation + answer. taskId " +
           "accepts the full id OR an unambiguous 8-char id-prefix (mirrors tasks_get).",
-        inputSchema: { taskId: z.string() },
+        inputSchema: strictShape({ taskId: z.string() }),
       },
       async ({ taskId }) => {
         const rows = listProjectTaskRequests(db, projectId, taskId);
@@ -126,7 +126,7 @@ export class TaskMcpRouter {
           "`id` is the request id (from tasks_get's `requests.items`/task_requests_list). Optional `taskId` " +
           "(full id or an unambiguous 8-char id-prefix) further scopes the lookup — if given, the request " +
           "must be connected to THAT task or this errors.",
-        inputSchema: { id: z.string(), taskId: z.string().optional(), projectId: z.string().optional() },
+        inputSchema: strictShape({ id: z.string(), taskId: z.string().optional(), projectId: z.string().optional() }),
       },
       async ({ id, taskId }) => ok(getProjectTaskRequest(db, projectId, id, taskId)),
     );
@@ -152,7 +152,7 @@ export class TaskMcpRouter {
         "tasks_create",
         {
           description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2. Optional repoKey (multi-repo epic) targets one of this project's registered `repos` — omit (or pass \"primary\") for the project's primary repo; an unknown key is rejected with {error}.",
-          inputSchema: { title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional(), repoKey: z.string().nullable().optional() },
+          inputSchema: strictShape({ title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional(), repoKey: z.string().nullable().optional() }),
         },
         async (args) => ok(createProjectTask(db, projectId, args)),
       );
@@ -160,7 +160,7 @@ export class TaskMcpRouter {
         "tasks_update",
         {
           description: "Update a task by id; project-scoped. PATCH-style: pass only the field(s) you're changing. id accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); `taskId` is accepted as an ALIAS for `id` (matches the taskId param name every sibling task tool — tasks_get/task_requests_list/task_request_get — uses) — pass either one (if both, id wins). priority p0|p1|p2|p3 (low number = higher priority). held=true marks an owner-gated card the idle watchdog won't nag about — you MAY set this yourself. held=false CLEARS it, but only if held wasn't set by the owner: clearing an owner-set hold is REFUSED here (returns {error}, nothing written) — only the owner can release their own hold, via the board UI. deferred=true is YOUR OWN sequencing/dependency-gating marker — also discounted from the idle watchdog's actionable count, but (unlike held) never blocks worker_spawn. repoKey (multi-repo epic) re-targets the card to a different entry in this project's `repos` registry, or null/\"primary\" to reset it to the project's primary repo — an unknown key is REFUSED (whole patch rejected, nothing written), same convention as an unknown columnKey. A column/priority/deferred/held/repoKey-only move needs ONLY id + those fields — no body — and returns a TRIMMED ack ({id,title,columnKey,priority,position,held,deferred,heldBy,repoKey,updatedAt,changed}, no body) instead of echoing the full card back. Pass body when you're intentionally editing it — that returns the full updated task, body included.",
-          inputSchema: {
+          inputSchema: strictShape({
             id: z.string().optional(),
             taskId: z.string().optional(),
             title: z.string().optional(),
@@ -171,7 +171,7 @@ export class TaskMcpRouter {
             held: z.boolean().optional(),
             deferred: z.boolean().optional(),
             repoKey: z.string().nullable().optional(),
-          },
+          }),
         },
         async ({ id, taskId, ...patch }) => {
           const resolvedId = resolveAlias(id, taskId);
@@ -220,7 +220,7 @@ export class TaskMcpRouter {
           "self-corrects the moment the owner answers it instead of saying PENDING forever. Omitting " +
           "`requestIds` on an update preserves the existing links (same PATCH semantics as `tags`); pass " +
           "`[]` explicitly to clear them.",
-        inputSchema: {
+        inputSchema: strictShape({
           key: z.string(),
           text: z.string(),
           title: z.string().optional(),
@@ -228,13 +228,13 @@ export class TaskMcpRouter {
           tags: z.array(z.string()).optional(),
           requestIds: z.array(z.string()).optional(),
           baseVersion: z.number().int().optional(),
-        },
+        }),
       },
       async (args) => ok(writeProjectMemory(db, projectId, args)),
     );
     server.registerTool(
       "memory_forget",
-      { description: "Delete a project-scoped memory note by key. Idempotent — deleting a missing key returns {ok:true,deleted:false}, never an error.", inputSchema: { key: z.string() } },
+      { description: "Delete a project-scoped memory note by key. Idempotent — deleting a missing key returns {ok:true,deleted:false}, never an error.", inputSchema: strictShape({ key: z.string() }) },
       async ({ key }) => ok(forgetProjectMemory(db, projectId, key)),
     );
     server.registerTool(
@@ -246,7 +246,7 @@ export class TaskMcpRouter {
           "linked `requestIds` entry, resolved against the requests store's LIVE state at THIS read (never " +
           "frozen at write time): `[linked request <id>: <STATE> as of <date>]`, or a fail-visible " +
           "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => okLines(listProjectMemoryEntries(db, projectId)),
     );
@@ -258,7 +258,7 @@ export class TaskMcpRouter {
           "linked `requestIds` entry, resolved against the requests store's LIVE state at THIS read (never " +
           "frozen at write time): `[linked request <id>: <STATE> as of <date>]`, or a fail-visible " +
           "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve.",
-        inputSchema: { key: z.string() },
+        inputSchema: strictShape({ key: z.string() }),
       },
       async ({ key }) => ok(readProjectMemory(db, projectId, key)),
     );
@@ -269,13 +269,13 @@ export class TaskMcpRouter {
       {
         description:
           "Provide exactly one of `delaySeconds`/`minutes` or `wakeAt` (ISO). Schedule a one-shot wake-up: end your turn and go idle; you'll be re-prompted with `note` (or its alias `reason`) when it fires (re-submits as a fresh turn; auto-resumed if stopped). `minutes` is sugar for delaySeconds (×60) — if both are given, delaySeconds (the explicit form) wins. Use to WAIT for a known external process/condition — a build, render, deploy — instead of busy-polling. Min 30s, max 24h.",
-        inputSchema: {
+        inputSchema: strictShape({
           delaySeconds: z.number().optional(),
           minutes: z.number().optional(),
           wakeAt: z.string().optional(),
           note: z.string().optional(),
           reason: z.string().optional(),
-        },
+        }),
       },
       async ({ delaySeconds, minutes, wakeAt, note, reason }) => {
         try {
@@ -290,12 +290,12 @@ export class TaskMcpRouter {
     );
     server.registerTool(
       "wake_cancel",
-      { description: "Cancel one of your pending wake-ups by id.", inputSchema: { wakeId: z.string() } },
+      { description: "Cancel one of your pending wake-ups by id.", inputSchema: strictShape({ wakeId: z.string() }) },
       async ({ wakeId }) => ok({ ...wakes.cancel(sessionId, wakeId), ...nowEcho() }),
     );
     server.registerTool(
       "wake_list",
-      { description: "List your pending wake-ups.", inputSchema: {} },
+      { description: "List your pending wake-ups.", inputSchema: strictShape({}) },
       async () => ok(wakes.list(sessionId).map((w) => ({ ...w, wakeAtLocal: localTimeString(w.wakeAt) }))),
     );
 
@@ -323,13 +323,13 @@ export class TaskMcpRouter {
             "carry NON-auth headers only. `body` may be a string or a JSON-serializable object (a JSON " +
             "object defaults Content-Type: application/json). Bounded by a request timeout and a response-" +
             "size cap; each connection also has a request-rate limit.",
-          inputSchema: {
+          inputSchema: strictShape({
             connection: z.string(),
             path: z.string(),
             method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional(),
             headers: z.record(z.string(), z.string()).optional(),
             body: z.union([z.string(), z.record(z.string(), z.any())]).optional(),
-          },
+          }),
         },
         async (args) => ok(await performAuthenticatedRequest({ db, fetchImpl: fetchOverride }, sessionConnections, guard, args, projectId)),
       );
@@ -355,7 +355,7 @@ export class TaskMcpRouter {
               "Prefer the project's documented vault taxonomy folder for a well-behaved note rather than the " +
               "vault root. Returns { ok:true, committed } or { ok:false, reason } ('traversal' on a path " +
               "escape, 'is-dir', 'error'). There is no delete — this tool only ever creates or overwrites.",
-            inputSchema: { path: z.string(), content: z.string() },
+            inputSchema: strictShape({ path: z.string(), content: z.string() }),
           },
           async ({ path: relPath, content }) => {
             if (!project.vaultPath) return ok({ error: "no vault path for this project" });

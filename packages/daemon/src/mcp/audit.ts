@@ -8,6 +8,7 @@ import type { SessionService } from "../sessions/service.js";
 import { registerTranscriptReadTools } from "./transcript-read.js";
 import { registerRepoReadTools } from "./repo-read.js";
 import { auditRequestItem, pageRequests } from "./questionTool.js";
+import { strictShape } from "./arg-alias.js";
 
 // Same envelope as the task / orchestration / platform MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -104,14 +105,14 @@ export class AuditMcpRouter {
           "created within the last N minutes). Newest-first (createdAt DESC); no filters returns the whole " +
           `platform. Bounded to ${DEFAULT_REQUESTS_LIST_CAP} rows by default (see \`hasMore\`) — pass an ` +
           "explicit limit/offset to page past it.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string().optional(),
           state: z.enum(QUESTION_STATES).optional(),
           type: z.enum(QUESTION_TYPES).optional(),
           sinceMinutes: z.number().int().positive().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
-        },
+        }),
       },
       async ({ projectId, state, type, sinceMinutes, limit, offset }) => {
         const since = sinceMinutes !== undefined
@@ -135,11 +136,11 @@ export class AuditMcpRouter {
           "severity. DEDUPED server-side by title: filing a finding whose title already sits on the Platform " +
           "board is a no-op that returns {taskId, deduped:true} (the existing card) — still dedupe by judgement " +
           "first, but you cannot spam the backlog by re-filing. Returns {taskId, projectId} on a novel finding.",
-        inputSchema: {
+        inputSchema: strictShape({
           title: z.string(),
           detail: z.string(),
           severity: z.enum(["low", "medium", "high", "critical"]).optional(),
-        },
+        }),
       },
       async ({ title, detail, severity }) => {
         try {
@@ -164,11 +165,11 @@ export class AuditMcpRouter {
           "this 5× across 3 sessions\"). DEDUPED: suggesting a prompt that already exists as a preset OR " +
           "was already suggested is a no-op (returns {deduped:true,reason}) — do NOT re-nag. Returns " +
           "{created:true,id} on a genuinely-novel suggestion.",
-        inputSchema: {
+        inputSchema: strictShape({
           label: z.string(),
           prompt: z.string(),
           rationale: z.string().optional(),
-        },
+        }),
       },
       async ({ label, prompt, rationale }) => {
         try {
@@ -194,7 +195,7 @@ export class AuditMcpRouter {
           "next turn, act on it, THEN re-call end_me. On pass: your session gracefully stops (Ctrl-C×2, " +
           "clean, resumable — the row lands on Archive) and this tool's own reply is delivered before your " +
           "pty dies.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         try {

@@ -4,6 +4,7 @@ import vm from "node:vm";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { loomRepoRoot } from "../paths.js";
+import { strictShape } from "./arg-alias.js";
 
 // Same envelope as the task / orchestration / platform / audit MCP servers.
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
@@ -272,11 +273,11 @@ export function registerRepoReadTools(server: McpServer): void {
         `${MAX_READ_LINES} lines), and \`nextOffset\` is the next index to page from (null when the file is ` +
         "exhausted). Binary or oversized (>512 KiB) files are refused with {error}. Use repo_glob to find a " +
         "path and repo_grep to find a line first.",
-      inputSchema: {
+      inputSchema: strictShape({
         path: z.string(),
         offset: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().optional(),
-      },
+      }),
     },
     async ({ path: rel, offset, limit }) => {
       try { return ok(doReadFile(realRoot(loomRepoRoot()), rel, offset, limit)); }
@@ -298,12 +299,12 @@ export function registerRepoReadTools(server: McpServer): void {
         "if enough of them chain to blow the OVERALL time budget, the search stops early and returns " +
         "`timedOut:true` with whatever partial matches it found so far — narrow the glob if you see it. " +
         "Returns {matches, capped, timedOut} or {error} on a bad regex.",
-      inputSchema: {
+      inputSchema: strictShape({
         pattern: z.string(),
         glob: z.string().optional(),
         ignoreCase: z.boolean().optional(),
         maxResults: z.number().int().positive().optional(),
-      },
+      }),
     },
     async ({ pattern, glob, ignoreCase, maxResults }) => {
       try { return ok(doGrep(realRoot(loomRepoRoot()), pattern, glob, ignoreCase, maxResults)); }
@@ -320,10 +321,10 @@ export function registerRepoReadTools(server: McpServer): void {
         "\"**/*.test.mjs\". Skips node_modules/.git/dist. Discovery order is not guaranteed; " +
         `capped at ${MAX_GLOB_RESULTS} paths (\`capped:true\` when it hit the cap). Returns ` +
         "{matches, capped} of repo-relative paths to feed into repo_read_file / repo_grep.",
-      inputSchema: {
+      inputSchema: strictShape({
         pattern: z.string(),
         limit: z.number().int().positive().optional(),
-      },
+      }),
     },
     async ({ pattern, limit }) => {
       try { return ok(doGlob(realRoot(loomRepoRoot()), pattern, limit)); }
@@ -362,12 +363,12 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
         "exhausted). Binary or oversized (>512 KiB) files are refused with {error}, as is an unknown " +
         "projectId or a project with no readable repo root. Use repo_glob to find a path and repo_grep to " +
         "find a line first.",
-      inputSchema: {
+      inputSchema: strictShape({
         projectId: z.string(),
         path: z.string(),
         offset: z.number().int().nonnegative().optional(),
         limit: z.number().int().positive().optional(),
-      },
+      }),
     },
     async ({ projectId, path: rel, offset, limit }) => {
       const resolved = resolveRoot(projectId);
@@ -393,13 +394,13 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
         "and returns `timedOut:true` with whatever partial matches it found so far — narrow the glob if you " +
         "see it. Returns {matches, capped, timedOut} or {error} on a bad regex, an unknown projectId, or a " +
         "project with no readable repo root.",
-      inputSchema: {
+      inputSchema: strictShape({
         projectId: z.string(),
         pattern: z.string(),
         glob: z.string().optional(),
         ignoreCase: z.boolean().optional(),
         maxResults: z.number().int().positive().optional(),
-      },
+      }),
     },
     async ({ projectId, pattern, glob, ignoreCase, maxResults }) => {
       const resolved = resolveRoot(projectId);
@@ -420,11 +421,11 @@ export function registerScopedRepoReadTools(server: McpServer, resolveRoot: Scop
         `${MAX_GLOB_RESULTS} paths (\`capped:true\` when it hit the cap). Returns {matches, capped} of ` +
         "project-relative paths to feed into repo_read_file / repo_grep, or {error} for an unknown " +
         "projectId or a project with no readable repo root.",
-      inputSchema: {
+      inputSchema: strictShape({
         projectId: z.string(),
         pattern: z.string(),
         limit: z.number().int().positive().optional(),
-      },
+      }),
     },
     async ({ projectId, pattern, limit }) => {
       const resolved = resolveRoot(projectId);

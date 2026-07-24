@@ -108,7 +108,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
     "gate_status",
     {
       description,
-      inputSchema: { opId: z.string() },
+      inputSchema: strictShape({ opId: z.string() }),
     },
     async ({ opId }) => {
       try {
@@ -370,7 +370,7 @@ export class OrchestrationMcpRouter {
           "viaVoice, sentAt} | null} — your OWN bound channel(s) + effective voice-reply mode, and the last " +
           "reply you actually delivered (`text` IS that clip's transcript when `viaVoice` is true). Use it " +
           "to answer 'what did you just send / on which channel / was it spoken' from real state.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => ok(this.myContext(sessionId)),
     );
@@ -405,7 +405,7 @@ export class OrchestrationMcpRouter {
           "worker_report: emit one clean, final reply. Optional `voice:true` asks to SPEAK this reply " +
           "instead of texting it — it only has effect when the user's voice-reply setting is 'auto' (their " +
           "own on/off choice always wins otherwise); omit it (or pass false) to send plain text.",
-        inputSchema: { text: z.string(), voice: z.boolean().optional() },
+        inputSchema: strictShape({ text: z.string(), voice: z.boolean().optional() }),
       },
       async ({ text, voice }) => {
         if (!deliverReply) return ok({ delivered: false, error: "companion transport not configured" });
@@ -436,7 +436,7 @@ export class OrchestrationMcpRouter {
           "improved content (no appending, keep it bounded and self-consistent). A NEW name that closely " +
           "duplicates an existing skill is REJECTED with a note telling you to refine the existing one " +
           "instead. Returns the updated compact skill list, or {error}.",
-        inputSchema: { name: z.string(), content: z.string() },
+        inputSchema: strictShape({ name: z.string(), content: z.string() }),
       },
       async ({ name, content }) => {
         const r = authorCompanionSkill(sessionId, name, content);
@@ -450,7 +450,7 @@ export class OrchestrationMcpRouter {
         description:
           "List YOUR OWN personal skills as compact {name, description} entries. Consult this when a request " +
           "may match something you've learned before, then skill_read the one that fits to load it in full.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => ok({ skills: listCompanionSkills(sessionId) }),
     );
@@ -462,7 +462,7 @@ export class OrchestrationMcpRouter {
           "Read the FULL SKILL.md of one of YOUR OWN personal skills by name — the on-demand full load. Use " +
           "it after skill_list identifies a relevant skill, to load its steps before acting. Returns {name, " +
           "content}, or {error} if there's no such skill.",
-        inputSchema: { name: z.string() },
+        inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const content = readCompanionSkill(sessionId, name);
@@ -476,7 +476,7 @@ export class OrchestrationMcpRouter {
         description:
           "Remove one of YOUR OWN personal skills by name (curation/dedup). Returns the updated compact skill " +
           "list, or {error} if there's no such skill.",
-        inputSchema: { name: z.string() },
+        inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const r = removeCompanionSkill(sessionId, name);
@@ -505,7 +505,7 @@ export class OrchestrationMcpRouter {
           "whole refined content (no appending, keep it bounded and self-consistent). A NEW name that " +
           "closely duplicates an existing memory is REJECTED with a note telling you to refine the " +
           "existing one instead. Returns the updated compact memory list, or {error}.",
-        inputSchema: { name: z.string(), content: z.string() },
+        inputSchema: strictShape({ name: z.string(), content: z.string() }),
       },
       async ({ name, content }) => {
         const r = authorCompanionMemory(sessionId, name, content);
@@ -519,7 +519,7 @@ export class OrchestrationMcpRouter {
         description:
           "List YOUR OWN durable memory entries as compact {name, description, pinned} entries. Consult " +
           "this to see what you already remember before authoring a new entry or answering from memory.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => ok({ memories: listCompanionMemories(sessionId) }),
     );
@@ -530,7 +530,7 @@ export class OrchestrationMcpRouter {
         description:
           "Read the FULL MEMORY.md of one of YOUR OWN durable memory entries by name. Returns {name, " +
           "content}, or {error} if there's no such entry.",
-        inputSchema: { name: z.string() },
+        inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const content = readCompanionMemory(sessionId, name);
@@ -544,7 +544,7 @@ export class OrchestrationMcpRouter {
         description:
           "Remove one of YOUR OWN durable memory entries by name (curation/dedup). Returns the updated " +
           "compact memory list, or {error} if there's no such entry.",
-        inputSchema: { name: z.string() },
+        inputSchema: strictShape({ name: z.string() }),
       },
       async ({ name }) => {
         const r = removeCompanionMemory(sessionId, name);
@@ -577,7 +577,7 @@ export class OrchestrationMcpRouter {
           "reply route is captured SERVER-SIDE from your current turn (you never pass one), so a later fire " +
           "can chat_reply back to the SAME chat. Starts armed immediately. Returns {reminderId, nextFireAt}, " +
           "or {error} on an invalid cron expression.",
-        inputSchema: { cron: z.string(), prompt: z.string(), label: z.string().optional() },
+        inputSchema: strictShape({ cron: z.string(), prompt: z.string(), label: z.string().optional() }),
       },
       async ({ cron, prompt, label }) => {
         const now = new Date();
@@ -603,7 +603,7 @@ export class OrchestrationMcpRouter {
         description:
           "List YOUR OWN recurring reminders (any enabled state) as {id, cron, prompt, label, enabled, " +
           "nextFireAt}.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         const reminders = db.listCompanionRemindersForSession(sessionId);
@@ -622,7 +622,7 @@ export class OrchestrationMcpRouter {
         description:
           "Cancel one of YOUR OWN recurring reminders by id (scoped — can never touch another session's " +
           "reminder). Returns {cancelled}.",
-        inputSchema: { reminderId: z.string() },
+        inputSchema: strictShape({ reminderId: z.string() }),
       },
       async ({ reminderId }) => {
         const r = db.getCompanionReminder(reminderId);
@@ -751,7 +751,7 @@ export class OrchestrationMcpRouter {
             "a claim to weigh/verify (same treatment class as a worker_report), even when you're relaying " +
             "something the owner told you to pass along. Use this instead of writing 'lead, take note' into " +
             "shared memory or any other workaround — this is the sanctioned channel.",
-          inputSchema: { text: z.string() },
+          inputSchema: strictShape({ text: z.string() }),
         },
         async ({ text }) => {
           try {
@@ -771,14 +771,14 @@ export class OrchestrationMcpRouter {
         "worker_report",
         {
           description: "Report your status up to your manager: moves your task (done→review, blocked→waiting) and notifies the manager. Call when done, blocked, or to checkpoint progress. Returns a `deliveryStatus` (delivered-live | queued | boarded | dropped): your manager got it now, it's queued for its next turn, or it's durably boarded for a parked/offline manager (Loom auto-wakes it) — all safe; only `dropped` means it reached nobody. `noChanges` is an OPTIONAL flag on a `done` report for a LEGITIMATE no-op — you reviewed only, investigated and found nothing to change, or your deliverable lives outside this repo (e.g. a mockup) — where the CORRECT outcome is 0 commits. Set it and a 0-commit done skips the 'you likely forgot to commit' warning and auto-retires your session cleanly (frees your manager's concurrency slot, no worker_stop needed) — the same clean exit a declared no-commit role gets. Omit it (or a done that DID commit) and behavior is unchanged; a 0-commit done without it still warns, so don't set it unless the no-op is genuinely intentional. `awaiting` is an OPTIONAL hint on a `progress` report that disambiguates WHY you then go idle: pass `\"background\"` when you're parking because you kicked off a backgrounded command/sub-agent and are relying on its own completion (or the harness's on-completion re-invoke) to bring you back — the daemon cannot see an in-flight background shell, so without this flag the `[loom:worker-idle]` watchdog defaults to assuming you're awaiting your manager's reply, which wrongly invites a `worker_message` that would double-dispatch onto your still-running work. Omit it (or pass `\"manager\"`, the default) for a real checkpoint where you genuinely are waiting on your manager's decision — that case is unaffected and still reads as awaiting-reply. Only meaningful on `progress`: a `blocked` report already means you're waiting on your manager's decision (self-contradictory with `\"background\"`), and a `done` report means you're awaiting merge review, not a reply — don't set it on either.",
-          inputSchema: {
+          inputSchema: strictShape({
             status: z.enum(["done", "blocked", "progress"]),
             summary: z.string(),
             prUrl: z.string().optional(),
             needs: z.string().optional(),
             noChanges: z.boolean().optional(),
             awaiting: z.enum(["manager", "background"]).optional(),
-          },
+          }),
         },
         async ({ status, summary, prUrl, needs, noChanges, awaiting }) =>
           ok(await sessions.workerReport(sessionId, { status, summary, prUrl, needs, noChanges, awaiting })),
@@ -848,7 +848,7 @@ export class OrchestrationMcpRouter {
             "comparing its `validatedHead` to your own HEAD, but an UNCOMMITTED edit you made since that run " +
             "started is invisible to it. If you've edited since the last run_gate call, don't trust a cached " +
             "pass — wait out the grace window (or just act on your own judgment) before treating it as current.",
-          inputSchema: {},
+          inputSchema: strictShape({}),
         },
         async () => {
           try {
@@ -1138,7 +1138,7 @@ export class OrchestrationMcpRouter {
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `staleDirective` (non-null: `{msgId, deliveredAt, turnsSinceDelivery}`) flags a worker_message directive that was DELIVERED but has no worker_report since — distinct from the `{delivered:true}` worker_message itself returns, which only proves the text was submitted/queued, never that it was acted on. Fires only once the worker has completed several of its OWN real turns with no report at all since delivery (never on a single long-running turn, however long); clears the instant any worker_report lands, or once you send a newer worker_message (tracking always follows your MOST RECENT one — `worker_redirect` is a separate channel this does not track). `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all. It AUTO-FIRES on its own (FIFO — oldest queued first) the next time a concurrency slot on this manager actually frees, with no re-call needed; you can still re-`worker_spawn` the same taskId/agentId by hand if you don't want to wait, which clears the marker the same way it always did. If an auto-fire attempt itself fails for a real reason (its task went terminal/held, its worktree couldn't be created, …) you get a `[loom:cap-queue-autofire-failed]` message naming the opId/task/agent — the entry is dropped at that point and needs a fresh worker_spawn. To withdraw a queued entry BEFORE it fires, call `worker_stop({opId})` (see worker_stop's own docs) — it never auto-dispatches after that. Never count either placeholder as live or awaiting review.", inputSchema: {} },
+      { description: "List the workers you (this manager) have spawned — your direct children. `staleDirective` (non-null: `{msgId, deliveredAt, turnsSinceDelivery}`) flags a worker_message directive that was DELIVERED but has no worker_report since — distinct from the `{delivered:true}` worker_message itself returns, which only proves the text was submitted/queued, never that it was acted on. Fires only once the worker has completed several of its OWN real turns with no report at all since delivery (never on a single long-running turn, however long); clears the instant any worker_report lands, or once you send a newer worker_message (tracking always follows your MOST RECENT one — `worker_redirect` is a separate channel this does not track). `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all. It AUTO-FIRES on its own (FIFO — oldest queued first) the next time a concurrency slot on this manager actually frees, with no re-call needed; you can still re-`worker_spawn` the same taskId/agentId by hand if you don't want to wait, which clears the marker the same way it always did. If an auto-fire attempt itself fails for a real reason (its task went terminal/held, its worktree couldn't be created, …) you get a `[loom:cap-queue-autofire-failed]` message naming the opId/task/agent — the entry is dropped at that point and needs a fresh worker_spawn. To withdraw a queued entry BEFORE it fires, call `worker_stop({opId})` (see worker_stop's own docs) — it never auto-dispatches after that. Never count either placeholder as live or awaiting review.", inputSchema: strictShape({}) },
       async () => ok(fleetView()),
     );
 
@@ -1146,7 +1146,7 @@ export class OrchestrationMcpRouter {
       "worker_status",
       {
         description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `staleDirective` (see worker_list) — a delivered worker_message with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent vs. `lastActivity` tells you whether a busy worker is actively progressing or possibly wedged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
-        inputSchema: { workerSessionId: z.string().optional() },
+        inputSchema: strictShape({ workerSessionId: z.string().optional() }),
       },
       async ({ workerSessionId }) => {
         // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
@@ -1229,7 +1229,7 @@ export class OrchestrationMcpRouter {
           "equal) is true only if a stale link was actually repaired just now; false with found:true means " +
           "NOTHING was relinked — check `parentSessionId` to tell why: equal to your OWN session id means " +
           "it was already correctly linked, any other id means the worker genuinely isn't yours.",
-        inputSchema: { workerSessionId: z.string() },
+        inputSchema: strictShape({ workerSessionId: z.string() }),
       },
       async ({ workerSessionId }) => {
         const before = db.getSession(workerSessionId);
@@ -1250,14 +1250,14 @@ export class OrchestrationMcpRouter {
       "worker_spawn",
       {
         description: "Spawn a worker: creates an isolated git worktree + branch and starts a worker session in it. kickoffPrompt is the canonical param for the worker's kickoff instructions; `kickoff` is accepted as an ALIAS for it — pass either one (if both, kickoffPrompt wins). agentId is REQUIRED and must be an explicit WORKER agent (e.g. Dev/Bugfix/QA/Docs) — NEVER your own manager agent. Spawning under a manager/platform-role agent is rejected. agentId accepts EITHER the agent's id OR its NAME/slug (resolved within your project; a bad value returns a 'did you mean' hint). taskId is OPTIONAL — pass it to bind the worker to a board task (moves the task to in_progress; accepts EITHER the full id OR an unambiguous 8-char id-prefix, resolved within your project; an ambiguous prefix errors naming the candidate ids); OMIT it for a TASKLESS spawn — an ad-hoc spike/no-commit worker that gets its own isolated worktree with no board card to falsify or hijack. A taskless worker reports up via worker_report exactly like a tasked one, just with no card to move — it never lands in a review lane, so retire it yourself with worker_stop once you've read its report. If it produced commits you actually want landed, worker_merge_confirm still works on it (the branch merges onto main; there's just no card to move to done, since it never had one) — task it for real instead if you want the normal review-lane flow. The one-live-worker-per-task guard only ever applies to a REAL taskId — a taskless spawn never competes for it (two taskless spawns never collide with each other either). CLIENT-TIMEOUT RESILIENT: a fast spawn returns {workerSessionId,branch,worktreePath}; a slow one (worktree provisioning taking a while) instead returns {opId,status:\"pending\",taskId} — poll via worker_list (a placeholder row) or RE-CALL worker_spawn with the SAME taskId (or the same omission)/agentId/kickoffPrompt (idempotent-retryable for a TASKED retry: it attaches to the SAME in-flight spawn rather than starting a second one, and never throws 'already in flight'; a TASKLESS retry has no stable identity to dedupe against and may start a second taskless worker — retire the extra with worker_stop if so). REVIEW SPAWN (card 47bbdc3f): pass EITHER `reviewOfWorkerSessionId` (an existing worker session id) OR `reviewOfTaskId` (a task id, resolved to that task's own deterministic branch — works even if its worker has since exited) — mutually exclusive, both OPTIONAL, and orthogonal to `taskId` (the review convention is a TASKLESS spawn: pass a `reviewOf*` and omit `taskId`, e.g. for a Code Reviewer profile). Server-resolves the reviewed branch + its CURRENT tip sha and cuts THIS worker's own fresh branch FROM that tip instead of from the repo's HEAD — so its worktree's content is byte-identical to what's under review at spawn time (ordinary Read/Grep is correct by construction; no `git show`/hand-typed-branch step needed), and the resolved branch+sha is mechanically injected into its kickoff. A bad/unresolvable `reviewOf*` id is a hard `{error}` — it never silently falls back to a HEAD-forked spawn. This is a PINNED SNAPSHOT: a later push to the reviewed branch is not reflected without a fresh review spawn. The result ALSO carries `reviewOf:{branch,headSha}` when this was a review spawn (absent otherwise). WASTED-DISPATCH ADVISORY (tasked spawns only): if the card's title already appears — verbatim, once coerced to a commit subject the same way a squash-merge coerces one — as a commit on the project's mainline within its recent history, the result ALSO carries `shippedMatch:{sha,subject,mainBranch}` plus a human-readable `warning` naming the matching commit; this NEVER blocks the spawn (the worker still starts) — it's a flag for YOU to verify before letting it proceed, since the fix may already be shipped. Absent on a non-match, a taskless spawn, or any other spawn shape. REUSED-DIRTY-WORKTREE FLAG: when this spawn REUSED a worktree retained from a PRIOR hard-stopped or rejected-merge attempt on this task AND it still carries real leftover uncommitted work, the result ALSO carries `reusedDirtyWorktree:true` plus `reusedDirtyWorktreeStatus:{statusSummary,fileCount,truncated}` (a bounded `git status`-derived summary) — the worktree is NEVER auto-cleaned (Loom never silently discards a hard-stopped worker's edits), and the new worker's own kickoff already carries a reconcile note pointing at the same leftover paths, so you don't need to hand-instruct one yourself. Absent for a fresh worktree or a reused-but-clean one. STALE BRANCH BASE FLAG: when this spawn reused/reattached a task branch that carries prior-session commits (a recovery branch) AND that branch's base has since fallen behind the project's current mainline, Loom first tries a CLEAN auto-forward (merging the mainline into the branch — never a rebase, never past a conflict); if that succeeds the branch is simply caught up and nothing is surfaced. Only when a clean auto-forward wasn't possible does the result ALSO carry `staleBase:{baseSha,behindBy,changedFiles,truncated}` plus a human-readable `staleBaseWarning` — the worker's own kickoff already carries a matching forward-merge instruction, so you don't need to hand-instruct one yourself, but you may want to factor it into your review. Absent for a fresh branch, a branch that was never behind, or one that auto-forwarded cleanly. CONCURRENCY-CAP REJECTION: if the cap is full, the result is `{error:\"concurrency cap reached (N)\"}` PLUS `capQueued:{opId,taskId,queuedAt}` — the intent was recorded and is now visible as a placeholder row in worker_list, so it's never silently lost. It AUTO-FIRES on its own (FIFO) the next time a slot on this manager frees — no re-call needed — or re-call worker_spawn with the same args yourself if you don't want to wait; either clears the marker. To withdraw it instead, `worker_stop({opId})`.",
-        inputSchema: {
+        inputSchema: strictShape({
           taskId: z.string().optional(),
           agentId: z.string(),
           kickoffPrompt: z.string().optional(),
           kickoff: z.string().optional(),
           reviewOfWorkerSessionId: z.string().optional(),
           reviewOfTaskId: z.string().optional(),
-        },
+        }),
       },
       async ({ taskId, agentId, kickoffPrompt, kickoff, reviewOfWorkerSessionId, reviewOfTaskId }) => {
         // A usage-limit refusal carries a STRUCTURED retry-after deadline (PL Auditor finding #7) so the
@@ -1323,7 +1323,7 @@ export class OrchestrationMcpRouter {
       "worker_stop",
       {
         description: "ENDS one of your workers' sessions (graceful Ctrl-C by default, or hard kill) — this is TERMINAL, not a pause: the session is over and cannot resume mid-turn. If what you actually want is to HOLD it — pause it, make it stop what it's doing and wait for you, without ending it — use `worker_redirect` instead; this tool cannot do that. The worktree is retained. Pass EITHER workerSessionId (a real, already-spawned worker) OR opId (a `cap-queued` placeholder row from worker_list — an intent that was recorded but never actually spawned because the concurrency cap was full) — exactly one is required. The opId path withdraws the queued intent instead of stopping a pty (there's no pty yet): it returns `{cancelled:true}` if a matching queued entry was found and removed, or `{cancelled:false}` if not (already auto-fired once a slot freed, already TTL-reaped, or the opId was wrong) — that's a normal outcome, not an error, so check the flag rather than assuming success. A queued entry otherwise auto-fires on its own once a concurrency slot frees (no daemon restart needed) — cancel it BEFORE that happens if you no longer want it.",
-        inputSchema: { workerSessionId: z.string().optional(), opId: z.string().optional(), mode: z.enum(["graceful", "hard"]).optional() },
+        inputSchema: strictShape({ workerSessionId: z.string().optional(), opId: z.string().optional(), mode: z.enum(["graceful", "hard"]).optional() }),
       },
       async ({ workerSessionId, opId, mode }) => {
         if (!workerSessionId && !opId) return ok({ error: "worker_stop requires either workerSessionId or opId" });
@@ -1353,7 +1353,7 @@ export class OrchestrationMcpRouter {
           "own live session — a routine reap can never end the worker you scoped it to; use `worker_stop` " +
           "for that. Returns `{killedPids:[]}` on a healthy worktree (nothing to reap) — an empty list is " +
           "success, not a failure.",
-        inputSchema: { workerSessionId: z.string() },
+        inputSchema: strictShape({ workerSessionId: z.string() }),
       },
       async ({ workerSessionId }) => {
         try {
@@ -1385,7 +1385,7 @@ export class OrchestrationMcpRouter {
           "Pure keystroke injection: bypasses the busy/turn queue (~0 worker tokens), does not submit a " +
           "turn. Returns the FEEDBACK-VERIFIED landed mode (read off the footer after the cycle settles) " +
           "— may differ from `mode` if the cycle gave up early.",
-        inputSchema: { workerSessionId: z.string(), mode: z.enum(["acceptEdits", "auto", "plan"]) },
+        inputSchema: strictShape({ workerSessionId: z.string(), mode: z.enum(["acceptEdits", "auto", "plan"]) }),
       },
       async ({ workerSessionId, mode }) => {
         try {
@@ -1402,7 +1402,7 @@ export class OrchestrationMcpRouter {
       "worker_message",
       {
         description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = went out as a turn now); on `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting). A `\"held\"` result is a SUCCESS, not a failure — it ALSO carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based queue position), `busyForMs` (how long the worker has been mid-turn, when known), and `msgId` (to correlate with a later durable record), so you can read the outcome as the honest queue-and-will-land it is instead of inferring that from a bare `false`.",
-        inputSchema: { workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() },
+        inputSchema: strictShape({ workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() }),
       },
       async ({ workerSessionId, text, message }) => {
         try {
@@ -1446,7 +1446,7 @@ export class OrchestrationMcpRouter {
           "An idle worker (delivered:true) had nothing to interrupt — no Esc fires. " +
           "`text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if " +
           "both, text wins).",
-        inputSchema: { workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() },
+        inputSchema: strictShape({ workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() }),
       },
       async ({ workerSessionId, text, message }) => {
         try {
@@ -1471,7 +1471,7 @@ export class OrchestrationMcpRouter {
           "Pulling consumes them in one shot so they won't re-surface; the underlying events stay recorded. " +
           "Returns {messages: string[]} (FIFO order, empty if your inbox is clear). If you DON'T pull, Loom " +
           "still delivers them the normal way — this is an optional fast-drain, not required.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         try {
@@ -1527,7 +1527,7 @@ export class OrchestrationMcpRouter {
           "swallowed. You'll get a one-time push nudge into " +
           "your own session when the human answers; call question_pull to fetch the answer. Returns {questionId} — or, when `supersedes` was " +
           "passed, {questionId, supersede: {cancelled:true, questionId} | {error}}.",
-        inputSchema: QUESTION_ASK_INPUT_SHAPE,
+        inputSchema: strictShape(QUESTION_ASK_INPUT_SHAPE),
       },
       async (input) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
@@ -1568,7 +1568,7 @@ export class OrchestrationMcpRouter {
           "be returned again — call this when you reach the point the request was blocking, or after the " +
           "push nudge tells you one was answered. Returns {questions: [...]} (empty if none are answered " +
           "yet — a still-'pending' request is NOT returned; keep orchestrating and check back later).",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         // Scoped by AGENT LINEAGE, not this exact session id (card f88e91f0) — so a fresh (non-recycle)
@@ -1608,7 +1608,7 @@ export class OrchestrationMcpRouter {
           "request lands in a terminal 'cancelled' state, retained in the human's Requests history with " +
           "your `reason`. `questionId` is required; `reason` is optional but recommended (shown in the " +
           "human's history). Returns {cancelled:true, questionId} or {error}.",
-        inputSchema: { questionId: z.string(), reason: z.string().optional() },
+        inputSchema: strictShape({ questionId: z.string(), reason: z.string().optional() }),
       },
       async ({ questionId, reason }) => ok(cancelQuestionForAgent(db, managerSessionId, questionId, reason)),
     );
@@ -1656,7 +1656,7 @@ export class OrchestrationMcpRouter {
           "`note` prose. A successor reading this answer must read `note` for a chat-answered grant's " +
           "lifetime rather than assuming no scope was given. Returns {resolved:true, questionId, " +
           "chosenOption, note} or {error}.",
-        inputSchema: { questionId: z.string(), chosenOption: z.string().optional() },
+        inputSchema: strictShape({ questionId: z.string(), chosenOption: z.string().optional() }),
       },
       async ({ questionId, chosenOption }) =>
         ok(resolveQuestionForAgent(
@@ -1698,14 +1698,14 @@ export class OrchestrationMcpRouter {
           "filed an equivalent request that's still pending or answered-but-unpulled, instead of re-filing " +
           `a duplicate every cycle. Newest-first (createdAt DESC). Bounded to ${DEFAULT_REQUESTS_LIST_CAP} ` +
           "rows by default (see `hasMore`) — pass an explicit limit/offset to page past it.",
-        inputSchema: {
+        inputSchema: strictShape({
           state: z.enum(QUESTION_STATES).optional(),
           type: z.enum(QUESTION_TYPES).optional(),
           includeConsumed: z.boolean().optional(),
           mine: z.boolean().optional(),
           limit: z.number().int().positive().optional(),
           offset: z.number().int().nonnegative().optional(),
-        },
+        }),
       },
       async ({ state, type, includeConsumed, mine, limit, offset }) => {
         const asker = db.getSession(managerSessionId);
@@ -1723,7 +1723,7 @@ export class OrchestrationMcpRouter {
       "worker_recycle",
       {
         description: "Recycle a worker whose context has grown too large: closes it and spawns a FRESH worker in the SAME git worktree (code state kept) seeded with your handoff summary (intent kept). Same task + branch; gen+1. Read worker_transcript first and write the summary. `handoffSummary` is the canonical param; `continuationPrompt` (the sibling recycle_me tool's name for the same concept) is accepted as an ALIAS — pass either one (if both are given, handoffSummary wins).",
-        inputSchema: { workerSessionId: z.string(), handoffSummary: z.string().optional(), continuationPrompt: z.string().optional() },
+        inputSchema: strictShape({ workerSessionId: z.string(), handoffSummary: z.string().optional(), continuationPrompt: z.string().optional() }),
       },
       async ({ workerSessionId, handoffSummary, continuationPrompt }) => {
         const summary = resolveAlias(handoffSummary, continuationPrompt);
@@ -1781,7 +1781,7 @@ export class OrchestrationMcpRouter {
           "defaulted to `chore:`), not a judgment that the title is wrong. Retitle the card now (before " +
           "confirming) if `commitSubject` doesn't actually describe what shipped. Absent entirely for a " +
           "taskless worker (no card to preview a title from).",
-        inputSchema: { workerSessionId: z.string(), fullDiff: z.boolean().optional(), files: z.array(z.string()).optional(), pathGlob: z.string().optional() },
+        inputSchema: strictShape({ workerSessionId: z.string(), fullDiff: z.boolean().optional(), files: z.array(z.string()).optional(), pathGlob: z.string().optional() }),
       },
       async ({ workerSessionId, fullDiff, files, pathGlob }) => {
         try {
@@ -1797,7 +1797,7 @@ export class OrchestrationMcpRouter {
       "worker_merge_confirm",
       {
         description: "STEP 2: after reviewing, confirm the merge. Runs the build/DoD gate, and ONLY if green merges the branch as ONE squash commit, removes the worktree, and moves the task to done. The staged set is re-derived at confirm time (never a stale snapshot), so a valid +N-commit branch merges on the FIRST call. Fail-closed: a failed gate or a conflict leaves the repo untouched and the worktree retained. A genuine no-op is distinguishable via emptyKind: ALREADY_MERGED (branch already in main → finished idempotently, merged:true) vs STAGE_EMPTY_RETRY (no diff to merge → merged:false, worktree retained). A gate rejection (reason:\"build gate failed\") carries `gateDetail: {phase, failedStep, failingTest, stderrTail, exitCode, signal, timedOut}` — the failing phase (typecheck|test|build) if derivable, the failed step's own command, the first recognizable failing-test/assertion line if extractable, and a bounded (~4KB) stdout+stderr tail — so you can diagnose a real test failure vs. a flake vs. a build break without re-running the gate blind; the same detail is also folded into the `[loom:merge-rejected]` notification text. If the project has NO gateCommand configured, a successful merge carries {warning:\"unverified: ...\"} — the merge landed but was NOT checked by any build/DoD gate. A successful merge that created a NEW squash commit (i.e. not the ALREADY_MERGED no-op path) also echoes `commitSubject` — the exact subject it just committed — so a transcript reader can see what landed without a separate `git log`; this is the SAME subject worker_merge previewed at step 1. NESTED-REPO SAFETY: after a successful merge, the worktree is force-removed (it always carries expected ephemeral untracked content — node_modules, dist, build caches). If the worktree ALSO contains a nested git repository (a subdirectory with its own `.git` — e.g. something cloned into it, which can hold real unpushed work), the removal is REFUSED and the worktree is RETAINED intact — the merge itself already landed, only the cleanup is deferred; the result carries {warning} naming the nested path(s). Move/push that content out yourself and re-confirm, or pass forceRemoveWorktree:true if you've confirmed the nested content is disposable (default false — the safe choice) — a forceRemoveWorktree:true call ALWAYS runs for real (see below), so this is also how you retry the nested-repo case even moments after the first confirm. CLIENT-TIMEOUT RESILIENT: a fast confirm returns {merged,...,opId} (stamped with a correlation `opId`); a slow one (the gate genuinely takes a while) instead returns {opId,status:\"pending\",workerSessionId} — rather than polling, wait for the async `[loom:merge-done]`/`[loom:merge-rejected]`/`[loom:merge-failed]` nudge, which carries this SAME opId (plus the worker/task) so you can match it to this call even with several merges pending at once; or poll via worker_list (this worker's `pendingMerge` field) or RE-CALL worker_merge_confirm with the SAME workerSessionId — idempotent-retryable like worker_spawn: a re-call while the gate/merge is STILL running attaches to that SAME in-flight op (never a second one), and a re-call landing in the FEW SECONDS just after it settles gets the SAME cached result instead of starting a fresh one (worker_list's `pendingMerge.state` and this call's own `opId` in the result line up either way) — never throws 'already in flight'. The one exception is forceRemoveWorktree:true, which is a deliberate one-shot escalation and therefore ALWAYS runs for real, bypassing any cached result from an earlier call (so re-confirming with it set is the correct way to retry moments after a plain confirm, e.g. the nested-repo case above).",
-        inputSchema: { workerSessionId: z.string(), forceRemoveWorktree: z.boolean().optional() },
+        inputSchema: strictShape({ workerSessionId: z.string(), forceRemoveWorktree: z.boolean().optional() }),
       },
       async ({ workerSessionId, forceRemoveWorktree }) => {
         try {
@@ -1853,7 +1853,7 @@ export class OrchestrationMcpRouter {
           "(an in-memory read bounded by cap + queue depth, never a real scan) — safe to call on every loop " +
           "iteration, e.g. right after a run_gate/worker_merge_confirm call comes back `pending` to see the " +
           "full picture instead of only your own op's state.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         const projectId = db.getSession(managerSessionId)?.projectId;
@@ -1877,7 +1877,7 @@ export class OrchestrationMcpRouter {
           "daemon and is NOT re-execed by this restart), the success result additionally carries " +
           "{supervisorChanged:true, supervisorWarning} — those lines are silently inert until a human does a " +
           "manual `pnpm daemon:stable`; never report that part of the change as fully live.",
-        inputSchema: { reason: z.string() },
+        inputSchema: strictShape({ reason: z.string() }),
       },
       async ({ reason }) => {
         try {
@@ -1908,7 +1908,7 @@ export class OrchestrationMcpRouter {
             "limit. `reason` is a short note for the audit trail only — it is never part of the command run. " +
             "On success returns {deployed:true}; on a failed run returns {deployed:false,reason,exitCode," +
             "outputTail} with a bounded stdout+stderr tail to diagnose from.",
-          inputSchema: { reason: z.string() },
+          inputSchema: strictShape({ reason: z.string() }),
         },
         async ({ reason }) => {
           try {
@@ -1936,7 +1936,7 @@ export class OrchestrationMcpRouter {
           "— a changed hash after a restart proves the new web build is live), uptimeSeconds (this process's), " +
           "liveSessionCount (ACROSS ALL projects — a coarse sanity signal; use worker_list for your own " +
           "fleet)}.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         const webDist = resolveWebDistDir();
@@ -1962,7 +1962,7 @@ export class OrchestrationMcpRouter {
           "continuationPrompt, re-parents your live workers onto it, and then closes you. `continuationPrompt` " +
           "is the canonical param; `handoffSummary` (the sibling worker_recycle tool's name for the same " +
           "concept) is accepted as an ALIAS — pass either one (if both are given, continuationPrompt wins).",
-        inputSchema: { continuationPrompt: z.string().optional(), handoffSummary: z.string().optional() },
+        inputSchema: strictShape({ continuationPrompt: z.string().optional(), handoffSummary: z.string().optional() }),
       },
       async ({ continuationPrompt, handoffSummary }) => {
         const prompt = resolveAlias(continuationPrompt, handoffSummary);
@@ -1995,7 +1995,7 @@ export class OrchestrationMcpRouter {
           "count:N} — recycle_me or worker_stop them first, then re-call end_me. On pass: your session " +
           "gracefully stops (Ctrl-C×2, clean, resumable — the row lands on Archive) and this tool's own " +
           "reply is delivered before your pty dies.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         try {
@@ -2017,12 +2017,12 @@ export class OrchestrationMcpRouter {
           "a Request via `question_ask` instead. Always clears your unanswered-nudge counter. Pass a " +
           "short `detail` to say why (recorded for the human). `state` is the canonical param; `status` " +
           "is accepted as an ALIAS for it — pass either one (if both, state wins).",
-        inputSchema: {
+        inputSchema: strictShape({
           state: z.enum(["working", "waiting", "done"]).optional(),
           status: z.enum(["working", "waiting", "done"]).optional(),
           detail: z.string().optional(),
           minutes: z.number().optional(),
-        },
+        }),
       },
       async ({ state, status, detail, minutes }) => {
         const resolvedState = resolveAlias(state, status);
@@ -2064,7 +2064,7 @@ export class OrchestrationMcpRouter {
           "browserTesting, documentConversion, restrictedTools (resolved from the assigned/default " +
           "profile — same resolution profile_get/profile_list use; false when profile-less or the profile " +
           "leaves a flag unset)}, ordered by position.",
-        inputSchema: {},
+        inputSchema: strictShape({}),
       },
       async () => {
         const projectId = db.getSession(managerSessionId)?.projectId;
@@ -2108,7 +2108,7 @@ export class OrchestrationMcpRouter {
           "agent_list). Your project is derived SERVER-SIDE (you pass no projectId) — an agent outside YOUR " +
           "project resolves as not-found, same scoping as worker_list/agent_list. Error if unknown or an " +
           "ambiguous prefix (the error names the candidate ids).",
-        inputSchema: { agentId: z.string() },
+        inputSchema: strictShape({ agentId: z.string() }),
       },
       async ({ agentId }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
@@ -2146,7 +2146,7 @@ export class OrchestrationMcpRouter {
           "YOUR project (an agent outside it is REJECTED). agentId accepts the full id OR an unambiguous " +
           "8-char id-prefix (same resolution as agent_get) — an ambiguous prefix errors naming the candidate " +
           "ids, never resolving to an arbitrary match.",
-        inputSchema: { agentId: z.string(), profileId: z.string().nullable() },
+        inputSchema: strictShape({ agentId: z.string(), profileId: z.string().nullable() }),
       },
       async ({ agentId, profileId }) => {
         try {
@@ -2171,12 +2171,12 @@ export class OrchestrationMcpRouter {
           "YOUR project (an agent outside it is REJECTED). agentId accepts the full id OR an unambiguous " +
           "8-char id-prefix (same resolution as agent_get) — an ambiguous prefix errors naming the candidate " +
           "ids, never resolving to an arbitrary match. Omitted fields are left as-is.",
-        inputSchema: {
+        inputSchema: strictShape({
           agentId: z.string(),
           name: z.string().optional(),
           startupPrompt: z.string().optional(),
           appendToStartupPrompt: z.string().optional(),
-        },
+        }),
       },
       async ({ agentId, name, startupPrompt, appendToStartupPrompt }) => {
         try {
@@ -2199,7 +2199,7 @@ export class OrchestrationMcpRouter {
           "it first. 404 (\"agent not found\") if the id is unknown. FULL id required (no 8-char prefix — " +
           "deliberately stricter than agent_update/agent_assign_profile, which accept a prefix, since this " +
           "is a destructive action). Returns { deleted:true, agentId, sessions:<n> }.",
-        inputSchema: { agentId: z.string() },
+        inputSchema: strictShape({ agentId: z.string() }),
       },
       async ({ agentId }) => {
         try {
@@ -2223,7 +2223,7 @@ export class OrchestrationMcpRouter {
           "to your own project does NOT block delete (matches the human path's safe-by-design cascade: a " +
           "dangling profileId resolves to the plain backstop). 404 (\"profile not found\") if the id is unknown. " +
           "FULL id required (no 8-char prefix). Returns { deleted:true, profileId }.",
-        inputSchema: { profileId: z.string() },
+        inputSchema: strictShape({ profileId: z.string() }),
       },
       async ({ profileId }) => {
         try {
@@ -2243,12 +2243,12 @@ export class OrchestrationMcpRouter {
           "config is schema-validated on the AGENT path: orchestration.gateCommand (host-RCE) and unknown keys " +
           "are REJECTED (that capability stays human-only). repoPath is not editable here. Omitted fields are " +
           "left as-is.",
-        inputSchema: {
+        inputSchema: strictShape({
           projectId: z.string(),
           name: z.string().optional(),
           vaultPath: z.string().optional(),
           config: z.object({}).passthrough().optional(),
-        },
+        }),
       },
       async ({ projectId, name, vaultPath, config }) => {
         try {
@@ -2266,7 +2266,7 @@ export class OrchestrationMcpRouter {
           "Soft-archive a project: it disappears from the active project list, but its rows and sessions are " +
           "retained (not deleted). Structural, reversible-by-a-human. YOUR project only — a projectId outside " +
           "your own (e.g. the reserved Loom Platform home) is REJECTED.",
-        inputSchema: { projectId: z.string() },
+        inputSchema: strictShape({ projectId: z.string() }),
       },
       async ({ projectId }) => {
         try {
@@ -2289,7 +2289,7 @@ export class OrchestrationMcpRouter {
           "the schedule fires — omit for today's behavior (agent prompt only). Optional `name` is a " +
           "human-facing label shown in the Schedules UI; omit it and a friendly default is derived from " +
           "the cron (e.g. \"Every day at 9:00 AM\").",
-        inputSchema: { agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() },
+        inputSchema: strictShape({ agentId: z.string(), cron: z.string(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ agentId, cron, enabled, prompt, name }) => {
         try {
@@ -2309,7 +2309,7 @@ export class OrchestrationMcpRouter {
           "the agent's own startupPrompt on fire (pass an empty string to clear it). The schedule's agent must " +
           "be in YOUR project (a schedule outside it is REJECTED). Omitted fields are left as-is; a blank " +
           "`name` is ignored (a schedule always keeps a name).",
-        inputSchema: { scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() },
+        inputSchema: strictShape({ scheduleId: z.string(), cron: z.string().optional(), enabled: z.boolean().optional(), prompt: z.string().optional(), name: z.string().optional() }),
       },
       async ({ scheduleId, cron, enabled, prompt, name }) => {
         try {
@@ -2355,12 +2355,12 @@ export class OrchestrationMcpRouter {
           "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
           "project's task board (use tasks_create there). `detail` is the canonical param; `body` is " +
           "accepted as an ALIAS for it — pass either one (if both, detail wins).",
-        inputSchema: {
+        inputSchema: strictShape({
           title: z.string(),
           detail: z.string().optional(),
           body: z.string().optional(),
           severity: z.enum(["low", "medium", "high", "critical"]).optional(),
-        },
+        }),
       },
       async ({ title, detail, body, severity }) => {
         const resolvedDetail = resolveAlias(detail, body);
@@ -2414,7 +2414,7 @@ export class OrchestrationMcpRouter {
             "The delivered frame ([loom:from-manager · <name> · projectId:<id> · sessionId:<id>]) stamps YOUR " +
             "project id and this manager session's id, so a recipient can reply with peer_message using that " +
             "projectId as ITS targetProjectId — no need to ask the owner to relay it.",
-          inputSchema: { targetProjectId: z.string(), text: z.string() },
+          inputSchema: strictShape({ targetProjectId: z.string(), text: z.string() }),
         },
         async ({ targetProjectId, text }) => {
           try {
@@ -2441,7 +2441,7 @@ export class OrchestrationMcpRouter {
             "[{projectId, name}], one entry per owner-linked peer, excluding any peer that's since been " +
             "archived. Non-mutating — exposes only the projectId + display name, nothing else about the " +
             "peer project.",
-          inputSchema: {},
+          inputSchema: strictShape({}),
         },
         async () => {
           try {
@@ -2472,7 +2472,7 @@ export class OrchestrationMcpRouter {
           "itself a sign it was seen), a `status` of pending (still in the landing lane — not yet picked " +
           "up), in_progress (moved into a working lane — picked up), resolved (in a done/terminal column), " +
           "or closed (the task was deleted/archived), its columnKey, and updatedAt. No writes.",
-        inputSchema: { taskId: z.string().optional(), includeResolved: z.boolean().optional() },
+        inputSchema: strictShape({ taskId: z.string().optional(), includeResolved: z.boolean().optional() }),
       },
       async ({ taskId, includeResolved }) => {
         try {
@@ -2504,7 +2504,7 @@ export class OrchestrationMcpRouter {
           "column is appended after the existing ones. Delegates to the SAME atomic writer the human column " +
           "editor uses — every existing card is untouched. Returns {ok:true, columns, warnings} or " +
           "{ok:false, error} on a hard reject (e.g. a duplicate key).",
-        inputSchema: { key: z.string(), label: z.string(), role: columnRole.optional() },
+        inputSchema: strictShape({ key: z.string(), label: z.string(), role: columnRole.optional() }),
       },
       async ({ key, label, role }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
@@ -2525,7 +2525,7 @@ export class OrchestrationMcpRouter {
           "accent/WIP-limit are preserved unchanged. Delegates to the SAME atomic writer the human column " +
           "editor uses. Returns {ok:true, columns, warnings} or {ok:false, error} (e.g. `key` not found, or " +
           "`newKey` collides with another existing column).",
-        inputSchema: { key: z.string(), newKey: z.string().optional(), newLabel: z.string().optional() },
+        inputSchema: strictShape({ key: z.string(), newKey: z.string().optional(), newLabel: z.string().optional() }),
       },
       async ({ key, newKey, newLabel }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
@@ -2555,7 +2555,7 @@ export class OrchestrationMcpRouter {
           "terminal) is HARD-REJECTED unless another column already carries that role (reassign it first via " +
           "board_column_rename, or on the column you're keeping, before deleting this one). A board must " +
           "always keep at least one column. Returns {ok:true, columns, warnings} or {ok:false, error}.",
-        inputSchema: { key: z.string() },
+        inputSchema: strictShape({ key: z.string() }),
       },
       async ({ key }) => {
         const projectId = db.getSession(managerSessionId)?.projectId;
