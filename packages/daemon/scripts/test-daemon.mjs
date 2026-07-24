@@ -67,6 +67,20 @@ const POOL_SIZE = Math.max(
 );
 
 const TEST_TIMEOUT_MS = 120_000;
+// Card cc595ca7: a HANDFUL of git-locking/merge tests do heavy REAL git subprocess work (dozens to
+// hundreds of real `git` spawns — worktree creation, concurrent merges, content-integrity sweeps) with
+// no internal timing assertion of their own; under the full suite's ~540-concurrent-git contention, that
+// real work alone can blow past the blanket TEST_TIMEOUT_MS even though nothing is actually wedged
+// (confirmed: merge-repo-mutex.mjs timed out on an unrelated card's gate, all-green standalone;
+// merge-stranded-backstop.mjs flaked the same way at cap=2/concurrent=2). Raising TEST_TIMEOUT_MS itself
+// would dull fast-fail for the ~296 OTHER hermetic tests that have nothing to do with git contention, so
+// instead this is a small, explicit per-test override — same documented-list shape as NOT_HERMETIC above
+// — giving just these git-heavy tests real headroom. A genuine infinite hang in either still gets killed
+// and reported, just at a ceiling actually sized for their real workload instead of one with zero margin.
+const TEST_TIMEOUT_OVERRIDES = {
+  "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
+  "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
+};
 const tmpRoots = [];
 
 // Runs one test file on a fixed pool "lane" (its port for the whole run, so concurrent lanes never
@@ -89,7 +103,8 @@ function runOne(name, lane) {
     child.stdout.on("data", (d) => { stdout += d; });
     child.stderr.on("data", (d) => { stderr += d; });
 
-    const timer = setTimeout(() => { timedOut = true; child.kill(); }, TEST_TIMEOUT_MS);
+    const timeoutMs = TEST_TIMEOUT_OVERRIDES[name] ?? TEST_TIMEOUT_MS;
+    const timer = setTimeout(() => { timedOut = true; child.kill(); }, timeoutMs);
 
     child.on("error", (err) => {
       clearTimeout(timer);

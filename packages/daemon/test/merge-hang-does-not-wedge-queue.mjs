@@ -37,14 +37,27 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const GIT_ID = "-c user.email=mhdwq@loom -c user.name=mhdwq";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 
-const HOOK_SLEEP_S = 5; // long enough to be unambiguously distinct from BOUND_MS, short enough that an
-                         // orphaned hook process (if the block-timeout kill fires mid-sleep) self-exits
-                         // quickly rather than lingering — no PID-tracking cleanup needed.
+const HOOK_SLEEP_S = 20; // long enough to be unambiguously distinct from BOUND_MS (card cc595ca7: a
+                          // BOUND_MS=500 op reached 3013ms under the full suite's ~540-concurrent-git
+                          // contention — a ~6x inflation over its own bound — so the REAL discriminator
+                          // below, `op1ElapsedMs < HOOK_SLEEP_S * 1000`, needs generous headroom over that
+                          // observed inflation, not just over BOUND_MS itself); short enough that an
+                          // orphaned hook process (if the block-timeout kill fires mid-sleep) self-exits
+                          // quickly rather than lingering — no PID-tracking cleanup needed. Raising this
+                          // is FREE on the green path: op1 is still killed at its own real BOUND_MS
+                          // regardless of how long the hook would sleep, and op2 never waits on the sleep
+                          // at all (marker-file-gated — op1's hook writes the marker within ms of firing).
 const BOUND_MS = 500; // this op's own configured timeout — comfortably < HOOK_SLEEP_S so the split is
                        // unambiguous, and comfortably > typical real-op latency so it isn't itself flaky.
-const GUARD_MS = 3_000; // this TEST's own patience for "did the op ever settle" — well above BOUND_MS (so
-                         // a correctly-bounded op is never close to it) and well below HOOK_SLEEP_S's full
-                         // duration (so a genuinely wedged op is unambiguously caught, not just slow).
+const GUARD_MS = 30_000; // this TEST's own patience for "did the op ever settle" — deliberately ABOVE
+                          // HOOK_SLEEP_S*1000 (unlike the old 3000ms, which sat BELOW the hook's own
+                          // 5000ms duration and gave zero headroom for suite contention). Above the hook's
+                          // envelope, a genuinely wedged-but-finite op (this test's hook always exits on
+                          // its own) still settles for REAL instead of getting cut off into an opaque
+                          // "guard fired" sentinel — so the actual regression check, the elapsed-vs-
+                          // HOOK_SLEEP_S comparison below, is what fails (with real numbers), not a race
+                          // artifact. GUARD_MS only exists as a backstop against a truly non-terminating
+                          // promise (this test's own patience), not as the regression signal itself.
 
 const tmpDirs = [];
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;

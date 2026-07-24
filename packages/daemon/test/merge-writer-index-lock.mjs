@@ -65,8 +65,15 @@ const HOOK_SLEEP_S = 3; // long enough that the interleaved writer call unambigu
                          // quickly.
 const WRITER_FIRE_DELAY_MS = 600; // fired well after the squash has staged (near-instant) but well before
                                    // the hook's sleep ends.
-const GUARD_MS = 15_000; // this TEST's own patience — comfortably above HOOK_SLEEP_S so a genuinely fixed
+const GUARD_MS = 25_000; // this TEST's own patience — comfortably above HOOK_SLEEP_S so a genuinely fixed
                           // (queued) run has time to settle, comfortably bounded so a wedge can't hang CI.
+                          // Widened from 15_000 alongside card cc595ca7's fix to the identical `guard()`
+                          // -against-real-git-work shape in merge-hang-does-not-wedge-queue.mjs (which DID
+                          // false-red under full-suite contention at a tighter margin) — this file hadn't
+                          // been observed flaking, but shares the exact construct, so it gets the same
+                          // extra headroom pre-emptively. Free on the green path: the merge/writer/
+                          // createBranch calls under test settle in well under a second normally: this
+                          // only matters if a real wedge (or heavy contention) pushes them close to it.
 
 const tmpDirs = [];
 
