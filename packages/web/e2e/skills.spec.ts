@@ -163,13 +163,16 @@ test("a customized reference file with a pending update resolves non-destructive
   await skillButton(page, target).click();
 
   // BEFORE (observable): the file's divergence is now NAMED and inspectable, which is the whole point —
-  // previously it existed only as a sidebar dot with no diff behind it.
+  // previously it existed only as a sidebar dot with no diff behind it. Scoped to the file's own row
+  // button (not a bare page-wide text search) — `relPath`'s text can otherwise resolve to more than one
+  // element on the page (e.g. a title attribute plus the row's own label), tripping strict mode.
   await page.getByRole("button", { name: /Review files|What changed/ }).first().click();
-  await expect(page.getByText(relPath, { exact: false })).toBeVisible();
+  const fileRow = page.getByRole("button", { name: new RegExp(relPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).first();
+  await expect(fileRow).toBeVisible();
 
   // Expanding the row shows a REAL diff of what the user's copy holds — the precondition the card makes
   // structural: no discard is offered until the diff that justifies it is on screen.
-  await page.getByRole("button", { name: new RegExp(relPath.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")) }).first().click();
+  await fileRow.click();
   await expect(page.getByText("MY OUT-OF-BAND EDIT.", { exact: false })).toBeVisible();
 
   // ACT: "Keep mine" — the non-destructive resolution. This is the escape that did not exist.

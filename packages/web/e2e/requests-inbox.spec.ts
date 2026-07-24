@@ -96,7 +96,7 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(dialog.getByText("denied", { exact: true })).toBeVisible();
   });
 
-  test("a standing-scope permission request starts with the expiry select already enabled; Authorize folds scope+expiry into the recorded note", async ({ page, loomDaemon }) => {
+  test("a standing-scope permission request starts with the expiry select already enabled; Authorize sends scope+expiry structurally, not folded into the note", async ({ page, loomDaemon }) => {
     const mgr = await loomDaemon.seedLiveSession({ role: "manager", agentName: "StandingMgr" });
     const title = uniq("permission-standing");
     await loomDaemon.seedQuestion({
@@ -116,11 +116,23 @@ test.describe("requests inbox (card 695ebab0)", () => {
     await expect(expiry).toBeEnabled();
     await expiry.selectOption("30d");
 
+    // fix(mcp): persist and surface permission-request scope/expiry (card 75b3bde0) — the human's
+    // scope/expiry choice now goes to the answer route as STRUCTURED fields (`scope`/`expiresAt`), never
+    // folded into free-text `note`. Capture the actual POST body to prove that directly, rather than
+    // inferring it from the readout.
+    const answerReq = page.waitForRequest((req) => req.url().includes("/answer") && req.method() === "POST");
     await dialog.getByRole("button", { name: "Authorize" }).click();
+    const body = (await answerReq).postDataJSON() as { decision: string; scope?: string; expiresAt?: string; note?: string };
+    expect(body.decision).toBe("authorize");
+    expect(body.scope).toBe("standing");
+    expect(body.expiresAt).toBeTruthy();
+    expect(Date.parse(body.expiresAt!)).toBeGreaterThan(Date.now());
+    expect(body.note).toBeUndefined();
+
     await expect(dialog.getByText("ANSWERED", { exact: true })).toBeVisible();
-    // The human's scope/expiry choice is folded into the recorded note (composeNote), never silently
-    // dropped — the answer route only carries {decision, note}.
-    await expect(dialog.getByText("authorized · scope: standing until 30d", { exact: true })).toBeVisible();
+    // The note was left blank, so the recorded readout falls back to the no-note phrasing — the
+    // scope/expiry the human picked is persisted structurally (proven above), not shown here.
+    await expect(dialog.getByText("authorized · this action", { exact: true })).toBeVisible();
   });
 
   test("a credential request is masked with a working show/hide toggle and never echoes the value back", async ({ page, loomDaemon }) => {

@@ -433,6 +433,17 @@ export const test = base.extend<{ loomPage: Page; autoIsolation: void }, { loomD
         LOOM_PYTHON_NO_PROVISION: "1",
         LOOM_SUPPRESS_USAGE_POLLER: "1",
         LOOM_TEST: "1",
+        // A `seedCanned` entry (kind:"canned") has no hook relay (pty/host.ts only wires deliverHook for
+        // kind:"claude"), so once a spec arms busy on one via a real enqueueStdin/submit() — the ONLY
+        // documented way to do it (see `enqueue`'s doc above) — its Enter can never get `enterConfirmed`.
+        // submit()'s own verify-and-retry loop doesn't special-case non-claude kinds, so left at its
+        // default ~3.6s budget (SUBMIT_MAX_ATTEMPTS × SUBMIT_VERIFY_TIMEOUT_MS) it hits GIVE-UP RECOVERY
+        // and re-queues that already-"delivered" text onto `live.pending` mid-spec — corrupting any
+        // queue-count assertion that runs more than a few seconds after arming busy this way (found via
+        // terminal-queue-ledger.spec.ts, which failed deterministically ~15s in). Stretch the verify
+        // window far past any single spec's realistic runtime so give-up never fires against a canned
+        // session for the life of this daemon; harmless for kind:"claude" too, since e2e never spawns one.
+        LOOM_SUBMIT_VERIFY_TIMEOUT_MS: "600000",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
