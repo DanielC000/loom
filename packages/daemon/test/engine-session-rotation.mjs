@@ -163,6 +163,18 @@ try {
   check("8b: found-but-no-usage-line is named distinctly (a DIFFERENT reason than 8a)",
     warnLog.some((w) => w.includes("context-stats read failed (found-but-no-usage-line") && w.includes(ENGINE_3)));
   check("8b: ctxInputTokens still frozen (this transcript never gained a usage-bearing line)", db.getSession(SID)?.ctxInputTokens === ctxBefore8);
+
+  // === 9) Card dbc6bcac: a PERSISTENTLY-missing transcript (no file ever appears) must not re-pay the
+  // O(projects) fallback scan/log on every subsequent Stop — throttled to once per session per miss. ===
+  const ENGINE_4 = "engine-session-delta";
+  host.deliverHook(SID, { hook_event_name: "SessionStart", session_id: ENGINE_4 }); // rotate again, no transcript ever written for this one
+  host.deliverHook(SID, { hook_event_name: "Stop", session_id: ENGINE_4 }); // first miss — diagnosed + logged
+  const engine4WarnCountAfterFirst = warnLog.filter((w) => w.includes("context-stats read failed (file-not-found") && w.includes(ENGINE_4)).length;
+  check("9a: first miss for engine-4 is diagnosed and logged", engine4WarnCountAfterFirst === 1);
+  host.deliverHook(SID, { hook_event_name: "Stop", session_id: ENGINE_4 }); // SECOND consecutive miss, same session, still no file
+  const engine4WarnCountAfterSecond = warnLog.filter((w) => w.includes("context-stats read failed (file-not-found") && w.includes(ENGINE_4)).length;
+  check("9b: the SECOND consecutive missing-transcript Stop is throttled — no re-scan/re-log", engine4WarnCountAfterSecond === 1);
+  check("9b: ctxInputTokens stays frozen through the throttled miss too", db.getSession(SID)?.ctxInputTokens === ctxBefore8);
 } finally {
   console.warn = realWarn;
   try { host.stop(SID, "hard"); } catch { /* ignore */ }

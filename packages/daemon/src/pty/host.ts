@@ -14,7 +14,7 @@ import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.j
 import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
-import { engineTranscriptExists } from "../sessions/transcript.js";
+import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
@@ -1467,6 +1467,13 @@ interface Live {
                         // drain/submit (mirror of `stopping`) so the ~10s reconcile drain can't submit pending
                         // into the capped account and CLOBBER lastPrompt — the killed turn resumeAfterRateLimit
                         // must replay. Set when the StopFailure is detected as rate_limit; cleared on resume.
+  // Card dbc6bcac: latches once the Stop null-stats branch's diagnostic has confirmed this session's
+  // transcript is genuinely missing via `engineTranscriptExists`'s EXPENSIVE fallback path — a synchronous
+  // O(projects) `readdirSync` of `~/.claude/projects` (the same hot-path-sync-scan class as the c12b550
+  // freeze P0, scoped here to one broken session). While set, a further miss skips that fallback scan
+  // entirely instead of re-paying it on every subsequent Stop. Reset to false the moment a cheap direct
+  // existsSync check finds the transcript again — a session that recovers still deserves a fresh diagnosis.
+  transcriptMissingDiagnosedOnce: boolean;
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   // Card 0f9268cc: the raw-terminal-channel counterpart of `lastPrompt`, so the paste-tripwire can see a
   // paste/long text typed or pasted directly into the terminal panel (/ws/term -> writeStdin), NOT just a
@@ -2529,6 +2536,7 @@ export class PtyHost {
       stopping: false,
       drainHeld: false,
       rateLimited: false,
+      transcriptMissingDiagnosedOnce: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
       // route (a startup turn is never a companion inbound), so the route fields start null.
@@ -2690,7 +2698,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -2766,7 +2774,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -3149,9 +3157,30 @@ export class PtyHost {
             // transcript file itself is missing/unresolvable (cheap re-check via engineTranscriptExists,
             // which shares readContextStats' own resolveTranscriptFile resolution) vs. the file exists but
             // no assistant line in it carries a `usage` field.
-            const reason = engineTranscriptExists(live.cwd, live.engineSessionId) ? "found-but-no-usage-line" : "file-not-found";
-            // eslint-disable-next-line no-console
-            console.warn(`[context] ${sessionId} context-stats read failed (${reason}, engineSessionId=${live.engineSessionId}) — ctxInputTokens will NOT advance this turn`);
+            //
+            // Card dbc6bcac: `engineTranscriptExists`'s FALLBACK path (only reached once its own cheap
+            // direct existsSync check misses) is a synchronous O(projects) `readdirSync` of
+            // `~/.claude/projects` — fine as a one-off, but this branch is anomalous-path-only, so a
+            // persistently-broken session (transcript that never comes back) would otherwise re-pay that
+            // scan on EVERY subsequent Stop. Check the cheap direct path ourselves first — if it hits,
+            // there's nothing to throttle (this is the common, inexpensive "found-but-no-usage" case, and
+            // it also means a session already latched as missing has RECOVERED, so unlatch for a fresh
+            // diagnosis next time). Only when the direct check misses do we consult the latch: skip the
+            // expensive fallback scan (and the log) entirely once it's already confirmed this session's
+            // transcript is genuinely missing — a repeat scan would find the same nothing.
+            const directHit = fs.existsSync(engineTranscriptPath(live.cwd, live.engineSessionId));
+            let reason: "found-but-no-usage-line" | "file-not-found" | null = null;
+            if (directHit) {
+              reason = "found-but-no-usage-line";
+              live.transcriptMissingDiagnosedOnce = false;
+            } else if (!live.transcriptMissingDiagnosedOnce) {
+              reason = engineTranscriptExists(live.cwd, live.engineSessionId) ? "found-but-no-usage-line" : "file-not-found";
+              if (reason === "file-not-found") live.transcriptMissingDiagnosedOnce = true;
+            }
+            if (reason !== null) {
+              // eslint-disable-next-line no-console
+              console.warn(`[context] ${sessionId} context-stats read failed (${reason}, engineSessionId=${live.engineSessionId}) — ctxInputTokens will NOT advance this turn`);
+            }
           }
           // Bare-pasted-text-placeholder tripwire (card eef4883c, DETECTION ONLY — see paste-tripwire.ts's
           // doc for the 8a39f544 background). Compares the SUBMITTED turn against the transcript's
