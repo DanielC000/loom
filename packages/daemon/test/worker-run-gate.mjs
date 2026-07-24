@@ -15,6 +15,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { performance } from "node:perf_hooks";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -27,6 +28,26 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// STRUCTURAL barrier (card 4dd52048 — replaces (J)'s old fixed-wall-clock margin, which guessed how long
+// confirmWorkerMerge's real git prep takes rather than observing it): polls SessionService.snapshotGates()
+// — the same live GateSemaphore registry read the Gates page / gate_queue use — for a session's own gate
+// entry to reach a given phase ("running"/"queued"). The registry records a QUEUED entry SYNCHRONOUSLY the
+// instant GateSemaphore.runExclusive is called, before it ever awaits a slot (see gate-semaphore.ts), so
+// this observes "has genuinely reached the semaphore" directly — no dependency on how long anything
+// upstream (real git-subprocess work, admission itself) took to get there. `timeoutMs` is a safety-net
+// backstop against a genuine hang, not part of the correctness logic: it never decides the assertion,
+// only how long a broken run stalls before failing loudly instead of hanging the suite.
+async function waitUntilGatePhase(sessions, sessionId, phase, label, timeoutMs = 10000, intervalMs = 20) {
+  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
+  while (performance.now() - start < timeoutMs) {
+    const entry = sessions.snapshotGates().gates.find((g) => g.sessionId === sessionId);
+    if (entry?.phase === phase) return;
+    await sleep(intervalMs);
+  }
+  throw new Error(`${label}: sessionId ${sessionId} never reached phase "${phase}" within ${timeoutMs}ms`);
+}
+
 const GIT_ID = "-c user.email=wg@loom -c user.name=wg";
 const now = new Date().toISOString();
 
@@ -306,11 +327,20 @@ try {
 
   // ── (J) PRIORITY WIRING (card 24642c3d): confirmWorkerMerge ("high") is NOT head-of-line-blocked by
   //        ALREADY-QUEUED runWorkerGate ("low") calls — the exact starvation pattern this card fixes.
-  //        Cap 1 (default): gate1 grabs the only slot and holds it; gate2 (a SECOND, independent gate-
-  //        only worker — runWorkerGate single-flights per workerSessionId via PendingOpRegistry, so two
-  //        concurrent calls for the SAME worker would attach to one in-flight op instead of each taking
-  //        their own semaphore turn) queues behind it; the merge fires LAST but, being high-priority, is
-  //        serviced BEFORE gate2's already-queued call once gate1 releases the slot. ───────────────────
+  //        Cap 1 (default): gate1 grabs the only slot and holds it (until the test explicitly releases
+  //        it — see below); gate2 (a SECOND, independent gate-only worker — runWorkerGate single-flights
+  //        per workerSessionId via PendingOpRegistry, so two concurrent calls for the SAME worker would
+  //        attach to one in-flight op instead of each taking their own semaphore turn) queues behind it;
+  //        the merge fires LAST but, being high-priority, is serviced BEFORE gate2's already-queued call
+  //        once gate1 releases the slot.
+  //
+  //        STRUCTURAL, not wall-clock (card 4dd52048): the original version held gate1 for a fixed
+  //        2500ms and guessed confirmWorkerMerge's real git prep (stranded-check + union-merge) would
+  //        finish enqueueing within that window (empirically ~1.1s locally) — an INVISIBLE margin that
+  //        reproduced flaky under real fleet load. This version instead uses `waitUntilGatePhase` to poll
+  //        the semaphore's own live registry and only releases gate1 once gate2 and the merge are BOTH
+  //        structurally confirmed queued behind it — correct regardless of how long git prep actually
+  //        takes on the host it runs on. ─────────────────────────────────────────────────────────────
   {
     const sfx = `j-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-j-${sfx}`);
@@ -330,26 +360,30 @@ try {
 
     const startOrder = [];
     let active = 0, maxActive = 0;
+    // gate1 is held open by an EXTERNALLY-controlled promise, not a fixed sleep — the test releases it
+    // only once it has structurally confirmed gate2 AND the merge are both genuinely queued behind it.
+    let releaseGate1;
+    const gate1Wait = new Promise((res) => { releaseGate1 = res; });
     const fakeGate = async (_gate, worktreePath) => {
       const label = worktreePath === gateWorktreePath1 ? "gate1" : worktreePath === gateWorktreePath2 ? "gate2" : "merge";
       startOrder.push(label);
       active++; maxActive = Math.max(maxActive, active);
-      await sleep(label === "gate1" ? 2500 : 50);
+      if (label === "gate1") await gate1Wait;
       active--;
       return { passed: true };
     };
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
 
-    // gate1 holds the only slot for 2500ms — long enough to comfortably outlast confirmWorkerMerge's own
-    // real git prep (stranded-check + union-merge, ~1.1s per (A)'s comment above) that runs BEFORE it
-    // ever reaches the semaphore, so the merge's actual "high" enqueue still lands well before gate1
-    // releases, giving it something to jump ahead of.
     const p1 = sessions.runWorkerGate(gateWorkerId1);
-    await sleep(150); // gate1 has genuinely acquired the only slot before anything else queues
-    const p2 = sessions.runWorkerGate(gateWorkerId2); // queues ("low") behind gate1 — no git prep, near-instant
-    await sleep(150);
-    const p3 = sessions.confirmWorkerMerge(mgrId, mergeWorkerId); // queues ("high") — LAST to fire (but its own git prep runs concurrently with gate1 still holding)
+    await waitUntilGatePhase(sessions, gateWorkerId1, "running", "(J) gate1");
+    const p2 = sessions.runWorkerGate(gateWorkerId2); // queues ("low") behind gate1
+    await waitUntilGatePhase(sessions, gateWorkerId2, "queued", "(J) gate2");
+    const p3 = sessions.confirmWorkerMerge(mgrId, mergeWorkerId); // queues ("high") — LAST to fire
+    // Waits out confirmWorkerMerge's real git prep for however long it ACTUALLY takes on this host —
+    // no guessed margin, however loaded the machine is.
+    await waitUntilGatePhase(sessions, mergeWorkerId, "queued", "(J) merge");
+    releaseGate1(); // only now — every party is structurally confirmed running/queued
 
     const [r1, r2, r3] = await Promise.all([p1, p2, p3]);
     check("(J) all three eventually ran", startOrder.length === 3);
@@ -413,33 +447,55 @@ try {
   // ── (L) card 2d72595c: run_gate returns a numeric durationMs — wall-clock from admission to settle
   //        (excludes queue wait) — on BOTH a passing and a failing outcome. This is the timing number a
   //        manager should read instead of directing a worker to hand-run the suite for one (the second
-  //        of the two observed semaphore-bypass instances this card exists to fix). ────────────────────
+  //        of the two observed semaphore-bypass instances this card exists to fix).
+  //
+  //        TIMING NOTE (card 4dd52048): the production `durationMs` is computed in service.ts via
+  //        `Date.now() - gateStartedAt` — `Date.now()` reads the SYSTEM wall clock, which is not
+  //        guaranteed monotonic (an NTP/clock-sync adjustment mid-run can make two reads a few ms apart
+  //        disagree with the real elapsed time), and its coarse per-ms resolution leaves no headroom
+  //        under host load. The original assertion pinned a bare `>=` against the fake's own exact sleep
+  //        value with zero slack and flaked 3x under real fleet load. This version (a) widens the fake's
+  //        own sleep so a few ms of clock jitter can't meaningfully threaten the property, (b)
+  //        cross-checks `durationMs` against an INDEPENDENT `performance.now()` (monotonic) measurement
+  //        of the whole call, and (c) gives the lower bound explicit, documented slack instead of an
+  //        undeclared exact match — still failing on the real regression this guards (durationMs stuck
+  //        at 0, or otherwise not actually measuring the run). ────────────────────────────────────────
   {
     const sfx = `l-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-l-${sfx}`);
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
-    const slowishGate = async () => { await sleep(30); return { passed: true }; };
+    const SLEEP_MS = 100; // wide margin — see TIMING NOTE above
+    const SLACK_MS = 50; // explicit, generous jitter budget (half of SLEEP_MS) — see TIMING NOTE above
+    const slowishGate = async () => { await sleep(SLEEP_MS); return { passed: true }; };
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: slowishGate });
 
+    const wallStart = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
     const rPass = await sessions.runWorkerGate(gateWorkerId);
+    const wallElapsed = performance.now() - wallStart;
     check("(L) a PASSING gate returns a numeric durationMs", rPass.settled === true && rPass.ok === true && typeof rPass.value.durationMs === "number");
-    check("(L) that durationMs reflects the actual run time (>= the fake's own sleep)", rPass.value.durationMs >= 30);
+    check("(L) that durationMs reflects the actual run time (within slack of the fake's own sleep, and never more than the independently-measured wall-clock call)",
+      rPass.value.durationMs >= SLEEP_MS - SLACK_MS && rPass.value.durationMs <= wallElapsed + SLACK_MS);
   }
   {
     const sfx = `l2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-l2-${sfx}`);
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
+    const SLEEP_MS = 100; // see (L)'s own TIMING NOTE above
+    const SLACK_MS = 50;
     const failingGate = async () => {
-      await sleep(20);
+      await sleep(SLEEP_MS);
       return { passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "FAIL x" };
     };
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: failingGate });
 
+    const wallStart = performance.now();
     const rFail = await sessions.runWorkerGate(gateWorkerId);
+    const wallElapsed = performance.now() - wallStart;
     check("(L) a FAILING gate ALSO returns a numeric durationMs", rFail.settled === true && rFail.ok === true && rFail.value.passed === false && typeof rFail.value.durationMs === "number");
-    check("(L) that durationMs reflects the actual run time (>= the fake's own sleep)", rFail.value.durationMs >= 20);
+    check("(L) that durationMs reflects the actual run time (within slack of the fake's own sleep, and never more than the independently-measured wall-clock call)",
+      rFail.value.durationMs >= SLEEP_MS - SLACK_MS && rFail.value.durationMs <= wallElapsed + SLACK_MS);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
