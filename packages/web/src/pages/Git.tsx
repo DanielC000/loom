@@ -69,23 +69,8 @@ export default function Git() {
                 this plain div instead — see the analogous note on the Commits panel below. */}
             <div data-git-pane="branches">
               {branches.isError && <ErrorLine error={branches.error} />}
-              {!branches.isError && (
-                <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
-                  {branches.data?.all.map((b) => {
-                    const current = b === branches.data?.current;
-                    return (
-                      <button key={b} title={current ? "current branch" : "checkout"} disabled={current || busy}
-                        onClick={() => checkout.mutate(b)}
-                        style={{
-                          display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none",
-                          cursor: current ? "default" : "pointer", padding: 0,
-                          fontFamily: font.mono, fontSize: 12, color: current ? color.phosphor : color.textDim,
-                        }}>
-                        {current && <Dot tone="phosphor" glow />}{b}
-                      </button>
-                    );
-                  })}
-                </div>
+              {!branches.isError && branches.data && (
+                <BranchList data={branches.data} busy={busy} onCheckout={(b) => checkout.mutate(b)} />
               )}
             </div>
             <div style={{ display: "flex", gap: 6, marginTop: 12, paddingTop: 10, borderTop: `1px solid ${color.border}` }}>
@@ -152,6 +137,114 @@ export default function Git() {
           )}
         </>
       )}
+    </div>
+  );
+}
+
+// The branch list degrades gracefully at ~300 refs (card a044b33b). A healthy Loom project accumulates a
+// worker branch (`loom/<id>`) per dispatched card, so the raw `git branch` list is dominated by opaque
+// hashes a human can't scan. Three moves make it usable without hiding anything:
+//   1. a substring FILTER over every branch name (the highest-value affordance);
+//   2. the CURRENT branch pinned prominently at the top instead of buried alphabetically;
+//   3. the `loom/*` worker branches folded into a collapsed "worker branches (N)" disclosure, so the
+//      default view shows what a human actually NAMED — with the count always visible, never a silent
+//      truncation. A live filter auto-expands the fold so a matching worker branch is never hidden.
+// NOTE we fold ALL worker branches, not merged ones specifically — `GET …/git/branches` returns only
+// { current, all } with no merged signal, and telling merged from unmerged is a daemon change owned
+// elsewhere. Likewise a `loom/<hash>` is shown verbatim (no card-title resolution): that mapping has no
+// endpoint today and resolving per-branch would be an N+1 — both were scoped out of this UI-only card.
+const isWorkerBranch = (b: string) => b.startsWith("loom/");
+
+function branchButtonStyle(c: string, busy: boolean) {
+  return {
+    display: "inline-flex", alignItems: "center", gap: 6, background: "none", border: "none",
+    cursor: busy ? "default" : "pointer", padding: 0, textAlign: "left" as const,
+    fontFamily: font.mono, fontSize: 12, color: c,
+  };
+}
+
+function BranchList({ data, busy, onCheckout }: {
+  data: { current: string; all: string[] };
+  busy: boolean;
+  onCheckout: (b: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [workersOpen, setWorkersOpen] = useState(false);
+  const q = query.trim().toLowerCase();
+  const matches = (b: string) => q === "" || b.toLowerCase().includes(q);
+
+  const current = data.current || null;
+  // Partition into current / human-named / worker(`loom/*`) — current is pulled out of both lists so it
+  // renders once, pinned, and never double-counts.
+  const named = data.all.filter((b) => b !== current && !isWorkerBranch(b));
+  const workers = data.all.filter((b) => b !== current && isWorkerBranch(b));
+  const namedShown = named.filter(matches);
+  const workersShown = workers.filter(matches);
+  const otherTotal = named.length + workers.length;
+  const otherShown = namedShown.length + workersShown.length;
+
+  // A live filter forces the worker fold open so a matching `loom/*` branch is never hidden behind it.
+  const showWorkers = q !== "" || workersOpen;
+
+  const checkoutBtn = (b: string) => (
+    <button key={b} title="checkout" disabled={busy} onClick={() => onCheckout(b)}
+      style={branchButtonStyle(color.textDim, busy)}>
+      {b}
+    </button>
+  );
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
+        <Input aria-label="Filter branches" placeholder="filter branches…" value={query}
+          onChange={(e) => setQuery(e.target.value)} style={{ flex: 1, minWidth: 0 }} />
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.textMuted, whiteSpace: "nowrap" }}>
+          {q === "" ? `${data.all.length} branches` : `${otherShown} of ${otherTotal} match`}
+        </span>
+      </div>
+
+      {/* Current branch — pinned at the top, always visible. Kept a (disabled) button whose accessible
+          name is exactly the branch name; the "current" tag is a SIBLING so it doesn't leak into that
+          name (repository.spec keys `getByRole("button", { name: /^(main|master)$/ })` on it). */}
+      {current && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: named.length || workers.length ? 12 : 0 }}>
+          <button title="current branch" disabled style={{ ...branchButtonStyle(color.phosphor, true), cursor: "default" }}>
+            <Dot tone="phosphor" glow />{current}
+          </button>
+          <span style={{ fontFamily: font.mono, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.08em", color: color.textMuted }}>
+            current
+          </span>
+        </div>
+      )}
+
+      {/* Human-named branches — the default, scannable view. */}
+      {named.length > 0 && (
+        namedShown.length > 0
+          ? <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>{namedShown.map(checkoutBtn)}</div>
+          : <Hint>no named branches match “{query.trim()}”</Hint>
+      )}
+
+      {/* Worker branches — folded away by default so hashes don't drown the named branches, with the
+          count always shown. */}
+      {workers.length > 0 && (
+        <div style={{ marginTop: named.length > 0 ? 12 : 0, paddingTop: named.length > 0 ? 10 : 0, borderTop: named.length > 0 ? `1px solid ${color.border}` : "none" }}>
+          <button onClick={() => setWorkersOpen((o) => !o)}
+            aria-expanded={showWorkers}
+            style={{ display: "flex", alignItems: "center", gap: 6, background: "transparent", border: "none", padding: 0, cursor: "pointer", fontFamily: font.mono, fontSize: 12, color: color.textDim }}>
+            <span style={{ color: color.phosphor }}>{showWorkers ? "▾" : "▸"}</span>
+            worker branches ({q === "" ? workers.length : `${workersShown.length} of ${workers.length}`})
+          </button>
+          {showWorkers && (
+            <div style={{ marginTop: 8, maxHeight: "40vh", overflow: "auto" }}>
+              {workersShown.length > 0
+                ? <div style={{ display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>{workersShown.map(checkoutBtn)}</div>
+                : <Hint>no worker branches match “{query.trim()}”</Hint>}
+            </div>
+          )}
+        </div>
+      )}
+
+      {otherTotal === 0 && !current && <Hint>no branches</Hint>}
     </div>
   );
 }
