@@ -3040,7 +3040,11 @@ async function mergeBranchLocked(
     // AND that commit's content is verified to actually contain the branch's own changes (see
     // findLandedSquashCommit's content-reachability check — trailer presence alone is not proof).
     const landed = await findLandedSquashCommit(repoPath, branch, "HEAD", deps);
-    return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY" };
+    // `sha` rides along on the ALREADY_MERGED case (card 1eebc46a) — `landed` IS the commit's sha,
+    // already resolved by the lookup just above; surfacing it costs no extra git call, just returning
+    // data this function already computed, so the caller (finalizeMerge) can persist ship-state without
+    // a redundant lookup of its own.
+    return { ok: true, noop: true, emptyKind: landed ? "ALREADY_MERGED" : "STAGE_EMPTY_RETRY", sha: landed ?? undefined };
   }
   // Land the staged diff as ONE plain commit (repo-config identity; clean subject + deterministic trailer).
   const rawSubject = (taskTitle && taskTitle.trim().split(/\r?\n/)[0]!.trim()) || branch;

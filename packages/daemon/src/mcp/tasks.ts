@@ -28,9 +28,24 @@ export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
 export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey">;
 
 /**
- * Resolve a project's git-derived merged state for one task, or null with no git call for a
- * vault-only project (no repoPath) OR when `includeMerged` is false (card f6753002) — the latter
- * lets a latency-sensitive, non-surfacing caller (the companion board) skip the enrichment
+ * {@link resolveMergedInfo}'s return: the git-derived ship state PLUS which repoKey was actually scanned
+ * to produce it (card 1eebc46a, Code Review Minor 2) — `null` = primary, same convention as `Task.repoKey`
+ * / `Task.mergedRepoKey`. Distinct from `task.repoKey` itself: this reports where the scan ACTUALLY ran,
+ * which diverges from the task's own (possibly stale or since-retargeted) `repoKey` in exactly the case
+ * that matters — a stale `UnknownRepoKeyError` degrade below resolves+scans PRIMARY, so `repoKey` here
+ * correctly reads `null`, not the stale key the task still carries. A caller that persists ship-state
+ * (the drawer's lazy backfill) MUST stamp THIS `repoKey`, never `task.repoKey` — stamping the task's own
+ * field would silently disagree with the repo the `merged` sha was actually found on.
+ */
+export interface ResolvedMergedInfo {
+  merged: MergedCommitInfo | null;
+  repoKey: string | null;
+}
+
+/**
+ * Resolve a project's git-derived merged state for one task, or `{merged:null, repoKey:null}` with no git
+ * call for a vault-only project (no repoPath) OR when `includeMerged` is false (card f6753002) — the
+ * latter lets a latency-sensitive, non-surfacing caller (the companion board) skip the enrichment
  * entirely rather than pay for a field it discards.
  *
  * Multi-repo epic (49136451) phase 1: resolves the task's TARGET repo via {@link resolveRepo} (its
@@ -38,24 +53,30 @@ export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "p
  * READ path every `tasks_get`/`tasks_list` call goes through, so a STALE `repoKey` (the registry entry
  * was removed after the task was written) must never break the read — `resolveRepo` throwing
  * {@link UnknownRepoKeyError} here is caught and degraded to the project's primary repo (logged, not
- * silent) rather than propagated, so one stale card can never take down a whole board read.
+ * silent) rather than propagated, so one stale card can never take down a whole board read. The returned
+ * `repoKey` reflects that degrade (reads `null`/primary, not the stale key) — see {@link ResolvedMergedInfo}.
  */
-async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Task, "id" | "repoKey">, includeMerged = true): Promise<MergedCommitInfo | null> {
-  if (!includeMerged) return null;
+export async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Task, "id" | "repoKey">, includeMerged = true): Promise<ResolvedMergedInfo> {
+  if (!includeMerged) return { merged: null, repoKey: null };
   const project = db.getProject(projectId);
-  if (!project || !project.repoPath) return null;
+  if (!project || !project.repoPath) return { merged: null, repoKey: null };
   let repoPath: string;
+  let resolvedKey: string | null;
   try {
-    repoPath = resolveRepo(project, task).path;
+    const resolved = resolveRepo(project, task);
+    repoPath = resolved.path;
+    resolvedKey = resolved.key === "primary" ? null : resolved.key;
   } catch (e) {
     if (e instanceof UnknownRepoKeyError) {
       console.warn(`[mcp/tasks] task ${task.id} has a stale repoKey (${e.repoKey}) not in project ${projectId}'s registry — falling back to the primary repo for ship-state`);
       repoPath = project.repoPath;
+      resolvedKey = null; // degraded to primary — see this function's own doc
     } else {
       throw e;
     }
   }
-  return getTaskMergedInfo(repoPath, task.id);
+  const merged = await getTaskMergedInfo(repoPath, task.id);
+  return { merged, repoKey: resolvedKey };
 }
 
 /**
@@ -175,7 +196,7 @@ export async function listProjectTasks(
   // task's O(1) map lookup here — see getTaskMergedInfo — so this stays cheap regardless of board size.
   // Skipped entirely when includeMerged is false (card f6753002).
   const withMerged: TaskWithMerged[] = await Promise.all(
-    tasks.map(async (t) => ({ ...t, merged: await resolveMergedInfo(db, projectId, t, includeMerged) })),
+    tasks.map(async (t) => ({ ...t, merged: (await resolveMergedInfo(db, projectId, t, includeMerged)).merged })),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
 }
@@ -264,7 +285,7 @@ export async function getProjectTask(
 ): Promise<TaskWithRequests | { error: string }> {
   const found = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in found) return found;
-  const merged = await resolveMergedInfo(db, projectId, found, opts.includeMerged ?? true);
+  const merged = (await resolveMergedInfo(db, projectId, found, opts.includeMerged ?? true)).merged;
   return { ...found, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
 }
 

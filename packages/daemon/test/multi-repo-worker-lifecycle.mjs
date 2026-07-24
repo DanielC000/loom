@@ -141,6 +141,25 @@ try {
   check("(1) squash did NOT leak into primary", !fs.existsSync(path.join(repoPrimary, "secondary-change.txt")));
   check("(1) squash did NOT leak into the gateless repo", !fs.existsSync(path.join(repoGateless, "secondary-change.txt")));
   check("(1) task moved to done", db.getTask(taskSecondary)?.columnKey === "done");
+  // ===== card 1eebc46a: ship-state persisted at merge-confirm time, correct repo identity =====
+  const secondaryLandedSha = git(repoSecondary, "rev-parse HEAD");
+  check("(1eebc46a) secondary card's mergedSha persisted, matching the actual landed commit", db.getTask(taskSecondary)?.mergedSha === secondaryLandedSha.slice(0, 7));
+  check("(1eebc46a) secondary card's mergedRepoKey records 'secondary' (not primary, not a bare sha)", db.getTask(taskSecondary)?.mergedRepoKey === "secondary");
+  check("(1eebc46a) secondary card's mergedDate is a parseable ISO date", !isNaN(Date.parse(db.getTask(taskSecondary)?.mergedDate ?? "")));
+
+  // ===== card 1eebc46a Code Review coverage gap: a REPLAY finalize (a second confirmWorkerMerge for the
+  // SAME already-fully-finalized worker — an idempotent retry / reconnect scenario) must leave an
+  // already-persisted mergedSha UNTOUCHED. Plant a SENTINEL value first (not the real sha) — if the
+  // first-finalize-only guard did NOT hold, the replay would overwrite it back to the real landed sha,
+  // which would look identical to "correctly preserved" if we'd only re-asserted the original value. The
+  // sentinel makes "still there after the replay" unambiguous proof the write was actually skipped.
+  db.updateTask(taskSecondary, { mergedSha: "sentinel", mergedRepoKey: "sentinel-key", mergedDate: "1999-01-01T00:00:00.000Z" });
+  const confirmSecondaryReplay = await sessions.confirmWorkerMerge(mgr.id, wSecondary.id);
+  check("(1eebc46a replay) a second confirmWorkerMerge for the same already-merged worker still reports merged", confirmSecondaryReplay.merged === true);
+  check("(1eebc46a replay) the REPLAY finalize does NOT overwrite the planted sentinel mergedSha (first-finalize-only guard holds)", db.getTask(taskSecondary)?.mergedSha === "sentinel");
+  check("(1eebc46a replay) the REPLAY finalize does NOT overwrite the planted sentinel mergedRepoKey", db.getTask(taskSecondary)?.mergedRepoKey === "sentinel-key");
+  // Restore the real values so scenario (4)'s ship-state cross-checks below still exercise the true state.
+  db.updateTask(taskSecondary, { mergedSha: secondaryLandedSha.slice(0, 7), mergedRepoKey: "secondary", mergedDate: new Date().toISOString() });
 
   // ===================== (2) GATELESS registry repo: no fallback to the project gate, repo-named warning =====================
   const wGateless = await sessions.spawnWorker(mgr.id, { taskId: taskGateless, agentId: "wkrAgent", kickoffPrompt: "GO" });
@@ -160,6 +179,8 @@ try {
     fs.existsSync(primaryGateMarker) === primaryMarkerBefore);
   check("(2) squash landed on the gateless repo's own main", fs.existsSync(path.join(repoGateless, "gateless-change.txt")));
   check("(2) squash did NOT leak into primary or secondary", !fs.existsSync(path.join(repoPrimary, "gateless-change.txt")) && !fs.existsSync(path.join(repoSecondary, "gateless-change.txt")));
+  check("(1eebc46a) gateless card's mergedRepoKey records 'gateless'", db.getTask(taskGateless)?.mergedRepoKey === "gateless");
+  check("(1eebc46a) gateless card's mergedSha matches the actual landed commit", db.getTask(taskGateless)?.mergedSha === git(repoGateless, "rev-parse HEAD").slice(0, 7));
 
   // ===================== (3) SIBLING primary-repo card: byte-identical, unaffected =====================
   const wPrimary = await sessions.spawnWorker(mgr.id, { taskId: taskPrimary, agentId: "wkrAgent", kickoffPrompt: "GO" });
@@ -176,6 +197,8 @@ try {
   check("(3) primary sibling's own gate (project-level) ran green, no warning", confirmPrimary.warning === undefined);
   check("(3) squash landed on PRIMARY's own main", fs.existsSync(path.join(repoPrimary, "primary-change.txt")));
   check("(3) squash did NOT leak into secondary or gateless", !fs.existsSync(path.join(repoSecondary, "primary-change.txt")) && !fs.existsSync(path.join(repoGateless, "primary-change.txt")));
+  check("(1eebc46a) primary sibling's mergedRepoKey is null (primary, not a registry key)", db.getTask(taskPrimary)?.mergedRepoKey === null);
+  check("(1eebc46a) primary sibling's mergedSha matches the actual landed commit", db.getTask(taskPrimary)?.mergedSha === git(repoPrimary, "rev-parse HEAD").slice(0, 7));
 
   // ===================== (4) ship-state resolves EACH task against its OWN target repo =====================
   const secondarySha = git(repoSecondary, "rev-parse HEAD");
@@ -214,6 +237,8 @@ try {
   check("(5) boot-reconcile removed the repo-scoped worktree dir", !fs.existsSync(wOrphan.worktreePath));
   check("(5) boot-reconcile's own git op targeted SECONDARY (Session.repoKey), not primary — the squash is only discoverable there",
     (await getTaskMergedInfo(repoSecondary, taskOrphan)) !== null && (await getTaskMergedInfo(repoPrimary, taskOrphan)) === null);
+  check("(1eebc46a) boot-reconcile ALSO persists ship-state for the orphaned merge (mergedRepoKey='secondary')", db.getTask(taskOrphan)?.mergedRepoKey === "secondary");
+  check("(1eebc46a) boot-reconcile's persisted mergedSha matches the actual landed commit", db.getTask(taskOrphan)?.mergedSha === git(repoSecondary, "rev-parse HEAD").slice(0, 7));
 } finally {
   db.close();
   for (const wt of worktreesToClean) { try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* best-effort */ } }

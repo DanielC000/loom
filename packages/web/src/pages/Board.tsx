@@ -172,7 +172,7 @@ export default function Board({ projectId: propProjectId }: { projectId?: string
                     tasks={shownTasks.filter((t) => t.columnKey === col.key)
                       .sort(isDoneColumn(col) ? byRecentlyDone : byPriorityThenPosition)}
                     filterActive={filterActive} workers={workerByTask} onOpen={setOpenTaskId}
-                    multiRepo={multiRepo}
+                    multiRepo={multiRepo} repos={repos} primaryRepoPath={project?.repoPath ?? ""}
                     cardCount={allTasks.filter((t) => t.columnKey === col.key).length} />
                 ))}
               </div>
@@ -247,9 +247,9 @@ function labelColorFor(accent: string | null): string {
   return accent;
 }
 
-function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, cardCount }:
+function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, repos, primaryRepoPath, cardCount }:
   { col: KanbanColumn; tasks: BoardTask[]; filterActive: boolean; workers: Map<string, SessionListItem>; onOpen: (id: string) => void; multiRepo: boolean;
-    cardCount: number }) {
+    repos: RepoRegistryEntry[]; primaryRepoPath: string; cardCount: number }) {
   const { setNodeRef, isOver } = useDroppable({ id: col.key });
   // ONE resolved color for the lane (role → tone, else accentColor, else null). Drives the accent bar,
   // the header label, and each card's left border so all three agree. null = un-accented: transparent
@@ -296,7 +296,7 @@ function Column({ col, tasks, filterActive, workers, onOpen, multiRepo, cardCoun
         )}
       </SectionLabel>
       <div style={{ flex: 1, minHeight: 0, overflowY: "auto", padding: "0 12px 12px" }}>
-        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} onOpen={() => onOpen(task.id)} />)}
+        {tasks.map((task) => <Card key={task.id} task={task} accent={cardAccent} worker={workers.get(task.id)} multiRepo={multiRepo} repos={repos} primaryRepoPath={primaryRepoPath} isDoneLane={isDoneColumn(col)} onOpen={() => onOpen(task.id)} />)}
         {/* Filtered-empty state: the filter hid every card in this column. Reads as deliberate, not broken. */}
         {tasks.length === 0 && filterActive && (
           <div style={{ color: color.textMuted, fontFamily: font.mono, fontSize: 11, padding: "8px 2px" }}>no matches</div>
@@ -477,7 +477,8 @@ function MergeTrack({ merge }: { merge: MergeDisplay }) {
   );
 }
 
-function Card({ task, accent, worker, multiRepo, onOpen }: { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; onOpen: () => void }) {
+function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, isDoneLane, onOpen }:
+  { task: BoardTask; accent: string; worker?: SessionListItem; multiRepo: boolean; repos: RepoRegistryEntry[]; primaryRepoPath: string; isDoneLane: boolean; onOpen: () => void }) {
   const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({ id: task.id });
   const st = worker ? workerStatus(worker) : null;
   const merge = worker ? mergeDisplay(worker.pendingMerge) : null;
@@ -547,6 +548,18 @@ function Card({ task, accent, worker, multiRepo, onOpen }: { task: BoardTask; ac
                 character, so at a crushed lane width the flex row collapses it to one letter per row. */}
             <span style={{ flex: "1 1 120px", minWidth: 0, overflowWrap: "break-word" }}>{task.title}</span>
             {hasBody && <span title="has a description" style={{ color: color.textMuted, flexShrink: 0 }}>≣</span>}
+            {/* Ship-state (card 1eebc46a) — a compact "landed" marker naming the sha; the REPO it landed on
+                (which may differ from the target-repo badge above, though it normally agrees) is in the
+                tooltip rather than crowding the card — the drawer's Shipped line spells it out in full.
+                Gated to a DONE/terminal lane: a re-tasked card still carries its PRIOR landing's mergedSha
+                (correctly — see finalizeMerge's own doc) while it's actively being reworked in a live
+                lane, where a "✓ shipped" marker would read as done when it visibly isn't. */}
+            {task.mergedSha && isDoneLane && (
+              <span title={`Landed as ${task.mergedSha} on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}`}
+                style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 9.5, color: color.phosphor }}>
+                ✓ {task.mergedSha}
+              </span>
+            )}
           </div>
           {worker && st && (
             <div style={{ marginTop: 5, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
@@ -591,6 +604,17 @@ function TaskDrawerLoading({ onClose }: { onClose: () => void }) {
       </div>
     </div>
   );
+}
+
+// Human-readable repo label for a persisted ship-state (card 1eebc46a) — the SAME repoKey → path
+// resolution the Repo picker's own path line already does (below), just against the STAMPED
+// `mergedRepoKey` (recorded at merge time) rather than the live edit-in-progress `repoKey` state. A key
+// that no longer names a registry entry (removed after the card shipped) reads as "no longer registered"
+// rather than silently falling back to primary — same posture as the picker's own `stale` handling.
+function shipRepoLabel(mergedRepoKey: string | null | undefined, repos: RepoRegistryEntry[], primaryRepoPath: string): string {
+  if (!mergedRepoKey) return primaryRepoPath || "primary";
+  const entry = repos.find((r) => r.key === mergedRepoKey);
+  return entry ? entry.path : `${mergedRepoKey} — no longer registered`;
 }
 
 // Centered modal detail dialog: view + edit a task's title and description (the `body` field that the
@@ -797,6 +821,19 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
               overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
               title={repoKey ? (repos.find((r) => r.key === repoKey)?.path ?? "") : primaryRepoPath}>
               {repoKey ? (repos.find((r) => r.key === repoKey)?.path ?? "unknown repo — this key is no longer registered") : (primaryRepoPath || "the project's primary repo")}
+            </span>
+          </>
+        )}
+        {/* Ship-state (card 1eebc46a) — read-only: which commit this card's work landed as, and which
+            repo it landed ON (not just which repo the card TARGETS, above). Persisted at merge-confirm
+            time (or lazily backfilled on this drawer's first open for a card that shipped before this
+            existed); null on a card that hasn't merged yet, so nothing renders for the common case. */}
+        {task.mergedSha && (
+          <>
+            <span style={labelStyle}>Shipped</span>
+            <span style={{ fontFamily: font.mono, fontSize: 12, color: color.phosphor }}
+              title={`Landed on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}${task.mergedDate ? ` — ${task.mergedDate}` : ""}`}>
+              ✓ {task.mergedSha} <span style={{ color: color.textMuted }}>on</span> {shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}
             </span>
           </>
         )}

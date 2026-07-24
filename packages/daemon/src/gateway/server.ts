@@ -22,7 +22,7 @@ import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
-import { toBoardTasks } from "../mcp/tasks.js";
+import { toBoardTasks, resolveMergedInfo } from "../mcp/tasks.js";
 import type { OrchestrationMcpRouter } from "../mcp/orchestration.js";
 import type { PlatformMcpRouter } from "../mcp/platform.js";
 import type { AuditMcpRouter } from "../mcp/audit.js";
@@ -3351,6 +3351,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   app.get("/api/tasks/:id", async (req, reply) => {
     const t = deps.db.getTask((req.params as { id: string }).id);
     if (!t) return reply.code(404).send({ error: "task not found" });
+    // Lazy ship-state backfill (card 1eebc46a): a card merged BEFORE mergedSha started being persisted
+    // at merge-confirm time has no cached ship-state yet. Fill it in on this first open — ONE single-task
+    // git lookup (resolveMergedInfo), never the per-poll-scale cost the board LIST route avoids by
+    // design (measured ~40s at ~1200 cards; this route is a single row). BEST-EFFORT: resolveMergedInfo
+    // already fails safe to null internally, but this write-through cache-fill must never 500 the drawer
+    // — any failure here just falls through and returns the row unchanged.
+    //
+    // Two Code Review fixes over the original implementation:
+    //  - Uses setTaskMergedInfoNoTouch (NOT updateTask) so this pure GET-triggered cache-fill never bumps
+    //    `updatedAt` — the done lane sorts byRecentlyDone, so a plain updateTask() call here would jump an
+    //    old done card to the top of its lane the first time anyone opened its drawer.
+    //  - Stamps the repoKey resolveMergedInfo ACTUALLY scanned (`resolved.repoKey`), not `t.repoKey` — a
+    //    stale/since-retargeted task.repoKey can disagree with where the sha was actually found (e.g. a
+    //    stale key degrades to primary; stamping t.repoKey there would render "<key> — no longer
+    //    registered" for a sha that's really on primary).
+    if (!t.mergedSha) {
+      try {
+        const resolved = await resolveMergedInfo(deps.db, t.projectId, t);
+        if (resolved.merged) {
+          deps.db.setTaskMergedInfoNoTouch(t.id, { mergedSha: resolved.merged.sha, mergedRepoKey: resolved.repoKey, mergedDate: resolved.merged.date });
+          return deps.db.getTask(t.id);
+        }
+      } catch { /* best-effort cache-fill; fall through and return the row unchanged */ }
+    }
     return t;
   });
   // Memory — the read-only, per-project window into project_memory (the durable knowledge the fleet

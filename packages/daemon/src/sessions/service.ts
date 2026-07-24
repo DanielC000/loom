@@ -7722,7 +7722,7 @@ export class SessionService {
     if (!fs.existsSync(worktreePath) || taskAlreadyTerminal) {
       const alreadyLanded = await findLandedSquashCommit(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
       if (alreadyLanded) {
-        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt });
+        return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, opStartedAt, mergedSha: alreadyLanded, repoKey: worker.repoKey ?? null });
       }
     }
 
@@ -8079,8 +8079,9 @@ export class SessionService {
         return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
-      // bookkeeping idempotently via the SAME helper the early-idempotency check above uses.
-      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree });
+      // bookkeeping idempotently via the SAME helper the early-idempotency check above uses. `merge.sha`
+      // rides along free (mergeBranchLocked's own findLandedSquashCommit lookup, widened to return it).
+      return this.finishAlreadyMerged({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, opId: thisOpId, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
     }
 
     // Green: the branch is on the canonical repo. The worker (which reported 'done' but is still
@@ -8095,7 +8096,9 @@ export class SessionService {
     // Retire the worktree, delete the now-merged branch (so a later worker on this task — or any
     // id8-colliding task — doesn't hit "branch already exists"), and finish the task. The rejected
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree });
+    // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
+    // return — persisted onto the task alongside the rest of finalize's bookkeeping.
+    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
     // NESTED-REPO WARNING (card b6d41db1): the worktree was retained (not force-removed) because it holds
     // an unrecoverable nested clone (or the scan couldn't confirm it was clean) — surface it so the
     // manager knows cleanup is on it.
@@ -8153,6 +8156,8 @@ export class SessionService {
     managerSessionId: string; workerSessionId: string; taskId: string | null;
     worktreePath: string; branch: string; repoPath: string; projectId: string; opId: string;
     forceRemoveWorktree?: boolean; opStartedAt?: string;
+    /** Ship-state to persist (card 1eebc46a) — forwarded verbatim into {@link finalizeMerge}; see its own doc. */
+    mergedSha?: string | null; repoKey?: string | null;
   }): Promise<ConfirmMergeResult> {
     const alreadyFinalized = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
     if (!alreadyFinalized) {
@@ -9102,6 +9107,15 @@ export class SessionService {
      * Default OFF (safe): a nested repo is retained unless this is explicitly set.
      */
     forceRemoveWorktree?: boolean;
+    /**
+     * Ship-state to persist onto the task (card 1eebc46a) — the landed squash commit's sha, and the
+     * repoKey it landed on (SAME convention as `Task.repoKey`: `null`/absent = primary). Every current
+     * caller already has both in hand with ZERO extra git calls (mergeBranch's own return on the Green
+     * path, the early-idempotency/ALREADY_MERGED lookup, or boot-reconcile's own landed-squash lookup) —
+     * see this method's callers. Omitted only defensively; the columns then simply stay null, same as
+     * before this card, never blocking the rest of finalize's bookkeeping.
+     */
+    mergedSha?: string | null; repoKey?: string | null;
   }): Promise<{ nestedRepoBlock?: { paths: string[]; truncated: boolean } }> {
     // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
     // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
@@ -9157,7 +9171,21 @@ export class SessionService {
         ? (this.columnKeyForProjectRole(task.projectId, "mergeLanding") ??
           this.columnKeyForProjectRole(task.projectId, "terminal"))
         : undefined;
-      if (landingKey) this.db.updateTask(args.taskId, { columnKey: landingKey });
+      // Ship-state (card 1eebc46a): persisted alongside the column move, in the SAME first-finalize-only
+      // guard (gated on `!alreadyFinalized`, i.e. no prior merge_done event for this worker) — so a
+      // REPLAY finalize (an idempotent worktree-GC retry, or a reconnect/boot reconcile re-run finding the
+      // merge already landed for the SAME worker) leaves an already-persisted mergedSha untouched, exactly
+      // like the columnKey move above it. This guard is NOT a re-task protection — a genuinely re-tasked
+      // card gets a brand-new worker/session and correctly OVERWRITES the prior landing's ship-state on
+      // ITS OWN first finalize, same as it correctly overwrites columnKey. `args.mergedSha` is shortened
+      // to 7 chars to match the MCP `merged.sha` convention (mcp/tasks.ts). Best-effort: omitted
+      // `mergedSha` (a defensive caller) just means these columns stay null, exactly as before this card.
+      const shipPatch = args.mergedSha
+        ? { mergedSha: args.mergedSha.slice(0, 7), mergedRepoKey: args.repoKey ?? null, mergedDate: new Date().toISOString() }
+        : {};
+      if (landingKey || args.mergedSha) {
+        this.db.updateTask(args.taskId, { ...(landingKey ? { columnKey: landingKey } : {}), ...shipPatch });
+      }
     }
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
@@ -9319,9 +9347,12 @@ export class SessionService {
             ? null
             : await findLandedSquashCommit(repoPath, s.branch, "HEAD", { timeoutMs: this.gitOpMs, ...gitDeps }, () => { preFixTrailerNoticeCount++; });
         if (!landedSha) continue;
+        // `landedSha` + `s.repoKey` (card 1eebc46a) are already resolved above (the squash-detection
+        // lookup this pass exists to do) — free to persist, no extra git call.
         await this.finalizeMerge({
           managerSessionId: s.parentSessionId ?? "", workerSessionId: s.id, taskId: s.taskId,
           worktreePath, branch: s.branch, repoPath, projectId: project.id,
+          mergedSha: landedSha, repoKey: s.repoKey ?? null,
         });
         handledWorktrees.add(worktreePath);
         mergesFinished++;

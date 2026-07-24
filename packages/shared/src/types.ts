@@ -1283,6 +1283,26 @@ export interface Task {
    * (`projects/resolve-repo.ts`), never by reading this field directly.
    */
   repoKey?: string | null;
+  /**
+   * Ship-state persisted at merge-confirm time (card 1eebc46a) — WHICH repo the branch's squash-merge
+   * commit actually landed on, so a multi-repo project's web board/drawer can answer "did this land, and
+   * where" from a plain column read instead of a per-poll git scan (measured ~40s at ~1200 cards — the
+   * per-hit `git branch --list` verification cost is NOT bounded by caching; see the card's checkpoint).
+   * `mergedSha` is the landed commit's short (7-char) sha. `mergedRepoKey` is the SAME convention as
+   * `repoKey` (a key into `Project.repos`, or `null` = primary) — recorded from the merging session's own
+   * pinned `repoKey` (or, for boot-reconcile, the session row's own), never re-derived from a path, so it
+   * can't drift from the repo the worktree was actually cut from. `mergedDate` is a best-effort ISO
+   * date — the commit's own author date when a write path already has it for free (the lazy backfill's
+   * git lookup), else the instant Loom recorded the ship-state (merge-finalize, which doesn't fetch the
+   * commit's date separately to avoid an extra git call in that hot path). All three are null until a
+   * merge finalizes — or, for a card that landed before this shipped, until its drawer is first opened
+   * (`GET /api/tasks/:id` lazily backfills, best-effort). This is a CACHE, not the ground truth: the MCP
+   * `tasks_get`/`tasks_list` `merged` field (`TaskWithMerged`, mcp/tasks.ts) stays the live-verified
+   * answer agents rely on — these columns exist purely so the web board/drawer never pay that scan's cost.
+   */
+  mergedSha?: string | null;
+  mergedRepoKey?: string | null;
+  mergedDate?: string | null;
   createdAt: string;
   updatedAt: string;
 }
