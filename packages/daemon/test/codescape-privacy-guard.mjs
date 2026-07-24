@@ -215,29 +215,45 @@ function shippedAssetsFiles(assetsRoot) {
 }
 
 // =====================================================================================================
-// KNOWN PRE-EXISTING LEAK QUARANTINE (card 97776a17, blocking fix: `ffe0a82d`) — DO NOT GROW THIS LIST.
+// ACCEPTED COMPILED-INTERNAL BASELINE — a permanent regression guard, NOT a countdown to zero.
+// OWNER RULING 2026-07-23 (Request e685f273): codescape identifiers inside compiled JS are NOT a leak.
 // =====================================================================================================
-// Widening this guard's scope (this card) immediately re-discovered the pre-existing codescape leak that
-// `ffe0a82d` already tracks as OWNER-GATED — deleting/renaming these files is NOT this card's call. But a
-// guard that just skips these paths (or the directories/roots they live in) would re-blind itself on
-// exactly the surface it exists to watch, and the NEXT file that starts leaking would go unnoticed right
-// alongside them. So this is a LITERAL, HAND-LISTED inventory of every file known to leak TODAY — not a
-// pattern, not a directory skip, and DERIVED FROM NOTHING (no "skip anything under a codescape-named
-// directory", no regex over the leak shape) — a codescape-named file NOT on this exact list is a HARD
-// FAILURE below (a new leak, or this one spreading to a file not already accounted for); a file ON this
-// list is a loud, non-fatal WARNING naming `ffe0a82d`. The exemption can only ever SHRINK — as `ffe0a82d`
-// work removes/renames a listed file, delete its entry here; never add to this list to make a gate green.
+// When this guard was widened (card 97776a17) to scan the daemon/shared dist roots, it surfaced 26
+// codescape-named files compiled into the shipped `dist/`. Asked directly whether those files count as a
+// user-visible leak, the owner ruled 2026-07-23 (Request `e685f273`): NO — compiled internals are not a
+// user-visible surface; keep the quarantine as a regression guard only.
 //
-// Provenance: the packages/daemon/dist/* entries (24) match `ffe0a82d`'s own measurement (`grep -ril
-// codescape packages/daemon/dist/`), which was scoped to published tarballs. The packages/shared/dist/*
-// entries (2) were NOT in `ffe0a82d`'s original audit — they were found by THIS card (`97776a17`) widening
-// the guard to a root `ffe0a82d` never scanned (packages/shared/src/config.ts's `resolveCodescapeConfig`/
-// `resolveCodescapeIntegrationPath`, compiled). Report this to the owner alongside `ffe0a82d`: the real
-// leak surface is wider than that card currently records.
+// The line the owner drew: a leak is what an end user ENCOUNTERS — a rendered UI row, a config-schema key,
+// a shipped skill, doctrine text, docs. It is NOT a codescape identifier buried inside compiled JS that a
+// user would have to go grepping through the published tarball to find. Section A (shipped skill doctrine)
+// and the platform-config coverage (rendered REST fields / Settings rows) guard the surfaces that ARE
+// user-visible; this list simply catalogues the compiled-internal footprint the owner has explicitly
+// accepted.
+//
+// So this is NOT a temporary exemption counting down to empty. It is a fixed BASELINE: a LITERAL,
+// HAND-LISTED inventory of every codescape-named file that ships in `dist/` TODAY — not a pattern, not a
+// directory skip, DERIVED FROM NOTHING (no "skip anything under a codescape-named directory", no regex over
+// the leak shape). Its whole purpose is to FREEZE that footprint so it cannot grow or spread: a
+// codescape-named file NOT on this exact list is a HARD FAILURE below — the footprint has grown, or spread
+// into a file not already accounted for, possibly into a genuinely user-facing artifact. A file ON the
+// list is an expected, accepted internal. NEVER add to this list to silence a genuinely new hit — a new
+// codescape-named file is exactly the signal this guard exists to catch; investigate it, don't quarantine
+// it. (The `KNOWN_LEAKING_FILES` identifier is historical and kept to avoid churn — per the ruling these
+// are accepted compiled internals, not leaks.)
+//
+// Not to be confused with card `ffe0a82d`, a DIFFERENT and genuinely user-visible surface: a codescape
+// Settings row in the published WEB bundle (`packages/web/dist`), shipped in versions 0.17.0–0.24.0. That
+// one is a real leak and is owner-gated on its own; it does NOT gate this compiled-internal baseline (main
+// already builds the web bundle clean). Keep the two separate.
+//
+// Provenance of the 26 entries: the 24 `packages/daemon/dist/*` files are every match of `grep -ril
+// codescape packages/daemon/dist/`; the 2 `packages/shared/dist/*` files (config.js/.d.ts, compiling
+// `resolveCodescapeConfig`/`resolveCodescapeIntegrationPath`) were added when card `97776a17` widened this
+// scan to the shared dist root.
 //
 // Paths are relative to the repo root, POSIX-separated (portable across OSes/worktrees).
 const KNOWN_LEAKING_FILES = [
-  // packages/daemon/dist — 24 files, matches ffe0a82d's own measured count.
+  // packages/daemon/dist — 24 files (every match of `grep -ril codescape packages/daemon/dist/`).
   "packages/daemon/dist/codescape/manifest.d.ts",
   "packages/daemon/dist/codescape/manifest.d.ts.map",
   "packages/daemon/dist/codescape/manifest.js",
@@ -262,16 +278,18 @@ const KNOWN_LEAKING_FILES = [
   "packages/daemon/dist/sessions/service.js",
   "packages/daemon/dist/skills/store.d.ts",
   "packages/daemon/dist/skills/store.js",
-  // packages/shared/dist — 2 files, found by THIS card (97776a17), NOT in ffe0a82d's original audit.
+  // packages/shared/dist — 2 files, added when card 97776a17 widened the scan to the shared dist root.
   "packages/shared/dist/config.d.ts",
   "packages/shared/dist/config.js",
 ];
 
 if (KNOWN_LEAKING_FILES.length === 0) {
   console.log(
-    "\n🔔 KNOWN_LEAKING_FILES is now EMPTY — this quarantine block is dead code. DELETE this whole block " +
-      "(and this notice) from codescape-privacy-guard.mjs. Leaving an empty quarantine in place is a " +
-      "permanent hole waiting for the next leak to silently slide into it."
+    "\n🔔 The compiled-internal baseline is EMPTY. Per the 2026-07-23 owner ruling (Request e685f273) these " +
+      "files are expected to keep shipping, so an empty baseline does NOT mean 'done' — it means the compiled " +
+      "footprint changed out from under this guard. Re-derive it (`grep -ril codescape` over the built dist " +
+      "roots) rather than deleting this block; an empty baseline would let the next new codescape-named file " +
+      "slide in unnoticed."
   );
 }
 
@@ -280,16 +298,16 @@ function toRepoRelativePosix(absPath) {
   return path.relative(repoRoot, absPath).split(path.sep).join("/");
 }
 
-// Accumulates every KNOWN_LEAKING_FILES entry actually observed as still-leaking across all root checks
-// below, for the final countdown.
+// Accumulates every KNOWN_LEAKING_FILES entry actually observed in the shipped output across all root
+// checks below, for the summary line printed at the end.
 const observedKnownLeaks = [];
 
 /**
  * Falsification-then-real-scan for one shipped root: prove the scanner catches an injected mention in a
  * file type never previously allowlisted (`.svg`) and skips a binary type carrying the same bytes (`.png`)
  * — proven RED-first, per root, before trusting that root's real "clean" result below — then scan the
- * real built root (or `realFiles`, when the root needs curation). A hit matching `KNOWN_LEAKING_FILES` is
- * a loud non-fatal warning; any other hit is a hard failure.
+ * real built root (or `realFiles`, when the root needs curation). A hit on the accepted compiled-internal
+ * baseline (`KNOWN_LEAKING_FILES`) is an expected, informational line; any other hit is a hard failure.
  */
 function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
   if (!fs.existsSync(rootDir)) {
@@ -318,8 +336,8 @@ function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
     fs.rmSync(fakeDist, { recursive: true, force: true });
   }
 
-  // --- The real assertion: scan every file this root actually ships, splitting quarantined (known,
-  // pre-existing, ffe0a82d-blocked) hits from anything else (a new leak or this one spreading). ---
+  // --- The real assertion: scan every file this root actually ships, splitting accepted
+  // compiled-internal-baseline hits from anything else (a new leak or the footprint spreading). ---
   const hits = realFiles ? scanDistForCodescapeMentions(rootDir, { files: realFiles }) : scanDistForCodescapeMentions(rootDir);
   const scannedCount = (realFiles ?? walkFiles(rootDir)).filter((f) => !BINARY_ASSET_EXT_RE.test(f)).length;
 
@@ -332,14 +350,14 @@ function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
   }
 
   if (known.length > 0) {
-    console.log(`  ⚠  KNOWN PRE-EXISTING LEAK (blocking card: ffe0a82d), NOT a gate failure — ${known.length} quarantined file(s) in ${label}:`);
+    console.log(`  ℹ  ${known.length} accepted compiled-internal file(s) in ${label} — codescape identifiers in compiled JS, ruled NOT a user-visible leak (owner ruling e685f273):`);
     for (const rel of known) console.log(`       ${rel}`);
     observedKnownLeaks.push(...known);
   }
   if (unknown.length > 0) {
-    for (const f of unknown) console.log(`  LEAK  ${f}: contains a codescape-named string (NOT in the known ffe0a82d quarantine — new leak or spread)`);
+    for (const f of unknown) console.log(`  LEAK  ${f}: contains a codescape-named string and is NOT on the accepted compiled-internal baseline — a new or spreading footprint; investigate, do not add it to the list`);
   }
-  check(`(B) ${label} carries no codescape-named string outside the known ffe0a82d quarantine (${scannedCount} files scanned)`, unknown.length === 0);
+  check(`(B) ${label} carries no codescape-named string outside the accepted compiled-internal baseline (${scannedCount} files scanned)`, unknown.length === 0);
 }
 
 checkRootForCodescapeLeaks("packages/web/dist (built web bundle)", PACKAGED_ROOTS.webDist);
@@ -351,17 +369,19 @@ checkRootForCodescapeLeaks("packages/daemon/assets, curated (published as assets
 
 if (observedKnownLeaks.length > 0) {
   console.log(
-    `\n⚠  ${observedKnownLeaks.length} known-leaking file(s) remain under the ffe0a82d quarantine ` +
-      `(of ${KNOWN_LEAKING_FILES.length} listed) — not a gate failure, but not fixed either. Blocking card: ffe0a82d.`
+    `\nℹ  ${observedKnownLeaks.length} accepted compiled-internal file(s) present (of ${KNOWN_LEAKING_FILES.length} ` +
+      "in the baseline) — codescape identifiers compiled into dist/, ruled NOT a user-visible leak (owner ruling " +
+      "2026-07-23, Request e685f273). This is the expected steady state, not an outstanding fix."
   );
 } else if (KNOWN_LEAKING_FILES.length > 0) {
   console.log(
-    `\n✅ 0 of ${KNOWN_LEAKING_FILES.length} listed quarantine files are still leaking — prune ` +
-      "KNOWN_LEAKING_FILES down as ffe0a82d work lands each fix, and delete the whole block once it's empty."
+    `\n🔔 0 of the ${KNOWN_LEAKING_FILES.length} baseline files were found in the shipped output — the compiled ` +
+      "footprint changed out from under this guard. Re-derive KNOWN_LEAKING_FILES against the built dist roots; " +
+      "do NOT assume the baseline is obsolete."
   );
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — no codescape-named string reaches an end-user-reachable surface outside the known, tracked ffe0a82d quarantine."
+  ? "\n✅ ALL PASS — no codescape-named string reaches a user-visible surface, and the compiled-internal footprint matches the accepted baseline."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
