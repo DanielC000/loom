@@ -11,18 +11,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // SCOPE NOTE (card 187873f9): codescape was later moved to DEV_ONLY_SKILLS — omitted from the
 // *published* npm bundle while staying canonical in this repo's own assets/skills/ (dev/self-host still
-// ships it, uncurated). This test exercises exactly that still-bundled path (seed.ts's ASSET_SKILLS is
-// hardcoded to the real dist-relative dir — never LOOM_ASSET_SKILLS-overridable — so it always sees the
-// genuine, uncurated asset set) and remains correct unchanged. The COMPLEMENTARY case — an end-user
-// install upgrading past a release that curated codescape out, left with an orphaned pristine store
-// copy — is covered separately by skills-codescape-unbundle-retire.mjs (retireOrphanedBundledSkillDirs,
-// which DOES read the LOOM_ASSET_SKILLS-overridable store.ts ASSET_SKILLS); the two can't share one test
-// process because seed.ts's and store.ts's ASSET_SKILLS would then disagree about what's bundled.
+// ships it, uncurated). This test exercises exactly that still-bundled path against the genuine,
+// uncurated asset set: seed.ts's ASSET_SKILLS is (as of card 86e84e1c) overridable via LOOM_ASSET_SKILLS
+// (mirrors store.ts), but this test deliberately leaves that env var UNSET, so it still resolves to the
+// real dist-relative assets/skills dir here. The COMPLEMENTARY case — an end-user install upgrading past
+// a release that curated codescape out, left with an orphaned pristine store copy — is covered
+// separately by skills-codescape-unbundle-retire.mjs (retireOrphanedBundledSkillDirs, which reads
+// store.ts's own LOOM_ASSET_SKILLS-overridable ASSET_SKILLS); the two don't share one test process here
+// because that other test DOES set LOOM_ASSET_SKILLS to a synthetic dir, and seed.ts's and store.ts's
+// ASSET_SKILLS must agree within a single process about what's bundled.
 //
-// seed.ts's ASSET_SKILLS is NOT LOOM_ASSET_SKILLS-overridable (unlike store.ts) — it always resolves to
-// the real dist-relative assets/skills dir. So this test only fakes LOOM_HOME (the store side); the
-// asset side is the genuine shipped codescape doctrine. Fully hermetic on the store: a temp LOOM_HOME +
-// sandboxed HOME, never touches ~/.loom or :4317. Run after build.
+// This test only fakes LOOM_HOME (the store side); the asset side is the genuine shipped codescape
+// doctrine (LOOM_ASSET_SKILLS left unset). Fully hermetic on the store: a temp LOOM_HOME + sandboxed
+// HOME, never touches ~/.loom or :4317. Run after build.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";

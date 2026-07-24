@@ -5,8 +5,12 @@ import { SKILLS_DIR } from "../paths.js";
 import { seedBaseSnapshots, seedFileBaseSnapshots, autoFastForwardPristineSkills, retireOrphanedBundledSkillDirs } from "./store.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-// dist/skills -> dist -> daemon root -> assets/skills
-const ASSET_SKILLS = path.join(__dirname, "..", "..", "assets", "skills");
+// dist/skills -> dist -> daemon root -> assets/skills. Overridable via LOOM_ASSET_SKILLS (mirrors
+// store.ts's own override) so hermetic tests can point seedGlobalSkills() at synthetic skills instead
+// of always cpSync-backfilling the real repo assets — a human/ops-only env seam, not an agent-facing
+// config field (nothing in the config schema exposes it, so the agent config validator has nothing to
+// reject here by construction).
+const ASSET_SKILLS = process.env.LOOM_ASSET_SKILLS || path.join(__dirname, "..", "..", "assets", "skills");
 
 /**
  * Seed Loom's bundled, project-agnostic skills into the Loom-OWNED skill store (~/.loom/skills) —
