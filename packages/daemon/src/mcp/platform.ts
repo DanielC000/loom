@@ -1973,11 +1973,16 @@ export class PlatformMcpRouter {
           "keys (mirrors tasks_list's excludeDone/columns filters). DEFAULT returns a lightweight SUMMARY per " +
           "card (id, title, columnKey, position, priority, updatedAt, merged) so the aggregate stays bounded; the " +
           "unbounded body is DROPPED. Pass includeBody:true for full Task rows (use sparingly — page it). " +
-          "`merged` is each card's git-derived ship state — {sha,date} of its squash-merge commit on that " +
-          "card's project repo, else null. null means NOT PROVEN merged (never merged, landed outside the scan " +
-          "window, or a git read failure), never an authoritative 'never merged' — this is the field that " +
-          "kills a stale handoff claiming a card is unbuilt when it's actually already shipped; check it " +
-          "before relaying such a claim as fact. Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
+          "`merged` is each card's git-derived ship state — {sha,date,verification?} of its squash-merge commit " +
+          "on that card's project repo, else null. null means NOT PROVEN merged (never merged, landed outside " +
+          "the scan window, or a git read failure), never an authoritative 'never merged' — this is the field " +
+          "that kills a stale handoff claiming a card is unbuilt when it's actually already shipped; check it " +
+          "before relaying such a claim as fact. `verification` names WHICH check answered it: \"content\" " +
+          "(byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the " +
+          "landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, " +
+          "not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). " +
+          "Absent means unknown, not unverified — treat it the same as a confident match, never as a red flag. " +
+          "Reads are capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by " +
           "default. PAGINATION: with NO offset/limit passed and the whole matching set fits in one page, " +
           "returns the bare tasks array (today's shape, unchanged) — otherwise, or whenever you pass " +
           "offset/limit explicitly, it returns a page envelope {tasks, total, returned, offset, nextOffset}, " +

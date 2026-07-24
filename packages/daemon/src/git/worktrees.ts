@@ -2345,12 +2345,36 @@ export function __workerDiffCacheSizeForTest(): number {
   return diffCache.size;
 }
 
+/**
+ * Which verification mode produced a {@link MergedCommitInfo} answer (card 52e978ad). Same field, same
+ * shape, but the three values are NOT the same guarantee — a caller must not treat them interchangeably:
+ *  - `"content"` — the branch ref was still LIVE; verified by an actual byte-for-byte diff of the
+ *    branch's own changed paths between the candidate commit and the branch tip ({@link
+ *    branchContentLandedInCommit}). The strongest guarantee this file produces.
+ *  - `"pathset"` — the branch was already gone; verified from the landed commit's OWN ancestry against
+ *    its persisted `Loom-Worker-PathSet` trailer ({@link verifyPersistedPathSet}). Survives `git gc`
+ *    indefinitely, but only proves the SAME SET OF FILES landed, not the same CONTENT — see that
+ *    function's own doc for exactly what it does and doesn't rule out. Weaker than `"content"`; do not
+ *    render it with the same confidence.
+ *  - `"trailer-only"` — the branch was gone AND the commit predates the `Loom-Worker-PathSet` trailer
+ *    (pre-f621f185 history). The answer rests on `Loom-Worker-Branch:` trailer PRESENCE alone — no
+ *    content or path check at all. The weakest of the three; render this qualified, not as a second
+ *    confident tick.
+ */
+export type MergedVerificationMode = "content" | "pathset" | "trailer-only";
+
 /** A task's landed squash-merge commit on main, as surfaced by {@link getTaskMergedInfo}. */
 export interface MergedCommitInfo {
   /** Short (7-char) sha of the squash-merge commit. */
   sha: string;
   /** Strict ISO-8601 author date of that commit (git's `%aI`). */
   date: string;
+  /**
+   * Which of the three verification modes answered this — see {@link MergedVerificationMode}. Absent
+   * means unknown/not computed by this caller (e.g. a persisted cache row written before this field
+   * existed) — NEVER read absence as either "verified" or "unverified", just "no signal either way".
+   */
+  verification?: MergedVerificationMode;
 }
 
 /**
@@ -2547,6 +2571,13 @@ export async function getMergedCommitMapCached(
   return { map: entry.map, truncated: entry.truncated };
 }
 
+/** {@link resolveMergedCommitMapHit}'s resolved answer: the verified sha PLUS which mode verified it —
+ *  see {@link MergedVerificationMode}. */
+interface ResolvedMergedHit {
+  sha: string;
+  verification: MergedVerificationMode;
+}
+
 /**
  * Shared verification body for a {@link scanMergedCommitMap} entry, factored out of {@link
  * getTaskMergedInfo} so {@link findLandedSquashCommitViaMap} (boot-reconcile Pass A's batch path, card
@@ -2557,7 +2588,7 @@ export async function getMergedCommitMapCached(
  */
 async function resolveMergedCommitMapHit(
   repoPath: string, branch: string, hit: MergedMapEntry, deps: BoundedGitDeps,
-): Promise<string | null> {
+): Promise<ResolvedMergedHit | null> {
   try {
     // Bounded via the SAME git+timeoutMs as the merge-base call below (mirrors findLandedSquashCommit's
     // OWN `branch --list` check exactly) — NOT the shared branchExists() helper, whose bare `simpleGit()`
@@ -2572,14 +2603,16 @@ async function resolveMergedCommitMapHit(
       )).trim();
       if (mergeBase === hit.sha) return null; // re-cut onto its own prior squash: live again, not landed
       if (!(await branchContentLandedInCommit(repoPath, branch, hit.sha, mergeBase, deps))) return null;
+      return { sha: hit.sha, verification: "content" };
     } else if (hit.pathSetDigest) {
       // Branch gone (card f621f185): verify against the persisted path-set trailer.
       if (!(await verifyPersistedPathSet(git, timeoutMs, hit.sha, hit.pathSetDigest))) return null;
+      return { sha: hit.sha, verification: "pathset" };
     }
     // else: pre-fix history (no path-set trailer) — degrades to the trailer-presence-only answer.
     // Deliberately NOT logged here for either caller: scanMergedCommitMap already logs the pre-fix count
     // once per actual scan (cache-gated, rebuilt only on a HEAD move) — see its own comment.
-    return hit.sha;
+    return { sha: hit.sha, verification: "trailer-only" };
   } catch {
     return null; // fail safe
   }
@@ -2618,8 +2651,8 @@ export async function findLandedSquashCommitViaMap(
   const { map, truncated } = await getMergedCommitMapCached(repoPath, deps);
   const entry = map.get(branch);
   if (!entry) return { hit: false, scanComplete: !truncated };
-  const sha = await resolveMergedCommitMapHit(repoPath, branch, entry, deps);
-  return { hit: true, sha };
+  const resolved = await resolveMergedCommitMapHit(repoPath, branch, entry, deps);
+  return { hit: true, sha: resolved?.sha ?? null };
 }
 
 /**
@@ -2637,6 +2670,11 @@ export async function findLandedSquashCommitViaMap(
  * (fail-safe). Treat `null` as "not proven merged (within this window)", NEVER as an authoritative
  * "never merged" — that distinction matters because this exists specifically to replace stale-handoff
  * claims with ground truth, and a false-confident null would just move the same failure elsewhere.
+ *
+ * The returned {@link MergedCommitInfo}'s `verification` field (card 52e978ad) names WHICH of the means
+ * below actually answered — a caller that only reads `sha`/`date` can no longer tell a byte-verified
+ * "content" landing apart from a weaker "pathset" or "trailer-only" one; a caller that cares about the
+ * strength of the guarantee must read it.
  *
  * VERIFIED regardless of whether the branch ref is still live, but by TWO DIFFERENT MEANS of two different
  * strengths — same split as {@link findLandedSquashCommit} (card e076d2a2 for the live-branch mode, card
@@ -2666,10 +2704,12 @@ export async function getTaskMergedInfo(
   if (!hit) return null;
   // Verification delegated to {@link resolveMergedCommitMapHit} (card 6ee48e4d factored this out of a
   // hand-inlined copy here so boot-reconcile Pass A's {@link findLandedSquashCommitViaMap} shares the
-  // IDENTICAL re-task-guard + content/path-set check) — behaviour-identical to the version this replaces.
-  const sha = await resolveMergedCommitMapHit(repoPath, branch, hit, deps);
-  if (!sha) return null;
-  return { sha: sha.slice(0, 7), date: hit.date };
+  // IDENTICAL re-task-guard + content/path-set check) — behaviour-identical to the version this replaces,
+  // now ALSO reporting which of the two verification means (or the pre-fix degrade) answered it (card
+  // 52e978ad) — see {@link MergedVerificationMode}.
+  const resolved = await resolveMergedCommitMapHit(repoPath, branch, hit, deps);
+  if (!resolved) return null;
+  return { sha: resolved.sha.slice(0, 7), date: hit.date, verification: resolved.verification };
 }
 
 /** TEST-ONLY: clear the merged-commit map cache (settled + in-flight) between hermetic test cases reusing the same temp repos. */

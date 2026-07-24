@@ -86,6 +86,9 @@ try {
   __resetMergedCommitMapCacheForTest();
   const genuineBoardResult = await getTaskMergedInfo(repo, taskIdA);
   check("(2) getTaskMergedInfo ACCEPTS the genuine commit too", genuineBoardResult !== null && genuine.sha.startsWith(genuineBoardResult.sha));
+  // Card 52e978ad: branch A is still LIVE at this point (never deleted in this test) — the strongest
+  // verification mode, a byte-for-byte diff against the live branch tip.
+  check("(2) getTaskMergedInfo reports verification:\"content\" for a still-live branch", genuineBoardResult?.verification === "content");
 } finally {
   for (const d of tmpDirs) {
     try { fs.rmSync(d, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }

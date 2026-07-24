@@ -1310,6 +1310,20 @@ export interface Task {
   mergedSha?: string | null;
   mergedRepoKey?: string | null;
   mergedDate?: string | null;
+  /**
+   * Which verification mode produced `mergedSha` (card 52e978ad) — mirrors the daemon's
+   * `MergedVerificationMode` (`git/worktrees.ts`): `"content"` (byte-verified against a still-live branch
+   * tip), `"pathset"` (verified from the landed commit's own ancestry against its persisted path-set
+   * trailer — proves the same FILES landed, not the same content), or `"trailer-only"` (pre-fix history —
+   * trailer PRESENCE alone, the weakest of the three). `null`/absent means unknown — either this card
+   * hasn't been through the verification-aware write path yet, or the write path that stamped `mergedSha`
+   * didn't itself know its own mode (the fresh-squash merge-confirm path is the one exception that always
+   * knows: it stamps `"content"` directly, since it just created that commit from the live branch in the
+   * same call). Never read absence as either "verified" or "unverified" — just "no signal yet"; the web
+   * board/drawer render a muted, qualified treatment for `"trailer-only"` and treat everything else
+   * (including absent) as the plain confident tick.
+   */
+  mergedVerification?: "content" | "pathset" | "trailer-only" | null;
   createdAt: string;
   updatedAt: string;
 }

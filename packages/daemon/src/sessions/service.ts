@@ -8247,7 +8247,7 @@ export class SessionService {
     // paths above return early WITHOUT deleting, so a re-task keeps its retained worktree + branch.
     // `merge.sha` (card 1eebc46a) is the just-created squash commit's sha, free from mergeBranch's own
     // return — persisted onto the task alongside the rest of finalize's bookkeeping.
-    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null });
+    const finalizeResult = await this.finalizeMerge({ managerSessionId, workerSessionId, taskId, worktreePath, branch, repoPath, projectId: project.id, forceRemoveWorktree, mergedSha: merge.sha ?? null, repoKey: worker.repoKey ?? null, mergedVerification: merge.sha ? "content" : null });
     // NESTED-REPO WARNING (card b6d41db1): the worktree was retained (not force-removed) because it holds
     // an unrecoverable nested clone (or the scan couldn't confirm it was clean) — surface it so the
     // manager knows cleanup is on it.
@@ -9272,6 +9272,16 @@ export class SessionService {
      * before this card, never blocking the rest of finalize's bookkeeping.
      */
     mergedSha?: string | null; repoKey?: string | null;
+    /**
+     * Which verification mode produced `mergedSha` (card 52e978ad) — see `Task.mergedVerification`'s own
+     * doc. ONLY the fresh-squash "Green" caller can state this for free: `merge.sha` there is the commit
+     * `mergeBranchLocked` just created from the live branch content in the SAME call, which is exactly
+     * the "content" guarantee, no separate check needed. The ALREADY_MERGED / boot-reconcile callers
+     * derive `mergedSha` from `findLandedSquashCommit`, which does NOT report its own verification mode —
+     * they omit this, leaving the column null until the drawer's lazy backfill (`GET /api/tasks/:id`)
+     * fills it in from a real `getTaskMergedInfo` read.
+     */
+    mergedVerification?: "content" | null;
   }): Promise<{ nestedRepoBlock?: { paths: string[]; truncated: boolean } }> {
     // SIBLING SWEEP first (incident 35fc823f): retire any OTHER live session bound to this task before the
     // worktree is removed, so no zombie is left running in the about-to-be-deleted cwd. The keep is the
@@ -9337,7 +9347,10 @@ export class SessionService {
       // to 7 chars to match the MCP `merged.sha` convention (mcp/tasks.ts). Best-effort: omitted
       // `mergedSha` (a defensive caller) just means these columns stay null, exactly as before this card.
       const shipPatch = args.mergedSha
-        ? { mergedSha: args.mergedSha.slice(0, 7), mergedRepoKey: args.repoKey ?? null, mergedDate: new Date().toISOString() }
+        ? {
+          mergedSha: args.mergedSha.slice(0, 7), mergedRepoKey: args.repoKey ?? null, mergedDate: new Date().toISOString(),
+          mergedVerification: args.mergedVerification ?? null,
+        }
         : {};
       if (landingKey || args.mergedSha) {
         this.db.updateTask(args.taskId, { ...(landingKey ? { columnKey: landingKey } : {}), ...shipPatch });

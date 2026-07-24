@@ -555,8 +555,8 @@ function Card({ task, accent, worker, multiRepo, repos, primaryRepoPath, isDoneL
                 (correctly — see finalizeMerge's own doc) while it's actively being reworked in a live
                 lane, where a "✓ shipped" marker would read as done when it visibly isn't. */}
             {task.mergedSha && isDoneLane && (
-              <span title={`Landed as ${task.mergedSha} on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}`}
-                style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 9.5, color: color.phosphor }}>
+              <span title={`Landed as ${task.mergedSha} on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}${shipVerificationStyle(task.mergedVerification).suffix}`}
+                style={{ flexShrink: 0, fontFamily: font.mono, fontSize: 9.5, color: shipVerificationStyle(task.mergedVerification).color }}>
                 ✓ {task.mergedSha}
               </span>
             )}
@@ -615,6 +615,19 @@ function shipRepoLabel(mergedRepoKey: string | null | undefined, repos: RepoRegi
   if (!mergedRepoKey) return primaryRepoPath || "primary";
   const entry = repos.find((r) => r.key === mergedRepoKey);
   return entry ? entry.path : `${mergedRepoKey} — no longer registered`;
+}
+
+// Ship-state verification tier (card 52e978ad) — "content" and "pathset" are both real verification (a
+// live byte-diff or a gc-surviving path-set digest against the commit's own ancestry); render them with
+// the SAME confident tick, never weakened to look like the weaker case. "trailer-only" (pre-fix history —
+// the commit predates any content/path check, trailer PRESENCE alone) is the one tier that must NOT read
+// as a second confident tick — muted color + a qualifying tooltip suffix, but still shown, never hidden.
+// `null`/undefined (unknown — not yet computed, or a legacy row) reads the same as a confident tick: this
+// is the byte-identical default every pre-existing "✓ sha" render already had before this field existed.
+function shipVerificationStyle(verification: Task["mergedVerification"]): { color: string; suffix: string } {
+  return verification === "trailer-only"
+    ? { color: color.textMuted, suffix: " (unverified content — pre-dates path-set verification)" }
+    : { color: color.phosphor, suffix: "" };
 }
 
 // Centered modal detail dialog: view + edit a task's title and description (the `body` field that the
@@ -831,8 +844,8 @@ function TaskDrawer({ task, column, repos, primaryRepoPath, onClose, onSave, sav
         {task.mergedSha && (
           <>
             <span style={labelStyle}>Shipped</span>
-            <span style={{ fontFamily: font.mono, fontSize: 12, color: color.phosphor }}
-              title={`Landed on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}${task.mergedDate ? ` — ${task.mergedDate}` : ""}`}>
+            <span style={{ fontFamily: font.mono, fontSize: 12, color: shipVerificationStyle(task.mergedVerification).color }}
+              title={`Landed on ${shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}${task.mergedDate ? ` — ${task.mergedDate}` : ""}${shipVerificationStyle(task.mergedVerification).suffix}`}>
               ✓ {task.mergedSha} <span style={{ color: color.textMuted }}>on</span> {shipRepoLabel(task.mergedRepoKey, repos, primaryRepoPath)}
             </span>
           </>

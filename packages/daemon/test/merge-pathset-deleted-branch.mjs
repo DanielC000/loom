@@ -160,6 +160,9 @@ try {
     __resetMergedCommitMapCacheForTest();
     const board = await getTaskMergedInfo(repo, taskId);
     check("(2) getTaskMergedInfo ACCEPTS the genuine commit too", board !== null && merged.sha.startsWith(board.sha));
+    // Card 52e978ad: branch is gone but the landed commit carries the Loom-Worker-PathSet trailer —
+    // verified from the commit's OWN ancestry, weaker than a live byte-diff but still a real check.
+    check("(2) getTaskMergedInfo reports verification:\"pathset\" (branch gone, path-set trailer present)", board?.verification === "pathset");
 
     // (3b) — the discriminating case: a tip-sha design passes the checks above but breaks HERE, because
     // the dangling branch tip is exactly what a real gc prunes. The path-set design needs nothing but the
@@ -169,6 +172,7 @@ try {
     __resetMergedCommitMapCacheForTest();
     const boardPostGc = await getTaskMergedInfo(repo, taskId);
     check("(3b) POST-GC: getTaskMergedInfo STILL accepts the genuine commit", boardPostGc !== null && merged.sha.startsWith(boardPostGc.sha));
+    check("(3b) POST-GC: getTaskMergedInfo STILL reports verification:\"pathset\" (survives git gc --prune=now, as designed)", boardPostGc?.verification === "pathset");
   }
 
   // ── (4) MAIN ADVANCES on a file the branch ALSO touches (non-conflicting), then squash + delete + gc ───
@@ -223,6 +227,10 @@ try {
     __resetMergedCommitMapCacheForTest();
     const board = await getTaskMergedInfo(repo, taskId);
     check("(5) getTaskMergedInfo ALSO still resolves it", board !== null && sha.startsWith(board.sha));
+    // Card 52e978ad — the third and weakest mode: no path-set trailer at all (pre-f621f185 history), so
+    // the answer rests on Loom-Worker-Branch trailer PRESENCE alone. Must be reported as such, not
+    // silently upgraded to look as confident as the "content"/"pathset" cases above.
+    check("(5) getTaskMergedInfo reports verification:\"trailer-only\" for pre-fix history (no path-set trailer)", board?.verification === "trailer-only");
   }
 } finally {
   for (const d of tmpDirs) {

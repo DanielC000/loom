@@ -1498,6 +1498,10 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   merged_sha: "TEXT",
   merged_repo_key: "TEXT",
   merged_date: "TEXT",
+  // Which verification mode produced merged_sha (card 52e978ad) — see Task.mergedVerification's own doc.
+  // Nullable, no DEFAULT (mirrors merged_sha/merged_repo_key/merged_date): every legacy row backfills to
+  // NULL ("unknown mode"), read identically to a merge that landed before this column existed.
+  merged_verification: "TEXT",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -5061,14 +5065,14 @@ export class Db {
   // NOT go through this method — see {@link backfillTaskMergedInfo} below, which writes the same three
   // columns WITHOUT touching `updatedAt`, so opening an old done card's drawer can never reorder the
   // owner's `byRecentlyDone`-sorted done lane (Code Review finding, card 1eebc46a).
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null });
   }
   /**
    * Write-through cache-fill for a task's ship-state (card 1eebc46a) — used ONLY by the drawer's lazy
@@ -5079,10 +5083,10 @@ export class Db {
    * original implementation routed this through updateTask and bumped it, jumping an old done card to the
    * top of its lane the first time anyone opened it). A no-op on a missing row, same as updateTask.
    */
-  setTaskMergedInfoNoTouch(id: string, info: { mergedSha: string | null; mergedRepoKey: string | null; mergedDate: string | null }): void {
+  setTaskMergedInfoNoTouch(id: string, info: { mergedSha: string | null; mergedRepoKey: string | null; mergedDate: string | null; mergedVerification: string | null }): void {
     this.db.prepare(
-      "UPDATE tasks SET merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate WHERE id=@id",
-    ).run({ id, mergedSha: info.mergedSha, mergedRepoKey: info.mergedRepoKey, mergedDate: info.mergedDate });
+      "UPDATE tasks SET merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification WHERE id=@id",
+    ).run({ id, mergedSha: info.mergedSha, mergedRepoKey: info.mergedRepoKey, mergedDate: info.mergedDate, mergedVerification: info.mergedVerification });
   }
   /** Reassign a card to a DIFFERENT project's board — the one write `updateTask` never performs (it has
    *  no `projectId` in its patch type). Single atomic transaction: the task's project_id + column_key +
@@ -6700,6 +6704,7 @@ function toTask(r0: unknown): Task {
     mergedSha: (r.merged_sha as string | null) ?? null,
     mergedRepoKey: (r.merged_repo_key as string | null) ?? null,
     mergedDate: (r.merged_date as string | null) ?? null,
+    mergedVerification: (r.merged_verification as Task["mergedVerification"]) ?? null,
     createdAt: r.created_at as string, updatedAt: r.updated_at as string,
   };
 }

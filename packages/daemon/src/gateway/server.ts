@@ -3366,11 +3366,20 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     //    stale/since-retargeted task.repoKey can disagree with where the sha was actually found (e.g. a
     //    stale key degrades to primary; stamping t.repoKey there would render "<key> — no longer
     //    registered" for a sha that's really on primary).
-    if (!t.mergedSha) {
+    //
+    // Also re-runs (mergedSha present but mergedVerification still null — card 52e978ad) for a card
+    // whose mergedSha was stamped by a write path that didn't itself know its verification mode
+    // (finishAlreadyMerged / boot-reconcile's landed-sha paths — see finalizeMerge's own doc) — so the
+    // board eventually shows the verification tier for EVERY merged card, not just the ones that went
+    // through the fresh-squash happy path or a pre-existing legacy backfill.
+    if (!t.mergedSha || t.mergedVerification == null) {
       try {
         const resolved = await resolveMergedInfo(deps.db, t.projectId, t);
         if (resolved.merged) {
-          deps.db.setTaskMergedInfoNoTouch(t.id, { mergedSha: resolved.merged.sha, mergedRepoKey: resolved.repoKey, mergedDate: resolved.merged.date });
+          deps.db.setTaskMergedInfoNoTouch(t.id, {
+            mergedSha: resolved.merged.sha, mergedRepoKey: resolved.repoKey, mergedDate: resolved.merged.date,
+            mergedVerification: resolved.merged.verification ?? null,
+          });
           return deps.db.getTask(t.id);
         }
       } catch { /* best-effort cache-fill; fall through and return the row unchanged */ }
