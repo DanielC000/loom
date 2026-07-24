@@ -107,6 +107,27 @@ const ptyStub = () => {
   return { stub: { stop() {}, isAlive() { return false; }, enqueueStdin: (...args) => enqueued.push(args) }, enqueued };
 };
 
+// Card 9ef89fee — sibling of 4032ba4d's AttachResult fix, but a DIFFERENT mechanism: below, `Promise.all`
+// races the UNTRACKED `confirmWorkerMerge`/`runWorkerGate` calls directly (not the Tracked/
+// PendingOpRegistry wrapper), so a genuine rejection (either call can throw for real under CPU
+// starvation) rejects `Promise.all` itself and throws AT THE AWAIT, aborting the rest of this file before
+// any later block runs. `Promise.allSettled` + explicit per-entry handling reports that rejection as a
+// NAMED FAIL (with its error printed) and lets every remaining block still execute.
+// DECISION (per the card): a rejection here is NOT tolerated — it's reported as a FAIL, not swallowed.
+// Every block below asserts both calls SUCCEED under the semaphore; a rejection failing that property is
+// the exact thing this file exists to catch, so it must surface as a failing check, not be silently
+// treated as an acceptable outcome of "racing under load".
+async function raceReport(promises, labels, blockLabel) {
+  const settled = await Promise.allSettled(promises);
+  return settled.map((s, i) => {
+    check(`(${blockLabel}) ${labels[i]} did not reject`, s.status === "fulfilled");
+    if (s.status === "rejected") {
+      console.log(`  -> (${blockLabel}) ${labels[i]} rejected: ${s.reason?.stack || s.reason}`);
+    }
+    return s.status === "fulfilled" ? s.value : null;
+  });
+}
+
 try {
   // ── (A) mixed merge-gate + worker-gate calls never exceed the configured cap ────────────────────────
   {
@@ -129,14 +150,15 @@ try {
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
 
-    const [mergeResult, gateResult] = await Promise.all([
-      sessions.confirmWorkerMerge(mgrId, mergeWorkerId),
-      sessions.runWorkerGate(gateWorkerId),
-    ]);
+    const [mergeResult, gateResult] = await raceReport(
+      [sessions.confirmWorkerMerge(mgrId, mergeWorkerId), sessions.runWorkerGate(gateWorkerId)],
+      ["confirmWorkerMerge", "runWorkerGate"],
+      "A",
+    );
     check("(A) both the merge gate and the worker gate actually ran", calls === 2);
     check("(A) default cap 1 NEVER let a merge gate and a worker gate run concurrently", maxActive === 1);
-    check("(A) the merge still succeeded", mergeResult.merged === true);
-    check("(A) the worker gate settled inline and passed", gateResult.settled === true && gateResult.ok === true && gateResult.value.passed === true);
+    check("(A) the merge still succeeded", mergeResult?.merged === true);
+    check("(A) the worker gate settled inline and passed", gateResult?.settled === true && gateResult?.ok === true && gateResult?.value.passed === true);
   }
 
   // ── (B) raising the cap to 2 lets a merge gate and a worker gate run TRULY concurrently ────────────
@@ -156,14 +178,15 @@ try {
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
 
-    const [mergeResult, gateResult] = await Promise.all([
-      sessions.confirmWorkerMerge(mgrId, mergeWorkerId),
-      sessions.runWorkerGate(gateWorkerId),
-    ]);
+    const [mergeResult, gateResult] = await raceReport(
+      [sessions.confirmWorkerMerge(mgrId, mergeWorkerId), sessions.runWorkerGate(gateWorkerId)],
+      ["confirmWorkerMerge", "runWorkerGate"],
+      "B",
+    );
     check("(B) both ran", calls === 2);
     check("(B) cap 2 let the merge gate and the worker gate run truly concurrently", maxActive === 2);
-    check("(B) the merge still succeeded", mergeResult.merged === true);
-    check("(B) the worker gate still passed", gateResult.ok === true && gateResult.value.passed === true);
+    check("(B) the merge still succeeded", mergeResult?.merged === true);
+    check("(B) the worker gate still passed", gateResult?.ok === true && gateResult?.value.passed === true);
   }
 
   // ── (C) WITHOUT the semaphore (calling the fake gate directly), two concurrent calls DO overlap —

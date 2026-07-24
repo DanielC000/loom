@@ -279,6 +279,27 @@ async function seedTwoWorkers(sfx, reposDir) {
   return { db, mgrId, workers };
 }
 
+// Card 9ef89fee — sibling of 4032ba4d's AttachResult fix, but a DIFFERENT mechanism: below, `Promise.all`
+// races the UNTRACKED `confirmWorkerMerge` call directly (not the Tracked/PendingOpRegistry wrapper), so
+// a genuine rejection (confirmWorkerMerge can throw for real under CPU starvation — a stranded-check or
+// union-merge subprocess failing) rejects `Promise.all` itself and throws AT THE AWAIT, aborting the rest
+// of this file before any later block runs. `Promise.allSettled` + explicit per-entry handling reports
+// that rejection as a NAMED FAIL (with its error printed) and lets every remaining block still execute.
+// DECISION (per the card): a rejection here is NOT tolerated — it's reported as a FAIL, not swallowed.
+// Every block below asserts confirmWorkerMerge SUCCEEDS under the semaphore; a rejection failing that
+// property is the exact thing this file exists to catch, so it must surface as a failing check, not be
+// silently treated as an acceptable outcome of "racing under load".
+async function raceReport(promises, labels, blockLabel) {
+  const settled = await Promise.allSettled(promises);
+  return settled.map((s, i) => {
+    check(`(${blockLabel}) ${labels[i]} did not reject`, s.status === "fulfilled");
+    if (s.status === "rejected") {
+      console.log(`  -> (${blockLabel}) ${labels[i]} rejected: ${s.reason?.stack || s.reason}`);
+    }
+    return s.status === "fulfilled" ? s.value : null;
+  });
+}
+
 try {
   // ── (A) default cap (1, no platform override) SERIALIZES two concurrent daemon-run gates ───────────
   {
@@ -305,13 +326,14 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
 
-    const [r1, r2] = await Promise.all([
-      sessions.confirmWorkerMerge(mgrId, workers[0]),
-      sessions.confirmWorkerMerge(mgrId, workers[1]),
-    ]);
+    const [r1, r2] = await raceReport(
+      [sessions.confirmWorkerMerge(mgrId, workers[0]), sessions.confirmWorkerMerge(mgrId, workers[1])],
+      ["confirmWorkerMerge[1]", "confirmWorkerMerge[2]"],
+      "A",
+    );
     check("(A) both confirms ran the gate", calls === 2);
     check("(A) default cap 1 NEVER let both gates run concurrently", maxActive === 1);
-    check("(A) both merges still succeeded (queued, not rejected)", r1.merged === true && r2.merged === true);
+    check("(A) both merges still succeeded (queued, not rejected)", r1?.merged === true && r2?.merged === true);
   }
 
   // ── (B) raising the cap to 2 lets both gates run TRULY concurrently ────────────────────────────────
@@ -352,10 +374,11 @@ try {
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
 
-    const [r1, r2] = await Promise.all([
-      sessions.confirmWorkerMerge(mgrId, workers[0]),
-      sessions.confirmWorkerMerge(mgrId, workers[1]),
-    ]);
+    const [r1, r2] = await raceReport(
+      [sessions.confirmWorkerMerge(mgrId, workers[0]), sessions.confirmWorkerMerge(mgrId, workers[1])],
+      ["confirmWorkerMerge[1]", "confirmWorkerMerge[2]"],
+      "B",
+    );
     check("(B) both confirms ran the gate", calls === 2);
     // A barrier timeout and a real cap-honoring serialization both observably leave maxActive at 1 — an
     // ambiguous signal is exactly what this de-race is supposed to remove, so the two are reported with
@@ -366,7 +389,7 @@ try {
         : "(B) cap 2 actually let both gates run concurrently (not a silent hardcoded serialize)",
       !barrierTimedOut && maxActive === 2,
     );
-    check("(B) both merges succeeded", r1.merged === true && r2.merged === true);
+    check("(B) both merges succeeded", r1?.merged === true && r2?.merged === true);
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
