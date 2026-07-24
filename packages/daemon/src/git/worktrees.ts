@@ -2929,13 +2929,37 @@ async function mergeBranchLocked(
   // throws), so it runs FIRST and unconditionally; the `rev-parse --verify MERGE_HEAD` check (which exits
   // non-zero → throws when there is no in-progress merge) is isolated in its OWN try/catch so its throw
   // can't skip the unmerged probe — unmerged residue WITHOUT a MERGE_HEAD is now auto-recovered up front too.
+  //
+  // The clear itself uses `--merge`, not `--hard` (card c78cbf5f, fast-follow to 9e77050f/06b5c47f): a
+  // precondition only licenses the operation over the state it actually observed, and the affirmative
+  // MERGE_HEAD/unmerged signal here licenses clearing THAT merge state, not discarding unrelated unstaged
+  // work elsewhere in the same tree — the gap this block used to have, sitting upstream of the dirty-tree
+  // refusal below (which only protects the squash itself, not this earlier clear). `git reset --merge
+  // <commit>` is the mechanism `git merge --abort` itself uses, generalized to run whether or not MERGE_HEAD
+  // is actually set (`merge --abort` requires it; `--squash` never sets it, so the bare-unmerged-without-
+  // MERGE_HEAD case this block also handles needs the same clear too, and plain `merge --abort` can't do
+  // that). Verified empirically (not just from docs): since this always resets to the CURRENT HEAD — never
+  // a different commit — every unmerged/conflicted path is unconditionally resettable (that IS what aborting
+  // a merge means), while a file with only an unstaged edit outside the conflict is never part of the
+  // HEAD→HEAD delta and so is left untouched, where `--hard` would have discarded it regardless. (Staged
+  // content to such a file is NOT protected by `--merge` either — same as `--hard` — but that is unchanged
+  // from before this fix and outside this card's scope, which is specifically the unstaged case.)
   try {
     const unmerged = (await withTimeout(git.raw(["ls-files", "--unmerged"]), timeoutMs, "git ls-files --unmerged (canonical, pre-check)")).trim() !== "";
     let inProgressMerge = false;
     try {
       inProgressMerge = (await withTimeout(git.raw(["rev-parse", "-q", "--verify", "MERGE_HEAD"]), timeoutMs, "git rev-parse MERGE_HEAD (canonical)")).trim() !== "";
     } catch { /* no MERGE_HEAD ⇒ that signal is simply false */ }
-    if (inProgressMerge || unmerged) await withTimeout(git.raw(["reset", "--hard", "HEAD"]), timeoutMs, "git reset --hard (canonical, residue clear)");
+    if (inProgressMerge || unmerged) {
+      try {
+        await withTimeout(git.raw(["reset", "--merge", "HEAD"]), timeoutMs, "git reset --merge (canonical, residue clear)");
+      } catch (e) {
+        // Surfaced explicitly rather than falling into the outer catch below, whose "no residue to clear"
+        // reasoning does not apply here: we already know there IS residue (the signal above was affirmative)
+        // and failed to clear it, so silence here would let a genuinely dirty canonical repo look untouched.
+        return { ok: false, reason: `failed to clear in-progress-merge residue in canonical repo (MERGE_HEAD/unmerged detected, but \`git reset --merge HEAD\` did not complete): ${(e as Error).message}` };
+      }
+    }
   } catch { /* ls-files failed (e.g. not a repo / no HEAD) ⇒ no residue to clear */ }
 
   // ── Staged-but-not-unmerged residue (card 9e77050f — a SECOND, non-concurrent trigger for the same
