@@ -416,6 +416,47 @@ const DROPPED_BOARD = {
   cleanup(e);
 }
 
+// ===== (1i) the nudge NAMES each actionable card (id + title + held/deferred flags), not just the count =====
+// (card 40deea6f — the watcher already computes openCards to COUNT them; surface the same set so a
+// manager never has to burn several tasks_get calls hunting which card "N actionable" meant.)
+{
+  const e = makeEnv();
+  seedManager(e, "mgr-named");
+  seedTitled(e, "todo", "fix(web): real actionable task", false, false);
+  e.watcher.tick(NOW);
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1i) fires with the one actionable card", e.enqueued.length === 1 && text.includes("1 actionable"));
+  check("(1i) the nudge names the card's id (8-char prefix)", text.includes(e.db.listTasks(e.projId)[0].id.slice(0, 8)));
+  check("(1i) the nudge names the card's title", text.includes("fix(web): real actionable task"));
+  check("(1i) the nudge states its held/deferred flags as false", text.includes("held:false") && text.includes("deferred:false"));
+  cleanup(e);
+}
+{
+  // Multiple actionable cards → each is named, not just the last/first one.
+  const e = makeEnv();
+  seedManager(e, "mgr-named-multi");
+  seedTitled(e, "todo", "fix(daemon): alpha task", false, false);
+  seedTitled(e, "todo", "fix(web): beta task", false, false);
+  e.watcher.tick(NOW);
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1i) fires with both actionable cards", e.enqueued.length === 1 && text.includes("2 actionable"));
+  check("(1i) both titles are named in the nudge", text.includes("fix(daemon): alpha task") && text.includes("fix(web): beta task"));
+  cleanup(e);
+}
+{
+  // A held card stays EXCLUDED from the named list too (not just the count) — only genuinely-actionable
+  // cards are named alongside a held one.
+  const e = makeEnv();
+  seedManager(e, "mgr-named-held-mixed");
+  seedTitled(e, "todo", "owner-held decision", true, false);          // held → discounted + NOT named
+  seedTitled(e, "todo", "fix(web): genuine actionable task", false);  // counted + named
+  e.watcher.tick(NOW);
+  const text = e.enqueued[0]?.text ?? "";
+  check("(1i) the held card's title is NOT named", !text.includes("owner-held decision"));
+  check("(1i) the genuine card's title IS named", text.includes("fix(web): genuine actionable task"));
+  cleanup(e);
+}
+
 // ============================ (2) SILENT — not idle long enough ============================
 {
   const e = makeEnv();

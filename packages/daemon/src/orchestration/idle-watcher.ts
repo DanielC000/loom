@@ -335,6 +335,20 @@ export class IdleWatcher {
         && !(isPlatform && t.columnKey === parkedKey)
         && !hasPendingQuestion(t.id),
       );
+      // Card 40deea6f: name the actionable cards in the nudge itself (id + title + held/deferred flags) —
+      // the watcher already computed openCards to COUNT them, so surfacing the same set costs nothing
+      // extra and saves the manager from burning several tasks_get calls hunting which card "N actionable"
+      // meant (real incident: orch 80472fe5 spent 3 sequential lookups + narration turns on exactly this).
+      // Capped at 10 (matches the DENY-GLOB listing convention in sessions/service.ts) so a large board
+      // doesn't blow the nudge up into an unreadable wall of text — id + title + flags only, never bodies.
+      const ACTIONABLE_LIST_CAP = 10;
+      const actionableList = openCards
+        .slice(0, ACTIONABLE_LIST_CAP)
+        .map((t) => `${t.id.slice(0, 8)} ${t.title} (held:${t.held === true}, deferred:${t.deferred === true})`)
+        .join("; ");
+      const actionableSuffix = openCards.length === 0
+        ? ""
+        : `: ${actionableList}${openCards.length > ACTIONABLE_LIST_CAP ? `, +${openCards.length - ACTIONABLE_LIST_CAP} more` : ""}`;
       // Narrow liveWorkers (all idle at this point — a live BUSY one would have skipped above) to
       // GENUINELY STRANDED ones (CR blocker #2): a live worker that's rate-limited, already reported
       // (awaiting merge), or parked awaiting an ack is NOT "unreported" and nobody needs to check on it
@@ -376,16 +390,16 @@ export class IdleWatcher {
         : strandedWorkers.length > 0
         ? `[loom:idle] You've been idle ~${n} min and your ${strandedWorkers.length} live worker(s) are ALSO idle and unreported — ` +
           `nobody else watches this. Check on them first: worker_transcript / worker_status, then worker_message or ` +
-          `worker_merge as appropriate. ${openTodos} other actionable task(s) pending. Then call idle_report with your ` +
+          `worker_merge as appropriate. ${openTodos} other actionable task(s) pending${actionableSuffix}. Then call idle_report with your ` +
           `state: 'working' (back at it), 'waiting' (on a long worker or external thing — optionally pass minutes), ` +
           `or 'done' (the queue is genuinely drained). Need a human decision/credential/access? File a Request via question_ask instead.`
         : liveWorkers.length > 0
-        ? `[loom:idle] You've been idle ~${n} min with ${openTodos} actionable task(s) pending. ` +
+        ? `[loom:idle] You've been idle ~${n} min with ${openTodos} actionable task(s) pending${actionableSuffix}. ` +
           `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
           `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
           `external thing — optionally pass minutes), or 'done' (the queue is genuinely drained). Need a human ` +
           `decision/credential/access? File a Request via question_ask instead. Resume the loop if appropriate.`
-        : `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s). ` +
+        : `[loom:idle] You've been idle ~${n} min with no live workers and ${openTodos} actionable task(s)${actionableSuffix}. ` +
           `Why are you idle? If you simply dropped the orchestration loop, pick up the next task NOW. ` +
           `Then call idle_report with your state: 'working' (back at it), 'waiting' (on a long worker or ` +
           `external thing — optionally pass minutes), or 'done' (the queue is genuinely drained). Need a human ` +
