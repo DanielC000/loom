@@ -6327,6 +6327,22 @@ export class SessionService {
     // class doc. Lifted in a finally so a throw anywhere in this window can never leave it stuck suppressed.
     this.suppressCapQueueDrain(managerSessionId);
     try {
+      // STALE IDLE-NUDGE PURGE (task 69a128b0 — evaluation-vs-delivery gap): the predecessor may have a
+      // `[loom:worker-idle]`/`[loom:worker-spawn-broken]` nudge already QUEUED (not yet delivered) in this
+      // manager's FIFO — enqueued correctly at the time it went idle, but the manager was busy (e.g. mid-
+      // turn deciding to recycle) so it never drained. That predecessor is about to be hard-stopped and
+      // will NEVER re-engage, so nothing else purges it: `purgeStaleIdleNudgeForReengagedWorker` only fires
+      // on a worker's OWN busy(false→true) edge (finding 2e3a8e6f) — a recycled predecessor has no such
+      // edge. Left alone, the stale nudge drains later naming a session that's already `exited` and
+      // superseded — a `worker_message` to it is a guaranteed session-dead drop (observed incident: worker
+      // 1bf634de recycled to f9feeccc, manager still told "worker 1bf634de … is idle … parked awaiting your
+      // reply"). Purge BEFORE the hard-stop (pure FIFO splice, no pty-liveness dependency) so the queue is
+      // already clean by the time anything could drain it. Scoped to THIS worker's id only — a later
+      // idle-and-unreported successor gets its OWN fresh, correctly-addressed nudge via the normal busy-
+      // edge/periodic mechanisms (never suppressed by this purge, since it's keyed by the successor's own,
+      // different session id).
+      try { this.pty.purgeQueuedWorkerIdleNudges(managerSessionId, workerSessionId); } catch { /* manager not live */ }
+
       // Close the old worker HARD: reliable, and we spawn fresh (never resume) so a clean graceful
       // exit isn't needed. Wait until the pty is actually gone before reusing the worktree.
       this.pty.stop(workerSessionId, "hard");
@@ -8818,6 +8834,13 @@ export class SessionService {
       this.pty.stop(sib.id, "graceful");
       this.db.setProcessState(sib.id, "exited");
       this.db.setBusy(sib.id, false);
+      // Task 69a128b0: same stale-nudge purge as the primary recycled worker above — a retired sibling
+      // never re-engages either, so any `[loom:worker-idle]` nudge already queued for it must not survive
+      // to drain naming a now-dead session. A sibling can belong to a DIFFERENT manager (board-wide lookup
+      // — see the class doc), so purge from ITS OWN parent's queue, not the caller's.
+      if (sib.parentSessionId) {
+        try { this.pty.purgeQueuedWorkerIdleNudges(sib.parentSessionId, sib.id); } catch { /* manager not live */ }
+      }
     }
     // Each sibling's slot just freed DETERMINISTICALLY (same reasoning as the no-commit auto-retire path)
     // — drain now rather than waiting for the graceful stop above to actually land and reach the generic
