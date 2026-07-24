@@ -7270,7 +7270,7 @@ export class SessionService {
     // OPTIONAL files/pathGlob filter (additive — see diffBranch) further scopes BOTH the diffstat and the
     // patch to matching file(s), so a manager can pull one file's hunk at a time instead of the whole patch.
     const includePatch = opts.includePatch === true;
-    const diff = await diffBranch(repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true });
+    const diff = await diffBranch(repoPath, worker.branch, "HEAD", { includePatch, files: opts.files, pathGlob: opts.pathGlob, includeStatus: true }, { timeoutMs: this.gitOpMs });
     // BACKSTOP: a worker that committed to a SELF-CREATED branch instead of its assigned `loom/<key>`
     // leaves the assigned branch 0-ahead, so `diff` reads empty and the stranded commits would be
     // silently lost. Surface a WARNING at review time so the manager sees the divergence (only an

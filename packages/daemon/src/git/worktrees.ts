@@ -129,6 +129,27 @@ function boundedMergeGit(repoPath: string, deps: BoundedGitDeps): { git: Pick<Si
 }
 
 /**
+ * Injectable seam for {@link diffBranch}, mirroring {@link BoundedGitDeps} — same
+ * block-timeout + {@link withTimeout} race, same `timeoutMs` default of {@link GIT_OP_TIMEOUT_MS} — but
+ * its `gitFactory` returns `diffSummary`/`diff` too (not just `raw`), since diffBranch uses simple-git's
+ * convenience methods rather than raw plumbing for its diffstat/patch. Kept separate from
+ * {@link BoundedGitDeps} rather than widening that shared interface: `BoundedGitDeps.gitFactory` backs
+ * ~20 other call sites (and their test fakes) that only ever implement `raw` — widening it there would
+ * break every one of those fakes for a need only diffBranch has.
+ */
+export interface DiffBranchDeps {
+  gitFactory?: (repoPath: string, blockTimeoutMs: number) => Pick<SimpleGit, "raw" | "diffSummary" | "diff">;
+  timeoutMs?: number;
+}
+
+/** Build the bounded git instance + resolve the timeout for {@link diffBranch}'s ops, applying the seam's defaults. */
+function boundedDiffGit(repoPath: string, deps: DiffBranchDeps): { git: Pick<SimpleGit, "raw" | "diffSummary" | "diff">; timeoutMs: number } {
+  const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
+  const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
+  return { git: makeGit(repoPath, timeoutMs), timeoutMs };
+}
+
+/**
  * Reject `p` after `ms` if it hasn't settled, so a git step is bounded even if the underlying promise
  * NEVER settles. In production the simpleGit `block` timeout (set on the instance) also kills the hung
  * child so it doesn't leak — this race is the belt-and-suspenders guarantee that the FUNCTION returns
@@ -1674,14 +1695,14 @@ function pathGlobToRegExp(rawGlob: string): RegExp {
  *   status to either would be a guess (is the new path "added"? is the old path "deleted"?), so these
  *   lines are skipped entirely; both paths end up with no status, same as an untracked file.
  * - A path containing a tab, or any row that doesn't parse as `<letter><digits?>\t<path>`, is skipped.
- * - Any git failure (missing range, non-repo, etc.) returns an empty map — the caller degrades to "no
- *   status available", not an error.
+ * - Any git failure (missing range, non-repo, etc.) OR a `timeoutMs` timeout (a hung `git diff` child)
+ *   returns an empty map — the caller degrades to "no status available", not an error or a hang.
  */
-async function diffNameStatus(git: SimpleGit, range: string): Promise<Map<string, DiffstatFile["status"]>> {
+async function diffNameStatus(git: Pick<SimpleGit, "raw">, range: string, timeoutMs: number): Promise<Map<string, DiffstatFile["status"]>> {
   const map = new Map<string, DiffstatFile["status"]>();
   const SINGLE_PATH_STATUS = new Set(["A", "M", "D", "T", "U", "X", "B"]);
   try {
-    const raw = await git.raw(["diff", "--name-status", range]);
+    const raw = await withTimeout(git.raw(["diff", "--name-status", range]), timeoutMs, "git diff --name-status (diffBranch)");
     for (const line of raw.split("\n")) {
       if (!line.trim()) continue;
       const tab = line.indexOf("\t");
@@ -1704,6 +1725,7 @@ async function diffNameStatus(git: SimpleGit, range: string): Promise<Map<string
 export async function diffBranch(
   repoPath: string, branch: string, base = "HEAD",
   opts: { includePatch?: boolean; files?: string[]; pathGlob?: string; includeStatus?: boolean } = {},
+  deps: DiffBranchDeps = {},
 ): Promise<{ filesChanged: number; insertions: number; deletions: number; files: DiffstatFile[]; allFiles: DiffstatFile[]; patch: string; hint?: string }> {
   // The full unified `patch` is UNBOUNDED — on a large change it overflows an MCP display limit, blinding a
   // manager exactly when the diff is biggest/riskiest. So the patch is OPT-IN: callers that only need a
@@ -1711,9 +1733,14 @@ export async function diffBranch(
   // existing callers (the orchestration view's workerDiff) stay byte-identical. The `files` diffstat — built
   // from the summary git already computes — is always returned and is the bounded review surface.
   const includePatch = opts.includePatch ?? true;
-  const git = simpleGit(repoPath);
+  // BOUNDED (card 53518a56): every op below now goes through the same block-timeout + withTimeout race as
+  // the sibling reconcile ops reviewWorkerMerge already calls alongside this one (detectStrandedWork,
+  // countCommitsBehind) — a hung diffSummary/diff/name-status child used to be able to wedge
+  // reviewWorkerMerge (and thus the manager's worker_merge gate) forever; the outer try/catch there only
+  // ever caught an ERROR, never a HANG.
+  const { git, timeoutMs } = boundedDiffGit(repoPath, deps);
   const range = `${base}...${branch}`; // 3-dot: changes on `branch` since the merge-base with `base`
-  const summary = await git.diffSummary([range]);
+  const summary = await withTimeout(git.diffSummary([range]), timeoutMs, "git diff --stat (diffBranch summary)");
   const allFiles: DiffstatFile[] = summary.files.map((f) => ({
     file: f.file,
     insertions: "insertions" in f ? f.insertions : 0, // binary files carry before/after, not ins/del
@@ -1725,7 +1752,7 @@ export async function diffBranch(
   // merged onto allFiles by path. Off by default — every existing caller pays no extra git call and
   // stays byte-identical; only reviewWorkerMerge's deny-glob check opts in.
   if (opts.includeStatus) {
-    const statusByPath = await diffNameStatus(git, range);
+    const statusByPath = await diffNameStatus(git, range, timeoutMs);
     for (const f of allFiles) {
       const s = statusByPath.get(f.file);
       if (s) f.status = s;
@@ -1748,8 +1775,8 @@ export async function diffBranch(
 
   const patch = includePatch
     ? filtering
-      ? (files.length > 0 ? await git.diff([range, "--", ...files.map((f) => f.file)]) : "")
-      : await git.diff([range])
+      ? (files.length > 0 ? await withTimeout(git.diff([range, "--", ...files.map((f) => f.file)]), timeoutMs, "git diff (diffBranch patch, filtered)") : "")
+      : await withTimeout(git.diff([range]), timeoutMs, "git diff (diffBranch patch)")
     : "";
 
   // pathGlob matched ZERO of the N actually-changed files: without this, the result is `filesChanged:0`
