@@ -26,6 +26,7 @@ import { withScheduleTimeEcho, nowEcho } from "../orchestration/time-echo.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
 import { createAgentCore, cloneAgentCore } from "../agents/clone-core.js";
+import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
@@ -810,7 +811,7 @@ export class PlatformMcpRouter {
       },
       async ({ projectId, name, startupPrompt, profileId }) => {
         const res = createAgentCore(db, { projectId, name, startupPrompt, profileId });
-        return res.ok ? ok(res.agent) : ok({ error: res.error });
+        return res.ok ? ok(res.promptWarning ? { ...res.agent, promptWarning: res.promptWarning } : res.agent) : ok({ error: res.error });
       },
     );
 
@@ -840,8 +841,11 @@ export class PlatformMcpRouter {
         const { agentId: _aid, ...rawPatch } = rawArgs as Record<string, unknown>;
         const v = validateAgentPatch(rawPatch, (pid) => !!db.getProfile(pid), { allowEndpointFlags: false });
         if (!v.ok) return ok({ error: v.error });
+        // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
+        const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
-        return ok(db.getAgent(resolved.id));
+        const updated = db.getAgent(resolved.id);
+        return ok(warning ? { ...updated, promptWarning: warning } : updated);
       },
     );
 
@@ -870,7 +874,7 @@ export class PlatformMcpRouter {
       },
       async ({ sourceAgentId, targetProjectId, nameOverride, promptPatch }) => {
         const res = cloneAgentCore(db, sourceAgentId, targetProjectId, { nameOverride, promptPatch });
-        return res.ok ? ok(res.agent) : ok({ error: res.error });
+        return res.ok ? ok(res.promptWarning ? { ...res.agent, promptWarning: res.promptWarning } : res.agent) : ok({ error: res.error });
       },
     );
 
@@ -901,7 +905,7 @@ export class PlatformMcpRouter {
             nameOverride: t.nameOverride, promptPatch: t.promptPatch,
           });
           return res.ok
-            ? { targetProjectId: t.targetProjectId, agent: res.agent }
+            ? { targetProjectId: t.targetProjectId, agent: res.promptWarning ? { ...res.agent, promptWarning: res.promptWarning } : res.agent }
             : { targetProjectId: t.targetProjectId, error: res.error };
         });
         return ok(results);

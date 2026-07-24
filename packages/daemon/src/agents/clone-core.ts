@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { Agent } from "@loom/shared";
 import type { Db } from "../db.js";
 import { isPlatformProfile } from "../profiles/seed.js";
+import { agentCreatePromptWarning } from "./promptLint.js";
 
 /**
  * Shared core behind agent_create/agent_clone/agent_clone_batch (mcp/platform.ts) AND the companion
@@ -12,7 +13,7 @@ export function createAgentCore(
   db: Db,
   { projectId, name, startupPrompt, profileId }:
     { projectId: string; name: string; startupPrompt?: string; profileId?: string | null },
-): { ok: true; agent: Agent } | { ok: false; error: string } {
+): { ok: true; agent: Agent; promptWarning: string | null } | { ok: false; error: string } {
   if (!db.getProject(projectId)) return { ok: false, error: "project not found" };
   // Option B: a caller may ASSIGN an existing human-authored profile but never create one — a provided
   // profileId MUST resolve (else reject). Absent/null ⇒ profile-less agent.
@@ -27,7 +28,8 @@ export function createAgentCore(
     endpoint: false, ioSchema: null,
   };
   db.insertAgent(agent);
-  return { ok: true, agent };
+  // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
+  return { ok: true, agent, promptWarning: agentCreatePromptWarning(db, { startupPrompt, profileId }) };
 }
 
 // Least-privilege guard shared by every clone call site: a clone carries the source agent's profileId
@@ -59,7 +61,7 @@ export function cloneAgentCore(
   db: Db,
   sourceAgentId: string, targetProjectId: string,
   patch: { nameOverride?: string; promptPatch?: string },
-): { ok: true; agent: Agent } | { ok: false; error: string } {
+): { ok: true; agent: Agent; promptWarning: string | null } | { ok: false; error: string } {
   const source = db.getAgent(sourceAgentId);
   if (!source) return { ok: false, error: "source agent not found" };
   const roleErr = clonedProfileRoleError(db, source.profileId);

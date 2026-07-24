@@ -12,6 +12,7 @@ import {
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
+import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
@@ -6791,7 +6792,7 @@ export class SessionService {
   updateAgentPreset(
     managerSessionId: string, agentId: string,
     patch: { name?: string; startupPrompt?: string; appendToStartupPrompt?: string },
-  ): Agent {
+  ): Agent & { promptWarning?: string } {
     this.requireManager(managerSessionId, "agent_update");
     const agent = this.resolveManagerAgentRef(managerSessionId, agentId);
     this.requireOwnProject(managerSessionId, agent.projectId, "agent_update");
@@ -6803,7 +6804,12 @@ export class SessionService {
       : patch.startupPrompt;
     this.db.updateAgent(agent.id, { name: patch.name, startupPrompt });
     this.auditManage(managerSessionId, "agent_update", { agentId: agent.id, fields: Object.keys(patch).filter((k) => (patch as Record<string, unknown>)[k] !== undefined) });
-    return this.db.getAgent(agent.id)!;
+    const updated = this.db.getAgent(agent.id)!;
+    // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts. This is the
+    // one agent_update path that bypasses validateAgentPatch entirely (updateAgentPreset predates it),
+    // so the lint is called directly here against the agent's now-current profile/prompt.
+    const warning = agentUpdatePromptWarning(this.db, updated, {});
+    return warning ? { ...updated, promptWarning: warning } : updated;
   }
 
   /**

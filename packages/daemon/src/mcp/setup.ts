@@ -11,6 +11,7 @@ import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
 import { expandTilde } from "../paths.js";
 import { validateProfile, agentProfileKeyError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
+import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { validateAgentProjectConfigOverride, mergeConfigOverride, CONFIG_TOP_LEVEL_KEYS } from "./platform.js";
 import { ensureVaultRoot } from "../vault/writer.js";
 import { validateVaultPath } from "../projects/vault-path.js";
@@ -360,7 +361,9 @@ export class SetupMcpRouter {
           endpoint: false, ioSchema: null,
         };
         db.insertAgent(agent);
-        return ok(agent);
+        // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
+        const warning = agentCreatePromptWarning(db, { startupPrompt, profileId });
+        return ok(warning ? { ...agent, promptWarning: warning } : agent);
       },
     );
 
@@ -404,8 +407,11 @@ export class SetupMcpRouter {
           const roleErr = setupRoleError(db.getProfile(v.patch.profileId)?.role);
           if (roleErr) return ok({ error: roleErr });
         }
+        // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
+        const warning = agentUpdatePromptWarning(db, resolved, v.patch);
         db.updateAgent(resolved.id, v.patch);
-        return ok(db.getAgent(resolved.id));
+        const updated = db.getAgent(resolved.id);
+        return ok(warning ? { ...updated, promptWarning: warning } : updated);
       },
     );
 

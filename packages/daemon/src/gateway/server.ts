@@ -64,6 +64,7 @@ import { writeVaultFile, createVaultFile, deleteVaultFile } from "../vault/write
 import { listSkills, readSkill, writeSkill, deleteSkill, resetSkillToBundled, publishSkillToBundled, isValidSkillName, skillTemplate, skillUpdateAvailable, previewSkillMerge, adoptSkillUpdate, skillUpdateDiff, skillFileDiff, resolveSkillFile } from "../skills/store.js";
 import { validateProfile, capabilityGrantBindingError } from "../profiles/validate.js";
 import { validateAgentPatch } from "../agents/validate.js";
+import { agentCreatePromptWarning, agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { cloneAgentCore } from "../agents/clone-core.js";
 import { resetProfileToBundled } from "../profiles/seed.js";
 import { profileCustomizationState, profileUpdateAvailable, previewProfileMerge, profileUpdateDiff, adoptProfileUpdate, type ProfileFieldResolution } from "../profiles/customization.js";
@@ -1553,8 +1554,10 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     if (typeof b.startupPrompt !== "string" || b.startupPrompt.length > COMPANION_PROMPT_MAX) {
       return reply.code(400).send({ error: `startupPrompt must be a string of at most ${COMPANION_PROMPT_MAX} characters` });
     }
+    // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
+    const warning = agentUpdatePromptWarning(deps.db, r.agent, { startupPrompt: b.startupPrompt });
     deps.db.updateAgent(r.agent.id, { startupPrompt: b.startupPrompt });
-    return { sessionId, startupPrompt: b.startupPrompt, baseBrief: ASSISTANT_BASE_BRIEF };
+    return { sessionId, startupPrompt: b.startupPrompt, baseBrief: ASSISTANT_BASE_BRIEF, promptWarning: warning ?? undefined };
   });
 
   app.get("/api/companion/skills/:sessionId", async (req, reply) => {
@@ -4073,7 +4076,9 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
       endpoint: false, ioSchema: null, // Agent Runs R1: new agents are non-endpoint (flip via PATCH below)
     };
     deps.db.insertAgent(agent);
-    return reply.code(201).send(agent);
+    // Advisory only (card 5338a86a) — never blocks the create; see agents/promptLint.ts.
+    const warning = agentCreatePromptWarning(deps.db, { startupPrompt: agent.startupPrompt, profileId: agent.profileId });
+    return reply.code(201).send(warning ? { ...agent, promptWarning: warning } : agent);
   });
 
   // Edit an agent preset (name / startup prompt / profile / Agent Runs endpoint flag). Same store the
@@ -4084,14 +4089,18 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // can never self-publish as an endpoint, mirroring how profile role / gateCommand are gated.
   app.post("/api/agents/:id", async (req, reply) => {
     const id = (req.params as { id: string }).id;
-    if (!deps.db.getAgent(id)) return reply.code(404).send({ error: "agent not found" });
+    const existing = deps.db.getAgent(id);
+    if (!existing) return reply.code(404).send({ error: "agent not found" });
     // PATCH validation + normalization is shared with the elevated loom-platform agent_update MCP tool
     // (agents/validate.ts) so the two write paths can't diverge. allowEndpointFlags:true keeps the
     // HUMAN-only endpoint/ioSchema (Agent Runs R1) writable here — the MCP path passes false.
     const v = validateAgentPatch(req.body, (pid) => !!deps.db.getProfile(pid), { allowEndpointFlags: true });
     if (!v.ok) return reply.code(v.kind === "notFound" ? 404 : 400).send({ error: v.error });
+    // Advisory only (card 5338a86a) — never blocks the update; see agents/promptLint.ts.
+    const warning = agentUpdatePromptWarning(deps.db, existing, v.patch);
     deps.db.updateAgent(id, v.patch);
-    return deps.db.getAgent(id);
+    const updated = deps.db.getAgent(id);
+    return warning ? { ...updated, promptWarning: warning } : updated;
   });
 
   // --- Agent Runs R1: project-scoped API keys (HUMAN-only, loopback REST — a TRUST-BOUNDARY surface
