@@ -3115,11 +3115,23 @@ export class PtyHost {
           this.markReady(sessionId); // idempotent: a repeat SessionStart still ensures readiness
         }
         break;
-      case "UserPromptSubmit":
+      case "UserPromptSubmit": {
         // Observed for EVERY turn, including the fresh-spawn startup-prompt arg — the FIRST one proves a
         // turn actually started, closing scheduleKickoffGuarantee's fallback window and healIfStuck's
         // short pre-first-turn stale window (see both). Idempotent after the first.
         live.firstTurnStarted = true;
+        // Card fca6af6d (REVERSE-order race, follow-up to b4b9b707): capture whether a submit() was
+        // OUTSTANDING for THIS hook BEFORE the line below flips enterConfirmed to true — this is the
+        // discriminator between the two cases a non-null pendingRawOwnerSubmit can mean below.
+        //   - outstanding-submit was false (no submit in flight) → this hook confirms a genuine
+        //     raw-terminal-originated turn (writeStdin's Enter IS what started it) → attribute.
+        //   - outstanding-submit was true (a submit()'s Enter is being confirmed) → ANY pendingRawOwnerSubmit
+        //     seen here can only have raced in during the async gap between that submit() clearing the
+        //     field and ITS OWN hook firing (submit() is the sole writer that clears it, and it clears it
+        //     before writing a byte — see the field's doc) — a raced-in HUMAN line, but not this turn's
+        //     own attestation. Attributing it here would credit the agent-originated submit's turn with
+        //     words the human typed for some other (possibly never-realized) turn. Discard, don't attribute.
+        const submitWasOutstanding = !live.enterConfirmed;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
         this.purgeConfirmedGiveUpRequeue(sessionId, live, false); // card 441499ee/09e655d5 — see the method doc; UserPromptSubmit purges without advancing the queue
         // Card b4b9b707: attribute a raw-terminal-typed line to THIS turn's ownerText. SECURITY INVARIANT
@@ -3133,12 +3145,15 @@ export class PtyHost {
         // attributed or discarded as stale, it must never survive this check to a later turn.
         if (live.pendingRawOwnerSubmit !== null) {
           const fresh = live.pendingRawOwnerSubmitAt !== null && Date.now() - live.pendingRawOwnerSubmitAt <= RAW_OWNER_SUBMIT_TTL_MS;
-          if (fresh) this.attributeOwnerText(live, live.pendingRawOwnerSubmit);
+          // Card fca6af6d: fresh alone is not enough — a raced-in raw line confirmed by a submit()'s OWN
+          // outstanding Enter (submitWasOutstanding) must NOT be credited to that submit-originated turn.
+          if (fresh && !submitWasOutstanding) this.attributeOwnerText(live, live.pendingRawOwnerSubmit);
           live.pendingRawOwnerSubmit = null;
           live.pendingRawOwnerSubmitAt = null;
         }
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
+      }
       case "Stop":
       case "StopFailure": {
         // ┌─ M2 INVARIANT (busy-gate drain ordering) — DO NOT INTRODUCE AN `await` IN THIS BRANCH ─┐

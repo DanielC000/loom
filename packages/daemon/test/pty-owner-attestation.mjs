@@ -214,6 +214,33 @@ try {
     check("13: a stale (TTL-expired) raw draft is discarded, never attributed to an unrelated later turn", host.getActiveTurnOwnerText(sid) === null);
   }
 
+  // ===== 14. REVERSE-order race (card fca6af6d, follow-up to b4b9b707): a Loom submit() clears
+  // pendingRawOwnerSubmit and goes outstanding FIRST; a raw-terminal Enter races in DURING the gap
+  // before that submit's own UserPromptSubmit hook fires, re-populating the field with a genuine human
+  // line. The hook that then fires is confirming the SUBMIT's Enter (enqueueStdin drained it
+  // synchronously — enterConfirmed is false the instant writeStdin races in), not the human's raced-in
+  // line — so it must NOT attribute that human text to this agent-originated turn. This is the mirror
+  // image of test 11 (raw-then-submit, already correct): here the SUBMIT lands first, and a raw line
+  // races in AFTER it but BEFORE its confirming hook.
+  {
+    const sid = newSession("N"); SIDS.push(sid);
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent"); // submit() outstanding — enterConfirmed now false
+    host.writeStdin(sid, "raced human line\r"); // races in BEFORE the submit's own hook fires — sets pendingRawOwnerSubmit
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // confirms the SUBMIT's Enter, not the raced raw line
+    check("14: a raw line raced in behind an outstanding submit() is NOT attributed to that submit-originated turn", host.getActiveTurnOwnerText(sid) === null);
+  }
+
+  // ===== 15. Discriminator regression guard: a genuine raw-terminal Enter with NO submit() outstanding
+  // still attests correctly (enterConfirmed was already true before the hook fires — the forward case
+  // the fix must not break) =====
+  {
+    const sid = newSession("O"); SIDS.push(sid);
+    const line = "confirmed via raw terminal";
+    host.writeStdin(sid, `${line}\r`); // no submit() in flight — enterConfirmed is already true
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // this hook confirms the raw Enter's OWN turn
+    check("15: a genuine raw-terminal Enter (no submit outstanding) still attests correctly", host.getActiveTurnOwnerText(sid) === line);
+  }
+
   await sleep(200); // let async paste-ends/Enters flush before teardown
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -221,6 +248,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed."
+  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed. Card fca6af6d (the REVERSE-order race): a raw line that races in BEHIND an already-outstanding submit() — before that submit's own confirming hook fires — is likewise never attributed to the submit-originated turn, while a genuine raw-terminal Enter with no submit outstanding still attests correctly (the enterConfirmed-captured-before-hook discriminator)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
