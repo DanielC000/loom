@@ -1123,6 +1123,10 @@ CREATE TABLE IF NOT EXISTS project_memory (
   pinned INTEGER NOT NULL DEFAULT 0,      -- pinned notes ride IN FULL on every kickoff, NEVER evicted
   tags TEXT NOT NULL DEFAULT '[]',        -- JSON string[]
   version INTEGER NOT NULL DEFAULT 1,     -- monotonic CAS token (card a5f98bb4) — +1 on every write, in SQL
+  request_ids TEXT,                       -- nullable JSON string[] of linked Request ids (card e6d270b3);
+                                           -- NULL means "links nothing" — resolved against the LIVE requests
+                                           -- store at read time, never frozen here (see toProjectMemoryEntry
+                                           -- + sessions/project-memory-request-links.ts)
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   last_retrieved_at TEXT,                 -- NULL until first retrieved; feeds LRU-by-retrieval eviction
@@ -1478,6 +1482,10 @@ const PROJECT_MEMORY_ADDED_COLUMNS: Record<string, string> = {
   // legacy row to version 1 in place — the same starting point a brand-new row gets, so a pre-existing
   // note's first post-migration write is a normal version-1→2 update, nothing special-cased.
   version: "INTEGER NOT NULL DEFAULT 1",
+  // Request-link annotation (card e6d270b3). Nullable, no DEFAULT (mirrors held_by/repo_key in
+  // TASK_ADDED_COLUMNS) — every pre-existing note backfills to NULL ("links nothing"), identical to the
+  // behavior a brand-new note gets when its writer simply omits `requestIds`.
+  request_ids: "TEXT",
 };
 
 /** Columns added to `companion_config` after its initial ship; applied to existing DBs by
@@ -5073,23 +5081,27 @@ export class Db {
    *  The agent-facing memory_write path goes through {@link upsertProjectMemoryChecked} instead. */
   upsertProjectMemory(
     projectId: string,
-    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[] },
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[] },
     maxNotes: number,
   ): ProjectMemoryEntry {
     const now = new Date().toISOString();
-    // PATCH semantics on update (card 249004c3): title/pinned/tags each bind as SQL NULL when the caller
-    // omits them, and COALESCE against the pre-existing row's own column in the ON CONFLICT branch — an
-    // omitted field survives an update untouched instead of resetting to a default. A brand-new row has
-    // no existing value to fall back to, so the INSERT branch's COALESCE lands on the same "" / false / []
-    // defaults the old unconditional bind used — the create path is byte-identical either way. An
-    // EXPLICIT clear (pinned:false, tags:[], or title:"") still binds a concrete non-null value, so
-    // COALESCE takes it as-is — the escape hatch stays reachable.
+    // PATCH semantics on update (card 249004c3, extended to requestIds by card e6d270b3): title/pinned/
+    // tags/requestIds each bind as SQL NULL when the caller omits them, and COALESCE against the
+    // pre-existing row's own column in the ON CONFLICT branch — an omitted field survives an update
+    // untouched instead of resetting to a default. A brand-new row has no existing value to fall back to,
+    // so the INSERT branch's COALESCE lands on the same "" / false / [] defaults the old unconditional
+    // bind used — the create path is byte-identical either way. requestIds has no such default to
+    // coalesce to on INSERT (NULL — "links nothing" — IS its correct create-time default), so it binds
+    // directly rather than via COALESCE there. An EXPLICIT clear (pinned:false, tags:[], requestIds:[], or
+    // title:"") still binds a concrete non-null value, so COALESCE takes it as-is on UPDATE — the escape
+    // hatch stays reachable.
     this.db.prepare(
-      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, created_at, updated_at, last_retrieved_at, retrieval_count, version)
-       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @now, @now, NULL, 0, 1)
+      `INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, request_ids, created_at, updated_at, last_retrieved_at, retrieval_count, version)
+       VALUES (@id, @projectId, @key, COALESCE(@title, ''), @text, COALESCE(@pinned, 0), COALESCE(@tags, '[]'), @requestIds, @now, @now, NULL, 0, 1)
        ON CONFLICT(project_id, key) DO UPDATE SET
          title = COALESCE(@title, title), text = @text,
          pinned = COALESCE(@pinned, pinned), tags = COALESCE(@tags, tags),
+         request_ids = COALESCE(@requestIds, request_ids),
          updated_at = @now, version = version + 1`,
     ).run({
       id: randomUUID(),
@@ -5099,6 +5111,7 @@ export class Db {
       text: input.text,
       pinned: input.pinned === undefined ? null : (input.pinned ? 1 : 0),
       tags: input.tags === undefined ? null : JSON.stringify(input.tags),
+      requestIds: input.requestIds === undefined ? null : JSON.stringify(input.requestIds),
       now,
     });
     this.evictProjectMemoryOverCap(projectId, maxNotes);
@@ -5130,7 +5143,7 @@ export class Db {
    */
   upsertProjectMemoryChecked(
     projectId: string,
-    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[] },
+    input: { key: string; title?: string; text: string; pinned?: boolean; tags?: string[]; requestIds?: string[] },
     maxNotes: number,
     baseVersion: number | undefined,
   ): { ok: true; entry: ProjectMemoryEntry } | { ok: false; current: ProjectMemoryEntry } {
@@ -6535,6 +6548,15 @@ function toProjectMemoryEntry(r0: unknown): ProjectMemoryEntry {
     lastRetrievedAt: (r.last_retrieved_at as string | null) ?? null,
     retrievalCount: (r.retrieval_count as number) ?? 0,
     version: (r.version as number) ?? 1,
+    requestIds: (() => {
+      const raw = r.request_ids as string | null;
+      if (!raw) return null;
+      try {
+        return JSON.parse(raw) as string[];
+      } catch {
+        return null;
+      }
+    })(),
   };
 }
 /** Turn free-form kickoff/task text into a safe FTS5 MATCH query: split into word tokens, drop short

@@ -558,7 +558,12 @@ mid-report — before sending anything.
    asking voice** ("PENDING request `<id>` asks the owner to authorize X"), never the decided form: a
    decided-voice note becomes false authority the moment it outlives the pending state; the id lets any
    later reader check the LIVE state via the non-consuming `task_requests_list` / `task_request_get`
-   reads.
+   reads. **Also pass that same id via `memory_write`'s `requestIds` param** — every future read of the
+   note (kickoff injection, `memory_read`, `memory_list`) then re-resolves it against the LIVE requests
+   store and appends `[linked request <id>: <STATE> as of <date>]` automatically, so the note
+   self-corrects the moment the owner answers it instead of relying on a reader remembering to check by
+   hand; asking-voice phrasing in `text` stays the human-readable fallback, `requestIds` is what makes
+   the check automatic.
 9. **Verify the whole, not just the parts.** Before declaring a phase done, require an integrated
    end-to-end pass; eyeball what can't be verified automatically. For visual/UI work the eyeball is
    *yours* — verifying it "done" means *seeing* it. **Prefer the Playwright/`browserTesting` path**: if

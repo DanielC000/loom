@@ -3350,12 +3350,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // Memory — the read-only, per-project window into project_memory (the durable knowledge the fleet
   // writes + recalls via the `memory` MCP: memory_write/read/list/forget). PROJECT-SCOPED: the db
   // query filters by projectId (WHERE project_id = ?), so this ONLY ever returns THIS project's own
-  // memory — never another project's. REUSES db.listProjectMemory (the same method backing the
-  // memory_list MCP tool), returning full entries — pinned flag + retrievalCount + updatedAt + the
-  // note text — so a single list read backs BOTH the entry list and the note-detail body (the corpus
-  // is small by design: dozens to low-hundreds of short ≤4KB notes). HUMAN-only loopback read, same
-  // trust posture as the sibling /board + /vault project reads; READ-ONLY — no write/forget surface
-  // here (curation stays the memory MCP's job).
+  // memory — never another project's. Calls db.listProjectMemory DIRECTLY (raw rows, no
+  // `requestAnnotations`) rather than the memory_list MCP tool's business logic — that tool wraps the
+  // same rows with a live-resolved-request-link annotation (card e6d270b3); this route deliberately
+  // doesn't, since the owner viewing this page can already see a request's live state via the Requests
+  // UI directly. Returns full entries — pinned flag + retrievalCount + updatedAt + the note text — so a
+  // single list read backs BOTH the entry list and the note-detail body (the corpus is small by design:
+  // dozens to low-hundreds of short ≤4KB notes). HUMAN-only loopback read, same trust posture as the
+  // sibling /board + /vault project reads; READ-ONLY — no write/forget surface here (curation stays the
+  // memory MCP's job).
   app.get("/api/projects/:id/memory", async (req, reply) => {
     const p = deps.db.getProject((req.params as { id: string }).id);
     if (!p) return reply.code(404).send({ error: "project not found" });

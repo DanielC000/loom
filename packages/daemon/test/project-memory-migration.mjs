@@ -243,7 +243,112 @@ try {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome2, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
 }
 
+// ===== THIRD scenario (card e6d270b3): a pre-`request_ids`-column project_memory DB — the EXACT shape
+// every real Loom install has TODAY (has `version` from card a5f98bb4, but no `request_ids` yet). Proves
+// migrateProjectMemory()'s new ADD COLUMN reaches an existing table with real rows, backfills every
+// pre-existing note's requestIds to null ("links nothing" — identical to the behavior a brand-new note
+// gets when its writer omits requestIds), and that a POST-migration write with requestIds persists and
+// round-trips correctly against a note that predates the migration. A SEPARATE tmp dir — the first two
+// scenarios' `finally` blocks above already deleted their own tmpHomes.
+const tmpHome3 = path.join(os.tmpdir(), `loom-pm-requestids-migration-${Date.now()}-${process.pid}`);
+fs.mkdirSync(tmpHome3, { recursive: true });
+const dbFile3 = path.join(tmpHome3, "legacy-pre-request-ids-column.db");
+const projId3 = randomUUID();
+const noteId3 = randomUUID();
+const t2 = "2026-01-01T00:00:00.000Z";
+
+{
+  const raw = new Database(dbFile3);
+  raw.pragma("journal_mode = WAL");
+  raw.exec(`
+    CREATE TABLE projects (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL, vault_path TEXT NOT NULL,
+      config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT, reserved INTEGER NOT NULL DEFAULT 0
+    );
+    -- project_memory WITH version (card a5f98bb4) but WITHOUT request_ids — the real shape every Loom
+    -- install has today, immediately before this card.
+    CREATE TABLE project_memory (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL REFERENCES projects(id),
+      key TEXT NOT NULL,
+      title TEXT NOT NULL DEFAULT '',
+      text TEXT NOT NULL,
+      pinned INTEGER NOT NULL DEFAULT 0,
+      tags TEXT NOT NULL DEFAULT '[]',
+      version INTEGER NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      last_retrieved_at TEXT,
+      retrieval_count INTEGER NOT NULL DEFAULT 0,
+      UNIQUE(project_id, key)
+    );
+    CREATE INDEX idx_project_memory_project ON project_memory(project_id, pinned, last_retrieved_at);
+    CREATE VIRTUAL TABLE project_memory_fts USING fts5(title, text, content='project_memory', content_rowid='rowid');
+    CREATE TRIGGER project_memory_ai AFTER INSERT ON project_memory BEGIN
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+    CREATE TRIGGER project_memory_ad AFTER DELETE ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+    END;
+    CREATE TRIGGER project_memory_au AFTER UPDATE OF title, text ON project_memory BEGIN
+      INSERT INTO project_memory_fts(project_memory_fts, rowid, title, text) VALUES ('delete', old.rowid, old.title, old.text);
+      INSERT INTO project_memory_fts(rowid, title, text) VALUES (new.rowid, new.title, new.text);
+    END;
+  `);
+  raw.prepare("INSERT INTO projects (id, name, repo_path, vault_path, config_json, created_at, archived_at, reserved) VALUES (?, ?, ?, ?, '{}', ?, NULL, 0)")
+    .run(projId3, "Pre-RequestIds Project", projId3, projId3, t2);
+  // A real pre-existing note, written before request_ids existed — this is the row the migration must reach.
+  raw.prepare(
+    "INSERT INTO project_memory (id, project_id, key, title, text, pinned, tags, version, created_at, updated_at, last_retrieved_at, retrieval_count) VALUES (?, ?, 'pre-existing-note', 'A note from before request links', 'this note predates the request_ids column', 0, '[]', 1, ?, ?, NULL, 0)",
+  ).run(noteId3, projId3, t2, t2);
+  raw.close();
+
+  const cols0 = new Set(new Database(dbFile3, { readonly: true }).prepare("PRAGMA table_info(project_memory)").all().map((c) => c.name));
+  check("(rid-migrate setup) the synthesized pre-migration table has NO request_ids column yet", !cols0.has("request_ids"));
+}
+
+let db3;
+try {
+  let ctorError3 = null;
+  try {
+    const { Db } = await import("../dist/db.js");
+    db3 = new Db(dbFile3);
+  } catch (err) {
+    ctorError3 = err;
+  }
+  check("(rid-migrate) constructing Db against a pre-request_ids-column project_memory DB does not throw", ctorError3 === null);
+  if (ctorError3) console.log(`    threw: ${ctorError3?.stack || ctorError3}`);
+
+  if (!ctorError3) {
+    const raw2 = new Database(dbFile3, { readonly: true });
+    try {
+      const cols = raw2.prepare("PRAGMA table_info(project_memory)").all().map((c) => c.name);
+      check("(rid-migrate) the `request_ids` column was added to the existing table", cols.includes("request_ids"));
+    } finally {
+      raw2.close();
+    }
+
+    // ===== the pre-existing row backfills to requestIds:null ("links nothing"), untouched otherwise =====
+    const preExisting = db3.getProjectMemoryByKey(projId3, "pre-existing-note");
+    check("(rid-migrate) the pre-existing note is still readable post-migration", preExisting?.text === "this note predates the request_ids column");
+    check("(rid-migrate) the pre-existing note backfills requestIds to null (same as a brand-new note that never linked anything)", preExisting?.requestIds === null);
+    check("(rid-migrate) the pre-existing note's version survived the migration untouched", preExisting?.version === 1);
+
+    // ===== a POST-migration write with requestIds actually persists against this upgraded-in-place row =====
+    const updated = db3.upsertProjectMemoryChecked(projId3, { key: "pre-existing-note", text: "the real next edit", requestIds: ["req-after-migration"] }, 500, preExisting.version);
+    check("(rid-migrate) a post-migration write with requestIds against a MIGRATED row succeeds", updated.ok === true);
+    check("(rid-migrate) requestIds actually persisted on the migrated row", Array.isArray(updated.entry?.requestIds) && updated.entry.requestIds[0] === "req-after-migration");
+
+    // ===== a brand-new post-migration note with no requestIds behaves exactly as before this card =====
+    const fresh = db3.upsertProjectMemory(projId3, { key: "brand-new-post-migration", text: "no links here" }, 500);
+    check("(rid-migrate) a brand-new post-migration note with requestIds omitted defaults to null", fresh.requestIds === null);
+  }
+} finally {
+  try { db3?.close(); } catch { /* ignore */ }
+  for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome3, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows."
+  ? "\n✅ ALL PASS — Db boots clean against a real pre-project_memory legacy DB (the brand-new-table CREATE TABLE IF NOT EXISTS additive migration never references data that isn't there yet), project_memory + project_memory_fts + all three sync triggers land correctly, pre-existing rows are untouched, and the full write/search/upsert/evict/forget round-trip works against the upgraded-in-place DB (not just table-exists — the FTS5 triggers are actually wired). Also: Db boots clean against a real pre-`version`-column project_memory DB (card a5f98bb4), migrateProjectMemory() ADD COLUMNs `version` and backfills every pre-existing row to 1 in place, and the version-based optimistic-concurrency guard (stale-rejected, correct-accepted, version bumps by exactly 1) works correctly against a note that predates the migration — not just against brand-new rows. Also: Db boots clean against a real pre-`request_ids`-column project_memory DB (card e6d270b3 — the exact shape every Loom install has TODAY), migrateProjectMemory() ADD COLUMNs `request_ids`, every pre-existing note backfills requestIds to null, and a post-migration requestIds write persists correctly against a note that predates the migration."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

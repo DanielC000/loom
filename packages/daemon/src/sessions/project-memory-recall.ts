@@ -1,6 +1,7 @@
 import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
+import { annotateRequestLinks } from "./project-memory-request-links.js";
 
 /**
  * Loom PROJECT MEMORY — project-scoped SHARED knowledge (card 2fd9abf9), the fleet-wide sibling of the
@@ -32,6 +33,12 @@ import type { Db } from "../db.js";
  * Known remaining gap: the platform/auditor spawn paths do not inject project memory — they sit above/
  * outside the per-project board this feature is scoped to, so there's no natural project to retrieve
  * notes from; not pursued further here.
+ *
+ * Card e6d270b3: a note may link one or more Requests (`ProjectMemoryEntry.requestIds`, set via
+ * `memory_write`). Those links are resolved to a live annotation line PER NOTE, PER READ, right here in
+ * `composeProjectMemoryDigest`'s `annotate` callback (see project-memory-request-links.ts) — so a note
+ * written in asking voice about a PENDING request self-corrects the moment the owner answers it, instead
+ * of freezing that word forever across every future kickoff.
  */
 
 export const PROJECT_MEMORY_TAG = "[loom:project-memory]";
@@ -53,9 +60,13 @@ function sanitizeTitle(title: string): string {
   return title.replace(/\s+/g, " ").trim();
 }
 
-function noteBlock(m: ProjectMemoryEntry): string {
+/** `annotations` (card e6d270b3) — one live-resolved line per linked Request id, appended AFTER the note's
+ *  own body so a stale decided/pending claim in `text` is immediately followed by the current truth. `[]`
+ *  (a note that links nothing, or no `annotate` callback supplied) ⇒ byte-identical to before this card. */
+function noteBlock(m: ProjectMemoryEntry, annotations: string[] = []): string {
   const title = sanitizeTitle(m.title) || m.key;
-  return `### ${title} (${m.key})\n${m.text.trim()}`;
+  const lines = [`### ${title} (${m.key})`, m.text.trim(), ...annotations];
+  return lines.join("\n");
 }
 
 /**
@@ -79,6 +90,11 @@ export function composeProjectMemoryDigest(
   pinned: ProjectMemoryEntry[],
   related: ProjectMemoryEntry[],
   budgetTokens: number,
+  /** Card e6d270b3 — resolves a note's linked Request ids to live annotation lines. Defaults to "no
+   *  annotations" so every pre-existing call site (incl. every hermetic test fixed against fixture
+   *  entries with no DB) stays byte-identical. The real caller ({@link retrieveProjectMemoryForKickoff})
+   *  passes a callback backed by {@link annotateRequestLinks}. */
+  annotate: (m: ProjectMemoryEntry) => string[] = () => [],
 ): { digest: string | null; includedIds: string[] } {
   if (pinned.length === 0 && related.length === 0) return { digest: null, includedIds: [] };
   const includedIds: string[] = [];
@@ -88,9 +104,10 @@ export function composeProjectMemoryDigest(
   {
     const blocks: string[] = [];
     for (const m of pinnedSorted) {
-      const candidate = ["## Pinned project memory (always included)", ...blocks, noteBlock(m)].join(SECTION_SEP);
+      const block = noteBlock(m, annotate(m));
+      const candidate = ["## Pinned project memory (always included)", ...blocks, block].join(SECTION_SEP);
       if (estimateTokens(candidate) > budgetTokens) continue; // pack maximally: skip an oversized note, keep trying the rest
-      blocks.push(noteBlock(m));
+      blocks.push(block);
       pinnedSection = candidate;
       includedIds.push(m.id);
     }
@@ -104,9 +121,10 @@ export function composeProjectMemoryDigest(
     const blocks: string[] = [];
     const remaining = budgetTokens - usedTokens - (pinnedSection ? estimateTokens(SECTION_SEP) : 0);
     for (const m of related) {
-      const candidate = ["## Related project memory (matched your kickoff)", ...blocks, noteBlock(m)].join(SECTION_SEP);
+      const block = noteBlock(m, annotate(m));
+      const candidate = ["## Related project memory (matched your kickoff)", ...blocks, block].join(SECTION_SEP);
       if (estimateTokens(candidate) > remaining) break;
-      blocks.push(noteBlock(m));
+      blocks.push(block);
       relatedSection = candidate;
       includedIds.push(m.id);
     }
@@ -135,8 +153,9 @@ export function buildFramedProjectMemory(
   pinned: ProjectMemoryEntry[],
   related: ProjectMemoryEntry[],
   budgetTokens: number,
+  annotate: (m: ProjectMemoryEntry) => string[] = () => [],
 ): { framed: string | null; includedIds: string[] } {
-  const { digest, includedIds } = composeProjectMemoryDigest(pinned, related, budgetTokens);
+  const { digest, includedIds } = composeProjectMemoryDigest(pinned, related, budgetTokens, annotate);
   return { framed: digest == null ? null : framedProjectMemory(digest), includedIds };
 }
 
@@ -155,7 +174,8 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const pinned = db.listPinnedProjectMemory(projectId);
   const related = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
   if (pinned.length === 0 && related.length === 0) return null;
-  const { framed, includedIds } = buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens);
+  const annotate = (m: ProjectMemoryEntry) => annotateRequestLinks(db, projectId, m.requestIds);
+  const { framed, includedIds } = buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate);
   if (framed) db.touchProjectMemoryRetrieved(includedIds);
   return framed;
 }

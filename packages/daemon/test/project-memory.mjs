@@ -24,6 +24,7 @@ const {
   composeProjectMemoryDigest, buildFramedProjectMemory, framedProjectMemory, estimateTokens,
   PROJECT_MEMORY_TAG, retrieveProjectMemoryForKickoff,
 } = await import("../dist/sessions/project-memory-recall.js");
+const { annotateRequestLinks } = await import("../dist/sessions/project-memory-request-links.js");
 const { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } = await import("../dist/mcp/memory.js");
 const { resolveConfig, MEMORY_CONFIG_MAX } = await import("@loom/shared");
 
@@ -48,7 +49,7 @@ try {
   }
 
   // ===================== pure compose: composeProjectMemoryDigest =====================
-  const mk = (over) => ({ id: over.id, projectId: projId, key: over.key, title: over.title ?? "", text: over.text, pinned: !!over.pinned, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 0, version: 1 });
+  const mk = (over) => ({ id: over.id, projectId: projId, key: over.key, title: over.title ?? "", text: over.text, pinned: !!over.pinned, tags: [], createdAt: now, updatedAt: now, lastRetrievedAt: null, retrievalCount: 0, version: 1, requestIds: over.requestIds ?? null });
 
   check("(compose) empty pinned + empty related ⇒ digest null, includedIds []", (() => {
     const { digest, includedIds } = composeProjectMemoryDigest([], [], 4000);
@@ -117,6 +118,28 @@ try {
       headerLines.length === 1 && headerLines[0] === "## Pinned project memory (always included)");
     check("(fix4) the title still renders (collapsed to one line) in the note's own header",
       digest.includes("### Normal ## Related project memory (matched your kickoff) Injected (evil-title)"));
+  }
+
+  {
+    // card e6d270b3: composeProjectMemoryDigest's `annotate` callback — no DB involved here, just the
+    // pure wiring (annotate(m) is invoked and its lines land AFTER the note's own body).
+    const note = mk({ id: "p-linked", key: "linked-note", text: "the note body" });
+    const annotate = (m) => (m.id === "p-linked" ? ["[linked request req-1: PENDING as of 2026-07-24]"] : []);
+    const { digest } = composeProjectMemoryDigest([note], [], 4000, annotate);
+    check("(annotate) an annotation line is appended AFTER the note's own body",
+      digest.indexOf("the note body") < digest.indexOf("[linked request req-1: PENDING as of 2026-07-24]"));
+
+    // Backward compat: every pre-existing call site (3-arg, no annotate) is byte-identical to before.
+    const noAnnotate = composeProjectMemoryDigest([note], [], 4000);
+    check("(annotate) omitting the callback entirely produces the same digest as an explicit no-op annotate",
+      noAnnotate.digest === composeProjectMemoryDigest([note], [], 4000, () => []).digest);
+    check("(annotate) omitting the callback never appends a stray annotation line",
+      !noAnnotate.digest.includes("[linked request"));
+
+    // buildFramedProjectMemory forwards the callback through to compose.
+    const framedWithAnnotation = buildFramedProjectMemory([note], [], 4000, annotate);
+    check("(annotate) buildFramedProjectMemory forwards the annotate callback",
+      framedWithAnnotation.framed.includes("[linked request req-1: PENDING as of 2026-07-24]"));
   }
 
   // ===================== framing =====================
@@ -350,6 +373,111 @@ try {
     const seed2 = db.upsertProjectMemory(seedProj, { key: "seeded", text: "second seed, no base needed" }, 500);
     check("(mcp) the blind upsertProjectMemory (e2e seed path) still overwrites with no base check at all", seed2.id === seed1.id && seed2.text === "second seed, no base needed");
     check("(mcp) the blind path still bumps version normally (it just never CHECKS it)", seed1.version === 1 && seed2.version === 2);
+  }
+
+  // ===================== card e6d270b3: linked request state resolved at RECALL time, never write time =====================
+  {
+    const mkQuestion = (over) => ({
+      id: over.id, sessionId: over.sessionId ?? "sess-fixture", projectId: over.projectId,
+      type: over.type ?? "decision", title: over.title ?? "Test question", body: over.body ?? "",
+      options: over.options ?? null, recommendation: over.recommendation ?? null, taskId: over.taskId ?? null,
+      permissionAction: over.permissionAction ?? null, permissionScope: over.permissionScope ?? null,
+      permissionExpiresAt: over.permissionExpiresAt ?? null, credentialEnvVar: over.credentialEnvVar ?? null,
+      provisionTarget: over.provisionTarget ?? null,
+      state: over.state ?? "pending", chosenOption: over.chosenOption ?? null, note: over.note ?? null,
+      createdAt: over.createdAt ?? now, answeredAt: over.answeredAt ?? null, consumedAt: over.consumedAt ?? null,
+      cancelledReason: over.cancelledReason ?? null, cancelledBy: over.cancelledBy ?? null, cancelledAt: over.cancelledAt ?? null,
+    });
+
+    // A single fixture session to satisfy `questions.session_id`'s FK (better-sqlite3 enforces
+    // foreign_keys in this build — see question-orphan-no-successor.mjs) — the FK only checks that the
+    // session ROW exists, it never requires the session's OWN project to match the question's `projectId`,
+    // so one shared session backs every question fixture below regardless of which project it's linked from.
+    const linkProj = "proj-links";
+    const otherProj = "proj-links-other";
+    db.insertProject({ id: "proj-fixture-sess", name: "Fixture Session Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: "agent-fixture", projectId: "proj-fixture-sess", name: "Fixture Agent", startupPrompt: "", position: 0 });
+    db.insertSession({
+      id: "sess-fixture", projectId: "proj-fixture-sess", agentId: "agent-fixture", engineSessionId: null, title: null, cwd: tmpHome,
+      processState: "live", resumability: "resumable", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager",
+    });
+    db.insertProject({ id: linkProj, name: "Links Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    db.insertProject({ id: otherProj, name: "Other Links Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+
+    // A real PENDING request, live on linkProj — the exact incident shape ("owner authorizes ~$30/mo
+    // spend" while the request stays pending).
+    const pendingReqId = "req-pending-1";
+    db.insertQuestion(mkQuestion({ id: pendingReqId, projectId: linkProj, title: "Authorize $30/mo spend?", state: "pending" }));
+    // A real request, but it lives on a DIFFERENT project — constraint (b): must never leak.
+    const crossProjReqId = "req-cross-1";
+    db.insertQuestion(mkQuestion({ id: crossProjReqId, projectId: otherProj, title: "Cross-project secret ask", state: "answered", chosenOption: "yes", note: "super secret answer" }));
+
+    // Pinned so it ALWAYS rides on kickoff injection regardless of FTS match (isolates this test from the
+    // FTS-matching behavior already covered elsewhere).
+    const writeRes = writeProjectMemory(db, linkProj, {
+      key: "spend-note",
+      text: "PENDING request req-pending-1 asks the owner to authorize ~$30/mo spend",
+      pinned: true,
+      requestIds: [pendingReqId, crossProjReqId, "req-does-not-exist"],
+    });
+    check("(links) memory_write with requestIds succeeds", !("error" in writeRes) && !("conflict" in writeRes));
+    check("(links) the stored note's requestIds round-trip in order", Array.isArray(writeRes.requestIds) &&
+      writeRes.requestIds.length === 3 && writeRes.requestIds[0] === pendingReqId);
+
+    // ===== memory_read: all three cases annotate correctly while the request is still PENDING =====
+    const readPending = readProjectMemory(db, linkProj, "spend-note");
+    check("(links) memory_read returns requestAnnotations (one per linked id)", Array.isArray(readPending.requestAnnotations) && readPending.requestAnnotations.length === 3);
+    check("(links) memory_read: the pending request annotates PENDING", readPending.requestAnnotations.some((a) => a.includes(pendingReqId) && a.includes("PENDING")));
+    check("(links) memory_read: cross-project id renders 'not found in this project' (constraint b)", readPending.requestAnnotations.some((a) => a.includes(crossProjReqId) && a.includes("not found in this project")));
+    check("(links) memory_read: cross-project annotation NEVER leaks the other project's real state/title/note", !readPending.requestAnnotations.some((a) => a.includes(crossProjReqId) && (/answered/i.test(a) || a.includes("secret"))));
+    check("(links) memory_read: an unknown/deleted id fails VISIBLY, never silently omitted (constraint a)", readPending.requestAnnotations.some((a) => a.includes("req-does-not-exist") && a.includes("request not found")));
+    check("(links) memory_read: raw `text` is never mutated by the annotation", readPending.text === "PENDING request req-pending-1 asks the owner to authorize ~$30/mo spend");
+
+    // ===== memory_list also annotates (owner decision: memory_list returns full bodies, same exposure as memory_read) =====
+    const listed = listProjectMemoryEntries(db, linkProj);
+    const listedNote = listed.find((e) => e.key === "spend-note");
+    check("(links) memory_list also carries requestAnnotations", !!listedNote && listedNote.requestAnnotations.length === 3);
+    check("(links) memory_list agrees with memory_read on the pending annotation", listedNote.requestAnnotations.some((a) => a.includes(pendingReqId) && a.includes("PENDING")));
+
+    // ===== kickoff injection annotates too (constraint d — not just memory_read) =====
+    const kickoffPending = retrieveProjectMemoryForKickoff(db, linkProj, "totally unrelated kickoff text");
+    check("(links) kickoff injection includes the PENDING annotation", kickoffPending.includes(`[linked request ${pendingReqId}: PENDING as of`));
+    check("(links) kickoff injection ALSO renders the cross-project id as not-found-in-project", kickoffPending.includes(`[linked request ${crossProjReqId}: not found in this project]`));
+    check("(links) kickoff injection ALSO fails visibly on the missing id", kickoffPending.includes("[linked request req-does-not-exist: request not found — may be deleted]"));
+
+    // ===== THE incident this card fixes: pending → answered flips the annotation, at RECALL time, with
+    // NO further memory_write at all (the note's stored text never changes) =====
+    const answered = db.answerQuestion(pendingReqId, { chosenOption: null, note: "approved, go ahead", answeredAt: new Date().toISOString() });
+    check("(links) setup: the request is now actually answered", answered?.state === "answered");
+
+    const readAfterAnswer = readProjectMemory(db, linkProj, "spend-note");
+    check("(links) memory_read: the SAME note now annotates ANSWERED, no memory_write needed", readAfterAnswer.requestAnnotations.some((a) => a.includes(pendingReqId) && a.includes("ANSWERED")));
+    check("(links) memory_read: the PENDING annotation is GONE post-answer (not stacked/duplicated)", !readAfterAnswer.requestAnnotations.some((a) => a.includes(pendingReqId) && a.includes("PENDING")));
+    check("(links) memory_read: the note's stored text is STILL untouched (still says PENDING in prose — the annotation is what corrected, not the text)", readAfterAnswer.text === "PENDING request req-pending-1 asks the owner to authorize ~$30/mo spend");
+
+    const kickoffAfterAnswer = retrieveProjectMemoryForKickoff(db, linkProj, "totally unrelated kickoff text");
+    check("(links) kickoff injection also flips to ANSWERED post-answer, at recall time", kickoffAfterAnswer.includes(`[linked request ${pendingReqId}: ANSWERED as of`));
+
+    // ===== memory_write PATCH semantics extend to requestIds (mirrors tags/pinned) =====
+    const patchLinksProj = "proj-mcp-patch-links";
+    db.insertProject({ id: patchLinksProj, name: "Patch Links Project", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+    const reqA = "req-patch-a";
+    db.insertQuestion(mkQuestion({ id: reqA, projectId: patchLinksProj, state: "pending" }));
+    const created = writeProjectMemory(db, patchLinksProj, { key: "linked", text: "original", requestIds: [reqA] });
+    check("(links-patch) setup: brand-new note lands with requestIds", !("error" in created) && created.requestIds.length === 1);
+    const contentOnly = writeProjectMemory(db, patchLinksProj, { key: "linked", text: "updated text only", baseVersion: created.version });
+    check("(links-patch) a content-only update PRESERVES requestIds (omitted, not reset)", contentOnly.requestIds.length === 1 && contentOnly.requestIds[0] === reqA);
+    const clearedLinks = writeProjectMemory(db, patchLinksProj, { key: "linked", text: contentOnly.text, requestIds: [], baseVersion: contentOnly.version });
+    check("(links-patch) an explicit requestIds:[] clears the links", Array.isArray(clearedLinks.requestIds) && clearedLinks.requestIds.length === 0);
+    const freshNoLinks = writeProjectMemory(db, patchLinksProj, { key: "unlinked", text: "brand new, no links" });
+    check("(links-patch) a brand-new key with requestIds omitted defaults to null (no links)", freshNoLinks.requestIds === null);
+
+    // ===== direct annotateRequestLinks unit coverage (deterministic `now`, no digest/read plumbing) =====
+    const fixedNow = new Date("2026-07-24T00:00:00.000Z");
+    check("(annotate-fn) null requestIds ⇒ [] with zero DB lookups needed", annotateRequestLinks(db, linkProj, null, fixedNow).length === 0);
+    check("(annotate-fn) empty requestIds ⇒ []", annotateRequestLinks(db, linkProj, [], fixedNow).length === 0);
+    const direct = annotateRequestLinks(db, linkProj, [pendingReqId, crossProjReqId, "nope"], fixedNow);
+    check("(annotate-fn) the 'as of' date matches the injected clock, not wall time", direct[0].includes("2026-07-24"));
   }
 
   // ===================== zero metered tokens (structural check) =====================

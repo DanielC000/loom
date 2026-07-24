@@ -1,6 +1,7 @@
 import type { ProjectMemoryEntry } from "@loom/shared";
 import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
+import { annotateRequestLinks } from "../sessions/project-memory-request-links.js";
 
 // Project-scoped SHARED memory tool business logic (card 2fd9abf9). EVERY function takes the projectId
 // resolved SERVER-SIDE from the session id — the agent never passes a projectId, mirroring tasks.ts.
@@ -25,6 +26,15 @@ export interface MemoryWriteInput {
   title?: string;
   pinned?: boolean;
   tags?: string[];
+  /**
+   * Card e6d270b3 — an OPTIONAL, EXPLICIT link to one or more Request ids (`question_ask` rows). Deliberately
+   * explicit, never sniffed out of `text` via regex/UUID-matching — this project already shipped and fixed a
+   * prefix-`taskId` ambiguity bug of exactly that class (`3a3f587`) that silently hid real owner answers.
+   * Every read of this note (kickoff injection, `memory_read`, `memory_list`) re-resolves each linked id's
+   * LIVE state against the requests store, so a note written in asking voice about a PENDING request
+   * self-corrects the moment the owner answers it — see project-memory-request-links.ts.
+   */
+  requestIds?: string[];
   /** The `version` the caller last read for this key (memory_read/memory_list/a prior memory_write
    *  response) — required to UPDATE an existing key; irrelevant for a brand-new one. Deliberately an
    *  integer version counter, NOT a timestamp — see {@link writeProjectMemory}. */
@@ -86,10 +96,15 @@ export function writeProjectMemory(
   if (title && title.length > MAX_TITLE_CHARS) {
     return { error: `title is too long (${title.length} chars, max ${MAX_TITLE_CHARS})` };
   }
+  // Trim/drop blanks only — no format validation (no regex-sniffing a "real" request id; an id that
+  // resolves to nothing just annotates fail-visibly at read time, see project-memory-request-links.ts).
+  const requestIds = input.requestIds === undefined
+    ? undefined
+    : input.requestIds.map((id) => id.trim()).filter((id) => id.length > 0);
   const maxNotes = resolveConfig(db.getProject(projectId)?.config).memory.maxNotes;
   const result = db.upsertProjectMemoryChecked(
     projectId,
-    { key, title, text, pinned: input.pinned, tags: input.tags },
+    { key, title, text, pinned: input.pinned, tags: input.tags, requestIds },
     maxNotes,
     input.baseVersion,
   );
@@ -110,14 +125,30 @@ export function forgetProjectMemory(db: Db, projectId: string, key: string): { o
   return { ok: true, deleted: db.deleteProjectMemory(projectId, key.trim()) };
 }
 
-/** Full listing (small corpus by design — dozens to low-hundreds of short notes, per the card's design
- *  doc) — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to curate. */
-export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntry[] {
-  return db.listProjectMemory(projectId);
+/** A note plus its linked Requests' LIVE state, resolved fresh at read time (card e6d270b3) — see
+ *  project-memory-request-links.ts. `text` itself is never mutated; annotations ride as their own field
+ *  so the raw stored note is always distinguishable from the live-resolved commentary about it. */
+export type ProjectMemoryEntryWithLinks = ProjectMemoryEntry & { requestAnnotations: string[] };
+
+function withLinks(db: Db, projectId: string, entry: ProjectMemoryEntry): ProjectMemoryEntryWithLinks {
+  return { ...entry, requestAnnotations: annotateRequestLinks(db, projectId, entry.requestIds) };
 }
 
-/** Read ONE note in full by key. */
-export function readProjectMemory(db: Db, projectId: string, key: string): ProjectMemoryEntry | { error: string } {
+/**
+ * Full listing (small corpus by design — dozens to low-hundreds of short notes, per the card's design
+ * doc) — pinned first, then most-recently-updated. Use `memory_forget`/re-`memory_write` to curate.
+ * Each row is annotated with its linked Requests' LIVE state (card e6d270b3): `memory_list` returns full
+ * note BODIES (unlike a metadata-only listing), so the same stale-decided-voice text this card exists to
+ * fix would otherwise stand unchallenged here too — annotating only kickoff-injection + `memory_read`
+ * would leave this access path telling a different story.
+ */
+export function listProjectMemoryEntries(db: Db, projectId: string): ProjectMemoryEntryWithLinks[] {
+  return db.listProjectMemory(projectId).map((e) => withLinks(db, projectId, e));
+}
+
+/** Read ONE note in full by key, annotated with its linked Requests' LIVE state (card e6d270b3). */
+export function readProjectMemory(db: Db, projectId: string, key: string): ProjectMemoryEntryWithLinks | { error: string } {
   const found = db.getProjectMemoryByKey(projectId, key.trim());
-  return found ?? { error: `no memory note with key "${key}" on this project` };
+  if (!found) return { error: `no memory note with key "${key}" on this project` };
+  return withLinks(db, projectId, found);
 }

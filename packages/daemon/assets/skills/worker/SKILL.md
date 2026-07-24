@@ -232,7 +232,12 @@ discipline for what you write. **A note that touches an owner gate — a pending
 or spend — must record the REQUEST ID + its STATE, in asking voice** ("PENDING request `<id>` asks the
 owner to authorize X"), never the decided form ("owner authorizes X"): a decided-voice note becomes
 false authority the moment it outlives the pending state, while the recorded id lets any later reader
-check what's true NOW via the non-consuming `task_requests_list` / `task_request_get` reads.
+check what's true NOW via the non-consuming `task_requests_list` / `task_request_get` reads. **Also pass
+that same id via `memory_write`'s `requestIds` param** — every future read of the note (kickoff
+injection, `memory_read`, `memory_list`) then re-resolves it against the LIVE requests store and appends
+`[linked request <id>: <STATE> as of <date>]` automatically, so the note self-corrects the moment the
+owner answers it instead of relying on a reader remembering to check by hand; asking-voice phrasing in
+`text` stays the human-readable fallback, `requestIds` is what makes the check automatic.
 
 **Worktree isolation — stay inside your own tree.** Your worktree may be nested inside another git
 working tree, so a careless relative path can climb out of it. Use **absolute paths** for every

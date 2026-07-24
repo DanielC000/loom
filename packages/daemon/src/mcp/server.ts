@@ -207,13 +207,21 @@ export class TaskMcpRouter {
           "timestamp). Omitting it, or passing a stale one, is REJECTED with `conflict:true` and `current` " +
           "(the note as it stands right now) instead of silently overwriting someone else's write — re-read, " +
           "merge your change into `current.text`, and retry with `baseVersion: current.version`. A brand-new " +
-          "key needs no base, and omitted `title`/`pinned`/`tags` default to \"\"/false/[] on create.",
+          "key needs no base, and omitted `title`/`pinned`/`tags` default to \"\"/false/[] on create. " +
+          "Optional `requestIds`: EXPLICITLY link this note to one or more Request ids (from `question_ask`) " +
+          "instead of writing their state into `text` yourself — every future read (kickoff injection, " +
+          "memory_read, memory_list) re-resolves each linked id's LIVE state and appends " +
+          "`[linked request <id>: <STATE> as of <date>]`, so a note written while a request is PENDING " +
+          "self-corrects the moment the owner answers it instead of saying PENDING forever. Omitting " +
+          "`requestIds` on an update preserves the existing links (same PATCH semantics as `tags`); pass " +
+          "`[]` explicitly to clear them.",
         inputSchema: {
           key: z.string(),
           text: z.string(),
           title: z.string().optional(),
           pinned: z.boolean().optional(),
           tags: z.array(z.string()).optional(),
+          requestIds: z.array(z.string()).optional(),
           baseVersion: z.number().int().optional(),
         },
       },
@@ -226,12 +234,27 @@ export class TaskMcpRouter {
     );
     server.registerTool(
       "memory_list",
-      { description: "List this project's SHARED memory notes (pinned first, then most-recently-updated). Returns NEWLINE-DELIMITED JSON, one note per line.", inputSchema: {} },
+      {
+        description:
+          "List this project's SHARED memory notes (pinned first, then most-recently-updated). Returns " +
+          "NEWLINE-DELIMITED JSON, one note per line. Each note carries `requestAnnotations` — one line per " +
+          "linked `requestIds` entry, resolved against the requests store's LIVE state at THIS read (never " +
+          "frozen at write time): `[linked request <id>: <STATE> as of <date>]`, or a fail-visible " +
+          "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve.",
+        inputSchema: {},
+      },
       async () => okLines(listProjectMemoryEntries(db, projectId)),
     );
     server.registerTool(
       "memory_read",
-      { description: "Read ONE project-scoped memory note in full by key.", inputSchema: { key: z.string() } },
+      {
+        description:
+          "Read ONE project-scoped memory note in full by key. Carries `requestAnnotations` — one line per " +
+          "linked `requestIds` entry, resolved against the requests store's LIVE state at THIS read (never " +
+          "frozen at write time): `[linked request <id>: <STATE> as of <date>]`, or a fail-visible " +
+          "\"request not found — may be deleted\"/\"not found in this project\" if the id doesn't resolve.",
+        inputSchema: { key: z.string() },
+      },
       async ({ key }) => ok(readProjectMemory(db, projectId, key)),
     );
 

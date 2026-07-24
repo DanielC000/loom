@@ -1302,6 +1302,17 @@ export interface ProjectMemoryEntry {
    * This is the field `memory_write`'s `baseVersion` compares against.
    */
   version: number;
+  /**
+   * Card e6d270b3 — an OPTIONAL, EXPLICIT link from this note to one or more Requests (`question_ask`
+   * rows), set via `memory_write`'s `requestIds` param. Never regex-sniffed out of `text` (that class of
+   * bug — an ambiguous 8-char id-prefix match — already shipped and was fixed once, `3a3f587`); an id here
+   * is only ever what the writer explicitly passed. `null` (the common case) means this note links
+   * nothing. The linked request's STATE is deliberately NOT stored here — it's resolved fresh against the
+   * live requests store every time the note is read (kickoff injection / `memory_read` / `memory_list` —
+   * see `sessions/project-memory-request-links.ts`), so a note written while a request was PENDING
+   * self-corrects the moment the owner answers it, instead of freezing "PENDING" forever.
+   */
+  requestIds: string[] | null;
 }
 
 /**
