@@ -48,7 +48,9 @@ const now = new Date().toISOString();
 
 const db = new Db();
 const ptyStopCalls = [];
-const ptyStub = { enqueueStdin() { return { delivered: true }; }, stop(id, mode) { ptyStopCalls.push({ id, mode, at: Date.now() }); } };
+// isAlive/isBusy: card ce7d99bb's bounded wait-for-idle reads these before the deferred `pty.stop` —
+// this test doesn't assert on stop TIMING, so `isBusy:false` lets it proceed straight through (no wait).
+const ptyStub = { enqueueStdin() { return { delivered: true }; }, isAlive() { return true; }, isBusy() { return false; }, stop(id, mode) { ptyStopCalls.push({ id, mode, at: Date.now() }); } };
 const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
 
 const liveWorkerCount = (mgrId) => db.listWorkers(mgrId).filter((w) => w.processState === "live").length;

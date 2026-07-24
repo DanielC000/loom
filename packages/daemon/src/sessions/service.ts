@@ -20,7 +20,7 @@ import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo }
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
-import { readRunUsage, readRunUsageFromFile } from "./context.js";
+import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
 import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../runs/snapshot.js";
 import { composeRunStartupPrompt } from "../runs/prompt.js";
@@ -508,6 +508,19 @@ const MERGE_PATCH_INLINE_CAP = 40_000;
  *  load. Env-overridable (mirrors pty/host.ts's LOOM_GRACEFUL_*_MS seams) so a test can shrink it instead
  *  of waiting out the real bound. */
 const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_000;
+
+/**
+ * Board card ce7d99bb: how long the auto-retire path (`workerReport`'s `autoRetireNoCommit` branch)
+ * gives a worker's final turn a bounded chance to end NATURALLY before its deferred `pty.stop` forces
+ * an interrupt. Mirrors `UPGRADE_BUSY_WAIT_MS`'s shape (same `isBusy` poll, same monotonic-clock bound)
+ * but a MUCH longer bound: a noCommit worker's `worker_report(done)` call is itself a tool call inside
+ * an ACTIVE turn, and the model routinely keeps generating a post-report recap afterward — unlike the
+ * companion-upgrade case, letting that recap finish is the WHOLE POINT here (its own Stop hook is what
+ * captures ctx metrics normally), not just a courtesy, so the bound is sized for a real reply to finish,
+ * not merely for REST responsiveness. A turn STILL busy when this expires falls through to the SAME
+ * forced interrupt this path has always done — see `autoRetireStopWhenIdle`'s doc.
+ */
+const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_MS) || 25_000;
 
 /**
  * classifyIdleWorker's `parked-background`/`parked-gate` decay window: how long a worker's
@@ -5884,20 +5897,76 @@ export class SessionService {
           managerSessionId: managerSessionId ?? "", workerSessionId, taskId, kind: "stop_worker",
           detail: { reason: "no-commit-auto-retire", trigger: autoRetireTrigger },
         });
-        // Deferred so THIS tool call's own MCP response (worker_report's reply, still in flight over the
-        // MCP transport back to the worker's CLI) flushes BEFORE the pty's Ctrl-C×2 lands — mirrors
-        // endMe's / recycleManager's close-after-delay (:4285 / :3765). Undeferred, the graceful-stop's
-        // immediate \x03 raced the in-flight tool response and could interrupt the worker's OWN
-        // worker_report turn, surfacing a false "[Request interrupted]" on a report that already
-        // succeeded (card f46f4b0d). The DB retire above stays synchronous — the concurrency slot still
-        // frees deterministically; only the pty write is delayed.
-        setTimeout(() => { try { this.pty.stop(workerSessionId, "graceful"); } catch { /* already gone */ } }, 3000);
+        // Fire-and-forget (never awaited — the report above is already durably recorded and must not
+        // wait on this). Board card ce7d99bb: this used to be a flat `setTimeout(..., 3000)` straight to
+        // `pty.stop`, deferred only so THIS tool call's own MCP response (worker_report's reply, still in
+        // flight over the MCP transport back to the worker's CLI) could flush before the pty's Ctrl-C×2
+        // landed (card f46f4b0d). That guarded the immediate race but NOT a slower one: a noCommit
+        // worker's `worker_report(done)` call is itself mid-turn, and the model often keeps generating a
+        // post-report recap for LONGER than 3s afterward — so the flat timer routinely fired while the
+        // worker was still busy, Ctrl-C'ing an in-flight generation. That (a) skipped the worker's own
+        // Stop hook, which is what normally captures ctx metrics (readContextStats/setContextCounters —
+        // see host.ts's Stop-hook handler), permanently leaving model/ctxInputTokens/ctxTurns null; and
+        // (b) is what stamps Claude Code's own generic "[Request interrupted by user]" line into the
+        // transcript — the CLI can't tell a daemon-sent Ctrl-C from a real keypress, so an auto-retired
+        // session's transcript falsely reads as a human interrupt. `autoRetireStopWhenIdle` replaces the
+        // flat timer with a bounded wait for the turn to end NATURALLY first (see its own doc).
+        // `.catch` is defensive, not currently load-bearing: every await inside is a bare setTimeout
+        // and every fallible call is already wrapped in its own try/catch, so nothing in there can
+        // reject today — this just future-proofs against a later refactor introducing one, so it can
+        // never surface as an unhandled rejection off this fire-and-forget call.
+        void this.autoRetireStopWhenIdle(workerSessionId).catch(() => { /* see comment above */ });
       } catch { /* never let auto-retire disturb the already-recorded report */ }
     }
 
     if (warning) return { reported: true, deliveryStatus, warning };
     if (autoRetireNoCommit) return { reported: true, deliveryStatus, autoRetired: true };
     return { reported: true, deliveryStatus };
+  }
+
+  /**
+   * Board card ce7d99bb: the auto-retire path's deferred graceful-stop, replacing a flat `setTimeout`
+   * with a BOUNDED wait for the worker's own in-flight turn to end naturally first — mirrors the
+   * companion-upgrade busy-wait shape (`isBusy`, a monotonic-clock bound; see `UPGRADE_BUSY_WAIT_MS`'s
+   * doc for the sibling pattern) rather than inventing a new one. `isBusy` reads the LIVE in-memory pty
+   * flag (no DB round-trip) — deliberately NOT the DB row's `busy` column, which this same auto-retire
+   * branch already stamped `false` moments ago (to free the concurrency slot deterministically) and so
+   * would always read as idle here regardless of the pty's real state.
+   *
+   * COMMON PATH: the worker's `worker_report(done)` tool call is itself mid-turn, and the model often
+   * keeps talking (a redundant post-report recap) afterward — this wait gives that turn up to
+   * `AUTO_RETIRE_IDLE_WAIT_MS` to finish on its own. Once it does, the worker's own Stop hook has ALREADY
+   * fired (that's what busy=false means), so ctx metrics are already captured through the normal path —
+   * the read below just reconfirms it — and `pty.stop`'s Ctrl-C×2 lands on an already-IDLE session (a
+   * clean exit; see `stop()`'s own comment that this is "the whole story" for an idle session). No
+   * interrupted-turn artifact, no false "[Request interrupted by user]" line.
+   *
+   * FALLBACK PATH: a turn still busy when the bound expires is STILL force-interrupted, exactly as
+   * before this fix (a genuinely long or wedged final turn — the interrupt, and the CLI's own generic
+   * marker, are unavoidable there, same residual every other graceful-stop escalation in this codebase
+   * already accepts). This is also the ONLY case where the read below is load-bearing rather than
+   * belt-and-suspenders: the interrupt about to fire prevents that worker's Stop hook from ever running
+   * for the still-in-flight turn, so without this explicit capture its ctx metrics would stay null.
+   *
+   * Either way, the capture is keyed off the DURABLE `cwd`/`engineSessionId` on the session row (the
+   * SAME transcript-tail read the Stop hook itself does — `readContextStats` + `setContextCounters`),
+   * never the live pty state the interrupt below is about to disturb — so it's identical on both paths,
+   * no divergence in WHAT gets captured. Best-effort throughout: a dead/gone session, or any read/write
+   * hiccup, never blocks the stop itself.
+   */
+  private async autoRetireStopWhenIdle(workerSessionId: string): Promise<void> {
+    if (!this.pty.isAlive(workerSessionId)) return; // already gone — nothing to wait on or stop
+    const waitDeadline = performance.now() + AUTO_RETIRE_IDLE_WAIT_MS;
+    while (this.pty.isBusy(workerSessionId) && performance.now() < waitDeadline) {
+      await new Promise((r) => setTimeout(r, 250));
+      if (!this.pty.isAlive(workerSessionId)) return; // died on its own mid-wait — nothing left to stop
+    }
+    try {
+      const s = this.db.getSession(workerSessionId);
+      const stats = s?.engineSessionId ? readContextStats(s.cwd, s.engineSessionId) : null;
+      if (stats) this.db.setContextCounters(workerSessionId, { ctxInputTokens: stats.inputTokens, ctxTurns: stats.turns, model: stats.model });
+    } catch { /* best-effort — never let a metrics-capture hiccup block the stop below */ }
+    try { this.pty.stop(workerSessionId, "graceful"); } catch { /* already gone */ }
   }
 
   /**
