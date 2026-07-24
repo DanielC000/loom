@@ -61,6 +61,30 @@ try {
     { type: "assistant", message: { content: [{ type: "text", text: "still none" }] } },
   ]);
   check("(d) assistant lines but no usage → null", readContextStats(cwd, "nousage") === null);
+
+  // (h) card 7c1fc117: resolveTranscriptFile-routing survives project-dir encoding drift. Write a
+  // fixture under a DIFFERENT (wrong) computed dir than what encodeProjectDir(cwd) would produce —
+  // simulating the exact class of bug transcript-encode.mjs's "R1 fix" already documents (a `.`/`_`
+  // in cwd computing the wrong dir) recurring for some future, still-unknown encoding edge case. The
+  // engine session id is a globally-unique UUID, so readContextStats must still find and read it via
+  // the scan fallback, proving a wrong COMPUTED path no longer means a silently-frozen counter.
+  const driftId = "drifted-session-id";
+  const wrongCwd = path.join(os.tmpdir(), `loom-ctx-WRONG-${Date.now()}`);
+  const wrongDir = path.dirname(engineTranscriptPath(wrongCwd, driftId));
+  fs.mkdirSync(wrongDir, { recursive: true });
+  fs.writeFileSync(
+    engineTranscriptPath(wrongCwd, driftId),
+    [{ type: "assistant", message: { content: [{ type: "text", text: "drift" }], model: "claude-opus-4-8", usage: { input_tokens: 42, cache_read_input_tokens: 8 } } }]
+      .map((l) => JSON.stringify(l)).join("\n") + "\n",
+  );
+  try {
+    // Ask with the ORIGINAL (correct) `cwd` — its computed dir does NOT contain this file (it was
+    // written under `wrongCwd`'s dir instead). Only the scan-by-id fallback can find it.
+    const drifted = readContextStats(cwd, driftId);
+    check("(h) drifted computed path: still found + read via the scan fallback", drifted?.inputTokens === 50);
+  } finally {
+    fs.rmSync(wrongDir, { recursive: true, force: true });
+  }
 } finally {
   fs.rmSync(dir, { recursive: true, force: true });
 }

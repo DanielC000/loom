@@ -32,7 +32,7 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
  * globally-unique UUID, so a match is unambiguous regardless of how Claude encoded the dir. This
  * makes transcript reads resilient to any future dir-encoding drift. Returns null if not found.
  */
-function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {
+export function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {
   const direct = engineTranscriptPath(cwd, engineSessionId);
   if (fs.existsSync(direct)) return direct;
   const root = path.join(os.homedir(), ".claude", "projects");

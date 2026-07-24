@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { engineTranscriptPath } from "./transcript.js";
+import { engineTranscriptPath, resolveTranscriptFile } from "./transcript.js";
 
 export interface ContextStats {
   /** Tokens the model carried as INPUT on the most recent turn ≈ current context occupancy. */
@@ -74,11 +74,21 @@ function userTurnText(content: unknown): string | null {
  * input_tokens + cache_read + cache_creation (the cache fields hold the bulk of a warm context).
  * `turns` counts assistant lines (with a message) as a coarse secondary signal.
  * Returns null if the transcript file is missing or no assistant line carries usage.
+ *
+ * Resolves the file via {@link resolveTranscriptFile} (computed path first, else a scan of
+ * `~/.claude/projects/*` by the globally-unique engine session id) rather than the direct computed
+ * path alone — card 7c1fc117: the direct path is exposed to the SAME project-dir-encoding-drift class
+ * `resolveTranscriptFile` already exists to guard `engineTranscriptExists` against (see its doc), and a
+ * miss here used to fail SILENTLY (a caught `readFileSync` ENOENT → `null`), permanently freezing the
+ * caller's persisted context counter with zero signal. Defense-in-depth only, not the fix for every
+ * freeze cause — see host.ts's SessionStart handler for the OTHER (confirmed, more common) cause: the
+ * engine itself rotating to a new transcript file mid-session.
  */
 export function readContextStats(cwd: string, engineSessionId: string): ContextStats | null {
-  const file = engineTranscriptPath(cwd, engineSessionId);
+  const file = resolveTranscriptFile(cwd, engineSessionId);
+  if (!file) return null; // not found at the computed path OR anywhere under ~/.claude/projects
   let raw: string;
-  try { raw = fs.readFileSync(file, "utf8"); } catch { return null; } // missing transcript
+  try { raw = fs.readFileSync(file, "utf8"); } catch { return null; } // exists but unreadable (race/permissions)
 
   let turns = 0;
   let lastUsage: Record<string, unknown> | null = null;

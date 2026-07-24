@@ -14,6 +14,7 @@ import { writeSessionSettings, writeSessionMcpConfig } from "./claude-settings.j
 import { ensureTrusted } from "./claude-config.js";
 import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
+import { engineTranscriptExists } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
@@ -3027,8 +3028,22 @@ export class PtyHost {
       case "SessionStart":
         // SessionStart only fires once boot is past the (now-dismissed) MCP prompt — stop scanning.
         live.mcpPromptHandled = true; live.bootScan = "";
-        // Capture the engine session id once (unchanged from phase 1).
-        if (typeof hook.session_id === "string" && !live.engineSessionId) {
+        // Capture the engine session id — and track a ROTATION. Card 7c1fc117 (confirmed via a real
+        // production incident, not just a theory): the engine can fire a SECOND SessionStart, reporting a
+        // DIFFERENT session_id, for the SAME live pty process — NO new Loom spawn, no resume, no fork —
+        // most likely an internal auto-compact restarting the engine's own session bookkeeping under a
+        // fresh transcript file. The OLD guard (`!live.engineSessionId`, capture-once) silently discarded
+        // that second hook: `live.engineSessionId` stayed pinned at the FIRST (now-abandoned) id forever,
+        // so every downstream reader keyed off it (readContextStats — the manager-recycle context
+        // counter — engineTranscriptExists' resumability check, the "sessionId" broadcast) kept reading a
+        // transcript the engine had already stopped writing to, while the REAL, growing conversation went
+        // on in a file Loom never knew existed. A later report of the SAME id (the overwhelmingly common
+        // case — a plain resume/fork correctly re-reports what it was given) is still a no-op below.
+        if (typeof hook.session_id === "string" && hook.session_id !== live.engineSessionId) {
+          if (live.engineSessionId) {
+            // eslint-disable-next-line no-console
+            console.warn(`[pty] ${sessionId} engine session id ROTATED mid-session: ${live.engineSessionId} -> ${hook.session_id} (SessionStart fired without a new spawn) — updating tracked id`);
+          }
           live.engineSessionId = hook.session_id;
           this.events.onEngineSessionId(sessionId, hook.session_id);
           this.broadcastControl(live, { type: "sessionId", id: hook.session_id });
@@ -3123,7 +3138,21 @@ export class PtyHost {
           // manager's own occupancy matters too, "who recycles the manager"). Keep it sync — see the M2
           // box above before making this (or anything here) async.
           const stats = live.engineSessionId ? readContextStats(live.cwd, live.engineSessionId) : null;
-          if (stats) this.events.onContextStats(sessionId, stats);
+          if (stats) {
+            this.events.onContextStats(sessionId, stats);
+          } else if (live.engineSessionId) {
+            // FAIL-VISIBLE (card 7c1fc117): a Stop always follows a completed assistant turn, so a null
+            // read here is ALWAYS anomalous — never a normal "nothing to measure yet" case — and used to
+            // be swallowed with zero signal, permanently freezing the persisted context counter (the
+            // recycle-nudge watcher's only input) with no trace. Distinguish the two null causes so a
+            // future freeze is diagnosable at a glance instead of re-investigated from scratch: the
+            // transcript file itself is missing/unresolvable (cheap re-check via engineTranscriptExists,
+            // which shares readContextStats' own resolveTranscriptFile resolution) vs. the file exists but
+            // no assistant line in it carries a `usage` field.
+            const reason = engineTranscriptExists(live.cwd, live.engineSessionId) ? "found-but-no-usage-line" : "file-not-found";
+            // eslint-disable-next-line no-console
+            console.warn(`[context] ${sessionId} context-stats read failed (${reason}, engineSessionId=${live.engineSessionId}) — ctxInputTokens will NOT advance this turn`);
+          }
           // Bare-pasted-text-placeholder tripwire (card eef4883c, DETECTION ONLY — see paste-tripwire.ts's
           // doc for the 8a39f544 background). Compares the SUBMITTED turn against the transcript's
           // recorded turn for that same turn (`stats.lastUserText`, from the SAME single-pass read above
