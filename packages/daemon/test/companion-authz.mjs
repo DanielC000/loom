@@ -205,7 +205,7 @@ try {
       "memory_write", "memory_list", "memory_read", "memory_remove",
       "reminder_create", "reminder_list", "reminder_cancel",
     ]);
-    check("human-only: the assistant's tools are chat_reply + my_context + its skill/memory/reminder tools (no admin writer)", assistantTools.includes("chat_reply") && assistantTools.every((t) => t === "chat_reply" || t === "my_context" || companionSkillTools.has(t)));
+    check("human-only: the assistant's tools are chat_reply + my_context + notify_lead + its skill/memory/reminder tools (no admin writer)", assistantTools.includes("chat_reply") && assistantTools.every((t) => t === "chat_reply" || t === "my_context" || t === "notify_lead" || companionSkillTools.has(t)));
     check("human-only: a non-companion manager never even gets chat_reply", !managerTools.includes("chat_reply"));
     // Negative control — prove the substring gate HAS TEETH (a hypothetical admin tool WOULD be caught).
     check("human-only: negative control — a phantom 'companion_bind' tool WOULD trip the gate", forbidden.test("companion_bind"));

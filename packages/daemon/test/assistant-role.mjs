@@ -195,13 +195,15 @@ try {
     check("(e) companion assistant HAS chat_reply (the companion gate)", names.includes("chat_reply"));
     check("(e) companion assistant does NOT have worker_spawn (no manager surface)", !names.includes("worker_spawn"));
     check("(e) companion assistant does NOT have worker_report", !names.includes("worker_report"));
+    check("(e) companion assistant HAS notify_lead (card 2db23c4d subordinate→lead relay)", names.includes("notify_lead"));
     // Phase 2 (self-authored skills + memory) adds the four skill_* tools and the four memory_* tools, and
     // Reminders s4 adds the three reminder_* tools, to the bound companion surface — still NO manager/
-    // writer surface. The full companion surface is chat_reply + my_context + the skill/memory/reminder tools.
-    check("(e) companion assistant surface is EXACTLY {my_context, chat_reply, skill_*, memory_*, reminder_*}",
+    // writer surface. The full companion surface is chat_reply + my_context + notify_lead + the
+    // skill/memory/reminder tools.
+    check("(e) companion assistant surface is EXACTLY {my_context, notify_lead, chat_reply, skill_*, memory_*, reminder_*}",
       JSON.stringify([...names].sort()) === JSON.stringify([
         "chat_reply", "memory_list", "memory_read", "memory_remove", "memory_write",
-        "my_context", "reminder_cancel", "reminder_create", "reminder_list",
+        "my_context", "notify_lead", "reminder_cancel", "reminder_create", "reminder_list",
         "skill_author", "skill_list", "skill_read", "skill_remove",
       ]));
     const res = await client.callTool({ name: "chat_reply", arguments: { text: "hi from the companion" } });
@@ -220,6 +222,7 @@ try {
   {
     const { names, close } = await toolsFor("other-asst", "assistant");
     check("(e) a non-companion assistant HAS my_context", names.includes("my_context"));
+    check("(e) a non-companion assistant HAS notify_lead (the always-on subordinate→lead relay)", names.includes("notify_lead"));
     check("(e) a non-companion assistant does NOT have chat_reply (single-session companion gate)", !names.includes("chat_reply"));
     await close();
   }

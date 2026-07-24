@@ -51,7 +51,7 @@ import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "..
 import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
-import { checkPeerMessageRateLimit } from "./peer-message-guard.js";
+import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
 import { planColumnLayout, setProjectConfigSafe, type DesiredColumn } from "../tasks/columns.js";
 import { resolveIdPrefix, looksLikeId, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 
@@ -5096,6 +5096,109 @@ export class SessionService {
   }
 
   /**
+   * Subordinate→lead relay (orchestration `notify_lead`, board card 2db23c4d) — an owner-facing NON-manager
+   * session (role "assistant": the Companion, or any ideation/thought-partner rig sharing that same role)
+   * relaying a message to ITS OWN project's live manager. The Companion's own `session_message`
+   * (companion/capabilities.ts SESSION_STEER) already solved the "owner asks its Companion to control/
+   * message some session" case (an owner-granted act-mode scope + Primitive-A turn-attestation, because
+   * that lever ACTS on the owner's behalf with real authority over another session) — and `messagePeerManager`
+   * above solved the manager↔manager peer case. This is the missing, narrower subordinate→lead lever: an
+   * assistant-role session with NO grant and NO target choice, reaching ONLY its own project's live manager.
+   * Mirrors `messagePeerManager`'s mechanics, same-project instead of cross-project:
+   *   - ASSISTANT-ONLY caller (`requireAssistant`) — defense in depth on top of this being registered ONLY
+   *     on the `role==="assistant"` MCP branch (mcp/orchestration.ts).
+   *   - ALWAYS the caller's own project, server-derived from its session id — there is no target param at
+   *     all (narrower than `peer_message`, which at least validates an owner-declared link before naming a
+   *     cross-project target).
+   *   - Target manager resolved FRESH on every call (`role==="manager" && processState==="live"` within the
+   *     caller's own project) — survives a manager recycle for free: recycle retires the predecessor's row
+   *     and inserts the successor as the project's new live row (see recycleAsManager's re-parent comments),
+   *     so this query always finds whoever is live now, with no lineage-chain walk needed.
+   *   - RATE-LIMITED per calling assistant session (`checkNotifyLeadRateLimit`, its OWN dedicated bucket in
+   *     peer-message-guard.ts — never shared with peer_message's bucket): role "assistant" is the most
+   *     injection-exposed surface in Loom (chat-facing), so a compromised/confused session can't turn this
+   *     into a spam vector against its own manager.
+   *   - FRAMED as a subordinate CLAIM, never as attested owner/human words (owner ruling, card 2db23c4d):
+   *     `[loom:from-assistant · <name> · sessionId:...]`. Even when the assistant is relaying something the
+   *     owner told it, the manager receives it as "the assistant relayed: X", to weigh/verify — never as an
+   *     owner-authored turn. This is WHY no Primitive-A gate is needed here: unlike the Companion's
+   *     operator-mode session_message/session_steer (which ACT with real authority over another session,
+   *     so they require verified owner text), this lever only ever produces a non-authoritative relay the
+   *     recipient manager must independently judge — mirrors `workerReport`, which has no such gate either.
+   * When the caller's own project has NO live manager, mirrors `messagePeerManager`'s own-board fallback:
+   * boards a durable card on the SAME project's board (never silently dropped or errored for a legitimately
+   * offline/recycling manager). Audited via a single `assistant_relay_message` event.
+   */
+  notifyLead(
+    assistantSessionId: string,
+    text: string,
+  ): { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string } {
+    this.requireAssistant(assistantSessionId, "notify_lead");
+    const caller = this.db.getSession(assistantSessionId)!;
+    const projectId = caller.projectId;
+    if (!projectId) throw new Error("no project for this session");
+    if (!checkNotifyLeadRateLimit(assistantSessionId)) {
+      throw new Error("notify_lead: rate limit exceeded — slow down and try again shortly");
+    }
+
+    const agent = caller.agentId ? this.db.getAgent(caller.agentId) : undefined;
+    const senderName = agent?.name ?? "assistant";
+    // Framed as a subordinate CLAIM (owner ruling, card 2db23c4d) — never as attested owner/human words,
+    // even when the assistant is relaying something the owner told it. The recipient manager must weigh/
+    // verify this like a worker_report, not act on it as an owner-authored instruction.
+    const framed = `[loom:from-assistant · ${senderName} · sessionId:${assistantSessionId}]\n${text}`;
+
+    // ASSISTANT-role's own project's live manager ONLY — a live worker/other role there is never matched
+    // (mirrors messagePeerManager's manager-only match), resolved fresh so a recycled predecessor is never
+    // stale-targeted.
+    const targetManager = this.db.listAllSessions().find(
+      (s) => s.projectId === projectId && s.role === "manager" && s.processState === "live",
+    );
+
+    const now = new Date().toISOString();
+    let result: { deliveryStatus: DeliveryStatus; position?: number; taskId?: string; targetSessionId?: string };
+    if (targetManager) {
+      const r = this.enqueueDurableMessage(targetManager.id, framed, { sender: assistantSessionId, taskId: targetManager.taskId ?? null });
+      result = { deliveryStatus: this.deliveryStatusFor(r), position: r.position, targetSessionId: targetManager.id };
+    } else {
+      // No live manager in the caller's own project: board a durable card on that SAME project's board
+      // (mirrors messagePeerManager's "no live target" fallback) — the message survives until a manager
+      // next attaches, instead of being silently dropped or erroring for a legitimately offline/recycling one.
+      const body = [
+        "**Message relayed from this project's assistant session** (boarded because no manager session was live).",
+        "",
+        `- **From (assistant session):** \`${assistantSessionId}\` (${senderName})`,
+        "",
+        "## Message",
+        "",
+        text,
+      ].join("\n");
+      const task: Task = {
+        id: randomUUID(),
+        projectId,
+        title: `[Assistant relay] from ${senderName}`,
+        body,
+        columnKey: this.columnKeyForProjectRole(projectId, "defaultLanding") ?? "backlog",
+        position: Date.now(),
+        priority: DEFAULT_TASK_PRIORITY,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.db.insertTask(task);
+      result = { deliveryStatus: "boarded", taskId: task.id };
+    }
+
+    this.db.appendEvent({
+      id: randomUUID(), ts: now,
+      managerSessionId: assistantSessionId, workerSessionId: result.targetSessionId ?? "", taskId: result.taskId ?? null,
+      kind: "assistant_relay_message",
+      detail: { assistantSessionId, projectId, targetSessionId: result.targetSessionId ?? null, text, deliveryStatus: result.deliveryStatus },
+    });
+
+    return result;
+  }
+
+  /**
    * Manager→Platform escalation READ (orchestration `escalation_status`) — closes the gap where a manager
    * has no way to tell whether a `platform_escalate` it filed was ever picked up, so it re-escalates work
    * the Lead already claimed. READ-ONLY, origin-project-scoped: the candidate set is derived SERVER-SIDE
@@ -6715,6 +6818,16 @@ export class SessionService {
     const session = this.db.getSession(sessionId);
     if (!session) throw new Error("unknown session");
     if (session.role !== "worker") throw new Error(`${surface} is a worker-only surface`);
+  }
+
+  /** Role gate for {@link notifyLead} (card 2db23c4d): the caller must be a live ASSISTANT session (the
+   *  Companion, or any ideation/thought-partner rig sharing that role) — defense in depth mirroring
+   *  `requireManager`/`requireWorker`, on TOP of `notify_lead` only ever being REGISTERED on the
+   *  `role==="assistant"` MCP branch in the first place (mcp/orchestration.ts). */
+  private requireAssistant(sessionId: string, surface: string): void {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("unknown session");
+    if (session.role !== "assistant") throw new Error(`${surface} is an assistant-only surface`);
   }
 
   /**

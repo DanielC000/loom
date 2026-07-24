@@ -87,7 +87,7 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
 // The worker's tested depth-1 surface (orchestration.ts's own comment: "EXACTLY { gate_status,
 // my_context, run_gate, worker_report }" — pinned by 5 existing hermetic tests there).
 export const ORCH_WORKER_TOOLS: readonly string[] = ["gate_status", "my_context", "run_gate", "worker_report"];
-export const ORCH_ASSISTANT_TOOLS: readonly string[] = ["my_context"];
+export const ORCH_ASSISTANT_TOOLS: readonly string[] = ["my_context", "notify_lead"];
 
 // loom-tasks: universal across every role except assistant (which loses the two write tools).
 export const TASKS_UNIVERSAL_TOOLS: readonly string[] = [

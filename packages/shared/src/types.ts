@@ -1069,7 +1069,18 @@ export type OrchestrationEventKind =
   // cap as the merge/deploy gates (instead of an unbounded raw-Bash self-check). Filed under the CALLING
   // WORKER itself (managerSessionId = its own id — there is no separate manager owner for a self-scoped
   // op); `detail` carries { passed }.
-  | "worker_gate";
+  | "worker_gate"
+  // Subordinate→lead relay (orchestration `notify_lead`, board card 2db23c4d) — an owner-facing
+  // NON-manager session (role "assistant": the Companion, or any ideation/thought-partner rig sharing that
+  // same role) relaying a message to ITS OWN project's live manager. The narrower, always-on sibling of
+  // `cross_project_message` above (same-project only, no owner-declared link to check, no target param at
+  // all). `detail` carries { assistantSessionId, projectId, targetSessionId, deliveryStatus }; managerSessionId
+  // is the SENDING assistant session (mirrors cross_project_message's "sender in managerSessionId" audit
+  // convention), workerSessionId (reused as the generic "other session" column) is the TARGET manager
+  // session when one was live else "". The relay is framed as a subordinate CLAIM, never as attested
+  // owner/human words — the recipient manager must independently weigh/verify it, same treatment class as
+  // a worker_report.
+  | "assistant_relay_message";
 
 export interface OrchestrationEvent {
   id: string;

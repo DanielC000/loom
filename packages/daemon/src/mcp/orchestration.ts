@@ -721,6 +721,35 @@ export class OrchestrationMcpRouter {
     // profile is a later card). Returns before the manager fall-through below.
     if (role === "assistant") {
       this.registerMyContext(server, sessionId);
+      // Subordinate→lead relay (card 2db23c4d): the ONE narrow lever an owner-facing non-manager session
+      // gets — a durable-queued message to ITS OWN project's live manager. NOT the full orchestration
+      // surface (no spawn/list/stop/merge) — mirrors messagePeerManager's mechanics, same-project instead
+      // of cross-project. See SessionService.notifyLead's own doc for the full trust-boundary rationale.
+      server.registerTool(
+        "notify_lead",
+        {
+          description:
+            "Relay a message to YOUR OWN project's live manager/lead — the one bounded escalation lever an " +
+            "owner-facing non-manager (assistant-role) session has. There is no target param: this always " +
+            "reaches your own project's manager, never any other session or project. Delivers to the LIVE " +
+            "manager session ONLY (never a worker or other role there); if no manager is live right now, the " +
+            "message is durably BOARDED as a task on your project's OWN board instead of being dropped — its " +
+            "manager will see it next time it attaches. Returns `deliveryStatus` (delivered-live | queued | " +
+            "boarded) plus `taskId` when boarded. Rate-limited per session. The message is framed and " +
+            "delivered as a SUBORDINATE RELAY, not an owner-authored instruction — the manager treats it as " +
+            "a claim to weigh/verify (same treatment class as a worker_report), even when you're relaying " +
+            "something the owner told you to pass along. Use this instead of writing 'lead, take note' into " +
+            "shared memory or any other workaround — this is the sanctioned channel.",
+          inputSchema: { text: z.string() },
+        },
+        async ({ text }) => {
+          try {
+            return ok(sessions.notifyLead(sessionId, text));
+          } catch (e) {
+            return ok({ error: (e as Error).message });
+          }
+        },
+      );
       return server;
     }
 
