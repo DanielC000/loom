@@ -13,9 +13,9 @@ import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
 import { GitReader } from "../git/reader.js";
-import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError } from "../projects/resolve-repo.js";
+import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
 import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
@@ -25,7 +25,7 @@ import { createRunSnapshot, removeRunSnapshot, sweepAllRunSnapshots } from "../r
 import { composeRunStartupPrompt } from "../runs/prompt.js";
 import { composeManagerStartupPrompt, appendScheduledPrompt } from "./manager-prompt.js";
 import { composePlatformLeadStartupPrompt, composeResumeDocOperationalNotes, lineageRootId, liveLineageSuccessor, resolvePlatformLeadResumeDocPath } from "./platform-lead-prompt.js";
-import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext } from "./worker-prompt.js";
+import { composeWorkerStartupPrompt, buildWorkerRepoContext, type WorkerRepoContext, type ReviewOfInfo } from "./worker-prompt.js";
 import { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } from "./assistant-prompt.js";
 import { listCompanionMemories, readCompanionMemory } from "../skills/companion-memory-store.js";
 import { buildFramedMemoryRecall } from "../companion/memory-recall.js";
@@ -3565,14 +3565,26 @@ export class SessionService {
    */
   async spawnWorker(
     managerSessionId: string,
-    opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
+    opts: {
+      taskId?: string; agentId?: string; kickoffPrompt: string;
+      /** Review-spawn support (card 47bbdc3f) — mutually exclusive with each other (not with `taskId`,
+       *  though the review-only convention is a TASKLESS spawn). Resolved SERVER-SIDE to a branch + tip
+       *  sha (see `reviewForkFrom` below) that this worker's OWN fresh branch is cut from, and mechanically
+       *  injected into its kickoff — eliminating both the wrong-tree-read default and the hand-typed-branch
+       *  step. `reviewOfWorkerSessionId` names an existing session (any role with a `.branch`); resolves
+       *  via that session's own stamped `repoKey` (mirrors every other session-scoped repo resolution). */
+      reviewOfWorkerSessionId?: string;
+      /** `reviewOfTaskId` names a task and resolves to that task's DETERMINISTIC branch (`loom/<taskKey>`)
+       *  — the same branch any worker spawned on it would use — in that task's CURRENT repoKey. */
+      reviewOfTaskId?: string;
+    },
     /** INTERNAL — set ONLY by {@link maybeDrainCapQueue}'s own re-call of this method. `skipCapQueueRecord`
      *  suppresses the normal cap-reject `record()` call (see {@link CapQueueRejectedError}'s doc for why:
      *  the drain already holds the original popped entry and re-queues THAT itself, preserving its opId/
      *  FIFO position instead of letting a fresh `record()` mint a new one at the back). Every OTHER caller
      *  (worker_spawn/spawnWorkerTracked) omits this — byte-identical cap-reject behavior for them. */
     internal?: { skipCapQueueRecord?: boolean },
-  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo }> {
+  ): Promise<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }> {
     const manager = this.db.getSession(managerSessionId);
     if (!manager || manager.role !== "manager") throw new Error("not a manager session");
     const project = this.db.getProject(manager.projectId);
@@ -3669,6 +3681,53 @@ export class SessionService {
       if (liveHolder) {
         throw new Error(`worker_spawn taskId '${taskId}' already has a live worker (${liveHolder}); stop or recycle it before re-spawning`);
       }
+    }
+    // REVIEW-SPAWN resolution (card 47bbdc3f) — validated BEFORE any side effect, same posture as the
+    // taskId/agentId guards above. `reviewOfWorkerSessionId`/`reviewOfTaskId` are mutually exclusive; a bad
+    // or unresolvable id THROWS here rather than silently degrading to a normal HEAD-forked spawn — a
+    // silent fallback would reintroduce exactly the wrong-tree-read bug this mechanism exists to close.
+    if (opts.reviewOfWorkerSessionId && opts.reviewOfTaskId) {
+      throw new Error("worker_spawn: pass EITHER reviewOfWorkerSessionId OR reviewOfTaskId, not both");
+    }
+    let reviewForkFrom: { branch: string; repo: ResolvedRepo; headSha: string } | undefined;
+    if (opts.reviewOfWorkerSessionId) {
+      const reviewed = this.db.getSession(opts.reviewOfWorkerSessionId);
+      if (!reviewed || reviewed.projectId !== manager.projectId) {
+        throw new Error(`worker_spawn reviewOfWorkerSessionId '${opts.reviewOfWorkerSessionId}' does not resolve to a session in this project`);
+      }
+      if (!reviewed.branch) {
+        throw new Error(`worker_spawn reviewOfWorkerSessionId '${opts.reviewOfWorkerSessionId}' names a session with no branch (not a worker on a worktree) — nothing to review`);
+      }
+      // Session-scoped repo resolution uses the session's OWN stamped repoKey (never a fresh task read) —
+      // see resolveRepoByKey's doc: the worktree is physically rooted in whatever repo it was cut from.
+      const reviewRepo = resolveRepoByKey(project, reviewed.repoKey);
+      const headSha = await resolveGitRef(reviewRepo.path, reviewed.branch);
+      if (!headSha) {
+        throw new Error(`worker_spawn reviewOfWorkerSessionId '${opts.reviewOfWorkerSessionId}' names branch '${reviewed.branch}' which does not exist in ${reviewRepo.path}`);
+      }
+      reviewForkFrom = { branch: reviewed.branch, repo: reviewRepo, headSha };
+    } else if (opts.reviewOfTaskId) {
+      const reviewRef = opts.reviewOfTaskId.trim();
+      if (/\s/.test(reviewRef)) throw new Error(`worker_spawn reviewOfTaskId '${opts.reviewOfTaskId}' is not a valid task id`);
+      const exactReviewed = this.db.getTask(reviewRef);
+      let reviewedTask = exactReviewed && exactReviewed.projectId === manager.projectId ? exactReviewed : undefined;
+      if (!reviewedTask) {
+        const resolvedReviewed = resolveIdPrefix(this.db.listTasks(manager.projectId), reviewRef);
+        if (resolvedReviewed.kind === "ambiguous") {
+          throw new Error(`worker_spawn reviewOfTaskId '${reviewRef}' is an ambiguous id-prefix — it matches ${resolvedReviewed.ids.join(", ")}; pass more characters or the full id`);
+        }
+        if (resolvedReviewed.kind === "found") reviewedTask = resolvedReviewed.record;
+      }
+      if (!reviewedTask) throw new Error(`worker_spawn reviewOfTaskId '${reviewRef}' does not resolve to an existing task in this project`);
+      // The branch a task's own worker would use is DETERMINISTIC (see createWorktree/taskKey) — no
+      // session lookup needed, so this also works for a task whose worker has since exited/recycled.
+      const reviewBranch = `loom/${taskKey(reviewedTask.id)}`;
+      const reviewRepo = resolveRepo(project, reviewedTask);
+      const headSha = await resolveGitRef(reviewRepo.path, reviewBranch);
+      if (!headSha) {
+        throw new Error(`worker_spawn reviewOfTaskId '${reviewRef}' resolves to branch '${reviewBranch}' which does not exist in ${reviewRepo.path} — has a worker been spawned on it yet?`);
+      }
+      reviewForkFrom = { branch: reviewBranch, repo: reviewRepo, headSha };
     }
     // Resolve THAT agent's profile for its browser-automation opt-in + skill subset — a manager spawns a
     // QA worker by pointing it at a browserTesting profile (e.g. the bundled "QA Tester"). Explicit role is
@@ -3795,8 +3854,11 @@ export class SessionService {
       // repo. The resolved `{key, path}` is stamped onto the session below (Session.repoKey) and used for
       // every later op on THIS worktree (gate/merge/finalize/boot-reconcile) instead of re-resolving from
       // the task each time — see that field's doc for why.
-      const targetRepo = resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
-      const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key);
+      // A review spawn (reviewForkFrom set) cuts its worktree from the SAME repo the reviewed branch lives
+      // in — never always-primary — so the review target's own resolved repo wins over the normal
+      // taskId-or-primary resolution below.
+      const targetRepo = reviewForkFrom ? reviewForkFrom.repo : resolveRepo(project, taskId ? this.db.getTask(taskId) : null);
+      const { worktreePath, branch, reusedDirtyWorktree, staleBase } = await createWorktree(targetRepo.path, project.id, taskId ?? claimKey, { timeoutMs: this.provisionMs, runBuild: !noCommit }, targetRepo.key, reviewForkFrom?.branch);
       // Card 088afc94 (P4 wiring): register this worktree with codescape's fleet daemon — fire-and-forget,
       // NEVER blocks the spawn. DELIBERATELY pinned to `project.repoPath` (the primary), NOT
       // `targetRepo.path` — Codescape indexes ONE graph per project regardless of which repo a given task
@@ -3864,7 +3926,7 @@ export class SessionService {
         startupPrompt: appendMemoryRecallToStartupPrompt(
           // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
           // session row above — the same resolution, so the prompt can never disagree with the worktree.
-          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo)),
+          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
           workerProjectMemoryFramed,
         ),
         role: "worker", // gives the worker the orchestration surface (worker_report only)
@@ -3915,7 +3977,8 @@ export class SessionService {
       // worker_list placeholder doesn't linger alongside the now-real worker row.
       if (taskId) this.capQueue.clearForTask(taskId);
       else this.capQueue.clearTasklessForAgent(managerSessionId, workerAgent.id);
-      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, staleBase };
+      const reviewOf = reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined;
+      return { ...worker, processState: "live", shippedMatch, reusedDirtyWorktree, staleBase, reviewOf };
     } finally {
       // Release the per-taskId (or taskless per-call) claim. By here the row is either live (liveHolder now
       // rejects re-spawns for a real task) or the spawn threw before any persistent state — either way the
@@ -3946,11 +4009,11 @@ export class SessionService {
    */
   async spawnWorkerTracked(
     managerSessionId: string,
-    opts: { taskId?: string; agentId?: string; kickoffPrompt: string },
-  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo }>> {
+    opts: { taskId?: string; agentId?: string; kickoffPrompt: string; reviewOfWorkerSessionId?: string; reviewOfTaskId?: string },
+  ): Promise<AttachResult<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>> {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
-    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo }>(
+    return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>(
       key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       () => this.spawnWorker(managerSessionId, opts),
     );

@@ -3,6 +3,21 @@ import type { ResolvedRepo } from "../projects/resolve-repo.js";
 import type { ReusedDirtyWorktreeInfo, StaleBaseInfo } from "../git/worktrees.js";
 
 /**
+ * What a REVIEW-ONLY spawn (card 47bbdc3f) needs mechanically injected into its kickoff — the
+ * server-resolved branch + tip sha this worker's OWN branch was cut FROM, so a manager never hand-types
+ * the reviewed branch name again (the bug that let a mistyped branch review the wrong card). Present ONLY
+ * when `worker_spawn` was called with `reviewOfWorkerSessionId`/`reviewOfTaskId`; every other spawn omits
+ * it and its prompt is byte-identical to before this existed.
+ */
+export interface ReviewOfInfo {
+  /** The reviewed branch name (e.g. `loom/abc123`). */
+  branch: string;
+  /** That branch's tip commit sha AT SPAWN TIME — a pinned snapshot, not a live pointer (see the block's
+   *  own text: the worker is told explicitly that a later push to the reviewed branch is NOT reflected). */
+  headSha: string;
+}
+
+/**
  * What a worker needs to know about a MULTI-REPO project's writable registry (multi-repo epic 49136451,
  * phase 3). Supplied ONLY when the project actually has a registry — a single-repo project passes
  * `undefined` and the whole block is omitted, so its prompt is byte-identical to before this existed.
@@ -90,6 +105,14 @@ export function buildWorkerRepoContext(
  * commits behind main this branch's base is and what changed on main since — the fix for the incident
  * this card exists to close: a re-spawn onto a commits-ahead branch used to silently keep building on its
  * ORIGINAL fork point forever, with no signal to the worker that main had moved on.
+ *
+ * `reviewOf` (card 47bbdc3f) is likewise OPTIONAL: `undefined` omits the block entirely (every non-review
+ * spawn stays byte-identical). When present (this worker's OWN branch was cut from the tip of a reviewed
+ * branch via `reviewOfWorkerSessionId`/`reviewOfTaskId` — see `spawnWorker`'s `reviewForkFrom`), a block
+ * names that branch + sha SO THE MANAGER NEVER HAND-TYPES IT AGAIN, and says explicitly that this
+ * worktree's content already IS that reviewed branch's committed tip — ordinary Read/Grep is correct by
+ * construction, no `git show`/diff gymnastics needed — while also flagging that it's a PINNED SNAPSHOT
+ * (a later push to the reviewed branch is not reflected without a fresh spawn).
  */
 export function composeWorkerStartupPrompt(
   brief: string | undefined,
@@ -99,6 +122,7 @@ export function composeWorkerStartupPrompt(
   reusedDirtyWorktree?: ReusedDirtyWorktreeInfo,
   staleBase?: StaleBaseInfo,
   repoContext?: WorkerRepoContext,
+  reviewOf?: ReviewOfInfo,
 ): string {
   const base = brief?.trim();
   const body = base ? `${base}\n\n---\n\n${dynamicPart}` : dynamicPart;
@@ -168,5 +192,15 @@ export function composeWorkerStartupPrompt(
           (staleBase.truncated ? `\n(showing the first ${staleBase.changedFiles.length} — more files changed)\n` : "")
         : "")
     : "";
-  return `${block}${refBlock}${repoBlock}${dirtyBlock}${staleBlock}\n\n${body}`;
+  const reviewBlock = reviewOf
+    ? "\n\n**🧐 This is a REVIEW spawn — your worktree already IS the reviewed content:** your own branch " +
+      `above was cut from the TIP of \`${reviewOf.branch}\` at commit \`${reviewOf.headSha}\` — NOT from ` +
+      "the project's mainline. Ordinary `Read`/`Grep` against your worktree already shows the reviewed " +
+      "branch's code; you do NOT need `git show <branch>:<path>` or a manual diff against another tree " +
+      "to see the right content. This is a PINNED SNAPSHOT taken at spawn time, not a live pointer — if " +
+      "the author has pushed further commits to that branch since, this worktree will not reflect them; " +
+      "say so in your report if the timing matters, and ask for a fresh review spawn if you need the " +
+      "latest tip."
+    : "";
+  return `${block}${refBlock}${repoBlock}${dirtyBlock}${staleBlock}${reviewBlock}\n\n${body}`;
 }

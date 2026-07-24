@@ -22,6 +22,12 @@ import { execSync } from "node:child_process";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const rejects = async (label, fn, needle) => {
+  let threw = null;
+  try { await fn(); } catch (e) { threw = e; }
+  const ok = threw != null && (!needle || String(threw.message).includes(needle));
+  check(`${label}${ok || !threw ? "" : ` (got: ${threw.message})`}`, ok);
+};
 
 // --- Hermetic LOOM_HOME (set BEFORE importing dist — paths.ts reads it at import time) ---
 const tmpHome = path.join(os.tmpdir(), `loom-wprompt-${Date.now()}-${process.pid}`);
@@ -147,6 +153,19 @@ try {
   const composedBoth = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, dirtyInfo, staleInfo);
   check("(1g) pure: dirtyBlock + staleBlock can co-exist", composedBoth.includes("Reused worktree") && composedBoth.includes("Stale branch base"));
   check("(1g) pure: dirty block leads the stale-base block", order(composedBoth, "Reused worktree", "Stale branch base"));
+
+  // ===================== (1h) card 47bbdc3f: reviewOf mechanically-injected block =====================
+  check("(1h) pure: no reviewOf (undefined) ⇒ byte-identical to the pre-card composition", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, dirtyInfo, staleInfo) === composedBoth);
+  check("(1h) pure: no reviewOf ⇒ no review block", !composedCwd.includes("REVIEW spawn"));
+  const reviewInfo = { branch: "loom/abc123def456", headSha: "cafebabe1234" };
+  const composedReview = composeWorkerStartupPrompt("BRIEF", "DYNAMIC", "/wt/path", undefined, undefined, undefined, undefined, reviewInfo);
+  check("(1h) pure: reviewOf set ⇒ review block present", composedReview.includes("REVIEW spawn"));
+  check("(1h) pure: block names the reviewed branch", composedReview.includes("loom/abc123def456"));
+  check("(1h) pure: block names the resolved tip sha", composedReview.includes("cafebabe1234"));
+  check("(1h) pure: block tells the worker ordinary Read/Grep already shows the reviewed content", /Read.*Grep/i.test(composedReview));
+  check("(1h) pure: block flags the pinned-snapshot caveat (a later push is not reflected)", /pinned snapshot|pushed.*commits/i.test(composedReview));
+  check("(1h) pure: worktree location block + brief + dynamic still all present alongside the review block", composedReview.includes("/wt/path") && composedReview.includes("BRIEF") && composedReview.includes("DYNAMIC"));
+  check("(1h) pure: no cwd ⇒ reviewOf is ignored too, output unchanged from the 2-arg form", composeWorkerStartupPrompt("BRIEF", "DYNAMIC", undefined, undefined, undefined, undefined, undefined, reviewInfo) === "BRIEF\n\n---\n\nDYNAMIC");
 
   // ===================== (2) SPAWN composes the worktree block + brief ahead of the kickoff =====================
   const wA = await svc.spawnWorker("mgr1", { taskId: taskA, agentId: "agentDev", kickoffPrompt: "KICKOFF_A" });
@@ -277,6 +296,107 @@ try {
   const normE = (s) => s.replace(/\r\n/g, "\n");
   check("(6) the branch's own committed content survived the aborted auto-forward attempt",
     normE(fs.readFileSync(path.join(wE2.worktreePath, "README.md"), "utf8")) === "branch version E\n");
+
+  // ===================== (7) REVIEW SPAWN (card 47bbdc3f) =====================
+  // A review-only worker's own branch is cut from the TIP of the branch under review — not from HEAD —
+  // so its worktree's content is byte-identical to what's under review at spawn time, and the resolved
+  // branch+sha reaches its kickoff mechanically (no manager hand-typing, the bdc05c55 failure mode).
+  // A fresh isolated project (generous cap) so this section's bookkeeping never interacts with the cap
+  // arithmetic the earlier sections already manage carefully.
+  const repoRev = path.join(os.tmpdir(), `loom-wprompt-repoRev-${Date.now()}`);
+  fs.mkdirSync(repoRev, { recursive: true });
+  fs.writeFileSync(path.join(repoRev, "README.md"), "# review-spawn test — mainline\n");
+  execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repoRev });
+  db.insertProject({ id: "pRev", name: "RevProj", repoPath: repoRev, vaultPath: repoRev, config: { orchestration: { maxConcurrentWorkers: 10 } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: "agentDevRev", projectId: "pRev", name: "Dev", startupPrompt: "DEV_REV_BRIEF", position: 0, profileId: null });
+  db.insertSession({
+    id: "mgrRev", projectId: "pRev", agentId: "agentDevRev", engineSessionId: null, title: null,
+    cwd: repoRev, processState: "live", resumability: "unknown", busy: false,
+    createdAt: now, lastActivity: now, lastError: null, role: "manager",
+  });
+  const worktreesRev = [];
+
+  // --- (7a) reviewOfWorkerSessionId: happy path, author still LIVE ---
+  const taskRevA = "77777777-7777-7777-8777-777777777701";
+  db.insertTask({ id: taskRevA, projectId: "pRev", title: "RevA", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
+  const authorA = await svc.spawnWorker("mgrRev", { taskId: taskRevA, agentId: "agentDevRev", kickoffPrompt: "AUTHOR_A_KICKOFF" });
+  worktreesRev.push(authorA.worktreePath);
+  fs.writeFileSync(path.join(authorA.worktreePath, "feature.txt"), "author A change\n");
+  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "author A commit"`, { cwd: authorA.worktreePath });
+  const authorASha = execSync("git rev-parse HEAD", { cwd: authorA.worktreePath }).toString().trim();
+
+  const reviewerA = await svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "REVIEW_A_KICKOFF", reviewOfWorkerSessionId: authorA.id });
+  worktreesRev.push(reviewerA.worktreePath);
+  check("(7a) reviewOfWorkerSessionId spawn succeeds, taskless", reviewerA.role === "worker" && reviewerA.taskId === null);
+  check("(7a) result carries reviewOf naming the author's branch + its committed tip sha", reviewerA.reviewOf?.branch === authorA.branch && reviewerA.reviewOf?.headSha === authorASha);
+  check("(7a) reviewer gets its OWN fresh branch (never the author's — no checkout conflict)", reviewerA.branch !== authorA.branch);
+  check("(7a) reviewer's worktree is cut FROM the author's tip — its HEAD sha matches exactly",
+    execSync("git rev-parse HEAD", { cwd: reviewerA.worktreePath }).toString().trim() === authorASha);
+  check("(7a) reviewer's worktree content IS the author's committed file (not mainline, which never had it)",
+    fs.readFileSync(path.join(reviewerA.worktreePath, "feature.txt"), "utf8").includes("author A change"));
+  check("(7a) the still-live author's own worktree is untouched by the review spawn",
+    fs.existsSync(authorA.worktreePath) && fs.readFileSync(path.join(authorA.worktreePath, "feature.txt"), "utf8").includes("author A change"));
+  const oReviewerA = optsFor(reviewerA.id);
+  check("(7a) reviewer's kickoff carries the reviewed branch name — server-resolved, not hand-typed by the manager's kickoffPrompt",
+    (oReviewerA?.startupPrompt ?? "").includes(authorA.branch));
+  check("(7a) reviewer's kickoff carries the resolved tip sha", (oReviewerA?.startupPrompt ?? "").includes(authorASha));
+  check("(7a) reviewer's kickoff tells it ordinary Read/Grep already shows the reviewed content",
+    /already IS the reviewed content/i.test(oReviewerA?.startupPrompt ?? ""));
+  check("(7a) reviewer's kickoff still carries the manager's own dynamic kickoff text", (oReviewerA?.startupPrompt ?? "").includes("REVIEW_A_KICKOFF"));
+
+  // --- (7b) reviewOfTaskId: resolves the task's DETERMINISTIC branch, works even after the author exited ---
+  const taskRevB = "77777777-7777-7777-8777-777777777702";
+  db.insertTask({ id: taskRevB, projectId: "pRev", title: "RevB", body: "", columnKey: "todo", position: 2, createdAt: now, updatedAt: now });
+  const authorB = await svc.spawnWorker("mgrRev", { taskId: taskRevB, agentId: "agentDevRev", kickoffPrompt: "AUTHOR_B_KICKOFF" });
+  worktreesRev.push(authorB.worktreePath);
+  fs.writeFileSync(path.join(authorB.worktreePath, "feature-b.txt"), "author B change\n");
+  execSync(`git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m "author B commit"`, { cwd: authorB.worktreePath });
+  const authorBSha = execSync("git rev-parse HEAD", { cwd: authorB.worktreePath }).toString().trim();
+  db.setProcessState(authorB.id, "exited"); // the author is GONE — reviewOfTaskId must still resolve (no session lookup needed)
+
+  const reviewerB = await svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "REVIEW_B_KICKOFF", reviewOfTaskId: taskRevB });
+  worktreesRev.push(reviewerB.worktreePath);
+  check("(7b) reviewOfTaskId resolves the task's OWN deterministic branch (matches the exited author's)", reviewerB.reviewOf?.branch === authorB.branch);
+  check("(7b) reviewOfTaskId resolves the correct committed tip sha even though the author has since exited", reviewerB.reviewOf?.headSha === authorBSha);
+  check("(7b) reviewer's worktree content is the author's committed file", fs.readFileSync(path.join(reviewerB.worktreePath, "feature-b.txt"), "utf8").includes("author B change"));
+
+  // --- (7c) a NORMAL spawn (no reviewOf) is completely unaffected — still forks the repo's current HEAD ---
+  const taskRevC = "77777777-7777-7777-8777-777777777703";
+  db.insertTask({ id: taskRevC, projectId: "pRev", title: "RevC", body: "", columnKey: "todo", position: 3, createdAt: now, updatedAt: now });
+  const normalC = await svc.spawnWorker("mgrRev", { taskId: taskRevC, agentId: "agentDevRev", kickoffPrompt: "NORMAL_C_KICKOFF" });
+  worktreesRev.push(normalC.worktreePath);
+  check("(7c) a normal (non-review) spawn carries no reviewOf on the result", normalC.reviewOf === undefined);
+  check("(7c) a normal spawn's worktree is forked from the repo's current mainline, not any reviewed branch",
+    fs.readFileSync(path.join(normalC.worktreePath, "README.md"), "utf8").includes("mainline")
+    && !fs.existsSync(path.join(normalC.worktreePath, "feature.txt"))
+    && !fs.existsSync(path.join(normalC.worktreePath, "feature-b.txt")));
+  const oNormalC = optsFor(normalC.id);
+  check("(7c) a normal spawn's kickoff carries NO review block", !(oNormalC?.startupPrompt ?? "").includes("REVIEW spawn"));
+
+  // --- (7d) validation: bad/ambiguous input FAILS LOUDLY — never silently degrades to a HEAD-forked spawn ---
+  const liveBeforeRev = db.listWorkers("mgrRev").filter((w) => w.processState === "live").length;
+  await rejects("(7d) both reviewOfWorkerSessionId AND reviewOfTaskId ⇒ rejected", () =>
+    svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "X", reviewOfWorkerSessionId: authorA.id, reviewOfTaskId: taskRevA }),
+    "EITHER reviewOfWorkerSessionId OR reviewOfTaskId");
+  await rejects("(7d) an unresolvable reviewOfWorkerSessionId ⇒ rejected", () =>
+    svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "X", reviewOfWorkerSessionId: "does-not-exist" }),
+    "does not resolve to a session");
+  await rejects("(7d) reviewOfWorkerSessionId naming a branch-less session (the manager itself) ⇒ rejected", () =>
+    svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "X", reviewOfWorkerSessionId: "mgrRev" }),
+    "no branch");
+  await rejects("(7d) an unresolvable reviewOfTaskId ⇒ rejected", () =>
+    svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "X", reviewOfTaskId: "00000000-0000-0000-8000-000000000000" }),
+    "does not resolve to an existing task");
+  const taskRevNoWorker = "77777777-7777-7777-8777-777777777704";
+  db.insertTask({ id: taskRevNoWorker, projectId: "pRev", title: "RevNoWorker", body: "", columnKey: "todo", position: 4, createdAt: now, updatedAt: now });
+  await rejects("(7d) reviewOfTaskId naming a task that never had a worker (branch never created) ⇒ rejected", () =>
+    svc.spawnWorker("mgrRev", { agentId: "agentDevRev", kickoffPrompt: "X", reviewOfTaskId: taskRevNoWorker }),
+    "does not exist");
+  check("(7d) every rejected review spawn left NO new live worker (no side effect on failure)",
+    db.listWorkers("mgrRev").filter((w) => w.processState === "live").length === liveBeforeRev);
+
+  for (const wt of worktreesRev) { try { await removeWorktree(repoRev, wt); } catch { /* best-effort */ } }
+  try { fs.rmSync(repoRev, { recursive: true, force: true }); } catch { /* best-effort */ }
 } finally {
   for (const wt of worktrees) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } }
   if (repoR) { for (const wt of worktreesR) { try { await removeWorktree(repoR, wt); } catch { /* best-effort */ } } }
@@ -287,6 +407,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — workers receive their agent base brief composed ahead of the dynamic part on BOTH spawn and recycle; an empty brief degrades to the dynamic part alone — claude-free."
+  ? "\n✅ ALL PASS — workers receive their agent base brief composed ahead of the dynamic part on BOTH spawn and recycle; an empty brief degrades to the dynamic part alone; a review spawn (reviewOfWorkerSessionId/reviewOfTaskId) cuts its own branch from the reviewed branch's committed tip — content matches exactly, the branch+sha reach its kickoff mechanically, a normal spawn is untouched, and bad input is rejected with no side effect — claude-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

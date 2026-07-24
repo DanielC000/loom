@@ -167,6 +167,25 @@ export function codescapeWorktreeId(taskId: string | null | undefined): string |
 }
 
 /**
+ * Resolve `ref` (a branch name or sha) to its current commit sha in `repoPath`, or `null` if it doesn't
+ * resolve to a real commit. Used by the review-spawn path (card 47bbdc3f) to VALIDATE a `reviewOf*`-
+ * resolved branch actually exists BEFORE cutting the reviewer's own branch from it via `createWorktree`'s
+ * `forkFrom` — a bad/stale branch name must fail loudly here, not silently fall back to HEAD (which would
+ * reintroduce the wrong-tree-read bug this whole mechanism exists to close). BOUNDED like every other op
+ * in this file (a hung `rev-parse` must not wedge the spawning manager's turn).
+ */
+export async function resolveGitRef(repoPath: string, ref: string, deps: BoundedGitDeps = {}): Promise<string | null> {
+  try {
+    const { git, timeoutMs } = boundedGit(repoPath, deps);
+    const out = await withTimeout(git.raw(["rev-parse", "--verify", `${ref}^{commit}`]), timeoutMs, "git rev-parse --verify");
+    const sha = out.trim();
+    return sha || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Per-creation ceiling for the at-creation dep install. Generous (a warm-store frozen install is
  * usually seconds), but BOUNDED so a wedged/slow `pnpm install` can never hold up the spawn path
  * indefinitely. Far larger than {@link GIT_OP_TIMEOUT_MS} because an install legitimately takes longer
@@ -678,6 +697,19 @@ async function resolveStaleBase(
  */
 export async function createWorktree(
   repoPath: string, projectId: string, taskId: string, deps: ProvisionDeps = {}, repoKey?: string | null,
+  /**
+   * OPTIONAL branch name (or sha) to cut a FRESH branch FROM, instead of the repo's current HEAD — the
+   * review-spawn mechanism (card 47bbdc3f): a review-only worker's own branch starts at the TIP of the
+   * branch under review, so its worktree's content is byte-identical to what's being reviewed at spawn
+   * time, instead of ~mainline. Omitted (every caller before this existed, and every non-review spawn)
+   * is BYTE-IDENTICAL to before — the branch still forks the repo's current HEAD. Only consulted on the
+   * FRESH branch-cut path (worktree dir doesn't exist AND the branch name doesn't already exist) — a
+   * review spawn always keys off a brand-new claimKey, so it can never hit the reuse/reattach paths below,
+   * which stay untouched. `mainSha` in the returned {@link WorktreeInfo} is STILL the repo's actual current
+   * HEAD either way (used by the staleness machinery below), not `forkFrom`'s own tip — callers that need
+   * the review branch's tip resolve it themselves before calling (see `spawnWorker`'s `reviewForkFrom`).
+   */
+  forkFrom?: string,
 ): Promise<WorktreeInfo> {
   const key = taskKey(taskId);
   const branch = `loom/${key}`;
@@ -711,8 +743,10 @@ export async function createWorktree(
   await git.raw(["worktree", "prune"]); // drop any stale admin record for a since-deleted dir
   const branchExists = (await git.raw(["branch", "--list", branch])).trim() !== "";
   await git.raw(branchExists
-    ? ["worktree", "add", worktreePath, branch]        // branch survived a worktree removal → re-attach
-    : ["worktree", "add", worktreePath, "-b", branch]); // fresh task → new branch
+    ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
+    : forkFrom
+      ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
+      : ["worktree", "add", worktreePath, "-b", branch]);         // fresh task → new branch off current HEAD
   let staleBase: StaleBaseInfo | undefined;
   if (branchExists) {
     // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
