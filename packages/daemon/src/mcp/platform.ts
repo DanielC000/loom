@@ -5,8 +5,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
 import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry } from "@loom/shared";
-import { MEMORY_CONFIG_MAX } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
+import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 import type { PtyHost } from "../pty/host.js";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
@@ -32,6 +33,12 @@ import { setProjectConfigSafe } from "../tasks/columns.js";
 import { projectSessionList, filterSessionsByState, DEFAULT_SESSION_SUMMARY_CAP } from "./sessionView.js";
 import { projectAgentList, DEFAULT_AGENT_SUMMARY_CAP } from "./agentView.js";
 import { skillListData, skillWriteData, skillWriteInputSchema, skillEditData, skillEditInputSchema } from "./skillTools.js";
+import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } from "./promptSearch.js";
+
+/** Backstop cap on a default `events_search` read (limit omitted) — same posture as
+ *  DEFAULT_PROMPT_SEARCH_CAP/DEFAULT_AGENT_SUMMARY_CAP: bounds the payload of an unscoped forensics
+ *  query, while an explicit `limit` can still page up to MAX_EVENTS_SEARCH_PAGE. */
+const DEFAULT_EVENTS_SEARCH_CAP = 50;
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
 import { prioritySchema } from "./server.js";
@@ -284,6 +291,57 @@ const agentProjectConfigOverrideSchema = projectConfigOverrideSchema
 
 function formatZodIssues(error: z.ZodError): string {
   return error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ");
+}
+
+/** A `remoteAccess`-shaped object, loosely typed for the redaction helper below (works on both the raw
+ *  override's `remoteAccess` and `resolveConfig`'s resolved `RemoteAccessConfig`). */
+type RedactableRemoteAccess = { tls?: { certPath: string; keyPath: string }; [key: string]: unknown } | undefined;
+
+/** Replace `remoteAccess.tls.{certPath,keyPath}` (host filesystem paths to TLS private-key material)
+ *  with a bare `{configured: true}` — see `sanitizePlatformConfigForAgent`'s doc for why. A `remoteAccess`
+ *  with no `tls` set passes through unchanged (nothing to redact). */
+function redactRemoteAccessTls(remoteAccess: RedactableRemoteAccess): Record<string, unknown> | undefined {
+  if (!remoteAccess) return remoteAccess;
+  const { tls, ...rest } = remoteAccess;
+  return tls ? { ...rest, tls: { configured: true } } : rest;
+}
+
+/**
+ * Strip host-secret-adjacent fields from a platform config payload before it reaches an AGENT MCP tool
+ * (`platform_config_get`) — the human REST `GET /api/platform/config` returns this same shape
+ * UNREDACTED, but the human is the trust boundary there; the agent isn't (same reasoning as the
+ * gateCommand/alertWebhook project-config split). Audited every `PlatformConfig`/`PlatformConfigOverride`
+ * field (card 80b7a33b): the gateway TOKEN itself is never part of this shape — it's stored in a keyed
+ * table, never in config (see `RemoteAccessConfig`'s own doc) — and no other field carries a literal
+ * credential. Two fields are still host-path-shaped and stay off the agent surface:
+ *   - `integrations.codescape.path` — DROPPED ENTIRELY. Codescape is a private product with NO
+ *     user/agent-visible surface anywhere Loom ships (project memory
+ *     `codescape-is-private-no-user-visible-surface`); `resolveConfig`'s own `ResolvedConfig` already
+ *     omits `integrations` for the identical reason (card 3bd8ef17 — it flows into the web client
+ *     bundle), so the RAW override blob — which still carries a human-set value there, validated
+ *     independently of `ResolvedConfig` — is the one place this tool must not just forward verbatim.
+ *   - `remoteAccess.tls.{certPath,keyPath}` — redacted by `redactRemoteAccessTls` above. Host filesystem
+ *     paths to TLS private-key material; the path string itself isn't the secret, but handing an agent
+ *     the exact on-disk location of key material is the same shape of exposure `gateCommand`/
+ *     `obsidian.path`/`python.interpreterPath` are kept human-only for.
+ * Every other field (rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, connections
+ * bounds, `coalesceAgentMessages`/`companionVoiceEnabled`/`operatorEnabled`/`schedulerEnabled`, the
+ * concurrency caps, usage-sample cadence/retention, `updateCheckIntervalMs`, `remoteAccess.enabled`/
+ * `bindHost`/`rateLimit`) is plain operational tuning with no credential/secret shape — exposed as-is.
+ */
+function sanitizePlatformConfigForAgent(
+  override: PlatformConfigOverride,
+  resolvedPlatform: Record<string, unknown>,
+  resolvedRemoteAccess: RedactableRemoteAccess,
+): { override: Record<string, unknown>; resolved: Record<string, unknown> } {
+  const raw = override as unknown as Record<string, unknown> & { remoteAccess?: RedactableRemoteAccess };
+  const { integrations: _integrations, remoteAccess: overrideRemoteAccess, ...restOverride } = raw;
+  const sanitizedOverride: Record<string, unknown> = { ...restOverride };
+  if (overrideRemoteAccess !== undefined) sanitizedOverride.remoteAccess = redactRemoteAccessTls(overrideRemoteAccess);
+  return {
+    override: sanitizedOverride,
+    resolved: { ...resolvedPlatform, remoteAccess: redactRemoteAccessTls(resolvedRemoteAccess) },
+  };
 }
 
 /**
@@ -1109,6 +1167,83 @@ export class PlatformMcpRouter {
         if ("error" in project) return ok(project);
         // Schedules are keyed by agentId; a project filter resolves each schedule's agent → its project.
         return ok(all.filter((s) => db.getAgent(s.agentId)?.projectId === project.id).map((s) => withScheduleTimeEcho(s)));
+      },
+    );
+
+    // --- forensics reads (card 80b7a33b) — closes the gap where the Lead's platform_config /
+    // orchestration-events / cross-project-prompt forensics had no tool and fell back to raw sqlite reads
+    // of loom.db (Platform-Audit finding 4b9ee332). All three are READ-ONLY. ---
+    server.registerTool(
+      "platform_config_get",
+      {
+        description: "Read the daemon-GLOBAL platform config: the stored override blob PLUS the resolved platform group (same underlying data as the human REST GET /api/platform/config) — closes the gap where 'what is maxConcurrentGates/coalesceAgentMessages/etc actually set to right now' had no tool short of a raw sqlite read of the platform_config table. No args. REDACTED for the agent surface (audited every field — see the daemon source's sanitizePlatformConfigForAgent doc): `integrations` (incl. any codescape path) is DROPPED entirely (codescape has no user/agent-visible surface anywhere Loom ships), and `remoteAccess.tls.{certPath,keyPath}` (host paths to TLS private-key material) collapses to `{configured:true/false}`. Every other field — rate-limit numbers, watcher cadences, timeouts, backup/gateRetry tuning, the P2 authenticated-request rate/size bounds, coalesceAgentMessages/companionVoiceEnabled/operatorEnabled/schedulerEnabled, the concurrency caps, usage-sample cadence/retention, updateCheckIntervalMs, remoteAccess.enabled/bindHost/rateLimit — is plain operational tuning with no credential shape, returned as-is. Read-only: no platform_config WRITE tool exists on any agent surface (human REST PATCH only).",
+        inputSchema: {},
+      },
+      async () => {
+        const override = db.getPlatformConfig();
+        const resolvedConfig = resolveConfig(undefined, override);
+        return ok(sanitizePlatformConfigForAgent(
+          override,
+          resolvedConfig.platform as unknown as Record<string, unknown>,
+          resolvedConfig.remoteAccess as unknown as RedactableRemoteAccess,
+        ));
+      },
+    );
+
+    server.registerTool(
+      "events_search",
+      {
+        description: "A BOUNDED, newest-first page of orchestration_events across the platform (or scoped to one project/session/task) — the general sibling of the Gates page's own gate-only history read, for forensics that aren't limited to gate-run kinds (a fleet-down incident may need kill_switch/recycle_begin/merge_rejected/platform_escalate/etc, not just worker_gate/build_gate/deploy). `kind` optionally narrows to specific event kinds (an OrchestrationEventKind value each, e.g. \"kill_switch\") — omitted, returns every kind. `projectId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. `sessionId` matches an event where that session is EITHER the manager or the worker. `taskId` matches the event's linked task. Each event returns {id, ts, kind, detail, taskId, taskTitle, sessionId, projectId, projectName, agentName, branch} — detail is the raw kind-specific payload (already-durable operational metadata, not a dump of session transcript content). limit/offset paginate (default " + DEFAULT_EVENTS_SEARCH_CAP + " when omitted, clamped to " + MAX_EVENTS_SEARCH_PAGE + "); the result is ALWAYS the {events, total, returned, offset, nextOffset} envelope (never a bare array) since this read is inherently a forensics page, not a small enumerable set — page deterministically via offset:nextOffset until it is null.",
+        inputSchema: {
+          kind: z.array(z.string()).optional(),
+          projectId: z.string().optional(),
+          sessionId: z.string().optional(),
+          taskId: z.string().optional(),
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        },
+      },
+      async ({ kind, projectId, sessionId, taskId, limit, offset }) => {
+        let resolvedProjectId: string | null = null;
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          resolvedProjectId = project.id;
+        }
+        const off = offset ?? 0;
+        const page = db.listOrchestrationEventsBounded({
+          kind, projectId: resolvedProjectId, sessionId: sessionId ?? null, taskId: taskId ?? null,
+          limit: limit ?? DEFAULT_EVENTS_SEARCH_CAP, offset: off,
+        });
+        const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
+        return ok({ events: page.items, total: page.total, returned: page.items.length, offset: off, nextOffset });
+      },
+    );
+
+    server.registerTool(
+      "agent_prompt_search",
+      {
+        description: "Case-insensitive LITERAL substring search over every agent's startupPrompt across the platform (or one project) — the cross-project 'who references X' read a Lead has repeatedly reached for via raw sqlite, e.g. hunting stale references to a renamed project/skill/tool across the whole fleet (the same class of check lintStalePromptsOnProjectChange already runs reactively for ONE project on its own rename, generalized here to an ad-hoc cross-project query). `query` is a plain substring, not a regex. Optional `projectId` narrows to one project — accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get); unknown/ambiguous is an explicit error. Bounded: returns at most `limit` hits (default " + DEFAULT_PROMPT_SEARCH_CAP + ", max " + MAX_PROMPT_SEARCH_CAP + ") with `truncated:true` when more matches exist — narrow with projectId or a more specific query rather than raising limit past the cap. Each hit is {agentId, projectId, projectName, agentName, snippet} — a short excerpt around the first match, NOT the full prompt (agent_get already covers reading one agent's whole startupPrompt).",
+        inputSchema: {
+          query: z.string().min(1),
+          projectId: z.string().optional(),
+          limit: z.number().int().positive().optional(),
+        },
+      },
+      async ({ query, projectId, limit }) => {
+        let projects = db.listAllProjects();
+        if (projectId !== undefined) {
+          const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
+          if ("error" in project) return ok(project);
+          projects = [project];
+        }
+        const eff = Math.max(1, Math.min(limit ?? DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP));
+        const { hits, truncated } = searchAgentPrompts(
+          projects.map((p) => ({ id: p.id, name: p.name, agents: db.listAgents(p.id) })),
+          query,
+          eff,
+        );
+        return ok({ hits, returned: hits.length, truncated });
       },
     );
 

@@ -37,10 +37,11 @@ import type { SessionRole } from "@loom/shared";
 // --- Layer B: hand-authored per-router tool tables (verified against a live buildServer() dump) ---
 
 export const PLATFORM_TOOLS: readonly string[] = [
-  "agent_clone", "agent_clone_batch", "agent_create", "agent_delete", "agent_get", "agent_update",
-  "daemon_restart", "end_me", "git_checkout", "git_commit", "git_create_branch", "git_push",
-  "idle_report", "list_all_agents", "list_all_profiles", "list_all_projects", "list_all_schedules",
-  "list_all_sessions", "list_all_tasks", "profile_assign", "profile_create", "profile_delete",
+  "agent_clone", "agent_clone_batch", "agent_create", "agent_delete", "agent_get", "agent_prompt_search",
+  "agent_update", "daemon_restart", "end_me", "events_search", "git_checkout", "git_commit",
+  "git_create_branch", "git_push", "idle_report", "list_all_agents", "list_all_profiles",
+  "list_all_projects", "list_all_schedules", "list_all_sessions", "list_all_tasks",
+  "platform_config_get", "profile_assign", "profile_create", "profile_delete",
   "profile_get", "profile_update", "project_archive", "project_configure", "project_create",
   "project_get", "project_init", "project_task_create", "project_task_get", "project_task_update",
   "project_update", "question_ask", "question_cancel", "question_pull", "question_resolve",

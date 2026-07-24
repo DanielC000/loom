@@ -1259,6 +1259,12 @@ const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedu
  *  return an unbounded event set. A "load more" client reads the effective `limit` back to detect capping. */
 const MAX_GATE_HISTORY_PAGE = 200;
 
+/** Clamp for a bounded, kind-filterable events-forensics page (listOrchestrationEventsBounded, card
+ *  80b7a33b) — same posture as MAX_GATE_HISTORY_PAGE: a caller's `limit` is clamped into [1,
+ *  MAX_EVENTS_SEARCH_PAGE] so a huge value can't return an unbounded slice of the event log. Exported so
+ *  the `events_search` MCP tool's description can cite the same number without redeclaring it. */
+export const MAX_EVENTS_SEARCH_PAGE = 200;
+
 /** The gate-run orchestration_event kinds that constitute Gates-page HISTORY — one row per daemon-executed
  *  lane run: a worker self-check (`worker_gate`), a merge gate + its transient-kill retry (`build_gate` /
  *  `build_gate_retry`, both gateType "merge"), and a scoped deploy (`deploy`). The marker-only
@@ -4841,6 +4847,65 @@ export class Db {
     return { items: rows.map(toGateHistoryRow), total, limit };
   }
   /**
+   * Card 80b7a33b — a BOUNDED, kind-filterable, newest-first page of orchestration_events across the
+   * whole platform (or scoped to one project/session/task), plus the total matching count. Generalizes
+   * `listGateEvents`' own bounded/paginated/JOIN-enriched shape (SAME project/agent/branch/task-title
+   * enrichment, SAME clamp-and-report-effective-limit contract) to an ARBITRARY caller-supplied `kind`
+   * set instead of the hardcoded `GATE_HISTORY_KINDS` — the read that closes the gap a Lead's forensics
+   * repeatedly fell back to raw sqlite for: a fleet-down incident isn't limited to gate-run kinds (it may
+   * need `kill_switch`/`recycle_begin`/`merge_rejected`/`platform_escalate`/etc.).
+   *
+   * `kind` here is CALLER-supplied (an agent/Lead argument), unlike `GATE_HISTORY_KINDS` (a trusted
+   * internal constant) — so unlike that call site's plain string interpolation, every kind value is bound
+   * as a query PARAMETER (`?` placeholders), never interpolated into the SQL text. An unrecognized kind
+   * therefore just matches zero rows; it can never reach the query as raw text, so it is not an injection
+   * vector no matter what a caller passes.
+   */
+  listOrchestrationEventsBounded(opts: {
+    kind?: string[]; projectId?: string | null; sessionId?: string | null; taskId?: string | null;
+    limit: number; offset: number;
+  }): { items: EventForensicsRow[]; total: number; limit: number } {
+    const limit = Math.max(1, Math.min(opts.limit, MAX_EVENTS_SEARCH_PAGE));
+    const offset = Math.max(0, opts.offset);
+    const conditions: string[] = [];
+    const params: unknown[] = [];
+    if (opts.kind && opts.kind.length > 0) {
+      conditions.push(`oe.kind IN (${opts.kind.map(() => "?").join(",")})`);
+      params.push(...opts.kind);
+    }
+    if (opts.projectId) {
+      conditions.push("s.project_id = ?");
+      params.push(opts.projectId);
+    }
+    if (opts.sessionId) {
+      conditions.push("(oe.manager_session_id = ? OR oe.worker_session_id = ?)");
+      params.push(opts.sessionId, opts.sessionId);
+    }
+    if (opts.taskId) {
+      conditions.push("oe.task_id = ?");
+      params.push(opts.taskId);
+    }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+    const from =
+      `FROM orchestration_events oe
+       LEFT JOIN sessions s ON s.id = COALESCE(oe.worker_session_id, oe.manager_session_id)
+       LEFT JOIN projects p ON p.id = s.project_id
+       LEFT JOIN agents a ON a.id = s.agent_id
+       LEFT JOIN tasks t ON t.id = oe.task_id
+       ${where}`;
+    const total = (this.db.prepare(`SELECT COUNT(*) AS c ${from}`).get(...params) as { c: number }).c;
+    const rows = this.db.prepare(
+      `SELECT oe.id AS id, oe.ts AS ts, oe.kind AS kind, oe.detail_json AS detailJson, oe.task_id AS taskId,
+              COALESCE(oe.worker_session_id, oe.manager_session_id) AS sessionId,
+              s.project_id AS projectId, p.name AS projectName, a.name AS agentName,
+              s.branch AS branch, t.title AS taskTitle
+       ${from}
+       ORDER BY oe.seq DESC
+       LIMIT ? OFFSET ?`,
+    ).all(...params, limit, offset) as GateEventJoinRow[];
+    return { items: rows.map(toEventForensicsRow), total, limit };
+  }
+  /**
    * Every `platform_escalate` event whose `detail.originProjectId` matches the given project — the
    * manager-facing `escalation_status` read's SERVER-SIDE scoped set (mcp/orchestration.ts). Scoped by
    * ORIGIN PROJECT (not managerSessionId), so a recycled successor manager in the same project still
@@ -6541,6 +6606,38 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     durationMs,
     endedAt: r.ts,
     failingTest,
+  };
+}
+
+/** One row of {@link Db.listOrchestrationEventsBounded}'s result — the generic (kind-agnostic) sibling of
+ *  {@link GateHistoryRow}: the raw event (id/ts/kind/detail/taskId) plus the SAME project/agent/branch/
+ *  task-title enrichment `listGateEvents` computes, without the gate-specific outcome/duration/failingTest
+ *  derivation (a non-gate kind's `detail` shape varies too widely to normalize into those fields). */
+export interface EventForensicsRow {
+  id: string;
+  ts: string;
+  kind: string;
+  detail: Record<string, unknown> | undefined;
+  taskId: string | null;
+  taskTitle: string | null;
+  sessionId: string | null;
+  projectId: string | null;
+  projectName: string | null;
+  agentName: string | null;
+  branch: string | null;
+}
+
+/** Map one JOINed event row (the SAME {@link GateEventJoinRow} shape `listGateEvents` selects) to a
+ *  kind-agnostic {@link EventForensicsRow} — no outcome/duration derivation, since those are gate-specific. */
+function toEventForensicsRow(r: GateEventJoinRow): EventForensicsRow {
+  let detail: Record<string, unknown> | undefined;
+  if (r.detailJson) {
+    try { detail = JSON.parse(r.detailJson) as Record<string, unknown>; } catch { /* tolerate a bad blob */ }
+  }
+  return {
+    id: r.id, ts: r.ts, kind: r.kind, detail, taskId: r.taskId, taskTitle: r.taskTitle,
+    sessionId: r.sessionId, projectId: r.projectId, projectName: r.projectName,
+    agentName: r.agentName, branch: r.branch,
   };
 }
 
