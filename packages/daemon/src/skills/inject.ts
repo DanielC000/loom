@@ -263,9 +263,13 @@ function resolveGitCommonDir(cwd: string): string | null {
   return path.resolve(privateDir, commondirRaw);
 }
 
-/** Append local git-ignore patterns for the injected skill dirs + manifest — resolving through a linked
- *  worktree to the shared common dir (see resolveGitCommonDir) so a worktree-cwd session (every worker)
- *  hides its injected skills too, not just a repoPath-cwd session (manager/platform/setup/auditor). */
+/** Append local git-ignore patterns for the injected skill dirs + manifest, PLUS Claude Code's own
+ *  `.claude/settings.local.json` (written by acceptEdits permission persistence — a Loom worktree never
+ *  writes this itself, but it lands in every worker's `.claude/` regardless and a blind `git add -A`
+ *  would otherwise stage it onto the worker's branch) — resolving through a linked worktree to the shared
+ *  common dir (see resolveGitCommonDir) so a worktree-cwd session (every worker) hides both too, not just
+ *  a repoPath-cwd session (manager/platform/setup/auditor). Deliberately just the ONE settings file, not
+ *  all of `.claude/` — a repo may track a shared `.claude/settings.json` that must stay visible to git. */
 function hideFromGit(cwd: string, entries: string[]): void {
   const gitDir = resolveGitCommonDir(cwd);
   if (!gitDir) return; // no .git resolvable — nothing to hide from
@@ -273,9 +277,9 @@ function hideFromGit(cwd: string, entries: string[]): void {
   try { fs.mkdirSync(infoDir, { recursive: true }); } catch { /* ignore */ }
   const excludePath = path.join(infoDir, "exclude");
   let cur = ""; try { cur = fs.readFileSync(excludePath, "utf8"); } catch { /* none */ }
-  const want = entries.map((e) => `/.claude/skills/${e}`);
+  const want = [...entries.map((e) => `/.claude/skills/${e}`), "/.claude/settings.local.json"];
   const missing = want.filter((p) => !cur.split(/\r?\n/).includes(p));
   if (missing.length === 0) return;
   const prefix = cur === "" || cur.endsWith("\n") ? "" : "\n";
-  try { fs.appendFileSync(excludePath, `${prefix}# loom-managed skills (injected per session; do not commit)\n${missing.join("\n")}\n`); } catch { /* ignore */ }
+  try { fs.appendFileSync(excludePath, `${prefix}# loom-managed exclusions (injected per session; do not commit)\n${missing.join("\n")}\n`); } catch { /* ignore */ }
 }

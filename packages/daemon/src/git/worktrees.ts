@@ -1266,10 +1266,12 @@ export async function countCommitsBehind(repoPath: string, branch: string, base 
 
 /**
  * Does `git status --porcelain` output represent REAL worker work, or only daemon-injected noise?
- * Loom mirrors its managed skills/settings into every worktree's `.claude/` (injectSkills); in a
- * worktree those untracked files are hidden only via the SHARED main `.git/info/exclude` (hideFromGit
- * no-ops in a worktree, where `.git` is a file), so a skill name not yet in that shared exclude
- * surfaces as `?? .claude/…`. That is NEVER the worker's product — the product is src/, package files,
+ * Loom mirrors its managed skills/settings into every worktree's `.claude/` (injectSkills); hideFromGit
+ * resolves a linked worktree's `.git` file back to the shared main repo's common dir (resolveGitCommonDir
+ * in skills/inject.ts) and writes there, so those untracked files ARE hidden via the SHARED
+ * `.git/info/exclude` — but only for entries actually written into it (skill dirs, the manifest, and
+ * `.claude/settings.local.json`); anything not yet in that shared exclude still surfaces as `?? .claude/…`.
+ * That is NEVER the worker's product — the product is src/, package files,
  * tests, anything OUTSIDE the injected `.claude/` churn — so two daemon-noise classes are dropped:
  * (a) ANY UNTRACKED `.claude/` path (skill injection + Claude's own `.claude/settings.local.json`
  * permission writes), and (b) the daemon-injected `.claude/skills/` subtree at ANY status (a re-copy
