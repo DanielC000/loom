@@ -21,6 +21,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       semantics.
 //   (d) a dedup does not fire a redundant live-Lead nudge (only the genuinely-new-event live-nudge path is
 //       exercised — platform-escalate-parked-wake.mjs already covers that live-nudge wiring itself).
+//   (e) SEVERITY ESCALATION (finding 97c2c37b): the title-only gate above used to swallow a re-escalation
+//       of a still-open title whose severity genuinely WORSENED — no fresh event, no fresh push, even
+//       though the client-side title+severity signature (attention-push.ts) exists to catch exactly this.
+//       An unchanged-or-LOWER severity re-file of a still-open title still dedupes (the original target of
+//       (a)/(c) above); a HIGHER severity than what's on file for that title does NOT dedupe — it reuses
+//       the SAME task (no duplicate card) but appends a fresh `platform_escalate` event, so attention-push
+//       sees a real signature change and re-pushes.
 //
 // DETERMINISTIC + CLAUDE-FREE + NETWORK-FREE — a REAL Db + SessionService driven directly (no MCP layer;
 // escalation-status.mjs / platform-messaging.mjs already cover the tool-surface wiring).
@@ -114,12 +121,49 @@ try {
   const esc6 = svc.platformEscalate("MGR", { title: TITLE, detail: "recurred after being resolved", severity: "high" });
   check("(d) after the original is RESOLVED, the SAME title is treated as a fresh occurrence",
     !!esc6.taskId && esc6.taskId !== esc1.taskId && !esc6.deduped);
+
+  // ===================== (e) severity escalation on a still-open title is NOT swallowed ==================
+  const TITLE2 = "gate queue depth spikes under load";
+  const esc7 = svc.platformEscalate("MGR", { title: TITLE2, detail: "queue depth hit 40", severity: "medium" });
+  check("(e) 1st escalation files a fresh task", !!esc7.taskId && !esc7.deduped);
+  const tasksAfter7 = db.listTasks("pHome").length;
+  const eventsAfter7 = platformEscalateEvents().length;
+
+  // Same severity → still dedupes (the original title-only-gate target, unaffected by the fix).
+  const escSame = svc.platformEscalate("MGR", { title: TITLE2, detail: "still spiking", severity: "medium" });
+  check("(e) an UNCHANGED severity re-file still dedupes", escSame.taskId === esc7.taskId && escSame.deduped === true);
+  check("(e) no new task/event for the unchanged-severity re-file",
+    db.listTasks("pHome").length === tasksAfter7 && platformEscalateEvents().length === eventsAfter7);
+
+  // Lower severity → still dedupes (a de-escalation is not "new information" worth a fresh push).
+  const escLower = svc.platformEscalate("MGR", { title: TITLE2, detail: "seems calmer now", severity: "low" });
+  check("(e) a LOWER severity re-file still dedupes", escLower.taskId === esc7.taskId && escLower.deduped === true);
+  check("(e) no new task/event for the lower-severity re-file",
+    db.listTasks("pHome").length === tasksAfter7 && platformEscalateEvents().length === eventsAfter7);
+
+  // Higher severity while still open (in_progress, not resolved) → NOT deduped: same task, fresh event.
+  db.updateTask(esc7.taskId, { columnKey: "review" }); // Lead claimed it, still working (not resolved)
+  const escHigher = svc.platformEscalate("MGR", { title: TITLE2, detail: "now timing out entirely", severity: "critical" });
+  check("(e) a HIGHER severity re-file of a still-open (in_progress) title reuses the SAME task",
+    escHigher.taskId === esc7.taskId);
+  check("(e) a HIGHER severity re-file is NOT reported as deduped", !escHigher.deduped);
+  check("(e) a HIGHER severity re-file files a FRESH platform_escalate event (attention-push has something new)",
+    platformEscalateEvents().length === eventsAfter7 + 1);
+  check("(e) a HIGHER severity re-file does NOT create a duplicate task", db.listTasks("pHome").length === tasksAfter7);
+  const eventsAfterEscalation = platformEscalateEvents().length;
+
+  // Once re-filed at the new (higher) severity, a repeat at that SAME severity dedupes again.
+  const escSameAfterEscalation = svc.platformEscalate("MGR", { title: TITLE2, detail: "still critical", severity: "critical" });
+  check("(e) a repeat at the NEW (escalated) severity dedupes again",
+    escSameAfterEscalation.taskId === esc7.taskId && escSameAfterEscalation.deduped === true);
+  check("(e) no new task/event for the repeat-at-new-severity",
+    db.listTasks("pHome").length === tasksAfter7 && platformEscalateEvents().length === eventsAfterEscalation);
 } finally {
   db.close();
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — platform_escalate dedupes an identical re-escalation while the original is STILL OPEN (pending OR claimed-but-unresolved — same normalized title, no new task, no new orchestration_event ⇒ attention-push has nothing new to loop on), leaves a genuinely distinct title unaffected, and lets the same title re-file fresh only once the Lead has actually RESOLVED the original."
+  ? "\n✅ ALL PASS — platform_escalate dedupes an identical-or-lower-severity re-escalation while the original is STILL OPEN (pending OR claimed-but-unresolved — same normalized title, no new task, no new orchestration_event ⇒ attention-push has nothing new to loop on), leaves a genuinely distinct title unaffected, lets the same title re-file fresh once the Lead has RESOLVED the original, and — for a still-open title — lets a genuinely HIGHER severity through as a fresh event on the SAME task instead of being swallowed by the title-only gate."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

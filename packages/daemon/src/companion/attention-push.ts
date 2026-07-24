@@ -231,7 +231,7 @@ export class AttentionPushWatcher {
    *  bounded-log-growth rationale). Cleared on any real push (immediate or digest flush). */
   private deferredSinceLastPush = false;
   /** Per-recipient "escalation" re-delivery suppression (companion re-delivery card, defense-in-depth
-   *  alongside the server-side platformEscalate() title-dedup, sessions/service.ts): taskId → the
+   *  alongside the server-side platformEscalate() title+severity-aware dedup, sessions/service.ts): taskId → the
    *  {@link escalationSignature} last pushed to THIS session for that task. `orchestration_events` rows are
    *  immutable once written (never mutated after insert — same premise `decisionSurfaceSignature`'s doc
    *  relies on for questions), so a repeat "escalation"-class event carrying a taskId+signature already in

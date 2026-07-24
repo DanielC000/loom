@@ -4900,66 +4900,90 @@ export class SessionService {
     // genuinely new and re-pushes "escalated to platform" every time, whether or not a Lead is live to act
     // on it. If THIS origin project already has a still-UNRESOLVED escalation (`pending` — never picked up,
     // still sitting in the Platform board's landing lane — OR `in_progress` — the Lead already moved it off
-    // the landing lane but hasn't resolved it) with the same normalized title, reuse it instead of filing a
-    // duplicate task/event: no new orchestration_event ⇒ no new attention-push alert, and no redundant
-    // live-nudge either. (Companion re-delivery card: widened from the original `pending`-only condition,
-    // which stopped deduping the instant a Lead so much as moved the card off the landing lane — a manager
-    // re-escalating the SAME still-open issue on a retry/idle-watchdog cycle kept re-firing a fresh
-    // "escalated to platform" alert for something already being worked, exactly the observed re-delivery
-    // symptom.) Only once the Lead RESOLVES it (moves it to the terminal column) does a repeat with the same
-    // title get treated as a genuinely new occurrence and file fresh — mirrors auditFileFinding's
-    // title-normalized dedupe, but scoped to "still open" rather than "ever filed" (an escalation, unlike an
-    // audit finding, can legitimately recur after resolution).
+    // the landing lane but hasn't resolved it) with the same normalized title AND an unchanged-or-lower
+    // severity, reuse it instead of filing a duplicate task/event: no new orchestration_event ⇒ no new
+    // attention-push alert, and no redundant live-nudge either. (Companion re-delivery card: widened from
+    // the original `pending`-only condition, which stopped deduping the instant a Lead so much as moved the
+    // card off the landing lane — a manager re-escalating the SAME still-open issue on a retry/idle-watchdog
+    // cycle kept re-firing a fresh "escalated to platform" alert for something already being worked, exactly
+    // the observed re-delivery symptom.) Only once the Lead RESOLVES it (moves it to the terminal column)
+    // does a repeat with the same title get treated as a genuinely new occurrence and file fresh — mirrors
+    // auditFileFinding's title-normalized dedupe, but scoped to "still open" rather than "ever filed" (an
+    // escalation, unlike an audit finding, can legitimately recur after resolution).
+    //
+    // SEVERITY ESCALATION (finding 97c2c37b): the title-only gate above swallowed a re-escalation of the
+    // SAME still-open title whose severity genuinely WORSENED (e.g. medium → critical) — no fresh event ⇒
+    // no fresh push, even though the client-side title+severity signature in attention-push.ts's
+    // `escalationSignature` exists precisely to catch that case (it never got the chance, because this
+    // server-side gate swallowed the event before it could see it). So a same-or-lower severity re-file
+    // still dedupes (the original target of this guard), but a HIGHER severity than the still-open task's
+    // last-filed severity is treated as new information: the SAME task is reused (no duplicate card) but a
+    // FRESH orchestration_event is filed below, so attention-push sees a real signature change and re-pushes.
     const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, " ");
     const key = norm(input.title);
+    const severity = (input.severity ?? "").trim() || "unspecified";
+    let reuseTaskId: string | undefined;
     for (const e of this.db.listEscalationsForProject(caller.projectId)) {
       const filedTitle = (e.detail?.title as string | undefined) ?? "";
       if (!e.taskId || norm(filedTitle) !== key) continue;
       const existingTask = this.db.getTask(e.taskId);
       if (existingTask && this.classifyEscalationStatus(home.id, existingTask.columnKey) !== "resolved") {
-        return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true };
+        const priorSeverity = (e.detail?.severity as string | undefined) ?? "unspecified";
+        if (this.escalationSeverityRank(severity) <= this.escalationSeverityRank(priorSeverity)) {
+          return { taskId: existingTask.id, projectId: home.id, deliveryStatus: "boarded", deduped: true };
+        }
+        // Higher severity than what's on file for this still-open task: stop scanning (this IS the
+        // authoritative current state for the title) and fall through to file a fresh event against it.
+        reuseTaskId = existingTask.id;
+        break;
       }
     }
 
     const origin = this.db.getProject(caller.projectId);
     const originName = origin?.name ?? caller.projectId;
-    const severity = (input.severity ?? "").trim() || "unspecified";
     const now = new Date().toISOString();
-    const body = [
-      "**Escalated by a project manager** (manager→Platform upward channel).",
-      "",
-      `- **Origin project:** ${originName} (\`${caller.projectId}\`)`,
-      `- **Manager session:** \`${managerSessionId}\``,
-      `- **Severity:** ${severity}`,
-      "",
-      "## Detail / evidence",
-      "",
-      input.detail,
-    ].join("\n");
-    const task: Task = {
-      id: randomUUID(),
-      projectId: home.id,
-      title: input.title,
-      body,
-      // The Platform home's default-landing lane (role-resolved, matches createProjectTask's landing).
-      columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
-      position: Date.now(),
-      priority: DEFAULT_TASK_PRIORITY,
-      createdAt: now,
-      updatedAt: now,
-    };
-    this.db.insertTask(task);
+    let taskId: string;
+    if (reuseTaskId) {
+      taskId = reuseTaskId;
+    } else {
+      const body = [
+        "**Escalated by a project manager** (manager→Platform upward channel).",
+        "",
+        `- **Origin project:** ${originName} (\`${caller.projectId}\`)`,
+        `- **Manager session:** \`${managerSessionId}\``,
+        `- **Severity:** ${severity}`,
+        "",
+        "## Detail / evidence",
+        "",
+        input.detail,
+      ].join("\n");
+      const task: Task = {
+        id: randomUUID(),
+        projectId: home.id,
+        title: input.title,
+        body,
+        // The Platform home's default-landing lane (role-resolved, matches createProjectTask's landing).
+        columnKey: this.columnKeyForProjectRole(home.id, "defaultLanding") ?? "backlog",
+        position: Date.now(),
+        priority: DEFAULT_TASK_PRIORITY,
+        createdAt: now,
+        updatedAt: now,
+      };
+      this.db.insertTask(task);
+      taskId = task.id;
+    }
     this.db.appendEvent({
       id: randomUUID(), ts: now,
-      managerSessionId, taskId: task.id, kind: "platform_escalate",
+      managerSessionId, taskId, kind: "platform_escalate",
       detail: { originProjectId: caller.projectId, severity, platformProjectId: home.id, title: input.title },
     });
 
     // Additive best-effort live nudge: if a Lead session happens to be live, push a heads-up via the same
     // enqueue channel — but the board TASK is the durable source of truth (the Lead reads escalations as
     // tasks on its home board). This never builds a fragile live-only inbox; it just saves the Lead a poll.
-    // The board task is always created above, so the FLOOR is `boarded` (durably persisted, no live taker);
-    // a live Lead upgrades it to `delivered-live` (idle, took the turn) or `queued` (busy, held FIFO).
+    // The board task is always present by this point (created above, or reused), so the FLOOR is `boarded`
+    // (durably persisted, no live taker); a live Lead upgrades it to `delivered-live` (idle, took the turn)
+    // or `queued` (busy, held FIFO).
     let deliveryStatus: DeliveryStatus = "boarded";
     const liveLead = this.db.listAllSessions().find((s) => s.role === "platform" && s.processState === "live");
     if (liveLead) {
@@ -4971,13 +4995,21 @@ export class SessionService {
       const escShas = extractCommitShas(`${input.title} ${input.detail}`);
       if (this.deployShaAlreadyDelivered(liveLead.id, escShas)) {
         // eslint-disable-next-line no-console
-        console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — SHA already delivered by a deploy restart (task ${task.id} still filed)`);
+        console.log(`[escalation] suppressed live completion nudge to Lead ${liveLead.id} — SHA already delivered by a deploy restart (task ${taskId} still filed)`);
       } else {
-        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${task.id}: ${input.title} (severity: ${severity})`;
+        const note = `[loom:escalation] ${originName} manager escalated a Loom issue → Platform board task ${taskId}: ${input.title} (severity: ${severity})`;
         try { deliveryStatus = this.deliveryStatusFor(this.pty.enqueueStdin(liveLead.id, note, "system", undefined, undefined, "agent")); } catch { /* Lead not live/ready — `boarded` stands */ }
       }
     }
-    return { taskId: task.id, projectId: home.id, deliveryStatus };
+    return { taskId, projectId: home.id, deliveryStatus };
+  }
+
+  /** Total order over `platform_escalate` severities (unknown/omitted ranks lowest) — used by the
+   *  server-side dedup above to decide whether a re-escalation of a still-open title is new information
+   *  (severity genuinely worsened) or a repeat (unchanged or lower) worth deduping. */
+  private escalationSeverityRank(severity: string): number {
+    const RANK: Record<string, number> = { unspecified: 0, low: 1, medium: 2, high: 3, critical: 4 };
+    return RANK[severity] ?? 0;
   }
 
   /**
