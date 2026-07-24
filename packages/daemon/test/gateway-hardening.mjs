@@ -16,7 +16,13 @@ import { requireHermeticEnv } from "./_guard.mjs";
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gwhard-"));
 process.env.LOOM_HOME = TMP;
-process.env.LOOM_PORT = "45341";
+// No real socket is ever bound in this file — buildServer + app.inject() is HERMETIC/NETWORK-FREE (see
+// header comment), and the CSRF/DNS-rebind onRequest hook matches Host/Origin by HOSTNAME only
+// (isLoopbackHostname in gateway/server.ts), never by port. So LOOM_PORT here is just a cosmetic value
+// baked into the injected Host/Origin headers — but pin it PID-derived (not a fixed literal) so two
+// concurrent runs of this file never collide on it.
+const PORT = 45318 + (process.pid % 900); // non-4317, low-collision — paths.ts reads this ONCE at import
+process.env.LOOM_PORT = String(PORT);
 const sandboxHome = path.join(TMP, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
@@ -53,7 +59,7 @@ const app = await buildServer({
 });
 
 // Loopback headers so the CSRF/DNS-rebind onRequest hook lets every request through to the handler.
-const H = { host: "127.0.0.1:45341", origin: "http://127.0.0.1:45341", "content-type": "application/json" };
+const H = { host: `127.0.0.1:${PORT}`, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/json" };
 const post = (url, payload) => app.inject({ method: "POST", url, headers: H, payload });
 const patch = (url, payload) => app.inject({ method: "PATCH", url, headers: H, payload });
 
