@@ -12,9 +12,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       collapsed to {configured:true}; plain operational fields pass through unredacted.
 //   (2) events_search is a bounded, kind/project/session/task-filterable page over orchestration_events,
 //       NOT limited to gate-run kinds; kind values are bound as query params (an unrecognized kind is
-//       zero rows, never an error/injection); pagination envelope is always returned.
+//       zero rows, never an error/injection); pagination envelope is always returned; its `limit` clamp
+//       (card 07ce7c0c) defaults to DEFAULT_EVENTS_SEARCH_CAP and never exceeds MAX_EVENTS_SEARCH_PAGE.
 //   (3) agent_prompt_search is a case-insensitive cross-project substring search over every agent's
-//       startupPrompt, bounded/capped with a snippet (not the full prompt) per hit.
+//       startupPrompt, bounded/capped with a snippet (not the full prompt) per hit; its `limit` clamp
+//       (card 07ce7c0c) defaults to DEFAULT_PROMPT_SEARCH_CAP and never exceeds MAX_PROMPT_SEARCH_CAP.
 //   (4) TRUST GATE — all three tools are PRESENT on loom-platform but ABSENT from every agent-facing
 //       surface: loom-orchestration (manager AND worker), loom-setup, and the in-project loom-tasks.
 //
@@ -39,18 +41,18 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this test runs no HTTP daemon)
 
-const { Db } = await import("../dist/db.js");
+const { Db, MAX_EVENTS_SEARCH_PAGE } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
-const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
+const { PlatformMcpRouter, DEFAULT_EVENTS_SEARCH_CAP } = await import("../dist/mcp/platform.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { WakeService } = await import("../dist/orchestration/wake.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
-const { searchAgentPrompts } = await import("../dist/mcp/promptSearch.js");
+const { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } = await import("../dist/mcp/promptSearch.js");
 
 // --- a real temp git repo so a spawn (never reached here) would have a valid cwd; createPty is faked ---
 const repo = path.join(os.tmpdir(), `loom-forensics-repo-${Date.now()}`);
@@ -205,6 +207,29 @@ try {
   const page2 = await call("events_search", { limit: 2, offset: page1.nextOffset });
   check("(2) paging via offset:nextOffset returns the remaining rows", page2.events.length >= 2 && page2.offset === 2);
 
+  // Clamp tests (card 07ce7c0c bundled nitpick): the `limit` clamp is a simple Math.min in
+  // Db.listOrchestrationEventsBounded, previously untested. Seed well past both the default cap (50) and
+  // the hard ceiling (MAX_EVENTS_SEARCH_PAGE=200) under one dedicated kind, so counts are exact regardless
+  // of the other events already seeded above.
+  const CLAMP_TOTAL = MAX_EVENTS_SEARCH_PAGE + 10;
+  for (let i = 0; i < CLAMP_TOTAL; i++) mkEvt(`ev-clamp-${i}`, "clamp_test_kind", {});
+
+  const clampDefault = await call("events_search", { kind: ["clamp_test_kind"] });
+  check(`(2) clamp: omitted limit defaults to DEFAULT_EVENTS_SEARCH_CAP (${DEFAULT_EVENTS_SEARCH_CAP})`,
+    clampDefault.returned === DEFAULT_EVENTS_SEARCH_CAP && clampDefault.events.length === DEFAULT_EVENTS_SEARCH_CAP &&
+    clampDefault.total === CLAMP_TOTAL && clampDefault.nextOffset === DEFAULT_EVENTS_SEARCH_CAP);
+
+  const clampOverMax = await call("events_search", { kind: ["clamp_test_kind"], limit: 999999 });
+  check(`(2) clamp: a limit far past the ceiling clamps to MAX_EVENTS_SEARCH_PAGE (${MAX_EVENTS_SEARCH_PAGE}), never returns unbounded rows`,
+    clampOverMax.returned === MAX_EVENTS_SEARCH_PAGE && clampOverMax.events.length === MAX_EVENTS_SEARCH_PAGE &&
+    clampOverMax.nextOffset === MAX_EVENTS_SEARCH_PAGE);
+
+  const clampAtMax = await call("events_search", { kind: ["clamp_test_kind"], limit: MAX_EVENTS_SEARCH_PAGE });
+  check("(2) clamp: a limit exactly at the ceiling is honored unclamped", clampAtMax.returned === MAX_EVENTS_SEARCH_PAGE);
+
+  const clampUnderCap = await call("events_search", { kind: ["clamp_test_kind"], limit: 5 });
+  check("(2) clamp: a limit well under both caps is honored exactly (not silently bumped)", clampUnderCap.returned === 5);
+
   // ===================== (3) agent_prompt_search — cross-project, bounded, snippeted =====================
   check("(3) loom-platform registers agent_prompt_search", platToolNames.includes("agent_prompt_search"));
 
@@ -223,6 +248,27 @@ try {
 
   const capped = await call("agent_prompt_search", { query: "seismo", limit: 1 });
   check("(3) an explicit limit below the match count caps hits and reports truncated:true", capped.hits.length === 1 && capped.truncated === true);
+
+  // Clamp tests (card 07ce7c0c bundled nitpick): `agent_prompt_search`'s effective limit is a plain
+  // `Math.max(1, Math.min(limit ?? DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP))`, previously
+  // untested. Seed well past both caps under one dedicated project + unique token, so counts are exact
+  // regardless of the "seismo" agents seeded above.
+  db.insertProject({ id: "pClamp", name: "Clamp", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null, reserved: false });
+  const CLAMP_AGENT_TOTAL = MAX_PROMPT_SEARCH_CAP + 10;
+  for (let i = 0; i < CLAMP_AGENT_TOTAL; i++) {
+    db.insertAgent({ id: `agentClamp${i}`, projectId: "pClamp", name: `Clamp${i}`, startupPrompt: "contains clamptoken here", position: i, profileId: null });
+  }
+
+  const promptClampDefault = await call("agent_prompt_search", { query: "clamptoken" });
+  check(`(3) clamp: omitted limit defaults to DEFAULT_PROMPT_SEARCH_CAP (${DEFAULT_PROMPT_SEARCH_CAP})`,
+    promptClampDefault.hits.length === DEFAULT_PROMPT_SEARCH_CAP && promptClampDefault.truncated === true);
+
+  const promptClampOverMax = await call("agent_prompt_search", { query: "clamptoken", limit: 999999 });
+  check(`(3) clamp: a limit far past the ceiling clamps to MAX_PROMPT_SEARCH_CAP (${MAX_PROMPT_SEARCH_CAP}), never returns unbounded hits`,
+    promptClampOverMax.hits.length === MAX_PROMPT_SEARCH_CAP && promptClampOverMax.truncated === true);
+
+  const promptClampAtMax = await call("agent_prompt_search", { query: "clamptoken", limit: MAX_PROMPT_SEARCH_CAP });
+  check("(3) clamp: a limit exactly at the ceiling is honored unclamped", promptClampAtMax.hits.length === MAX_PROMPT_SEARCH_CAP);
 
   const badProjectPrompt = await call("agent_prompt_search", { query: "seismo", projectId: "ghost" });
   check("(3) an unknown projectId is an explicit error", badProjectPrompt.error === "project not found");

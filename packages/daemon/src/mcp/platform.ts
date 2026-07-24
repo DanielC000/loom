@@ -38,7 +38,7 @@ import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } 
 /** Backstop cap on a default `events_search` read (limit omitted) — same posture as
  *  DEFAULT_PROMPT_SEARCH_CAP/DEFAULT_AGENT_SUMMARY_CAP: bounds the payload of an unscoped forensics
  *  query, while an explicit `limit` can still page up to MAX_EVENTS_SEARCH_PAGE. */
-const DEFAULT_EVENTS_SEARCH_CAP = 50;
+export const DEFAULT_EVENTS_SEARCH_CAP = 50;
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
 import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
 import { prioritySchema } from "./server.js";
@@ -328,6 +328,13 @@ function redactRemoteAccessTls(remoteAccess: RedactableRemoteAccess): Record<str
  * bounds, `coalesceAgentMessages`/`companionVoiceEnabled`/`operatorEnabled`/`schedulerEnabled`, the
  * concurrency caps, usage-sample cadence/retention, `updateCheckIntervalMs`, `remoteAccess.enabled`/
  * `bindHost`/`rateLimit`) is plain operational tuning with no credential/secret shape — exposed as-is.
+ *
+ * This is a fail-OPEN denylist (spread-everything-else, minus the two fields named above) — correct only
+ * as long as no FUTURE secret/host-path field is added to `PlatformConfigOverride` without a matching
+ * redaction here. `test/platform-config-redaction-drift.mjs` is the backstop: it asserts
+ * `PLATFORM_CONFIG_TOP_LEVEL_KEYS` (below) against a hand-authored expected list, so a new top-level key
+ * fails that test until this function (and the expected list) are updated to make an explicit
+ * redact-or-expose call on it (card 07ce7c0c).
  */
 function sanitizePlatformConfigForAgent(
   override: PlatformConfigOverride,
@@ -611,6 +618,16 @@ const platformConfigOverrideSchema = z.object({
   // (24h — still checks at least daily).
   updateCheckIntervalMs: z.number().int().min(3600000).max(86400000).optional(),
 }).strict();
+
+/**
+ * The daemon-global platform override's TOP-LEVEL key set, derived ONCE from the strict schema shape so
+ * it can never drift from the validator — mirrors `CONFIG_TOP_LEVEL_KEYS` above (project config). Exported
+ * so `test/platform-config-redaction-drift.mjs` can assert it against a hand-authored expected list: a new
+ * key added to `platformConfigOverrideSchema` without a matching entry there fails that test, forcing an
+ * explicit redact-or-expose decision in `sanitizePlatformConfigForAgent` (above) at the time the field is
+ * added — the redaction-field-drift guard `sanitizePlatformConfigForAgent`'s own doc points back to.
+ */
+export const PLATFORM_CONFIG_TOP_LEVEL_KEYS: readonly string[] = Object.keys(platformConfigOverrideSchema.shape);
 
 /**
  * Validate a daemon-global platform override (the human REST `/api/platform/config` PATCH body).
