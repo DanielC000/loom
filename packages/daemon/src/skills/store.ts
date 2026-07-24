@@ -440,6 +440,15 @@ export const RETIRED_BUNDLED_SKILL_NAMES: readonly string[] = [
   // below (bundled.has(name) → skip) means this only ever fires against an end-user install whose OWN
   // dist/assets genuinely lacks it, never against the owner's dev/self-hosted daemon.
   "codescape",
+  // research: NOT renamed — unbundled from the PUBLISHED release only (card 426dbb37). It shipped as a
+  // bundled asset from 2026-06-04 (dba60dc3) and was genuinely published in real npm releases v0.3.0
+  // through v0.12.0 (2026-06-17 through 2026-06-29) before being moved into DEV_ONLY_SKILLS at 17f14025
+  // on 2026-06-30 (install-specific: bespoke to the owner's own geopolitics/history vault), first taking
+  // effect in v0.13.0. Any end user who installed/updated during that window keeps an orphaned copy
+  // without this entry. Still canonical in packages/daemon/assets/skills/ (dev/self-host keeps it
+  // bundled), so guard (b) below protects the owner's own dev/self-hosted daemon exactly as it does for
+  // codescape.
+  "research",
 ];
 
 /**
