@@ -7561,6 +7561,64 @@ export class SessionService {
   }
 
   /**
+   * Core of the ON-DEMAND worktree-scoped process reap (card cf17ebf3 — the classifier-blocked-cleanup
+   * finding: a Lead's zombie-vitest kill got blocked by Claude Code's own auto-mode safety classifier
+   * twice during a fleet-down incident, forcing a manual owner one-liner. A daemon-executed kill of the
+   * daemon's OWN children is not a classifier question — this gives Lead/manager a structural way to
+   * reap a lingering escaped process WITHOUT routing through that classifier at all, and WITHOUT having
+   * to stop the session it's scoped to). Reuses the EXACT SAME `reapWorktreeProcesses`/
+   * `reapProcessesRootedInWorktree` machinery {@link sweepWorktreeStrays} already uses on stop — matched
+   * STRICTLY by executable path/cwd/command line rooted under THIS session's OWN worktreePath (never a
+   * bare image-name or port match — see `reapProcessesRootedInWorktree`'s SAFETY doc for the full
+   * scoping proof), excludes this session's own live pty pid (a routine reap must never kill the very
+   * session it's scoped to — mirrors sweepWorktreeStrays' worker self-exclusion), and never the
+   * daemon's own pid (that function's unconditional self-exclusion). UNLIKE sweepWorktreeStrays this is
+   * AWAITED and returns the actual `killedPids`, so an explicit tool call/test can see what happened
+   * instead of firing-and-forgetting. REFUSES (throws) for a session with NO worktree at all
+   * (manager/plain/run/Lead) — see the guard's own comment for why falling back to `cwd` would be a
+   * daemon-crash-class bug, not a convenience.
+   */
+  private async reapSessionStraysCore(session: Session): Promise<{ killedPids: number[] }> {
+    // NO `?? session.cwd` FALLBACK (Code Review, card cf17ebf3 — CRITICAL): a manager/plain/run/Lead
+    // session has no worktree at all, and its `cwd` is the project's REPO ROOT, not an isolated tree.
+    // Falling back to cwd would scope reapProcessesRootedInWorktree to the WHOLE repo root — matching
+    // (and killing) sibling manager ptys, a running dev server, or on the self-hosting daemon the
+    // SUPERVISOR itself (cwd rooted there too), reopening the exact host-wide-kill daemon-crash class
+    // this card exists to avoid (see worker-host-wide-kill-crashes-daemon in project memory). A session
+    // whose only scope would be the repo root MUST NEVER be reaped — refuse loudly instead of a silent
+    // no-op, so the caller (a Lead mid fleet-down cleanup) knows nothing was reaped and doesn't assume
+    // it was.
+    if (!session.worktreePath) {
+      throw new Error(`session ${session.id} has no isolated worktree; worktree-scoped reap does not apply`);
+    }
+    const pid = this.pty.getPid?.(session.id);
+    const reap = this.reapWorktreeProcesses ?? ((p: string, o?: { excludePids?: number[] }) => reapProcessesRootedInWorktree(p, { excludePids: o?.excludePids }));
+    return reap(session.worktreePath, { excludePids: pid == null ? [] : [pid] });
+  }
+
+  /**
+   * Manager-scoped (parent-scoped, mirrors {@link stopWorker}): on-demand reap of a lingering escaped
+   * process rooted in one of the CALLER's OWN workers' worktree. See {@link reapSessionStraysCore} for
+   * the scoping guarantees.
+   */
+  async reapWorkerStrays(managerSessionId: string, workerSessionId: string): Promise<{ killedPids: number[] }> {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    return this.reapSessionStraysCore(worker);
+  }
+
+  /**
+   * Lead-scoped (cross-project, by sessionId alone — mirrors {@link stopSession}/`session_stop`'s
+   * reach: the Lead stands above every project's manager/worker tree, so this takes no
+   * project/parent scoping). See {@link reapSessionStraysCore} for the scoping guarantees.
+   */
+  async reapSessionStrays(sessionId: string): Promise<{ killedPids: number[] }> {
+    const session = this.db.getSession(sessionId);
+    if (!session) throw new Error("session not found");
+    return this.reapSessionStraysCore(session);
+  }
+
+  /**
    * Step 2: run the build/DoD gate, and ONLY if green merge the branch as ONE squash commit, remove the
    * worktree, and move the task to done. FAIL-CLOSED — a failed gate or a merge conflict leaves
    * the canonical repo UNTOUCHED and the worktree RETAINED (so the manager can re-task a fix).

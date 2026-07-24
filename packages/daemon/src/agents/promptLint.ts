@@ -46,7 +46,7 @@ export const PLATFORM_TOOLS: readonly string[] = [
   "project_get", "project_init", "project_task_create", "project_task_get", "project_task_update",
   "project_update", "question_ask", "question_cancel", "question_pull", "question_resolve",
   "recycle_me", "schedule_create", "schedule_delete", "schedule_get", "schedule_update",
-  "session_message", "session_spawn", "session_stop", "session_transcript", "skill_edit",
+  "session_message", "session_reap", "session_spawn", "session_stop", "session_transcript", "skill_edit",
   "skill_list", "skill_write", "template_apply", "template_list", "vault_write",
 ];
 
@@ -82,8 +82,8 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "platform_escalate", "profile_delete", "project_archive", "project_update", "question_ask",
   "question_cancel", "question_pull", "question_resolve", "recycle_me", "requests_list",
   "schedule_create", "schedule_update", "served_status", "worker_list", "worker_merge",
-  "worker_merge_confirm", "worker_message", "worker_recycle", "worker_redirect", "worker_relink",
-  "worker_set_mode", "worker_spawn", "worker_status", "worker_stop", "worker_transcript",
+  "worker_merge_confirm", "worker_message", "worker_reap", "worker_recycle", "worker_redirect",
+  "worker_relink", "worker_set_mode", "worker_spawn", "worker_status", "worker_stop", "worker_transcript",
 ];
 // The worker's tested depth-1 surface (orchestration.ts's own comment: "EXACTLY { gate_status,
 // my_context, run_gate, worker_report }" — pinned by 5 existing hermetic tests there).

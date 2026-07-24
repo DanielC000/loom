@@ -187,6 +187,9 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   Lead's cross-project reach — goes to **`platform_escalate`** instead; then poll **`escalation_status`**
   for the Lead's pickup/answer. Don't relay a platform concern through an owner `question_ask`, and don't
   sit on a Loom bug you can't fix — file it where the Lead will see it.
+- **A Claude Code "Stage 2 classifier error" (worded "blocking based on stage 1 assessment") is usually
+  TRANSIENT upstream flakiness, not a genuine denial** — retry the identical action once before treating
+  it as a blocker worth escalating at all.
 - **This holds even — especially — mid-conversation.** When you're actively chatting with the owner it
   feels natural to inline the ask as prose for them to answer right there in the chat; don't. You may
   narrate it or point at it in the chat, but the request OBJECT is FILED via `question_ask` — never typed

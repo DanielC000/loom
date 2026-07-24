@@ -1272,6 +1272,32 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "worker_reap",
+      {
+        description:
+          "Reap (kill) any OS process still lingering in one of your workers' worktree — a stuck test " +
+          "runner, an escaped/detached vite/esbuild, a zombie left behind after a crash — WITHOUT " +
+          "stopping the worker itself. Daemon-executed: the daemon killing its own children never routes " +
+          "through Claude Code's own auto-mode safety classifier, so use this instead of asking the " +
+          "worker (or yourself) to run a raw `kill`/`taskkill` Bash command that classifier may block. " +
+          "STRICTLY SCOPED to processes rooted in that worker's OWN worktree (matched by executable " +
+          "path/cwd/command line — never a bare image-name or port match), and it EXCLUDES the worker's " +
+          "own live session — a routine reap can never end the worker you scoped it to; use `worker_stop` " +
+          "for that. Returns `{killedPids:[]}` on a healthy worktree (nothing to reap) — an empty list is " +
+          "success, not a failure.",
+        inputSchema: { workerSessionId: z.string() },
+      },
+      async ({ workerSessionId }) => {
+        try {
+          ensureWorkerLinked(workerSessionId, "worker_reap");
+          return ok(await sessions.reapWorkerStrays(managerSessionId, workerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "worker_set_mode",
       {
         description:

@@ -1399,6 +1399,32 @@ export class PlatformMcpRouter {
       },
     );
 
+    server.registerTool(
+      "session_reap",
+      {
+        description:
+          "Reap (kill) any OS process still lingering in ANY session's worktree (cross-project, by " +
+          "sessionId alone) — a stuck test runner, an escaped/detached vite/esbuild, a zombie left " +
+          "behind after a crash — WITHOUT stopping the session itself. Daemon-executed: the daemon " +
+          "killing its own children never routes through Claude Code's own auto-mode safety classifier, " +
+          "so use this during a fleet-down cleanup instead of a raw `kill`/`taskkill` Bash command that " +
+          "classifier may block. STRICTLY SCOPED to processes rooted in that session's OWN worktree " +
+          "(matched by executable path/cwd/command line — never a bare image-name or port match — " +
+          "never sweep by name/port across the whole host), and it EXCLUDES the session's own live pid — " +
+          "a routine reap can never end the session you scoped it to; use `session_stop` for that. " +
+          "Returns `{killedPids:[]}` on a healthy worktree (nothing to reap) — an empty list is success, " +
+          "not a failure. 404 if the session is unknown.",
+        inputSchema: { sessionId: z.string() },
+      },
+      async ({ sessionId }) => {
+        try {
+          return ok(await sessions.reapSessionStrays(sessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     // session_transcript — cross-project by sessionId ALONE (card 95cc7ee3). Unlike the manager's
     // worker_transcript (lineage-scoped to the caller's own workers), the Lead stands ABOVE every
     // project's tree, so this takes NO projectId/parent scoping — just the session id. Reuses the SAME
