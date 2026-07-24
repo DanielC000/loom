@@ -77,6 +77,11 @@ export type RepoRegistryCheck =
  * means this repo has no configured gate; {@link resolveRepo} surfaces that as `gateCommand: undefined`
  * rather than inheriting the project-level command (see `RepoRegistryEntry`'s own doc).
  *
+ * `noGateByDesign` (card 22629cb2), when given, must be a boolean — same trust posture as `gateCommand`:
+ * this whole validator is HUMAN-REST-only, so accepting it here is exactly as safe as accepting
+ * `gateCommand` itself. Omitted defaults to `false` (unchanged behavior — still warns, see the field's
+ * own doc on `RepoRegistryEntry` for how it composes with `Project.noGateByDesign`).
+ *
  * Rejects the WHOLE array on the first bad entry (naming it), never a partial accept.
  */
 export async function validateRepoRegistry(
@@ -148,9 +153,20 @@ export async function validateRepoRegistry(
       }
       gateCommand = entry.gateCommand;
     }
+    let noGateByDesign: boolean | undefined;
+    if (entry.noGateByDesign !== undefined) {
+      if (typeof entry.noGateByDesign !== "boolean") {
+        return { ok: false, error: `repos entry "${key}" noGateByDesign must be a boolean when given` };
+      }
+      noGateByDesign = entry.noGateByDesign;
+    }
     seenKeys.add(key);
     seenPathKeys.add(pathKey);
-    out.push(gateCommand === undefined ? { key, path: canonicalPath } : { key, path: canonicalPath, gateCommand });
+    out.push({
+      key, path: canonicalPath,
+      ...(gateCommand === undefined ? {} : { gateCommand }),
+      ...(noGateByDesign === undefined ? {} : { noGateByDesign }),
+    });
   }
   return { ok: true, value: out };
 }
@@ -161,9 +177,10 @@ export async function validateRepoRegistry(
 export interface RepoRegistryDiff {
   added: string[];
   removed: string[];
-  /** A key present in BOTH before/after but whose `path` or `gateCommand` differs — a repo that MOVED or
-   *  gained/lost its gate is exactly as significant to a manager holding the OLD registry as an add/remove
-   *  (a stale path assumption, or a merge that now reports unverified for a reason the manager can't see). */
+  /** A key present in BOTH before/after but whose `path`, `gateCommand`, or `noGateByDesign` differs — a
+   *  repo that MOVED, gained/lost its gate, or flipped its own gateless-by-design declaration is exactly
+   *  as significant to a manager holding the OLD registry as an add/remove (a stale path assumption, or a
+   *  merge that now reports unverified — or stops reporting it — for a reason the manager can't see). */
   updated: string[];
 }
 
@@ -207,10 +224,10 @@ export function composeRepoRegistryChangeNote(diff: RepoRegistryDiff, opts: { pr
   const parts: string[] = [];
   if (diff.added.length) parts.push(`added: ${fmt(diff.added)}`);
   if (diff.removed.length) parts.push(`removed: ${fmt(diff.removed)}`);
-  if (diff.updated.length) parts.push(`reconfigured (path/gateCommand changed): ${fmt(diff.updated)}`);
+  if (diff.updated.length) parts.push(`reconfigured (path/gateCommand/noGateByDesign changed): ${fmt(diff.updated)}`);
   const changeSummary = parts.length ? parts.join("; ") : "its entries were updated";
   const scope = opts.projectName ? `Project "${opts.projectName}"'s` : "This project's";
-  return `[loom:repo-registry-changed] ${scope} repo registry changed (${changeSummary}). Cards are routed to a repo at CREATION time via \`repoKey\` (tasks_create/tasks_update); a card with no repoKey targets \`primary\`. A removed key can no longer be targeted — a card still carrying one will 400 at write time, so re-route or hold anything you were about to file at a removed key. A reconfigured key's new path/gate applies to any card routed there going forward.`;
+  return `[loom:repo-registry-changed] ${scope} repo registry changed (${changeSummary}). Cards are routed to a repo at CREATION time via \`repoKey\` (tasks_create/tasks_update); a card with no repoKey targets \`primary\`. A removed key can no longer be targeted — a card still carrying one will 400 at write time, so re-route or hold anything you were about to file at a removed key. A reconfigured key's new path/gate/gateless-declaration applies to any card routed there going forward.`;
 }
 
 /** Result of {@link resolveRepoKeyOrError}. */

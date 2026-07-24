@@ -541,11 +541,20 @@ function RepoRegistryEditor({ project }: { project: Project }) {
   // The persisted candidate: trimmed, fully-blank rows dropped, and a blank gateCommand OMITTED rather
   // than sent as "" (the validator rejects an empty-string gateCommand, and "no gate" is a real, distinct
   // state — see the hint below). Dirty and the payload both key off this, so a stray blank row neither
-  // enables Save nor reaches the validator.
+  // enables Save nor reaches the validator. `noGateByDesign` (card 22629cb2) is carried through VERBATIM
+  // from each source entry — this editor has no control for it (REST-only for now, like gateCommand
+  // started), but a PATCH here WHOLE-REPLACES the registry (validateRepoRegistry's shared REST/PATCH
+  // path), so reconstructing the entry without it would silently CLEAR a flag a human set out-of-band on
+  // every Save, and `dirty` would mis-report a flagged-but-otherwise-unedited project as already dirty.
   const clean: RepoRegistryEntry[] = repos
-    .map((r) => ({ key: r.key.trim(), path: r.path.trim(), gateCommand: r.gateCommand?.trim() || undefined }))
+    .map((r) => ({ ...r, key: r.key.trim(), path: r.path.trim(), gateCommand: r.gateCommand?.trim() || undefined }))
     .filter((r) => r.key || r.path)
-    .map((r) => (r.gateCommand === undefined ? { key: r.key, path: r.path } : r));
+    .map((r) => {
+      const out: RepoRegistryEntry = { key: r.key, path: r.path };
+      if (r.gateCommand !== undefined) out.gateCommand = r.gateCommand;
+      if (r.noGateByDesign !== undefined) out.noGateByDesign = r.noGateByDesign;
+      return out;
+    });
   const dirty = JSON.stringify(clean) !== JSON.stringify(saved);
 
   const save = useMutation({

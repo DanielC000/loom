@@ -96,6 +96,26 @@ try {
       });
       check("(A3) an entry with no gateCommand round-trips with gateCommand absent/undefined", created3.json().repos[0].gateCommand === undefined);
 
+      // (A3b) card 22629cb2 — noGateByDesign round-trips per-entry on CREATE, and an entry that omits it
+      // round-trips with the key simply absent (mirrors gateCommand's own A3 shape).
+      const created3b = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "P3b", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a", path: svcA, noGateByDesign: true }, { key: "svc-b", path: svcB }] },
+      });
+      check("(A3b) POST with a per-entry noGateByDesign:true -> 201", created3b.statusCode === 201);
+      check("(A3b) response round-trips noGateByDesign:true on the flagged entry", created3b.json().repos[0].noGateByDesign === true);
+      check("(A3b) the OTHER entry round-trips with noGateByDesign absent/undefined", created3b.json().repos[1].noGateByDesign === undefined);
+      check("(A3b) persisted to the Db", db.getProject(created3b.json().id)?.repos?.[0]?.noGateByDesign === true);
+
+      // (A3c) a non-boolean noGateByDesign is REJECTED (400) — the validator's rejection branch
+      // (repos.ts's validateRepoRegistry), previously never exercised by any test.
+      const badNoGate = await app.inject({
+        method: "POST", url: "/api/projects",
+        payload: { name: "BadNoGate", repoPath: primary, vaultPath: primary, repos: [{ key: "svc-a", path: svcA, noGateByDesign: "yes" }] },
+      });
+      check("(A3c) POST with a non-boolean per-entry noGateByDesign -> 400", badNoGate.statusCode === 400);
+      check("(A3c) error names the noGateByDesign boolean rule", /noGateByDesign must be a boolean/.test(badNoGate.json().error ?? ""));
+
       // (A4) a NON-REPO entry path is REJECTED (400), no project row created.
       const beforeCount = db.listAllProjects().length;
       const badCreate = await app.inject({
@@ -200,6 +220,22 @@ try {
       check("(A11) PATCH with valid repos -> 200", patched.statusCode === 200);
       check("(A11) PATCH round-trips repos", patched.json().repos.length === 2 && patched.json().repos[1].gateCommand === "pytest");
       check("(A11) PATCH persisted to the Db", db.getProject(p1.id)?.repos?.length === 2);
+
+      // (A11b) card 22629cb2 — PATCH sets a per-entry noGateByDesign on an EXISTING (previously-unflagged)
+      // entry, and it round-trips + persists. This is the ONLY surface that can ever set the field, so it
+      // is the real proof the field is reachable in practice, not just accepted by the validator in isolation.
+      const patchedFlag = await app.inject({ method: "PATCH", url: `/api/projects/${p1.id}`, payload: { repos: [{ key: "svc-a", path: svcA, noGateByDesign: true }, { key: "svc-b", path: svcB, gateCommand: "pytest" }] } });
+      check("(A11b) PATCH setting a per-entry noGateByDesign:true -> 200", patchedFlag.statusCode === 200);
+      check("(A11b) PATCH round-trips noGateByDesign:true on the flagged entry", patchedFlag.json().repos[0].noGateByDesign === true);
+      check("(A11b) the sibling entry's gateCommand is untouched by the flag", patchedFlag.json().repos[1].gateCommand === "pytest");
+      check("(A11b) persisted to the Db", db.getProject(p1.id)?.repos?.[0]?.noGateByDesign === true);
+
+      // (A11c) PATCH clearing it back to false round-trips + persists (mirrors noGateByDesign's own A6
+      // project-level precedent — an explicit false is a real, distinct, settable state, not just omission).
+      const patchedUnflag = await app.inject({ method: "PATCH", url: `/api/projects/${p1.id}`, payload: { repos: [{ key: "svc-a", path: svcA, noGateByDesign: false }, { key: "svc-b", path: svcB, gateCommand: "pytest" }] } });
+      check("(A11c) PATCH clearing a per-entry noGateByDesign:false -> 200", patchedUnflag.statusCode === 200);
+      check("(A11c) PATCH round-trips noGateByDesign:false", patchedUnflag.json().repos[0].noGateByDesign === false);
+      check("(A11c) persisted to the Db", db.getProject(p1.id)?.repos?.[0]?.noGateByDesign === false);
 
       // (A12) PATCH with a bad entry is REJECTED (400), stored value UNCHANGED.
       const patchBad = await app.inject({ method: "PATCH", url: `/api/projects/${p1.id}`, payload: { repos: [{ key: "bad", path: nonRepo }] } });
@@ -339,6 +375,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Project.repos round-trips on the HUMAN-only REST create/update/project-init (isGitRepo + absolute-path + unique-key + reserved-key + charset (phase 2, Code Review Major 2 — a key is a filesystem path segment, so `/`/`\\`/other specials and the traversal keys `.`/`..` are rejected) + no-aliasing validated, rejection leaves the stored value unchanged / creates no row, gateCommand round-trips per-entry), and is absent from every agent-facing MCP write surface's inputSchema (loom-setup + the elevated loom-platform's project_create/project_init/project_update) with the handler itself hardcoding repos:[] regardless of the project's real state — claude-free, network-free."
+  ? "\n✅ ALL PASS — Project.repos round-trips on the HUMAN-only REST create/update/project-init (isGitRepo + absolute-path + unique-key + reserved-key + charset (phase 2, Code Review Major 2 — a key is a filesystem path segment, so `/`/`\\`/other specials and the traversal keys `.`/`..` are rejected) + no-aliasing validated, rejection leaves the stored value unchanged / creates no row, gateCommand AND per-entry noGateByDesign (card 22629cb2 — a non-boolean value 400s) round-trip per-entry on both create and PATCH), and is absent from every agent-facing MCP write surface's inputSchema (loom-setup + the elevated loom-platform's project_create/project_init/project_update) with the handler itself hardcoding repos:[] regardless of the project's real state — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

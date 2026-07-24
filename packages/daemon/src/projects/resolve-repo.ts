@@ -12,6 +12,13 @@ export interface ResolvedRepo {
   key: string;
   path: string;
   gateCommand: string | undefined;
+  /**
+   * Per-entry no-build-gate declaration (card 22629cb2), resolved from the registry entry's own
+   * `RepoRegistryEntry.noGateByDesign` — see that field's doc for the two-flag (project vs. entry)
+   * independence. Always `false` for the primary repo: the primary is governed ONLY by
+   * `Project.noGateByDesign`, never by this field (there is no registry entry for it to read from).
+   */
+  noGateByDesign: boolean;
 }
 
 /**
@@ -63,11 +70,12 @@ export function resolveRepoByKey(project: Project, repoKey: string | null | unde
       key: "primary",
       path: project.repoPath,
       gateCommand: resolveConfig(project.config).orchestration.gateCommand || undefined,
+      noGateByDesign: false,
     };
   }
   const entry = project.repos.find((r) => r.key === repoKey);
   if (!entry) throw new UnknownRepoKeyError(repoKey, project.id);
-  return { key: entry.key, path: entry.path, gateCommand: entry.gateCommand };
+  return { key: entry.key, path: entry.path, gateCommand: entry.gateCommand, noGateByDesign: !!entry.noGateByDesign };
 }
 
 /**

@@ -153,7 +153,7 @@ const REGISTRY = [
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 {
   const out = composeWorkerStartupPrompt("BRIEF", "KICKOFF", "/wt/site/x", [], undefined, undefined, {
-    targetKey: "site", targetPath: "/work/aurora-site", targetGateCommand: undefined, registry: REGISTRY,
+    targetKey: "site", targetPath: "/work/aurora-site", targetGateCommand: undefined, targetNoGateByDesign: false, registry: REGISTRY,
   });
   check("(5) a gateless target repo reports the merge as unverified",
     out.includes("NO gate command configured") && out.includes("**unverified**"));
@@ -162,6 +162,24 @@ const REGISTRY = [
   check("(5) it tells the worker to say what is unverified in its report",
     out.includes("what is unverified"));
   check("(5) it does NOT claim run_gate will run some other command",
+    !out.includes("both run THIS repo's own gate command"));
+  check("(5) it does NOT use the deliberately-gateless wording", !out.includes("deliberately"));
+}
+
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+// (5b) WORKER — card 22629cb2: a target repo FLAGGED noGateByDesign says "deliberately gateless" instead
+// of "unverified" — the missing gate is a declared choice, not an oversight the worker should flag as such.
+// ─────────────────────────────────────────────────────────────────────────────────────────────────────
+{
+  const out = composeWorkerStartupPrompt("BRIEF", "KICKOFF", "/wt/site/x", [], undefined, undefined, {
+    targetKey: "site", targetPath: "/work/aurora-site", targetGateCommand: undefined, targetNoGateByDesign: true, registry: REGISTRY,
+  });
+  check("(5b) a flagged gateless target repo uses the deliberately-gateless wording",
+    out.includes("deliberately") && out.includes("noGateByDesign"));
+  check("(5b) it does NOT use the plain unverified wording", !out.includes("**unverified**"));
+  check("(5b) it still tells the worker to test by hand and say what was checked",
+    out.includes("test your change by hand") || out.includes("Test your change by hand") || out.includes("test your change"));
+  check("(5b) it does NOT claim run_gate will run some other command",
     !out.includes("both run THIS repo's own gate command"));
 }
 
@@ -192,14 +210,21 @@ const REGISTRY = [
 // (7) buildWorkerRepoContext maps a resolved repo onto the block's inputs.
 // ─────────────────────────────────────────────────────────────────────────────────────────────────────
 {
-  const primary = buildWorkerRepoContext({ repos: REGISTRY }, { key: "primary", path: "/work/loom", gateCommand: "pnpm build" });
+  const primary = buildWorkerRepoContext({ repos: REGISTRY }, { key: "primary", path: "/work/loom", gateCommand: "pnpm build", noGateByDesign: false });
   check("(7) a primary resolution maps to targetKey null (the Task/Session repoKey convention)", primary?.targetKey === null);
   check("(7) a primary resolution carries the primary path + gate", primary?.targetPath === "/work/loom" && primary?.targetGateCommand === "pnpm build");
-  const entry = buildWorkerRepoContext({ repos: REGISTRY }, { key: "api", path: "/work/aurora-api", gateCommand: "pytest -q" });
+  const entry = buildWorkerRepoContext({ repos: REGISTRY }, { key: "api", path: "/work/aurora-api", gateCommand: "pytest -q", noGateByDesign: false });
   check("(7) a registry resolution keeps its key", entry?.targetKey === "api");
-  const gateless = buildWorkerRepoContext({ repos: REGISTRY }, { key: "site", path: "/work/aurora-site", gateCommand: undefined });
+  const gateless = buildWorkerRepoContext({ repos: REGISTRY }, { key: "site", path: "/work/aurora-site", gateCommand: undefined, noGateByDesign: false });
   check("(7) a gateless registry entry keeps gateCommand undefined (never coerced to a fallback)", gateless?.targetGateCommand === undefined);
   check("(7) the full registry rides along for the not-yours list", entry?.registry.length === 2);
+
+  // card 22629cb2: targetNoGateByDesign threads through from the resolved repo verbatim.
+  const flagged = buildWorkerRepoContext({ repos: REGISTRY }, { key: "site", path: "/work/aurora-site", gateCommand: undefined, noGateByDesign: true });
+  check("(7) a flagged registry resolution carries targetNoGateByDesign:true", flagged?.targetNoGateByDesign === true);
+  check("(7) an unflagged registry resolution carries targetNoGateByDesign:false", gateless?.targetNoGateByDesign === false);
+  const primaryNeverFlagged = buildWorkerRepoContext({ repos: REGISTRY }, { key: "primary", path: "/work/loom", gateCommand: "pnpm build", noGateByDesign: false });
+  check("(7) a primary resolution always carries targetNoGateByDesign:false", primaryNeverFlagged?.targetNoGateByDesign === false);
 }
 
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }

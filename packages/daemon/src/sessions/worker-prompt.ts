@@ -31,11 +31,16 @@ export interface ReviewOfInfo {
  * configured" — it does NOT fall back to the project-level command, by design (a gate that exits 0 for
  * an unrelated reason would report a FALSE green on code it never tested). The block says so explicitly,
  * because "will my work be verified?" is the single fact a worker most needs from the registry.
+ *
+ * `targetNoGateByDesign` (card 22629cb2) is that resolved repo's OWN `noGateByDesign` — when true (and
+ * `targetGateCommand` is unset), the missing gate is DELIBERATE, not an oversight, so the composed block
+ * below says so instead of reading like an unverified accident.
  */
 export interface WorkerRepoContext {
   targetKey: string | null;
   targetPath: string;
   targetGateCommand?: string;
+  targetNoGateByDesign: boolean;
   registry: RepoRegistryEntry[];
 }
 
@@ -60,6 +65,7 @@ export function buildWorkerRepoContext(
     targetKey: resolved.key === "primary" ? null : resolved.key,
     targetPath: resolved.path,
     targetGateCommand: resolved.gateCommand,
+    targetNoGateByDesign: resolved.noGateByDesign,
     registry: project.repos,
   };
 }
@@ -158,10 +164,15 @@ export function composeWorkerStartupPrompt(
           "cut FROM that repo, and your branch, your gate and your merge all land there.\n\n" +
           (repoContext.targetGateCommand
             ? `Your \`run_gate\` self-check and the merge gate both run THIS repo's own gate command (\`${repoContext.targetGateCommand}\`).`
-            : "This repo has NO gate command configured, so a merge here is reported as **unverified**. It does " +
-              "not fall back to another repo's gate — a gate that passed for an unrelated repo would look like " +
-              "verification without being any. Test your change by hand, and say plainly in your report what you " +
-              "ran and what is unverified.") +
+            : repoContext.targetNoGateByDesign
+              ? "This repo has NO gate command configured — **deliberately** (flagged `noGateByDesign`): it has " +
+                "no buildable code/DoD check to run, so a merge here does NOT get the usual unverified warning. " +
+                "Still test your change by hand where that makes sense, and say plainly in your report what you " +
+                "checked."
+              : "This repo has NO gate command configured, so a merge here is reported as **unverified**. It does " +
+                "not fall back to another repo's gate — a gate that passed for an unrelated repo would look like " +
+                "verification without being any. Test your change by hand, and say plainly in your report what you " +
+                "ran and what is unverified.") +
           (otherLines.length > 0
             ? "\n\n**Other repos registered on this project (NOT yours for this task):**\n" + otherLines.join("\n")
             : "") +

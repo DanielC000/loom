@@ -8264,10 +8264,15 @@ export class SessionService {
     // `[loom:merge-done]` echo is the sole terminal signal. SUPPRESSED when the project is flagged
     // `noGateByDesign` (card 58b0bb60) — a deliberately gateless project (vault/markdown/knowledge, no
     // buildable code) opted OUT of this signal; an UNFLAGGED gateless project/repo still warns, so a
-    // genuinely missing gate stays surfaced. `noGateByDesign` has no per-registry-entry counterpart
-    // (phase-1 schema) — a gateless registry repo in an otherwise-gated project always warns; carded for
-    // a future phase, not built here (owner ruling).
-    const gateWarning = gate || project.noGateByDesign
+    // genuinely missing gate stays surfaced. `project.noGateByDesign`'s reach is UNCHANGED by the
+    // per-entry flag below: it still suppresses project-WIDE (primary or any registry entry), exactly
+    // as before. ALSO suppressed when `targetRepo.noGateByDesign` (card 22629cb2, the per-entry
+    // counterpart — `RepoRegistryEntry.noGateByDesign` via `resolveRepoByKey`) is set: a registry entry
+    // can declare ITSELF gatelessly-by-design independent of the project flag. `targetRepo.noGateByDesign`
+    // is hardcoded `false` when `targetRepo.key === "primary"` (see `ResolvedRepo`'s doc), so an entry's
+    // flag can never reach the primary repo's warning, and each merge only ever reads its OWN target
+    // repo's flag, so it can never suppress a sibling entry's warning either.
+    const gateWarning = gate || project.noGateByDesign || targetRepo.noGateByDesign
       ? undefined
       : `unverified: no gateCommand is configured for ${targetRepo.key === "primary" ? "this project" : `repo "${targetRepo.key}"`} — the merge was NOT checked by any build/DoD gate`;
     const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;

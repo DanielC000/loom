@@ -21,11 +21,30 @@ export type RunId = string;
  * means this repo has no configured gate, which `resolveRepo` surfaces as `gateCommand: undefined`
  * so the SAME "unverified: no gateCommand" merge warning a gateless project gets today applies to a
  * gateless registry repo too, rather than silently inheriting an unrelated project-level command.
+ *
+ * `noGateByDesign` (card 22629cb2, the per-entry follow-up to `Project.noGateByDesign` / card
+ * 58b0bb60) is the SAME deliberate no-build-gate declaration, ADDITIONALLY scoped to just THIS entry:
+ * when true, the per-merge "unverified: no gateCommand" warning is suppressed for merges targeting
+ * THIS repo, even when `Project.noGateByDesign` is false. **The two flags compose with OR, not with
+ * layering/inheritance** — `Project.noGateByDesign`'s existing behavior is UNCHANGED by this field's
+ * introduction: it still suppresses the warning project-WIDE, for a merge into the primary repo OR
+ * any registry entry, exactly as it did before this field existed (that's deliberate — a project
+ * declared entirely gateless stays entirely gateless). This field is a NARROWER, independent opt-out
+ * layered on top for a single entry: setting it never touches `Project.noGateByDesign` or any other
+ * entry, and — because the project-level flag is checked separately — clearing it never re-enables a
+ * warning the project-level flag is also suppressing. Concretely: a registry entry's flag can never
+ * suppress the PRIMARY repo's warning (the primary has no registry entry to read this field from), and
+ * can never suppress a SIBLING entry's warning (each merge only ever reads its own entry's flag).
+ * Default/omitted is `false` (still warns, subject to the project-level flag as today) — additive, so
+ * every existing entry is unaffected. Same HUMAN-only trust posture as the rest of
+ * `RepoRegistryEntry`/`repos`: no agent MCP tool ever declares this key (it rides inside `repos`,
+ * which is itself never agent-settable).
  */
 export interface RepoRegistryEntry {
   key: string;
   path: string;
   gateCommand?: string;
+  noGateByDesign?: boolean;
 }
 
 /** A project's two bindings + its config override blob. */

@@ -174,6 +174,22 @@ try {
   }
 
   // =====================================================================================================
+  // (T3b) card 22629cb2 — flipping ONLY a key's per-entry noGateByDesign (same path/gateCommand) is ALSO
+  // caught by diffRepoRegistry as "reconfigured", not silently treated as a no-op. Continues from svc-a's
+  // state left by (T3) above (path svcA, gateCommand "npm test").
+  // =====================================================================================================
+  {
+    const res = await app.inject({ method: "PATCH", url: "/api/projects/pA", payload: { repos: [{ key: "svc-a", path: svcA, gateCommand: "npm test", noGateByDesign: true }] } });
+    check("(T3b) PATCH flipping only noGateByDesign -> 200", res.statusCode === 200);
+    check("(T3b) DB persisted the flip", db.getProject("pA")?.repos?.[0]?.noGateByDesign === true);
+    const mgrCalls = callsFor(MGR);
+    check("(T3b) exactly one note enqueued to the manager", mgrCalls.length === 1);
+    check("(T3b) note names svc-a as reconfigured", /reconfigured[^`]*`svc-a`/.test(mgrCalls[0]?.text ?? ""));
+    check("(T3b) note does NOT claim svc-a was added or removed", !/added: `svc-a`/.test(mgrCalls[0]?.text ?? "") && !/removed: `svc-a`/.test(mgrCalls[0]?.text ?? ""));
+    clearCalls();
+  }
+
+  // =====================================================================================================
   // (T2) REMOVE — clearing the registry enqueues a note naming the removed key.
   // =====================================================================================================
   {
