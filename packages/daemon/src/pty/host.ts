@@ -543,6 +543,15 @@ const STARTUP_PROMPT_GRACE_MS = Number(process.env.LOOM_STARTUP_PROMPT_GRACE_MS)
 const FIRST_TURN_STALE_MS = Number(process.env.LOOM_FIRST_TURN_STALE_MS) || 30_000;
 
 /**
+ * Card b4b9b707: how long a captured Live.pendingRawOwnerSubmit may sit unconsumed before a later
+ * UserPromptSubmit discards it rather than attributing it — see that field's doc. A genuine raw-terminal
+ * answer is correlated to the engine's hook near-instantly; this only needs to be generous enough to
+ * absorb normal relay/scheduling latency while still bounding how far a stray (non-composer) Enter could
+ * drift onto an unrelated later turn.
+ */
+const RAW_OWNER_SUBMIT_TTL_MS = Number(process.env.LOOM_RAW_OWNER_SUBMIT_TTL_MS) || 30_000;
+
+/**
  * Graceful-stop escalation — makes a graceful stop ALWAYS terminate the session (the deterministic-stop
  * fix). A double Ctrl-C EXITS an IDLE `claude` (the second press exits from an empty prompt), but on a
  * session that's mid-turn the two Ctrl-Cs only INTERRUPT the running turn — the pty stays alive at a (now)
@@ -1468,6 +1477,25 @@ interface Live {
   // Stop/StopFailure chokepoint consumes it, so a leftover value never gets attributed to a LATER turn.
   // Best-effort by design, same spirit as composerLen/nextComposerLen — see nextRawDraftState.
   lastRawSubmit: string | null;
+  // Card b4b9b707: mirrors lastRawSubmit's capture (same writeStdin call site, same nextRawDraftState
+  // reconstruction) but is a SEPARATE field with its OWN lifecycle, dedicated to owner-text attribution —
+  // NOT a reuse of lastRawSubmit — so this feature can never perturb lastRawSubmit's own paste-tripwire
+  // consume/clear timing at Stop (see that field's doc). THE SECURITY INVARIANT: submit() is the SOLE
+  // gateway every Loom-originated turn goes through (kickoff/nudge/redirect/worker-report drain/rate-limit
+  // replay/companion/the REST composer — see submit()'s callers), and it clears this field FIRST, before
+  // writing a single byte of its own text. So this field can be non-null when UserPromptSubmit fires ONLY
+  // when the triggering keystrokes reached the pty via writeStdin — i.e. a human typing into /ws/term
+  // (writeStdin's one production caller, gateway/server.ts's raw `{type:"stdin"}` relay — never an
+  // agent/system path). Consumed (read + cleared) at the UserPromptSubmit hook — see deliverHook.
+  pendingRawOwnerSubmit: string | null;
+  // Epoch ms when pendingRawOwnerSubmit was captured. Bounds how long a captured-but-never-consumed raw
+  // line can sit around before a LATER, unrelated UserPromptSubmit could misattribute it — e.g. a bare "y"
+  // typed to answer a permission/resume-gate TUI prompt (which never itself starts a new top-level turn,
+  // so nothing clears or overwrites the field) must not still be sitting here to attribute to some
+  // different real prompt minutes later. See RAW_OWNER_SUBMIT_TTL_MS / the UserPromptSubmit consumption
+  // check. This is a UX/correctness bound, not a trust one — a stale value is always genuinely
+  // human-typed text, just possibly typed for a different purpose than the turn it would land on.
+  pendingRawOwnerSubmitAt: number | null;
   // True once ANY turn has ever started for this session (the first UserPromptSubmit hook observed).
   // Gates the fresh-spawn kickoff guarantee (scheduleKickoffGuarantee) and healIfStuck's short pre-first-
   // turn stale window (FIRST_TURN_STALE_MS) — see both for why "never started a turn" needs distinct
@@ -2505,6 +2533,8 @@ export class PtyHost {
       // route (a startup turn is never a companion inbound), so the route fields start null.
       lastPrompt: opts.startupPrompt ?? null,
       lastRawSubmit: null,
+      pendingRawOwnerSubmit: null,
+      pendingRawOwnerSubmitAt: null,
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
       enterConfirmed: true, // no submit() outstanding yet (the startup turn is a CLI arg, not submit()) — see submit()'s reset
       submitGeneration: 0,
@@ -2660,6 +2690,7 @@ export class PtyHost {
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null, lastRawSubmit: null,
+      pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -2735,6 +2766,7 @@ export class PtyHost {
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, lastPrompt: null, lastRawSubmit: null,
+      pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
       submitGeneration: 0,
@@ -3037,6 +3069,21 @@ export class PtyHost {
         live.firstTurnStarted = true;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
         this.purgeConfirmedGiveUpRequeue(sessionId, live, false); // card 441499ee/09e655d5 — see the method doc; UserPromptSubmit purges without advancing the queue
+        // Card b4b9b707: attribute a raw-terminal-typed line to THIS turn's ownerText. SECURITY INVARIANT
+        // (see Live.pendingRawOwnerSubmit's doc): submit() clears this field FIRST, before writing a byte,
+        // so a non-null value here can ONLY have originated from writeStdin — never from any Loom-issued
+        // submit() (kickoff/nudge/redirect/worker-report drain/rate-limit replay/companion/composer).
+        // TTL-bounded (RAW_OWNER_SUBMIT_TTL_MS): a raw Enter that lands on a non-composer TUI surface (a
+        // permission/resume-gate prompt) never itself starts a new turn, so nothing clears or overwrites
+        // the field afterward — if it sits unconsumed past the TTL, discard it rather than risk
+        // attributing stale human text to a later, unrelated prompt. Consumed (cleared) either way —
+        // attributed or discarded as stale, it must never survive this check to a later turn.
+        if (live.pendingRawOwnerSubmit !== null) {
+          const fresh = live.pendingRawOwnerSubmitAt !== null && Date.now() - live.pendingRawOwnerSubmitAt <= RAW_OWNER_SUBMIT_TTL_MS;
+          if (fresh) this.attributeOwnerText(live, live.pendingRawOwnerSubmit);
+          live.pendingRawOwnerSubmit = null;
+          live.pendingRawOwnerSubmitAt = null;
+        }
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
       case "Stop":
@@ -3908,6 +3955,22 @@ export class PtyHost {
     live.pty.write(data);
   }
 
+  /**
+   * Companion injection-guard Primitive A's SINGLE writer for `activeTurnOwnerText` /
+   * `lastPromptOwnerText` / the `recentOwnerTurns` ring — factored out of `submit()` (card b4b9b707) so
+   * the SAME reviewed logic also serves the raw-terminal attribution path (deliverHook's UserPromptSubmit
+   * case). `ownerText` here is always a real, already-known-owner-authored string — the `undefined`/null
+   * ("no owner text this turn") case is handled by each CALLER, not this helper, matching submit()'s prior
+   * inline shape exactly (byte-identical behavior for the composer/companion path this factors out of).
+   */
+  private attributeOwnerText(live: Live, ownerText: string): void {
+    live.activeTurnOwnerText = ownerText;
+    live.lastPromptOwnerText = ownerText;
+    // NEVER cleared at Stop — persists across the turn boundary so a later turn's lever call can still see it.
+    live.recentOwnerTurns.unshift(ownerText);
+    if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
+  }
+
   private submit(sessionId: string, text: string, route?: TurnRoute, ownerText?: string, proactive = false, senderId?: string | null, reason: string = "queue", origin?: QueuedMessage[]): void {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
@@ -3934,6 +3997,11 @@ export class PtyHost {
     // (e.g. its Stop hadn't fired yet, or fired without a readable transcript). Clear it so lastPrompt —
     // this NEW turn's real baseline — isn't shadowed by stale raw-channel text at the next Stop.
     live.lastRawSubmit = null;
+    // Card b4b9b707 (SECURITY INVARIANT): submit() is the SOLE gateway every Loom-originated turn goes
+    // through, so clearing pendingRawOwnerSubmit HERE — before a single byte of THIS turn's text is
+    // written — guarantees it can never survive into a turn submit() originates. See the field's doc.
+    live.pendingRawOwnerSubmit = null;
+    live.pendingRawOwnerSubmitAt = null;
     // Pin this turn's ORIGINATING route (Loom Companion), SYNCHRONOUSLY — before the async writeChunked, so
     // it's in place the instant the agent processes the turn and can chat_reply. null for every non-companion
     // turn (route undefined). `lastPromptRoute` mirrors `lastPrompt` so a rate-limit replay keeps the route.
@@ -3943,15 +4011,11 @@ export class PtyHost {
     // every non-owner-authored caller (proactive/heartbeat/reminder/system inject), so activeTurnOwnerText
     // stays null exactly like activeTurnRoute does today. `lastPromptOwnerText` mirrors lastPromptRoute so a
     // rate-limit-killed companion turn's replay (resumeAfterRateLimit) still attests correctly.
-    live.activeTurnOwnerText = ownerText ?? null;
-    live.lastPromptOwnerText = ownerText ?? null;
-    // Companion injection-guard Primitive A widening (card 2b26035c): append this turn's owner text to
-    // the bounded recent-turns ring, UNLESS it's undefined (no owner-authored turn — same guard as
-    // activeTurnOwnerText above). Unlike activeTurnOwnerText, this is NEVER cleared at Stop — it's meant
-    // to persist across the turn boundary so a later turn's lever call can still see it.
     if (ownerText !== undefined) {
-      live.recentOwnerTurns.unshift(ownerText);
-      if (live.recentOwnerTurns.length > RECENT_OWNER_TURNS_WINDOW) live.recentOwnerTurns.length = RECENT_OWNER_TURNS_WINDOW;
+      this.attributeOwnerText(live, ownerText);
+    } else {
+      live.activeTurnOwnerText = null;
+      live.lastPromptOwnerText = null;
     }
     // Companion Trust Window: pin the turn's authenticated sender id the SAME way — undefined/null for
     // every non-group-companion caller, so activeTurnSenderId stays null exactly like activeTurnOwnerText
@@ -4841,7 +4905,12 @@ export class PtyHost {
       // composerLen, with no tripwire baseline captured (nothing will be recorded to the transcript).
       const draft = nextRawDraftState(live.rawDraftText, data);
       live.rawDraftText = draft.text;
-      if (draft.submitted !== null) live.lastRawSubmit = draft.submitted;
+      if (draft.submitted !== null) {
+        live.lastRawSubmit = draft.submitted;
+        // Card b4b9b707: same capture, SEPARATE field/lifecycle — see Live.pendingRawOwnerSubmit's doc.
+        live.pendingRawOwnerSubmit = draft.submitted;
+        live.pendingRawOwnerSubmitAt = Date.now();
+      }
       // Box-free transition (submitted / cleared / backspaced-to-empty): drain the held queue PROMPTLY
       // — don't wait for the reconcile tick — so a held programmatic turn delivers right after the
       // human frees their box. drainPending is fully guarded (no-op if busy/stopping/empty/not-ready).

@@ -152,6 +152,68 @@ try {
     check("8: an OLD-ENOUGH turn (the very first one) has fallen out of the window", !window.includes("turn one"));
   }
 
+  // ===== 9. RAW-TERMINAL capture (card b4b9b707): a genuine raw Enter-submit attests ownerText =====
+  // /ws/term's stdin path (gateway/server.ts) calls PtyHost.writeStdin directly, bypassing submit() —
+  // this is the exact bypass the card closes. writeStdin is exercised here the same way the real
+  // websocket handler drives it.
+  {
+    const sid = newSession("I"); SIDS.push(sid);
+    const line = "Go with B General";
+    host.writeStdin(sid, `${line}\r`); // typed into the raw terminal, then Enter
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("9: a raw-terminal-typed line attests as ownerText for the turn it started", host.getActiveTurnOwnerText(sid) === line);
+    check("9: it also lands in the recent-owner window — same server-attested tier as the composer", host.getRecentOwnerTurns(sid)[0] === line);
+    stop(sid);
+    check("9: cleared at Stop like any other owner attestation (unchanged Primitive A behavior)", host.getActiveTurnOwnerText(sid) === null);
+  }
+
+  // ===== 10. NEGATIVE (security-critical): a Loom-originated turn, with NO raw-terminal activity, attests NULL =====
+  {
+    const sid = newSession("J"); SIDS.push(sid);
+    host.enqueueStdin(sid, "[loom:idle] you've been idle a while", "system", undefined, undefined, "warning");
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("10: a Loom-originated (system/kickoff/nudge) turn never attests ownerText with no prior raw activity", host.getActiveTurnOwnerText(sid) === null);
+  }
+
+  // ===== 11. NEGATIVE (security-critical): a raw draft is captured, but a Loom-originated submit() races in FIRST =====
+  // This is the crux of the fabrication guard: submit() must invalidate the pending raw baseline BEFORE
+  // the system turn's own UserPromptSubmit fires, so the system turn's hook never sees it.
+  {
+    const sid = newSession("K"); SIDS.push(sid);
+    host.writeStdin(sid, "some human draft\r"); // frees the box, sets pendingRawOwnerSubmit — session still idle
+    // A Loom-originated turn (worker-report-drain shape) submits before the engine's own hook fires.
+    host.enqueueStdin(sid, "[loom:worker-report] done", "system", undefined, undefined, "agent");
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("11: a raced-in submit() invalidates the pending raw draft — the system turn attests NULL, never the human's draft", host.getActiveTurnOwnerText(sid) === null);
+  }
+
+  // ===== 12. NEGATIVE (security-critical): consume-once — a LATER, unrelated turn never inherits an already-consumed raw attestation =====
+  {
+    const sid = newSession("L"); SIDS.push(sid);
+    const line = "approved";
+    host.writeStdin(sid, `${line}\r`);
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // turn 1: consumes + attests
+    check("12: turn 1 attests the raw line", host.getActiveTurnOwnerText(sid) === line);
+    stop(sid); // turn 1 ends
+    // Turn 2 is Loom-originated (no ownerText) — its own UserPromptSubmit must NOT see turn 1's raw
+    // attestation, proving pendingRawOwnerSubmit was actually nulled at consumption, not left dangling.
+    host.enqueueStdin(sid, "[loom:reminder] follow-up", "system", undefined, undefined, "agent");
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" });
+    check("12: a LATER unrelated turn does NOT inherit the already-consumed raw attestation", host.getActiveTurnOwnerText(sid) === null);
+  }
+
+  // ===== 13. TTL bound: a stale, never-consumed raw draft (e.g. a stray non-composer Enter) is discarded, =====
+  // ===== not attributed to a later, unrelated turn — see RAW_OWNER_SUBMIT_TTL_MS's doc =====
+  {
+    const sid = newSession("M"); SIDS.push(sid);
+    const line = "y"; // e.g. a bare permission-gate keystroke that never itself started a new top-level turn
+    host.writeStdin(sid, `${line}\r`);
+    // Simulate time passing well beyond the TTL with nothing consuming/overwriting it in between.
+    host.live.get(sid).pendingRawOwnerSubmitAt = Date.now() - 999_999;
+    host.deliverHook(sid, { hook_event_name: "UserPromptSubmit" }); // an unrelated LATER real prompt starts
+    check("13: a stale (TTL-expired) raw draft is discarded, never attributed to an unrelated later turn", host.getActiveTurnOwnerText(sid) === null);
+  }
+
   await sleep(200); // let async paste-ends/Enters flush before teardown
 } finally {
   for (const sid of SIDS) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }
@@ -159,6 +221,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills."
+  ? "\n✅ ALL PASS — getActiveTurnOwnerText attests the literal owner bytes of an owner-authored turn, stays null for a proactive/system turn, and is cleared at turn end (never inherited by a later turn); getRecentOwnerTurns (card 2b26035c widening) retains a bounded, most-recent-first window of the SAME server-attested owner bytes that survives Stop, never admits a non-owner-authored turn, and evicts an old-enough entry once the window fills. Card b4b9b707: a raw-terminal (/ws/term) Enter-submit ALSO attests ownerText via the SAME writer, a Loom-originated submit() racing in before the correlating hook ALWAYS wins (never fabricates), a consumed attestation never leaks to a later turn, and a stale never-consumed draft is TTL-discarded rather than misattributed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
