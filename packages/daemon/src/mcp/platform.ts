@@ -2310,8 +2310,14 @@ export class PlatformMcpRouter {
           "optional-but-validated for a \"decision\" that offers `options` (must be one of them), and " +
           "must be OMITTED for a question with no offered options — the owner's reply stands alone as " +
           "the note either way. Prefer this over question_ask-then-question_cancel whenever the owner " +
-          "has already answered live in this chat. Returns {resolved:true, questionId, chosenOption, " +
-          "note} or {error}.",
+          "has already answered live in this chat. For type:\"permission\": unlike the REST inbox answer " +
+          "path (which captures the human's chosen scope/expiry structurally into decidedScope/" +
+          "decidedExpiresAt), this path has no structured scope/expiry input — the chat composer is " +
+          "freeform prose — so a chat-resolved permission always surfaces decidedScope/decidedExpiresAt " +
+          "null and lapsed false; the owner's actual scope/expiry (if they stated one) lives only in " +
+          "`note` prose. A successor reading this answer must read `note` for a chat-answered grant's " +
+          "lifetime rather than assuming no scope was given. Returns {resolved:true, questionId, " +
+          "chosenOption, note} or {error}.",
         inputSchema: { questionId: z.string(), chosenOption: z.string().optional() },
       },
       async ({ questionId, chosenOption }) => {

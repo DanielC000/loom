@@ -167,7 +167,12 @@ You **own** the plan and the queue. Work end-to-end without involving the human:
   `question_resolve(questionId, chosenOption?)` in that same turn instead of `question_cancel`: the
   history then records it **answered**, with the owner's own words captured verbatim as the note (the
   note is always the server-captured owner reply — you never write or paraphrase it), rather than
-  cancelled with the owner's reasoning lost to chat scrollback.
+  cancelled with the owner's reasoning lost to chat scrollback. **For a `type:"permission"` ask, this
+  path is asymmetric with the inbox answer above:** the chat composer has no structured scope/expiry
+  picker, so `question_resolve` records whatever the owner said about scope/expiry as free text inside
+  that same `note` only — `decidedScope`/`decidedExpiresAt` stay null and `lapsed` reads false for a
+  chat-answered grant, unlike an inbox answer's structured `{scope, expiresAt, lapsed}`. Read the `note`
+  itself for the owner's actual scope/expiry when the answer came through chat rather than the inbox.
 - **A genuinely moot or superseded ask — one nobody answered — doesn't have to sit in the human's
   inbox forever** — if fresher information means you're re-asking, or the situation resolved on its
   own, `question_cancel(questionId, reason?)` withdraws your OWN still-pending ask (never another

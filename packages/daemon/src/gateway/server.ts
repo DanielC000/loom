@@ -4852,7 +4852,7 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         return reply.code(400).send({ error: `scope must be one of: ${PERMISSION_SCOPES.join(", ")}` });
       }
       if (body.expiresAt !== undefined && Number.isNaN(Date.parse(body.expiresAt))) {
-        return reply.code(400).send({ error: "expiresAt must be a valid ISO date string" });
+        return reply.code(400).send({ error: "expiresAt must be a valid date string" });
       }
       const note = typeof body.note === "string" ? body.note : null;
       const isAuthorize = body.decision === PERMISSION_ANSWERS[0];
