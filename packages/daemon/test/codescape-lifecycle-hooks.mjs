@@ -35,6 +35,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       itself is reused, never removed).
 //   (5)/(6) NEGATIVE CASES: LOOM_DEV off, OR the project not codescape-enabled, ⇒ the spy client is called
 //       ZERO times across an equivalent spawn/merge/gc lifecycle — byte-identical otherwise.
+//   (8) Card f11f3aae (investigate-first on a narrow timing residual left by 088afc94): a CODE-ORDERING
+//       regression guard — fireCodescapeRegisterWorktree is always ISSUED before pty.spawn, across all
+//       four lifecycle paths (fresh spawn / resume / forkSession / recycleWorker). Investigated FIRST
+//       whether claude's own MCP client retries a failed initial connection (it does NOT for a 404 —
+//       Claude Code's docs classify not-found as non-retryable, unlike 5xx/timeout/refused — so this
+//       window is real, not self-healing), then scoped the guard to what's actually testable: the CODE
+//       ordering, not the real network race (which no hermetic test can reproduce). See the guard's own
+//       comment block (section (8) below) for the full citation.
 //
 // Run: 1) build daemon, 2) node test/codescape-lifecycle-hooks.mjs
 import fs from "node:fs";
@@ -88,8 +96,12 @@ function seedManifest(homeDir, repo, codescapeId) {
 }
 
 // A spy CodescapeSupervisor duck-type — the 3 control-plane methods P4 now calls. `reingestMain`
-// artificially delays so the test can prove finalizeMerge never awaits it inline.
-function makeFakeCodescape(homeDir) {
+// artificially delays so the test can prove finalizeMerge never awaits it inline. `orderLog` is an
+// OPTIONAL shared sequence array (card f11f3aae) — when supplied, registerWorktree appends "register"
+// to it at the exact moment it's CALLED (synchronous, before the fire-and-forget promise settles),
+// letting a caller compare call order against SeamHost's "spawn" tag below. undefined ⇒ byte-identical
+// to today (every existing caller of this factory omits it).
+function makeFakeCodescape(homeDir, orderLog) {
   const calls = { register: [], reingest: [], drop: [] };
   let reingestInFlight = 0;
   return {
@@ -98,6 +110,7 @@ function makeFakeCodescape(homeDir) {
     resolveProjectId: (repoPath) => resolveCodescapeProjectId(repoPath, homeDir),
     reingestInFlightCount: () => reingestInFlight,
     async registerWorktree(projectId, info) {
+      orderLog?.push("register");
       calls.register.push({ projectId, ...info });
       return { ok: true };
     },
@@ -125,23 +138,44 @@ function seedProject(db, p) {
 // A real PtyHost with ONLY createPty (the actual claude/node-pty spawn) and isAlive faked out — mirrors
 // codescape-mcp-spawn.mjs's SeamHost, needed here because startManager/spawnWorker/recycleWorker all
 // drive `this.pty.spawn(...)` (a real PtyHost method), not just the narrow stop/enqueue surface.
+// `orderLog` (card f11f3aae, optional — see makeFakeCodescape's identical doc): createPty appends
+// "spawn" to it at the exact moment `PtyHost.spawn()` calls it — that call is `createPty`'s FIRST
+// synchronous action (host.ts), so this tags the true moment claude's own process would be launched.
 class SeamHost extends PtyHost {
-  createPty(opts) { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  constructor(events, orderLog) { super(events); this.orderLog = orderLog; }
+  createPty(opts) { this.orderLog?.push("spawn"); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
   isAlive() { return false; }
 }
-function makeHost(db) {
+function makeHost(db, orderLog) {
   const events = {
     onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
     onBusy(id, busy) { db.setBusy(id, busy); },
     onContextStats() {}, onRateLimited() {},
     onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
   };
-  return new SeamHost(events);
+  return new SeamHost(events, orderLog);
 }
 
 async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
   for (let i = 0; i < tries && !cond(); i++) await sleep(everyMs);
   return cond();
+}
+
+// Card f11f3aae regression guard (see section (8) below for the full rationale): asserts that, within
+// the slice of `orderLog` appended since `sliceStart`, a "register" tag was pushed before a "spawn" tag
+// — i.e. fireCodescapeRegisterWorktree was ISSUED before pty.spawn for this one lifecycle call. Polls
+// (waitFor) rather than reading orderLog synchronously: both tags are pushed synchronously in the real
+// code today, but polling for BOTH tags to appear before comparing order also holds if that ever
+// changed, without turning a genuine ordering regression into a flaky pass/fail.
+async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
+  await waitFor(() => {
+    const added = orderLog.slice(sliceStart);
+    return added.includes("register") && added.includes("spawn");
+  });
+  const added = orderLog.slice(sliceStart);
+  const r = added.indexOf("register");
+  const s = added.indexOf("spawn");
+  check(`(order) ${label}: fireCodescapeRegisterWorktree is issued before pty.spawn`, r !== -1 && s !== -1 && r < s);
 }
 
 // ===================== (1)-(4) POSITIVE: LOOM_DEV=1 + a detected codescape CLI + project opted in =====================
@@ -153,9 +187,11 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
   const codescapeId = `clh-pos-codescape-${sfx}`;
   initRepo(P.repo, "# clh positive\n");
   seedManifest(homeDir, P.repo, codescapeId);
-  const fake = makeFakeCodescape(homeDir);
+  // orderLog (card f11f3aae): a shared call-order sequence — see (8) below for what it guards.
+  const orderLog = [];
+  const fake = makeFakeCodescape(homeDir, orderLog);
   const db = new Db();
-  const sessions = new SessionService(db, makeHost(db), new OrchestrationControl(), {
+  const sessions = new SessionService(db, makeHost(db, orderLog), new OrchestrationControl(), {
     codescape: fake,
     reapWorktreeProcesses: async () => ({ killedPids: [] }), // no real OS process enumeration needed here
   });
@@ -289,6 +325,62 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
     void forked;
     // cleanup worker4's worktree by hand (not merged in this test)
     try { fs.rmSync(worker4.worktreePath, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
+
+    // --- (8) CODE-ORDERING REGRESSION GUARD (card f11f3aae) ---
+    // card f11f3aae investigated a narrow timing residual left by 088afc94's re-fire hooks above: the
+    // register-worktree POST (fire-and-forget, never awaited — awaiting it would put a network call on
+    // the spawn hot path) races claude's OWN MCP client, which connects to /mcp/<codescapeId>/<worktreeId>
+    // ~1-3s later. If claude's connect attempt reaches codescape BEFORE the POST lands, the route 404s.
+    //
+    // INVESTIGATE-FIRST FINDING: this does NOT self-heal. Claude Code's documented MCP behavior
+    // (code.claude.com/docs/en/mcp, "Automatic reconnection") retries an HTTP/SSE server's INITIAL
+    // connection at startup up to 3x, but ONLY for transient errors (5xx, connection-refused, timeout):
+    // "Authentication and not-found errors are not retried because they require a configuration change
+    // to resolve." A 404 — exactly what an unregistered worktree route returns (see this file's own
+    // fake-codescape-cli.mjs fallback 404, and codescape-mcp-spawn.mjs's identical fixture) — is a
+    // not-found error: ZERO retries, and the worker silently has no codescape tools for that session's
+    // entire lifetime. Confirmed against the daemon's actually-spawned claude binary (2.1.219 at
+    // investigation time), well past the v2.1.121 release the retry-classification behavior shipped in.
+    //
+    // WHAT THIS CAN AND CANNOT PROVE: the network race itself (POST landing vs. MCP connect) is NOT
+    // hermetically testable — there's no real claude process and no real network timing here, so this
+    // can't assert the POST always LANDS before claude's first connect attempt. What IS controllable,
+    // and IS guarded here, is the CODE ordering 088afc94 established: fireCodescapeRegisterWorktree must
+    // always be ISSUED (synchronously) before pty.spawn, in EVERY lifecycle path — so the register POST
+    // is always in flight before claude's process (and therefore its MCP client) even exists. If a
+    // future refactor reorders these two calls, the window widens from "possible under a slow/loaded
+    // host" to "certain on every single spawn" — this guard catches exactly that regression. The
+    // residual network-timing race is being raised with codescape directly (register-on-first-use at
+    // mount time, their side) rather than built around here.
+    const taskId5 = `clh-task5-${sfx}`;
+    db.insertTask({ id: taskId5, projectId: P.projId, title: "CLH task 5", body: "", columnKey: "backlog", position: 5, priority: "p2", createdAt: now, updatedAt: now });
+    let orderStart = orderLog.length;
+    const worker5 = await sessions.spawnWorker(mgr.id, { taskId: taskId5, agentId: P.workerAgentId, kickoffPrompt: "GO" });
+    await assertRegisterBeforeSpawn(orderLog, "fresh spawn (spawnWorker)", orderStart);
+
+    // Give worker5 a real engine transcript so resume()'s/forkSession()'s resumability guards pass
+    // (mirrors worker4's identical setup above).
+    const engId5 = "55555555-5555-4555-8555-555555555555";
+    db.setEngineSessionId(worker5.id, engId5);
+    const tpath5 = engineTranscriptPath(worker5.worktreePath, engId5);
+    fs.mkdirSync(path.dirname(tpath5), { recursive: true });
+    fs.writeFileSync(tpath5, JSON.stringify({ type: "user", message: { content: "hi" } }) + "\n");
+
+    orderStart = orderLog.length;
+    sessions.resume(worker5.id);
+    await assertRegisterBeforeSpawn(orderLog, "resume", orderStart);
+
+    orderStart = orderLog.length;
+    const forked5 = sessions.forkSession(worker5.id);
+    await assertRegisterBeforeSpawn(orderLog, "forkSession", orderStart);
+    void forked5;
+
+    orderStart = orderLog.length;
+    await sessions.recycleWorker(mgr.id, worker5.id, "handoff: ordering guard");
+    await assertRegisterBeforeSpawn(orderLog, "recycleWorker", orderStart);
+
+    // cleanup worker5's worktree by hand (not merged in this test)
+    try { fs.rmSync(worker5.worktreePath, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   } finally {
     db.close();
     try { fs.rmSync(P.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -368,6 +460,6 @@ async function waitFor(cond, { tries = 200, everyMs = 50 } = {}) {
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape lifecycle hooks (P4 rewrite, card 088afc94): register-worktree fires on spawnWorker's create-worktree path for a TASKED spawn (registering codescape's OWN manifest-resolved project id, this worker's own worktree path/branch, keyed by a stable per-task worktreeId) — a taskless spawn never registers at all (no stable id), and a SECOND tasked spawn registers its OWN distinct entry too (per-worktree, not a once-per-project gate); reingest-main fires after finalizeMerge succeeds, unconditionally, on BOTH the Green and ALREADY_MERGED paths, backgrounded (never awaited inline) with no Loom-side debounce; a genuine gcWorktreeDir removal now fires a REAL drop-worktree call (reviving the C1 hook the old rewrite had left an inert no-op) for the merged worker's own worktreeId; a recycleWorker reuse triggers neither a register NOR a drop call (same worktree, never re-created or removed); and the negative case (LOOM_DEV off, or the project not opted in) fires zero calls across an otherwise byte-identical spawn/merge/gc lifecycle."
+  ? "\n✅ ALL PASS — Codescape lifecycle hooks (P4 rewrite, card 088afc94): register-worktree fires on spawnWorker's create-worktree path for a TASKED spawn (registering codescape's OWN manifest-resolved project id, this worker's own worktree path/branch, keyed by a stable per-task worktreeId) — a taskless spawn never registers at all (no stable id), and a SECOND tasked spawn registers its OWN distinct entry too (per-worktree, not a once-per-project gate); reingest-main fires after finalizeMerge succeeds, unconditionally, on BOTH the Green and ALREADY_MERGED paths, backgrounded (never awaited inline) with no Loom-side debounce; a genuine gcWorktreeDir removal now fires a REAL drop-worktree call (reviving the C1 hook the old rewrite had left an inert no-op) for the merged worker's own worktreeId; recycleWorker RE-FIRES register-worktree under the SAME worktreeId (but never a drop — the worktree is reused, never removed); resume() and forkSession() both re-fire it too, same worktreeId; a code-ordering regression guard (card f11f3aae) confirms register is always ISSUED before pty.spawn across all four lifecycle paths (fresh spawn/resume/fork/recycle — the residual network-timing race that isn't hermetically testable is documented at the guard, not built around); and the negative case (LOOM_DEV off, or the project not opted in) fires zero calls across an otherwise byte-identical spawn/merge/gc lifecycle."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
