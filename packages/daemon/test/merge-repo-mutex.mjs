@@ -50,6 +50,99 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const GIT_ID = "-c user.email=mrm@loom -c user.name=mrm";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 
+// ── Integrity-sweep exec hardening (board escalation, gate loss 2026-07-25 on card 45585896's merge):
+//    the sweep below calls several read-only git subprocesses against an already-quiescent repo. A
+//    TRANSIENT exec death (non-zero exit, EMPTY stderr — the git *process* itself failed to run, not a
+//    bad object) used to raw-throw and abort the whole file, which reads exactly like a merge-repo-mutex
+//    defect when it is really host-load flakiness. A GENUINE git error (non-empty stderr, e.g.
+//    `fatal: bad object`) is a REAL signal and must never be retried or swallowed.
+//    The backoff is deliberately measured in SECONDS, not milliseconds: what's being absorbed is a git
+//    subprocess failing to SPAWN under the gate's own sustained cap=2 concurrent-suite host load, which
+//    persists for seconds to minutes — not an unloaded-host blip. A tight ~100ms budget just resamples
+//    the SAME congested instant a few times and still goes red; the escalating delays below are sized to
+//    span past a real congestion spike instead. This is the same class of budget-sized-for-an-unloaded-
+//    host mistake sibling card 40e3c88f fixes elsewhere — don't re-tighten this back down.
+const GIT_TRANSIENT_RETRY_DELAYS_MS = [300, 800, 1500]; // ~2.6s total span across the 3 gaps between 4 attempts
+const GIT_TRANSIENT_RETRIES = GIT_TRANSIENT_RETRY_DELAYS_MS.length + 1;
+
+class GitIntegrityError extends Error {
+  constructor(message, { transient, label }) {
+    super(message);
+    this.transient = transient;
+    this.label = label;
+  }
+}
+
+function sleepSyncMs(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Every git subprocess call the integrity sweep makes goes through here. `execImpl` is injectable so the
+// self-test below can prove both the retry path and the fail-loud path without needing a real flaky git.
+function execGitIntegrity(cwd, args, label, execImpl = (c, a) => execSync(`git ${a}`, { cwd: c }).toString()) {
+  let lastErr;
+  for (let attempt = 1; attempt <= GIT_TRANSIENT_RETRIES; attempt++) {
+    try {
+      return execImpl(cwd, args);
+    } catch (e) {
+      const stderr = (e.stderr ? e.stderr.toString() : "").trim();
+      if (stderr) {
+        throw new GitIntegrityError(`git subprocess reported an error at "${label}": ${stderr}`, { transient: false, label });
+      }
+      lastErr = e;
+      if (attempt < GIT_TRANSIENT_RETRIES) sleepSyncMs(GIT_TRANSIENT_RETRY_DELAYS_MS[attempt - 1]);
+    }
+  }
+  throw new GitIntegrityError(
+    `git subprocess flaked (transient, empty stderr, exit ${lastErr?.status ?? "?"}) after ${GIT_TRANSIENT_RETRIES} attempts at "${label}"`,
+    { transient: true, label },
+  );
+}
+
+// ── Self-test: INJECT both failure shapes to prove the retry / clean-report / fail-loud paths actually
+//    work, before spending time on the real TRIALS below — a regression here fails fast with a clear label.
+{
+  const makeFlakyExec = (failCount) => {
+    let calls = 0;
+    return () => {
+      calls++;
+      if (calls <= failCount) {
+        const err = new Error("Command failed");
+        err.status = 1;
+        err.stderr = Buffer.from(""); // transient: the process died, no git-level error text
+        throw err;
+      }
+      return "injected-success-output";
+    };
+  };
+
+  const recovered = execGitIntegrity(".", "self-test-a", "self-test: transient-recovers", makeFlakyExec(GIT_TRANSIENT_RETRIES - 1));
+  check("[self-test] transient exec failure within the retry budget recovers", recovered === "injected-success-output");
+
+  let bExc = null;
+  try { execGitIntegrity(".", "self-test-b", "self-test: transient-exhausts", makeFlakyExec(GIT_TRANSIENT_RETRIES + 5)); }
+  catch (e) { bExc = e; }
+  check("[self-test] persistent transient failure throws GitIntegrityError, not a raw execSync stack", bExc instanceof GitIntegrityError);
+  check("[self-test] persistent transient failure is labeled transient:true", bExc?.transient === true);
+  check("[self-test] persistent transient failure names the subprocess + label in its message", typeof bExc?.message === "string" && bExc.message.includes("self-test: transient-exhausts"));
+
+  let cCalls = 0;
+  const genuineExec = () => {
+    cCalls++;
+    const err = new Error("Command failed");
+    err.status = 128;
+    err.stderr = Buffer.from("fatal: bad object deadbeef\n"); // genuine git-level error
+    throw err;
+  };
+  let cExc = null;
+  try { execGitIntegrity(".", "self-test-c", "self-test: genuine-error", genuineExec); }
+  catch (e) { cExc = e; }
+  check("[self-test] genuine git error (fatal: on stderr) throws GitIntegrityError immediately", cExc instanceof GitIntegrityError);
+  check("[self-test] genuine git error is labeled transient:false (never retried, never swallowed)", cExc?.transient === false);
+  check("[self-test] genuine git error is NOT retried — fails on the first attempt", cCalls === 1);
+  check("[self-test] genuine git error message carries the real git stderr", typeof cExc?.message === "string" && cExc.message.includes("bad object deadbeef"));
+}
+
 const TRIALS = 15;
 const tmpDirs = [];
 
@@ -94,31 +187,81 @@ try {
     const shas = log.split("\n").filter(Boolean);
     let trailerCommitsChecked = 0;
     for (const sha of shas) {
-      const msg = execSync(`git --no-pager log -1 --format=%B ${sha}`, { cwd: repo }).toString();
+      let msg;
+      try {
+        msg = execGitIntegrity(repo, `--no-pager log -1 --format=%B ${sha}`, `git log -1 --format=%B ${sha.slice(0, 7)} (:97)`);
+      } catch (e) {
+        if (e instanceof GitIntegrityError && e.transient) {
+          check(`[trial ${t}] commit ${sha.slice(0, 7)}: ${e.message}`, false);
+          continue;
+        }
+        throw e; // genuine git error (e.g. fatal:/bad object) — fail loudly, never swallowed.
+      }
       const m = msg.match(/^Loom-Worker-Branch:\s*(\S+)/m);
       if (!m) continue;
       trailerCommitsChecked++;
       const branch = m[1];
       const expectedFile = branch === "loom/branch-a" ? "file-a.txt" : "file-b.txt";
+
       let ownContent;
-      try { ownContent = execSync(`git show ${sha}:${expectedFile}`, { cwd: repo }).toString(); } catch { ownContent = null; }
+      try {
+        ownContent = execGitIntegrity(repo, `show ${sha}:${expectedFile}`, `git show ${sha.slice(0, 7)}:${expectedFile} (:104)`);
+      } catch (e) {
+        if (e instanceof GitIntegrityError && e.transient) {
+          check(`[trial ${t}] commit ${sha.slice(0, 7)}: ${e.message}`, false);
+          continue;
+        }
+        ownContent = null; // genuine error (e.g. path does not exist in this commit) — a real integrity signal; the check below fails loudly on it.
+      }
       check(`[trial ${t}] commit ${sha.slice(0, 7)} (trailer ${branch}) contains ITS OWN file ${expectedFile}`, ownContent !== null);
+
+      let branchTipContent;
+      try {
+        branchTipContent = execGitIntegrity(repo, `show ${branch}:${expectedFile}`, `git show ${branch}:${expectedFile} (:108)`);
+      } catch (e) {
+        if (e instanceof GitIntegrityError && e.transient) {
+          check(`[trial ${t}] commit ${sha.slice(0, 7)}: ${e.message}`, false);
+          continue;
+        }
+        throw e;
+      }
       // The corruption's exact shape: the trailer's file is present, but the content is the WRONG branch's
       // — so compare directly against that branch's own tip content, not just presence of the path.
-      const branchTipContent = execSync(`git show ${branch}:${expectedFile}`, { cwd: repo }).toString();
       check(`[trial ${t}] commit ${sha.slice(0, 7)}'s ${expectedFile} content MATCHES branch ${branch}'s own tip (not swapped)`, ownContent === branchTipContent);
+
       // ── CONFINEMENT (card 9f776570): the two checks above only assert the trailer's OWN file is present
       //    and correct — a commit carrying its own file AND a FOREIGN one (the zero-concurrency corruption
       //    reproduced in card 9e77050f) passes both of them. Assert the landed commit's diff path set is
       //    EXACTLY the branch's own changed-file set — the same property the Loom-Worker-PathSet digest
       //    encodes (mergeBase..branch), checked here against the commit's own diffstat.
-      const commitPaths = execSync(`git show --stat --format= ${sha}`, { cwd: repo }).toString()
+      let statOut;
+      try {
+        statOut = execGitIntegrity(repo, `show --stat --format= ${sha}`, `git show --stat ${sha.slice(0, 7)} (:115)`);
+      } catch (e) {
+        if (e instanceof GitIntegrityError && e.transient) {
+          check(`[trial ${t}] commit ${sha.slice(0, 7)}: ${e.message}`, false);
+          continue;
+        }
+        throw e;
+      }
+      const commitPaths = statOut
         .split("\n")
         .map((line) => { const m = line.match(/^\s*(.+?)\s*\|\s*\d/); return m ? m[1] : null; })
         .filter(Boolean)
         .sort();
-      const branchPaths = git(repo, `diff --name-only --no-renames ${mainlineBase}..${branch}`)
-        .split("\n").map((s) => s.trim()).filter(Boolean).sort();
+
+      let diffOut;
+      try {
+        diffOut = execGitIntegrity(repo, `diff --name-only --no-renames ${mainlineBase}..${branch}`, `git diff ${mainlineBase.slice(0, 7)}..${branch} (:120)`);
+      } catch (e) {
+        if (e instanceof GitIntegrityError && e.transient) {
+          check(`[trial ${t}] commit ${sha.slice(0, 7)}: ${e.message}`, false);
+          continue;
+        }
+        throw e;
+      }
+      const branchPaths = diffOut.split("\n").map((s) => s.trim()).filter(Boolean).sort();
+
       check(`[trial ${t}] commit ${sha.slice(0, 7)}'s diff is CONFINED to ${branch}'s own path set ` +
         `${JSON.stringify(branchPaths)} (got ${JSON.stringify(commitPaths)}, no foreign file)`,
         JSON.stringify(commitPaths) === JSON.stringify(branchPaths));
