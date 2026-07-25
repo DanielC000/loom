@@ -2161,10 +2161,17 @@ export async function workerDiff(
 
 // ── Diff cache for the polled orchestration-view endpoint (`GET /api/sessions/:id/diff`) ──────────
 //
-// Overview polls this once per rendered worker card every ~4s regardless of whether anything changed,
-// and workerDiff() always shells out to git (350-415ms/poll in the 2026-07-16 perf profile). This wraps
+// workerDiff() always shells out to git (350-415ms/poll in the 2026-07-16 perf profile). This wraps
 // workerDiff with a cache keyed on a CHEAP, git-subprocess-free freshness proof, so a repeat poll on an
-// unchanged worker skips git entirely.
+// unchanged worker skips git entirely. ACTUAL client cadence (web/src, verified by grep — don't restate
+// a rounder number from memory, it drifts): `reviewQueue.tsx` polls every 8000ms, but only for the
+// review-queue cards (a worker awaiting merge); `Overview.tsx`'s `WorkerDiffPanel` and `ReviewPanel.tsx`
+// set NO `refetchInterval` at all, and the app's `QueryClient` has no default one either — react-query's
+// own default `staleTime: 0` means those refetch on every component MOUNT instead, so the actual hot path
+// is likely BURST mount traffic (re-expanding/re-rendering worker cards), not a steady interval. This
+// cache — and its TTL fast path below — help both shapes: a steady 8s poll less dramatically (see the
+// measured ~2x below), a mount-driven burst far more (a burst of near-simultaneous requests inside the
+// TTL costs one walk total instead of one per request).
 //
 // KEY DESIGN (correctness over hit-rate — a false HIT serves a stale diff, worse than the perf cost it
 // saves):
@@ -2181,6 +2188,32 @@ export async function workerDiff(
 //  - The walk is capped (DIFF_FINGERPRINT_MAX_ENTRIES) — past the cap we can't CHEAPLY prove the worktree
 //    is unchanged, so the key resolves to null and the caller always recomputes: a false MISS, which only
 //    costs perf, never correctness.
+//
+// TTL fast path (card 31552de1 — the walk itself was the real cost, not the git subprocess it replaces):
+// the walk IS the cache key, so it used to run BEFORE the cache was ever consulted — every poll paid the
+// full recursive stat walk (~94ms / ~1742 stats on a real pnpm-monorepo worktree), even a cache HIT. That
+// runs IN-DAEMON (event loop + libuv threadpool), unlike the git subprocess it replaces (a separate
+// process) — at N live workers, that's continuous fs-syscall churn on the daemon itself, whether it's
+// driven by a steady poll or a burst of near-simultaneous mount refetches (see the client-cadence note
+// above). `DIFF_FINGERPRINT_TTL_MS` bounds how often the walk actually runs: once a live worktree's
+// content fingerprint has been walked, a repeat poll within the TTL trusts that fingerprint WITHOUT
+// re-walking — it only re-reads the CANONICAL repo's HEAD (one or two small file reads — `.git/HEAD` then
+// `refs/heads/<branch>`, falling through to scan `packed-refs` when refs are packed — never a walk). That
+// re-read only ever catches the CANONICAL repo's own checked-out branch moving (e.g. another worker's PR
+// landing on main, which shifts the merge-base this diff is computed from) — it is caught immediately,
+// TTL or not.
+//
+// It does NOT, and does not need to, catch the worker's OWN commits as a separate case: `fingerprintWorktree`
+// walks the WORKING TREE, not `.git`, so a commit that writes no working-tree bytes (e.g. committing
+// content the walk already fingerprinted) is invisible to the walk too, at ANY TTL — correctly, because
+// workerDiff's own stage-1 diffs merge-base(canonical HEAD, branch) -> WORKING TREE, so a commit of
+// already-fingerprinted content changes nothing about the diff it would serve either. What the TTL actually
+// bounds is working-tree WRITES — the only thing that can change the stage-1 diff — whether or not those
+// writes are ever committed. A write inside the TTL window (staged, committed, or neither) is served stale
+// until the walk runs again; bounded staleness, acceptable for a DISPLAY read (the merge gate does its own
+// diff via `reviewWorkerMerge`, never through this cache). The TTL clock is anchored to the last REAL walk,
+// not the last served poll, so a fast-path hit never pushes the deadline out — continuous polling still
+// forces a re-walk at least once per TTL window instead of deferring it forever.
 //
 // Bounded via simple LRU eviction (DIFF_CACHE_MAX_ENTRIES) keyed by branch — branches come and go with
 // workers over the daemon's whole lifetime, so an unbounded map would leak.
@@ -2212,10 +2245,20 @@ export async function workerDiff(
 
 const DIFF_CACHE_MAX_ENTRIES = 500;
 const DIFF_FINGERPRINT_MAX_ENTRIES = 20_000;
+/** How long a live-worktree entry's content fingerprint (the walk) is trusted without re-walking — see
+ *  the TTL fast-path note above. Anchored to the last REAL walk, never bumped by a fast-path hit. */
+const DIFF_FINGERPRINT_TTL_MS = 12_000;
 
 interface DiffCacheEntry {
   key: string;
   result: WorkerDiff | null;
+  /** headSha component of a live-worktree (`wt:...`) `key`, used by the TTL fast path to cheaply
+   *  re-verify staleness without a walk. Null for a `branch:`/`merged:` entry — no worktree, so no walk
+   *  was ever paid for it, and so no fast path to take. */
+  wtHeadSha: string | null;
+  /** When this entry's content fingerprint was last actually walked (real recompute, not a fast-path
+   *  hit). The TTL is measured from here. */
+  fingerprintedAt: number;
 }
 
 const diffCache = new Map<string, DiffCacheEntry>();
@@ -2254,9 +2297,11 @@ async function readHeadSha(repoPath: string): Promise<string | null> {
  * Bounded, git-free recursive fingerprint of a worktree's files (path + mtime + size + mode), so a
  * repeat poll can PROVE no uncommitted edit happened without shelling out to git. Returns null if the
  * walk exceeds {@link DIFF_FINGERPRINT_MAX_ENTRIES} (can't cheaply prove unchanged -> caller always
- * recomputes) — never wrong, just no speedup for a pathologically large tree.
+ * recomputes) — never wrong, just no speedup for a pathologically large tree. Exported (card 31552de1)
+ * purely so a test can wrap it as a counting seam via {@link getWorkerDiffCached}'s `deps.fingerprint` —
+ * mirrors why {@link workerDiff} itself is exported as the default for `deps.compute`.
  */
-async function fingerprintWorktree(worktreePath: string): Promise<string | null> {
+export async function fingerprintWorktree(worktreePath: string): Promise<string | null> {
   const parts: string[] = [];
   let overflowed = false;
   async function walk(dir: string): Promise<void> {
@@ -2286,46 +2331,93 @@ async function fingerprintWorktree(worktreePath: string): Promise<string | null>
   return createHash("sha1").update(parts.join("\n")).digest("hex");
 }
 
-/** Compute the cache freshness key for one workerDiff() call, or null if it can't be cheaply proven. */
+/**
+ * Compute the cache freshness key for one workerDiff() call, or null if it can't be cheaply proven. Also
+ * returns the resolved `headSha` (always one or two small fs reads — `.git/HEAD` then, when it's a
+ * symbolic ref, `refs/heads/<branch>`, falling through to scan `packed-refs` when refs are packed — never
+ * a walk) so the caller can drive the TTL fast path without a second read. `fingerprint` is an injectable
+ * seam (defaults to the real {@link fingerprintWorktree}) purely so a test can count actual WALK
+ * invocations.
+ */
 async function computeDiffCacheKey(
   repoPath: string, branch: string, worktreePath: string | null,
-): Promise<string | null> {
+  fingerprint: typeof fingerprintWorktree = fingerprintWorktree,
+): Promise<{ key: string | null; headSha: string }> {
   const headSha = (await readHeadSha(repoPath)) ?? "-";
   if (worktreePath && fs.existsSync(worktreePath)) {
-    const contentFp = await fingerprintWorktree(worktreePath);
-    if (contentFp === null) return null;
-    return `wt:${headSha}:${contentFp}`;
+    const contentFp = await fingerprint(worktreePath);
+    if (contentFp === null) return { key: null, headSha };
+    return { key: `wt:${headSha}:${contentFp}`, headSha };
   }
   const branchSha = await readRefSha(path.join(repoPath, ".git"), `refs/heads/${branch}`);
-  if (branchSha) return `branch:${branchSha}`;
+  if (branchSha) return { key: `branch:${branchSha}`, headSha };
   // Branch merged+deleted (or unknown): stage 3 searches history from HEAD, so HEAD alone is the key.
-  return `merged:${headSha}`;
+  return { key: `merged:${headSha}`, headSha };
 }
 
 /**
  * Cached wrapper around {@link workerDiff} for the polled orchestration-view diff endpoint. `deps.compute`
  * is an injectable seam (defaults to the real {@link workerDiff}) so a test can count git-subprocess-
- * triggering calls without mocking `simple-git`/`child_process`.
+ * triggering calls without mocking `simple-git`/`child_process`. `deps.fingerprint` is the matching seam
+ * for {@link fingerprintWorktree} (defaults to the real walk) so a test can count WALK invocations
+ * separately — the two are no longer the same thing once the TTL fast path (see the comment block above
+ * this cache) can skip the walk on a poll that still cheaply re-reads HEAD. `deps.now` defaults to
+ * `Date.now` and lets a test drive the TTL deterministically without a real sleep.
  */
 export async function getWorkerDiffCached(
   repoPath: string,
   opts: { branch: string; worktreePath: string | null },
-  deps: { compute?: typeof workerDiff } = {},
+  deps: { compute?: typeof workerDiff; fingerprint?: typeof fingerprintWorktree; now?: () => number } = {},
 ): Promise<WorkerDiff | null> {
   const compute = deps.compute ?? workerDiff;
-  const key = await computeDiffCacheKey(repoPath, opts.branch, opts.worktreePath);
-  if (key !== null) {
-    const cached = diffCache.get(opts.branch);
-    if (cached && cached.key === key) {
+  const fingerprint = deps.fingerprint ?? fingerprintWorktree;
+  const now = deps.now ?? Date.now;
+
+  const hasLiveWorktree = !!(opts.worktreePath && fs.existsSync(opts.worktreePath));
+  const cached = diffCache.get(opts.branch);
+
+  // TTL fast path: a live-worktree entry whose content fingerprint was walked within the last
+  // DIFF_FINGERPRINT_TTL_MS is trusted WITHOUT re-walking — only a cheap re-read of the CANONICAL repo's
+  // HEAD runs (one or two small file reads, plus a packed-refs scan when refs are packed — never a walk),
+  // so the canonical repo's own branch moving (e.g. another worker's PR landing on main, which shifts the
+  // merge-base this diff is computed from) is still caught immediately even inside the TTL window. A
+  // worker's own commit needs no separate handling here: it writes no working-tree bytes beyond what a
+  // plain uncommitted edit would, so it's bounded by the same TTL as any other working-tree write (see the
+  // comment block above this cache for why). `hasLiveWorktree` also gates this — a worktree that vanished
+  // since this entry was cached (the worker merged and its worktree was removed) must NOT be served from
+  // this stale live-worktree entry, TTL or not. `fingerprintedAt` is deliberately NOT bumped here, so
+  // continuous polling still forces a real walk at least once per TTL.
+  if (cached && hasLiveWorktree && cached.wtHeadSha !== null
+    && now() - cached.fingerprintedAt < DIFF_FINGERPRINT_TTL_MS) {
+    const headSha = (await readHeadSha(repoPath)) ?? "-";
+    if (headSha === cached.wtHeadSha) {
       diffCache.delete(opts.branch); // move to the Map's end (most-recently-used)
       diffCache.set(opts.branch, cached);
       return cached.result;
+    }
+    // The canonical repo's HEAD moved -> fall through to a full recompute below (a real walk).
+  }
+
+  const { key, headSha } = await computeDiffCacheKey(repoPath, opts.branch, opts.worktreePath, fingerprint);
+  // Derived from `key` itself (computeDiffCacheKey's OWN existence check), not from the outer
+  // `hasLiveWorktree` sampled above — the worktree could vanish BETWEEN the two checks, and `key` is the
+  // one that's authoritative for what was actually computed just now. Keeping a single source of truth
+  // makes a `wt:...`-keyed entry with a null `wtHeadSha` (or vice versa) structurally impossible.
+  const wtHeadSha = key !== null && key.startsWith("wt:") ? headSha : null;
+  if (key !== null) {
+    const existing = diffCache.get(opts.branch);
+    if (existing && existing.key === key) {
+      // Confirmed unchanged by a REAL walk just now -> refresh the TTL window forward from here.
+      const refreshed: DiffCacheEntry = { ...existing, fingerprintedAt: now() };
+      diffCache.delete(opts.branch);
+      diffCache.set(opts.branch, refreshed);
+      return refreshed.result;
     }
   }
   const result = await compute(repoPath, { branch: opts.branch, worktreePath: opts.worktreePath });
   if (key !== null) {
     diffCache.delete(opts.branch);
-    diffCache.set(opts.branch, { key, result });
+    diffCache.set(opts.branch, { key, result, wtHeadSha, fingerprintedAt: now() });
     while (diffCache.size > DIFF_CACHE_MAX_ENTRIES) {
       const oldest = diffCache.keys().next().value;
       if (oldest === undefined) break;
