@@ -354,6 +354,15 @@ export class CodescapeSupervisor {
    */
   private lastInstalledBuildFailureReason: string | null = null;
   /**
+   * Test seam: count of {@link probeHealth} invocations that ran to full completion (a tick skipped by the
+   * `probeInFlight` guard does NOT count). A REAL subprocess spawn now sits inside every successful probe
+   * (`checkBuildDrift` -> `readInstalledBuild`), so the number of probes that complete in any given
+   * wall-clock window is not deterministic (varies with host load) — a test asserting "fires loudly
+   * exactly once across N ticks" needs to wait for N COMPLETED ticks, not sleep through a window and hope
+   * enough landed. See `test/codescape-health-probe.mjs` scenario (8).
+   */
+  private completedProbeTicks = 0;
+  /**
    * Card 088afc94 P4 follow-up: codescape's OWN authoritative project id, cached per NORMALIZED (resolved
    * + lowercased — see {@link repoKey}) repoRoot once {@link registerProject} succeeds OR a manifest read
    * inside {@link resolveProjectId} hits — the fast path resolveProjectId checks before ever falling back
@@ -403,6 +412,11 @@ export class CodescapeSupervisor {
   /** The live child's PID, or null when not running. Diagnostic / test seam. */
   getPid(): number | null {
     return this.child?.pid ?? null;
+  }
+
+  /** Test seam — see {@link completedProbeTicks}. */
+  getCompletedProbeTickCount(): number {
+    return this.completedProbeTicks;
   }
 
   /**
@@ -665,6 +679,7 @@ export class CodescapeSupervisor {
       if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
     } finally {
       this.probeInFlight = false;
+      this.completedProbeTicks++;
     }
   }
 

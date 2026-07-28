@@ -342,8 +342,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    healthProbeIntervalMs: 60, // fast — many probe ticks over the wait below, to prove the diagnostic latches
-    healthProbeTimeoutMs: 200,
+    // Same margin rule as every other scenario in this file (see (1)/(2)/(5) etc.'s identical comment):
+    // intervalMs/timeoutMs must stay safely above real subprocess round-trip latency, or the WEDGE
+    // detector (an unrelated mechanism from the build-drift-latch behavior this scenario actually tests)
+    // can false-positive under host load and kill+restart the serve — which scenario (8) explicitly
+    // asserts never happens. An earlier, more aggressive 60/200 combo here (chosen to pack "many ticks"
+    // into a fixed sleep window) was exactly that false-positive under load; a deterministic wait on
+    // completed probe ticks (below) replaces the need for a fast interval to get enough ticks in.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
     versionProbeTimeoutMs: 2000,
   });
@@ -352,12 +359,22 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
   const pidBefore = sup.getPid();
 
-  await sleep(500); // an unresolvable installed side (${installedFailureMode}) must never be treated as a mismatch
+  // Drive a deterministic number of COMPLETED probe ticks instead of sleeping through a wall-clock window
+  // and hoping enough landed — each successful health probe now spawns a REAL subprocess
+  // (checkBuildDrift -> readInstalledBuild), so the number that complete in a fixed sleep is not
+  // deterministic under host load. Wait for several completed ticks (each one re-exercises the
+  // diagnostic-latch check), then settle briefly to catch a would-be flood before asserting.
+  const MIN_TICKS = 5;
+  for (let i = 0; i < 160 && sup.getCompletedProbeTickCount() < MIN_TICKS; i++) await sleep(50);
+  check(`(8) at least ${MIN_TICKS} probe ticks completed (${installedFailureMode})`,
+    sup.getCompletedProbeTickCount() >= MIN_TICKS);
+  await sleep(200); // settle window — let a would-be flood happen before checking the counts below
+
   check(`(8) an unresolvable installed build (${installedFailureMode}) never triggers a restart`,
     readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
 
   const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
-  check(`(8) an unresolvable installed build (${installedFailureMode}) is reported LOUDLY, but exactly ONCE across ~8 probe ticks (not once per tick)`,
+  check(`(8) an unresolvable installed build (${installedFailureMode}) is reported LOUDLY, but exactly ONCE across ${MIN_TICKS}+ completed probe ticks (not once per tick)`,
     diagnosticLines.length === 1);
 
   warnings.restore();
