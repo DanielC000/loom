@@ -68,6 +68,12 @@ const DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 5_000;
  */
 const DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD = 3;
 /**
+ * Bound (ms) for reading the INSTALLED codescape binary's own build id (a `--version`-style call) —
+ * card 90550a97's build-id drift detection. Short, mirroring the health-probe timeout: this is a cheap
+ * local process spawn, never a network call, so a healthy install answers fast.
+ */
+const DEFAULT_VERSION_PROBE_TIMEOUT_MS = 5_000;
+/**
  * CR follow-up (card 088afc94): how long a `resolveProjectId` MISS (no in-memory cache entry, no manifest
  * entry either) is remembered before the next call is allowed to re-read the manifest. Without this, a
  * repo that boot registration never covered (a project created, or `codescape.enabled` toggled on, after
@@ -102,6 +108,8 @@ export interface CodescapeSupervisorOpts {
   healthProbeTimeoutMs?: number;
   /** Test seam: override {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
   healthProbeFailureThreshold?: number;
+  /** Test seam: shrink/lengthen {@link DEFAULT_VERSION_PROBE_TIMEOUT_MS}. */
+  versionProbeTimeoutMs?: number;
 }
 
 export interface CodescapeRequestResult {
@@ -167,6 +175,66 @@ function runBounded(command: string, args: string[], cwd: string, timeoutMs: num
   });
 }
 
+/** What {@link runBoundedSplit} resolves — like {@link RunResult} but keeps stdout/stderr SEPARATE. */
+interface SplitRunResult {
+  ok: boolean;
+  code: number | null;
+  timedOut: boolean;
+  stdout: string;
+  stderr: string;
+}
+
+/**
+ * Same async/bounded/never-rejects discipline as {@link runBounded} above, but captures stdout and
+ * stderr SEPARATELY instead of merging them into one buffer. Card 90550a97 (build-id drift detection):
+ * the agreed installed-build-id contract puts the JSON payload EXCLUSIVELY on stdout and reserves stderr
+ * for a human-readable usage/failure banner. Merging the two streams — as `runBounded` deliberately does
+ * for its OTHER callers (`ingest()`), where mixed diagnostic output is perfectly fine to log together —
+ * would let stray stderr content corrupt the very JSON parse this exists to do. This is the SAME class of
+ * mistake a review pass on this feature already caught once (a manual repro that piped `2>&1` into `head`
+ * and then read `$?` through the pipe, merging the exact two signals it needed to keep apart): whenever
+ * the STREAM a value arrives on is part of what's being checked, never merge streams. Only used by
+ * {@link CodescapeSupervisor.readInstalledBuild}.
+ */
+function runBoundedSplit(command: string, args: string[], cwd: string, timeoutMs: number): Promise<SplitRunResult> {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timedOut = false;
+    const makeCapture = () => {
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      return {
+        onData: (b: Buffer): void => {
+          chunks.push(b);
+          bytes += b.length;
+          while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
+        },
+        tail: (): string => {
+          const s = Buffer.concat(chunks).toString("utf-8").trim();
+          return s.length > OUTPUT_TAIL_BYTES ? s.slice(-OUTPUT_TAIL_BYTES) : s;
+        },
+      };
+    };
+    const out = makeCapture();
+    const err = makeCapture();
+    const finish = (ok: boolean, code: number | null): void => {
+      if (!settled) { settled = true; resolve({ ok, code, timedOut, stdout: out.tail(), stderr: err.tail() }); }
+    };
+    let child: ChildProcess;
+    try {
+      child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+    } catch {
+      finish(false, null);
+      return;
+    }
+    child.stdout?.on("data", out.onData);
+    child.stderr?.on("data", err.onData);
+    const timer = setTimeout(() => { timedOut = true; try { child.kill(); } catch { /* noop */ } finish(false, null); }, timeoutMs);
+    child.on("error", () => { clearTimeout(timer); finish(false, null); });
+    child.on("exit", (code) => { clearTimeout(timer); finish(code === 0, code); });
+  });
+}
+
 /**
  * Nitpick fix (card 088afc94): normalize a repo path for use as a `projectIds`/`unresolvedProjectIds` map
  * key. Resolved + lowercased — mirrors `codescape/manifest.ts`'s `samePath` (itself mirroring codescape's
@@ -225,6 +293,7 @@ export class CodescapeSupervisor {
   private readonly healthProbeIntervalMs: number;
   private readonly healthProbeTimeoutMs: number;
   private readonly healthProbeFailureThreshold: number;
+  private readonly versionProbeTimeoutMs: number;
 
   /**
    * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
@@ -256,6 +325,35 @@ export class CodescapeSupervisor {
   /** Resets to 0 on any successful `/graph/health` probe — see {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
   private consecutiveHealthFailures = 0;
   /**
+   * Card 90550a97 review follow-up: true while a `probeHealth()` call is still in flight (its own HTTP
+   * fetch, plus — on a successful response — the {@link readInstalledBuild} subprocess spawn it now
+   * awaits). `probeHealth` no-ops a tick that lands while this is still true, so two overlapping ticks
+   * (the version-probe subprocess spawn can occasionally outrun a fast `healthProbeIntervalMs`, esp.
+   * under host load) can never both observe the SAME unresolved-installed-build failure and both log the
+   * one-shot diagnostic — the check-then-set on {@link lastInstalledBuildFailureReason} is otherwise not
+   * atomic across two concurrently-running probes.
+   */
+  private probeInFlight = false;
+  /**
+   * Card 90550a97: the INSTALLED build id we already gave ONE deliberate drift-restart to, or `null` if
+   * none yet. {@link checkBuildDrift} only fires a kill when the currently-mismatched installed build
+   * differs from THIS — so a serve that keeps reporting a stale/failing `build` after the restart (the
+   * installed side hasn't changed) is never kicked a second time; a restart only fires again once the
+   * installed build itself moves on to something new. Reset on {@link stop}/{@link start} (a fresh
+   * supervisor lifetime starts with no drift-restart memory), but DELIBERATELY NOT on an ordinary
+   * death/restart in between — the "one restart per drift event" guarantee must survive a restart chain.
+   */
+  private lastDriftRestartInstalledBuild: string | null = null;
+  /**
+   * Card 90550a97 review follow-up: latches the CLASSIFIED reason {@link readInstalledBuild} last failed
+   * with, so an unreadable installed build is reported LOUDLY exactly ONCE per distinct reason — not
+   * once per 30s probe tick forever (this project's own scar, `16b7c38c`: a silent "can't tell" that
+   * reads identically to "nothing to report" quietly disabled a whole subsystem for months). `null` means
+   * either "no failure has ever been latched" or "the last read succeeded" — {@link checkBuildDrift}
+   * resets it to `null` on any successful installed-build read, so a later regression warns again.
+   */
+  private lastInstalledBuildFailureReason: string | null = null;
+  /**
    * Card 088afc94 P4 follow-up: codescape's OWN authoritative project id, cached per NORMALIZED (resolved
    * + lowercased — see {@link repoKey}) repoRoot once {@link registerProject} succeeds OR a manifest read
    * inside {@link resolveProjectId} hits — the fast path resolveProjectId checks before ever falling back
@@ -282,6 +380,7 @@ export class CodescapeSupervisor {
     this.healthProbeIntervalMs = opts?.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
     this.healthProbeTimeoutMs = opts?.healthProbeTimeoutMs ?? DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
     this.healthProbeFailureThreshold = opts?.healthProbeFailureThreshold ?? DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD;
+    this.versionProbeTimeoutMs = opts?.versionProbeTimeoutMs ?? DEFAULT_VERSION_PROBE_TIMEOUT_MS;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
@@ -371,6 +470,8 @@ export class CodescapeSupervisor {
       }
       if (this.port == null) this.port = await pickLoopbackPort();
       this.restartAttempts = 0;
+      this.lastDriftRestartInstalledBuild = null;
+      this.lastInstalledBuildFailureReason = null;
       this.spawnServe();
       this.startHealthMonitor();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
@@ -413,6 +514,8 @@ export class CodescapeSupervisor {
     if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
     if (this.healthProbeTimer) { clearInterval(this.healthProbeTimer); this.healthProbeTimer = null; }
     this.consecutiveHealthFailures = 0;
+    this.lastDriftRestartInstalledBuild = null;
+    this.lastInstalledBuildFailureReason = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -537,21 +640,160 @@ export class CodescapeSupervisor {
    * never opens a second restart channel; it just triggers the existing one.
    *
    * Never runs when `!alive` (nothing to check) or after `stop()` (`this.stopped`) — no probe traffic on a
-   * dead, never-started, or intentionally-stopped serve.
+   * dead, never-started, or intentionally-stopped serve. Also never runs while a PRIOR tick is still in
+   * flight ({@link probeInFlight}) — see that field's own doc for why the drift-detection addition below
+   * needs this (a slow subprocess spawn occasionally outruns a fast probe interval).
    */
   private async probeHealth(): Promise<void> {
-    if (this.stopped || !this.alive) return;
-    const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
-    if (res.ok) {
+    if (this.stopped || !this.alive || this.probeInFlight) return;
+    this.probeInFlight = true;
+    try {
+      const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
+      // stop() may have raced this in-flight probe (its fetch was already underway when stop() ran) —
+      // abandon silently rather than act on a dead instance (no stray warn/kill after stop()).
+      if (this.stopped) return;
+      if (res.ok) {
+        this.consecutiveHealthFailures = 0;
+        await this.checkBuildDrift(res.json);
+        return;
+      }
+      this.consecutiveHealthFailures++;
+      if (this.consecutiveHealthFailures < this.healthProbeFailureThreshold) return;
+      console.warn(`[codescape] serve health probe failed ${this.consecutiveHealthFailures}x consecutively (alive but unresponsive) — killing for restart`);
       this.consecutiveHealthFailures = 0;
+      const child = this.child;
+      if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
+    } finally {
+      this.probeInFlight = false;
+    }
+  }
+
+  /**
+   * Card 90550a97: build-id drift detection, layered onto a SUCCESSFUL health probe above. Compares the
+   * RUNNING serve's `build` (from THIS `/graph/health` response) against the INSTALLED binary's build
+   * (a fresh, bounded read below) — NEVER `healthJson`'s `version` field, which is the static
+   * `CODESCAPE_VERSION` semver and reads identically across commits; wiring drift to it would produce a
+   * detector that reports "no drift" forever. `version` is deliberately never even read here.
+   *
+   * THREE distinguishable outcomes on the installed side (agreed contract with the Codescape manager,
+   * not two): a real SHA (comparable), an HONEST `build: null` at exit 0 (a dist built outside a git
+   * checkout — a legitimate answer, never a failure), or a genuine couldn't-read (non-zero exit, or
+   * malformed/unparseable stdout at exit 0 — see {@link readInstalledBuild}'s own doc). The running side
+   * keeps its existing two-case fail-safe (absent from the response, or `build: null`). ALL FOUR of these
+   * non-comparable states mean "do nothing" — a restart only fires when BOTH sides resolve to non-empty,
+   * DIFFERING strings. `healthJson`'s `version` field is NEVER read here — it is the static
+   * `CODESCAPE_VERSION` semver and reads identically across commits; wiring drift to it would produce a
+   * detector that reports "no drift" forever.
+   *
+   * On a genuine mismatch this does NOT call `scheduleRestart`/`spawnServe` directly — exactly like the
+   * wedge-kill above, it kills the live child ONCE and lets the EXISTING `child.on("exit")` -> `onDeath`
+   * -> `scheduleRestart` path own the actual restart, inheriting the same `restartAttempts` budget,
+   * backoff, and give-up ceiling (never a second restart channel that could resurrect a serve past an
+   * exhausted budget).
+   *
+   * One deliberate restart per detected drift: {@link lastDriftRestartInstalledBuild} remembers the
+   * installed build we already kicked a restart for, so a serve that keeps reporting a stale/failing
+   * `build` after that restart (the installed side hasn't moved) is never kicked again on every
+   * subsequent probe tick — that guard is what stops an endless restart cycle when the new build can't
+   * come up. A restart fires again only once the installed build itself changes to something new.
+   *
+   * Review follow-up (card 90550a97): a genuine couldn't-read on the installed side is loud, not silent —
+   * "no drift" and "can't tell if there's drift" must never look identical (the `16b7c38c` lesson: a
+   * `finish([])` that couldn't tell "enumeration failed" from "nothing found" silently disabled worktree
+   * reaping for months). An HONEST `build: null` answer is the OPPOSITE case — codescape successfully
+   * told us it has no build id — and stays silent, exactly like the running side's own absent/null
+   * fail-safe; only a genuine read FAILURE gets the loud diagnostic. See {@link readInstalledBuild}'s
+   * classified result and the {@link lastInstalledBuildFailureReason} latch below for how "loud" stays
+   * bounded to once per distinct reason, not once per 30s tick forever.
+   */
+  private async checkBuildDrift(healthJson: unknown): Promise<void> {
+    const runningBuild = (healthJson as { build?: unknown } | null)?.build;
+    if (typeof runningBuild !== "string" || runningBuild.length === 0) return; // absent or null -> no-op
+    const installed = await this.readInstalledBuild();
+    // stop() may have raced this in-flight read (the version-probe subprocess was already spawned when
+    // stop() ran) — abandon silently. Otherwise a stray warn/kill could land on an already-dead instance,
+    // arbitrarily late (bounded only by versionProbeTimeoutMs), long after the caller believes it's inert.
+    if (this.stopped) return;
+    if (installed.failed) {
+      // A genuine read FAILURE (non-zero exit, or malformed/unparseable stdout at exit 0) — fail-safe
+      // behavior is UNCHANGED (still never restart), only the reporting changes. Latched so a sustained
+      // failure (the expected steady state until Codescape ships its version-command surface, or any
+      // other persistent misconfiguration) logs ONCE, not on every ~30s probe tick forever; a NEW reason
+      // (or the read recovering, which resets the latch below) is always reported again.
+      if (installed.reason !== this.lastInstalledBuildFailureReason) {
+        console.warn(`[codescape] cannot read the INSTALLED build id — drift detection is inert until this resolves (${installed.reason}). Will not repeat this warning unless the reason changes.`);
+        this.lastInstalledBuildFailureReason = installed.reason ?? null;
+      }
       return;
     }
-    this.consecutiveHealthFailures++;
-    if (this.consecutiveHealthFailures < this.healthProbeFailureThreshold) return;
-    console.warn(`[codescape] serve health probe failed ${this.consecutiveHealthFailures}x consecutively (alive but unresponsive) — killing for restart`);
-    this.consecutiveHealthFailures = 0;
+    this.lastInstalledBuildFailureReason = null; // any non-failed read (a real build OR an honest null) resets the latch
+    if (installed.build == null) return; // an HONEST "no build id available" answer — fail-safe, SILENT: not a failure to report
+    const installedBuild = installed.build;
+    if (installedBuild === runningBuild) return; // no drift
+    if (installedBuild === this.lastDriftRestartInstalledBuild) return; // already gave THIS installed build its one restart
+    console.warn(`[codescape] serve build drift detected (running "${runningBuild}" != installed "${installedBuild}") — killing for restart`);
+    this.lastDriftRestartInstalledBuild = installedBuild;
     const child = this.child;
     if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
+  }
+
+  /**
+   * Read the INSTALLED codescape binary's own build id — bounded + async, via {@link runBoundedSplit}
+   * (NOT the shared `runBounded` `ingest()` uses — see that function's own doc for why stdout/stderr must
+   * stay separate here), never on any hot path (this only ever runs off the periodic {@link probeHealth}
+   * tick, itself off any request path). The ONLY place that knows how to ask the installed binary for its
+   * build — deliberately isolated here so wiring to the real command, once it ships, is a one-function
+   * change with no ripple elsewhere.
+   *
+   * AGREED CONTRACT (with the Codescape manager, superseding an earlier wrong read of the CLI's failure
+   * shape): both `codescape version` and `codescape --version` will work, resolving THREE distinguishable
+   * outcomes, not two:
+   *   - exit 0, stdout `{"version":"0.1.0","build":"<sha>"}` — normal; comparable for drift.
+   *   - exit 0, stdout `{"version":"0.1.0","build":null}` — an HONEST answer (e.g. a dist built outside a
+   *     git checkout), never a failure.
+   *   - non-zero exit — reserved for a genuine failure to answer.
+   * Two guarantees this relies on: stdout is clean JSON ONLY (no banners/prefixes mixed in) when exit is
+   * 0, and the CLI reads the SAME `buildInfo.generated.ts` source `/graph/health` already serves, so there
+   * is no second resolution path that could disagree with the running side. Given that guarantee, parsing
+   * is STRICT (`JSON.parse` on the whole trimmed stdout) — never a lenient/substring/regex extraction. A
+   * banner leaking onto stdout at exit 0 would be a REAL defect on their side and must fail loudly here,
+   * not get silently rescued by a forgiving parser (that would hide exactly the class of bug this feature
+   * already cost a round of review to find).
+   *
+   * AS OF THIS WRITING the real CLI does not implement this yet — it exits 1 with EMPTY stdout and a usage
+   * banner on stderr for any unrecognized flag/subcommand — so this resolves the classified
+   * `{build:null, failed:true, reason:"... failed (exit 1) ..."}` case every time against today's binary.
+   * That is the CORRECT, SAFE outcome (never restart when the installed side can't be read), not a bug to
+   * route around: do NOT read Codescape's internal `dist/buildInfo.generated.js` (or any other
+   * undocumented internal file) to make this "work" today — that is an unversioned cross-project coupling
+   * that breaks silently the moment Codescape reshapes its build output, exactly the class of stale
+   * cross-project belief this project has already been burned by. Once their version-command surface
+   * ships, only this function needs to change.
+   *
+   * Never throws; never fabricates a value. `failed` is true ONLY for a genuine read failure (spawn/exec
+   * failure or timeout — `runBoundedSplit`'s own `!ok` — or malformed/unparseable stdout at exit 0); it is
+   * FALSE for both a real build string AND an honest `build: null` — the two are deliberately kept
+   * distinguishable from a read failure. `reason` is set only alongside `failed:true`, for
+   * {@link checkBuildDrift}'s one-shot diagnostic.
+   */
+  private async readInstalledBuild(): Promise<{ build: string | null; failed: boolean; reason?: string }> {
+    const { command, args } = resolveCodescapeBin(this.codescapePath);
+    const r = await runBoundedSplit(command, [...args, "--version"], this.homeDir, this.versionProbeTimeoutMs);
+    if (!r.ok) {
+      return { build: null, failed: true, reason: `"${command} --version" ${r.timedOut ? "timed out" : `failed (exit ${r.code ?? "null"})`}${r.stderr ? ` — ${r.stderr}` : ""}` };
+    }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(r.stdout);
+    } catch {
+      // Guarantee violated: stdout was supposed to be clean JSON at exit 0. A REAL defect on their side —
+      // never silently rescued by a lenient/substring parser (see this function's own doc above).
+      return { build: null, failed: true, reason: `"${command} --version" exited 0 but stdout was not valid JSON: ${r.stdout || "(empty)"}` };
+    }
+    const build = (parsed as { build?: unknown } | null)?.build;
+    if (typeof build === "string" && build.length > 0) return { build, failed: false };
+    if (build === null) return { build: null, failed: false }; // the HONEST "no build id" answer — not a failure
+    return { build: null, failed: true, reason: `"${command} --version" returned a malformed "build" field: ${r.stdout || "(empty)"}` };
   }
 
   /** Bounded, best-effort loopback POST/DELETE to the running `serve` — NEVER throws; resolves `ok:false`

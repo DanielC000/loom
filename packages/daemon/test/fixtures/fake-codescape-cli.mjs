@@ -20,7 +20,28 @@
 //     handler deliberately never responds (no `res.end`, connection just sits open) — simulating a serve
 //     that's alive and port-bound but genuinely not answering, the exact "wedged" case the supervisor's
 //     periodic health probe exists to catch. Checked live per-request (not just at spawn), so a test can
-//     flip a running fixture from healthy to wedged (and back) by creating/removing that file.
+//     flip a running fixture from healthy to wedged (and back) by creating/removing that file. The
+//     `build` field is driven by env `FAKE_CODESCAPE_HEALTH_BUILD` (default `"fake"` — matches the
+//     `--version` default below, so an env-untouched test sees NO drift): the literal `"__ABSENT__"`
+//     omits the `build` key entirely (simulating a pre-build-id serve), `"__NULL__"` sends `build:null`
+//     (simulating a build that genuinely can't resolve), anything else is sent verbatim. `version` is
+//     independently driven by env `FAKE_CODESCAPE_HEALTH_VERSION` (default `"fake"`) — lets a test vary
+//     `version` while `build` matches, to prove drift detection never reads it.
+//   - `--version` — build-id drift coverage (card 90550a97): standing in for the INSTALLED binary's own
+//     version report the supervisor's bounded `readInstalledBuild()` reads. Driven by env
+//     `FAKE_CODESCAPE_INSTALLED_BUILD` (default `"fake"`), modeling the AGREED three-way contract (never
+//     two): default/anything else -> exits 0, prints `{version:"fake", build:<value>}` on stdout (a
+//     comparable build). `"__NULL__"` -> exits 0, prints `{version:"fake", build:null}` — the HONEST
+//     "no build id" answer (e.g. a dist built outside a git checkout), NOT a failure. `"__FAIL__"` ->
+//     exits 1 with EMPTY stdout and a usage banner on STDERR ONLY — the real CLI's actual shape today for
+//     any unrecognized flag (confirmed by direct repro; an earlier report of "exits 0 with a banner" was
+//     wrong — it came from a test that piped `2>&1` into `head`, merging the two streams under test and
+//     reading `$?` through the pipe). `"__NONJSON__"` -> exits 0 but prints non-JSON stdout — a
+//     hypothetical defect case (never expected in practice, since stdout is guaranteed clean JSON at exit
+//     0) kept as defensive coverage that the parser never lenient-rescues a guarantee violation. Only
+//     `"__NULL__"` is a non-failure; `"__FAIL__"` and `"__NONJSON__"` must both resolve `failed:true`
+//     (never a fabricated build), and they are INDEPENDENT failure paths (a non-zero exit vs. malformed
+//     stdout at exit 0), not one case wearing two names.
 //   - `mcp --graph <path>` — records the call, prints a "server ready on stdio" line (mirrors the real
 //     CLI's own startup line), then stays alive reading stdin (a real stdio MCP server would too) until
 //     killed — never actually speaks JSON-RPC (no test here exercises the protocol, only the spawn shape).
@@ -48,6 +69,16 @@ if (args[0] === "ingest") {
     fs.writeFileSync(out, JSON.stringify({ nodes: [], edges: [], flows: [] }));
   }
   process.exit(0);
+} else if (args[0] === "--version") {
+  const raw = process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+  if (raw === "__FAIL__") {
+    // The real CLI's actual shape today: non-zero exit, EMPTY stdout, usage banner on STDERR ONLY.
+    process.stderr.write("usage: codescape ingest <path-to-loom> ...\n       codescape diff ... / mcp ... / mcp-usage ... / serve ...\n");
+    process.exit(1);
+  }
+  if (raw === "__NONJSON__") { console.log("not json"); process.exit(0); } // exit 0 but malformed stdout (hypothetical defect)
+  console.log(JSON.stringify({ version: "fake", build: raw === "__NULL__" ? null : (raw === undefined ? "fake" : raw) }));
+  process.exit(0);
 } else if (args[0] === "mcp") {
   const graphIdx = args.indexOf("--graph");
   record({ cmd: "mcp", graph: graphIdx === -1 ? null : args[graphIdx + 1] });
@@ -64,8 +95,12 @@ if (args[0] === "ingest") {
       if (req.method === "GET" && req.url === "/graph/health") {
         const wedgeFile = process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
         if (wedgeFile && fs.existsSync(wedgeFile)) return; // simulate wedged: accept, never respond
+        const rawBuild = process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+        const rawVersion = process.env.FAKE_CODESCAPE_HEALTH_VERSION;
+        const body = { live: true, projects: registered.size, version: rawVersion === undefined ? "fake" : rawVersion };
+        if (rawBuild !== "__ABSENT__") body.build = rawBuild === "__NULL__" ? null : (rawBuild === undefined ? "fake" : rawBuild);
         res.writeHead(200, { "content-type": "application/json" });
-        res.end(JSON.stringify({ live: true, projects: registered.size, version: "fake", build: "fake" }));
+        res.end(JSON.stringify(body));
         return;
       }
       if (req.method === "POST" && req.url === "/project") {

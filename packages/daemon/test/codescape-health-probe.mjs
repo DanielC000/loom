@@ -29,6 +29,17 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Card 90550a97 review follow-up: an unresolvable installed build must warn LOUDLY but only ONCE per
+// distinct reason (never once per ~30s probe tick forever). Intercepts console.warn for the duration of a
+// scenario (still forwarding to the real console, so failures stay visible in test output) and counts
+// matches against a substring, so a test can assert "warned exactly once" over many probe ticks.
+function captureWarnings() {
+  const original = console.warn;
+  const lines = [];
+  console.warn = (...args) => { lines.push(args.join(" ")); original(...args); };
+  return { lines, restore: () => { console.warn = original; } };
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli.mjs");
 
@@ -200,14 +211,357 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
 }
 
+// ===================== (5) genuine build drift: restarted once, then does NOT loop; a NEW drift fires again ====
+{
+  const homeDir = path.join(tmpHome, "drift-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old"; // the running serve never actually picks up a new build in this test
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-new";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as scenarios (1)/(2): intervalMs/timeoutMs must stay safely above real child-
+    // process startup latency (~70-85ms observed, more under host load), or a restart here can be killed
+    // by an unrelated wedge probe failure before it ever gets a fair chance to answer a drift check.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  // NOTE: drift fires on the very FIRST successful health probe (no failure-threshold to accumulate,
+  // unlike the wedge tests above) — often faster than a point-in-time `sup.getPid()`/`getPort()` sample
+  // can land relative to it. So every assertion below reads pids from the calls-file LOG itself (each
+  // record carries the spawning process's own `pid`) rather than sampling live supervisor state, and
+  // only bumps env AFTER confirming the previous restart's spawn is already on record — race-free
+  // regardless of how fast the probe interval fires relative to this test's own polling cadence.
+  await sup.start(["/fake/repo/drift"]);
+  const portAfterStart = sup.getPort(); // the reserved port is fixed for the instance's lifetime — safe to read anytime
+
+  for (let i = 0; i < 100 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  let calls = readServeCalls(callsFile);
+  check("(5) a genuine build drift (running != installed) triggers a restart via the EXISTING death path (initial spawn + one restart on record)",
+    calls.length === 2);
+  check("(5) restart reused the SAME port", sup.getPort() === portAfterStart);
+  check("(5) restart produced a genuinely NEW pid", calls.length === 2 && calls[0].pid !== calls[1].pid);
+
+  // The new (2nd) child inherits the SAME env, so it keeps reporting the SAME stale running build against
+  // the SAME installed build — a persisting mismatch. Several more probe intervals must NOT trigger a
+  // second kill: one restart per drift event, never an endless cycle.
+  await sleep(500);
+  check("(5) a persisting mismatch against the SAME installed build does NOT loop (still exactly 2 spawns on record)",
+    readServeCalls(callsFile).length === 2);
+
+  // Now the installed build genuinely moves on — a NEW drift event — which must fire its OWN restart.
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-newer";
+  for (let i = 0; i < 100 && readServeCalls(callsFile).length < 3; i++) await sleep(50);
+  calls = readServeCalls(callsFile);
+  check("(5) a NEW drift (installed build changes again) fires its own restart (a 3rd spawn on record)",
+    calls.length === 3 && calls[2].pid !== calls[1].pid);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (6) running build ABSENT from the health response never restarts =====================
+{
+  const homeDir = path.join(tmpHome, "drift-absent-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "__ABSENT__";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-new";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
+    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
+    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
+    // before it ever gets a fair chance to run.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  await sup.start(["/fake/repo/drift-absent"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  const pidBefore = sup.getPid();
+
+  await sleep(500); // several probe intervals — an absent `build` field must never be treated as a mismatch
+  check("(6) `build` ABSENT from the health response never triggers a restart",
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (7) running build:null never restarts =====================
+{
+  const homeDir = path.join(tmpHome, "drift-null-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "__NULL__";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-new";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
+    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
+    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
+    // before it ever gets a fair chance to run.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  await sup.start(["/fake/repo/drift-null"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  const pidBefore = sup.getPid();
+
+  await sleep(500);
+  check("(7) `build: null` never triggers a restart",
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (8) an unresolvable INSTALLED build (spawn failure / non-JSON) never restarts, but IS loud (once) ====
+for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
+  const homeDir = path.join(tmpHome, `drift-installed-unresolved-${installedFailureMode.replace(/\W/g, "")}-home`);
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old"; // a real, resolvable running build
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = installedFailureMode;
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 60, // fast — many probe ticks over the wait below, to prove the diagnostic latches
+    healthProbeTimeoutMs: 200,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  const warnings = captureWarnings();
+  await sup.start([`/fake/repo/drift-installed-unresolved-${installedFailureMode}`]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  const pidBefore = sup.getPid();
+
+  await sleep(500); // an unresolvable installed side (${installedFailureMode}) must never be treated as a mismatch
+  check(`(8) an unresolvable installed build (${installedFailureMode}) never triggers a restart`,
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+
+  const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
+  check(`(8) an unresolvable installed build (${installedFailureMode}) is reported LOUDLY, but exactly ONCE across ~8 probe ticks (not once per tick)`,
+    diagnosticLines.length === 1);
+
+  warnings.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (8b) the diagnostic re-fires if the failure REASON changes, and stops once it recovers ====
+{
+  const homeDir = path.join(tmpHome, "drift-installed-unresolved-reason-change-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "__FAIL__";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
+    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
+    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
+    // before it ever gets a fair chance to run.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  const warnings = captureWarnings();
+  const diagCount = () => warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id")).length;
+  // Poll until the expected count first APPEARS (never a blind sleep-then-snapshot — a straggler
+  // diagnostic can land after its own probe's subprocess round-trip, arbitrarily close to a fixed
+  // sleep's boundary), THEN settle an extra window and re-check — catches a FLOOD (more than expected)
+  // that a bare "count >= expected" poll would otherwise miss by returning the instant it's satisfied.
+  const waitForDiagCount = async (atLeast, maxWaitMs = 3000) => {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs && diagCount() < atLeast) await sleep(50);
+    await sleep(400); // settle window — let a would-be flood happen before we check
+  };
+
+  await sup.start(["/fake/repo/drift-installed-unresolved-reason-change"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+
+  await waitForDiagCount(1);
+  check("(8b) exactly one diagnostic for the FIRST failure reason", diagCount() === 1);
+
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "__NONJSON__"; // a DIFFERENT reason — must warn again once
+  await waitForDiagCount(2);
+  check("(8b) a CHANGED failure reason produces exactly one MORE diagnostic (not zero, not a flood)",
+    diagCount() === 2);
+
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-old"; // recovers: now matches the running build exactly
+  await sleep(900); // several probe ticks (at the 300ms interval) of a healthy read — must add NO further diagnostics
+  check("(8b) a recovered (successful) installed-build read adds no further diagnostics",
+    diagCount() === 2);
+  check("(8b) recovery with a MATCHING build does not restart either", readServeCalls(callsFile).length === 1);
+
+  warnings.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (8c) an HONEST installed build:null (exit 0) is a real answer, not a failure — SILENT, no restart ====
+{
+  const homeDir = path.join(tmpHome, "drift-installed-honest-null-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-old"; // a real, resolvable running build
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "__NULL__"; // exit 0, {"version":"fake","build":null} — an honest answer
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
+    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
+    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
+    // before it ever gets a fair chance to run.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  const warnings = captureWarnings();
+  await sup.start(["/fake/repo/drift-installed-honest-null"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  const pidBefore = sup.getPid();
+
+  await sleep(500); // several probe ticks — an honest exit-0 build:null must never be mistaken for a read failure
+  check("(8c) an HONEST installed build:null never triggers a restart",
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+  const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
+  check("(8c) an HONEST installed build:null is SILENT — it is a real answer, not a couldn't-read failure",
+    diagnosticLines.length === 0);
+
+  warnings.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
+// ===================== (9) `version` is NEVER the drift signal — a version mismatch with build MATCHING must not restart ====
+{
+  const homeDir = path.join(tmpHome, "drift-version-unused-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "same-build";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "same-build";
+  process.env.FAKE_CODESCAPE_HEALTH_VERSION = "totally-different-version"; // if drift ever read `version`, this alone would look like a mismatch
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
+    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
+    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
+    // before it ever gets a fair chance to run.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  await sup.start(["/fake/repo/drift-version-unused"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  const pidBefore = sup.getPid();
+
+  await sleep(500);
+  check("(9) `build` matching never restarts even when `version` differs — `version` is not the drift signal",
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+  delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
+}
+
+// ===================== (10) drift detection cannot resurrect a serve past an exhausted restartAttempts budget ====
+{
+  const homeDir = path.join(tmpHome, "drift-giveup-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-stuck"; // the running serve never actually comes up on the new build
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-1"; // a fresh drift target for the initial spawn
+
+  const backoffMs = [40, 40]; // fast + few — exhausts the schedule quickly
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: backoffMs,
+    healthyRunMs: 60_000, // a kill-right-after-spawn (drift) must never count as "healthy"
+    // Same margin rule as scenarios (1)/(2) above: intervalMs/timeoutMs must stay safely above real
+    // child-process startup latency (~70-85ms observed, more under host load), or a restart can be killed
+    // (by an unrelated wedge probe failure, or miscounted by a test racing its own diagnostic window)
+    // before it ever gets a fair chance to run.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+  });
+  await sup.start(["/fake/repo/drift-giveup"]);
+
+  // Same shape as test (2)'s give-up proof, but EVERY kill here is drift-driven, not a health-probe
+  // timeout. Staged (not a generic loop) and race-free like test (5): each env bump happens only AFTER
+  // the previous restart's spawn is already on record, so `lastDriftRestartInstalledBuild` can never be
+  // raced past — this proves the give-up ceiling binds drift restarts too, not just death/wedge restarts.
+  // backoffMs=[40,40] (length 2): kill#1 (vs "build-1") schedules restart #1 (call #2, restartAttempts->1);
+  // kill#2 (vs "build-2") schedules restart #2 (call #3, restartAttempts->2); kill#3 (vs "build-3") finds
+  // restartAttempts(2) >= backoffMs.length(2) and gives up — no call #4.
+  for (let i = 0; i < 100 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  check("(10) restart #1 (drift vs the initial installed build) recorded", readServeCalls(callsFile).length === 2);
+
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-2"; // arm the SECOND drift event
+  for (let i = 0; i < 100 && readServeCalls(callsFile).length < 3; i++) await sleep(50);
+  check("(10) restart #2 (a NEW drift) recorded", readServeCalls(callsFile).length === 3);
+
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-3"; // arm the THIRD drift event — this one exhausts the budget
+  for (let i = 0; i < 100 && sup.getPort() !== null; i++) await sleep(50);
+  check("(10) after drift-driven kills exhaust the bounded restart budget, getPort() is null (gave up, not phantom-alive)",
+    sup.getPort() === null);
+  check("(10) give-up happened WITHOUT a 4th spawn (drift cannot resurrect past the exhausted budget)",
+    readServeCalls(callsFile).length === 3);
+
+  // Belt-and-suspenders: even a BRAND NEW drift event (installed build moves on yet again) must NOT
+  // resurrect a serve past the exhausted budget — probeHealth itself no-ops once `!alive`.
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-final-after-giveup";
+  const callsAtGiveUp = readServeCalls(callsFile).length;
+  await sleep(400);
+  check("(10) give-up STAYS terminal under drift — no further restart / serve spawn, even with a fresh drift event and the health-probe timer still ticking",
+    sup.getPort() === null && readServeCalls(callsFile).length === callsAtGiveUp);
+
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
 delete process.env.LOOM_DEV;
 delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
+delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either — claude-free, network-free beyond loopback."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either. Build-id drift detection (card 90550a97): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path and does not loop even under a persisting mismatch, but a NEW drift (installed build changes again) restarts again; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path is bound by the SAME restartAttempts give-up ceiling; and a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, a successful read (real build OR honest null) resets the latch — claude-free, network-free beyond loopback."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
