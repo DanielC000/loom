@@ -34,7 +34,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, killableRemoveDir } = await import("../dist/git/worktrees.js");
-const { processRootedInWorktree, reapProcessesRootedInWorktree, parseWin32CimStdout } = await import("../dist/pty/host.js");
+const { processRootedInWorktree, reapProcessesRootedInWorktree, parseWin32CimStdout, classifyWin32EnumerationClose } = await import("../dist/pty/host.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -165,6 +165,54 @@ if (process.platform === "win32") {
     result.enumerationFailed === true);
   check("(unit) THE FIX: the failure is LOUD — a classified [reap] error naming the worktree + cause was logged, not swallowed silently",
     errors.some((e) => e.includes("[reap]") && e.includes(WT2) && e.includes("simulated enumeration failure")));
+}
+
+// ============================== (unit) win32 CIM close classification — empty-stdout regression guard ==============================
+// The RESIDUAL gap after 16b7c38c: a powershell.exe that closes FAST and CLEANLY with truly EMPTY stdout
+// (an execution-policy refusal, a CIM/WMI service problem, a host/profile issue — previously invisible
+// because stderr was discarded via `stdio: ["ignore","pipe","ignore"]`) sailed straight through
+// parseWin32CimStdout's `sanitized || "[]"` fallback and came back as a silent, valid-looking `[]` —
+// indistinguishable, at every one of reapProcessesRootedInWorktree's SEVEN call sites, from "no matching
+// process exists". `classifyWin32EnumerationClose` is PURE (drives the classification logic directly,
+// no real powershell.exe spawn), so this guard is DETERMINISTIC and HOST-INDEPENDENT — it runs on every
+// platform, not just win32, and FAILS RED against pre-fix code (the function didn't exist at all; the
+// pre-fix enumerator's real close handler fed empty stdout straight into parseWin32CimStdout and got back
+// a silent `[]`, never a rejection).
+{
+  let threwEmpty = null;
+  try {
+    classifyWin32EnumerationClose("", "");
+  } catch (err) {
+    threwEmpty = err;
+  }
+  check("(unit) classifyWin32EnumerationClose THROWS on empty stdout from a clean close (never silently [])", threwEmpty !== null);
+  check("(unit) THE FIX: the rejection is classified empty-output, not conflated with a parse error",
+    threwEmpty !== null && /empty-output/.test(threwEmpty.message));
+
+  let threwWhitespace = null;
+  try {
+    classifyWin32EnumerationClose("   \n  ", "");
+  } catch (err) {
+    threwWhitespace = err;
+  }
+  check("(unit) whitespace-only stdout is ALSO treated as empty (not a valid zero-length JSON payload)",
+    threwWhitespace !== null && /empty-output/.test(threwWhitespace.message));
+
+  const STDERR_SAMPLE = "Get-CimInstance : Access is denied. (Exception from HRESULT: 0x80070005 (E_ACCESSDENIED))";
+  let threwWithStderr = null;
+  try {
+    classifyWin32EnumerationClose("", STDERR_SAMPLE);
+  } catch (err) {
+    threwWithStderr = err;
+  }
+  check("(unit) THE FIX: a captured stderr tail is FOLDED into the classified error instead of discarded",
+    threwWithStderr !== null && threwWithStderr.message.includes(STDERR_SAMPLE));
+
+  // The empty check must not be over-broad: a real, non-empty payload still parses cleanly.
+  const VALID_PAYLOAD = `[{"ProcessId":1,"ExecutablePath":null,"CommandLine":null}]`;
+  const parsed = classifyWin32EnumerationClose(VALID_PAYLOAD, "");
+  check("(unit) a real non-empty payload still parses cleanly through classifyWin32EnumerationClose",
+    Array.isArray(parsed) && parsed.length === 1 && parsed[0].pid === 1);
 }
 
 // ============================== (real) real OS processes, real enumerator/killer ==============================

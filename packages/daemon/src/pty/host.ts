@@ -2339,6 +2339,42 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
   }));
 }
 
+/** Cap (bytes) on the captured stderr tail kept for diagnostics from a failing win32 CIM query — mirrors
+ *  the ~4KB output-tail discipline `codescape/supervisor.ts`'s `runBounded` already uses. */
+const STDERR_TAIL_BYTES = 4096;
+
+/**
+ * Classify {@link enumerateProcessesWin32}'s outcome once the CIM query's `powershell.exe` has CLOSED
+ * CLEANLY — i.e. neither the self-timeout nor a spawn error fired, both handled separately by the caller.
+ * Pure + exported so a test can drive it directly with a crafted stdout/stderr pair instead of spawning a
+ * real `powershell.exe` — mirrors {@link parseWin32CimStdout}'s own testability shape, and this is the
+ * direct follow-up to the failure class that doc-comment explains: the residual gap was that a
+ * `powershell.exe` closing FAST and CLEANLY with EMPTY stdout (an execution-policy refusal, a CIM/WMI
+ * service problem, a host/profile issue — never surfaced because stderr used to be discarded) sailed
+ * through `parseWin32CimStdout`'s `sanitized || "[]"` fallback and came back as a silent, valid-looking
+ * `[]` — indistinguishable, at every one of `reapProcessesRootedInWorktree`'s seven call sites, from "no
+ * matching process exists". `@(Get-CimInstance Win32_Process | …)` enumerates EVERY live process on the
+ * host, and the querying `powershell.exe` is itself always in that result set — so empty stdout on a clean
+ * close is ALWAYS anomalous, never a legitimate "nothing running" answer, which is what makes failing on
+ * it safe rather than a guess. Treated as the `empty-output` failure kind, same severity as a parse error.
+ * `stderrTail` — a bounded capture of the child's own stderr, previously discarded via `stdio: "ignore"` —
+ * is folded into whichever failure fires, since a genuine PowerShell error message is exactly the
+ * diagnostic this path used to throw away.
+ */
+export function classifyWin32EnumerationClose(stdout: string, stderrTail: string): WorktreeProcess[] {
+  const stderrSuffix = stderrTail ? ` — stderr: ${stderrTail}` : "";
+  if (!stdout.replace(CONTROL_CHAR_RE, "").trim()) {
+    throw new Error(
+      `win32 process enumeration failed (empty-output): powershell.exe closed cleanly but produced no stdout — a live host always has at least the querying process itself, so empty output is always anomalous${stderrSuffix}`,
+    );
+  }
+  try {
+    return parseWin32CimStdout(stdout);
+  } catch (err) {
+    throw new Error(`win32 process enumeration failed (parse-error): ${(err as Error).message}${stderrSuffix}`);
+  }
+}
+
 /** Real win32 process enumerator: `Get-CimInstance Win32_Process` for every live process's ExecutablePath
  *  + CommandLine (win32 exposes no per-process cwd via CIM, so `cwd` is always null here — Path +
  *  CommandLine is what the live-evidence investigation found sufficient: the esbuild service's OWN
@@ -2355,18 +2391,31 @@ export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
  *  `timeoutMs` — so a wedged/slow CIM query (WMI contention, a loaded host) can never leave an orphaned
  *  helper process behind, the same leak class this whole feature exists to prevent.
  *
- *  LOUD ON FAILURE: every failure path (spawn error, this self-timeout, or a parse failure in
- *  {@link parseWin32CimStdout}) REJECTS with a classified, descriptive Error instead of silently
- *  resolving `[]` — {@link reapProcessesRootedInWorktree}'s catch logs it and reports
- *  `enumerationFailed: true`, so a total enumeration failure is never indistinguishable from "no matching
- *  process exists" again. */
+ *  LOUD ON FAILURE: every failure path (spawn error, this self-timeout, empty stdout on a clean close, or
+ *  a parse failure — see {@link classifyWin32EnumerationClose}) REJECTS with a classified, descriptive
+ *  Error instead of silently resolving `[]` — {@link reapProcessesRootedInWorktree}'s catch logs it and
+ *  reports `enumerationFailed: true`, so a total enumeration failure is never indistinguishable from "no
+ *  matching process exists" again. stderr is CAPTURED (bounded to a ~4KB tail, not discarded via
+ *  `stdio: "ignore"` like before) and folded into whichever classified error fires, so a genuine
+ *  PowerShell error message is preserved as a diagnostic instead of thrown away. */
 function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> {
   return new Promise((resolve, reject) => {
     const cmd = spawnProcess("powershell.exe", [
       "-NoProfile", "-NonInteractive", "-Command",
       "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress",
-    ], { stdio: ["ignore", "pipe", "ignore"] });
+    ], { stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
+    const stderrChunks: Buffer[] = [];
+    let stderrBytes = 0;
+    const captureStderr = (chunk: Buffer): void => {
+      stderrChunks.push(chunk);
+      stderrBytes += chunk.length;
+      while (stderrBytes > STDERR_TAIL_BYTES && stderrChunks.length > 1) stderrBytes -= stderrChunks.shift()!.length;
+    };
+    const stderrTail = (): string => {
+      const s = Buffer.concat(stderrChunks).toString("utf8").trim();
+      return s.length > STDERR_TAIL_BYTES ? s.slice(-STDERR_TAIL_BYTES) : s;
+    };
     let settled = false;
     const finish = (result: WorktreeProcess[]) => {
       if (settled) return;
@@ -2378,7 +2427,8 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      reject(new Error(`win32 process enumeration failed (${kind}): ${detail}`));
+      const tail = stderrTail();
+      reject(new Error(`win32 process enumeration failed (${kind}): ${detail}${tail ? ` — stderr: ${tail}` : ""}`));
     };
     const timer = setTimeout(() => {
       // Force-kill the query helper itself so a wedged CIM call never leaks an orphaned powershell.exe —
@@ -2392,12 +2442,16 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
     // wedge-retry sweep catches a missed process next pass).
     cmd.stdout?.setEncoding("utf8");
     cmd.stdout?.on("data", (d) => { out += d; });
+    cmd.stderr?.on("data", captureStderr);
     cmd.on("error", (err) => fail("spawn-error", err.message));
     cmd.on("close", () => {
+      if (settled) return;
       try {
-        finish(parseWin32CimStdout(out));
+        finish(classifyWin32EnumerationClose(out, stderrTail()));
       } catch (err) {
-        fail("parse-error", (err as Error).message);
+        settled = true;
+        clearTimeout(timer);
+        reject(err as Error);
       }
     });
   });
