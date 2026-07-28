@@ -74,6 +74,9 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // this.maybeDrainCapQueue(...)` catch-up call in its finally, which — correctly, per its own doc —
 // completes AFTER recycleWorker's returned promise itself resolves). No real op in this suite takes
 // anywhere near this long; the bound is a safety net against a genuine hang, not a tuned timing budget.
+// EXCEPTION: a poll waiting on a REAL worktree spawn reaching processState:"live" (e.g. :468) shares the
+// flake surface measured in rate-limit-clear-cap-queue-drain.mjs (card f11f3aae, 2026-07-25 — cap=2
+// merge-gate contention exceeded 1000ms) and passes its own widened { tries, delayMs } override there.
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const waitUntil = async (fn, { tries = 50, delayMs = 20 } = {}) => {
   for (let i = 0; i < tries; i++) { if (await fn()) return true; await sleep(delayMs); }
@@ -465,7 +468,11 @@ try {
       listMid.filter((w) => w.processState === "live").length <= 2);
 
     await recyclePromise; // recycleWorker's own finally unsuppresses + fires a fire-and-forget catch-up drain
-    const fired = await waitUntil(async () => (await callD("worker_list")).some((w) => w.taskId === taskD[2] && w.processState === "live"));
+    // Real-worktree-spawn-live poll — same flake surface as rate-limit-clear-cap-queue-drain.mjs's taskB/
+    // taskD polls (card f11f3aae, 2026-07-25: cap=2 merge-gate contention exceeded the old 1000ms default).
+    // Widened identically; this is the one call site in this file where the "no real op takes this long"
+    // reasoning above does NOT hold, since D2's fire is a real worktree provisioning, not a cheap op.
+    const fired = await waitUntil(async () => (await callD("worker_list")).some((w) => w.taskId === taskD[2] && w.processState === "live"), { tries: 250, delayMs: 20 });
     check("(19) once the swap settles, the finally's catch-up drain fires D2 into the leftover headroom D4 left behind", fired);
     const listAfter = await callD("worker_list");
     check("(19) no overshoot the OTHER way either — exactly 2 live workers (D1's successor + D2), not 3", listAfter.filter((w) => w.processState === "live").length === 2);

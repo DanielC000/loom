@@ -178,10 +178,12 @@ try {
   check("(2) the watcher resumed the manager's held turn (pty.resumeAfterRateLimit called)",
     watcherResumedIds.includes("mgr1"));
 
-  // Default poll budget (tries:50 * delayMs:20 = 1000ms). Not widened reflexively: worker-spawn-cap-queue.mjs's
-  // own auto-fire wait (same real-worktree + fake-pty spawn shape) uses this identical default successfully, so
-  // 1s is adequate for what this spawn actually costs — a poll timeout here points at host contention, not budget.
-  const fired = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskB && w.processState === "live"));
+  // MEASURED, not assumed: under real merge-gate load (cap=2 concurrent full suites — the gate's own
+  // operating condition), this real-worktree + fake-pty spawn did NOT come live within the old 1000ms
+  // default and cost card f11f3aae's unrelated merge a gate rejection on 2026-07-25. Worktree provisioning
+  // is real git work, and cap=2 contention stacks multiple full suites' worth of it — widened to 5000ms.
+  // Still a bounded poll, not a blind sleep.
+  const fired = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskB && w.processState === "live"), { tries: 250, delayMs: 20 });
   check("(2) taskB auto-fires on the limit-clear alone — NO unrelated worker exit happened after the park", fired);
   check("(3) exactly ONE cap-queue drain call happened after the park — caused by the watcher's resume hook",
     drainSpyCalls === 1);
@@ -218,6 +220,16 @@ try {
   check("(5 setup) taskC is cap-queued (cap full again, taskB's worker live)", !!rejC.capQueued && !!liveB);
   db.setProcessState(liveB.workerSessionId, "exited");
   db.setBusy(liveB.workerSessionId, false);
+  // NO waitUntil poll here, deliberately — this call is DIRECTLY awaited, and maybeDrainCapQueue
+  // (service.ts) loops `await this.spawnWorker(...)` inline, so it doesn't resolve until that spawn is
+  // fully live AND its trailing findShippedCardMatch check + inFlightSpawnTaskIds release have settled
+  // (service.ts's own `finally`). By the time this line's await returns, taskC is already fully live —
+  // deterministic, no race window. This is DIFFERENT from taskB/taskD above/below: their drains arrive
+  // via RateLimitWatcher.performResume / the REST clear route, both of which call
+  // `void maybeDrainCapQueue(...)` — the dep's own type signature is `(...): void` (fire-and-forget,
+  // orchestration/rate-limit-watcher.ts:15-16) — so the caller there returns BEFORE the spawn settles and
+  // genuinely needs the poll. Do not "fix" this line by adding one, and do not copy this no-poll shape to
+  // a fire-and-forget call site.
   await svc.maybeDrainCapQueue("mgr1"); // the EXISTING slot-free path — no usage limit involved this time
   list = await call("worker_list");
   const liveC = list.find((w) => w.taskId === taskC && w.processState === "live");
@@ -265,7 +277,9 @@ try {
     check("(6) REST clear 200 OK", r.statusCode === 200);
     check("(6) REST clear resumed the manager (pty.resumeAfterRateLimit called)", restResumed.includes("mgr1"));
 
-    const firedD = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskD && w.processState === "live"));
+    // Same real-worktree-spawn-live flake surface as taskB's poll above (see that comment for the
+    // measurement) — widened identically.
+    const firedD = await waitUntil(async () => (await call("worker_list")).some((w) => w.taskId === taskD && w.processState === "live"), { tries: 250, delayMs: 20 });
     check("(6) taskD auto-fires from the REST clear alone — no unrelated worker exit involved", firedD);
     check("(6) causation: exactly ONE cap-queue drain call happened, from the REST route's own hook", restDrainCalls === 1);
 
