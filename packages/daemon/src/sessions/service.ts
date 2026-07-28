@@ -186,9 +186,11 @@ type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateD
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
  *  point of card 50c1e0d0, how long `PendingOpRegistry.attach()`'s own retention-window dedupe (see its
- *  class doc) will hand a RE-CALL back the SAME settled result instead of starting a genuinely fresh gate
- *  run. Mirrors {@link MERGE_OP_RETAIN_MS} exactly — same grace window, same reasoning: long enough that a
- *  worker's "did it pass?" re-call lands inside it, short enough that a stale terminal view doesn't linger. */
+ *  class doc) will hand a RE-CALL back the SAME settled result — WHEN that result is usable (card 79b0ee52:
+ *  a `headCurrent:false` result never gets re-served, however long is left on this window) — instead of
+ *  starting a genuinely fresh gate run. Mirrors {@link MERGE_OP_RETAIN_MS} exactly — same grace window, same
+ *  reasoning: long enough that a worker's "did it pass?" re-call lands inside it, short enough that a stale
+ *  terminal view doesn't linger. */
 const GATE_OP_RETAIN_MS = 5_000;
 
 /** Forced onto the worker self-gate's OWN spawned child (card 7f96aa09, revised by 68920f5b), additive to
@@ -8537,25 +8539,32 @@ export class SessionService {
    *      `opId`) straight out of `PendingOpRegistry`'s retention cache — `run()` below is NOT invoked again
    *      — instead of silently starting a brand-new ~gate-timeout-long run (the origin incident: a re-call
    *      meant to "fetch the passed result" instead ran a whole fresh gate that then failed on unrelated
-   *      flakes).
-   *      KNOWN BOUNDARY (Code Review, card 50c1e0d0 hardening — intentionally NOT re-checked here, mirroring
-   *      the merge-op retention precedent, which also never re-validates its own cache hit): this cached path
-   *      is served straight out of `PendingOpRegistry` — it never re-derives `staleAgainstWorktree`, so it
-   *      carries only what was computed ONCE at the original settle (`validatedHead`, plus `headCurrent`/
-   *      `headWarning` — card 39196378, a caller CAN detect a HEAD change by comparing `validatedHead` to
-   *      their own HEAD even without re-deriving it), not a fresh dirty-state comparison taken NOW. A caller
-   *      who made an UNCOMMITTED edit since the cached run started and re-calls within the grace window sees
-   *      a cached `{passed, validatedHead:<unchanged>, headCurrent:<as of original settle>}` with NO fresh
-   *      staleness signal for that NEW edit — footgun #2 stays closed for the MID-FLIGHT branch above, not
-   *      this settled one. In practice this only matters for a fast (<`SYNC_ATTACH_BUDGET_MS`) `gateCommand`:
-   *      Loom's own ~8-minute gate always degrades to the covered in-flight path first.
+   *      flakes). "Served" here means served WHEN USABLE — `isRetainedResultUsable` below (card 79b0ee52)
+   *      rejects a cache hit whose OWN settled value already declared itself contaminated, in which case
+   *      this call falls through to a genuinely fresh run instead, same as a real cache miss.
+   *      RESIDUAL BOUNDARY (Code Review, card 50c1e0d0 hardening — narrowed, not closed, by card 79b0ee52):
+   *      a USABLE cached path (headCurrent `true`/`undefined`, or `ran:false`) is still served straight out
+   *      of `PendingOpRegistry` without re-deriving `staleAgainstWorktree` — it carries only what was
+   *      computed ONCE at the original settle (`validatedHead`, plus `headCurrent`/`headWarning` — card
+   *      39196378, a caller CAN detect a HEAD change by comparing `validatedHead` to their own HEAD even
+   *      without re-deriving it), not a fresh dirty-state comparison taken NOW. A caller who makes an
+   *      UNCOMMITTED edit AFTER the cached run already settled CLEAN (`headCurrent:true`) and re-calls
+   *      within the grace window still sees that cached `{passed, validatedHead:<unchanged>,
+   *      headCurrent:true}` with NO fresh staleness signal for the NEW edit — footgun #2 stays closed for
+   *      the MID-FLIGHT branch above, and (as of 79b0ee52) for a run that settled already-contaminated, but
+   *      NOT for an edit made entirely AFTER an already-clean settle. In practice this only matters for a
+   *      fast (<`SYNC_ATTACH_BUDGET_MS`) `gateCommand`: Loom's own ~8-minute gate always degrades to the
+   *      covered in-flight path first.
    *
-   *      Deliberately not fixed by ALSO stamping+comparing on the cached path: that would mean re-running
+   *      Deliberately not fixed by ALSO stamping+comparing on EVERY cache hit: that would mean re-running
    *      `computeWorktreeGateStamp` on every cache hit just to potentially discard it, adding a git round-trip
    *      to the fast path this retention window exists to keep fast, for a case (a fast-gate project + an
-   *      edit inside a 5s window) the origin incidents never actually hit. If this becomes a real footgun in
-   *      practice, the fix is comparing `validatedHead`/a fresh dirty stamp on the cache-hit path too — not
-   *      today's minimal fix.
+   *      edit inside a 5s window, striking AFTER an already-clean settle) the origin incidents never actually
+   *      hit. `isRetainedResultUsable` already closes the higher-value case — a settled result that KNOWS
+   *      it's contaminated — for free, since `headCurrent` is computed once at settle regardless of whether
+   *      anyone ever re-calls; it's the free half of this tradeoff, not a substitute for the rest of it. If
+   *      the residual above becomes a real footgun in practice, the fix is comparing `validatedHead`/a fresh
+   *      dirty stamp on every cache-hit path too — not today's fix.
    *  (2) MID-FLIGHT STALENESS: `attachedToInFlight` (computed via a `peek()` BEFORE this call's own
    *      `attach()`, so it reflects whether SOME EARLIER call — not this one — already has an op running
    *      under this key) tells a re-caller it attached to an already-running op rather than starting one.
@@ -8876,15 +8885,31 @@ export class SessionService {
       },
       {
         // SETTLE-GRACE WINDOW (card 50c1e0d0): see the "RESULT-CONSUMPTION FIX" doc above — a re-call
-        // landing within this window of settle is served this SAME cached outcome by attach() itself,
-        // never reaching this closure again. `this.gateOpRetainMs` defaults to GATE_OP_RETAIN_MS in
-        // production; see its doc for the test-only override.
-        // KNOWN BOUNDARY (Code Review hardening): this cached outcome is NOT re-checked against the
-        // worktree's CURRENT state — it carries `validatedHead` only (a caller can compare that to their
-        // own HEAD), never a fresh `staleAgainstWorktree`. An uncommitted edit made after this run started
-        // and before a re-call lands inside the window is invisible here — see the doc above for why this
-        // is accepted (mirrors the merge-op retention precedent, which doesn't re-check its cache either).
+        // landing within this window of settle is served this SAME cached outcome by attach() itself
+        // WHEN IT'S USABLE (see `isRetainedResultUsable` just below), never reaching this closure again.
+        // `this.gateOpRetainMs` defaults to GATE_OP_RETAIN_MS in production; see its doc for the test-only
+        // override.
+        // RESIDUAL BOUNDARY (Code Review hardening, narrowed by card 79b0ee52): a USABLE cached outcome is
+        // still NOT re-checked against the worktree's CURRENT state — it carries `validatedHead` only (a
+        // caller can compare that to their own HEAD), never a fresh `staleAgainstWorktree`. An uncommitted
+        // edit made AFTER an already-clean settle, before a re-call lands inside the window, is invisible
+        // here — see the doc above for why this residual is accepted (mirrors the merge-op retention
+        // precedent, which doesn't re-check its cache either). What's NO LONGER accepted is re-serving a
+        // result that was already contaminated AT SETTLE — `isRetainedResultUsable` below rejects that
+        // case outright, so this closure DOES run again for it (a fresh gate, against the current tree).
         retainMs: this.gateOpRetainMs,
+        // KNOWN-CONTAMINATED GUARD (card 79b0ee52 — `run_gate` re-serving a `headCurrent:false` result out
+        // of the retention cache cost a live merge wave a usable gate slot): a `ran:true` result whose
+        // OWN settle already found `headCurrent:false` (the worktree moved WHILE the gate was running) is
+        // never handed back from the retained cache — the caller was already told, via the settle nudge,
+        // that this exact result is unusable; re-serving it wastes a round-trip on an answer already known
+        // to be discarded. Every OTHER shape (`ran:false` — no gateCommand / circuit-broken; `headCurrent`
+        // `true` or `undefined`) stays usable exactly as before this existed, which is what preserves card
+        // 50c1e0d0's own guarantee (a genuinely usable settled result is served from cache, never re-run):
+        // this predicate only ever NARROWS what's servable, never widens or removes the base case. No new
+        // git round-trip on the fast path — `headCurrent` is already computed and stored on the cached
+        // value by `describeGateHeadCurrency` at settle, so this is a plain field read.
+        isRetainedResultUsable: (value) => !(value.ran && value.headCurrent === false),
         classifyOutcome: (outcome) => (!outcome.ok ? "errored" : outcome.value.passed ? "passed" : "failed"),
         // DURABLE MARKER (card edc1ec12): fires synchronously, strictly before any possible settle for
         // this op (see PendingOpRegistry.attach's onSurfacedPending doc) — records that workerSessionId is

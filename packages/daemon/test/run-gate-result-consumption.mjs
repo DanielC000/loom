@@ -20,6 +20,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       second gate invocation.
 //   (B) a re-call while the gate is still running reports attachedToInFlight:true, and — after the
 //       worktree is edited mid-flight — staleAgainstWorktree:true.
+//   (C) card 79b0ee52 — once a run SETTLES already known-contaminated (headCurrent:false, the RACY shape:
+//       the worktree moved WHILE the gate was actually running), a re-call within the SAME settle-grace
+//       window this file's scenario (A) proves reuses a cached result for must NOT reuse that contaminated
+//       result — it must mint a genuinely fresh gate run against the current tree instead. This is the
+//       literal step-3 failure from the observed live sequence this card documents.
 // Run: 1) build daemon (pnpm build), 2) node test/run-gate-result-consumption.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -167,6 +172,52 @@ try {
     // Let the real op actually settle so nothing dangles past this block.
     await waitUntil(() => sessions.pendingOps.peek(`gate:${workerId}`)?.state !== "running", 20_000);
   }
+
+  // ── (C) card 79b0ee52: a settled result already known CONTAMINATED (headCurrent:false, RACY shape) is
+  //     NEVER re-served from the retention cache — a re-call within the SAME grace window scenario (A)
+  //     proves reuses a result for must instead mint a genuinely fresh gate run ─────────────────────────
+  {
+    const repo = path.join(os.tmpdir(), `loom-rgc-repo-c-${Date.now()}`);
+    fs.mkdirSync(repo, { recursive: true });
+    fs.writeFileSync(path.join(repo, "README.md"), "# rgc\n");
+    execSync(`git init -q && git config user.email rgc@loom && git config user.name rgc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
+
+    const db = new Db();
+    dbs.push(db);
+    const P = "rgc-c", workerId = "rgc-c-wkr";
+    const { worktreePath, branch } = await createWorktree(repo, P, "t-c");
+    worktrees.push([repo, worktreePath]);
+    db.insertProject({ id: P, name: "RGC-C", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: null, worktreePath, branch });
+
+    let gateCalls = 0;
+    // Simulates "the worktree moved WHILE the gate was running" from INSIDE the injected gate step itself
+    // — an uncommitted edit to an EXISTING tracked file, made strictly between runWorkerGate's `admitStamp`
+    // (taken right before this function is invoked, inside gateSemaphore.runExclusive) and its
+    // `settleStamp` (taken right after this function resolves) — exactly the window
+    // describeGateHeadCurrency reads as the RACY headCurrent:false shape (service.ts ~7680-7684), the same
+    // shape the origin observed sequence hit ("that op settled — contaminated, headCurrent: false").
+    const contaminatingGate = async () => {
+      gateCalls++;
+      fs.appendFileSync(path.join(worktreePath, "README.md"), `edit ${gateCalls}\n`);
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: contaminatingGate });
+
+    const r1 = await sessions.runWorkerGate(workerId);
+    check("(C) setup: first run settles inline and passes", r1.settled === true && r1.ok === true && r1.value.passed === true);
+    check("(C) setup: first run settled CONTAMINATED (headCurrent:false) — the edit landed during the run itself", r1.value.headCurrent === false);
+    check("(C) setup: exactly one gate invocation so far", gateCalls === 1);
+    const opId1 = r1.value.opId;
+
+    // Re-call immediately — comfortably inside GATE_OP_RETAIN_MS (5s), the SAME window scenario (A) proves
+    // reuses a cached result for. Before card 79b0ee52 this returned the SAME contaminated result (same
+    // opId, no second invocation) straight out of the retention cache — the literal step-3 bug.
+    const r2 = await sessions.runWorkerGate(workerId);
+    check("(C) THE FIX: a re-call against a KNOWN-CONTAMINATED cached result triggers a genuinely FRESH gate run, not a cache hit", gateCalls === 2);
+    check("(C) the fresh run returns a DIFFERENT opId — it is not the stale cached one handed back again", r2.settled === true && r2.ok === true && r2.value.opId !== opId1);
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
@@ -174,6 +225,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — run_gate's settle-grace retention window returns a cached result with no second run, and a mid-flight re-call correctly reports attachedToInFlight + staleAgainstWorktree after a worktree edit."
+  ? "\n✅ ALL PASS — run_gate's settle-grace retention window returns a USABLE cached result with no second run, a mid-flight re-call correctly reports attachedToInFlight + staleAgainstWorktree after a worktree edit, and (card 79b0ee52) a re-call against a settled result already known CONTAMINATED (headCurrent:false) never reuses it — it mints a genuinely fresh gate run against the current tree instead."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

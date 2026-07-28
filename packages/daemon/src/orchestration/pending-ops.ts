@@ -171,6 +171,14 @@ interface RetainedView extends PendingOpView {
  * retained view a successor op wrote under the same key before the OLDER view's own timer fires — and by
  * the same token, that successor's own `retained` write is what a THIRD call would dedupe against once
  * installed, never the stale one the timer is about to (or already did) evict.
+ *
+ * The dedupe above hands back a live `retained` hit UNCONDITIONALLY BY DEFAULT — right for a "merge" op
+ * (there is no such thing as a merge outcome that's "settled but already known unusable"; the WHY above is
+ * entirely about not re-running against a torn-down worktree). `attach()`'s `opts.isRetainedResultUsable`
+ * (card 79b0ee52) is the per-value escape hatch for a kind whose own settled outcome CAN self-declare
+ * staleness — `run_gate`'s `headCurrent:false` — so a caller already told a specific cached answer is
+ * contaminated is never handed that SAME answer again on the very next call. See `attach()`'s own doc for
+ * the mechanics; this key point belongs here too since it changes the "unconditional" framing above.
  */
 export class PendingOpRegistry {
   private readonly entries = new Map<string, Entry<unknown>>();
@@ -321,6 +329,31 @@ export class PendingOpRegistry {
    * settle (ungated by this flag), so a later NON-forced re-confirm within ITS window correctly dedupes
    * against the fresh (forced) outcome, not the stale pre-force one.
    *
+   * `opts.isRetainedResultUsable` (card 79b0ee52 — `run_gate`'s KNOWN-CONTAMINATED re-serve): unlike
+   * `bypassRetained` (a per-CALL, caller-decided-in-advance escalation), this is a per-VALUE predicate
+   * evaluated against the cached `ok:true` outcome itself, at read time. A retention hit whose own settled
+   * value already told an earlier caller it was unusable (e.g. `runWorkerGate`'s `headCurrent:false` — the
+   * worktree moved WHILE that run was executing) has nothing to protect by being handed back again: unlike
+   * the merge-op precedent the base retention dedupe exists to serve (avoiding a real re-run against an
+   * already-torn-down worktree), there is no correctness value in re-serving a result the caller has
+   * already been told to discard. When given and it returns `false` for the cached value, THIS call's read
+   * is treated as a miss — falls through to the same fresh-mint path as a genuine cache miss below — while
+   * the cache is still WRITTEN on every settle exactly as always (this predicate only gates the READ,
+   * mirroring `bypassRetained`'s own read/write split). Never consulted for an `ok:false` (thrown error)
+   * retained hit — an error carries no analogous staleness signal, so those are unaffected. Omit it (every
+   * call site except `runWorkerGate`, today) and behavior is byte-identical to before this existed — a
+   * retained hit is always usable.
+   *
+   * SINGLE-FLIGHT UNDER REPEATED REJECTION: this predicate only changes which VALUES pass the retained-hit
+   * check above — it never touches the RUNNING-entry branch at the top of this method. So even a caller
+   * that keeps re-calling against a persistently-contaminated key (the worktree keeps moving) can never
+   * mint two CONCURRENT real invocations: the first rejecting call falls through and synchronously
+   * registers a fresh `entries` row (the same no-await window the ATOMICITY PROOF above already relies on)
+   * before any `run()` internals ever `await`; every other call arriving before that fresh op settles finds
+   * a RUNNING entry and attaches to it via the ordinary dedupe, never re-evaluating the (already-superseded)
+   * retained cache at all. Worst case is still exactly one real invocation in flight per `key` at a time —
+   * this predicate can only remove a wasted cache-hit round-trip, never add a concurrent one.
+   *
    * `opts.onSurfacedPending` (card edc1ec12 — the restart-orphan signaling gap): fired SYNCHRONOUSLY, from
    * inside THIS call's own `if (e.state === "running")` branch below, the instant this call is about to
    * return `{settled:false}` — i.e. exactly (and only) when a caller is actually told "pending". A caller
@@ -341,6 +374,7 @@ export class PendingOpRegistry {
       retainMs?: number;
       classifyOutcome?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => PendingOpOutcome;
       bypassRetained?: boolean;
+      isRetainedResultUsable?: (value: T) => boolean;
       onSurfacedPending?: (op: PendingOpView, opId: string) => void;
     },
   ): Promise<AttachResult<T>> {
@@ -359,9 +393,16 @@ export class PendingOpRegistry {
       // fresh-op path below exactly as before — a genuine retry after the window still runs for real.
       const retainedHit = this.retained.get(key);
       if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt) {
-        return retainedHit.rawOutcome.ok
-          ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T }
-          : { settled: true, ok: false, error: retainedHit.rawOutcome.error };
+        // USABILITY GATE (card 79b0ee52): an `ok:false` hit, or an `ok:true` hit with no
+        // `isRetainedResultUsable` opt, is unconditionally usable — byte-identical to before this opt
+        // existed. An `ok:true` hit whose value the predicate rejects is treated as a MISS: falls through
+        // to the fresh-mint path below instead of returning here, exactly like a genuine cache miss.
+        const usable = !retainedHit.rawOutcome.ok || !opts?.isRetainedResultUsable || opts.isRetainedResultUsable(retainedHit.rawOutcome.value as T);
+        if (usable) {
+          return retainedHit.rawOutcome.ok
+            ? { settled: true, ok: true, value: retainedHit.rawOutcome.value as T }
+            : { settled: true, ok: false, error: retainedHit.rawOutcome.error };
+        }
       }
       const fresh: Entry<T> = {
         opId: randomUUID(), kind, key, managerSessionId, startedAt: new Date().toISOString(),

@@ -842,12 +842,15 @@ export class OrchestrationMcpRouter {
             "true) instead of starting a second one — `staleAgainstWorktree:true` on that reply means the " +
             "worktree changed (a new commit or an uncommitted edit) since THAT run started, so trust nothing it " +
             "reports about your current code. Within a short grace window AFTER a run settles, a re-call is " +
-            "served that SAME settled result (same opId) instead of starting a fresh run; only a re-call " +
-            "OUTSIDE that window starts a genuinely new one. CAVEAT on that settled-window reply: it is NOT " +
-            "re-checked against your worktree's current state — you can still tell if the commit changed by " +
-            "comparing its `validatedHead` to your own HEAD, but an UNCOMMITTED edit you made since that run " +
-            "started is invisible to it. If you've edited since the last run_gate call, don't trust a cached " +
-            "pass — wait out the grace window (or just act on your own judgment) before treating it as current.",
+            "USUALLY served that SAME settled result (same opId) instead of starting a fresh run — EXCEPT when " +
+            "that settled result itself already carries `headCurrent:false` (the worktree moved WHILE the gate " +
+            "was running): a KNOWN-CONTAMINATED result is never re-served — a re-call in that case always starts " +
+            "a genuinely new run against your current tree, same as outside the window. CAVEAT on an ordinarily- " +
+            "served settled-window reply: it is NOT re-checked against your worktree's current state — you can " +
+            "still tell if the commit changed by comparing its `validatedHead` to your own HEAD, but an " +
+            "UNCOMMITTED edit you make AFTER an already-clean settle, before your re-call, is invisible to it. " +
+            "If you've edited since the last run_gate call, don't trust a cached pass — wait out the grace " +
+            "window (or just act on your own judgment) before treating it as current.",
           inputSchema: strictShape({}),
         },
         async () => {

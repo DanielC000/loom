@@ -427,7 +427,58 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(retain ttl) a call after expiry runs a genuinely FRESH op, unaffected by the earlier dedupe hits", calls === 1 && r3.value.opId === "op-3");
 }
 
+// opts.isRetainedResultUsable (card 79b0ee52 — run_gate re-serving a KNOWN-CONTAMINATED cached result to
+// a re-caller who was already told to discard it): a per-VALUE predicate gates the retained-cache READ
+// (mirrors bypassRetained's read/write split, but decided by the cached VALUE itself rather than by the
+// re-caller's own flag). Proves BOTH halves explicitly in one sequence, since the regression this fix could
+// most easily reintroduce is losing the "usable stays cached" half (the 50c1e0d0 guarantee) while chasing
+// the "unusable gets re-served" half.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const usable = (v) => v.headCurrent !== false; // mirrors runWorkerGate's own predicate shape
+
+  // (a) a retained value the predicate marks UNUSABLE is never served — a re-call within the window mints
+  // a genuinely fresh op instead of returning the known-contaminated cached one.
+  await reg.attach("g1", "gate", "mgr1", 200, async () => { calls++; return { opId: "op-1", headCurrent: false }; }, undefined, { retainMs: 200, isRetainedResultUsable: usable });
+  check("(isRetainedResultUsable) first (contaminated) run settles and is retained", calls === 1);
+  const r2 = await reg.attach("g1", "gate", "mgr1", 200, async () => { calls++; return { opId: "op-2", headCurrent: true }; }, undefined, { retainMs: 200, isRetainedResultUsable: usable });
+  check("(isRetainedResultUsable) a re-call within the window against a CONTAMINATED cached value runs a genuinely FRESH op", calls === 2 && r2.value.opId === "op-2");
+
+  // (b) REGRESSION GUARD (the 50c1e0d0 guarantee, and the one the manager most wants pinned): a retained
+  // value the predicate marks USABLE is still served with NO second invocation.
+  const r3 = await reg.attach("g1", "gate", "mgr1", 200, async () => { calls++; return { opId: "op-3", headCurrent: true }; }, undefined, { retainMs: 200, isRetainedResultUsable: usable });
+  check("(isRetainedResultUsable regression guard) a re-call against a USABLE cached value dedupe-hits — NO second invocation", calls === 2 && r3.value.opId === "op-2");
+
+  // (c) omitting the predicate entirely is byte-identical to before this opt existed — even a
+  // "contaminated"-shaped cached value is served unconditionally when no predicate opts in.
+  const r4 = await reg.attach("g1", "gate", "mgr1", 200, async () => { calls++; return { opId: "op-4", headCurrent: true }; }, undefined, { retainMs: 200 });
+  check("(isRetainedResultUsable omitted) no predicate given → always served from cache, same as before this opt existed", calls === 2 && r4.value.opId === "op-2");
+}
+
+// SINGLE-FLIGHT UNDER REPEATED REJECTION (card 79b0ee52 — the manager's own explicit ask before approving
+// this design): even while the retained cache is being rejected by the predicate on EVERY call, two callers
+// racing the SAME key with NO await between them (mirrors the "genuinely CONCURRENT retry-attach" block
+// above) must still invoke run() EXACTLY ONCE for the fresh op — the predicate only changes which cached
+// VALUES are servable; it must never let two concurrent rejecting callers both fall through to their own
+// fresh mint, which would mean two real gate invocations racing for the same worker's daemon-global slot.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const alwaysUnusable = () => false;
+  // Seed a retained (rejectable) value first.
+  await reg.attach("g2", "gate", "mgr1", 200, async () => { calls++; return { opId: "seed", headCurrent: false }; }, undefined, { retainMs: 500, isRetainedResultUsable: alwaysUnusable });
+  check("(single-flight under rejection) seed run settled", calls === 1);
+
+  const slow = async () => { calls++; await sleep(50); return { opId: "fresh", headCurrent: true }; };
+  const p1 = reg.attach("g2", "gate", "mgr1", 500, slow, undefined, { retainMs: 500, isRetainedResultUsable: alwaysUnusable });
+  const p2 = reg.attach("g2", "gate", "mgr1", 500, slow, undefined, { retainMs: 500, isRetainedResultUsable: alwaysUnusable }); // fired before p1 is awaited — no interleaving gap
+  const [r1, r2] = await Promise.all([p1, p2]);
+  check("(single-flight under rejection) run() invoked EXACTLY ONCE for the fresh op despite two concurrent rejecting callers (1 seed + 1 fresh)", calls === 2);
+  check("(single-flight under rejection) BOTH callers observe the SAME fresh result — the second attached rather than minting its own", r1.settled && r1.ok && r2.settled && r2.ok && r1.value.opId === "fresh" && r2.value.opId === "fresh");
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, and opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, and (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation, and never lets two concurrent rejecting callers mint two concurrent real ops for the same key."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
