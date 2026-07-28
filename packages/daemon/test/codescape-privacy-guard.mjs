@@ -65,19 +65,50 @@ function walkFiles(dir, extRe) {
 // =====================================================================================================
 
 // Strict (fatal) UTF-8 decoding — a skill dir ships more than Markdown (scripts/, references/, …, per
-// card 75a0755d) and a codescape mention can hide in any of them, not just .md. A file that isn't valid
-// UTF-8 is treated as binary/non-text and skipped rather than crashing the scan.
+// card 75a0755d) and a codescape mention can hide in any of them, not just .md. UTF-8 decoding is used
+// ONLY to render a line number/snippet for a human-readable report — it is NOT the precondition for
+// detection. A file that isn't valid UTF-8 can still carry the plain ASCII byte sequence "codescape"
+// (greppable, `strings`-visible, and every bit as much a leak as one inside a Markdown line), so
+// detection always runs against the RAW BYTES first; a file that fails to decode is reported by byte
+// offset instead of line number, never silently skipped (card 7283bcab — the original decode-first
+// scanner had a hole here).
 const utf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
-/** Scan every shipped text file under `skillRootDir` for a case-insensitive "codescape" mention, line-numbered. */
+/** Case-insensitive search for the raw ASCII byte sequence "codescape" in `buf`. Returns every match's byte offset. */
+function findCodescapeByteOffsets(buf) {
+  const needle = Buffer.from("codescape", "ascii");
+  const offsets = [];
+  for (let i = 0; i <= buf.length - needle.length; i++) {
+    let matched = true;
+    for (let j = 0; j < needle.length; j++) {
+      const b = buf[i + j];
+      const lower = b >= 0x41 && b <= 0x5a ? b + 0x20 : b; // ASCII upper→lower
+      if (lower !== needle[j]) { matched = false; break; }
+    }
+    if (matched) offsets.push(i);
+  }
+  return offsets;
+}
+
+/**
+ * Scan every shipped file under `skillRootDir` for a case-insensitive "codescape" mention. Detection is
+ * byte-level and runs regardless of encoding. For a file that decodes as valid UTF-8, hits are reported
+ * line-numbered (matches prior behavior). For a file that does NOT decode as UTF-8, hits are still
+ * reported — by byte offset — rather than skipped; decoding is a presentation concern, not a detection
+ * precondition. Never throws on a non-UTF-8 file (the no-crash property card 3a6e3078 added).
+ */
 function scanSkillDirForCodescapeMentions(skillRootDir) {
   const hits = [];
   for (const file of walkFiles(skillRootDir)) {
+    const buf = fs.readFileSync(file);
     let text;
     try {
-      text = utf8Decoder.decode(fs.readFileSync(file));
+      text = utf8Decoder.decode(buf);
     } catch {
-      continue; // not valid UTF-8 — not a text file this guard can meaningfully scan
+      for (const byteOffset of findCodescapeByteOffsets(buf)) {
+        hits.push({ file, byteOffset, text: `<non-UTF-8 file, byte offset ${byteOffset}>` });
+      }
+      continue;
     }
     const lines = text.split("\n");
     lines.forEach((line, i) => {
@@ -104,8 +135,18 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
     // Non-.md fixture: a skill's scripts/ ships to end users too (card 75a0755d) — this is the case
     // this card is about, so the falsification must inject here, not only in a .md file.
     fs.writeFileSync(path.join(fakeRoot, "scripts", "helper.mjs"), "// setup\nconst thing = 1;\n// a Codescape mention buried in a script comment\n");
-    // A non-UTF-8 (binary) file must be skipped, not crash the scan.
-    fs.writeFileSync(path.join(fakeRoot, "scripts", "opaque.bin"), Buffer.from([0xff, 0xfe, 0x00, 0xff, 0xd8, 0xff]));
+    // A non-UTF-8 (binary) file must still be DETECTED, not skipped — the gap this card fixes. The
+    // leading bytes are invalid UTF-8 (a bare 0xff is never a valid UTF-8 lead byte), forcing the
+    // fatal decode to throw, while the trailing ASCII bytes carry a mixed-case "codescape" mention that
+    // a byte-level scan must still catch.
+    const opaqueBinPath = path.join(fakeRoot, "scripts", "opaque.bin");
+    fs.writeFileSync(
+      opaqueBinPath,
+      Buffer.concat([
+        Buffer.from([0xff, 0xfe, 0x00, 0xff, 0xd8, 0xff]),
+        Buffer.from("a Codescape mention inside non-UTF-8 bytes", "ascii"),
+      ])
+    );
 
     const mdFileHit = { file: path.join(fakeRoot, "SKILL.md"), line: 4 };
     const nonMdFileHit = { file: path.join(fakeRoot, "scripts", "helper.mjs"), line: 3 };
@@ -118,7 +159,11 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
       "[falsification] scanner catches an injected codescape mention in a non-.md file",
       fakeHits.some((h) => h.file === nonMdFileHit.file && h.line === nonMdFileHit.line)
     );
-    check("[falsification] scanner skips a non-UTF-8 file instead of crashing", fakeHits.length === 2);
+    check(
+      "[falsification] scanner catches a codescape byte sequence inside a non-UTF-8 file instead of skipping it",
+      fakeHits.some((h) => h.file === opaqueBinPath && typeof h.byteOffset === "number")
+    );
+    check("[falsification] scanner does not crash scanning a non-UTF-8 file", fakeHits.length === 3);
   } finally {
     fs.rmSync(fakeRoot, { recursive: true, force: true });
   }
@@ -129,7 +174,7 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
     leakHits.push(...scanSkillDirForCodescapeMentions(path.join(assetSkills, name)));
   }
   if (leakHits.length > 0) {
-    for (const h of leakHits) console.log(`  LEAK  ${h.file}:${h.line}: ${h.text}`);
+    for (const h of leakHits) console.log(`  LEAK  ${h.file}:${h.line ?? `byte ${h.byteOffset}`}: ${h.text}`);
   }
   check(`(A) no shipped skill's doctrine mentions codescape anywhere (${shippedSkillDirs.length} shipped skill dirs scanned)`, leakHits.length === 0);
 }
