@@ -53,6 +53,21 @@ const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
 /** A `serve` that ran at least this long before dying is treated as a fresh failure — resets the backoff. */
 const DEFAULT_HEALTHY_RUN_MS = 30_000;
 /**
+ * How often to probe a believed-alive `serve` with `GET /graph/health` — process-exit detection alone
+ * (`spawnServe`'s `child.on("exit")`) never sees a serve that's up, port bound, but wedged and not
+ * answering; this periodic probe is what catches THAT case. Card: the 2026-07 four-day freeze survived
+ * 12+ boots specifically because nothing but an exit event could ever flip `alive` back to false.
+ */
+const DEFAULT_HEALTH_PROBE_INTERVAL_MS = 30_000;
+/** Bound (ms) for a single `/graph/health` probe call — short, since a healthy serve answers fast. */
+const DEFAULT_HEALTH_PROBE_TIMEOUT_MS = 5_000;
+/**
+ * Consecutive probe failures required before treating `serve` as wedged. NOT 1 — a busy serve can miss a
+ * single beat under load, and a lone blip must not be mistaken for a real wedge (see `probeHealth`'s own
+ * doc). Reset to 0 on ANY successful probe, so only a genuinely SUSTAINED run of failures counts.
+ */
+const DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD = 3;
+/**
  * CR follow-up (card 088afc94): how long a `resolveProjectId` MISS (no in-memory cache entry, no manifest
  * entry either) is remembered before the next call is allowed to re-read the manifest. Without this, a
  * repo that boot registration never covered (a project created, or `codescape.enabled` toggled on, after
@@ -81,6 +96,12 @@ export interface CodescapeSupervisorOpts {
    * control-plane client methods can be exercised hermetically against a fake HTTP server.
    */
   port?: number;
+  /** Test seam: shrink {@link DEFAULT_HEALTH_PROBE_INTERVAL_MS} so a wedge test doesn't wait 30 real seconds. */
+  healthProbeIntervalMs?: number;
+  /** Test seam: shrink/lengthen {@link DEFAULT_HEALTH_PROBE_TIMEOUT_MS}. */
+  healthProbeTimeoutMs?: number;
+  /** Test seam: override {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
+  healthProbeFailureThreshold?: number;
 }
 
 export interface CodescapeRequestResult {
@@ -201,6 +222,9 @@ export class CodescapeSupervisor {
   private readonly registerTimeoutMs: number;
   private readonly reingestTimeoutMs: number;
   private readonly negativeCacheTtlMs: number;
+  private readonly healthProbeIntervalMs: number;
+  private readonly healthProbeTimeoutMs: number;
+  private readonly healthProbeFailureThreshold: number;
 
   /**
    * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
@@ -225,6 +249,12 @@ export class CodescapeSupervisor {
   private spawnedAt: number | null = null;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
+  /** True once `start()` was called with at least one repoPath — gates the health-probe timer so it
+   *  never runs (and never sends traffic) when the daemon has no codescape-enabled projects at all. */
+  private hasEnabledProjects = false;
+  private healthProbeTimer: ReturnType<typeof setInterval> | null = null;
+  /** Resets to 0 on any successful `/graph/health` probe — see {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
+  private consecutiveHealthFailures = 0;
   /**
    * Card 088afc94 P4 follow-up: codescape's OWN authoritative project id, cached per NORMALIZED (resolved
    * + lowercased — see {@link repoKey}) repoRoot once {@link registerProject} succeeds OR a manifest read
@@ -249,6 +279,9 @@ export class CodescapeSupervisor {
     this.registerTimeoutMs = opts?.registerTimeoutMs ?? DEFAULT_REGISTER_TIMEOUT_MS;
     this.reingestTimeoutMs = opts?.reingestTimeoutMs ?? DEFAULT_REINGEST_TIMEOUT_MS;
     this.negativeCacheTtlMs = opts?.negativeCacheTtlMs ?? PROJECT_ID_NEGATIVE_CACHE_TTL_MS;
+    this.healthProbeIntervalMs = opts?.healthProbeIntervalMs ?? DEFAULT_HEALTH_PROBE_INTERVAL_MS;
+    this.healthProbeTimeoutMs = opts?.healthProbeTimeoutMs ?? DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
+    this.healthProbeFailureThreshold = opts?.healthProbeFailureThreshold ?? DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
@@ -330,6 +363,7 @@ export class CodescapeSupervisor {
     }
     this.starting = true;
     this.stopped = false;
+    this.hasEnabledProjects = repoPaths.length > 0;
     try {
       fs.mkdirSync(this.homeDir, { recursive: true });
       for (const repoPath of repoPaths) {
@@ -338,6 +372,7 @@ export class CodescapeSupervisor {
       if (this.port == null) this.port = await pickLoopbackPort();
       this.restartAttempts = 0;
       this.spawnServe();
+      this.startHealthMonitor();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
       // Card 088afc94 P4 follow-up: codescape's `POST /project` dynamic registration (confirmed merged/
       // live, commit 669548e) is now the SANCTIONED id-resolution path. Register every project
@@ -371,10 +406,13 @@ export class CodescapeSupervisor {
     }
   }
 
-  /** Stop supervision: kills the live child (if any), cancels any pending restart, and disarms restart-on-death. */
+  /** Stop supervision: kills the live child (if any), cancels any pending restart, disarms restart-on-death,
+   *  and stops the health-probe timer. */
   stop(): void {
     this.stopped = true;
     if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
+    if (this.healthProbeTimer) { clearInterval(this.healthProbeTimer); this.healthProbeTimer = null; }
+    this.consecutiveHealthFailures = 0;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -417,6 +455,9 @@ export class CodescapeSupervisor {
     this.child = child;
     this.alive = true;
     this.spawnedAt = Date.now();
+    // A fresh child is presumed responsive — don't let a wedge-count from the PREVIOUS (now-dead) process
+    // carry over and trip the threshold after only one or two real probes against the new one.
+    this.consecutiveHealthFailures = 0;
     const chunks: Buffer[] = [];
     let bytes = 0;
     const capture = (b: Buffer): void => {
@@ -463,6 +504,54 @@ export class CodescapeSupervisor {
     const delay = this.restartBackoffMs[this.restartAttempts];
     this.restartAttempts++;
     this.restartTimer = setTimeout(() => { this.restartTimer = null; this.spawnServe(); }, delay);
+  }
+
+  /**
+   * Start the periodic `GET /graph/health` liveness probe — idempotent (a re-entrant `start()` call is
+   * already blocked by the `this.child` guard at its own top, but this guard makes the intent explicit:
+   * never stack a second interval). Gated on {@link hasEnabledProjects} so a daemon with codescape
+   * enabled but zero codescape-enabled projects sends no probe traffic at all (there's nothing for it to
+   * watch); `probeHealth` itself gates on `alive`, so the timer is a harmless no-op tick whenever serve
+   * isn't currently believed up (never started, mid-restart-backoff, or given up for good).
+   */
+  private startHealthMonitor(): void {
+    if (this.healthProbeTimer || !this.hasEnabledProjects) return;
+    this.healthProbeTimer = setInterval(() => { void this.probeHealth(); }, this.healthProbeIntervalMs);
+  }
+
+  /**
+   * One `/graph/health` check. `spawnServe`'s `child.on("exit")` only ever catches a `serve` that DIES —
+   * a serve that's alive, port bound, and simply not answering (wedged) stays `alive:true` forever under
+   * that detector alone, and `getPort()` keeps handing sessions a port that will hang. This is what closes
+   * that gap.
+   *
+   * A single failed probe is NOT enough — a busy serve can miss one beat under load, and treating that as
+   * death would restart a perfectly healthy process. Only a SUSTAINED run of
+   * {@link healthProbeFailureThreshold} consecutive failures (reset to 0 by any success — see
+   * `spawnServe`'s own reset on a fresh spawn) counts as a wedge.
+   *
+   * On a sustained failure, this does NOT call `scheduleRestart`/`spawnServe` itself — it kills the live
+   * child. That kill is a REAL process death, so it fires the exact same `child.on("exit")` → `onDeath` →
+   * `scheduleRestart` path a crash would (same `restartAttempts` budget, same backoff, same give-up
+   * ceiling) — a health-driven restart can never resurrect a serve past an exhausted budget, because it
+   * never opens a second restart channel; it just triggers the existing one.
+   *
+   * Never runs when `!alive` (nothing to check) or after `stop()` (`this.stopped`) — no probe traffic on a
+   * dead, never-started, or intentionally-stopped serve.
+   */
+  private async probeHealth(): Promise<void> {
+    if (this.stopped || !this.alive) return;
+    const res = await this.request("GET", "/graph/health", undefined, this.healthProbeTimeoutMs);
+    if (res.ok) {
+      this.consecutiveHealthFailures = 0;
+      return;
+    }
+    this.consecutiveHealthFailures++;
+    if (this.consecutiveHealthFailures < this.healthProbeFailureThreshold) return;
+    console.warn(`[codescape] serve health probe failed ${this.consecutiveHealthFailures}x consecutively (alive but unresponsive) — killing for restart`);
+    this.consecutiveHealthFailures = 0;
+    const child = this.child;
+    if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
   }
 
   /** Bounded, best-effort loopback POST/DELETE to the running `serve` — NEVER throws; resolves `ok:false`

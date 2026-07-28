@@ -15,6 +15,12 @@
 //     append to `fake-codescape-calls.jsonl` (that log is for SUBPROCESS invocations; a registration is an
 //     HTTP call against the already-recorded `serve` process, and mixing it in would shift the
 //     position-indexed assertions elsewhere in codescape-supervisor.mjs that read that file).
+//     Also answers `GET /graph/health` — `{live:true, projects, version:"fake", build:"fake"}` normally.
+//     If env `FAKE_CODESCAPE_HEALTH_WEDGE_FILE` is set AND that path exists on disk at request time, the
+//     handler deliberately never responds (no `res.end`, connection just sits open) — simulating a serve
+//     that's alive and port-bound but genuinely not answering, the exact "wedged" case the supervisor's
+//     periodic health probe exists to catch. Checked live per-request (not just at spawn), so a test can
+//     flip a running fixture from healthy to wedged (and back) by creating/removing that file.
 //   - `mcp --graph <path>` — records the call, prints a "server ready on stdio" line (mirrors the real
 //     CLI's own startup line), then stays alive reading stdin (a real stdio MCP server would too) until
 //     killed — never actually speaks JSON-RPC (no test here exercises the protocol, only the spawn shape).
@@ -55,6 +61,13 @@ if (args[0] === "ingest") {
     const registered = new Map(); // repoRoot -> id
     let nextId = 1;
     const server = http.createServer((req, res) => {
+      if (req.method === "GET" && req.url === "/graph/health") {
+        const wedgeFile = process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
+        if (wedgeFile && fs.existsSync(wedgeFile)) return; // simulate wedged: accept, never respond
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ live: true, projects: registered.size, version: "fake", build: "fake" }));
+        return;
+      }
       if (req.method === "POST" && req.url === "/project") {
         let body = "";
         req.on("data", (c) => { body += c; });
