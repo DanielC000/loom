@@ -2220,7 +2220,10 @@ export interface WorktreeProcess {
 /** Injectable process lister for {@link reapProcessesRootedInWorktree} (defaults to the real OS
  *  enumerator). Takes the same `timeoutMs` the caller is bounding by, so an enumerator that itself spawns
  *  a helper process (win32) can bound + kill that helper on timeout rather than merely being raced and
- *  abandoned by an outer wrapper — see {@link enumerateProcessesWin32}. */
+ *  abandoned by an outer wrapper — see {@link enumerateProcessesWin32}. Must REJECT (never resolve `[]`)
+ *  on a genuine enumeration failure — {@link reapProcessesRootedInWorktree}'s catch is what turns a
+ *  rejection into a loud, classified log line plus `enumerationFailed: true`, instead of a result that
+ *  looks identical to "no matching process exists". */
 export type ProcessEnumerator = (timeoutMs: number) => Promise<WorktreeProcess[]>;
 /** Injectable process killer for {@link reapProcessesRootedInWorktree} (defaults to a real OS kill). */
 export type ProcessKiller = (pid: number) => void;
@@ -2285,23 +2288,83 @@ async function enumerateProcessesPosix(_timeoutMs: number): Promise<WorktreeProc
  *  (exported) in sessions/service.ts to sanitize gate output before it's piped through `enqueueStdin`. */
 export const CONTROL_CHAR_RE = new RegExp(`[${String.fromCharCode(0)}-${String.fromCharCode(31)}]`, "g");
 
+/**
+ * Parse {@link enumerateProcessesWin32}'s raw PowerShell stdout (a `ConvertTo-Json -Compress` array) into
+ * {@link WorktreeProcess} records. Pure + exported so a test can drive it directly with a crafted payload
+ * instead of spawning a real `powershell.exe` — see `test/worktree-process-reap.mjs`'s deterministic
+ * enumeration-failure regression guard.
+ *
+ * THROWS on a malformed payload (never silently drops to an empty array) — this is the other half of the
+ * fix for a real P1: a live self-hosting daemon host had `[Console]::OutputEncoding` defaulting to a
+ * single-byte, non-UTF8 codepage (IBM850/CP850 — confirmed via `[Console]::OutputEncoding` + `chcp`), so
+ * any character in ANY live process's `CommandLine` that codepage's best-fit encoder couldn't cleanly
+ * round-trip could corrupt the ALREADY-CORRECTLY-ESCAPED JSON `ConvertTo-Json` had produced — breaking
+ * `JSON.parse` for the WHOLE array, not just the one affected process. {@link enumerateProcessesWin32} now
+ * forces `[Console]::OutputEncoding` to UTF8 (verified live: the same query against 465 real processes on
+ * that host threw a JSON parse error without it, and parsed cleanly with it) — but the NEXT surprise in
+ * that payload must not go silent either, so this function throws with the JSON position + a short
+ * excerpt around it, and the caller ({@link enumerateProcessesWin32}) turns that into a rejection instead
+ * of a bare `[]`. That silent-collapse was itself the reason a total enumeration failure went undetected:
+ * `reapProcessesRootedInWorktree` runs from SEVEN call sites in sessions/service.ts (the merge-confirm
+ * pre-gate reap, post-merge `gcWorktreeDir`, worker-stop cleanup, boot/GC sweeps), all of which would
+ * silently do nothing on this failure with no observable difference from "nothing needed killing".
+ *
+ * `ConvertTo-Json` can also leave a raw, UN-ESCAPED control character inside a `CommandLine` string
+ * (observed live against real running processes on this host) — a JSON structural character is never
+ * below 0x20, so blanking those out is always safe. A leading BOM is stripped defensively too: forcing
+ * `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8` is documented as BOM-emitting for some .NET
+ * writer shapes, though verified empirically NOT to appear for this exact assignment + query shape — a
+ * BOM would otherwise break `JSON.parse` at character 0.
+ */
+export function parseWin32CimStdout(raw: string): WorktreeProcess[] {
+  const withoutBom = raw.charCodeAt(0) === 0xfeff ? raw.slice(1) : raw;
+  const sanitized = withoutBom.replace(CONTROL_CHAR_RE, " ");
+  const text = sanitized || "[]";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch (err) {
+    const message = (err as Error).message;
+    const offsetMatch = /position (\d+)/.exec(message);
+    const offset = offsetMatch ? Number(offsetMatch[1]) : null;
+    const excerpt = offset != null ? text.slice(Math.max(0, offset - 60), offset + 60) : text.slice(0, 120);
+    throw new Error(`${message} (payload length ${text.length}; excerpt around the failure: ${JSON.stringify(excerpt)})`);
+  }
+  const arr = Array.isArray(parsed) ? parsed : [parsed];
+  return arr.map((r: Record<string, unknown>) => ({
+    pid: Number(r["ProcessId"]),
+    exePath: (r["ExecutablePath"] as string | null) ?? null,
+    cwd: null,
+    commandLine: (r["CommandLine"] as string | null) ?? null,
+  }));
+}
+
 /** Real win32 process enumerator: `Get-CimInstance Win32_Process` for every live process's ExecutablePath
  *  + CommandLine (win32 exposes no per-process cwd via CIM, so `cwd` is always null here — Path +
  *  CommandLine is what the live-evidence investigation found sufficient: the esbuild service's OWN
  *  executable runs FROM inside the worktree, and vite's global node.exe carries the worktree path in its
  *  CommandLine). `@(...)` forces array context so ConvertTo-Json returns a JSON ARRAY even for 0 or 1
  *  processes (bare `ConvertTo-Json` on a single object would otherwise emit a bare object, not `[obj]`).
+ *  `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;` is prepended INSIDE the same `-Command`
+ *  string — see {@link parseWin32CimStdout}'s doc for why: a non-UTF8 console codepage can corrupt the
+ *  CIM query's own JSON output for reasons having nothing to do with the worktree being searched for.
  *
  *  SELF-BOUNDED: unlike the outer {@link withReapTimeout} race (which only stops the CALLER waiting, the
  *  same limitation `withTimeout` in git/worktrees.ts documents for its own callers), this function arms
  *  its OWN timer and force-kills the `powershell.exe` child it spawned if the query hasn't closed by
  *  `timeoutMs` — so a wedged/slow CIM query (WMI contention, a loaded host) can never leave an orphaned
- *  helper process behind, the same leak class this whole feature exists to prevent. */
+ *  helper process behind, the same leak class this whole feature exists to prevent.
+ *
+ *  LOUD ON FAILURE: every failure path (spawn error, this self-timeout, or a parse failure in
+ *  {@link parseWin32CimStdout}) REJECTS with a classified, descriptive Error instead of silently
+ *  resolving `[]` — {@link reapProcessesRootedInWorktree}'s catch logs it and reports
+ *  `enumerationFailed: true`, so a total enumeration failure is never indistinguishable from "no matching
+ *  process exists" again. */
 function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> {
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const cmd = spawnProcess("powershell.exe", [
       "-NoProfile", "-NonInteractive", "-Command",
-      "@(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress",
+      "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath,CommandLine) | ConvertTo-Json -Compress",
     ], { stdio: ["ignore", "pipe", "ignore"] });
     let out = "";
     let settled = false;
@@ -2311,38 +2374,30 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
       clearTimeout(timer);
       resolve(result);
     };
+    const fail = (kind: string, detail: string) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(new Error(`win32 process enumeration failed (${kind}): ${detail}`));
+    };
     const timer = setTimeout(() => {
       // Force-kill the query helper itself so a wedged CIM call never leaks an orphaned powershell.exe —
       // mirrors killRemoveChild's win32 posture (taskkill /T /F, then a plain kill as belt-and-suspenders).
       if (cmd.pid) { try { spawnProcess("taskkill", ["/pid", String(cmd.pid), "/T", "/F"], { stdio: "ignore" }); } catch { /* best effort */ } }
       try { cmd.kill(); } catch { /* already gone */ }
-      finish([]);
+      fail("timeout", `CIM query produced no output within ${timeoutMs}ms — force-killed the helper (pid ${cmd.pid ?? "?"})`);
     }, timeoutMs);
     // Explicit utf8 decoding — without it a multibyte sequence split across chunk boundaries could
     // corrupt a CommandLine path and MISS a match (fail-safe: under-kill, not over-kill, since the
     // wedge-retry sweep catches a missed process next pass).
     cmd.stdout?.setEncoding("utf8");
     cmd.stdout?.on("data", (d) => { out += d; });
-    cmd.on("error", () => finish([]));
+    cmd.on("error", (err) => fail("spawn-error", err.message));
     cmd.on("close", () => {
       try {
-        // `ConvertTo-Json` can leave a raw, UN-ESCAPED control character inside a `CommandLine` string
-        // (observed live against real running processes on this host), which makes strict `JSON.parse`
-        // throw on an otherwise well-formed array — silently zeroing out the WHOLE enumeration (the old
-        // catch-all below would swallow it and return no processes at all, not just skip the one bad
-        // entry). A JSON structural character is never below 0x20, so any raw control character can only
-        // ever be sitting inside a string VALUE — safe to blank out without corrupting the JSON shape.
-        const sanitized = out.replace(CONTROL_CHAR_RE, " ");
-        const parsed = JSON.parse(sanitized || "[]") as unknown;
-        const arr = Array.isArray(parsed) ? parsed : [parsed];
-        finish(arr.map((r: Record<string, unknown>) => ({
-          pid: Number(r["ProcessId"]),
-          exePath: (r["ExecutablePath"] as string | null) ?? null,
-          cwd: null,
-          commandLine: (r["CommandLine"] as string | null) ?? null,
-        })));
-      } catch {
-        finish([]);
+        finish(parseWin32CimStdout(out));
+      } catch (err) {
+        fail("parse-error", (err as Error).message);
       }
     });
   });
@@ -2389,10 +2444,17 @@ function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
  * BOUNDED + BEST-EFFORT: the enumerate step is time-boxed both by the outer {@link withReapTimeout} race
  * AND, for the real win32 enumerator, by its OWN internal timer that force-kills its spawned helper (see
  * {@link enumerateProcessesWin32}) — so a wedged query can never leak a helper process on top of failing
- * to find its target. ANY failure (a missing OS tool, an enumeration timeout, a kill that errors) is
- * swallowed — this must never throw or block teardown, mirroring every other best-effort helper in the
- * worktree-removal path. Injectable via `deps` (enumerate/kill/timeoutMs) so a test can drive it with a
- * fake process list instead of the real OS.
+ * to find its target. ANY failure (a missing OS tool, an enumeration timeout, a malformed CIM payload, a
+ * kill that errors) is still swallowed here — this must never throw or block teardown, mirroring every
+ * other best-effort helper in the worktree-removal path — but a REAL P1 (a non-UTF8 PowerShell console
+ * codepage on this project's own self-hosting host silently zeroed EVERY enumeration for as long as any
+ * live process's CommandLine held a character that codepage couldn't cleanly round-trip, across all
+ * SEVEN call sites of this function in sessions/service.ts) proved that "swallowed" must not also mean
+ * "invisible": a failure here is now logged with a classified reason via `console.error` and reported
+ * back as `enumerationFailed: true`, so it no longer looks identical to a clean `killedPids: []`. See
+ * {@link parseWin32CimStdout}'s doc for the mechanism. Injectable via `deps` (enumerate/kill/timeoutMs) so
+ * a test can drive it with a fake process list — or a fake enumerator that REJECTS — instead of the real
+ * OS.
  *
  * ACCEPTED RISK (both fail-safe / under-kill, not over-kill — reviewed and deliberately kept): (1) the
  * command-line arm of {@link processRootedInWorktree} intentionally over-matches a process that merely
@@ -2422,7 +2484,7 @@ function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 export async function reapProcessesRootedInWorktree(
   worktreePath: string,
   deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number; excludePids?: number[] } = {},
-): Promise<{ killedPids: number[] }> {
+): Promise<{ killedPids: number[]; enumerationFailed?: boolean }> {
   const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   const kill = deps.kill ?? killProcessById;
   const timeoutMs = deps.timeoutMs ?? 10_000;
@@ -2437,8 +2499,14 @@ export async function reapProcessesRootedInWorktree(
       try { kill(proc.pid); killedPids.push(proc.pid); } catch { /* best effort */ }
     }
     return { killedPids };
-  } catch {
-    return { killedPids: [] }; // enumeration failed/timed out — best-effort, never throw past the caller
+  } catch (err) {
+    // LOUD ON FAILURE: still fail-CLOSED (never widen the kill set on a failure — return nothing to kill,
+    // exactly like before) but no longer SILENT — a total enumeration collapse used to be indistinguishable
+    // from "no matching process exists" (finish([]) on every failure path), which is what let worktree
+    // process cleanup silently no-op host-wide, undetected, for as long as the underlying trigger
+    // persisted. Never rethrown past this caller — best-effort by construction, teardown must never block.
+    console.error(`[reap] ${worktreePath}: process enumeration FAILED this cycle — found/killed NOTHING (fail-closed, not proof nothing needed killing): ${(err as Error).message}`);
+    return { killedPids: [], enumerationFailed: true };
   }
 }
 

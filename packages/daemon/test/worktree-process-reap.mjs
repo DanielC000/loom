@@ -34,7 +34,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, killableRemoveDir } = await import("../dist/git/worktrees.js");
-const { processRootedInWorktree, reapProcessesRootedInWorktree } = await import("../dist/pty/host.js");
+const { processRootedInWorktree, reapProcessesRootedInWorktree, parseWin32CimStdout } = await import("../dist/pty/host.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -119,6 +119,52 @@ const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   check("(unit) a caller-excluded pid rooted in the worktree is NEVER killed", !killed.includes(55555));
   check("(unit) a different matching pid NOT in excludePids IS still killed", killed.includes(66666));
   check("(unit) killedPids in the return value excludes the caller-excluded pid too", !result.killedPids.includes(55555));
+}
+
+// ============================== (unit) enumeration-failure classification — regression guard ==============================
+// A P1 (2026-07-28): on a live self-hosting daemon host, `[Console]::OutputEncoding` defaulted to a
+// non-UTF8 single-byte codepage (IBM850/CP850 — confirmed via `[Console]::OutputEncoding`/`chcp`), so a
+// character in ANY live process's CommandLine that codepage couldn't cleanly round-trip corrupted the CIM
+// query's OWN `ConvertTo-Json` output — a stray, un-escaped `"` landing in the middle of a CommandLine
+// string value, breaking `JSON.parse` for the WHOLE array. The old code caught that and silently returned
+// `[]` — INDISTINGUISHABLE from "no matching process exists" — across all SEVEN call sites of
+// `reapProcessesRootedInWorktree` in sessions/service.ts, so worktree process cleanup could silently do
+// nothing, host-wide, for as long as the trigger persisted. MUST NOT depend on this host's environment (no
+// live non-ASCII-argv process, no particular codepage) — this feeds a deliberately malformed payload,
+// shaped exactly like the real failure (an unescaped `"` prematurely terminating a CommandLine string
+// value, producing the same "Expected ',' or '}' after property value" class of error), straight through
+// the real parsing function and the real reap catch path.
+if (process.platform === "win32") {
+  const MALFORMED_CIM_PAYLOAD = `[{"ProcessId":424242,"ExecutablePath":null,"CommandLine":"node "unterminated because a stray quote broke this value""}]`;
+  let threw = false;
+  try {
+    parseWin32CimStdout(MALFORMED_CIM_PAYLOAD);
+  } catch {
+    threw = true;
+  }
+  check("(unit) parseWin32CimStdout THROWS on a malformed CIM payload (never silently returns [])", threw);
+}
+
+{
+  const WT2 = "/home/x/.loom/worktrees/proj1/deadbeef9999";
+  const errors = [];
+  const origConsoleError = console.error;
+  console.error = (msg) => { errors.push(String(msg)); };
+  let result;
+  try {
+    result = await reapProcessesRootedInWorktree(WT2, {
+      enumerate: async () => { throw new Error("simulated enumeration failure (malformed CIM payload)"); },
+    });
+  } finally {
+    console.error = origConsoleError;
+  }
+  check("(unit) an enumerator that fails yields killedPids: [] (fail-CLOSED — never proof nothing needed killing)",
+    Array.isArray(result.killedPids) && result.killedPids.length === 0);
+  check("(unit) THE FIX: the failure is DISTINGUISHABLE in the return value via enumerationFailed: true " +
+    "(this assertion FAILS against pre-fix code, where the field never existed at all)",
+    result.enumerationFailed === true);
+  check("(unit) THE FIX: the failure is LOUD — a classified [reap] error naming the worktree + cause was logged, not swallowed silently",
+    errors.some((e) => e.includes("[reap]") && e.includes(WT2) && e.includes("simulated enumeration failure")));
 }
 
 // ============================== (real) real OS processes, real enumerator/killer ==============================
