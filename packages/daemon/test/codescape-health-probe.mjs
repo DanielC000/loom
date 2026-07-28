@@ -59,8 +59,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: [50, 100, 150], // fast — proves the restart without waiting real minutes
     healthyRunMs: 60_000, // a kill-right-after-spawn (wedge) must never count as "healthy"
-    healthProbeIntervalMs: 100,
-    healthProbeTimeoutMs: 50,
+    // healthProbeIntervalMs/healthProbeTimeoutMs: NOT shrunk further than this — a REAL respawned child
+    // process needs real wall-clock time just to start up (Node runtime init + ESM resolution) before it
+    // can record its own spawn or bind its port; empirically ~70-85ms on this fixture, occasionally more
+    // under host load. The floor time before a kill is eligible is (threshold-1)*intervalMs — it must stay
+    // safely above that startup latency, or the health monitor can kill a freshly-restarted generation
+    // before it ever gets to run, making it silently vanish from the calls file (card 7a86df32: this exact
+    // under-margin caused scenario (2)'s "exactly N spawns" count to read low nondeterministically).
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
   });
   await sup.start(["/fake/repo/sustained-wedge"]);
@@ -69,7 +76,7 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   const portBefore = sup.getPort();
   check("(1) initial serve spawned", readServeCalls(callsFile).length === 1 && typeof pidBefore === "number");
 
-  // 3 consecutive failed probes @100ms apart (~300ms) should trigger a kill -> real exit -> the EXISTING
+  // 3 consecutive failed probes @300ms apart (~900ms) should trigger a kill -> real exit -> the EXISTING
   // restart path. Poll the calls file (never a blind sleep) for the second 'serve' record.
   for (let i = 0; i < 100 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
   check("(1) a sustained wedge triggers a restart via the EXISTING death path (a new serve call recorded)",
@@ -94,8 +101,12 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: backoffMs,
     healthyRunMs: 60_000,
-    healthProbeIntervalMs: 60,
-    healthProbeTimeoutMs: 40,
+    // See scenario (1)'s identical comment: intervalMs/timeoutMs must stay safely above real child-process
+    // startup latency (~70-85ms observed), since the floor time before a kill is eligible is
+    // (threshold-1)*intervalMs. This scenario chains THREE respawns back to back (more exposure to the
+    // race than (1)'s single respawn), so it needs the same margin, not a smaller one.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 2,
   });
   await sup.start(["/fake/repo/giveup-wedge"]);
@@ -117,7 +128,7 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     sup.getPort() === null);
 
   const callsAtGiveUp = readServeCalls(callsFile).length;
-  await sleep(400); // several more health-probe intervals' worth — a lingering tick must NOT resurrect it
+  await sleep(1000); // several more health-probe intervals' worth — a lingering tick must NOT resurrect it
   check("(2) give-up STAYS terminal — no further restart / serve spawn, even with the health-probe timer still ticking",
     sup.getPort() === null && readServeCalls(callsFile).length === callsAtGiveUp);
 
