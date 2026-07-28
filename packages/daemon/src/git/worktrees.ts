@@ -3072,25 +3072,51 @@ export async function mergeMainIntoWorktree(
 }
 
 export async function mergeBranch(
-  repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {},
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
+  repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; reuseInvalidated?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
   // GitWriter.commit/checkout/createBranch against the same repo, can never interleave with this one. See
   // the lock's own doc (git/repo-lock.ts) for the exact corruption this closes.
-  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps));
+  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead));
 }
 
 async function mergeBranchLocked(
-  repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {},
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind }> {
+  repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; reuseInvalidated?: boolean }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
   // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
   // fix, `git = simpleGit(repoPath)` here had NEITHER — a hung git child (e.g. a wedged commit hook) never
   // settled, which (post-e076d2a2) wedged the per-repo merge mutex PERMANENTLY, not just this one op.
   const { git, timeoutMs } = boundedMergeGit(repoPath, deps);
+  // REUSE-PREMISE RE-VERIFICATION (card e50600d2 — CR follow-up): `confirmWorkerMerge` may have decided to
+  // skip a redundant gate run because, AS OF A CHECK MADE BEFORE THIS LOCK WAS ACQUIRED, canonical main
+  // hadn't moved past what the branch already contains. That check alone is a TOCTOU gap — main is a
+  // process-wide shared resource, and ANOTHER worker's merge on this SAME repo can land between that check
+  // and this lock being granted (this lock only serializes the squash sequence itself, not the caller's
+  // earlier decision). `requireCanonicalHead`, when the caller passed one, is the canonical HEAD sha it
+  // observed at the moment it decided to reuse — re-read HERE, the FIRST thing after acquiring the lock and
+  // BEFORE touching anything (no residue-clear, no squash), so an invalidated premise is caught with ZERO
+  // side effects: canonical repo AND worktree stay completely untouched, and the caller gets a distinct
+  // `reuseInvalidated:true` it can surface as a benign race rather than a real merge failure. Absent
+  // (the ordinary case: a real gate ran, or no reuse was ever considered) this check is skipped entirely —
+  // byte-identical to before this existed.
+  if (requireCanonicalHead) {
+    let currentHead: string;
+    try {
+      currentHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, reuse-premise check)")).trim();
+    } catch (e) {
+      return { ok: false, reason: `failed to verify canonical HEAD before honoring a reused self-check: ${(e as Error).message}` };
+    }
+    if (currentHead !== requireCanonicalHead) {
+      return {
+        ok: false, reuseInvalidated: true,
+        reason: "canonical main advanced between the self-check reuse decision and the merge lock (a benign race between concurrent merges on this repo, not a problem with this branch) — canonical repo and worktree are untouched; re-confirm to re-gate against the current tree",
+      };
+    }
+  }
   // Re-derive from a CLEAN index: clear any AFFIRMATIVE in-progress-merge residue (a stale MERGE_HEAD or
   // unmerged entries from an aborted op) BEFORE the squash, so a leftover state can't make the first
   // --squash stage nothing (the idempotency bug). Gated on a positive signal so a clean canonical repo is

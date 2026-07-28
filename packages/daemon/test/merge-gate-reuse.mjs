@@ -1,0 +1,360 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
+// REUSE-A-GREEN-SELF-CHECK test (card e50600d2 — perf(orchestration): don't re-run the identical gate at
+// merge when the worker's own `run_gate` self-check already validated the EXACT same merge input). REAL
+// git on temp repos, an INJECTED `runGate` seam shared by BOTH `runWorkerGate` and `confirmWorkerMerge`
+// (mirrors merge-gate-retry.mjs's in-process style) so a call COUNTER proves whether the gate command
+// actually ran a second time, rather than trusting the return value alone.
+//
+// THE WASTE THIS CLOSES: `run_gate` (worker self-check) and `worker_merge_confirm` (merge gate) run the
+// IDENTICAL gateCommand. When main hasn't moved and nothing changed since a green self-check, the second
+// run tests a byte-identical tree — pure duplicate lane time.
+//
+// FAIL-CLOSED IS THE WHOLE DESIGN: this suite's center of gravity is the REFUSAL cases, not the happy
+// path — an unprovable reuse must always fall back to running the gate, never to assuming.
+//
+// Proves:
+//   (A) HAPPY PATH — a green, current self-check on an unmoved/clean/caught-up branch is REUSED: the
+//       gate command is called exactly ONCE (by run_gate; confirmWorkerMerge calls it zero more times),
+//       the merge succeeds, and the result records gateRan:false + reusedOpId === the self-check's opId.
+//       The `build_gate` audit event also carries `reused:true` + the same `reusedOpId`.
+//   (B) MOVED MAIN (after the self-check) — main advances past the branch's fork point AFTER a green
+//       self-check: confirmWorkerMerge must call the gate command again (a real re-gate), and the result
+//       records gateRan:true with no reusedOpId.
+//   (C) STALE BASE (before the self-check even ran) — the branch was ALREADY behind main when the
+//       self-check ran (a distinct temporal ordering from (B), same underlying guard: behindMain is
+//       re-derived FRESH at confirm time, never assumed): still forces a real re-gate.
+//   (D) RACY/"UNVERIFIED" SELF-CHECK — the self-check's OWN settle already flagged headCurrent:false (the
+//       worktree changed WHILE that run was executing — the same shape run-gate-head-currency.mjs proves
+//       elsewhere): never reused, even though nothing has changed since that settle.
+//   (E) DIRTY WORKTREE — a real uncommitted edit lands AFTER a green, current self-check: never reused.
+//   (F) A LATER FAILING SELF-CHECK SUPERSEDES AN EARLIER GREEN ONE — run_gate passes, then run_gate is
+//       called again at the SAME commit and FAILS: confirmWorkerMerge must re-gate (the LATEST self-check
+//       is what's on record, not the stale earlier green).
+// Run: 1) build daemon (pnpm build), 2) node test/merge-gate-reuse.mjs
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+import { execSync } from "node:child_process";
+
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgru-home-${Date.now()}`);
+fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+
+const { Db } = await import("../dist/db.js");
+const { SessionService } = await import("../dist/sessions/service.js");
+const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+const { createWorktree } = await import("../dist/git/worktrees.js");
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const GIT_ID = "-c user.email=mgru@loom -c user.name=mgru";
+const now = new Date().toISOString();
+
+const eventsOfKind = (db, mgrId, kind) => db.listEvents(mgrId).filter((e) => e.kind === kind);
+
+function seed(db, p, gateCommand) {
+  db.insertProject({ id: p.projId, name: "MGRU", repoPath: p.repo, vaultPath: p.repo, config: { orchestration: { gateCommand } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: p.taskId, projectId: p.projId, title: "MGRU-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: p.workerId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
+}
+
+function makeRepo(p) {
+  fs.mkdirSync(p.repo, { recursive: true });
+  fs.writeFileSync(path.join(p.repo, "README.md"), "# mgru\n");
+  execSync(`git init -q && git config user.email mgru@loom && git config user.name mgru && git add . && git ${GIT_ID} commit -q -m init`, { cwd: p.repo });
+}
+
+const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const mk = (label, file) => ({
+  projId: `mgru-${label}-proj-${sfx}`, agentId: `mgru-${label}-agent-${sfx}`, taskId: `mgru-${label}-task-${sfx}`,
+  mgrId: `mgru-${label}-mgr-${sfx}`, workerId: `mgru-${label}-wkr-${sfx}`,
+  repo: path.join(os.tmpdir(), `loom-mgru-${label}-${sfx}`), file,
+});
+
+const dbs = [];
+const worktrees = [];
+try {
+  // ── (A) HAPPY PATH — reuse ───────────────────────────────────────────────────────────────────────────
+  {
+    const A = mk("a", "feature-a.txt");
+    makeRepo(A);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
+    A.worktreePath = worktreePath; A.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, A.file), "work for A\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${A.file}"`, { cwd: worktreePath });
+    seed(db, A, "pnpm gate");
+
+    const selfCheck = await sessions.runWorkerGate(A.workerId);
+    check("(A) precondition: self-check settled green", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true);
+    check("(A) precondition: gate called exactly once (the self-check)", calls === 1);
+
+    const confirm = await sessions.confirmWorkerMerge(A.mgrId, A.workerId);
+    check("(A) confirmWorkerMerge does NOT call the gate again", calls === 1);
+    check("(A) merged:true", confirm.merged === true);
+    check("(A) gateRan:false", confirm.gateRan === false);
+    check("(A) reusedOpId === the self-check's own opId", confirm.reusedOpId === selfCheck.value.opId);
+    const buildGate = eventsOfKind(db, A.mgrId, "build_gate")[0];
+    check("(A) build_gate audit event carries reused:true + the same reusedOpId", buildGate?.detail?.reused === true && buildGate?.detail?.reusedOpId === selfCheck.value.opId);
+    check("(A) task moved to done", db.getTask(A.taskId).columnKey === "done");
+  }
+
+  // ── (B) MOVED MAIN (after the self-check) — must re-gate ────────────────────────────────────────────
+  {
+    const B = mk("b", "feature-b.txt");
+    makeRepo(B);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(B.repo, B.projId, B.taskId);
+    B.worktreePath = worktreePath; B.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, B.file), "work for B\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${B.file}"`, { cwd: worktreePath });
+    seed(db, B, "pnpm gate");
+
+    const selfCheck = await sessions.runWorkerGate(B.workerId);
+    check("(B) precondition: self-check settled green", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true);
+
+    // Main advances AFTER the self-check ran — the branch's history now misses this commit.
+    fs.writeFileSync(path.join(B.repo, "main-advance-b.txt"), "main moved forward\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance b"`, { cwd: B.repo });
+
+    const confirm = await sessions.confirmWorkerMerge(B.mgrId, B.workerId);
+    check("(B) confirmWorkerMerge re-ran the gate for real", calls === 2);
+    check("(B) merged:true (the union-merge forwards cleanly, no conflict)", confirm.merged === true);
+    check("(B) gateRan:true", confirm.gateRan === true);
+    check("(B) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (C) STALE BASE (before the self-check even ran) — must re-gate ─────────────────────────────────
+  {
+    const C = mk("c", "feature-c.txt");
+    makeRepo(C);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(C.repo, C.projId, C.taskId);
+    C.worktreePath = worktreePath; C.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, C.file), "work for C\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${C.file}"`, { cwd: worktreePath });
+    // Main advances BEFORE the self-check runs — the branch is stale from the outset.
+    fs.writeFileSync(path.join(C.repo, "main-advance-c.txt"), "main moved forward first\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance c"`, { cwd: C.repo });
+    seed(db, C, "pnpm gate");
+
+    const selfCheck = await sessions.runWorkerGate(C.workerId);
+    check("(C) precondition: self-check settled green despite the stale base", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true);
+
+    const confirm = await sessions.confirmWorkerMerge(C.mgrId, C.workerId);
+    check("(C) confirmWorkerMerge re-ran the gate for real", calls === 2);
+    check("(C) merged:true (the union-merge forwards cleanly, no conflict)", confirm.merged === true);
+    check("(C) gateRan:true", confirm.gateRan === true);
+    check("(C) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (D) RACY / "UNVERIFIED" SELF-CHECK — must re-gate ───────────────────────────────────────────────
+  {
+    const D = mk("d", "feature-d.txt");
+    makeRepo(D);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async (_gate, wt) => {
+      calls++;
+      if (calls === 1) {
+        // Mutate the worktree WHILE the "gate" is running — the exact RACY shape run-gate-head-currency.mjs
+        // proves elsewhere: the settle stamp diverges from the admit stamp, so this run settles
+        // headCurrent:false ("treat this result as UNVERIFIED for your current code") even though nothing
+        // moves again after this.
+        fs.writeFileSync(path.join(wt, "late.txt"), "late work\n");
+        execSync(`git add . && git ${GIT_ID} commit -q -m "late commit"`, { cwd: wt });
+      }
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(D.repo, D.projId, D.taskId);
+    D.worktreePath = worktreePath; D.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, D.file), "work for D\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${D.file}"`, { cwd: worktreePath });
+    seed(db, D, "pnpm gate");
+
+    const selfCheck = await sessions.runWorkerGate(D.workerId);
+    check("(D) precondition: self-check settled green but RACY (headCurrent:false)", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true && selfCheck.value.headCurrent === false);
+
+    const confirm = await sessions.confirmWorkerMerge(D.mgrId, D.workerId);
+    check("(D) confirmWorkerMerge re-ran the gate for real (a racy settle is never reused)", calls === 2);
+    check("(D) merged:true", confirm.merged === true);
+    check("(D) gateRan:true", confirm.gateRan === true);
+    check("(D) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (E) DIRTY WORKTREE (a real uncommitted edit after a green, current self-check) — must re-gate ──
+  {
+    const E = mk("e", "feature-e.txt");
+    makeRepo(E);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(E.repo, E.projId, E.taskId);
+    E.worktreePath = worktreePath; E.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, E.file), "work for E\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${E.file}"`, { cwd: worktreePath });
+    seed(db, E, "pnpm gate");
+
+    const selfCheck = await sessions.runWorkerGate(E.workerId);
+    check("(E) precondition: self-check settled green and current", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true && selfCheck.value.headCurrent === true);
+
+    // A real uncommitted edit lands AFTER the self-check settled clean.
+    fs.writeFileSync(path.join(worktreePath, "uncommitted.txt"), "post-gate edit\n");
+
+    const confirm = await sessions.confirmWorkerMerge(E.mgrId, E.workerId);
+    check("(E) confirmWorkerMerge re-ran the gate for real (a dirty worktree is never reused)", calls === 2);
+    check("(E) gateRan:true", confirm.gateRan === true);
+    check("(E) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (F) A LATER FAILING SELF-CHECK SUPERSEDES AN EARLIER GREEN ONE — must re-gate ──────────────────
+  {
+    const F = mk("f", "feature-f.txt");
+    makeRepo(F);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => {
+      calls++;
+      if (calls === 2) return { passed: false, failedStep: "pnpm gate", failedStatus: 1, failedSignal: null, failedTimedOut: false, outputTail: "flaked" };
+      return { passed: true };
+    };
+    // gateOpRetainMs:0 (mirrors gate-timeout-circuit-breaker.mjs): disables run_gate's own settle-grace
+    // retention window, so these two BACK-TO-BACK run_gate calls each trigger a genuinely fresh
+    // invocation instead of the second being served the first's cached (green) result.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, gateOpRetainMs: 0 });
+    const { worktreePath, branch } = await createWorktree(F.repo, F.projId, F.taskId);
+    F.worktreePath = worktreePath; F.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, F.file), "work for F\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${F.file}"`, { cwd: worktreePath });
+    seed(db, F, "pnpm gate");
+
+    const first = await sessions.runWorkerGate(F.workerId);
+    check("(F) precondition: FIRST self-check settled green", first.settled === true && first.ok === true && first.value.passed === true);
+    const second = await sessions.runWorkerGate(F.workerId);
+    check("(F) precondition: SECOND self-check (same commit) settled FAILED", second.settled === true && second.ok === true && second.value.passed === false);
+
+    const confirm = await sessions.confirmWorkerMerge(F.mgrId, F.workerId);
+    check("(F) confirmWorkerMerge re-ran the gate for real (latest record is the failing one, not the stale green)", calls === 3);
+    check("(F) merged:true (the third call, back to passing, is what's on record)", confirm.merged === true);
+    check("(F) gateRan:true", confirm.gateRan === true);
+    check("(F) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (G) A NEW COMMIT on the branch itself after the self-check — must re-gate (never match on a newer
+  //        sha than the one the self-check actually validated) ───────────────────────────────────────────
+  {
+    const G = mk("g", "feature-g.txt");
+    makeRepo(G);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(G.repo, G.projId, G.taskId);
+    G.worktreePath = worktreePath; G.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, G.file), "work for G\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${G.file}"`, { cwd: worktreePath });
+    seed(db, G, "pnpm gate");
+
+    const selfCheck = await sessions.runWorkerGate(G.workerId);
+    check("(G) precondition: self-check settled green at commit A", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true);
+    const shaA = selfCheck.value.validatedHead;
+
+    // A NEW commit (B) lands on the branch itself AFTER the self-check validated A — main is untouched.
+    fs.writeFileSync(path.join(worktreePath, "second-commit.txt"), "commit B\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "second commit B"`, { cwd: worktreePath });
+    const shaB = execSync("git rev-parse HEAD", { cwd: worktreePath }).toString().trim();
+    check("(G) precondition: the branch really did advance past what was validated", shaB !== shaA);
+
+    const confirm = await sessions.confirmWorkerMerge(G.mgrId, G.workerId);
+    check("(G) confirmWorkerMerge re-ran the gate for real (validatedHead A can never match commit B)", calls === 2);
+    check("(G) gateRan:true", confirm.gateRan === true);
+    check("(G) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (H) SIMULATED DAEMON RESTART — the in-memory self-check record is process-local; a fresh
+  //        SessionService (a new process, sharing the same on-disk db) has never seen it, so a merge right
+  //        after a restart falls back to gating cleanly — no crash, no `undefined` treated as a match ────
+  {
+    const H = mk("h", "feature-h.txt");
+    makeRepo(H);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    const preRestart = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(H.repo, H.projId, H.taskId);
+    H.worktreePath = worktreePath; H.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, H.file), "work for H\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${H.file}"`, { cwd: worktreePath });
+    seed(db, H, "pnpm gate");
+
+    const selfCheck = await preRestart.runWorkerGate(H.workerId);
+    check("(H) precondition: self-check settled green on the PRE-restart instance", selfCheck.settled === true && selfCheck.ok === true && selfCheck.value.passed === true);
+
+    // A fresh SessionService — its lastWorkerGateCheck map starts empty, exactly like a real
+    // daemon_restart's new process — sharing the SAME db (the on-disk state a restart actually preserves).
+    const postRestart = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const confirm = await postRestart.confirmWorkerMerge(H.mgrId, H.workerId);
+    check("(H) confirmWorkerMerge on the post-restart instance ran the gate for real (no crash, no phantom reuse)", calls === 2);
+    check("(H) merged:true", confirm.merged === true);
+    check("(H) gateRan:true", confirm.gateRan === true);
+    check("(H) reusedOpId is absent", confirm.reusedOpId === undefined);
+  }
+
+  // ── (I) THE TOCTOU GUARD ITSELF — mergeBranch's own in-lock re-verification (CR follow-up) ───────────
+  // Directly exercises the mechanism that closes the race the manager flagged: reuse is decided BEFORE
+  // mergeBranch's own canonical-index lock is even requested, so a SIBLING merge on this same repo could
+  // land in between. `requireCanonicalHead` is what confirmWorkerMerge threads through so mergeBranch can
+  // catch that INSIDE its own lock, before touching anything, rather than trusting a stale premise.
+  {
+    const I = mk("i", "feature-i.txt");
+    makeRepo(I);
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+    const { worktreePath, branch } = await createWorktree(I.repo, I.projId, I.taskId);
+    I.worktreePath = worktreePath; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, I.file), "work for I\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${I.file}"`, { cwd: worktreePath });
+    const realMainHead = execSync("git rev-parse HEAD", { cwd: I.repo }).toString().trim();
+
+    // A STALE (wrong) requireCanonicalHead — simulating "main advanced after the reuse decision was made".
+    const staleResult = await mergeBranch(I.repo, branch, "MGRU-I stale", {}, "0000000000000000000000000000000000000000");
+    check("(I) a stale requireCanonicalHead is REFUSED, not silently honored", staleResult.ok === false && staleResult.reuseInvalidated === true);
+    check("(I) the refusal reads as a benign race, not a real merge failure", /benign race|advanced/i.test(staleResult.reason ?? ""));
+    const headAfterStale = execSync("git rev-parse HEAD", { cwd: I.repo }).toString().trim();
+    check("(I) canonical repo HEAD is COMPLETELY untouched by the refused attempt", headAfterStale === realMainHead);
+    const stagedAfterStale = execSync("git diff --cached --name-only", { cwd: I.repo }).toString().trim();
+    check("(I) canonical repo index carries NO residue from the refused attempt", stagedAfterStale === "");
+
+    // The MATCHING (current) head is honored normally — the check doesn't block a genuinely valid reuse.
+    const okResult = await mergeBranch(I.repo, branch, "MGRU-I ok", {}, realMainHead);
+    check("(I) a CURRENT requireCanonicalHead proceeds normally (merged, not refused)", okResult.ok === true && okResult.reuseInvalidated === undefined);
+  }
+} finally {
+  for (const db of dbs) try { db.close(); } catch { /* ignore */ }
+  for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
+  try { fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true }); } catch { /* ignore */ }
+}
+
+console.log(failures === 0
+  ? "\n✅ ALL PASS — a merge whose inputs are provably identical to a green, current self-check skips the redundant gate run (gateRan:false + reusedOpId), while a moved main, a stale base, a racy/UNVERIFIED settle, a dirty worktree, or a superseding later failure ALL still force a real re-gate (gateRan:true, no reusedOpId)."
+  : `\n❌ ${failures} FAILURE(S).`);
+process.exit(failures === 0 ? 0 : 1);

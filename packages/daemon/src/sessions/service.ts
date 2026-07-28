@@ -147,7 +147,15 @@ type GateRejectionDetail = {
   circuitBroken?: boolean;
 };
 
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string };
+/** `confirmWorkerMerge`'s explicit record of WHICH path a merge's gate took (card e50600d2 — reuse a
+ *  worker's green self-check instead of re-running the identical gate at merge). `gateRan:true` means
+ *  this merge actually spawned+ran `gateCommand` (today's behavior, byte-identical); `gateRan:false`
+ *  means it was PROVABLY skipped because the worker's own `run_gate` self-check already validated the
+ *  exact same merge input, in which case `reusedOpId` names that self-check's `opId` so a reader can
+ *  trace the reused result back to the specific run that produced it. Absent entirely on a rejection
+ *  path that never reached the reuse decision (stranded work, union conflict, circuit breaker) — those
+ *  never ran or skipped a gate, so the field would be meaningless noise there. */
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string; gateRan?: boolean; reusedOpId?: string };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
  *  PendingOpRegistry's doc) after {@link SessionService.confirmWorkerMergeTracked} settles it — long
@@ -183,6 +191,26 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  same as `validatedHead` — EXCEPT the circuit-breaker short-circuit path (no gate actually ran, no stamp
  *  taken, so neither field is set, same as `validatedHead`/`durationMs` there). */
 type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string };
+
+/**
+ * A worker's most recent SETTLED `run_gate` self-check outcome (card e50600d2 — reuse a green
+ * self-check instead of re-running the identical gate at merge). Recorded by {@link
+ * SessionService.runWorkerGate} on EVERY settled (`ran:true`) outcome, pass OR fail — overwriting
+ * whatever was there before — so a LATER failing (or racy) self-check at the exact same commit always
+ * supersedes an earlier green one; a stale green can never be resurrected by this record alone.
+ *
+ * `stamp` is the SAME {@link WorktreeGateStamp} `runWorkerGate` took at settle (equivalent to its start/
+ * admit stamps whenever `headCurrent` is true, since those three stamps must already agree for
+ * `headCurrent` to read true — see `describeGateHeadCurrency`) — {@link SessionService.confirmWorkerMerge}
+ * compares a FRESH stamp against this one via {@link gateStampsDiffer} to prove (or refute) that the
+ * worktree is byte-identical to what this run validated.
+ *
+ * In-memory only, same daemon-uptime-scoped posture as {@link gateStartStamps}: a daemon restart between
+ * the self-check and the merge confirm simply loses this record, which is FINE — the reuse check in
+ * `confirmWorkerMerge` fails closed on a missing record (falls through to running the gate exactly as
+ * before this existed), never on a false "nothing changed" guess.
+ */
+type LastWorkerGateCheck = { passed: boolean; headCurrent: boolean; stamp: WorktreeGateStamp; opId: string; branch: string };
 
 /** How long a settled `run_gate` op stays `peek()`-able (as a RETAINED terminal view) — and, more to the
  *  point of card 50c1e0d0, how long `PendingOpRegistry.attach()`'s own retention-window dedupe (see its
@@ -625,6 +653,18 @@ export class SessionService {
    * harmless (nothing can attach to it after restart anyway — the op itself doesn't survive either).
    */
   private readonly gateStartStamps = new Map<string, WorktreeGateStamp>();
+  /** {@link LastWorkerGateCheck} per worker session — see that type's doc. Keyed by `workerSessionId`
+   *  (not `gate:${workerSessionId}` like {@link gateStartStamps} — this outlives a single run_gate call's
+   *  own lifecycle, on purpose: it's read much later, at merge-confirm time). PLAIN IN-MEMORY, process-
+   *  scoped — NOT durable, NOT persisted to `db`: a `daemon_restart` (a new process) starts with this map
+   *  EMPTY, same as any other in-memory map in this class. That's the intended failure mode, not a gap to
+   *  fix — `confirmWorkerMerge`'s reuse check is a plain `Map.get` that reads `undefined` for every worker
+   *  after a restart, which its `if (lastCheck && …)` guard already treats as "unprovable" and falls
+   *  through to running the gate for real; there's no separate restart branch to get wrong. Never
+   *  explicitly purged on worker retirement beyond the one cleanup {@link confirmWorkerMerge} does on its
+   *  own successful merge — a bounded, tiny (one small object per worker session ever created) leak on a
+   *  long-running daemon, mirroring the accepted tradeoff already documented on {@link gateTimeoutStreak}. */
+  private readonly lastWorkerGateCheck = new Map<string, LastWorkerGateCheck>();
   /** Test-only override for {@link GATE_OP_RETAIN_MS} (mirrors the `wedgeSweepIntervalMs`-style seams
    *  below) — defaults to the real production constant. A hermetic test that deliberately issues several
    *  BACK-TO-BACK `runWorkerGate` calls, each expecting to trigger its OWN fresh gate invocation (e.g. the
@@ -7936,6 +7976,21 @@ export class SessionService {
     // shared memory footprint across lint+test+build was OOM-killing a worker's gate (exit 137,
     // Auditor finding b9515beb). Same fail-closed short-circuit semantics as the old `&&` chain: the
     // first non-zero step stops the run.
+    //
+    // `gateRan`/`reusedOpId` (card e50600d2): declared at THIS outer scope (not inside `if (gate)`
+    // below) so the plain GREEN merge return at the bottom of this method — which sits OUTSIDE that
+    // block — can report which path this merge's gate took. `gateRan` defaults `false` for a project
+    // with no gate at all (nothing ran, nothing was reused either — the existing `gateWarning` already
+    // explains that case); flipped `true` the moment the `if (gate)` block below decides to actually
+    // spawn one, then flipped back `false` (with `reusedOpId` set) only when the reuse check proves it
+    // doesn't need to.
+    let gateRan = false;
+    let reusedOpId: string | undefined;
+    // The canonical HEAD sha `confirmWorkerMerge` observed at the moment it decided to reuse (card
+    // e50600d2 CR follow-up) — threaded into `mergeBranch` so it can re-verify, INSIDE its own merge
+    // lock, that main provably hasn't moved since this decision. `undefined` whenever reuse wasn't
+    // considered/decided, in which case `mergeBranch` skips that re-check entirely (byte-identical).
+    let reuseMainHead: string | undefined;
     if (gate) {
       // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
       // worker left running (an escaped vite/esbuild that detached from the pty's process tree) can hold
@@ -8025,6 +8080,56 @@ export class SessionService {
         };
       }
 
+      // REUSE-A-GREEN-SELF-CHECK (card e50600d2): `run_gate` (the worker's own self-check) and this merge
+      // gate run the IDENTICAL `gateCommand`. When this merge's input is PROVABLY the exact same tree the
+      // worker's self-check already validated green, re-running it here is pure duplicate lane time — so
+      // skip it. FAIL-CLOSED BY CONSTRUCTION: every condition below must be independently re-derived from
+      // recorded/fresh state right now, never inferred from elapsed time — any missing/unprovable/false
+      // condition falls straight through to running the gate exactly as before this existed.
+      //   1. The worker's LATEST run_gate self-check (this.lastWorkerGateCheck, recorded by
+      //      runWorkerGate on every settle) passed, AND its OWN settle already proved current (headCurrent)
+      //      — this alone excludes BOTH a self-check that settled RACY/"UNVERIFIED" (headCurrent:false)
+      //      and, transitively, one that was ever `staleAgainstWorktree` while still in flight (a run that
+      //      genuinely tested a torn tree can only ever settle headCurrent:false, never true).
+      //   2. `!freshStamp.dirty` — the worktree carries NO uncommitted changes right now (a clean tree),
+      //      and `!gateStampsDiffer(lastCheck.stamp, freshStamp)` — that clean tree's HEAD (and, had it
+      //      been dirty, its content hash) is BYTE-IDENTICAL to what the self-check validated: no commits,
+      //      no edits, landed since. This directly proves the self-check's validated sha IS the branch tip
+      //      being merged, and that nothing changed post-gate.
+      //   3. `freshBehindMain === 0` — re-derived FRESH here (never assumed from anything computed
+      //      earlier in this method, and never skipped just because a union-merge already ran above) —
+      //      main's current HEAD is already an ancestor of the branch. This is the hard constraint: a main
+      //      that moved past what the branch contains ALWAYS fails this check (`undefined` on a git error
+      //      also fails it, strict `=== 0`), forcing a real re-gate.
+      // Any gap in this proof (no self-check on record for this exact branch, one that failed or settled
+      // racy, a dirty worktree, a moved HEAD, or main having advanced) leaves `reuseResult` unset below and
+      // the gate runs for real, unchanged from before this existed.
+      let reuseResult: GateSequentialResult | undefined;
+      const lastCheck = this.lastWorkerGateCheck.get(workerSessionId);
+      if (lastCheck && lastCheck.branch === branch && lastCheck.passed && lastCheck.headCurrent) {
+        const freshStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
+        const freshBehindMain = await countCommitsBehind(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
+        if (!freshStamp.dirty && !gateStampsDiffer(lastCheck.stamp, freshStamp) && freshBehindMain === 0) {
+          // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF THIS
+          // READ — main is a process-wide shared resource, and a SIBLING merge on this same repo can still
+          // land before this merge's own squash actually runs (this reuse decision happens well before
+          // `mergeBranch`'s own lock is ever requested). Capturing `reuseMainHead` here and threading it
+          // through does NOT close that window by itself — it only lets `mergeBranch` catch the invalidated
+          // premise INSIDE its own lock, immediately before doing anything else, and refuse instead of
+          // silently landing an unverified merge. See mergeBranchLocked's own doc for the actual guarantee.
+          reuseMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+          // A HEAD we can no longer resolve (a git read failure on this second call) means the re-check
+          // inside the lock can never succeed either (nothing to compare against would ever match) — fail
+          // CLOSED by not reusing at all, rather than passing `undefined` through (which `mergeBranch`
+          // would read as "no re-check requested", silently skipping the very protection this exists for).
+          if (reuseMainHead) {
+            reuseResult = { passed: true };
+            reusedOpId = lastCheck.opId;
+          }
+        }
+      }
+      gateRan = !reuseResult;
+
       const runGateSeq = this.runGate ?? runGateSequential;
       // HOST-LOAD guard (card 301d8c01): queue behind any other in-flight daemon-executed heavy gate
       // rather than running alongside it unbounded. See GateSemaphore's class doc. Held only across the
@@ -8036,7 +8141,7 @@ export class SessionService {
       // (admission) drives the `build_gate` event's real run-time `durationMs`, excluding queue wait. "high"
       // priority (card 24642c3d) — see the host-load-guard doc above.
       const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId };
-      let gateStartedAt = 0;
+      let gateStartedAt = Date.now();
       // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the semaphore's own active-run count at the instant
       // THIS run was admitted (i.e. including itself) — read inside the `fn` callback so it reflects
       // admission, not settle (by settle, a released slot could already read low again). Carried onto
@@ -8052,21 +8157,28 @@ export class SessionService {
       // of another permanent mystery. Do not prune these as noise — they look unused right up until the
       // one investigation that needs them, at which point there is no way to backfill them retroactively.
       let concurrentAtStart = 0;
-      let gateResult = await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => {
+      let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => {
         gateStartedAt = startedAt;
         concurrentAtStart = this.gateSemaphore.snapshot().active;
         return runGateSeq(gate, worktreePath, gateTimeoutMs);
       }, "high");
-      evt("build_gate", { passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart });
-      if (gateResult.failedTimedOut) {
-        // POST-TIMEOUT SWEEP (card 3564fd1e): gate-runner's own tree-kill already reaps everything still
-        // parented under the killed shell — this is the SAME worktree-path-scoped backstop the pre-gate
-        // sweep above uses, for whatever already detached/re-parented before that kill landed. Excludes the
-        // worker's own live pty pid for the identical reason the pre-gate sweep does (see its doc above) —
-        // this must never race gate-runner.ts's own precise tree-kill by ALSO killing the confirming worker.
-        try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+      evt("build_gate", {
+        passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart,
+        ...(gateRan ? {} : { reused: true, reusedOpId }),
+      });
+      if (gateRan) {
+        if (gateResult.failedTimedOut) {
+          // POST-TIMEOUT SWEEP (card 3564fd1e): gate-runner's own tree-kill already reaps everything still
+          // parented under the killed shell — this is the SAME worktree-path-scoped backstop the pre-gate
+          // sweep above uses, for whatever already detached/re-parented before that kill landed. Excludes the
+          // worker's own live pty pid for the identical reason the pre-gate sweep does (see its doc above) —
+          // this must never race gate-runner.ts's own precise tree-kill by ALSO killing the confirming worker.
+          try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
+        }
+        // `recordGateTimeoutOutcome`'s own doc: call after EVERY REAL (non-short-circuited) gate
+        // invocation — a REUSED result never actually ran, so it must not feed the circuit breaker.
+        await this.recordGateTimeoutOutcome(branch, worktreePath, !!gateResult.failedTimedOut);
       }
-      await this.recordGateTimeoutOutcome(branch, worktreePath, !!gateResult.failedTimedOut);
       // TRANSIENT-KILL AUTO-RETRY (card bcba83a1 — the gate "lies" under memory pressure): an OOM/SIGKILL
       // (or our OWN gateTimeoutMs bound) killing a step used to surface identically to a genuine test/build
       // failure as the flat "build gate failed" — managers learned not to trust it under load and hand-
@@ -8190,8 +8302,23 @@ export class SessionService {
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
     // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
     const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
-    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs });
+    // `reuseMainHead` (card e50600d2 CR follow-up) is set ONLY when this merge decided to reuse a green
+    // self-check above — it's the canonical HEAD sha that decision was made against, so mergeBranch can
+    // re-verify (INSIDE its own lock, before touching anything) that main provably hasn't moved since.
+    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, reuseMainHead);
     if (!merge.ok) {
+      if (merge.reuseInvalidated) {
+        // BENIGN RACE, NOT A REAL MERGE FAILURE: a sibling merge on this same repo landed between this
+        // merge's reuse decision and mergeBranch's own lock — caught with ZERO side effects (canonical
+        // repo and worktree are both untouched; no residue, no partial squash). Worded so the manager reads
+        // this as "just re-confirm" rather than a code/branch problem needing investigation — a re-confirm
+        // re-derives the reuse decision fresh against the NEW main and either reuses validly this time or
+        // gates for real, exactly as any other confirm would.
+        const why = merge.reason ?? "canonical main advanced between the self-check reuse decision and the merge lock — re-confirm to re-gate against the current tree";
+        const suppressed = await rejectNotify("reuse_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo AND worktree untouched — just re-run worker_merge_confirm.`);
+        evt("merge_rejected", { reason: "reuse_invalidated", ...(suppressed ? { suppressed: true } : {}) });
+        return { merged: false, reason: why, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
+      }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       const failReason = merge.conflict ? "conflict" : "merge_failed";
       const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
@@ -8278,12 +8405,15 @@ export class SessionService {
       ? undefined
       : `unverified: no gateCommand is configured for ${targetRepo.key === "primary" ? "this project" : `repo "${targetRepo.key}"`} — the merge was NOT checked by any build/DoD gate`;
     const warning = [nestedWarning, gateWarning].filter((w): w is string => !!w).join(" ") || undefined;
+    // This worker is retiring (its worktree is gone/going) — drop its recorded self-check so the map
+    // (card e50600d2) doesn't hold an entry for a session that can never merge again.
+    this.lastWorkerGateCheck.delete(workerSessionId);
     // Echo the exact subject this commit landed with (card b88704bb) — a transcript reader can see what
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
   }
 
   /**
@@ -8782,6 +8912,14 @@ export class SessionService {
           // doc for why three checkpoints, and the resulting wording split.
           const settleStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
           const headCurrency = this.describeGateHeadCurrency(startStamp, admitStamp!, settleStamp);
+          // REUSE-A-GREEN-SELF-CHECK RECORD (card e50600d2): record THIS settle — pass or fail — as the
+          // worker's latest self-check outcome, so confirmWorkerMerge can later prove (or refuse to
+          // assume) that a merge's input is byte-identical to what this run validated. Overwrites
+          // whatever was recorded before, so a later failing (or racy) run at the same commit always
+          // supersedes an earlier green one instead of leaving it reusable.
+          if (worker.branch) {
+            this.lastWorkerGateCheck.set(workerSessionId, { passed: gateResult.passed, headCurrent: headCurrency.headCurrent, stamp: settleStamp, opId, branch: worker.branch });
+          }
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
             evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart });
