@@ -3,7 +3,12 @@
 //   project -> agent -> board task + move -> spawn real session (live terminal) ->
 //   agent sees the board via MCP -> vault browse -> git view -> transcript ->
 //   dead-session detection (grey-out).
-// Run: 1) start the daemon, 2) node test/integration-e2e.mjs
+// Run: 1) start the daemon WITH LOOM_TEST=1 set (in addition to an isolated LOOM_HOME/LOOM_PORT),
+// 2) node test/integration-e2e.mjs
+// LOOM_TEST=1 on the DAEMON (not just this test process) is required for step 8: it gates the
+// `/internal/test/sweep-dead-sessions` trigger (gateway/server.ts) the same way it gates
+// `/internal/test/seed` — mounted only under `inTestMode()`, so a real end-user daemon never has this
+// route at all.
 //
 // This is the one test that MUST spawn a real `claude` (so it can't use an isolated
 // CLAUDE_CONFIG_DIR — that breaks the unattended spawn; see test/claude-config.mjs). The
@@ -96,15 +101,23 @@ try {
   const tx = await get(`/api/sessions/${session.id}/transcript`);
   check("7. transcript renders real turns", tx.length > 0 && tx.some((t) => t.role === "assistant"));
 
-  // 8. dead-session grey-out: stop, delete the engine transcript, let the watcher mark it dead
+  // 8. dead-session grey-out: stop, delete the engine transcript, then deterministically trigger the
+  // REAL production sweep (sessions/liveness.ts's sweepDeadSessions — the same function boot and the
+  // chokidar watcher call) via the test-only /internal/test/sweep-dead-sessions route, and assert
+  // immediately. No poll loop, no timing bound — see card 4baa7a08.
+  // A "hard" stop auto-archives the session on exit (archiveOnExit, card b37750a4 — every stopped
+  // session leaves the live rail), so GET /api/sessions (live rail only) can never see it again
+  // regardless of how long anything polls; read it back via the project's Archive listing instead.
   await post(`/api/sessions/${session.id}/stop`, { mode: "hard" });
   await sleep(1500);
   if (engineId) fs.rmSync(path.join(os.homedir(), ".claude", "projects", encodeProjectDir(dir), `${engineId}.jsonl`), { force: true });
-  let dead = false;
-  for (let i = 0; i < 12 && !dead; i++) {
-    await sleep(1000);
-    dead = (await get("/api/sessions")).find((s) => s.id === session.id)?.resumability === "dead";
+  const sweepRes = await postRaw("/internal/test/sweep-dead-sessions", {});
+  if (sweepRes.status === 404) {
+    throw new Error("8. /internal/test/sweep-dead-sessions is 404 — this test requires the daemon to be started with LOOM_TEST=1 (see this file's header comment)");
   }
+  check("8. dead-session sweep trigger succeeded", sweepRes.status === 200);
+  const archived = await get(`/api/projects/${P.id}/archive`);
+  const dead = archived.items.find((s) => s.id === session.id)?.resumability === "dead";
   check("8. session greyed out as dead once its transcript vanished", dead);
 } finally {
   // Tear down so the suite is hermetic: stop a still-live session, remove ONLY the trust entry

@@ -15,6 +15,7 @@ import { nextFireAt, nextFireTimes } from "../orchestration/cron.js";
 import { MIN_POLL_INTERVAL_MS } from "../orchestration/poll.js";
 import { readTranscript, readArchivedTranscript, archivedTranscriptExists, archivedSnapshotIds, engineTranscriptExists, deleteProjectArchives } from "../sessions/transcript.js";
 import { buildTimeline, diffTimelines } from "../sessions/audit.js";
+import { sweepDeadSessions } from "../sessions/liveness.js";
 import type { Db } from "../db.js";
 import { inTestMode } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
@@ -2937,6 +2938,21 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         liveSessionIds, wakeIds, enqueued, archivedSessionIds, orchestrationEventIds, questionIds,
         projectMemoryIds, scheduleDeferralIds,
       });
+    });
+
+    // Deterministic dead-session-sweep trigger (card 4baa7a08): integration-e2e.mjs's dead-session
+    // grey-out check had no way to force `sweepDeadSessions` to run on demand — in production it fires
+    // ONLY at boot (index.ts) or via the chokidar-debounced `watchClaudeProjects` watcher
+    // (sessions/liveness.ts, 1500ms debounce off a `.jsonl` unlink) — so the test had to poll a 12s
+    // wall-clock window waiting for the watcher to notice. `sweepDeadSessions` itself is synchronous and
+    // side-effect-only (DB read + fs.existsSync + DB write, no async internals), so it's safe to invoke
+    // directly and return its result in the same response — no polling, no timing bound. This calls the
+    // SAME production sweep the boot path and the watcher call, not a parallel reimplementation. Same
+    // trust posture as `/internal/test/seed` immediately above: gated on BOTH `inTestMode()` (so it's
+    // absent from a real end-user daemon's route table entirely) AND loopback.
+    app.post("/internal/test/sweep-dead-sessions", async (req, reply) => {
+      if (!LOOPBACK.has(req.ip)) return reply.code(403).send("forbidden");
+      return reply.send({ ok: true, marked: sweepDeadSessions(deps.db) });
     });
   }
 
