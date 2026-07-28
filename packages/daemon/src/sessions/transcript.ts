@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { LOOM_HOME } from "../paths.js";
-import { spillTextIfLarge } from "../spill.js";
+import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 export interface TranscriptTurn {
   role: "user" | "assistant" | "tool_result";
@@ -210,10 +210,12 @@ export function readTranscript(cwd: string, engineSessionId: string): Transcript
 
 /**
  * Per-PAGE size budget (chars) for a transcript_read page. A single rendered page must fit the MCP
- * tool-result token cap; ~48 KB is roughly 12K tokens — comfortably under the cap with headroom for the
- * page envelope and JSON quoting. A page is bounded by this budget so it can never overflow / spill.
+ * tool-result token cap, with headroom for the page envelope and JSON quoting. An ALIAS of
+ * {@link SPILL_INLINE_BUDGET_CHARS} (spill.ts) — same underlying "MCP tool-result inline cap" figure,
+ * kept as its own exported name here since call sites in this module already read as "the transcript
+ * page budget." A page is bounded by this budget so it can never overflow / spill.
  */
-export const TRANSCRIPT_PAGE_CHAR_BUDGET = 48_000;
+export const TRANSCRIPT_PAGE_CHAR_BUDGET = SPILL_INLINE_BUDGET_CHARS;
 
 /** Hard ceiling on turns per page (independent of the char budget) — a defensive upper bound. */
 export const DEFAULT_TRANSCRIPT_PAGE_TURNS = 400;

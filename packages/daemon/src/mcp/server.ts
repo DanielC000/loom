@@ -1,4 +1,5 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { createHash } from "node:crypto";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
@@ -14,18 +15,74 @@ import { performAuthenticatedRequest } from "../connections/request.js";
 import { writeVaultFile } from "../vault/writer.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { withWakeTimeEcho, nowEcho, localTimeString } from "../orchestration/time-echo.js";
+import { spillTextIfLarge, SPILL_INLINE_BUDGET_CHARS } from "../spill.js";
 
 const ok = (data: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(data) }] });
 
 /**
  * List-shaped response, NEWLINE-DELIMITED (one JSON object per line) instead of a single
- * `JSON.stringify(array)` blob (card dc647ae2 part A). A wide `tasks_list` window (e.g.
- * excludeDone:false + a large limit/offset) can overflow the MCP tool-result cap; when the engine
- * spills an oversized result to a temp file, a SINGLE giant JSON-array line is unpaginatable —
- * `Read` can't offset/limit-slice one line, forcing a fragile manual char-slice. NDJSON keeps that
- * spill file (or a live grep) Read/grep-pageable one row at a time regardless of size.
+ * `JSON.stringify(array)` blob (card dc647ae2 part A) — relies on the host engine's own opaque
+ * overflow-spill if the result is big enough. Used by `memory_list`, whose notes are already bounded by
+ * the 4000-byte-per-note write cap. See {@link okLinesSpillable} for the tasks_list/task_requests_list
+ * sibling, which proactively spills through the shared `spillTextIfLarge` primitive instead.
  */
 const okLines = (rows: unknown[]) => ({ content: [{ type: "text" as const, text: rows.map((r) => JSON.stringify(r)).join("\n") }] });
+
+/**
+ * The `tasks_list`/`task_requests_list` sibling of {@link okLines}: same NEWLINE-DELIMITED JSON shape,
+ * but proactively spilled via the SHARED {@link spillTextIfLarge} primitive (the same one
+ * `sessions/transcript.ts` uses for oversized transcript turns) instead of relying on the host engine's
+ * own opaque overflow-spill. A wide `tasks_list` window (e.g. excludeDone:false + a large limit/offset,
+ * or includeBody:true over many cards) can overflow the MCP tool-result cap; the host engine's own spill
+ * of a SINGLE giant JSON-array line would be unpaginatable (`Read` can't offset/limit-slice one line), so
+ * this renders NDJSON text first (always Read/grep-pageable one row at a time) and only THEN checks it
+ * against the budget.
+ *
+ * BELOW the cap: byte-identical to before — the bare NDJSON text, no envelope.
+ * ABOVE the cap: the text is written verbatim to `sessionId`'s own scratch dir (real per-row line
+ * breaks, explicit UTF-8 — same NDJSON shape the inline text already promised) and the response becomes
+ * a small `{rowsFile,rowsChars,rowCount,note}` pointer instead. `key` should be deterministic per
+ * (session, list) so repeated pulls overwrite rather than accumulate scratch-dir garbage.
+ */
+const okLinesSpillable = (sessionId: string, subdir: string, key: string, rows: unknown[]) => {
+  const text = rows.map((r) => JSON.stringify(r)).join("\n");
+  const spill = spillTextIfLarge(sessionId, subdir, key, text, SPILL_INLINE_BUDGET_CHARS);
+  if (spill.inline) return { content: [{ type: "text" as const, text }] };
+  const note =
+    `${rows.length} rows are ${spill.chars} chars — too large to inline safely, so they were written to ` +
+    `${spill.file} as NDJSON (one JSON object per line, real line breaks, UTF-8) — page it with Read ` +
+    "(offset/limit are LINE-based) or grep it for a field/id. Re-call with a narrower filter/limit to inline fewer rows instead.";
+  return ok({ rowsFile: spill.file, rowsChars: spill.chars, rowCount: rows.length, note });
+};
+
+/**
+ * Deterministic JSON serialization with object keys sorted (recursively) — unlike `JSON.stringify`'s
+ * array-form replacer (which filters/reorders EVERY nested object's keys against the SAME top-level key
+ * list, silently emptying a nested array's numeric-index "keys"), this only touches actual object
+ * properties and leaves array contents untouched. Used to derive a stable hash from an args object whose
+ * key insertion order isn't guaranteed to be identical across two calls with the same logical content.
+ */
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (value && typeof value === "object") {
+    const obj = value as Record<string, unknown>;
+    return `{${Object.keys(obj).sort().map((k) => `${JSON.stringify(k)}:${stableJson(obj[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * The `tasks_list` spill KEY — derived from the effective (post-default) query args rather than a fixed
+ * string. `spillTextIfLarge`'s own contract is "deterministic path so repeated pulls of THE SAME CONTENT
+ * overwrite" — a fixed key would instead make *different* content (two distinct filter/pagination
+ * combos) collide on one filename: call A spills under columns:["backlog"], call B spills under
+ * excludeDone:false+includeBody:true and SILENTLY OVERWRITES A's file, so a caller reading A's pointer
+ * after B's call gets B's rows with no error or signal. Hashing the args keeps the "same query overwrites,
+ * not accumulates" property while giving genuinely different queries genuinely different files.
+ */
+function taskListSpillKey(effectiveArgs: Record<string, unknown>): string {
+  return `tasks-${createHash("sha1").update(stableJson(effectiveArgs)).digest("hex").slice(0, 10)}`;
+}
 
 /** Task priority enum, shared by the create/update/list tool schemas (rejects any other string). */
 export const prioritySchema = z.enum(["p0", "p1", "p2", "p3"]);
@@ -64,7 +121,7 @@ export class TaskMcpRouter {
       "tasks_list",
       {
         description:
-          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt,merged}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. `merged` is this card's git-derived ship state — {sha,date,verification?} of its squash-merge commit on this project's repo if one is found, else null; null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), not an authoritative 'never merged' — treat a predecessor's 'unbuilt'/'won't-do' claim as suspect if merged is non-null. `verification` names WHICH check answered it: \"content\" (byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). Absent means unknown, not unverified. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
+          "List this project's board tasks. Returns NEWLINE-DELIMITED JSON — one task object per line, NOT a JSON array — so a wide read stays Read/grep-pageable even if it spills to a file. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows are written to a scratch file instead of inlining, and the response becomes a `{rowsFile,rowsChars,rowCount,note}` pointer at that same NDJSON text (one task per line) — page it with Read or grep it; re-call with a narrower filter/limit to inline instead. DEFAULT: a lightweight SUMMARY ({id,title,columnKey,position,priority,updatedAt,merged}) — bodies OMITTED, terminal/done cards EXCLUDED. Pass includeBody:true for full bodies, or tasks_get(id) for one card. `merged` is this card's git-derived ship state — {sha,date,verification?} of its squash-merge commit on this project's repo if one is found, else null; null means NOT PROVEN merged (never merged, landed outside the scan window, or a git read failure), not an authoritative 'never merged' — treat a predecessor's 'unbuilt'/'won't-do' claim as suspect if merged is non-null. `verification` names WHICH check answered it: \"content\" (byte-verified against a still-live branch tip — the strongest), \"pathset\" (verified from the landed commit's own ancestry against a persisted path-set trailer — proves the same FILES landed, not the same content), or \"trailer-only\" (pre-fix history — trailer PRESENCE alone, the weakest). Absent means unknown, not unverified. Filters: columns:[...] (only those column keys), excludeDone:false (include done), minPriority:p0|p1|p2|p3 (only tasks at or above it; lower number = higher priority), idPrefix (only ids starting with this), titleContains (case-insensitive title substring) — prefer a scoped filter over paging a huge window. Capped at " + DEFAULT_TASK_SUMMARY_CAP + " rows by default — page with limit/offset.",
         inputSchema: strictShape({
           columns: z.array(z.string()).optional(),
           excludeDone: z.boolean().optional(),
@@ -77,8 +134,13 @@ export class TaskMcpRouter {
         }),
       },
       // Backstop the read with a default cap (caller-applied, the agentView/sessionView pattern) so an
-      // includeBody read on a board with hundreds of cards can't overflow the tool-result cap.
-      async (args) => okLines(await listProjectTasks(db, projectId, { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP })),
+      // includeBody read on a board with hundreds of cards can't overflow the tool-result cap. The spill
+      // key is derived from the EFFECTIVE (post-default) args (taskListSpillKey) — a repeat pull under the
+      // SAME filter combo overwrites the same scratch file, but two DIFFERENT filter combos never collide.
+      async (args) => {
+        const effective = { ...args, limit: args.limit ?? DEFAULT_TASK_SUMMARY_CAP };
+        return okLinesSpillable(sessionId, "tasks-list-spills", taskListSpillKey(effective), await listProjectTasks(db, projectId, effective));
+      },
     );
     server.registerTool(
       "tasks_get",
@@ -100,13 +162,19 @@ export class TaskMcpRouter {
           "cancelled alike — as lightweight NEWLINE-DELIMITED JSON rows: {id,type,title,state,answeredAt}. " +
           "NON-CONSUMING: unlike question_pull (which drains + consumes), this is a stable, re-readable " +
           "reference you can call again later or from a different agent/turn and still see the same " +
-          "requests. Use task_request_get(id) for the full body/options/recommendation + answer. taskId " +
+          "requests. Above ~" + SPILL_INLINE_BUDGET_CHARS + " chars the rows spill to a scratch file " +
+          "instead of inlining, and the response becomes a `{rowsFile,rowsChars,rowCount,note}` pointer at " +
+          "that same NDJSON text (one request per line) — page it with Read or grep it. Use " +
+          "task_request_get(id) for the full body/options/recommendation + answer. taskId " +
           "accepts the full id OR an unambiguous 8-char id-prefix (mirrors tasks_get).",
         inputSchema: strictShape({ taskId: z.string() }),
       },
       async ({ taskId }) => {
-        const rows = listProjectTaskRequests(db, projectId, taskId);
-        return "error" in rows ? ok(rows) : okLines(rows);
+        const result = listProjectTaskRequests(db, projectId, taskId);
+        if ("error" in result) return ok(result);
+        // Key by the RESOLVED full task id, not the raw arg — two different unambiguous prefixes naming
+        // the same task must spill to the SAME file (see listProjectTaskRequests's own doc).
+        return okLinesSpillable(sessionId, "task-requests-spills", result.taskId, result.rows);
       },
     );
     server.registerTool(

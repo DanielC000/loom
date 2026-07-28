@@ -37,6 +37,17 @@ function assertPathSegment(paramName: string, value: string): void {
 }
 
 /**
+ * The MCP tool-result INLINE budget, in characters — the threshold a `spillTextIfLarge` caller commonly
+ * checks against to decide "does this text still fit inline in a tool response, or does it need to
+ * spill." ~48KB is roughly 12K tokens — comfortably under the real MCP tool-result token cap, with
+ * headroom for whatever envelope/JSON-quoting overhead wraps the text. Lives HERE, next to the spill
+ * primitive itself, rather than being duplicated (or borrowed by name-only coincidence) per caller — a
+ * caller with a genuinely different budget should define its OWN constant instead of reusing this one by
+ * accident; this one is for "the general MCP inline cap," not for any one caller's specific page shape.
+ */
+export const SPILL_INLINE_BUDGET_CHARS = 48_000;
+
+/**
  * Persist `text` to `sessionId`'s own scratch dir (grep/Read-pageable — UTF-8, written verbatim so any
  * real line breaks the caller already shaped into `text` survive) when it exceeds `capChars`; a no-op
  * ({inline:true}) otherwise, so a caller under the cap is byte-identical to not calling this at all.

@@ -301,11 +301,18 @@ export interface TaskRequestSummaryRow {
  * 988bb585). `taskId` accepts the full id OR an unambiguous 8-char id-prefix (mirrors getProjectTask).
  * Project-scoped symmetrically with {@link getProjectTaskRequest}'s single-request get — a foreign-
  * project question carrying this project's task id is filtered out (see `db.listQuestionsForTask`).
+ *
+ * Returns the RESOLVED full task id alongside `rows` (not just the rows) so a caller that spills the
+ * NDJSON rendering of `rows` to a scratch file can key that spill by the CANONICAL id rather than by
+ * whatever prefix string the caller happened to pass — two different unambiguous prefixes naming the
+ * SAME task must land on the SAME scratch path (spillTextIfLarge's "same content overwrites" contract),
+ * which the raw, unresolved `taskId` argument can't guarantee.
  */
-export function listProjectTaskRequests(db: Db, projectId: string, taskId: string): TaskRequestSummaryRow[] | { error: string } {
+export function listProjectTaskRequests(db: Db, projectId: string, taskId: string): { taskId: string; rows: TaskRequestSummaryRow[] } | { error: string } {
   const owned = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in owned) return owned;
-  return db.listQuestionsForTask(projectId, owned.id).map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state, answeredAt: q.answeredAt }));
+  const rows = db.listQuestionsForTask(projectId, owned.id).map((q) => ({ id: q.id, type: q.type, title: q.title, state: q.state, answeredAt: q.answeredAt }));
+  return { taskId: owned.id, rows };
 }
 
 /**
