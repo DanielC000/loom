@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import { useQueries, useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import type { SessionListItem } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, workerDiffQuery } from "../lib/api";
 import { analyzeDiff, riskTone, type DiffAnalysis } from "../lib/diff";
 import { Panel, Button, Chip, Dot, SectionLabel } from "./ui";
 import { color, font, radius, tone } from "../theme";
@@ -26,13 +26,15 @@ export function ReviewQueue({ workerIds, showLabel = true }: { workerIds: string
 
   // One diff fetch per pending review. Pending reviews are few (the parallel ceiling is ~3-8), so this
   // is a handful of small requests; react-query keys + caches them and the panel shares the cache with
-  // the full ReviewPanel, so opening one is instant.
+  // the full ReviewPanel, so opening one is instant. The card's own body IS the diff analysis (headline,
+  // ±, top-risk files), so this fan-out is content, not speculative prefetch — it can't be deferred to an
+  // expand without gutting the card. The 8s refetchInterval is what keeps these cards live; the shared
+  // staleTime (workerDiffQuery, 10s — up from a local 4000) only governs MOUNT/focus refetches, so this
+  // component's live cadence is unchanged while a remount inside the window now serves the cache.
   const diffs = useQueries({
     queries: workerIds.map((id) => ({
-      queryKey: ["workerDiff", id],
-      queryFn: () => api.workerDiff(id),
+      ...workerDiffQuery(id),
       refetchInterval: 8000,
-      staleTime: 4000,
     })),
   });
 

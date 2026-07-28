@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { contextWindowForModel, CONTEXT_WARN_RATIO } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, workerDiffQuery } from "../lib/api";
 import { Panel, Button, SectionLabel, Chip, Meter, Dot, Badge } from "../components/ui";
 import { FileDiffBlock, FileOverviewRow } from "../components/Diff";
 import { analyzeDiff, riskOrder, riskTone } from "../lib/diff";
@@ -30,7 +30,9 @@ function ReviewPanelInner({ workerId }: { workerId: string }) {
 
   const sessions = useQuery({ queryKey: ["allSessions"], queryFn: api.allSessions });
   const worker = (sessions.data ?? []).find((s) => s.id === workerId);
-  const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), enabled: !!workerId });
+  // Shares the Review-queue card's cache entry (same key via workerDiffQuery), so arriving here from a
+  // card — the normal path — renders the diff from cache instead of re-issuing the git call.
+  const diff = useQuery({ ...workerDiffQuery(workerId), enabled: !!workerId });
 
   const merge = useMutation({
     mutationFn: () => api.mergeWorker(workerId),

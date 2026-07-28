@@ -581,6 +581,8 @@ export const api = {
     get<GateHistoryPage>(
       `/api/gates/history?limit=${opts?.limit ?? 100}&offset=${opts?.offset ?? 0}${opts?.projectId ? `&projectId=${encodeURIComponent(opts.projectId)}` : ""}`,
     ),
+  // The freshness policy for this one lives in `workerDiffQuery` below — every consumer spreads that
+  // rather than hand-writing the key/fetcher, so the cache entry is genuinely shared.
   workerDiff: (sessionId: string) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`),
   // Human-initiated merge of a worker's branch — runs the daemon's fail-closed build gate then
   // merges (manager derived from the worker's parentSessionId server-side).
@@ -1023,6 +1025,30 @@ export const api = {
   createProjectLink: (b: { projectA: string; projectB: string }) => postErr<ProjectLink>("/api/project-links", b),
   deleteProjectLink: (id: string) => delErr<{ ok: boolean }>(`/api/project-links/${encodeURIComponent(id)}`),
 };
+
+// How long a fetched worker-branch diff counts as FRESH client-side. react-query's default staleTime is
+// 0, so before this every mount of a diff consumer refetched immediately — and the real load on
+// /api/sessions/:id/diff is therefore a BURST (a wave of refetches whenever diff consumers mount:
+// navigating to Overview, opening a review card and coming back, toggling a worker's Diff tab), not a
+// steady poll. That endpoint is a git call over a live worktree, so the burst is the expensive shape.
+// 10s sits just under the daemon's own 12s worktree-fingerprint TTL (5cd78d92), so a remount inside the
+// window is served from the client cache instead of round-tripping to a daemon that would mostly re-serve
+// its own cached answer anyway. Display tolerance: a genuinely-changed worktree surfaces on the first
+// refetch after the window — the Review-queue cards keep their own 8s refetchInterval ON TOP of this, so
+// the live-polling surface is unchanged; only the redundant remount burst goes away.
+export const WORKER_DIFF_STALE_MS = 10_000;
+
+// The single source of the worker-diff query: its cache key, its fetcher, and its freshness window. All
+// three consumers — the project Overview's per-worker Diff tab, the full ReviewPanel, and the shared
+// Review-queue cards — spread this, so they SHARE one cache entry and cannot drift on the key or the
+// staleTime (they previously hand-wrote `["workerDiff", id]` in three places with three different
+// freshness policies). Spread it first and add your own options after it (reviewQueue's refetchInterval,
+// ReviewPanel's `enabled`, Overview's `placeholderData`).
+export const workerDiffQuery = (sessionId: string) => ({
+  queryKey: ["workerDiff", sessionId] as const,
+  queryFn: () => api.workerDiff(sessionId),
+  staleTime: WORKER_DIFF_STALE_MS,
+});
 
 // Stop + (once fully exited) resume a companion's own session — the only way a spawn-time property like
 // restrictedTools actually takes effect on an already-running companion (see RestrictToolsSection in

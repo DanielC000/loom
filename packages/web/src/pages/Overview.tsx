@@ -2,7 +2,7 @@ import { useState, useMemo, type CSSProperties } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useQueries, useMutation, useQueryClient, keepPreviousData } from "@tanstack/react-query";
 import type { Agent, SessionListItem, OrchestrationEvent, Schedule, SessionRole } from "@loom/shared";
-import { api } from "../lib/api";
+import { api, workerDiffQuery } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
 import { useAttention, attentionOpenTarget, dismissAttention, type AttentionItem } from "../lib/attention";
 import { useOpenRequest } from "../components/requests";
@@ -512,8 +512,15 @@ function ManagerTimeline({ managerId }: { managerId: string }) {
 // the landed diff once merged). The manager→worker→live-diff drill-down that the Orchestration page owned
 // now lives here, reached by expanding a worker row under its manager. Mounted only when the Diff tab is
 // active. On error (no branch / merged-away) it says so rather than showing an empty pane.
+//
+// The fetch is ALREADY scoped to one worker at a time by construction — SessionCockpit renders only under
+// an OPEN FleetCockpitRow, and TerminalCard renders `tabs.diff` only while the Diff tab is active — so
+// this never fans out one git call per rendered fleet row. What it lacked was a freshness window: at
+// react-query's default staleTime of 0, every tab-toggle and every row re-expand re-issued the git call.
+// workerDiffQuery supplies that window (and the shared cache key, so a diff already fetched by the
+// Review-queue card is reused here).
 function WorkerDiffPanel({ workerId }: { workerId: string }) {
-  const diff = useQuery({ queryKey: ["workerDiff", workerId], queryFn: () => api.workerDiff(workerId), placeholderData: keepPreviousData });
+  const diff = useQuery({ ...workerDiffQuery(workerId), placeholderData: keepPreviousData });
   return (
     <Panel style={{ maxHeight: 440, overflow: "auto" }}>
       {diff.isLoading && <span style={{ color: color.textMuted, fontSize: 12 }}>Loading diff…</span>}
