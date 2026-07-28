@@ -306,6 +306,87 @@ function runBuildStep(step: BuildStep, cwd: string): Promise<{ code: number; out
  * without a real spawn. Defaults to {@link runBuildStep}. */
 export interface BuildDeps {
   runStep?: (step: BuildStep, cwd: string) => Promise<{ code: number; out: string }>;
+  /** Test-only repo-root override, so a hermetic test can point the snapshot/restore logic below (and the
+   * build steps' cwd) at an isolated temp dir instead of the real checkout. Defaults to {@link repoRoot}. */
+  root?: string;
+}
+
+/** packages/web/dist, relative to the repo root — the one directory the deploy build can actually wipe
+ * out from under a failure (card 0eb97fa1). See the module comment above {@link snapshotWebDist} for why
+ * only this path, not packages/daemon/dist or packages/shared/dist, needs protecting. */
+const WEB_DIST_REL = path.join("packages", "web", "dist");
+
+/**
+ * Where a deploy's pre-build packages/web/dist snapshot lives — under LOOM_HOME (same home as
+ * restart-intent.json), never inside the repo tree, so it can't collide with anything turbo/vite reads
+ * or writes. A FIXED path, overwritten (never accumulated) by every deploy attempt that reaches the
+ * build step — see {@link snapshotWebDist} for why that's also what makes an interrupted deploy
+ * self-healing without any extra recovery code.
+ */
+function webDistBackupDir(): string {
+  return path.join(LOOM_HOME, "deploy-backup", "web-dist");
+}
+
+/**
+ * Snapshot packages/web/dist before the build step that can wipe it out from under a failure — card
+ * 0eb97fa1: turbo.json's `clean` task runs unconditionally ahead of `@loom/web`'s `build` task, so a
+ * deploy build that then fails (tests, typecheck, or vite itself) currently leaves the daemon serving a
+ * broken/missing UI while reporting itself healthy (the old dist was already deleted; nothing rebuilt
+ * it). Called only immediately before the "build" step — never before "install", which never touches
+ * dist, so an install failure (the common lockfile-drift case) pays zero snapshot cost.
+ *
+ * Best-effort: never throws past its own call site (wrapped in try/catch by {@link buildDaemon}) — a
+ * snapshot failure must never block the deploy itself, only leave that one deploy unprotected.
+ *
+ * INTERRUPTED-DEPLOY CASE: if the daemon process dies mid-build (after this snapshot is taken but before
+ * the matching restore/discard runs — see buildDaemon), the backup is simply left on disk. It is not a
+ * growing leak: the FIRST line here unconditionally clears any existing backup before taking a new one,
+ * so the very next deploy attempt that reaches the build step overwrites the orphan with a fresh
+ * snapshot. Worst case is one extra dist-sized copy sitting under LOOM_HOME until then — never served,
+ * never user-visible, never accumulating. A crash between the wipe and a restore does mean the UI stays
+ * broken until that next deploy attempt (successful or not) resolves it; that gap needs a human to notice
+ * the crash and re-run the supervisor regardless (see CLAUDE.md), so it isn't made worse by this design.
+ */
+function snapshotWebDist(root: string): void {
+  const backup = webDistBackupDir();
+  fs.rmSync(backup, { recursive: true, force: true }); // drop any orphaned backup from a crashed prior attempt
+  const dist = path.join(root, WEB_DIST_REL);
+  if (!fs.existsSync(dist)) return; // nothing pre-existing to protect (e.g. a brand-new checkout's first deploy)
+  copyDirAtomic(dist, backup);
+}
+
+/**
+ * Roll packages/web/dist back to its pre-build snapshot after a failed deploy build, then discard the
+ * (now-consumed) snapshot. No-ops if no snapshot was taken (dist didn't exist pre-deploy — nothing to
+ * roll back to, so a failed very-first deploy behaves exactly as it did before this fix). Best-effort:
+ * never throws past its own call site — a restore failure must never mask the real build error.
+ */
+function restoreWebDist(root: string): void {
+  const backup = webDistBackupDir();
+  if (!fs.existsSync(backup)) return;
+  copyDirAtomic(backup, path.join(root, WEB_DIST_REL));
+  fs.rmSync(backup, { recursive: true, force: true });
+}
+
+/** Discard the pre-build snapshot after a successful deploy — the freshly-built dist is what needs
+ * protecting NEXT time, so the old snapshot must not linger and bloat disk. Best-effort. */
+function discardWebDistBackup(): void {
+  fs.rmSync(webDistBackupDir(), { recursive: true, force: true });
+}
+
+/**
+ * Copy `src` into `dest` atomically: build the copy at a sibling tmp path first, then swap it into place
+ * with a rename, so a copy interrupted partway (crash, disk full) never leaves `dest` half-written.
+ * Mirrors the tmp+rename pattern skills/inject.ts's copySkillAtomic uses for the same reason. Throws on
+ * failure — callers decide how that's handled (see snapshotWebDist/restoreWebDist).
+ */
+function copyDirAtomic(src: string, dest: string): void {
+  const tmp = `${dest}.loom-tmp`;
+  fs.rmSync(tmp, { recursive: true, force: true }); // clear a stale tmp left by a prior interrupted attempt
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  fs.cpSync(src, tmp, { recursive: true });
+  fs.rmSync(dest, { recursive: true, force: true });
+  fs.renameSync(tmp, dest);
 }
 
 /**
@@ -314,16 +395,30 @@ export interface BuildDeps {
  * it — rather than exiting into a daemon that won't come back up. Runs {@link deployBuildSteps} IN ORDER
  * and SHORT-CIRCUITS on the first non-zero step (a failed install never reaches the build). Resolves the
  * exit code + a tail of output for the failure message; never throws (a spawn error → a non-zero code).
+ *
+ * Also snapshots/restores packages/web/dist around the "build" step (card 0eb97fa1) — see
+ * {@link snapshotWebDist} — so a failed build leaves the previously-served UI intact instead of wiped.
  */
 export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail: string }> {
-  const root = repoRoot();
+  const root = deps.root ?? repoRoot();
   const run = deps.runStep ?? runBuildStep;
   return (async () => {
     let lastOut = "";
     for (const step of deployBuildSteps(root)) {
+      if (step.label === "build") {
+        try { snapshotWebDist(root); }
+        catch (e) { console.log(`[restart] pre-build dist snapshot failed (deploy continues unprotected): ${e instanceof Error ? e.message : String(e)}`); }
+      }
       const r = await run(step, root);
       lastOut = r.out;
       if (r.code === 0) continue;
+      let restoreNote = "";
+      if (step.label === "build") {
+        try { restoreWebDist(root); }
+        catch (e) {
+          restoreNote = `\n(warning: could not restore the pre-deploy packages/web/dist snapshot — ${e instanceof Error ? e.message : String(e)}. The previously-served UI may now be missing; the next successful deploy will rebuild it fresh.)`;
+        }
+      }
       // NEVER resolve with an empty failure tail — an empty spawn-env output would otherwise leave the
       // manager an UNDEBUGGABLE "build failed: <empty>" (exactly what 51522f05 hit). Always include the
       // command, cwd, exit code, and a marker when no output was captured.
@@ -332,8 +427,10 @@ export function buildDaemon(deps: BuildDeps = {}): Promise<{ code: number; tail:
       const hint = step.label === "install"
         ? "\nA merged package.json/lockfile change is likely out of sync — commit the updated pnpm-lock.yaml (or run `pnpm install` on main), then retry."
         : "";
-      return { code: r.code, tail: `daemon ${step.label} FAILED (code=${r.code})\ncmd: ${cmdStr}\ncwd: ${root}${hint}\n${captured}`.trim() };
+      return { code: r.code, tail: `daemon ${step.label} FAILED (code=${r.code})\ncmd: ${cmdStr}\ncwd: ${root}${hint}${restoreNote}\n${captured}`.trim() };
     }
+    try { discardWebDistBackup(); }
+    catch (e) { console.log(`[restart] post-deploy snapshot cleanup failed (harmless): ${e instanceof Error ? e.message : String(e)}`); }
     return { code: 0, tail: lastOut.trim().slice(-1500) };
   })();
 }
