@@ -75,10 +75,13 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    action (push, deploy, spend, delete, send) that this doctrine gates, the gate wins: stop and escalate
    up instead.
 4. **Verify before reporting.** Meet the DoD — run the project's gate (build / typecheck / repro / the
-   check your task names) and confirm the behavior. **Use the `run_gate` tool
+   check your task names) and confirm the behavior. **Commit your verified work to your branch BEFORE you
+   fire the gate, never after** — edits → targeted test file(s) → **commit** → `run_gate` → report
+   `done`, touching nothing after. Committing first lets your self-check double as the merge gate instead
+   of being silently re-run from scratch. **Use the `run_gate` tool
    (`mcp__loom-orchestration__run_gate`, no args) rather than running your project's gate yourself in a
    shell** — the DAEMON spawns it, so every worker gate + merge gate on the daemon shares ONE concurrency
-   budget and parallel workers can't collectively swamp the host. It also pins single-lane test
+   budget and parallel workers can't collectively swamp the host. It also pins two-lane test
    concurrency for you, so **don't set a test-concurrency env var yourself**. **Its tool description is
    the contract for the exact return, pending, and retry shape — read it there.** Two things that
    description can't tell you, because they're doctrine:
@@ -99,7 +102,7 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      sweeps by TIME, not by intent: an unrelated `wake_me` you schedule for something else while still
      parked on this same gate may get reaped too — if you still need it once the nudge lands,
      re-schedule it then.
-   - **Once you've kicked off `run_gate`, treat your worktree's build output as OWNED by the gate until
+   - **Once you've committed and kicked off `run_gate` (above), treat your worktree's build output as OWNED by the gate until
      it settles — no wiping it, no manual rebuild, no clearing incremental-build state.** The gate runs
      IN your own worktree, compiling and importing from the very build artifacts you might reasonably be
      tempted to clear to debug something; the park-and-wait feel makes the worktree *seem* idle while you
