@@ -7986,11 +7986,26 @@ export class SessionService {
     // doesn't need to.
     let gateRan = false;
     let reusedOpId: string | undefined;
-    // The canonical HEAD sha `confirmWorkerMerge` observed at the moment it decided to reuse (card
-    // e50600d2 CR follow-up) — threaded into `mergeBranch` so it can re-verify, INSIDE its own merge
-    // lock, that main provably hasn't moved since this decision. `undefined` whenever reuse wasn't
-    // considered/decided, in which case `mergeBranch` skips that re-check entirely (byte-identical).
-    let reuseMainHead: string | undefined;
+    // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
+    // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
+    // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
+    // HEAD is at squash time (`git merge --squash branch`, entirely independent of the worktree's own
+    // unioned tree) — so THIS sha, not any later read, is what ties the squash back to what actually got
+    // tested. Two distinct producers feed this ONE var, never both (mutually exclusive on `gateRan`):
+    //   - REUSE path (card e50600d2 CR follow-up): the sha `confirmWorkerMerge` observed at the moment it
+    //     decided to skip a redundant gate run — proven safe because `freshBehindMain === 0`, checked
+    //     moments earlier, already shows main is an ancestor of the branch.
+    //   - REAL gate-run path (card eda70da6): the sha {@link mergeMainIntoWorktree}'s own union-merge
+    //     actually unioned into the worktree — captured AT THAT CALL, not later at gate admission. The gap
+    //     between the union-merge and admission is unbounded SEMAPHORE QUEUE WAIT (routinely 10+ minutes
+    //     at `maxConcurrentGates=2` with an 8-14min gate, easily longer than the gate's own run time) — an
+    //     admission-time capture leaves that entire window open, closing only the smaller admission→squash
+    //     half of it (a real gap found on review of this card's first attempt). Capturing at the
+    //     union-merge instead closes the FULL window: union-merge → [queue wait] → gate run → squash lock.
+    // `undefined` whenever no gate ran at all (no gateCommand configured) or the branch had already landed
+    // (the union-merge itself skipped — see `preLanded` below), in which case `mergeBranch` skips the
+    // re-check entirely (byte-identical to before either fix existed).
+    let gateBaseMainHead: string | undefined;
     if (gate) {
       // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
       // worker left running (an escaped vite/esbuild that detached from the pty's process tree) can hold
@@ -8061,6 +8076,14 @@ export class SessionService {
           evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
           return { merged: false, reason: why, notified: !suppressed, opId: thisOpId };
         }
+        // GATE-BASE CAPTURE (card eda70da6): `union.mainSha` is the canonical main tip THIS union-merge
+        // itself read and unioned into the worktree — the exact sha the tree the gate is about to validate
+        // is built from. Captured HERE, at the union-merge, NOT later at gate admission: see
+        // `gateBaseMainHead`'s own doc above for why the gap between the two can be the larger half of the
+        // window this card exists to close. Possibly overwritten below by the reuse path's OWN capture
+        // (a distinct, independently-proven invariant) when reuse is decided instead; left as this union
+        // sha whenever the gate ends up actually running for real.
+        gateBaseMainHead = union.mainSha;
       }
 
       // CIRCUIT BREAKER (card 3564fd1e): a branch that has already timed out GATE_TIMEOUT_BREAKER_THRESHOLD
@@ -8113,16 +8136,16 @@ export class SessionService {
           // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF THIS
           // READ — main is a process-wide shared resource, and a SIBLING merge on this same repo can still
           // land before this merge's own squash actually runs (this reuse decision happens well before
-          // `mergeBranch`'s own lock is ever requested). Capturing `reuseMainHead` here and threading it
+          // `mergeBranch`'s own lock is ever requested). Capturing `gateBaseMainHead` here and threading it
           // through does NOT close that window by itself — it only lets `mergeBranch` catch the invalidated
           // premise INSIDE its own lock, immediately before doing anything else, and refuse instead of
           // silently landing an unverified merge. See mergeBranchLocked's own doc for the actual guarantee.
-          reuseMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+          gateBaseMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
           // A HEAD we can no longer resolve (a git read failure on this second call) means the re-check
           // inside the lock can never succeed either (nothing to compare against would ever match) — fail
           // CLOSED by not reusing at all, rather than passing `undefined` through (which `mergeBranch`
           // would read as "no re-check requested", silently skipping the very protection this exists for).
-          if (reuseMainHead) {
+          if (gateBaseMainHead) {
             reuseResult = { passed: true };
             reusedOpId = lastCheck.opId;
           }
@@ -8157,6 +8180,10 @@ export class SessionService {
       // of another permanent mystery. Do not prune these as noise — they look unused right up until the
       // one investigation that needs them, at which point there is no way to backfill them retroactively.
       let concurrentAtStart = 0;
+      // NOTE (card eda70da6): `gateBaseMainHead` for this real-run path is ALREADY set above, at the
+      // union-merge — not captured here at admission. The gap between the union-merge and this admission
+      // is unbounded semaphore queue wait; capturing here instead would leave that whole gap unverified
+      // (a real defect found on review of this card's first draft — see `gateBaseMainHead`'s own doc).
       let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => {
         gateStartedAt = startedAt;
         concurrentAtStart = this.gateSemaphore.snapshot().active;
@@ -8302,21 +8329,23 @@ export class SessionService {
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
     // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
     const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
-    // `reuseMainHead` (card e50600d2 CR follow-up) is set ONLY when this merge decided to reuse a green
-    // self-check above — it's the canonical HEAD sha that decision was made against, so mergeBranch can
-    // re-verify (INSIDE its own lock, before touching anything) that main provably hasn't moved since.
-    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, reuseMainHead);
+    // `gateBaseMainHead` is set whenever a gate ran for this merge — either the REUSE path (card e50600d2,
+    // a skipped redundant re-gate) or the REAL gate-run path (card eda70da6, the sha the union-merge
+    // actually unioned into the worktree BEFORE the gate ran) — with the canonical main sha the gate's
+    // validated tree is provably based on, so mergeBranch can re-verify (INSIDE its own lock, before
+    // touching anything) that main provably hasn't moved since.
+    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead);
     if (!merge.ok) {
-      if (merge.reuseInvalidated) {
-        // BENIGN RACE, NOT A REAL MERGE FAILURE: a sibling merge on this same repo landed between this
-        // merge's reuse decision and mergeBranch's own lock — caught with ZERO side effects (canonical
-        // repo and worktree are both untouched; no residue, no partial squash). Worded so the manager reads
-        // this as "just re-confirm" rather than a code/branch problem needing investigation — a re-confirm
-        // re-derives the reuse decision fresh against the NEW main and either reuses validly this time or
-        // gates for real, exactly as any other confirm would.
-        const why = merge.reason ?? "canonical main advanced between the self-check reuse decision and the merge lock — re-confirm to re-gate against the current tree";
-        const suppressed = await rejectNotify("reuse_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo AND worktree untouched — just re-run worker_merge_confirm.`);
-        evt("merge_rejected", { reason: "reuse_invalidated", ...(suppressed ? { suppressed: true } : {}) });
+      if (merge.gateBaseInvalidated) {
+        // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated
+        // tree was fixed (reused or freshly unioned) and mergeBranch's own lock — caught with ZERO side
+        // effects (canonical repo and worktree are both untouched; no residue, no partial squash). Worded
+        // so the manager reads this as "just re-confirm" rather than a code/branch problem needing
+        // investigation — a re-confirm re-derives everything fresh against the new main and either reuses
+        // validly, gates for real, or (for a gate that already ran for real) simply re-gates again.
+        const why = merge.reason ?? "canonical main advanced since this merge's gate-validated tree was fixed — re-confirm to re-gate against the current tree";
+        const suppressed = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo AND worktree untouched — just re-run worker_merge_confirm.`);
+        evt("merge_rejected", { reason: "gate_base_invalidated", ...(suppressed ? { suppressed: true } : {}) });
         return { merged: false, reason: why, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");

@@ -46,6 +46,7 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const GIT_ID = "-c user.email=mgru@loom -c user.name=mgru";
 const now = new Date().toISOString();
 
@@ -337,7 +338,7 @@ try {
 
     // A STALE (wrong) requireCanonicalHead — simulating "main advanced after the reuse decision was made".
     const staleResult = await mergeBranch(I.repo, branch, "MGRU-I stale", {}, "0000000000000000000000000000000000000000");
-    check("(I) a stale requireCanonicalHead is REFUSED, not silently honored", staleResult.ok === false && staleResult.reuseInvalidated === true);
+    check("(I) a stale requireCanonicalHead is REFUSED, not silently honored", staleResult.ok === false && staleResult.gateBaseInvalidated === true);
     check("(I) the refusal reads as a benign race, not a real merge failure", /benign race|advanced/i.test(staleResult.reason ?? ""));
     const headAfterStale = execSync("git rev-parse HEAD", { cwd: I.repo }).toString().trim();
     check("(I) canonical repo HEAD is COMPLETELY untouched by the refused attempt", headAfterStale === realMainHead);
@@ -346,7 +347,159 @@ try {
 
     // The MATCHING (current) head is honored normally — the check doesn't block a genuinely valid reuse.
     const okResult = await mergeBranch(I.repo, branch, "MGRU-I ok", {}, realMainHead);
-    check("(I) a CURRENT requireCanonicalHead proceeds normally (merged, not refused)", okResult.ok === true && okResult.reuseInvalidated === undefined);
+    check("(I) a CURRENT requireCanonicalHead proceeds normally (merged, not refused)", okResult.ok === true && okResult.gateBaseInvalidated === undefined);
+  }
+
+  // ── (J) MAIN ADVANCES DURING A REAL (non-reused) GATE'S OWN RUN — card eda70da6. Unlike (B)/(C)/(D)/(E),
+  //        where main only ever moves BEFORE the real gate starts (so the union-merge already folds the
+  //        move in before the gate runs), here main advances INSIDE the fake gate call itself — i.e.
+  //        strictly AFTER the gate is admitted and BEFORE it settles. This is a SUBSET of the full window
+  //        the fix closes (`gateBaseMainHead` is captured earlier still, at the union-merge — see (K) for
+  //        the part of the window this test can't distinguish: a move during the QUEUE WAIT between the
+  //        union-merge and admission, which an admission-time capture would have missed). No self-check is
+  //        ever recorded for this worker (mirrors (H)'s post-restart shape), so this is unambiguously the
+  //        REAL gate-run path, not the reuse path (card e50600d2) already covered by (I). The squash must
+  //        refuse — a benign, retryable race, zero side effects — rather than silently landing on a tree
+  //        the gate never actually validated. The retry (main now holding still) then proves the paired
+  //        unchanged-main-proceeds case using the SAME real-gate-run path.
+  {
+    const J = mk("j", "feature-j.txt");
+    makeRepo(J);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => {
+      calls++;
+      if (calls === 1) {
+        // Main advances WHILE this FIRST gate "run" is in flight — after admission, before settle.
+        // Simulates a human REST commit (or, on a peer project, a sibling merge) landing mid-gate.
+        fs.writeFileSync(path.join(J.repo, "main-advance-during-gate.txt"), "main moved during the gate\n");
+        execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during gate"`, { cwd: J.repo });
+      }
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    const { worktreePath, branch } = await createWorktree(J.repo, J.projId, J.taskId);
+    J.worktreePath = worktreePath; J.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, J.file), "work for J\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${J.file}"`, { cwd: worktreePath });
+    seed(db, J, "pnpm gate");
+
+    const mainHeadBeforeConfirm = execSync("git rev-parse HEAD", { cwd: J.repo }).toString().trim();
+    const confirm = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
+    check("(J) the gate ran for real (no self-check on record)", calls === 1);
+    check("(J) gateRan:true (a real run, not the reuse-path refusal (I) already covers)", confirm.gateRan === true);
+    check("(J) confirmWorkerMerge REFUSES rather than landing on the un-gated tree", confirm.merged === false);
+    check("(J) the refusal reads as a benign, retryable race, not a real merge/gate failure", /benign race|advanced/i.test(confirm.reason ?? ""));
+    const commitsAheadOfBaseline = execSync(`git rev-list --count ${mainHeadBeforeConfirm}..HEAD`, { cwd: J.repo }).toString().trim();
+    check("(J) canonical repo gained ONLY the mid-gate commit — no squash landed on top of it (zero side effects)", commitsAheadOfBaseline === "1");
+    const stagedAfterRefusal = execSync("git diff --cached --name-only", { cwd: J.repo }).toString().trim();
+    check("(J) canonical repo index carries no residue from the refused attempt", stagedAfterRefusal === "");
+    check("(J) worktree retained for a retry (not torn down on this refusal)", fs.existsSync(worktreePath) === true);
+
+    // RETRY: main holds still through this second real gate run — re-confirming re-derives everything
+    // fresh and actually lands, proving the refusal above was retryable, not a dead end.
+    const retry = await sessions.confirmWorkerMerge(J.mgrId, J.workerId);
+    check("(J) a retry re-confirm succeeds once main stops moving mid-gate", retry.merged === true);
+    check("(J) task moved to done on the retry", db.getTask(J.taskId).columnKey === "done");
+  }
+
+  // ── (K) MAIN ADVANCES DURING THE SEMAPHORE QUEUE WAIT (between the union-merge and gate admission) —
+  //        card eda70da6, CR follow-up. THIS is the case that actually discriminates "capture at the
+  //        union-merge" (correct) from "capture at gate admission" (the card's own first-draft bug,
+  //        caught on review): (J) moves main strictly AFTER admission, where both capture points behave
+  //        identically (nothing separates union-merge from admission when nothing else holds the gate
+  //        semaphore). Here, an external holder occupies the ONE gate slot (default `maxConcurrentGates`
+  //        is 1 — see gate-semaphore-concurrency.mjs's own (A)), so confirmWorkerMerge's real gate request
+  //        genuinely QUEUES after its union-merge already ran and captured `gateBaseMainHead`. Main
+  //        advances WHILE queued (before admission), then the holder releases and the queued gate is
+  //        admitted and passes trivially. An admission-time capture would read the ALREADY-advanced main
+  //        here and wrongly match it at squash time; the union-merge-time capture correctly still points
+  //        at the STALE pre-advance sha and refuses.
+  {
+    const K = mk("k", "feature-k.txt");
+    makeRepo(K);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    let calls = 0;
+    const fakeGate = async () => { calls++; return { passed: true }; };
+    // reapWorktreeProcesses STUBBED (CR follow-up): the pre-gate reap this test would otherwise exercise
+    // for real (reapProcessesRootedInWorktree, unstubbed elsewhere in this file) does a live process
+    // enumeration (WMI on Windows) with its OWN default 10s timeout (pty/host.ts) — one enumeration
+    // hitting that bound could consume this test's ENTIRE queue-wait deadline below, throwing past the
+    // file's try/finally and silently skipping every test appended after (K). Stubbing it out removes
+    // that flake surface entirely rather than just outracing it; every OTHER step here is a handful of
+    // fast local git spawns.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {
+      runGate: fakeGate,
+      reapWorktreeProcesses: async () => ({ killedPids: [] }),
+    });
+    const { worktreePath, branch } = await createWorktree(K.repo, K.projId, K.taskId);
+    K.worktreePath = worktreePath; K.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, K.file), "work for K\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${K.file}"`, { cwd: worktreePath });
+    seed(db, K, "pnpm gate");
+
+    // Seize the ONE gate slot directly on the SAME semaphore confirmWorkerMerge itself uses, via an
+    // unrelated descriptor — simulating a sibling gate (or, on this project's own self-hosting setup, any
+    // other daemon-executed heavy gate) already holding the lane when this confirm's own gate request
+    // arrives. Held open until `releaseHolder()` is called below.
+    let releaseHolder;
+    const holderPromise = new Promise((resolve) => { releaseHolder = resolve; });
+    const holderRun = sessions.gateSemaphore.runExclusive(
+      1, { gateType: "merge", projectId: "mgru-k-holder-proj", sessionId: "mgru-k-holder-sess" }, () => holderPromise,
+    );
+
+    const mainHeadBeforeConfirm = execSync("git rev-parse HEAD", { cwd: K.repo }).toString().trim();
+    const confirmPromise = sessions.confirmWorkerMerge(K.mgrId, K.workerId);
+
+    // Wait until confirmWorkerMerge's OWN gate request is genuinely QUEUED behind the holder — i.e. its
+    // union-merge (and therefore its `gateBaseMainHead` capture) has already completed. Deterministic
+    // (polls live semaphore state), not a timed guess. Bounded so a real regression fails fast instead of
+    // hanging forever — but this bound is now a generous SAFETY MARGIN, not a race against a known 10s
+    // ceiling (reap is stubbed above), so 20s costs nothing on the pass path and still can't take down
+    // the rest of the file: the precondition failure is reported as a `check()`, and the block returns
+    // early (skipping the state-dependent assertions below, which would be meaningless without it)
+    // instead of throwing past this file's try/finally.
+    const queueDeadline = Date.now() + 20_000;
+    let queued = false;
+    while (Date.now() <= queueDeadline) {
+      if (sessions.gateSemaphore.snapshot().queued >= 1) { queued = true; break; }
+      await sleep(5);
+    }
+    check("(K) precondition: confirmWorkerMerge's gate request is genuinely queued (union-merge already ran)", queued);
+    if (!queued) {
+      // Precondition unmet — release the holder so nothing is left dangling, let the still-pending
+      // confirm settle on its own, and bail out of this block WITHOUT asserting on its (now
+      // indeterminate) outcome. Reported as a failed check above, not a thrown exception.
+      releaseHolder();
+      await Promise.allSettled([holderRun, confirmPromise]);
+    } else {
+      // Main advances WHILE genuinely queued — strictly BETWEEN the union-merge (already ran, captured)
+      // and this confirm's own gate ever being admitted.
+      fs.writeFileSync(path.join(K.repo, "main-advance-during-queue.txt"), "main moved during the queue wait\n");
+      execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during queue wait"`, { cwd: K.repo });
+
+      releaseHolder();
+      await holderRun;
+      const confirm = await confirmPromise;
+
+      check("(K) the queued gate ran for real once admitted", calls === 1);
+      check("(K) gateRan:true", confirm.gateRan === true);
+      check("(K) confirmWorkerMerge REFUSES — the union-merge-time capture catches the queue-wait move", confirm.merged === false);
+      check("(K) the refusal reads as a benign, retryable race, not a real merge/gate failure", /benign race|advanced/i.test(confirm.reason ?? ""));
+      const commitsAheadOfBaseline = execSync(`git rev-list --count ${mainHeadBeforeConfirm}..HEAD`, { cwd: K.repo }).toString().trim();
+      check("(K) canonical repo gained ONLY the queue-wait commit — no squash landed on top of it (zero side effects)", commitsAheadOfBaseline === "1");
+      const stagedAfterRefusal = execSync("git diff --cached --name-only", { cwd: K.repo }).toString().trim();
+      check("(K) canonical repo index carries no residue from the refused attempt", stagedAfterRefusal === "");
+      check("(K) worktree retained for a retry (not torn down on this refusal)", fs.existsSync(worktreePath) === true);
+
+      // RETRY: main holds still through this second attempt (no further holder contention) — re-confirming
+      // re-derives everything fresh (a new union-merge, a new gateBaseMainHead) and actually lands.
+      const retry = await sessions.confirmWorkerMerge(K.mgrId, K.workerId);
+      check("(K) a retry re-confirm succeeds once main stops moving mid-queue", retry.merged === true);
+      check("(K) task moved to done on the retry", db.getTask(K.taskId).columnKey === "done");
+    }
   }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }

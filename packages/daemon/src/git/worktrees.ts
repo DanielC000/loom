@@ -3005,9 +3005,14 @@ async function hasConfiguredGitIdentity(git: Pick<SimpleGit, "raw">): Promise<bo
   }
 }
 
+// Card eda70da6 (CR follow-up): `mainSha` is REQUIRED on every `ok:true` variant, by type, not just by
+// convention — a future early-success return that forgot it would otherwise typecheck clean while silently
+// making confirmWorkerMerge's `gateBaseMainHead` capture (and therefore mergeBranch's requireCanonicalHead
+// re-check) vanish, fail-OPEN. The `ok:false` variant carries no such guarantee (nothing was unioned) and
+// keeps its existing optional fields.
 export async function mergeMainIntoWorktree(
   repoPath: string, worktreePath: string, deps: BoundedGitDeps = {},
-): Promise<{ ok: boolean; conflict?: boolean; reason?: string; merged?: boolean }> {
+): Promise<{ ok: true; merged: boolean; mainSha: string } | { ok: false; conflict?: boolean; reason?: string }> {
   const timeoutMs = deps.timeoutMs ?? GIT_OP_TIMEOUT_MS;
   const makeGit = deps.gitFactory ?? ((p, ms) => simpleGit(p, { timeout: { block: ms } }));
   const repoGit = makeGit(repoPath, timeoutMs);
@@ -3020,12 +3025,19 @@ export async function mergeMainIntoWorktree(
     return { ok: false, reason: `failed to resolve main tip: ${(e as Error).message}` };
   }
 
+  // `mainSha` (card eda70da6) rides along on EVERY success return below — it's the canonical main tip
+  // THIS call actually read and unioned into the worktree, i.e. the exact sha the resulting worktree tree
+  // (and therefore whatever gate validates it next) is provably based on. A caller that later needs to
+  // re-verify canonical main hasn't moved since must compare against THIS sha, not a fresh HEAD read of
+  // its own taken at some LATER point (e.g. gate admission) — the gap between this call and that later
+  // point is exactly the window a fresh read would leave open. See confirmWorkerMerge's own doc for why.
+  //
   // Already caught up? (worktree HEAD already has mainSha as an ancestor — the common case for a
   // freshly-cut branch.) A merge-base probe failure isn't fatal — fall through and let the merge attempt
   // below settle it either way.
   try {
     const mergeBase = (await withTimeout(wtGit.raw(["merge-base", "HEAD", mainSha]), timeoutMs, "git merge-base (worktree)")).trim();
-    if (mergeBase === mainSha) return { ok: true, merged: false };
+    if (mergeBase === mainSha) return { ok: true, merged: false, mainSha };
   } catch { /* fall through to attempt the merge */ }
 
   // `git merge --no-edit` creates a real commit — on a host with no configured git identity (e.g. a CI
@@ -3068,12 +3080,12 @@ export async function mergeMainIntoWorktree(
     try { await withTimeout(wtGit.raw(["merge", "--abort"]), timeoutMs, "git merge --abort (worktree)"); } catch { /* best-effort cleanup */ }
     return { ok: false, reason: "git merge main into worktree failed" };
   }
-  return { ok: true, merged: true };
+  return { ok: true, merged: true, mainSha };
 }
 
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; reuseInvalidated?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
@@ -3084,36 +3096,55 @@ export async function mergeBranch(
 
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
-): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; reuseInvalidated?: boolean }> {
+): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
   // bounded op in this file, plus nonInteractiveEnv() to match git/reader.ts + git/writer.ts. Before this
   // fix, `git = simpleGit(repoPath)` here had NEITHER — a hung git child (e.g. a wedged commit hook) never
   // settled, which (post-e076d2a2) wedged the per-repo merge mutex PERMANENTLY, not just this one op.
   const { git, timeoutMs } = boundedMergeGit(repoPath, deps);
-  // REUSE-PREMISE RE-VERIFICATION (card e50600d2 — CR follow-up): `confirmWorkerMerge` may have decided to
-  // skip a redundant gate run because, AS OF A CHECK MADE BEFORE THIS LOCK WAS ACQUIRED, canonical main
-  // hadn't moved past what the branch already contains. That check alone is a TOCTOU gap — main is a
-  // process-wide shared resource, and ANOTHER worker's merge on this SAME repo can land between that check
-  // and this lock being granted (this lock only serializes the squash sequence itself, not the caller's
-  // earlier decision). `requireCanonicalHead`, when the caller passed one, is the canonical HEAD sha it
-  // observed at the moment it decided to reuse — re-read HERE, the FIRST thing after acquiring the lock and
-  // BEFORE touching anything (no residue-clear, no squash), so an invalidated premise is caught with ZERO
-  // side effects: canonical repo AND worktree stay completely untouched, and the caller gets a distinct
-  // `reuseInvalidated:true` it can surface as a benign race rather than a real merge failure. Absent
-  // (the ordinary case: a real gate ran, or no reuse was ever considered) this check is skipped entirely —
-  // byte-identical to before this existed.
+  // GATE-BASE RE-VERIFICATION (card e50600d2, generalized by card eda70da6): the squash below re-derives
+  // its result FRESH against whatever canonical HEAD is at the moment it runs (`git merge --squash
+  // <branch>` computes branch's diff against merge-base(HEAD, branch) and applies it to CURRENT HEAD) —
+  // it does NOT reuse the worktree's own already-unioned tree. So the squash is only provably the SAME
+  // thing the gate validated if canonical main hasn't moved between "the sha the gate's tree was actually
+  // built from" and this lock. `requireCanonicalHead`, when the caller passed one, IS that sha — either
+  // the main tip {@link mergeMainIntoWorktree} unioned into the worktree BEFORE the gate ran (the ordinary
+  // real-gate path, eda70da6), or the main tip a REUSED green self-check was proven to already contain
+  // (e50600d2). Main is a process-wide shared resource, and another writer (a sibling merge, or — outside
+  // this in-process mutex's reach — a human REST commit) can land any time between that sha being fixed
+  // and this lock being granted — including the whole of an unbounded SEMAPHORE QUEUE WAIT for the
+  // real-gate path, not just the gate's own run time. Do NOT "fix" this by holding the lock across the
+  // gate run (would serialize every merge on the repo behind each ~8-14min gate) or by re-running the gate
+  // once the lock is held (doubles gate cost and reopens the same window one level down) — this in-lock
+  // re-read is the intended shape. Re-read HERE, the FIRST thing after acquiring the lock and BEFORE
+  // touching anything (no residue-clear, no squash), so an invalidated premise is caught with ZERO side
+  // effects: canonical repo AND worktree stay completely untouched, and the caller gets a distinct
+  // `gateBaseInvalidated:true` it can surface as a benign race rather than a real merge failure. Absent
+  // whenever no gate ran at all (no gateCommand configured), in which case this check is skipped entirely
+  // — byte-identical to before either fix existed.
+  //
+  // ⚠️ KNOWN RESIDUAL GAP, deliberately NOT closed by this card (CR follow-up, tracked on a separate
+  // board card): when the branch's squash has ALREADY landed on main but its worktree survived and gained
+  // new commits since, confirmWorkerMerge SKIPS the union-merge entirely (`preLanded`, in the caller) —
+  // that skip predates this fix and exists to protect ALREADY_MERGED re-confirm classification, not to
+  // opt out of gating, so a REAL gate still runs (`gateRan:true`) even though nothing threaded
+  // `requireCanonicalHead` through this time, making the re-check below vacuous for that one path. This is
+  // NOT hypothetical: such a worktree stages a genuinely non-empty diff, and the `!staged` branch further
+  // down falls straight through to the commit. Fixing it means deciding how to reconcile "protect
+  // ALREADY_MERGED classification" with "gate-base-verify a preLanded squash" — a separate decision from
+  // this card's mechanism, left to that follow-up.
   if (requireCanonicalHead) {
     let currentHead: string;
     try {
-      currentHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, reuse-premise check)")).trim();
+      currentHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, gate-base check)")).trim();
     } catch (e) {
-      return { ok: false, reason: `failed to verify canonical HEAD before honoring a reused self-check: ${(e as Error).message}` };
+      return { ok: false, reason: `failed to verify canonical HEAD before honoring this merge's gate: ${(e as Error).message}` };
     }
     if (currentHead !== requireCanonicalHead) {
       return {
-        ok: false, reuseInvalidated: true,
-        reason: "canonical main advanced between the self-check reuse decision and the merge lock (a benign race between concurrent merges on this repo, not a problem with this branch) — canonical repo and worktree are untouched; re-confirm to re-gate against the current tree",
+        ok: false, gateBaseInvalidated: true,
+        reason: "canonical main advanced since this merge's gate-validated tree was fixed (a benign race between concurrent merges/commits on this repo, not a problem with this branch) — canonical repo and worktree are untouched; re-confirm to re-gate against the current tree",
       };
     }
   }
