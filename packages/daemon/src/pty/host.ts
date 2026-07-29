@@ -1373,19 +1373,41 @@ export type EnqueueDeliveryReason = "session-dead" | "held";
 /**
  * `enqueueStdin`'s full return shape (card `13e32e1d`, phase 2 of `7acee6d4`). `delivered` NEVER changes
  * meaning — callers and tests read it as-is (delivered now vs not-yet). The problem this type fixes is
- * that a `held` outcome (a SUCCESSFUL, durable enqueue — it WILL land) used to report through `delivered:
- * false` ALONE, reading identically to an actual drop. These fields are ADDITIVE, present ALONGSIDE
- * `delivered`/`reason`, and only meaningful on the `held` path:
- *   - `queued: true` — this text is durably recorded and WILL be delivered; this is success, not failure.
- *     `queued: false` on the `session-dead` path makes the negative explicit too, instead of leaving it to
- *     be inferred from the absence of the field.
- *   - `landsAt: "next-turn-boundary"` — WHEN it lands: at the recipient's next Stop/turn-boundary drain
- *     (or the reconcile tick), not "eventually" or "if you're lucky". Silent about this before this card.
+ * that a `held` outcome (a SUCCESSFUL, durable enqueue — it WILL be RETRIED until land) used to report
+ * through `delivered:false` ALONE, reading identically to an actual drop. These fields are ADDITIVE,
+ * present ALONGSIDE `delivered`/`reason`, and only meaningful on the `held` path:
+ *   - `queued: true` — this text is durably recorded and will be retried at the recipient's next turn
+ *     boundary; this is success, not failure. NOT an unconditional delivery guarantee though — a message
+ *     that keeps giving up (the recipient's Enter never confirms) can still exhaust its redelivery budget
+ *     and terminally PARK (`session_message_gave_up`, `handleGiveUpExhausted` in sessions/service.ts) —
+ *     surfaced to the sender rather than silently dropped, but genuinely never delivered. `queued: false`
+ *     on the `session-dead` path makes the negative explicit too, instead of leaving it to be inferred
+ *     from the absence of the field.
+ *   - `landsAt: "next-turn-boundary"` — WHEN the NEXT delivery attempt lands: at the recipient's next
+ *     Stop/turn-boundary drain (or the reconcile tick), not "eventually" or "if you're lucky". Silent
+ *     about this before this card.
  *   - `busyForMs` — how long the recipient has been mid-turn as of this call (undefined when the hold
  *     isn't due to busy — e.g. not-ready/composer-dirty/rate-limited), so a caller can tell "queued behind
  *     a long-running turn" from "queued behind one that just started".
  * `position` and `msgId` are unchanged in meaning (msgId is added by the higher-level durable-message
  * wrapper in sessions/service.ts, not by enqueueStdin itself — see `enqueueDurableMessage`).
+ *
+ * `deliveryState` (card 9da2a435, additive; CR follow-up [3] on top of an earlier `confirmed:boolean` that
+ * was rejected for carrying zero bits — it was present only alongside `delivered:true` and NEVER varied,
+ * so it discriminated nothing a caller could act on): `"handed-off" | "queued" | "dropped"`, ALWAYS
+ * present, one-to-one with which branch of this function actually ran — the honest per-call outcome,
+ * spelled out instead of left to be inferred by cross-referencing `delivered`/`reason`/`queued`.
+ * `"handed-off"` (the immediate-submit branch) makes explicit what `delivered:true` has always actually
+ * meant and never stopped meaning: the text was HANDED to `submit()` as a turn attempt — NOT that the
+ * engine confirmed receiving it. That confirmation (`fireEnterAndVerify`'s hook round-trip) is asynchronous
+ * and can still GIVE UP after this call already returned — the live specimen behind this card was exactly
+ * that: `worker_message` returned `{delivered:true}` for a message that never reached the worker's
+ * transcript. A caller that needs to know the real outcome must correlate `msgId` against a later
+ * `worker_list`/`worker_status` read (`staleDirective`/`parkedDirective` — see `staleDirectiveProjection`
+ * in mcp/orchestration.ts), which DOES read the durable `session_message_gave_up` trail this synchronous
+ * return value cannot see yet. `"queued"` (the held branch) and `"dropped"` (the `session-dead` branch)
+ * are the SAME per-branch identity `delivered`/`reason`/`queued` already convey — `deliveryState` doesn't
+ * add new information there, it just gives a caller one field to read instead of three.
  */
 export type EnqueueResult = {
   delivered: boolean;
@@ -1394,6 +1416,7 @@ export type EnqueueResult = {
   queued?: boolean;
   landsAt?: "next-turn-boundary";
   busyForMs?: number;
+  deliveryState: "handed-off" | "queued" | "dropped";
 };
 /**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
@@ -3650,7 +3673,7 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
-    if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false };
+    if (!live?.alive) return { delivered: false, reason: "session-dead", queued: false, deliveryState: "dropped" };
     // Shape guard (card 78a16dc5) — see the doc comments on both checks for why NEITHER tier drops: a
     // dropped "warning"-kind entry is a real stall hazard (the async run_gate failure nudge can legitimately
     // contain a lone surrogate — see sanitizeLoneSurrogates' doc comment), so this only ever sanitizes or
@@ -3699,11 +3722,15 @@ export class PtyHost {
       if (!live.busy) {
         throw new Error("M1 invariant violated: submit() did not arm busy synchronously — the optimistic busy=true was deferred, so a concurrent enqueue could race the pending Enter (host.ts).");
       }
-      // Immediate idle-submit: this IS the delivery, but we do NOT invoke onDeliver here — a message
-      // delivered straight as a turn is never persisted as `session_message_queued` (the caller only
-      // records the durable event on the delivered:false path below), so there's nothing to resolve. This
-      // also keeps the load-bearing M1/M2 window byte-identical: no extra work on the synchronous submit.
-      return { delivered: true };
+      // Immediate idle-submit: text handed to submit() as this turn's attempt — NOT invoking onDeliver
+      // here (a message delivered straight as a turn is never persisted as `session_message_queued`; the
+      // caller only records the durable event on the delivered:false path below), so there's nothing to
+      // resolve. This also keeps the load-bearing M1/M2 window byte-identical: no extra work on the
+      // synchronous submit. Card 9da2a435: `deliveryState:"handed-off"` makes explicit that this hand-off
+      // is NOT yet engine-confirmed — `fireEnterAndVerify`'s async hook round-trip settles that later and
+      // can still GIVE UP (see EnqueueResult's doc for why this return value must not be read as a
+      // delivery proof).
+      return { delivered: true, deliveryState: "handed-off" };
     }
     // Held (busy / not-ready / composer-dirty / rate-limit parked / still give-up-held). Carry the optional
     // delivery callback so that when this entry is finally handed to the recipient (drainPending or
@@ -3718,7 +3745,7 @@ export class PtyHost {
     // wonder whether it's a drop. `busyForMs` is only meaningful while the hold is actually busy-caused
     // (not-ready/composer-dirty/rate-limited holds have no busy-since edge to measure from).
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
-    return { delivered: false, position: live.pending.length, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs };
+    return { delivered: false, position: live.pending.length, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
   }
 
   /**

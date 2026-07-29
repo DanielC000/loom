@@ -102,6 +102,74 @@ seedWorker("w-superseded-by-newer", "MGR", { turnSeq: 5 });
 ev("w-superseded-by-newer", "MGR", "message_worker", at(0), { msgId: "m-old", turnSeqAtDelivery: 0 });
 ev("w-superseded-by-newer", "MGR", "message_worker", at(20), { msgId: "m-new", turnSeqAtDelivery: 5 });
 
+// ============ Card 9da2a435 — PARKED directive coverage (the give-up chain staleDirective missed) ============
+// THE LIVE SPECIMEN this reproduces: `worker_message` returned `{delivered:true}` for msgId `df77b3d7`,
+// the text never reached the worker's transcript, and the worker sat `busy:false` idle for ~26 minutes —
+// because a directive whose Enter is never confirmed also never advances the worker's own turnSeq, so the
+// OLD staleDirectiveProjection's `turnsSinceDelivery` stayed 0 forever and read `null` (indistinguishable
+// from "recently delivered, no problem yet"). These seed the REAL event shape `handleGiveUpExhausted`
+// (sessions/service.ts) emits — `session_message_gave_up` with `outcome: "reminted"|"parked"` — exactly as
+// production appends it, driving the same real worker_list/worker_status tools as every case above.
+//
+// CR follow-up: `GIVE_UP_REMINT_LIMIT` defaults to 1 (sessions/service.ts), so a ROOT msgId (chainDepth 0)
+// ALWAYS re-mints at least once (`0 < 1`) before it can ever park — a give-up `outcome:"parked"` event
+// carrying `msgId === rootMsgId` directly is NOT a shape production can emit. Every "parked" case below
+// therefore goes through at least one "reminted" hop first, matching what `handleGiveUpExhausted` actually
+// produces — do NOT special-case "a root can never park" in the PROJECTION itself, only in this seeding:
+// once card 129efe74 lands, a redriven message may reach a park at chainDepth 0 by a different path, and
+// `resolveDirectiveOutcome`'s chain walk already handles that (a park found on the very first msgId it
+// checks) without needing to know whether the msgId it's looking at happens to equal the root.
+
+// (j) FIRES parkedDirective — a realistic single-hop remint-then-park chain (root gives up once, reminted
+// under a fresh msgId, THAT gives up too and parks — the only shape GIVE_UP_REMINT_LIMIT=1 can produce).
+// turnSeq never advances past 0 (no turn ever ran) — the exact shape that used to make staleDirective (and
+// therefore the whole projection) read as if nothing were wrong.
+seedWorker("w-parked", "MGR", { turnSeq: 0 });
+ev("w-parked", "MGR", "message_worker", at(0), { msgId: "m-parked", turnSeqAtDelivery: 0 });
+ev("w-parked", "MGR", "session_message_gave_up", at(5), { msgId: "m-parked", rootMsgId: "m-parked", chainDepth: 0, outcome: "reminted", remintedAs: "m-parked-1" });
+ev("w-parked", "MGR", "session_message_gave_up", at(10), { msgId: "m-parked-1", rootMsgId: "m-parked", chainDepth: 1, outcome: "parked" });
+
+// (k) STICKY — parked, and an intervening worker_report does NOT clear it (CR follow-up [1]: the two
+// branches have opposite epistemics from staleDirective's "any report since clears it" rule — a parked
+// directive's text never reached the worker, so nothing it reports can be an acknowledgement of THIS one).
+seedWorker("w-parked-sticky", "MGR", { turnSeq: 1 });
+ev("w-parked-sticky", "MGR", "message_worker", at(0), { msgId: "m-parked-sticky", turnSeqAtDelivery: 0 });
+ev("w-parked-sticky", "MGR", "session_message_gave_up", at(5), { msgId: "m-parked-sticky", rootMsgId: "m-parked-sticky", chainDepth: 0, outcome: "reminted", remintedAs: "m-parked-sticky-1" });
+ev("w-parked-sticky", "MGR", "session_message_gave_up", at(10), { msgId: "m-parked-sticky-1", rootMsgId: "m-parked-sticky", chainDepth: 1, outcome: "parked" });
+ev("w-parked-sticky", "MGR", "worker_report", at(20), { status: "progress", summary: "unrelated checkpoint, never saw the parked directive" });
+
+// (k2) CLEARS — parked, but a NEWER worker_message supersedes tracking entirely ("latest wins", the only
+// way parkedDirective is meant to clear).
+seedWorker("w-parked-superseded", "MGR", { turnSeq: 1 });
+ev("w-parked-superseded", "MGR", "message_worker", at(0), { msgId: "m-parked-old", turnSeqAtDelivery: 0 });
+ev("w-parked-superseded", "MGR", "session_message_gave_up", at(5), { msgId: "m-parked-old", rootMsgId: "m-parked-old", chainDepth: 0, outcome: "reminted", remintedAs: "m-parked-old-1" });
+ev("w-parked-superseded", "MGR", "session_message_gave_up", at(10), { msgId: "m-parked-old-1", rootMsgId: "m-parked-old", chainDepth: 1, outcome: "parked" });
+ev("w-parked-superseded", "MGR", "message_worker", at(20), { msgId: "m-parked-new", turnSeqAtDelivery: 1 });
+
+// (l) FIRES staleDirective, reported against the ROOT msgId — a re-mint chain that eventually DELIVERS
+// (the reminted msgId gets its own session_message_delivered, held-path style) and then goes stale.
+// The manager only ever saw the ROOT msgId from its own worker_message call, so that's what must be
+// reported back, not the internal remint id.
+seedWorker("w-reminted-then-stale", "MGR", { turnSeq: 6 });
+ev("w-reminted-then-stale", "MGR", "message_worker", at(0), { msgId: "m-remint-root", turnSeqAtDelivery: 0 });
+ev("w-reminted-then-stale", "MGR", "session_message_gave_up", at(5), { msgId: "m-remint-root", rootMsgId: "m-remint-root", chainDepth: 0, outcome: "reminted", remintedAs: "m-remint-1" });
+ev("w-reminted-then-stale", "MGR", "session_message_delivered", at(6), { msgId: "m-remint-1", turnSeqAtDelivery: 1 });
+
+// (m) NO-FIRE — re-minted and still genuinely in flight (held, not yet resolved either way). Neither
+// delivered-and-stale nor parked; nothing to report yet, same as a plain still-queued directive.
+seedWorker("w-reminted-pending", "MGR", { turnSeq: 9 });
+ev("w-reminted-pending", "MGR", "message_worker", at(0), { msgId: "m-remint-pending-root", turnSeqAtDelivery: 0 });
+ev("w-reminted-pending", "MGR", "session_message_gave_up", at(5), { msgId: "m-remint-pending-root", rootMsgId: "m-remint-pending-root", chainDepth: 0, outcome: "reminted", remintedAs: "m-remint-pending-1" });
+
+// (n) FIRES parkedDirective via a MULTI-HOP chain (reminted TWICE, then parked) — proves the chain walk
+// keeps following `remintedAs` across more than one hop, not just the single hop GIVE_UP_REMINT_LIMIT=1
+// happens to produce today (this seeds a hypothetical higher limit to exercise the general walk).
+seedWorker("w-multihop-parked", "MGR", { turnSeq: 0 });
+ev("w-multihop-parked", "MGR", "message_worker", at(0), { msgId: "m-multi-root", turnSeqAtDelivery: 0 });
+ev("w-multihop-parked", "MGR", "session_message_gave_up", at(5), { msgId: "m-multi-root", rootMsgId: "m-multi-root", chainDepth: 0, outcome: "reminted", remintedAs: "m-multi-r1" });
+ev("w-multihop-parked", "MGR", "session_message_gave_up", at(10), { msgId: "m-multi-r1", rootMsgId: "m-multi-root", chainDepth: 1, outcome: "reminted", remintedAs: "m-multi-r2" });
+ev("w-multihop-parked", "MGR", "session_message_gave_up", at(15), { msgId: "m-multi-r2", rootMsgId: "m-multi-root", chainDepth: 2, outcome: "parked" });
+
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ ({
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
@@ -152,18 +220,73 @@ check("(h) never messaged → staleDirective null, no crash",
 check("(i) latest message_worker wins — tracks the NEW directive (turnsSinceDelivery=0), not the old stale one",
   byId["w-superseded-by-newer"]?.staleDirective === null);
 
+// ============ Card 9da2a435 — PARKED directive coverage ============
+check("(j) FIRES parkedDirective: single-hop remint-then-park (the only shape GIVE_UP_REMINT_LIMIT=1 can produce), turnSeq never advanced",
+  byId["w-parked"]?.parkedDirective !== null
+  && byId["w-parked"]?.parkedDirective?.msgId === "m-parked"
+  && byId["w-parked"]?.staleDirective === null);
+
+check("(k) STICKY: parked directive is NOT cleared by an intervening worker_report",
+  byId["w-parked-sticky"]?.parkedDirective !== null
+  && byId["w-parked-sticky"]?.parkedDirective?.msgId === "m-parked-sticky"
+  && byId["w-parked-sticky"]?.staleDirective === null);
+
+check("(k2) CLEARS: parked directive superseded by a NEWER worker_message ('latest wins')",
+  byId["w-parked-superseded"]?.parkedDirective === null
+  && byId["w-parked-superseded"]?.staleDirective === null
+  && byId["w-parked-superseded"]?.directive?.msgId === "m-parked-new");
+
+check("(l) FIRES staleDirective against the ROOT msgId after a re-mint chain actually delivers and goes stale",
+  byId["w-reminted-then-stale"]?.staleDirective !== null
+  && byId["w-reminted-then-stale"]?.staleDirective?.msgId === "m-remint-root"
+  && byId["w-reminted-then-stale"]?.staleDirective?.turnsSinceDelivery === 5
+  && byId["w-reminted-then-stale"]?.parkedDirective === null);
+
+check("(m) NO-FIRE: re-minted and still genuinely in flight (held, unresolved either way)",
+  byId["w-reminted-pending"]?.staleDirective === null && byId["w-reminted-pending"]?.parkedDirective === null);
+
+check("(n) FIRES parkedDirective via a multi-hop (two-remint) chain — the walk keeps following remintedAs",
+  byId["w-multihop-parked"]?.parkedDirective !== null
+  && byId["w-multihop-parked"]?.parkedDirective?.msgId === "m-multi-root"
+  && byId["w-multihop-parked"]?.staleDirective === null);
+
+// ============ Card 9da2a435 — `directive` raw-state discriminator (CR follow-up [2]) ============
+check("directive: never messaged → {msgId:null, state:\"none\", at:null}",
+  byId["w-never-messaged"]?.directive?.msgId === null
+  && byId["w-never-messaged"]?.directive?.state === "none"
+  && byId["w-never-messaged"]?.directive?.at === null);
+
+check("directive: still queued (held, unresolved) → state \"pending\" — distinguishable from never-messaged",
+  byId["w-still-queued"]?.directive?.msgId === "m-still-queued"
+  && byId["w-still-queued"]?.directive?.state === "pending");
+
+check("directive: delivered-and-fresh (below stale threshold) → state \"delivered\"",
+  byId["w-onelongturn"]?.directive?.state === "delivered"
+  && byId["w-onelongturn"]?.directive?.msgId === "m-onelongturn");
+
+check("directive: delivered-and-stale → state still reads \"delivered\" (staleDirective is the alarm layer)",
+  byId["w-stale"]?.directive?.state === "delivered" && byId["w-stale"]?.directive?.msgId === "m-stale");
+
+check("directive: parked → state \"parked\", at === parkedAt",
+  byId["w-parked"]?.directive?.state === "parked"
+  && byId["w-parked"]?.directive?.msgId === "m-parked"
+  && byId["w-parked"]?.directive?.at === byId["w-parked"]?.parkedDirective?.parkedAt);
+
 // ============================ worker_status mirrors worker_list ============================
 const sStale = await status("w-stale");
 check("worker_status(w-stale) carries the same staleDirective as worker_list",
   sStale.staleDirective?.msgId === "m-stale" && sStale.staleDirective?.turnsSinceDelivery === 3);
 const sAcked = await status("w-acked");
 check("worker_status(w-acked) → staleDirective null (acknowledged)", sAcked.staleDirective === null);
+const sParked = await status("w-parked");
+check("worker_status(w-parked) carries the same parkedDirective as worker_list",
+  sParked.parkedDirective?.msgId === "m-parked" && sParked.staleDirective === null);
 
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — staleDirective fires only once a worker_message directive has aged past the turn threshold with no worker_report since delivery (both the immediate and held delivery paths), never fires on a long single turn or once acknowledged by any report, and correctly ignores a still-queued/superseded/never-messaged/superseded-by-a-newer-directive worker."
+  ? "\n✅ ALL PASS — staleDirective fires only once a worker_message directive has aged past the turn threshold with no worker_report since delivery (both the immediate and held delivery paths), never fires on a long single turn or once acknowledged by any report, and correctly ignores a still-queued/superseded/never-messaged/superseded-by-a-newer-directive worker. parkedDirective (card 9da2a435) correctly fires for a directive whose give-up chain terminated PARKED — realistic single-hop and multi-hop remint-then-park chains, matching production's GIVE_UP_REMINT_LIMIT=1 shape — is STICKY against an intervening worker_report (opposite epistemics from staleDirective), clears only once superseded by a newer worker_message, stays null while a re-mint is still genuinely in flight, and staleDirective still reports against the ROOT msgId a manager actually recognizes even after a chain resolves via a re-mint. The raw `directive` discriminator (none/pending/delivered/parked) finally distinguishes a never-messaged worker from every other state, which used to be byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

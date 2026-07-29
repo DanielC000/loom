@@ -4672,10 +4672,18 @@ export class SessionService {
     const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null });
     // Card 343441bd: `msgId` (always minted — see enqueueDurableMessage's doc) lets the staleDirective
     // projection find THIS directive later. `turnSeqAtDelivery` is stamped HERE only on the immediate-
-    // delivery path (r.delivered — the worker was idle, so send time IS delivery time; `worker.turnSeq`
-    // was already read above and submit() itself never touches turn_seq, so it's still current). The
-    // held path stamps it later, at ACTUAL delivery, in `resolveQueuedMessage` — never here, and never at
-    // enqueue, since a held message hasn't reached the worker yet.
+    // delivery path (r.delivered — `worker.turnSeq` was already read above and submit() itself never
+    // touches turn_seq, so it's still current AT HAND-OFF). Card 9da2a435: hand-off is NOT confirmed
+    // delivery — the prior comment here claimed "send time IS delivery time", which is exactly the false
+    // premise that let a PARKED directive read as delivered; `submit()`'s Enter write is confirmed (or
+    // gives up) asynchronously, well after this method returns `r.delivered:true`/`r.deliveryState:
+    // "handed-off"` (see `enqueueStdin`'s EnqueueResult doc). A submit that gives up re-mints or terminally
+    // PARKS (`handleGiveUpExhausted`) and appends a `session_message_gave_up` event carrying this SAME
+    // msgId — `staleDirectiveProjection`'s chain walk (mcp/orchestration.ts) is what actually resolves
+    // whether this stamp held up, not this comment. The held path stamps `turnSeqAtDelivery` later, at its
+    // own hand-off, in `resolveQueuedMessage` — never here, and never at enqueue, since a held message
+    // hasn't reached the worker yet — and carries the IDENTICAL hand-off-not-confirmation caveat: see that
+    // method's own doc for why.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
@@ -5066,21 +5074,32 @@ export class SessionService {
   }
 
   /**
-   * Mark a durable queued message DELIVERED (idempotent) — the resolution half of `session_message_queued`.
-   * Fired by the host the instant a held message is handed to the recipient (drainPending / consumePending),
-   * and by the boot scan to RETIRE a message whose recipient is gone/superseded (`reason`). Idempotent via
-   * the delivered-marker check, and NEVER throws (a delivery-marking fault must not disturb the host drain
-   * or gate boot). A msgId that was never persisted (immediate delivery) simply records a harmless marker
-   * with no queued counterpart — but onDeliver is only ever attached to a HELD entry, so that can't occur.
+   * Mark a durable queued message HANDED OFF (idempotent) — the resolution half of
+   * `session_message_queued`. Fired by the host the instant a held message is handed to the recipient
+   * (drainPending / consumePending), and by the boot scan to RETIRE a message whose recipient is
+   * gone/superseded (`reason`). Idempotent via the delivered-marker check, and NEVER throws (a
+   * delivery-marking fault must not disturb the host drain or gate boot). A msgId that was never persisted
+   * (immediate delivery) simply records a harmless marker with no queued counterpart — but onDeliver is
+   * only ever attached to a HELD entry, so that can't occur.
+   *
+   * Card 9da2a435 (the caveat `messageWorker`'s own comment points back here for): despite the event kind
+   * name, this is a HAND-OFF stamp, not an engine-confirmed delivery — it fires the moment `drainPending`/
+   * `consumePending` splices the entry and calls `submit()`, exactly like the immediate-delivery path's own
+   * `turnSeqAtDelivery` stamp (`messageWorker`, above). `submit()`'s Enter write is confirmed — or GIVES UP
+   * — asynchronously, well after this method already ran. A submit that gives up re-mints or terminally
+   * PARKS (`handleGiveUpExhausted`) and appends a `session_message_gave_up` event carrying the SAME msgId
+   * this method just stamped "delivered" for; `staleDirectiveProjection`'s chain walk (mcp/orchestration.ts)
+   * is what actually resolves whether this stamp held up, not this method's name.
    */
   private resolveQueuedMessage(msgId: string, opts: { recipientId?: string; reason?: string } = {}): void {
     try {
       if (this.db.isQueuedMessageDelivered(msgId)) return; // already resolved — idempotent no-op
-      // Card 343441bd: this fires the instant a HELD message is actually handed to the recipient
+      // Card 343441bd: this fires the instant a HELD message is handed off to the recipient
       // (drainPending/consumePending's onDeliver, or the boot re-drive) — the correct stamp point for
       // `turnSeqAtDelivery` on the held path (mirrors messageWorker's immediate-path stamp; NEVER at
-      // enqueue). Only stamped on a genuine delivery (`!opts.reason`) — a "superseded"/"obsolete"
-      // resolution never actually delivered the text, so it has no real delivery turn to record.
+      // enqueue) — see this method's own doc above for why "handed off" is not "engine-confirmed". Only
+      // stamped on a genuine hand-off (`!opts.reason`) — a "superseded"/"obsolete" resolution never
+      // actually delivered the text, so it has no real delivery turn to record.
       const detail: Record<string, unknown> = opts.reason ? { msgId, reason: opts.reason } : { msgId };
       if (!opts.reason && opts.recipientId) {
         const recipient = this.db.getSession(opts.recipientId);

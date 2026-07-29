@@ -71,6 +71,10 @@ try {
   const r0 = host.enqueueStdin(SID, "IMMEDIATE_MSG", "system", () => { immFired++; });
   check("(A1) idle enqueue delivered immediately", r0.delivered === true && r0.position === undefined);
   check("(A1) onDeliver NOT fired on the immediate-submit path (M1/M2 window untouched)", immFired === 0);
+  // Card 9da2a435: `delivered:true` is a hand-off, not an engine-confirmed receipt — the live specimen
+  // behind this card was exactly a `delivered:true` message that never reached the worker. `deliveryState`
+  // makes that explicit in-band instead of only in a doc comment a caller might not read.
+  check("(A1) delivered:true carries deliveryState:\"handed-off\" — hand-off is not confirmation", r0.deliveryState === "handed-off");
 
   // Session is now busy → subsequent enqueues are HELD. Queue a DURABLE message + a PLAIN one.
   let durFired = 0;

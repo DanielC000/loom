@@ -951,48 +951,132 @@ export class OrchestrationMcpRouter {
     // read only when a manager actually looks at worker_list/worker_status.
     //
     // "Acknowledged" = the worker's next worker_report (ANY status) with a `ts` after the directive's
-    // ACTUAL delivery — the cheapest of the card's own candidate definitions, deliberately NOT a semantic
-    // match against the directive's text. Scoped to the LATEST `message_worker` event only (mirrors
+    // recorded HAND-OFF (see the `deliveryState`/hand-off-vs-confirmation caveat below — "delivery" here
+    // means the recorded hand-off point, not an engine-confirmed receipt) — the cheapest of the card's own
+    // candidate definitions, deliberately NOT a semantic match against the directive's text. Only applies
+    // to the `delivered` outcome below — see Card 9da2a435's note on why a `parked` outcome can NEVER be
+    // acknowledged this way. Scoped to the LATEST `message_worker` event only (mirrors
     // reportedProjection's own "latest wins" scan), and to `worker_message` ONLY — `worker_redirect`
     // already carries a correlatable `queuedMsgId` (card 02621025) and is deliberately deferred to a later
     // pass to keep this one minimal.
     //
     // turnSeqAtDelivery was stamped by messageWorker (immediate delivery) or resolveQueuedMessage (held —
-    // stamped at the ACTUAL handoff, never at enqueue); see both call sites' docs. A directive still
-    // sitting in the queue (held, not yet delivered) has no turnSeqAtDelivery anywhere yet — nothing to
-    // judge staleness against, so it reads as null exactly like an acknowledged one.
+    // stamped at HAND-OFF, never at enqueue); see both call sites' docs. A directive still sitting in the
+    // queue (held, not yet delivered) has no turnSeqAtDelivery anywhere yet — nothing to judge staleness
+    // against, so it reads as null exactly like an acknowledged one.
+    //
+    // Card 9da2a435: hand-off is NOT confirmed delivery (see enqueueStdin's EnqueueResult doc) — a submit
+    // that hands off optimistically can still GIVE UP asynchronously, and `handleGiveUpExhausted`
+    // (sessions/service.ts) either re-mints it under a FRESH msgId (chainDepth+1) or terminally PARKS it,
+    // appending a `session_message_gave_up` event either way. The OLD version of this function never
+    // looked for that event: a parked directive never gets a worker_report (nothing was ever handed to the
+    // worker to act on) AND never advances the worker's own turnSeq (no turn ran), so `turnsSinceDelivery`
+    // stayed 0 forever and `staleDirective` read `null` — indistinguishable from "recently delivered, no
+    // problem yet". `resolveDirectiveOutcome` below walks the give-up chain first so a parked directive is
+    // reported as parked, never silently as "no signal".
+    const resolveDirectiveOutcome = (
+      events: ReturnType<typeof db.listEventsForWorker>, rootDirective: (typeof events)[number], rootMsgId: string,
+    ):
+      | { state: "parked"; msgId: string; parkedAt: string }
+      | { state: "delivered"; msgId: string; deliveredAt: string; turnSeqAtDelivery: number }
+      | { state: "pending"; msgId: string } => {
+      // Each msgId gives up AT MOST ONCE (a give-up either re-mints to a brand-new msgId or parks
+      // terminally — see handleGiveUpExhausted's doc) — so walking msgId -> its one give-up event -> the
+      // next msgId cannot loop; `seen` is a cheap defensive bound, not a real cycle guard.
+      let msgId = rootMsgId;
+      const seen = new Set<string>();
+      while (!seen.has(msgId)) {
+        seen.add(msgId);
+        const gaveUp = events.find((e) => e.kind === "session_message_gave_up" && e.detail?.msgId === msgId);
+        if (!gaveUp) break;
+        if (gaveUp.detail?.outcome === "parked") {
+          return { state: "parked", msgId, parkedAt: gaveUp.ts };
+        }
+        const remintedAs = gaveUp.detail?.remintedAs as string | undefined;
+        // CR follow-up [8] (card 9da2a435): a malformed give-up (gave up, but neither "parked" nor a
+        // usable `remintedAs`) must fail toward "pending", NEVER fall through to the delivered-check
+        // below — this msgId DID give up; reporting it as cleanly delivered would resurrect the exact
+        // lie this card exists to remove, just triggered by corrupted data instead of an optimistic stamp.
+        if (!remintedAs) return { state: "pending", msgId };
+        msgId = remintedAs;
+      }
+      // `msgId` is now the chain's current (not-yet-given-up) candidate. Only the ROOT msgId's own
+      // message_worker event ever carries an immediate-delivery turnSeqAtDelivery; every OTHER msgId in
+      // the chain (a remint) always takes the HELD path (handleGiveUpExhausted forces giveUpHeldUntil —
+      // see its own doc), so its delivery record — if any — is a session_message_delivered event instead.
+      if (msgId === rootMsgId && typeof rootDirective.detail?.turnSeqAtDelivery === "number") {
+        return {
+          state: "delivered", msgId, deliveredAt: rootDirective.ts,
+          turnSeqAtDelivery: rootDirective.detail.turnSeqAtDelivery,
+        };
+      }
+      const delivery = events.find((e) =>
+        e.kind === "session_message_delivered" && e.detail?.msgId === msgId
+        && typeof e.detail?.turnSeqAtDelivery === "number");
+      if (!delivery) return { state: "pending", msgId }; // still queued/held, or mid-retry — nothing to judge yet
+      return { state: "delivered", msgId, deliveredAt: delivery.ts, turnSeqAtDelivery: delivery.detail!.turnSeqAtDelivery as number };
+    };
+
+    // CR follow-up [2] (card 9da2a435): `directive` is the raw four-valued discriminator a manager can
+    // read directly — "none" (never messaged) / "pending" (queued or mid give-up-retry, not yet resolved
+    // either way) / "delivered" / "parked" — always keyed to the ROOT msgId the manager actually got back
+    // from its own worker_message call (a mid-chain remint id was never handed to it and would be
+    // meaningless to correlate against). `staleDirective`/`parkedDirective` stay as derived ALARM flags
+    // layered on top (a manager scanning worker_list for problems shouldn't have to branch on `directive`
+    // itself) — `directive` closes the specific gap CR finding [2] named: without it, "never messaged" and
+    // "delivered, freshly, no problem" were byte-identical (`{staleDirective:null, parkedDirective:null}`).
     const staleDirectiveProjection = (
       workerSessionId: string, currentTurnSeq: number,
-    ): { staleDirective: { msgId: string; deliveredAt: string; turnsSinceDelivery: number } | null } => {
+    ): {
+      directive: { msgId: string | null; state: "none" | "pending" | "delivered" | "parked"; at: string | null };
+      staleDirective: { msgId: string; deliveredAt: string; turnsSinceDelivery: number } | null;
+      parkedDirective: { msgId: string; parkedAt: string } | null;
+    } => {
       const events = db.listEventsForWorker(workerSessionId);
-      let directive: (typeof events)[number] | undefined;
+      let directiveEvent: (typeof events)[number] | undefined;
       for (let i = events.length - 1; i >= 0; i--) {
-        if (events[i]?.kind === "message_worker") { directive = events[i]; break; }
+        if (events[i]?.kind === "message_worker") { directiveEvent = events[i]; break; }
       }
-      const msgId = directive?.detail?.msgId as string | undefined;
-      if (!directive || !msgId) return { staleDirective: null };
-      let deliveredAt: string;
-      let turnSeqAtDelivery: number;
-      if (typeof directive.detail?.turnSeqAtDelivery === "number") {
-        // Immediate delivery — stamped directly on the message_worker event itself.
-        deliveredAt = directive.ts;
-        turnSeqAtDelivery = directive.detail.turnSeqAtDelivery;
-      } else {
-        // Held at send time — find its LATER session_message_delivered resolution. Only a GENUINE delivery
-        // stamps turnSeqAtDelivery (resolveQueuedMessage never stamps it on a superseded/obsolete
-        // resolution, which never actually delivered the text) — so its presence alone is the delivery check.
-        const delivery = events.find((e) =>
-          e.kind === "session_message_delivered" && e.detail?.msgId === msgId
-          && typeof e.detail?.turnSeqAtDelivery === "number");
-        if (!delivery) return { staleDirective: null }; // still queued, or resolved without ever delivering
-        deliveredAt = delivery.ts;
-        turnSeqAtDelivery = delivery.detail!.turnSeqAtDelivery as number;
+      const rootMsgId = directiveEvent?.detail?.msgId as string | undefined;
+      if (!directiveEvent || !rootMsgId) {
+        return { directive: { msgId: null, state: "none", at: null }, staleDirective: null, parkedDirective: null };
       }
+
+      const outcome = resolveDirectiveOutcome(events, directiveEvent, rootMsgId);
+
+      if (outcome.state === "parked") {
+        // CR follow-up [1] (card 9da2a435): STICKY, deliberately NOT cleared by a later worker_report.
+        // The stale-delivered branch below treats a later report as an acknowledgement because the text
+        // genuinely reached the worker — but a PARKED directive's text never reached it, so no report the
+        // worker emits (about work it was already doing, or anything else) can possibly be an
+        // acknowledgement of THIS directive; the two branches have opposite epistemics, not a shared rule.
+        // It clears the only way it honestly can: a NEWER message_worker becomes the tracked directive
+        // (see the "latest wins" scan above) and this chain is never walked again.
+        return {
+          directive: { msgId: rootMsgId, state: "parked", at: outcome.parkedAt },
+          staleDirective: null,
+          parkedDirective: { msgId: rootMsgId, parkedAt: outcome.parkedAt },
+        };
+      }
+      if (outcome.state === "pending") {
+        // CR follow-up [7] (card 9da2a435): intentionally NO staleDirective/parkedDirective signal here —
+        // accepted, not an oversight. The window is bounded (SUBMIT_MAX_ATTEMPTS's own retry cycle, then
+        // GIVE_UP_HOLD_MS, then the reconcile tick), and letting it resolve into a clean parked/delivered
+        // read is worth more than a transient mid-retry alarm that would just flap while Loom is still
+        // working the redelivery on its own.
+        return { directive: { msgId: rootMsgId, state: "pending", at: directiveEvent.ts }, staleDirective: null, parkedDirective: null };
+      }
+
+      const { deliveredAt, turnSeqAtDelivery } = outcome;
+      const directive = { msgId: rootMsgId, state: "delivered" as const, at: deliveredAt };
       const acknowledged = events.some((e) => e.kind === "worker_report" && e.ts > deliveredAt);
-      if (acknowledged) return { staleDirective: null };
+      if (acknowledged) return { directive, staleDirective: null, parkedDirective: null };
       const turnsSinceDelivery = currentTurnSeq - turnSeqAtDelivery;
-      if (turnsSinceDelivery < STALE_DIRECTIVE_TURN_THRESHOLD) return { staleDirective: null };
-      return { staleDirective: { msgId, deliveredAt, turnsSinceDelivery } };
+      if (turnsSinceDelivery < STALE_DIRECTIVE_TURN_THRESHOLD) return { directive, staleDirective: null, parkedDirective: null };
+      // Reported against rootMsgId (never the resolved chain's current msgId) — the manager only ever saw
+      // the ROOT msgId returned from its own worker_message call; a mid-chain remint id was never handed
+      // to it and would be meaningless to correlate against.
+      return { directive, staleDirective: { msgId: rootMsgId, deliveredAt, turnsSinceDelivery }, parkedDirective: null };
     };
 
     // Card ae0b7891: "archived without report" — the archived counterpart to reportedState's "awaiting
@@ -1123,7 +1207,9 @@ export class OrchestrationMcpRouter {
         pendingSpawn: { opId: op.opId, startedAt: op.startedAt },
         reportedState: null,
         awaitingReview: false,
+        directive: { msgId: null, state: "none" as const, at: null },
         staleDirective: null,
+        parkedDirective: null,
         archivedWithoutReport: false,
       }));
       // A worker_spawn REJECTED purely because the concurrency cap was full gets its own ADDITIVE
@@ -1149,7 +1235,9 @@ export class OrchestrationMcpRouter {
         capQueued: { opId: e.opId, agentId: e.agentId, taskId: e.taskId, kickoffLabel: e.kickoffLabel, queuedAt: e.queuedAt },
         reportedState: null,
         awaitingReview: false,
+        directive: { msgId: null, state: "none" as const, at: null },
         staleDirective: null,
+        parkedDirective: null,
         archivedWithoutReport: false,
       }));
       // Archived-without-report workers (card ae0b7891): the archived counterpart to the three
@@ -1185,7 +1273,9 @@ export class OrchestrationMcpRouter {
           rateLimitDeadline: null,
           reportedState: null,
           awaitingReview: false,
+          directive: { msgId: null, state: "none" as const, at: null },
           staleDirective: null,
+          parkedDirective: null,
           archivedWithoutReport: true,
         }));
       return [...workers, ...pendingSpawns, ...capQueued, ...archivedUnreported];
@@ -1193,14 +1283,14 @@ export class OrchestrationMcpRouter {
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `staleDirective` (non-null: `{msgId, deliveredAt, turnsSinceDelivery}`) flags a worker_message directive that was DELIVERED but has no worker_report since — distinct from the `{delivered:true}` worker_message itself returns, which only proves the text was submitted/queued, never that it was acted on. Fires only once the worker has completed several of its OWN real turns with no report at all since delivery (never on a single long-running turn, however long); clears the instant any worker_report lands, or once you send a newer worker_message (tracking always follows your MOST RECENT one — `worker_redirect` is a separate channel this does not track). `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `archivedWithoutReport:true` flags a worker whose pty EXITED WITHOUT EVER CALLING worker_report — it no longer counts against your concurrency cap, but it did NOT silently vanish: this row is a distinct ADDITIVE category (a real worker row, `processState` reflects its actual exit state) that appears ONLY for a genuinely-unreported strand, never for a worker that reported (even `noChanges`) and cleanly auto-retired — pull `worker_transcript` to see what it did, then `worker_merge` to review/merge any committed work, or re-dispatch the task. It clears on its own once you resolve it (move the task off its active lane, or spawn/recycle a successor). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all. It AUTO-FIRES on its own (FIFO — oldest queued first) the next time a concurrency slot on this manager actually frees, with no re-call needed; you can still re-`worker_spawn` the same taskId/agentId by hand if you don't want to wait, which clears the marker the same way it always did. If an auto-fire attempt itself fails for a real reason (its task went terminal/held, its worktree couldn't be created, …) you get a `[loom:cap-queue-autofire-failed]` message naming the opId/task/agent — the entry is dropped at that point and needs a fresh worker_spawn. To withdraw a queued entry BEFORE it fires, call `worker_stop({opId})` (see worker_stop's own docs) — it never auto-dispatches after that. Never count either placeholder as live or awaiting review.", inputSchema: strictShape({}) },
+      { description: "List the workers you (this manager) have spawned — your direct children. `directive` (`{msgId, state, at}`, state one of `\"none\"|\"pending\"|\"delivered\"|\"parked\"`) is your MOST RECENT worker_message's raw resolved state, always keyed to the msgId YOU got back — `\"none\"` means you've never messaged this worker; `\"pending\"` means it's still queued or Loom is still retrying its redelivery internally, not yet resolved either way; `\"delivered\"`/`\"parked\"` are explained by `staleDirective`/`parkedDirective` below, which are derived ALARM flags layered on top of this same state (read those for the \"is something wrong\" signal; read `directive` when you need the raw state, e.g. to tell a fresh `\"pending\"` apart from a worker you've simply never messaged). `staleDirective` (non-null: `{msgId, deliveredAt, turnsSinceDelivery}`) flags a worker_message directive that was DELIVERED but has no worker_report since — distinct from the `{delivered:true}` worker_message itself returns, which only proves the text was HANDED OFF as a turn attempt (or durably queued), never that the engine confirmed it or that it was acted on — see worker_message's own docs for why `delivered:true` is not a delivery guarantee. Fires only once the worker has completed several of its OWN real turns with no report at all since delivery (never on a single long-running turn, however long); clears the instant any worker_report lands, or once you send a newer worker_message (tracking always follows your MOST RECENT one — `worker_redirect` is a separate channel this does not track). `parkedDirective` (non-null: `{msgId, parkedAt}`) is the THIRD state alongside `staleDirective` — a directive Loom gave up REDELIVERING entirely: your worker_message's hand-off never confirmed, Loom retried it internally (in-session, then across several re-mint attempts) and exhausted its budget, so it PARKED — this is the case `staleDirective` alone cannot see (a parked directive never reaches the worker, so the worker's own turnSeq never advances and `staleDirective` would otherwise read `null` forever, indistinguishable from \"nothing wrong\"). Mutually exclusive with `staleDirective` (a directive is either delivered-but-unacknowledged, or never-actually-delivered). ⚠️ STICKY, unlike `staleDirective`: a `worker_report` does NOT clear it — the text never reached the worker, so nothing the worker reports can be an acknowledgement of it. It clears the same way `directive` itself moves on: only once you send a NEWER worker_message. On `parkedDirective`, RE-SEND — Loom will not retry it for you. `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `archivedWithoutReport:true` flags a worker whose pty EXITED WITHOUT EVER CALLING worker_report — it no longer counts against your concurrency cap, but it did NOT silently vanish: this row is a distinct ADDITIVE category (a real worker row, `processState` reflects its actual exit state) that appears ONLY for a genuinely-unreported strand, never for a worker that reported (even `noChanges`) and cleanly auto-retired — pull `worker_transcript` to see what it did, then `worker_merge` to review/merge any committed work, or re-dispatch the task. It clears on its own once you resolve it (move the task off its active lane, or spawn/recycle a successor). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all. It AUTO-FIRES on its own (FIFO — oldest queued first) the next time a concurrency slot on this manager actually frees, with no re-call needed; you can still re-`worker_spawn` the same taskId/agentId by hand if you don't want to wait, which clears the marker the same way it always did. If an auto-fire attempt itself fails for a real reason (its task went terminal/held, its worktree couldn't be created, …) you get a `[loom:cap-queue-autofire-failed]` message naming the opId/task/agent — the entry is dropped at that point and needs a fresh worker_spawn. To withdraw a queued entry BEFORE it fires, call `worker_stop({opId})` (see worker_stop's own docs) — it never auto-dispatches after that. Never count either placeholder as live or awaiting review.", inputSchema: strictShape({}) },
       async () => ok(fleetView()),
     );
 
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `archivedWithoutReport` (see worker_list) — true only when this worker's pty EXITED WITHOUT EVER CALLING worker_report and the strand is still unresolved; NEVER true for a worker that reported (even `noChanges`) and cleanly auto-retired. Also includes `staleDirective` (see worker_list) — a delivered worker_message with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent vs. `lastActivity` tells you whether a busy worker is actively progressing or possibly wedged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
+        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `archivedWithoutReport` (see worker_list) — true only when this worker's pty EXITED WITHOUT EVER CALLING worker_report and the strand is still unresolved; NEVER true for a worker that reported (even `noChanges`) and cleanly auto-retired. Also includes `directive` (see worker_list) — your most recent worker_message's raw resolved state (`\"none\"|\"pending\"|\"delivered\"|\"parked\"`). Also includes `staleDirective` (see worker_list) — a delivered worker_message with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `parkedDirective` (see worker_list) — a worker_message Loom gave up redelivering entirely (exhausted its internal retry/re-mint budget with no confirmed hand-off); mutually exclusive with `staleDirective`, STICKY (a worker_report does NOT clear it — only a newer worker_message does), and the signal that catches a directive that never reached the worker at all — re-send it. Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent vs. `lastActivity` tells you whether a busy worker is actively progressing or possibly wedged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
         inputSchema: strictShape({ workerSessionId: z.string().optional() }),
       },
       async ({ workerSessionId }) => {
@@ -1457,7 +1547,7 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_message",
       {
-        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = went out as a turn now); on `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting). A `\"held\"` result is a SUCCESS, not a failure — it ALSO carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based queue position), `busyForMs` (how long the worker has been mid-turn, when known), and `msgId` (to correlate with a later durable record), so you can read the outcome as the honest queue-and-will-land it is instead of inferring that from a bare `false`.",
+        description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = HANDED OFF as a turn now); on `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting). A `\"held\"` result is a SUCCESS, not a failure — it ALSO carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based queue position), `busyForMs` (how long the worker has been mid-turn, when known), and `msgId` (to correlate with a later durable record), so you can read the outcome as the honest queue-and-will-land it is instead of inferring that from a bare `false`. ⚠️ `delivered:true` is NOT proof the worker ever saw it: it only means the text was handed to the engine as a turn attempt. `deliveryState` (always present, `\"handed-off\"|\"queued\"|\"dropped\"`, one-to-one with the actual outcome) spells that out explicitly instead of leaving it to be inferred from `delivered`/`reason`/`queued` — on `delivered:true` it reads `\"handed-off\"`, a REMINDER that the engine's own confirmation is asynchronous and can still GIVE UP after this call already returned (this happened in production — a `delivered:true` message never reached the worker's transcript and it sat idle for 26 minutes with no signal anything was wrong). To find out what actually happened, poll `worker_list`/`worker_status` and check this `msgId` against `directive`/`staleDirective` (delivered but unacknowledged after several of the worker's own turns) or `parkedDirective` (Loom gave up redelivering it entirely — re-send).",
         inputSchema: strictShape({ workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() }),
       },
       async ({ workerSessionId, text, message }) => {
@@ -1500,6 +1590,11 @@ export class OrchestrationMcpRouter {
           "— the worker was busy, its current turn is being cut short with an Esc right now, and this redirect " +
           "lands the instant that settles. Also carries `position`, `busyForMs`, and `msgId` like worker_message. " +
           "An idle worker (delivered:true) had nothing to interrupt — no Esc fires. " +
+          "⚠️ Like worker_message, `delivered:true` is NOT proof the worker ever saw it — only that the " +
+          "text was handed to the engine as a turn attempt; the engine's own confirmation is asynchronous " +
+          "and can still GIVE UP after this call already returned (see worker_message's own docs for the " +
+          "`deliveryState` field and the production incident behind this caveat). This projection's chain " +
+          "walk currently tracks worker_message directives only, not redirects — see worker_list's own docs. " +
           "`text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if " +
           "both, text wins).",
         inputSchema: strictShape({ workerSessionId: z.string(), text: z.string().optional(), message: z.string().optional() }),
