@@ -3,11 +3,25 @@
 // its own workers (manager derived from the URL path, server-side — no managerId param) and that
 // non-managers (workers / plain sessions) get no orchestration surface at all (role gate -> 404).
 // Run: 1) start the daemon (node dist/index.js), 2) node test/orch-scope.mjs
+//
+// Card 4f18bca2: this file is NOT_HERMETIC (needs the live daemon above) and so is excluded from
+// the automated gate (see scripts/test-daemon.mjs's NOT_HERMETIC set) — its own literal expected-
+// tools string had silently drifted (missing worker_reap) with nothing to catch it. Rather than
+// re-pin a second hand-authored literal here, the expected sets below are now DERIVED straight from
+// promptLint.ts's ORCH_MANAGER_TOOLS / ORCH_WORKER_TOOLS — the SAME tables
+// test/agent-prompt-lint-surface-drift.mjs already hermetically proves match the real routers'
+// registered tools, in the gate. That drift check plus this derive makes this file's tool-set
+// assertions structurally unable to disagree with the real manager/worker MCP surface: a change to
+// the router without a matching promptLint.ts edit now fails the (gated) surface-drift test before
+// it can ever reach this (ungated) one, and a promptLint.ts edit alone keeps this file's expectation
+// automatically current without a second hand-edit. This is option (a) from the card, chosen over
+// (b)/(c) because the derivation was directly available — no new hermetic sibling was needed.
 import Database from "better-sqlite3";
 import os from "node:os";
 import path from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { ORCH_MANAGER_TOOLS, ORCH_WORKER_TOOLS } from "../dist/agents/promptLint.js";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv({ port: true }); // prod-guard: abort unless LOOM_HOME=<temp> + LOOM_PORT != 4317
@@ -63,7 +77,11 @@ const M = await connect("M");
 const toolList = (await M.listTools()).tools;
 const tools = toolList.map((t) => t.name).sort();
 // the worker_* coordination surface (incl. worker_redirect, the "land it NOW" turn-interrupt escalation,
-// and worker_relink, card fc243a43's re-attach-a-stranded-worker repair tool) + my_context (own-occupancy
+// worker_relink, card fc243a43's re-attach-a-stranded-worker repair tool, and worker_reap, card
+// 1a9f2ace's daemon-executed reap of a stray OS process (a stuck test runner, an escaped/detached
+// vite/esbuild, a post-crash zombie) rooted in one worker's OWN worktree — scoped by executable
+// path/cwd/command line, never a bare image-name/port match, and excluding the worker's own live
+// session, since a routine reap can never end the worker it was scoped to) + my_context (own-occupancy
 // self-assessment, any role) + gate_status (card fc243a43, the read-only own-op-scoped complement to a
 // worker's run_gate — also surfaced to the manager) + gate_queue (card fa359824, the whole-daemon
 // read-only gate-queue snapshot — cap + every running/queued gate run — so a manager can tell healthy
@@ -79,8 +97,10 @@ const tools = toolList.map((t) => t.name).sort();
 // management trio (board_column_create/delete/rename) + the owner decision-inbox surface
 // (question_ask/question_cancel/question_resolve/question_pull, card 988bb585 + its requests_list
 // follow-up) + escalation_status (the dedupe-aware complement to platform_escalate) + platform_escalate
-// (the one upward channel to the Platform Lead). Keep in sync as the manager-MCP surface grows.
-const expected = "agent_assign_profile,agent_delete,agent_get,agent_list,agent_update,board_column_create,board_column_delete,board_column_rename,daemon_restart,end_me,escalation_status,gate_cancel,gate_queue,gate_status,idle_report,inbox_pull,my_context,platform_escalate,profile_delete,project_archive,project_update,question_ask,question_cancel,question_pull,question_resolve,recycle_me,requests_list,schedule_create,schedule_update,served_status,worker_list,worker_merge,worker_merge_confirm,worker_message,worker_recycle,worker_redirect,worker_relink,worker_set_mode,worker_spawn,worker_status,worker_stop,worker_transcript";
+// (the one upward channel to the Platform Lead). This prose is a HUMAN map of the surface, kept in sync
+// by hand as it grows — the actual pass/fail value below is DERIVED (see the file-header note), so a
+// stale sentence here can't make this check silently wrong the way the old hardcoded string did.
+const expected = ORCH_MANAGER_TOOLS.slice().sort().join(",");
 check(`tools = ${expected}  (got ${tools.join(",")})`, tools.join(",") === expected);
 
 // 1b) H3: worker_spawn's advertised schema carries taskId + kickoffPrompt but NOT the removed,
@@ -133,9 +153,11 @@ await M.close();
 //    is the own-occupancy self-assessment tool, available to any role; worker_report is NOT a manager
 //    tool; run_gate (card 7f96aa09) is the daemon-mediated DoD self-gate; gate_status (card fc243a43) is
 //    the read-only, own-op-scoped complement to run_gate — both added since this check was written.
+//    DERIVED from ORCH_WORKER_TOOLS (promptLint.ts), same rationale as the manager check above.
 const W = await connect("W1");
 const wTools = (await W.listTools()).tools.map((t) => t.name).sort();
-check(`worker W1 sees ONLY [gate_status, my_context, run_gate, worker_report]  (got ${wTools.join(",")})`, wTools.join(",") === "gate_status,my_context,run_gate,worker_report");
+const expectedWorkerTools = ORCH_WORKER_TOOLS.slice().sort().join(",");
+check(`worker W1 sees ONLY [${expectedWorkerTools}]  (got ${wTools.join(",")})`, wTools.join(",") === expectedWorkerTools);
 // my_context on an UNMEASURED session (W1 has no ctx_input_tokens) → pct null + a note, never a fake 0.
 const wCtx = parse(await W.callTool({ name: "my_context", arguments: {} }));
 check(`my_context(W1) unmeasured → ctxInputTokens null, pct null, note present (got ${JSON.stringify(wCtx)})`,
