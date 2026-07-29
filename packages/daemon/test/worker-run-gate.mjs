@@ -162,6 +162,20 @@ try {
   }
 
   // ── (B) raising the cap to 2 lets a merge gate and a worker gate run TRULY concurrently ────────────
+  // Card 0742f8c3: the old version proved overlap by HOPING a 4000ms sleep was wide enough to outlast
+  // confirmWorkerMerge's real git prep (stranded-check + union-merge) before runWorkerGate's own gate call
+  // finished — an invisible margin that a saturated host can blow through (git prep can itself take
+  // arbitrarily long under load), letting the first fake gate complete and release its slot before the
+  // second is ever admitted. That's the same "guessed wall-clock margin" class as (J)'s old fixed-2500ms
+  // hold and (L)'s old bare durationMs pin — fixed here the same way: make the overlap STRUCTURALLY
+  // GUARANTEED rather than scheduler-dependent. Each fake-gate invocation blocks (after recording its own
+  // active++, so maxActive is already captured) until BOTH invocations have actually entered — i.e. both
+  // calls were genuinely admitted concurrently by the semaphore — then releases both together. This
+  // observes the real property under test (cap 2 lets two calls be inside the gate at once) directly,
+  // with no dependency on how long anything upstream took. `OVERLAP_TIMEOUT_MS` is a safety-net backstop
+  // for a genuine regression (cap 2 somehow never admits the second call) — like `waitUntilGatePhase`'s
+  // `timeoutMs`, it never decides the assertion (maxActive would correctly stay at 1 and the check would
+  // fail), it just stops a broken run from hanging the suite forever.
   {
     const sfx = `b-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-b-${sfx}`);
@@ -169,9 +183,14 @@ try {
     db.setPlatformConfig({ maxConcurrentGates: 2 });
 
     let active = 0, maxActive = 0, calls = 0;
+    let resolveBothEntered;
+    const bothEntered = new Promise((res) => { resolveBothEntered = res; });
+    const OVERLAP_TIMEOUT_MS = 8000; // safety net only — see comment above; never widen this to "fix" a flake
+    const bothEnteredOrTimeout = Promise.race([bothEntered, sleep(OVERLAP_TIMEOUT_MS)]);
     const fakeGate = async () => {
       calls++; active++; maxActive = Math.max(maxActive, active);
-      await sleep(4000); // same wide overlap window rationale as (A) above
+      if (calls === 2) resolveBothEntered();
+      await bothEnteredOrTimeout; // block until the OTHER call has genuinely entered too (or the safety net fires)
       active--;
       return { passed: true };
     };
