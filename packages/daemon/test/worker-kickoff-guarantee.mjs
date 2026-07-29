@@ -37,6 +37,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { waitUntil } from "./_wait.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -98,10 +99,13 @@ try {
     const fa = lastFake();
     host.deliverHook(A, { hook_event_name: "SessionStart" }); // ready — no mode-cycles, no UserPromptSubmit ever
     check("(H1a) NOT force-submitted immediately at ready — grace window not yet elapsed", countIn(fa, PASTE_START) === 0);
-    await sleep(250); // > STARTUP_PROMPT_GRACE_MS(150) + slack
+    await waitUntil(() => countIn(fa, PASTE_START) === 1, { label: "(H1a) forced kickoff submit after the grace window" });
     check("(H1a) the kickoff was force-submitted exactly once after the grace window", countIn(fa, PASTE_START) === 1);
     check("(H1a) the force-submitted text is the ORIGINAL kickoff", writtenOf(fa).includes(KICKOFF));
     check("(H1a) busy was (re)armed true by the forced submit", busyById[A]?.[busyById[A].length - 1] === true);
+    // scheduleKickoffGuarantee is a ONE-SHOT setTimeout guarded by markReady's own live.ready latch — there
+    // is no further completion event to poll for here, only an absence to bound. 200ms is a fixed settle
+    // window measured from the ALREADY-OBSERVED force-submit above (not a guess about when it happens).
     await sleep(200);
     check("(H1a) still exactly ONE forced submit (no repeat firing)", countIn(fa, PASTE_START) === 1);
   }
@@ -121,6 +125,10 @@ try {
     await sleep(30); // well within the 150ms grace — the CLI's own turn starts on its own
     host.deliverHook(B, { hook_event_name: "UserPromptSubmit" }); // the vendor CLI's auto-submit landed
     host.deliverHook(B, { hook_event_name: "Stop" }); // the turn completes normally
+    // No positive event to poll for — proving an ABSENCE needs a bounded wall-clock window, not a guess
+    // about when something completes. firstTurnStarted flipped true synchronously above, so the grace
+    // timer's own guard is already deterministic by the time it fires; this only bounds how long we give
+    // it to (not) misfire. Single hop, not chained onto any other guessed constant.
     await sleep(250); // > grace(150) + slack — the fallback window fully elapses
     check("(H1b) NO forced submit — nothing was ever written to the pty by Loom's own submit()", countIn(fb, PASTE_START) === 0);
   }
@@ -142,6 +150,7 @@ try {
     const fc = lastFake();
     host.deliverHook(C, { hook_event_name: "UserPromptSubmit" }); // "the enqueue" fires BEFORE ready
     host.deliverHook(C, { hook_event_name: "SessionStart" });     // ready reached AFTER the turn already started
+    // Pure absence check (nothing to poll for) — see H1b's comment. Single bounded hop.
     await sleep(250); // > grace(150) + slack
     check("(H1c) ready-after-enqueue: no forced submit — the turn had already started when ready landed", countIn(fc, PASTE_START) === 0);
   }
@@ -156,6 +165,7 @@ try {
     });
     const fd = lastFake();
     host.deliverHook(D, { hook_event_name: "SessionStart" });
+    // Pure absence check (nothing to poll for) — see H1b's comment. Single bounded hop.
     await sleep(250); // > grace(150) + slack
     check("(H1d) resume path: NEVER force-submits (no kickoff was ever passed)", countIn(fd, PASTE_START) === 0);
   }
@@ -177,7 +187,7 @@ try {
     const fg = lastFake();
     host.deliverHook(G, { hook_event_name: "SessionStart" }); // ready — the CLI's own auto-submit never lands
     check("(H1f) recycle handoff: NOT force-submitted immediately at ready — grace window not yet elapsed", countIn(fg, PASTE_START) === 0);
-    await sleep(250); // > grace(150) + slack
+    await waitUntil(() => countIn(fg, PASTE_START) === 1, { label: "(H1f) recycle handoff forced submit after the grace window" });
     check("(H1f) recycle handoff: force-submitted exactly once after the grace window (the guarantee is NOT fresh-spawn-only)", countIn(fg, PASTE_START) === 1);
     check("(H1f) recycle handoff: the force-submitted text is the ORIGINAL handoff", writtenOf(fg).includes(HANDOFF));
   }
@@ -194,16 +204,25 @@ try {
     const fe = lastFake();
     fe.feed("accept edits on (shift+tab to cycle)"); // boot footer painted before SessionStart
     host.deliverHook(E, { hook_event_name: "SessionStart" }); // starts the feedback mode-cycle
-    await sleep(750); // > MODE_CYCLE_SETTLE_MS(700) — first footer read → press #1
-    fe.feed("plan mode on (shift+tab to cycle)");
-    await sleep(150); // > overridden poll (20ms) × several ticks — the change is observed → press #2
+
+    // Each hop below waits for the ACTUAL write it's reacting to, instead of summing nominal constants
+    // (MODE_CYCLE_SETTLE_MS + poll ticks + grace) into one guessed deadline — that sum is exactly the
+    // accumulation shape that bit pty-reassert-settle (65e4e978): individually-comfortable per-hop margins
+    // are not comfortable once chained, and this block chained THREE of them at the thinnest margin in the
+    // file. Waiting on real observables removes the guess at every hop.
+    await waitUntil(() => countIn(fe, SHIFT_TAB) === 1, { label: "(H1e) mode-cycle press #1" });
+    check("(H1e) press #1 landed before any forced submit", countIn(fe, PASTE_START) === 0);
+    fe.feed("plan mode on (shift+tab to cycle)"); // press #1's footer response — not yet the target
+
+    await waitUntil(() => countIn(fe, SHIFT_TAB) === 2, { label: "(H1e) mode-cycle press #2" });
+    check("(H1e) press #2 landed before any forced submit", countIn(fe, PASTE_START) === 0);
     fe.feed("auto mode on (shift+tab to cycle)"); // press #2 lands the target → markReady fires
-    await sleep(150);
-    check("(H1e) both Shift+Tab presses landed before any forced submit", countIn(fe, PASTE_START) === 0);
-    await sleep(250); // > grace(150) + slack, now counted from markReady (post-cycle)
+
+    await waitUntil(() => countIn(fe, PASTE_START) === 1, { label: "(H1e) the eventual forced kickoff submit" });
     check("(H1e) the kickoff was eventually force-submitted", countIn(fe, PASTE_START) === 1);
+    check("(H1e) no THIRD Shift+Tab was pressed once the target landed (cycle stopped at exactly 2)", countIn(fe, SHIFT_TAB) === 2);
     check("(H1e) ORDERING — the Shift+Tabs were written BEFORE the forced kickoff paste",
-      writtenOf(fe).indexOf(SHIFT_TAB) >= 0 && writtenOf(fe).indexOf(SHIFT_TAB) < writtenOf(fe).indexOf(PASTE_START));
+      writtenOf(fe).lastIndexOf(SHIFT_TAB) >= 0 && writtenOf(fe).lastIndexOf(SHIFT_TAB) < writtenOf(fe).indexOf(PASTE_START));
   }
 
   // ============ (H2) healIfStuck: SHORT pre-first-turn stale window self-heals busy fast =================
@@ -221,8 +240,12 @@ try {
     });
     host.deliverHook(F, { hook_event_name: "SessionStart" }); // ready; grace timer armed; never fires UserPromptSubmit
     check("(H2) busy immediately after spawn (optimistic set)", busyById[F]?.[0] === true);
-    await sleep(700); // > grace(150, force-submits and resets busySince) + stale(450) + slack
-    host.reconcile(); // the real production self-heal trigger
+    // Was a single sleep(700) summing grace(150, force-submits and resets busySince) + stale(450) + slack —
+    // the exact accumulation shape this card exists to kill. Poll the real production trigger (reconcile())
+    // repeatedly instead: it only flips busy once ACTUAL elapsed time clears both windows, so this is
+    // correct regardless of host scheduling contention, not a guess about how long two hops take together.
+    await waitUntil(() => { host.reconcile(); return busyById[F]?.[busyById[F].length - 1] === false; },
+      { intervalMs: 20, label: "(H2) busy self-heals via reconcile() on the short pre-first-turn window" });
     check("(H2) busy self-healed to false on the SHORT pre-first-turn window (well under the 5min default)",
       busyById[F]?.[busyById[F].length - 1] === false);
   }
