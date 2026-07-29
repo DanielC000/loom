@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { createRotatingLog } from "./lib/rotating-log.mjs";
+import { createLineTimestamper } from "./lib/line-timestamp.mjs";
 import { loadDotEnvFile, fillEnvDefaults } from "./lib/env-file.mjs";
 
 const RESTART_EXIT_CODE = 75; // must match packages/daemon/src/orchestration/restart.ts
@@ -63,7 +64,9 @@ function sh(command, cwd, extraEnv) {
 //
 //   1. Tee the daemon's stdout/stderr to a size-bounded rotating file, so the last output before a
 //      death survives even a death with no signature of its own (crashlog.ts complements this for
-//      the JS-crash case; this covers everything, including a silent native/external death).
+//      the JS-crash case; this covers everything, including a silent native/external death). Each
+//      teed line carries a trailing epoch-ms timestamp (card be9571a4) so the corpus is
+//      time-analyzable, not just interleaving-order-analyzable — see runDaemon() below.
 //   2. Run the daemon with Node's built-in diagnostic report (--report-on-fatalerror
 //      --report-uncaught-exception), so a NATIVE fatal error (OOM, an abort inside a native addon
 //      like node-pty/better-sqlite3) that crashlog.ts's JS-only handlers can't observe still drops a
@@ -102,14 +105,26 @@ function runDaemon(cwd, extraEnv) {
   const cmd = `node --report-on-fatalerror --report-uncaught-exception --report-directory="${REPORTS_DIR}" dist/index.js`;
   return new Promise((resolve) => {
     const child = spawn(cmd, { cwd, shell: true, env, stdio: ["inherit", "pipe", "pipe"] });
-    const tee = (out) => (chunk) => { out.write(chunk); OUTPUT_LOG.append(chunk); };
-    child.stdout.on("data", tee(process.stdout));
-    child.stderr.on("data", tee(process.stderr));
+    // The live console mirror stays a raw, unbuffered chunk passthrough (unchanged) so the terminal
+    // still streams output with no added latency. OUTPUT_LOG instead goes through a per-stream line
+    // timestamper (card be9571a4): a "data" event's chunk boundaries don't align with line
+    // boundaries, so stamping raw chunks would put one timestamp per arbitrary chunk instead of one
+    // per line. See lib/line-timestamp.mjs for why the stamp is a trailing epoch-ms suffix rather
+    // than a prefix (preserves every existing `^`-anchored measurement recipe unchanged).
+    const stdoutStamper = createLineTimestamper((line) => OUTPUT_LOG.append(line));
+    const stderrStamper = createLineTimestamper((line) => OUTPUT_LOG.append(line));
+    child.stdout.on("data", (chunk) => { process.stdout.write(chunk); stdoutStamper.write(chunk); });
+    child.stderr.on("data", (chunk) => { process.stderr.write(chunk); stderrStamper.write(chunk); });
     child.on("error", (err) => {
       console.error(`[supervisor] failed to start daemon: ${err.message}`);
       resolve(1);
     });
-    child.on("close", (code) => resolve(code ?? 1));
+    child.on("close", (code) => {
+      // Flush any trailing partial line (no terminating "\n") so a death mid-write isn't lost.
+      stdoutStamper.flush();
+      stderrStamper.flush();
+      resolve(code ?? 1);
+    });
   });
 }
 
