@@ -56,6 +56,19 @@ const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.j
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Card 7b3a585a (from the 7b634e58 audit): `runWorkerGate` reads a REAL async git subprocess
+// (`computeWorktreeGateStamp`) BEFORE the semaphore ever sees the op, so "issue op 1, then op 2" does NOT
+// by itself guarantee op 1 is ADMITTED (or queued) first — that depends on how long each op's git
+// subprocess takes, which is genuinely elapsed-time dependent, not JS-synchronous-guaranteed. Poll the
+// LIVE `snapshotGates()` registry for the actual phase instead of betting a fixed sleep outlasts it.
+async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
+  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
+  while (performance.now() - start < timeoutMs) {
+    if (cond()) return;
+    await sleep(intervalMs);
+  }
+  throw new Error(`${label}: condition not met within ${timeoutMs}ms`);
+}
 const GIT_ID = "-c user.email=rghc@loom -c user.name=rghc";
 const now = new Date().toISOString();
 const ptyStub = () => ({ stop() {}, isAlive() { return false; }, enqueueStdin() {} });
@@ -131,10 +144,16 @@ try {
     const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: fakeGate });
 
     const pBlocker = sessions.runWorkerGate(blockerId); // grabs the only slot first
-    await sleep(150); // the blocker has genuinely acquired it before the subject ever calls in
+    await waitUntil(
+      () => sessions.snapshotGates().gates.some((g) => g.sessionId === blockerId && g.phase === "running"),
+      "(B) the blocker genuinely admitted",
+    );
     const pSubject = sessions.runWorkerGate(subjectId); // queues behind the blocker (subject's startStamp
     // is taken now, BEFORE it queues — clean tree, since nothing's been mutated yet)
-    await sleep(150); // subject is now genuinely queued, waiting on admission
+    await waitUntil(
+      () => sessions.snapshotGates().gates.some((g) => g.sessionId === subjectId && g.phase === "queued"),
+      "(B) the subject genuinely queued",
+    );
 
     // The mutation that would have landed "while the worker kept working during the queue wait" — this
     // happens BEFORE the subject's own `fn` (and its `admitStamp`) ever runs, since the blocker still
