@@ -152,8 +152,12 @@ const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM
  * arrives) is held only this long before falling through to the pre-existing recovery-and-drain behavior
  * (card 441499ee) — the silent-drop protection that bound exists to preserve. Env-overridable so a
  * hermetic test can shrink it instead of waiting real seconds.
+ *
+ * EXPORTED (card ccb407eb CR follow-up): `sessions/service.ts`'s cross-turn-boundary re-mint reuses this
+ * SAME constant when stamping its own `giveUpHeldUntil` — "matching the requeue path's own discipline"
+ * means literally sharing the bound, not maintaining a second one that could drift from it.
  */
-const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
+export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
 
 /**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
@@ -1338,8 +1342,22 @@ export type QueuedMessageKind = "warning" | "agent";
  * ineligible for `drainPending` — see `isGiveUpHeld`/`GIVE_UP_HOLD_MS`. Stamped alongside `giveUpGen` in
  * `requeueGiveUpOrigin`, never elsewhere; undefined for every entry that was never requeued (so a normal
  * message's drain eligibility is untouched — `isGiveUpHeld` is false whenever this is undefined).
+ *
+ * `onGiveUpExhausted` (card ccb407eb) is the SAME shape of hook `onDeliver` is — a caller-supplied closure
+ * PtyHost invokes and otherwise knows nothing about — but fired on the OPPOSITE outcome: `requeueGiveUpOrigin`
+ * calls it instead of silently discarding a message whose `giveUpRequeues` has exceeded
+ * `GIVE_UP_REQUEUE_LIMIT`. Deliberately NOT reusing `onDeliver` for this: `onDeliver` fires (and, via
+ * `enqueueDurableMessage`'s wiring, marks the durable record "delivered") the instant a held message is
+ * HANDED to the recipient — see `resolveQueuedMessage`'s doc — which for a message that ends up giving up
+ * has usually ALREADY fired by the time exhaustion is detected; a second call is just an idempotent no-op,
+ * not a channel this branch can repurpose. `onGiveUpExhausted` is PtyHost's only hook for "this message's
+ * final in-session attempt failed and its budget is spent" — everything upstream of that (re-mint a fresh
+ * dispatch, or park it and tell the sender) is sessions/service.ts's `enqueueDurableMessage` /
+ * `handleGiveUpExhausted`'s concern, not PtyHost's; PtyHost stays DB-agnostic exactly as it already is for
+ * every other durability guarantee. undefined for every entry that never had one wired (every existing
+ * caller, and any `enqueueStdin` caller that doesn't need durability) — a strict no-op, never invoked.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -3525,8 +3543,15 @@ export class PtyHost {
    * today, but nothing enforces it) — a still-in-the-future `giveUpHeldUntil` now forces the held-push
    * path even if the session happens to already be idle-ready, so the hold can never silently evaporate
    * just because some future caller/reorder takes the immediate branch instead.
+   *
+   * `onGiveUpExhausted` (card ccb407eb) is likewise an OPTIONAL trailing arg, appended last for the same
+   * byte-identical-by-default reason — every existing caller omits it. `enqueueDurableMessage` is the one
+   * caller that supplies it, on BOTH the immediate-submit synthesized origin and the held push below, so a
+   * durable "agent"/settle-nudge message that later exhausts its give-up budget always has a hook to park
+   * or re-mint through, however it happened to be delivered. See {@link QueuedMessage}'s own doc for why
+   * this is a distinct hook from `onDeliver`.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number): EnqueueResult {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void): EnqueueResult {
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -3572,7 +3597,7 @@ export class PtyHost {
       // held entry would have, so a give-up can restore it onto `live.pending` by identity instead of
       // discarding it after this call already returns `delivered:true`.
       this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate",
-        [{ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId }]);
+        [{ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) }]);
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -3592,7 +3617,7 @@ export class PtyHost {
     // — only the boot restart-replay seam passes it, to restore a give-up hold onto the freshly re-enqueued
     // entry (card 9e27f4d2). Stamped whenever the caller supplied it (even an already-expired deadline —
     // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}) });
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) });
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary), instead of leaving a `delivered:false` reader to
     // wonder whether it's a drop. `busyForMs` is only meaningful while the hold is actually busy-caused
@@ -4695,6 +4720,22 @@ export class PtyHost {
    * what makes `drainPending` treat it as ineligible until a confirming hook purges it OR the hold expires
    * (see `isGiveUpHeld`), instead of the entry sitting at the front of `pending` as ordinary drainable
    * content that a reconcile tick could resubmit before a late hook ever gets to purge it.
+   *
+   * Card ccb407eb: a message whose budget IS exhausted (`requeues > GIVE_UP_REQUEUE_LIMIT`) — for a message
+   * that has `onGiveUpExhausted` wired — is never silently dropped here — this project's own "fail toward a
+   * duplicate, never a loss" principle (88f11385) forbids it, and this terminal branch is exactly what used
+   * to invert it (10 permanent drops across 6 sessions in one production log, incl. a `[loom:merge-done]`
+   * settle nudge that strands a manager indefinitely). `m.onGiveUpExhausted?.()` hands the decision to
+   * whoever wired it up (`enqueueDurableMessage` in sessions/service.ts) — this class stays DB-agnostic,
+   * exactly as it already is for every other durability guarantee (see `onGiveUpExhausted`'s own doc on
+   * {@link QueuedMessage}). CR follow-up (card ccb407eb): "no durable record is orphaned" is the precise
+   * claim — NOT "nothing is ever dropped here". A message with no hook wired (every non-durable caller — an
+   * idle/context/busy-stuck watchdog nudge — but ALSO, residually, a raw HUMAN composer turn: `enqueueStdin`'s
+   * own callers never wire `onGiveUpExhausted` for that source, so a human turn that exhausts its budget
+   * still hits a bare, silent drop, exactly like before this card) has nothing to hand off to. That residual
+   * is a real gap this card does not close — only a durable message minted via `enqueueDurableMessage`
+   * (worker_message/redirect/recycle-carry, plus the settle nudges this card converted) gets the "never
+   * orphaned" guarantee; nothing here claims a raw human turn does too.
    */
   private requeueGiveUpOrigin(sessionId: string, gen: number): void {
     const live = this.live.get(sessionId);
@@ -4707,7 +4748,14 @@ export class PtyHost {
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
         // eslint-disable-next-line no-console
-        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — dropping for real instead of requeuing again`);
+        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars, head=${JSON.stringify(m.text.slice(0, 60))}) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — handing off to onGiveUpExhausted (${m.onGiveUpExhausted ? "wired" : "none — non-durable entry, nothing further to preserve"}) instead of a bare drop`);
+        // CR follow-up (card ccb407eb, finding [7]): a give-up-exhausted fault must never break GIVE-UP
+        // RECOVERY itself, but swallowing it SILENTLY would also eat a deliberately-loud M1/M2 invariant
+        // throw from deep inside handleGiveUpExhausted's re-mint path (enqueueStdin → submit). Log it.
+        try { m.onGiveUpExhausted?.(); } catch (err) {
+          // eslint-disable-next-line no-console
+          console.error(`[submit] ${sessionId} onGiveUpExhausted threw for message ${m.id} — swallowed so GIVE-UP RECOVERY itself is never broken, but logged so it can't fail silently:`, err);
+        }
         continue;
       }
       kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS });
@@ -4798,8 +4846,20 @@ export class PtyHost {
    * equal it) and cause THIS purge to delete a genuinely-unconfirmed entry: the silent-loss failure this
    * whole file exists to avoid. The underlying discriminator decision (RECOVERY-vs-SUPPRESSED) this purge
    * is a safety net FOR is untouched and stays `04de8bbf`'s open question; this card only narrows a wrong
-   * decision's consequence, it does not eliminate it. This residual list enumerates DAEMON-RESTART-shaped
-   * bypasses of THIS purge specifically, not every place `giveUpHeldUntil` could apply. CLOSED (card
+   * decision's consequence, it does not eliminate it. (4) CR follow-up (card ccb407eb finding [B1-3]): a
+   * cross-turn-boundary RE-MINT (`sessions/service.ts` `handleGiveUpExhausted`, on a durable message whose
+   * `GIVE_UP_REQUEUE_LIMIT` was exhausted) stamps `giveUpHeldUntil` but NEVER `giveUpGen` — `enqueueStdin`
+   * has no public parameter for it, and this purge's own correlation is entirely internal to PtyHost. A
+   * false-negative give-up AT THE POINT OF BUDGET EXHAUSTION therefore yields a CERTAIN duplicate once the
+   * re-mint's hold expires or a natural drain trigger fires — not merely probable like (1), and not bounded
+   * by timing at all: this purge can NEVER find and remove that re-mint, at any hook latency, because it
+   * was never enrolled in `giveUpConfirmQueue` to begin with. Deliberately left this way, not a gap to
+   * close: per "fail toward a duplicate, never a loss" (88f11385), a certain duplicate here is the correct,
+   * accepted trade against the pre-card behaviour (a certain, silent, permanent DROP at that same point) —
+   * the same reasoning residual (3) already accepted for the restart case, one level up the give-up chain.
+   * This residual list enumerates DAEMON-RESTART-shaped bypasses of THIS purge specifically, not every place
+   * `giveUpHeldUntil` could apply — (4) above is the one exception, named here because it's this SAME
+   * purge's own blind spot, not a carry-path bypass. CLOSED (card
    * f25bf3bf): the give-up hold's OTHER carry paths besides a daemon restart — recycle/successor handoff
    * (`SessionService.carryPendingToSuccessor` and its three callers) and the companion capability re-pin
    * respawn (`SessionService.upgradeCompanionCapabilities`) — were assessed and decided, each on its own

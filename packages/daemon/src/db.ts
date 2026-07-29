@@ -5023,7 +5023,10 @@ export class Db {
    * direction that was HELD and never handed to it. The worker-done guard (workerReport) reads this to
    * REFUSE a done-report while manager direction is still pending, then narrows by origin (detail.sender ===
    * the worker's manager) so platform/cross-tree sends don't gate. Same msgId anti-join + FIFO order as the
-   * unscoped scan; watcher/system nudges use the non-durable enqueue and never appear here (origin-accurate).
+   * unscoped scan. CR follow-up (card ccb407eb, finding [B1-2] — the twin of service.ts's own [9] fix): a
+   * `[loom:*]` settle nudge held mid-turn DOES appear here now (it goes through the same durable enqueue as
+   * any other message, sender:"system") — origin-accuracy comes from the CALLER's `detail.sender ===
+   * managerSessionId` filter (service.ts), not from this query excluding system-sourced rows itself.
    */
   listUnresolvedQueuedMessagesForWorker(workerSessionId: string): OrchestrationEvent[] {
     return (this.db.prepare(

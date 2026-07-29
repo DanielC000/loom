@@ -10,8 +10,8 @@ import {
   type GatesActive, type GateRun, type GateType,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
-import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole } from "../pty/host.js";
+import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
@@ -551,6 +551,34 @@ const UPGRADE_BUSY_WAIT_MS = Number(process.env.LOOM_UPGRADE_BUSY_WAIT_MS) || 3_
  * forced interrupt this path has always done — see `autoRetireStopWhenIdle`'s doc.
  */
 const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_MS) || 25_000;
+
+/**
+ * Card ccb407eb: how many times a durable "agent" message may be RE-MINTED (a fresh `enqueueDurableMessage`
+ * dispatch, budget reset, at the recipient's next genuine turn boundary) after its in-session
+ * `GIVE_UP_REQUEUE_LIMIT` (pty/host.ts) is exhausted, before `handleGiveUpExhausted` gives up on automatic
+ * redelivery and PARKS it instead (stops writing to the recipient's pty for this message; surfaces to a
+ * live sender). This is a SEPARATE, ORTHOGONAL bound from `GIVE_UP_REQUEUE_LIMIT` — that one guards the
+ * immediate in-turn retry loop against a session already shown wedged; this one guards against re-minting
+ * forever across turn boundaries if the recipient STAYS wedged (⛔ never widen `GIVE_UP_REQUEUE_LIMIT` to
+ * fix a loss — that was rejected; this bound exists so re-minting itself can't become the new unbounded
+ * loop).
+ *
+ * PINNED AT 1, MEASURED (not a guess): a re-mint's own give-up cycle is NOT free — it re-runs the full
+ * `SUBMIT_MAX_ATTEMPTS`-Enter-attempt/`SUBMIT_VERIFY_TIMEOUT_MS` sequence at PRODUCTION timing (these
+ * constants are not test-shortened outside a suite that explicitly pins them), measured at ~5-6s per
+ * cycle. An earlier default of 3 here (0→1→2→park, 4 total give-up cycles for a message whose recipient
+ * stays wedged) turned `merge-spawn-tracked.mjs` from a clean ~26s pass into a >60s timeout — EVERY
+ * settle-nudge push (population B, this same card) that happens to land on a session mid-give-up in ANY
+ * test now pays this cost, compounding across the whole suite, not just one message. 1 means: the message
+ * gets exactly ONE genuinely fresh second chance (2 total cycles) before parking — still strictly better
+ * than the pre-fix behavior (0 chances, a bare unrecoverable drop), while keeping the worst-case
+ * compounding cost bounded to roughly what a single ordinary give-up already cost. Override via env for a
+ * deployment that can afford more automatic chances. CR follow-up (card ccb407eb, finding [12]): NOT
+ * "or fewer" — `Number(…) || 1` treats `LOOM_GIVE_UP_REMINT_LIMIT=0` (falsy) the same as unset, silently
+ * falling back to 1; 0 is unreachable via this env var. Genuinely wanting zero re-mints (park on the very
+ * first exhaustion) needs a code change to the fallback expression, not an env override.
+ */
+const GIVE_UP_REMINT_LIMIT = Number(process.env.LOOM_GIVE_UP_REMINT_LIMIT) || 1;
 
 /**
  * classifyIdleWorker's `parked-background`/`parked-gate` decay window: how long a worker's
@@ -2019,7 +2047,10 @@ export class SessionService {
           // PRESERVE the hold (card f25bf3bf): this is the SAME session/process, never stopped — any
           // still-held give-up requeue (`msg.giveUpHeldUntil`) is exactly as ambiguous as it was the
           // instant we drained it, so putting it back with the hold intact just restores the status quo.
-          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil);
+          // CR follow-up (card ccb407eb, finding [6]): carry msg.onGiveUpExhausted too — every other
+          // QueuedMessage field here is preserved by identity; dropping this one silently reverted a
+          // durable message's give-up policy back to a bare drop the instant it re-entered this FIFO.
+          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted);
           throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
         }
       } finally {
@@ -2045,7 +2076,11 @@ export class SessionService {
     // certain one landing the instant the resumed process is back up.
     for (const msg of carried) {
       if (msg.onDeliver) continue;
-      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil);
+      // Card ccb407eb, finding [6]: a durable (onDeliver-bearing) entry is skipped above, so this loop only
+      // ever carries plain (non-durable) entries — msg.onGiveUpExhausted is always undefined here in
+      // practice, but pass it through anyway for the same reason every other field is: identity, not
+      // re-derivation, is this loop's whole contract.
+      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted);
     }
     return resumed;
   }
@@ -3057,10 +3092,27 @@ export class SessionService {
       this.redriveInFlightMsgIds.add(msgId);
       // Re-driving a `session_message_queued` record — every such record originated from
       // enqueueDurableMessage's kind:"agent" enqueue, so the redrive preserves that classification.
-      const r = this.pty.enqueueStdin(recipientId, text, "system", (reason?: string) => {
-        this.redriveInFlightMsgIds.delete(msgId);
-        this.resolveQueuedMessage(msgId, { recipientId, reason });
-      }, undefined, "agent");
+      // CR follow-up (card ccb407eb, BLOCKING finding [2]): this call used to have NO onGiveUpExhausted at
+      // all — a redriven message (the exact path a crashed/wedged session actually takes) that then gave up
+      // hit the pre-card bare-drop branch: no re-mint, no park, no event, no sender surface, AND its
+      // onDeliver had already fired (see resolveQueuedMessage's doc) so it would never be redriven again
+      // either — Specimen Z's exact failure, intact, on this one path. Wired to the SAME handleGiveUpExhausted
+      // policy as every other durable dispatch. `sender` mirrors recoverUndeliveredMessagesOnBoot's own
+      // fallback (`e.detail.sender`, else `e.managerSessionId`). `rootMsgId`/`chainDepth` are NOT recoverable
+      // here — session_message_queued's own detail never persisted them (only the in-memory
+      // enqueueDurableMessage/handleGiveUpExhausted closure chain carries them) — so a redrive is treated as
+      // a FRESH chainDepth-0 dispatch, self-rooted at `msgId`. This mirrors the project's existing precedent
+      // for in-memory give-up state that doesn't survive a restart: `giveUpGen`/`giveUpConfirmQueue` are
+      // likewise deliberately NOT reconstructed across one (see requeueGiveUpOrigin's own doc) — resetting
+      // rather than guessing at lost state, not a new gap this card introduces.
+      const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
+      const r = this.pty.enqueueStdin(
+        recipientId, text, "system", (reason?: string) => {
+          this.redriveInFlightMsgIds.delete(msgId);
+          this.resolveQueuedMessage(msgId, { recipientId, reason });
+        }, undefined, "agent", undefined, undefined, undefined, undefined, undefined,
+        () => this.handleGiveUpExhausted(recipientId, text, msgId, msgId, 0, sender, e.taskId ?? null, "agent"),
+      );
       if (r.delivered || r.position !== undefined) return "reEnqueued";
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
       // enqueued; undo the in-flight mark and treat as stuck so a later live-flip can retry it.
@@ -4337,7 +4389,9 @@ export class SessionService {
       const target = this.resolveSettleNudgeTarget(row.ownerSessionId);
       const msg = `${tag} op ${row.opId} — daemon restart killed this run before it could finish (reason: restart) — ${verb}.` + this.settleNudgeAttribution(target, row.ownerSessionId);
       try {
-        this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "warning");
+        // Card ccb407eb: a restart-orphan resurfacing is a ONE-SHOT TERMINAL signal (this row is cleared
+        // right below regardless of outcome — never re-sent), so it's durable like every other settle nudge.
+        this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
         // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — if the target isn't
         // live, the fallback wake IS the session's real recovery path; reaping it here would strand the
         // session exactly when it most needs waking, so a failed/undelivered push leaves every pending
@@ -4431,11 +4485,14 @@ export class SessionService {
         // A genuine failure (worktree create failed, the task went terminal/held, its agent was deleted,
         // …) — the entry is already popped; don't retry it forever (that's the wedge this method must
         // avoid). Notify the manager with enough to re-drive it by hand, then keep draining the rest.
+        // Card ccb407eb: this is a ONE-SHOT TERMINAL notification (the entry is already dropped from the
+        // cap queue — never re-sent), so it goes through enqueueDurableMessage like the merge/gate settle
+        // nudges, instead of a bare enqueueStdin that a give-up could silently discard.
         try {
-          this.pty.enqueueStdin(
+          this.enqueueDurableMessage(
             managerSessionId,
             `[loom:cap-queue-autofire-failed] queued spawn (opId ${entry.opId}, task ${entry.taskId ?? "taskless"}, agent ${entry.agentId}) failed to auto-fire: ${(e as Error).message} — dropped from the queue; re-call worker_spawn yourself if it's still needed.`,
-            "system", undefined, undefined, "agent",
+            { sender: "system", taskId: entry.taskId ?? null, kind: "agent" },
           );
         } catch { /* best-effort — never let the notification disturb the drain */ }
       }
@@ -4711,18 +4768,45 @@ export class SessionService {
    * recipient — drained at its next Stop or pulled via inbox_pull. The boot scan
    * (recoverUndeliveredMessagesOnBoot) re-drives any that a process death interrupted before delivery.
    *
-   * Every caller of this helper enqueues an agent/human-authored, cross-session message (messageWorker,
-   * redirectWorker, messageSessionAsPlatform, the recycle carry-forward of a durable record) — always
-   * `kind: "agent"` (one-per-turn unless `coalesceAgentMessages` is on).
+   * Callers fall into two shapes:
+   *  - The original ones (messageWorker, redirectWorker, messageSessionAsPlatform, the recycle carry-
+   *    forward of a durable record): an agent/human-authored, cross-session message — always `ctx.kind`
+   *    omitted, defaulting `"agent"` (one-per-turn unless `coalesceAgentMessages` is on), `ctx.sender` a
+   *    real session id, `ctx.rootMsgId`/`ctx.chainDepth` omitted (this IS the root of its own chain).
+   *  - Card ccb407eb's ONE-SHOT TERMINAL settle-nudge callers (merge-done/-failed, merge-rejected,
+   *    already-merged, gate-done/-failed, the restart-orphan sweep, cap-queue-autofire-failed): pass
+   *    `ctx.kind` explicitly (preserving whatever kind that call site used before this card — "warning" or
+   *    "agent", unchanged), `ctx.sender` the SENTINEL `"system"` string (no real session originates these;
+   *    see `handleGiveUpExhausted`'s doc for why a sentinel is safe here), and — ONLY when this call is
+   *    itself a re-mint of a give-up-exhausted message — `ctx.rootMsgId`/`ctx.chainDepth` carried forward
+   *    from the predecessor so the whole chain traces back to one auditable origin (see the
+   *    `session_message_gave_up` event kind's doc).
+   *
+   * `onGiveUpExhausted` is ALWAYS wired (every durable message deserves the same "never silently drop"
+   * guarantee) — see `handleGiveUpExhausted`'s doc for what it does once budget-exhaustion actually fires.
+   *
+   * `ctx.giveUpHeldUntil` (CR follow-up, card ccb407eb finding [1]) is ONLY ever passed by
+   * `handleGiveUpExhausted`'s own re-mint call — see that method's doc for why a re-mint MUST supply this
+   * (skipping it lets the re-mint take `enqueueStdin`'s IMMEDIATE-SUBMIT branch and re-hammer a session the
+   * give-up detector just showed wedged, in the SAME synchronous chain that detected the wedge). Every other
+   * caller omits it, byte-identical to before this field existed.
    */
   private enqueueDurableMessage(
-    recipientId: string, framedText: string, ctx: { sender: string; taskId?: string | null },
+    recipientId: string, framedText: string,
+    ctx: { sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; chainDepth?: number; giveUpHeldUntil?: number },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
+    const kind: QueuedMessageKind = ctx.kind ?? "agent";
+    const chainDepth = ctx.chainDepth ?? 0;
+    const rootMsgId = ctx.rootMsgId ?? msgId; // self-root on a fresh (non-remint) dispatch
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
     // records WHY the durable record closed without being delivered as a turn.
-    const r = this.pty.enqueueStdin(recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }), undefined, "agent");
+    const r = this.pty.enqueueStdin(
+      recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }),
+      undefined, kind, undefined, undefined, undefined, undefined, ctx.giveUpHeldUntil,
+      () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
+    );
     if (!r.delivered) {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
       // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient
@@ -4737,6 +4821,112 @@ export class SessionService {
     // its OWN follow-up event to this exact enqueue attempt (deliverRedirect's redirect_worker event, card
     // 02621025) always has it to hand — cheap, since it's already minted above regardless of outcome.
     return { ...r, msgId };
+  }
+
+  /**
+   * Card ccb407eb: the terminal-branch policy for a durable message whose in-session `GIVE_UP_REQUEUE_LIMIT`
+   * (pty/host.ts) is exhausted — wired as EVERY `enqueueDurableMessage` dispatch's `onGiveUpExhausted` hook,
+   * so both original populations that used to hit this branch (a worker_message/redirect/recycle-carry
+   * "agent" message, AND — since this card — a settle-nudge "warning"/"agent" one-shot terminal push) are
+   * covered by the SAME policy instead of two independently-maintained ones.
+   *
+   * NEVER discards (this project's "fail toward a duplicate, never a loss" principle, 88f11385): below
+   * `GIVE_UP_REMINT_LIMIT`, RE-MINT — a fresh `enqueueDurableMessage` dispatch to the same recipient, new
+   * msgId, budget reset, `chainDepth + 1`. This is deliberately NOT the same thing the ⛔ "don't raise
+   * `GIVE_UP_REQUEUE_LIMIT`" constraint forbids: that budget guards the IMMEDIATE in-turn retry loop against
+   * a session already shown wedged in THIS turn; a re-mint is a genuinely independent dispatch. At/above the
+   * limit, PARK: stop dispatching entirely (no further `enqueueStdin` call for this message — the loop this
+   * bound exists to prevent), and surface it to a live sender.
+   *
+   * CR follow-up (card ccb407eb, BLOCKING finding [1]): the re-mint MUST pass `giveUpHeldUntil` (below) —
+   * WITHOUT it, this is NOT a turn-boundary dispatch at all. `fireEnterAndVerify` calls `setBusy(false)`
+   * BEFORE `requeueGiveUpOrigin` (host.ts) — the caller of THIS hook — so `live.busy` is already `false` the
+   * instant this method runs. A re-mint with no `giveUpHeldUntil` would pass `enqueueStdin`'s
+   * IMMEDIATE-SUBMIT gate and re-hammer the just-wedged session SYNCHRONOUSLY, in the very chain that just
+   * detected the wedge — exactly the immediate re-hammer the ⛔ constraint above forbids, just relocated one
+   * layer up. Passing `giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS` (the SAME constant `requeueGiveUpOrigin`
+   * uses for its own kept-requeue — "matching the requeue path's own discipline") forces `enqueueStdin`'s
+   * held branch instead: the re-mint sits ineligible for drain until a real turn boundary (Stop hook, the
+   * reconcile tick) or the hold expires — never an instant second attempt. It ALSO fixes a second bug the
+   * immediate path had: `enqueueDurableMessage`'s `if (!r.delivered)` durable-record append never ran for an
+   * immediately-"delivered" re-mint, so the re-mint carried NO `session_message_queued` row — not
+   * crash-durable. Held, it gets one, like every other durable dispatch.
+   *
+   * AUDITABLE: every re-mint (and the terminal park) appends a `session_message_gave_up` event carrying
+   * `rootMsgId` — the FIRST msgId in this logical message's chain — so "did my message ever land?" is
+   * answerable by querying that one id instead of chasing an unlabeled sequence of unrelated ids. This is
+   * INDEPENDENT of `session_message_delivered`: that marker is stamped the instant a HELD message is HANDED
+   * to the recipient (drainPending, well before give-up detection resolves — see `resolveQueuedMessage`'s
+   * doc), so the OLD msgId here has usually ALREADY been marked "delivered" (optimistically, pre-existing
+   * behavior this card does not change) by the time exhaustion fires. Calling `resolveQueuedMessage` again
+   * for it would be an idempotent no-op, not a resolution — so this method deliberately does NOT touch that
+   * marker; `session_message_gave_up` is the correction a reader must consult ALONGSIDE it, not instead.
+   *
+   * `sender` is the sentinel string `"system"` for every settle-nudge call site (merge-done, gate-done,
+   * cap-queue-autofire-failed, …) — there is no real originating session for a daemon-generated completion
+   * signal. That's safe: `ctx.sender` only ever feeds (a) this event's `managerSessionId` attribution
+   * (a plain TEXT column, no FK) and (b) the "surface to the sender" step below, where `db.getSession
+   * ("system")` simply returns undefined and the surface step is skipped — the SAME shape
+   * `recoverUndeliveredMessagesOnBoot` already documents for a sentinel sender with nobody to nudge.
+   */
+  private handleGiveUpExhausted(
+    recipientId: string, text: string, msgId: string, rootMsgId: string, chainDepth: number,
+    sender: string, taskId: string | null, kind: QueuedMessageKind,
+  ): void {
+    if (chainDepth < GIVE_UP_REMINT_LIMIT) {
+      // Re-mint FIRST so `remintedAs` below is the REAL new msgId (enqueueDurableMessage mints its own,
+      // internally) — recording a separately-generated id here would silently break the very audit chain
+      // this event exists to provide. giveUpHeldUntil (CR follow-up, finding [1]) forces the HELD branch —
+      // see this method's own doc above for why the immediate path was a live bug, not a simplification.
+      const reminted = this.enqueueDurableMessage(recipientId, text, {
+        sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS,
+      });
+      // eslint-disable-next-line no-console
+      console.warn(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, chainDepth ${chainDepth}) exhausted its in-session budget — re-minted as ${reminted.msgId} (attempt ${chainDepth + 1}/${GIVE_UP_REMINT_LIMIT})`);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sender, workerSessionId: recipientId, taskId,
+        kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "reminted", remintedAs: reminted.msgId },
+      });
+      return;
+    }
+    // PARKED: budget exhausted at every level (in-session AND cross-remint). Stop dispatching — no further
+    // enqueueStdin call for this message — and make the outcome loud + durable + sender-visible instead.
+    // eslint-disable-next-line no-console
+    console.error(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, ${text.length} chars, head=${JSON.stringify(text.slice(0, 60))}) PARKED after ${GIVE_UP_REMINT_LIMIT} re-mint attempts — Loom will NOT retry this automatically; surfacing to the sender`);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sender, workerSessionId: recipientId, taskId,
+      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked" },
+    });
+    // CR follow-up (card ccb407eb, finding [5]): NOT gated on `processState === "live"` — the notice below
+    // goes through enqueueDurableMessage, which already handles a not-currently-live recipient correctly
+    // (records the durable row regardless, redriven once that recipient resumes — the same mechanism
+    // recoverUndeliveredMessagesOnBoot relies on for every other durable message). Gating on liveness here
+    // would just drop the opportunity to notify a sender who is merely offline right now, not gone. Only
+    // `senderSession` (a real session ROW exists at all) is checked — an entirely nonexistent `sender`
+    // would just leave an orphaned record nothing will ever redrive, so that check stays. Dropping the
+    // liveness half does not weaken the recursion-termination guarantee (scenario (7)): `db.getSession
+    // ("system")` is still falsy regardless — the sentinel has no session ROW, live or not.
+    const senderSession = this.db.getSession(sender);
+    if (senderSession) {
+      const note =
+        `[loom:redelivery-parked] a message you sent to ${recipientId.slice(0, 8)} (head: ${JSON.stringify(text.slice(0, 60))}) ` +
+        `could not be confirmed delivered after ${GIVE_UP_REMINT_LIMIT} redelivery attempts and has been PARKED — Loom will not ` +
+        `retry it automatically. Re-send it if it's still needed, or check on ${recipientId.slice(0, 8)}'s session state.`;
+      // CR follow-up (card ccb407eb): this notice is ITSELF a one-shot terminal signal — by the exact
+      // criterion this card applied to the six settle-nudge sites above, it must not be a bare enqueueStdin
+      // a give-up could silently swallow one level up. Routed through enqueueDurableMessage exactly like
+      // those six, with `ctx.sender: "system"` (never `sender` — the notice is daemon-generated, not
+      // authored by the original message's sender). That specific choice is what TERMINATES the regress:
+      // if this notice itself gives up and exhausts its own remint budget, ITS OWN handleGiveUpExhausted
+      // park branch looks up `db.getSession("system")`, finds no live session for the sentinel, and its own
+      // surface-to-sender step no-ops — no notice-about-the-notice is ever sent. That termination depends on
+      // `"system"` never resolving to a live session (true today — session ids are UUIDs, `"system"` is a
+      // sender sentinel, never a spawned session id — but nothing STRUCTURALLY enforces it); scenario (7) in
+      // give-up-exhausted-durable.mjs is what HOLDS it true: it asserts zero follow-on dispatch attempts
+      // against the real Db, AND (7b) proves the assertion isn't vacuous by faking `getSession("system")`
+      // live and confirming a follow-on dispatch WOULD then occur. If that guard ever breaks, (7a) goes red.
+      try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId, kind: "warning" }); } catch { /* best-effort — the durable session_message_gave_up record for the ORIGINAL message still stands regardless */ }
+    }
   }
 
   /**
@@ -5840,9 +6030,13 @@ export class SessionService {
       // UNRESOLVED manager direction queued. The real incident: a worker raced to `done` on a SUPERSEDED
       // design and committed it BEFORE consuming the manager's queued redirects — "finishing" the wrong
       // thing. We gate on MANAGER-origin direction only (detail.sender === the worker's own manager), read
-      // from the durable `session_message_queued` events: origin-accurate, because watcher/system nudges go
-      // out via the non-durable enqueue and never create these. A message held mid-turn is unresolved
-      // precisely DURING the racing turn (it only resolves once the worker ends a turn and the FIFO drains),
+      // from the durable `session_message_queued` events. CR follow-up (card ccb407eb, finding [9]): origin-
+      // accuracy here comes from the `detail.sender === managerSessionId` filter below, NOT from "system
+      // nudges never create these records" — since this card, a `[loom:*]` settle nudge held mid-turn DOES
+      // create one too (sender:"system"), same as any other durable dispatch. The filter still correctly
+      // excludes it (its sender is the "system" sentinel, never a real manager id), so this guard's
+      // behaviour is unchanged — only the REASON the old comment gave for that was wrong.
+      // A message held mid-turn is unresolved precisely DURING the racing turn (it only resolves once the worker ends a turn and the FIFO drains),
       // so refusing here forces the worker to end its turn, drain the (coalesced) direction into its next
       // turn, act on it, THEN re-report. Mirrors the uncommitted-files refusal shape exactly (task NOT moved).
       if (managerSessionId) {
@@ -8055,7 +8249,9 @@ export class SessionService {
         // SAME lineage resolution the generic echo uses.
         const target = this.resolveSettleNudgeTarget(managerSessionId);
         try {
-          this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "agent");
+          // Card ccb407eb: a merge-rejection is a ONE-SHOT TERMINAL outcome (never re-sent), so it's
+          // durable — the specimen this card fixed was exactly this class of push going missing.
+          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId, kind: "agent" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
           // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
           // untouched. `opStartedAt` is the CLOSED-OVER confirmWorkerMerge param (captured by
@@ -8703,7 +8899,9 @@ export class SessionService {
       const target = this.resolveSettleNudgeTarget(args.managerSessionId);
       const msg = `[loom:already-merged] worker ${args.workerSessionId} (task ${args.taskId ?? "none"}) [op ${args.opId}] — ALREADY_MERGED: the branch's work was already in main; finishing the worktree cleanup + task without a new commit.` + this.settleNudgeAttribution(target, args.managerSessionId);
       try {
-        this.pty.enqueueStdin(target, msg, "system", undefined, undefined, "agent");
+        // Card ccb407eb: a ONE-SHOT TERMINAL success announcement (never re-sent) — durable like every
+        // other settle nudge.
+        this.enqueueDurableMessage(target, msg, { sender: "system", taskId: args.taskId, kind: "agent" });
         // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — a failed/undelivered
         // push leaves every pending wake untouched, since the fallback wake is then the session's own
         // real recovery path (see autoCancelSettleWakes's doc). `args.opStartedAt` is CAPTURED (not
@@ -8843,7 +9041,11 @@ export class SessionService {
         // tell this nudge apart from one of its own.
         const target = this.resolveSettleNudgeTarget(managerSessionId);
         try {
-          this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, managerSessionId), "system", undefined, undefined, "warning");
+          // Card ccb407eb: THE specimen this card fixed — this generic settle echo used to be a bare
+          // enqueueStdin with no onDeliver and no DB record at all (zero durability at any layer), so a
+          // give-up here was a total, unrecoverable loss even across a daemon restart. A ONE-SHOT TERMINAL
+          // signal (never re-sent) — now durable like every other settle nudge.
+          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, managerSessionId), { sender: "system", taskId, kind: "warning" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
           // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
           // untouched. `opStartedAt` is the CLOSED-OVER value captured right before `attach()` above —
@@ -9261,7 +9463,9 @@ export class SessionService {
         // same turn — without attribution it could misread the predecessor's op as its own gate passing.
         const target = this.resolveSettleNudgeTarget(workerSessionId);
         try {
-          this.pty.enqueueStdin(target, msg + this.settleNudgeAttribution(target, workerSessionId), "system", undefined, undefined, "warning");
+          // Card ccb407eb: a ONE-SHOT TERMINAL gate outcome (never re-sent) — durable like every other
+          // settle nudge.
+          this.enqueueDurableMessage(target, msg + this.settleNudgeAttribution(target, workerSessionId), { sender: "system", taskId: worker.taskId ?? null, kind: "warning" });
           // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — see
           // autoCancelSettleWakes's doc for why a failed/undelivered push must leave every pending wake
           // untouched. `opStartedAt` is the CLOSED-OVER value captured (alongside `attachedToInFlight`)
