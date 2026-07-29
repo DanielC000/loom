@@ -1512,6 +1512,11 @@ interface Live {
   // entirely instead of re-paying it on every subsequent Stop. Reset to false the moment a cheap direct
   // existsSync check finds the transcript again — a session that recovers still deserves a fresh diagnosis.
   transcriptMissingDiagnosedOnce: boolean;
+  // Card 7114838d: latches once the UserPromptSubmit frame-splice detector has confirmed (or refuted)
+  // its own unverified premise — that the engine's hook payload actually carries a `prompt` field at
+  // all — for THIS session, so a genuinely-absent field is reported explicitly and ONCE rather than the
+  // detector silently comparing `undefined` and never firing again for every subsequent turn.
+  promptFieldAbsentDiagnosedOnce: boolean;
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
   // Card 0f9268cc: the raw-terminal-channel counterpart of `lastPrompt`, so the paste-tripwire can see a
   // paste/long text typed or pasted directly into the terminal panel (/ws/term -> writeStdin), NOT just a
@@ -2727,6 +2732,7 @@ export class PtyHost {
       drainHeld: false,
       rateLimited: false,
       transcriptMissingDiagnosedOnce: false,
+      promptFieldAbsentDiagnosedOnce: false,
       // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
       // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
       // route (a startup turn is never a companion inbound), so the route fields start null.
@@ -2888,7 +2894,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -2964,7 +2970,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -3215,7 +3221,10 @@ export class PtyHost {
     sessionId: string,
     // StopFailure also carries error/error_details (and a future claude may carry resetsAt) — the
     // relay + /internal/hook forward the whole hook object; we read them for §19c usage-limit detect.
-    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number },
+    // `prompt` (card 7114838d): UserPromptSubmit's own report of what was actually submitted — read for
+    // the frame-splice detector below. Narrow BY CHOICE, same established pattern as the other extra
+    // fields here — extend, don't widen to `unknown`.
+    hook: { hook_event_name?: string; session_id?: string; error?: string; error_details?: unknown; resetsAt?: number; prompt?: string },
   ): void {
     const live = this.live.get(sessionId);
     if (!live) return;
@@ -3310,6 +3319,92 @@ export class PtyHost {
           if (fresh && !submitWasOutstanding) this.attributeOwnerText(live, live.pendingRawOwnerSubmit);
           live.pendingRawOwnerSubmit = null;
           live.pendingRawOwnerSubmitAt = null;
+        }
+        // Card 7114838d: frame-splice detector — LOG-ONLY, fixes nothing (see 3ce3fa39, the card this
+        // unblocks). `daemon-output.log`'s `[pty-write]`/`[submit-write]` lines prove only that a write was
+        // CALLED, never that ConPTY actually APPLIED it — nothing at the write layer distinguishes "written
+        // and applied" from "written and dropped/spliced". This comparison can, because its two sides come
+        // from genuinely INDEPENDENT sources: the engine's own report of what it actually submitted
+        // (`hook.prompt`) vs. the daemon's own record of what it intended to write for this turn
+        // (`live.lastPrompt`) — not two views of the same mocked/written state.
+        // Deliberately `console.log` (stdout), same stream as `[pty-write]`/`[submit-write]`/`[stdin-write]`
+        // — this detector's whole point is correlating a splice against the write records around it, and
+        // `console.warn` (stderr) is a SEPARATELY buffered/timestamped stream, so line order between the two
+        // in the combined log file is not guaranteed. Regardless of stream, correlate by the log's EPOCH-MS
+        // TIMESTAMPS, never by line order — the corpus is mixed with other stderr output too.
+        // Gated on submitWasOutstanding (captured above, BEFORE this hook flipped enterConfirmed): per
+        // Live.lastPrompt's doc, that field is set ONLY by Loom-originated submit() calls, never by a raw
+        // human-typed turn — an ungated always-compare would misfire on EVERY raw-terminal turn, comparing
+        // it against a stale lastPrompt left over from an earlier, unrelated Loom-originated turn.
+        // CHECKED (manager review, card 7114838d) so this isn't a SYSTEMATIC benign mismatch on every turn:
+        // `live.lastPrompt` is set from the EXACT literal `text` argument submit() receives (host.ts's own
+        // `live.lastPrompt = text` in submit()), and callers build any `[loom:from-manager]\n…`-style frame
+        // BEFORE calling in (e.g. sessions/service.ts `messageWorker`'s `const framed = ...`) — so
+        // `lastPrompt` already holds the FULL POST-FRAMING text, same form as what's typed into the composer.
+        // `writeChunked` (submit()'s writer) writes that string byte-for-byte with no daemon-side
+        // normalization (no trim, no CRLF conversion, no appended newline — Enter is a SEPARATE write). What
+        // remains genuinely UNCONFIRMED — because it lives entirely on the engine/CLI side, outside this
+        // repo — is whether Claude Code's own hook reports that identical string back verbatim (e.g. any
+        // Ink-side trimming). The tests below synthesize hook.prompt and so cannot answer that; only the
+        // first real hook after deploy can. `lenDelta`/tail-length fields below exist so THAT observation is
+        // self-classifying the moment it lands, rather than needing a follow-up investigation.
+        //
+        // ⭐ PRE-REGISTERED 2026-07-29, card 7114838d — BEFORE any real observation exists. The four bullets
+        // below are PREDICTIONS, not observed behaviour — do NOT read this as documentation of known
+        // engine/CLI behaviour. As of this writing, whether UserPromptSubmit's hook payload carries a
+        // `prompt` field at all is ITSELF unverified (that's the whole reason this detector exists — see the
+        // paragraph above). Predictions:
+        //   - SILENCE ⇒ Claude Code echoes the framed string back identically. Detector armed and working;
+        //     no splice observed yet. This is the expected steady state.
+        //   - `prompt-field-absent` (fires once) ⇒ the hook payload doesn't carry the prompt text at all.
+        //     This card's premise dies here, cleanly — 3ce3fa39 goes back to the accept-risk-vs-real-
+        //     terminal choice with nothing new to add.
+        //   - Mismatch with TINY tails (both `tailReportedLen`/`tailIntendedLen` small) and/or a small
+        //     `lenDelta`, divergence near the very END ⇒ benign normalization on Claude Code's own side
+        //     (e.g. trailing-whitespace trimming). NOT a splice — report it, don't suppress it; the
+        //     comparison would need relaxing/scoping, not this detector declared broken.
+        //   - Mismatch with LARGE tails on BOTH sides, divergence MID-STRING, `lenDelta` roughly the size of
+        //     a whole stranded message ⇒ the real thing: a live frame splice, captured with full context.
+        // ⛔ OBLIGATION: the FIRST time any of the above is actually observed (a real `[prompt-mismatch]` or
+        // `prompt-field-absent` line from a genuine session, not a test), UPDATE this comment to record which
+        // outcome occurred and REMOVE the stale predictions it didn't confirm. A pre-registration is only
+        // honest while no data exists yet — left unedited after the data arrives, it becomes exactly the
+        // false-reassurance shape (a confident claim nobody re-checks) this project keeps paying for.
+        if (submitWasOutstanding) {
+          if (typeof hook.prompt !== "string") {
+            // SELF-DIAGNOSING (card 7114838d): whether UserPromptSubmit's hook payload actually carries the
+            // prompt text at all was, until now, an UNCONFIRMED premise — Loom had simply never looked. Say
+            // so explicitly, ONCE per session, instead of silently comparing `undefined` and never firing —
+            // a detector that goes quiet when its input is missing is indistinguishable from one that's
+            // working and finding nothing. If this line is never seen after deploy, that itself answers the
+            // question: the field isn't there, and this detector has nothing to compare.
+            if (!live.promptFieldAbsentDiagnosedOnce) {
+              live.promptFieldAbsentDiagnosedOnce = true;
+              // eslint-disable-next-line no-console
+              console.log(`[prompt-mismatch] ${sessionId} UserPromptSubmit carried no usable 'prompt' field (keys=${JSON.stringify(Object.keys(hook))}) — card 7114838d's premise is UNCONFIRMED for this session; the detector cannot compare and will stay silent`);
+            }
+          } else if (hook.prompt !== live.lastPrompt) {
+            // live.lastPrompt is non-null here: submit() always writes it BEFORE ever setting
+            // enterConfirmed=false, and submitWasOutstanding===true means exactly that write already
+            // happened for this in-flight turn — the `?? ""` below is defensive only, never expected to fire.
+            const reported = hook.prompt;
+            const intended = live.lastPrompt ?? "";
+            let i = 0;
+            const max = Math.min(reported.length, intended.length);
+            while (i < max && reported[i] === intended[i]) i++;
+            // Show WHERE the divergence starts, not just that one exists — the known specimens all splice
+            // mid-token, so a bare "mismatch: true" would satisfy the letter of this and be useless in practice.
+            // ALSO make the log SELF-CLASSIFYING (manager review, card 7114838d): a systematic BENIGN mismatch
+            // (framing/normalization) would otherwise look identical to a real splice at a glance. `lenDelta`
+            // and the two tail lengths let a reader tell them apart without doing arithmetic — a splice makes
+            // `reported` longer by roughly a whole stranded message with a LARGE tail on both sides at the
+            // divergence point; a trailing-whitespace/normalization artifact diverges near the very END, so
+            // both tails are tiny (near 0) regardless of `lenDelta`; wholly different strings diverge at
+            // `divergesAtChar=0`.
+            const around = (s: string, at: number) => JSON.stringify(s.slice(Math.max(0, at - 20), at + 40));
+            // eslint-disable-next-line no-console
+            console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
+          }
         }
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
         break;
