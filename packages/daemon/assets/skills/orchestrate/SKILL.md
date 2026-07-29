@@ -605,6 +605,16 @@ mid-report — before sending anything.
    startup line, never assume a default. Hold both when you review a browser-capable worker's
    "verified live."
 
+   **Even the right bound URL isn't proof of the right data** — a dev server can silently fall back onto
+   a different live default and serve another instance's data while everything still renders looking
+   correct. **Assert the fixture's identity** (a count, a sentinel string, an id — something that fails
+   loudly if the underlying data swapped), not just that the page rendered.
+
+   **Positive-control any verification instrument before trusting its green**: show it can go red on a
+   known-bad case. A uniform result proves little by itself — validate the check against a contrasting
+   known-good case too, so a clean result means the instrument can tell the two apart, not merely that it
+   fired. Where you can, prefer evidence that doesn't depend on the instrument at all.
+
    To eyeball a **static on-disk HTML artifact**, to launch a **live dev server** against a worker's
    worktree, to print served HTML to **PDF**, or to keep a screenshot **as a file** — read
    `references/serving-and-capture.md` (under this skill's own directory) FIRST and follow its recipes;

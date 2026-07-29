@@ -200,7 +200,12 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    state change** — DOM/network/text differs before vs. after — not just that the page renders without
    console errors. When you self-verify, point Playwright at the dev server's **actual bound URL** —
    read the port from the framework's startup line, never assume a default (a stale server already
-   holding the default port would silently verify the wrong thing and report a false pass). **Stop any dev server (or other long-running process) you started BEFORE you
+   holding the default port would silently verify the wrong thing and report a false pass). Even the
+   right port isn't proof of the right data — a server can fall back onto another live default and serve
+   someone else's data with everything still rendering correctly, so **assert the fixture's identity** (a
+   count, sentinel, or id) rather than just that the page looks right, and **positive-control any check**
+   — including against a contrasting known-good case, not just a known-bad one — before trusting its
+   green. **Stop any dev server (or other long-running process) you started BEFORE you
    `worker_report done` — and stop it SAFELY.** Terminate it via the handle you started it with (the child
    process YOU spawned); don't re-discover it by process name or port. A stray dev server holds OS file
    locks on its own `node_modules` (on Windows a live Vite/esbuild binary can't be unlinked), so the merge
