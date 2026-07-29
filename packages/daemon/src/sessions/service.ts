@@ -8123,7 +8123,10 @@ export class SessionService {
       //      earlier in this method, and never skipped just because a union-merge already ran above) —
       //      main's current HEAD is already an ancestor of the branch. This is the hard constraint: a main
       //      that moved past what the branch contains ALWAYS fails this check (`undefined` on a git error
-      //      also fails it, strict `=== 0`), forcing a real re-gate.
+      //      also fails it, strict `=== 0`), forcing a real re-gate. Proved against a SINGLE captured
+      //      `freshHead` (card 24cc40f9) — the same sha this proof is checked against is the sha threaded
+      //      into `gateBaseMainHead` below, by construction, rather than two independent HEAD reads that
+      //      could each observe a different tip.
       // Any gap in this proof (no self-check on record for this exact branch, one that failed or settled
       // racy, a dirty worktree, a moved HEAD, or main having advanced) leaves `reuseResult` unset below and
       // the gate runs for real, unchanged from before this existed.
@@ -8131,24 +8134,31 @@ export class SessionService {
       const lastCheck = this.lastWorkerGateCheck.get(workerSessionId);
       if (lastCheck && lastCheck.branch === branch && lastCheck.passed && lastCheck.headCurrent) {
         const freshStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-        const freshBehindMain = await countCommitsBehind(repoPath, branch, "HEAD", { timeoutMs: this.gitOpMs });
-        if (!freshStamp.dirty && !gateStampsDiffer(lastCheck.stamp, freshStamp) && freshBehindMain === 0) {
-          // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF THIS
-          // READ — main is a process-wide shared resource, and a SIBLING merge on this same repo can still
-          // land before this merge's own squash actually runs (this reuse decision happens well before
-          // `mergeBranch`'s own lock is ever requested). Capturing `gateBaseMainHead` here and threading it
-          // through does NOT close that window by itself — it only lets `mergeBranch` catch the invalidated
-          // premise INSIDE its own lock, immediately before doing anything else, and refuse instead of
-          // silently landing an unverified merge. See mergeBranchLocked's own doc for the actual guarantee.
-          gateBaseMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
-          // A HEAD we can no longer resolve (a git read failure on this second call) means the re-check
-          // inside the lock can never succeed either (nothing to compare against would ever match) — fail
-          // CLOSED by not reusing at all, rather than passing `undefined` through (which `mergeBranch`
-          // would read as "no re-check requested", silently skipping the very protection this exists for).
-          if (gateBaseMainHead) {
-            reuseResult = { passed: true };
-            reusedOpId = lastCheck.opId;
-          }
+        // CAPTURE-ONCE (card 24cc40f9): resolve main's HEAD a single time and thread that SAME sha into
+        // `countCommitsBehind` as its explicit `base`, so the behind-main proof and the captured gate-base
+        // sha are pinned to one commit BY CONSTRUCTION — not two independent git spawns ~30-150ms apart
+        // that could each observe a different tip if canonical main advances (via a GitWriter REST
+        // commit/checkout, which does not serialize on `withRepoMergeLock`) in between them.
+        const freshHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+        // A HEAD we can't resolve means there is nothing to prove `freshBehindMain` against and nothing
+        // to hand `mergeBranch` as a re-check base — fail CLOSED by not reusing at all, rather than
+        // passing `undefined` through (which `mergeBranch` would read as "no re-check requested", silently
+        // skipping the very protection this exists for).
+        const freshBehindMain = freshHead
+          ? await countCommitsBehind(repoPath, branch, freshHead, { timeoutMs: this.gitOpMs })
+          : undefined;
+        if (freshHead && !freshStamp.dirty && !gateStampsDiffer(lastCheck.stamp, freshStamp) && freshBehindMain === 0) {
+          // TOCTOU NOTE (CR follow-up): `freshBehindMain === 0` only proves main hadn't moved AS OF
+          // `freshHead`'s single read — main is a process-wide shared resource, and a SIBLING merge on
+          // this same repo can still land before this merge's own squash actually runs (this reuse
+          // decision happens well before `mergeBranch`'s own lock is ever requested). Threading `freshHead`
+          // through as `gateBaseMainHead` does NOT close that window by itself — it only lets `mergeBranch`
+          // catch the invalidated premise INSIDE its own lock, immediately before doing anything else, and
+          // refuse instead of silently landing an unverified merge. See mergeBranchLocked's own doc for the
+          // actual guarantee.
+          gateBaseMainHead = freshHead;
+          reuseResult = { passed: true };
+          reusedOpId = lastCheck.opId;
         }
       }
       gateRan = !reuseResult;

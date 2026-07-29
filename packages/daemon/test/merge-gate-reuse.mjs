@@ -501,6 +501,59 @@ try {
       check("(K) task moved to done on the retry", db.getTask(K.taskId).columnKey === "done");
     }
   }
+  // ── (L) THE MOVED-MAIN-BETWEEN-THE-TWO-READS CASE — card 24cc40f9. The reuse path used to prove its
+  //        behind-main premise with one git read (`countCommitsBehind(repoPath, branch, "HEAD")`) and
+  //        capture its gate-base sha with a SEPARATE one (`resolveGitRef(repoPath, "HEAD")`): if main
+  //        advanced between those two independent spawns, the proof referred to the OLD sha while the
+  //        captured `gateBaseMainHead` held the NEW one — and the in-lock re-check at squash time, which
+  //        compares against the NEW sha, would then WRONGLY MATCH, landing a squash the self-check never
+  //        actually validated. The fix reads HEAD ONCE and threads that SAME sha into `countCommitsBehind`
+  //        as its explicit `base`, so the two are pinned to one commit by construction. This exercises the
+  //        actual production primitives in the actual production order (resolveGitRef → countCommitsBehind
+  //        with that captured sha as base → mergeBranch's requireCanonicalHead) — no new test seam needed,
+  //        since the fix already removes the vulnerable window rather than hiding it behind timing.
+  {
+    const L = mk("l", "feature-l.txt");
+    makeRepo(L);
+    const { resolveGitRef, countCommitsBehind, mergeBranch } = await import("../dist/git/worktrees.js");
+    const { worktreePath, branch } = await createWorktree(L.repo, L.projId, L.taskId);
+    L.worktreePath = worktreePath; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, L.file), "work for L\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${L.file}"`, { cwd: worktreePath });
+    const mainHeadAtCapture = execSync("git rev-parse HEAD", { cwd: L.repo }).toString().trim();
+
+    // The reuse path's own sequence: capture HEAD ONCE...
+    const freshHead = await resolveGitRef(L.repo, "HEAD");
+    check("(L) precondition: the single captured HEAD is main's real current tip", freshHead === mainHeadAtCapture);
+
+    // ...then main advances — the EXACT window the old two-separate-reads code was vulnerable to (a
+    // GitWriter REST commit/checkout can land at any time; it does not serialize on withRepoMergeLock).
+    fs.writeFileSync(path.join(L.repo, "main-advance-l.txt"), "main moved after the single capture\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "main advance l"`, { cwd: L.repo });
+    const mainHeadAfterAdvance = execSync("git rev-parse HEAD", { cwd: L.repo }).toString().trim();
+    check("(L) precondition: main genuinely advanced past the captured sha", mainHeadAfterAdvance !== freshHead);
+
+    // ...then `countCommitsBehind` is called with the FROZEN captured sha as `base` (never a live "HEAD"
+    // re-read) — its answer is pinned to the pre-advance commit regardless of main having since moved.
+    const freshBehindMain = await countCommitsBehind(L.repo, branch, freshHead);
+    check("(L) countCommitsBehind against the FROZEN captured sha is unaffected by the main advance", freshBehindMain === 0);
+
+    // The reuse decision threads this SAME frozen `freshHead` into mergeBranch as `gateBaseMainHead` —
+    // exercise that directly: since main has since moved, the in-lock TOCTOU re-check must REFUSE rather
+    // than match (the old bug's failure mode: a freshly re-read HEAD at capture time would have equalled
+    // main's now-current tip and WRONGLY matched here, landing a squash the behind-main proof never
+    // actually verified).
+    const result = await mergeBranch(L.repo, branch, "MGRU-L", {}, freshHead);
+    check("(L) mergeBranch's in-lock check REFUSES the stale frozen head — no incorrect match", result.ok === false && result.gateBaseInvalidated === true);
+    const headAfterRefusal = execSync("git rev-parse HEAD", { cwd: L.repo }).toString().trim();
+    check("(L) canonical repo HEAD untouched by the refused attempt", headAfterRefusal === mainHeadAfterAdvance);
+
+    // And the paired positive: the SAME frozen-head pattern proceeds normally once threaded with a head
+    // that DOES match main's actual current tip — proving the refusal above is specifically about the
+    // moved-main case, not a general brokenness of the mechanism.
+    const okResult = await mergeBranch(L.repo, branch, "MGRU-L ok", {}, mainHeadAfterAdvance);
+    check("(L) the same pattern proceeds normally once the captured head matches main's actual current tip", okResult.ok === true);
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
