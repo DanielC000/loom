@@ -34,6 +34,14 @@ const { PtyHost } = await import("../dist/pty/host.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 const now = new Date().toISOString();
 
 // A fake IPty: records every write; onExit/kill are inert (endMe's assertions only need the WRITE side —
@@ -104,8 +112,8 @@ try {
   check("(pass) endMe → {stopped:true}, no reason", rPass.stopped === true && rPass.reason === undefined);
   check("(pass) an end_me_complete event is recorded", db.listEvents(PASS_ID).some((e) => e.kind === "end_me_complete"));
   check("(pass) the graceful Ctrl-C has NOT landed yet (deferred — reply flushes before teardown)", countCtrlC(PASS_ID) === 0);
-  await sleep(3200);
-  check("(pass) the graceful Ctrl-C DOES land ~3s later", countCtrlC(PASS_ID) >= 1);
+  check("(pass) the graceful Ctrl-C DOES land ~3s later",
+    await waitUntil(() => countCtrlC(PASS_ID) >= 1, 8000)); // > the real 3000ms deferred graceful-stop, generous bound
 
   // ── (QUEUED) an unconsumed kind:"agent" message queued → refused ──────────────────────────────────
   const QUEUED_ID = spawnManager("queued");

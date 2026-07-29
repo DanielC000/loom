@@ -85,6 +85,14 @@ const liveLeads = (agentId) => db.liveSessions(agentId).filter((s) => s.role ===
 const platformRows = (agentId) => db.listSessions(agentId).filter((s) => s.role === "platform");
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 try {
   // ============================ (1) self-recycle → exactly ONE live Lead afterward ====================
@@ -172,11 +180,10 @@ try {
   // ============================ (2) NO ORPHAN — deferred hard-stop of every retired predecessor =======
   // The retired predecessors' ptys are hard-stopped on a 3s defer (so the recycle_me response flushes
   // first). Wait past the defer and confirm both retired predecessors were hard-stopped — no orphan pty.
-  await sleep(3200);
   check("(2) predecessor pty hard-stopped on the deferred teardown (no orphan)",
-    host.stopped.some((s) => s.id === pred.id && s.mode === "hard"));
+    await waitUntil(() => host.stopped.some((s) => s.id === pred.id && s.mode === "hard"), 8000)); // > the real 3000ms defer, generous bound
   check("(2) the first successor's pty hard-stopped on the chained recycle's deferred teardown (no orphan)",
-    host.stopped.some((s) => s.id === succ.id && s.mode === "hard"));
+    await waitUntil(() => host.stopped.some((s) => s.id === succ.id && s.mode === "hard"), 8000));
   check("(2) the LIVE successor was NEVER stopped", !host.stopped.some((s) => s.id === succ2.id));
   check("(2) FINAL: still exactly one live Lead after teardown settles", liveLeads("agentLead").length === 1 && liveLeads("agentLead")[0]?.id === succ2.id);
 } finally {

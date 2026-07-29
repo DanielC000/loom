@@ -146,14 +146,13 @@ try {
   host.enqueueStdin(B, "NUDGE_B");
   host.deliverHook(B, { hook_event_name: "SessionStart" }); // starts the feedback cycle; ready only after it lands
   check("2: NOT ready immediately after SessionStart — cycle in flight, nudge still queued", countIn(fb, PASTE_START) === 0);
-  await sleep(750); // > MODE_CYCLE_SETTLE_MS(700) — first footer read (acceptEdits) → press #1
+  await waitUntil(() => countIn(fb, SHIFT_TAB) === 1); // > MODE_CYCLE_SETTLE_MS(700) — first footer read (acceptEdits) → press #1
   check("2: NOT ready mid-cycle either — still queued after the first (unconfirmed) press", countIn(fb, PASTE_START) === 0);
   fb.feed("plan mode on (shift+tab to cycle)"); // press #1 registered: footer repaints to plan
-  await sleep(150); // > overridden poll (40ms) × a few ticks — the change is observed → press #2
+  await waitUntil(() => countIn(fb, SHIFT_TAB) === 2); // the change is observed → press #2
   fb.feed("auto mode on (shift+tab to cycle)"); // press #2 registered: footer repaints to auto (the target)
-  await sleep(150);
-  check("2: both Shift+Tab mode-cycles were sent", countIn(fb, SHIFT_TAB) === 2);
-  check("2: the nudge submitted exactly once after the cycle converged", countIn(fb, PASTE_START) === 1);
+  check("2: both Shift+Tab mode-cycles were sent", await waitUntil(() => countIn(fb, SHIFT_TAB) === 2));
+  check("2: the nudge submitted exactly once after the cycle converged", await waitUntil(() => countIn(fb, PASTE_START) === 1));
   check("2: ORDERING — the Shift+Tabs were written BEFORE the bracketed paste",
     writtenOf(fb).indexOf(SHIFT_TAB) >= 0 && writtenOf(fb).indexOf(SHIFT_TAB) < writtenOf(fb).indexOf(PASTE_START));
 

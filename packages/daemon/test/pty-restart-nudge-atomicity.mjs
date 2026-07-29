@@ -206,9 +206,11 @@ try {
     const r1 = host.enqueueStdin(SID, malformedUtf16, "system", undefined, undefined, "warning");
     check("(B1) a tagged-but-ill-formed (lone surrogate) nudge is DELIVERED, not dropped", r1.delivered === true);
     check("(B1) the shape guard logged the sanitize anomaly", warnLog.length > warnBefore1);
-    await sleep(350); // let its (shrunk-chunk-size) writeChunked chain finish landing on the pty
+    // let its (shrunk-chunk-size) writeChunked chain ACTUALLY finish landing on the pty — poll the real
+    // condition (mirrors Part A's card 2b9adeed fix), not a wall-clock guess.
+    check("(B1) the delivered text is SANITIZED — the lone surrogate is replaced with U+FFFD",
+      await waitUntil(() => writtenOf(fb).includes("differ�NEERING STEP")));
     const written1 = writtenOf(fb);
-    check("(B1) the delivered text is SANITIZED — the lone surrogate is replaced with U+FFFD", written1.includes("differ�NEERING STEP"));
     check("(B1) the REST of the original content survives intact around the sanitized spot", written1.includes("[loom:daemon-restarted] tests (full next-build ga real differ") && written1.includes("NEERING STEP"));
     check("(B1) the raw lone surrogate itself never reaches the pty (it's gone, not just present-plus-replacement)", !written1.includes(malformedUtf16));
 
@@ -221,8 +223,8 @@ try {
     const r2 = host.enqueueStdin(SID, untagged, "system", undefined, undefined, "warning");
     check("(B2) an untagged warning-kind nudge is DELIVERED, not dropped", r2.delivered === true);
     check("(B2) the shape guard logged the missing-tag anomaly", warnLog.length > warnBefore2);
-    await sleep(350);
-    check("(B2) it was actually written to the pty, VERBATIM (the missing tag never blocked or altered delivery)", writtenOf(fb).includes(untagged));
+    check("(B2) it was actually written to the pty, VERBATIM (the missing tag never blocked or altered delivery)",
+      await waitUntil(() => writtenOf(fb).includes(untagged)));
 
     host.deliverHook(SID, { hook_event_name: "Stop" }); // re-idle
 
@@ -232,8 +234,7 @@ try {
     const r3 = host.enqueueStdin(SID, goodNudge, "system", undefined, undefined, "warning");
     check("(B3) a well-formed [loom:*] warning still delivers", r3.delivered === true);
     check("(B3) NO anomaly logged for a well-formed, correctly-tagged warning", warnLog.length === warnBefore3);
-    await sleep(350);
-    check("(B3) it was actually written to the pty", writtenOf(fb).includes(goodNudge));
+    check("(B3) it was actually written to the pty", await waitUntil(() => writtenOf(fb).includes(goodNudge)));
 
     host.deliverHook(SID, { hook_event_name: "Stop" }); // re-idle
 
@@ -245,8 +246,7 @@ try {
     const r4 = host.enqueueStdin(SID, emojiNudge, "system", undefined, undefined, "warning");
     check("(B4) a valid emoji (real surrogate pair) tagged warning delivers", r4.delivered === true);
     check("(B4) NO anomaly logged for a valid surrogate pair (not a false positive)", warnLog.length === warnBefore4);
-    await sleep(350);
-    check("(B4) the emoji nudge was written VERBATIM, unchanged", writtenOf(fb).includes(emojiNudge));
+    check("(B4) the emoji nudge was written VERBATIM, unchanged", await waitUntil(() => writtenOf(fb).includes(emojiNudge)));
 
     host.deliverHook(SID, { hook_event_name: "Stop" }); // re-idle
 
@@ -261,13 +261,14 @@ try {
     const r6 = host.enqueueStdin(SID, workerReportIllFormed, "system", undefined, undefined, "agent");
     check("(B5) the ill-formed (lone surrogate) AGENT-kind message QUEUES behind r5's now-busy turn (exempt, not dropped either)", r6.delivered === false && r6.position === 1);
     check("(B5) NO anomaly logged for either agent-kind message (both checks are warning-only)", warnLog.length === warnBefore5);
-    await sleep(350); // let r5's OWN writeChunked chain fully finish before ending its turn — else this Stop
-                       // would race r6's drain against r5's still-in-flight chunks (a self-inflicted version
-                       // of the very interleave Part A tests against, not a guard-under-test concern here).
+    // wait for r5's OWN writeChunked chain to ACTUALLY finish before ending its turn — else this Stop
+    // would race r6's drain against r5's still-in-flight chunks (a self-inflicted version of the very
+    // interleave Part A tests against, not a guard-under-test concern here). Mirrors Part A's own fix
+    // (card 2b9adeed): poll the real condition, not a wall-clock guess.
+    await waitUntil(() => writtenOf(fb).includes(workerReportUntagged));
     host.deliverHook(SID, { hook_event_name: "Stop" }); // drains r6
-    await sleep(350);
     check("(B5) the ill-formed agent-kind text was delivered COMPLETELY UNMODIFIED (raw lone surrogate intact, not sanitized)",
-      writtenOf(fb).includes(workerReportIllFormed));
+      await waitUntil(() => writtenOf(fb).includes(workerReportIllFormed)));
   }
 } finally {
   console.warn = realWarn;

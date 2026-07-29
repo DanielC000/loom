@@ -56,6 +56,15 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 const flush = () => new Promise((r) => setTimeout(r, 0));
 
 function tmpDbFile(tag) {
@@ -306,9 +315,8 @@ class ControllableMcpPty {
   check("(W) the caller's own session is present in the persisted resume set",
     Array.isArray(written?.resume) && written.resume.some((e) => e.sessionId === "reqPlatWrite" && e.role === "platform"));
   check("(W) the exit callback fires with RESTART_EXIT_CODE (75) — captured, never actually exits", exitCalls.length === 0);
-  await new Promise((r) => setTimeout(r, 350)); // the real setTimeout(…, 300) inside requestDaemonRestart
   check("(W) after the 300ms delay elapses, the captured exit fires with 75 (not a real process.exit)",
-    exitCalls.length === 1 && exitCalls[0] === restart.RESTART_EXIT_CODE);
+    await waitUntil(() => exitCalls.length === 1, 3000) && exitCalls[0] === restart.RESTART_EXIT_CODE); // > the real setTimeout(…, 300) inside requestDaemonRestart, generous bound
 
   restart.clearRestartIntent();
   db.close();

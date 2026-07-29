@@ -30,6 +30,14 @@ const { buildServer } = await import("../dist/gateway/server.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 let shutdownCalls = 0;
 const stub = {};
@@ -47,8 +55,8 @@ try {
   const body = res.json();
   check("(a) body acks { ok:true, stopping:true }", body.ok === true && body.stopping === true);
   check("(a) ack returns BEFORE the exit fires (not yet invoked synchronously)", shutdownCalls === 0);
-  await sleep(120); // > the endpoint's 50ms defer — the graceful path must have been invoked by now
-  check("(a) requestShutdown invoked exactly once after the ack flushed", shutdownCalls === 1);
+  check("(a) requestShutdown invoked exactly once after the ack flushed",
+    await waitUntil(() => shutdownCalls === 1, 3000)); // > the endpoint's 50ms defer, generous bound
 
   // (b) NON-loopback caller → 403, and shutdown is NOT invoked (same posture as /internal/hook)
   const forbidden = await app.inject({ method: "POST", url: "/internal/shutdown", remoteAddress: "203.0.113.7" });

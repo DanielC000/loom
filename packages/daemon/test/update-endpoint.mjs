@@ -33,6 +33,14 @@ const { buildServer } = await import("../dist/gateway/server.js");
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 let updateCalls = 0;
 const stub = {};
@@ -50,8 +58,8 @@ try {
   const body = res.json();
   check("(a) body acks { ok:true, updating:true }", body.ok === true && body.updating === true);
   check("(a) ack returns BEFORE the spawn fires (not yet invoked synchronously)", updateCalls === 0);
-  await sleep(120); // > the endpoint's 50ms defer
-  check("(a) beginSelfUpdate invoked exactly once after the ack flushed", updateCalls === 1);
+  check("(a) beginSelfUpdate invoked exactly once after the ack flushed",
+    await waitUntil(() => updateCalls === 1, 3000)); // > the endpoint's 50ms defer, generous bound
 
   // (b) NON-loopback caller → 403, NOT invoked (same posture as /internal/shutdown + /internal/hook).
   const forbidden = await app.inject({ method: "POST", url: "/internal/update", remoteAddress: "203.0.113.7" });

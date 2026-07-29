@@ -25,6 +25,14 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 // ═══════════════════════════ Part 1: PtyHost.setPermissionMode (real cycler, fake footer) ═══════════════════════════
 {
@@ -79,11 +87,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     {
       const id = "sess-wsm-A";
       const fake = spawnAtAcceptEdits(id);
-      await sleep(750); // > MODE_CYCLE_SETTLE_MS(700): let the boot convergence settle (0 presses)
+      // No press is EVER issued on this path (boot's own cycle and the manual call below both target
+      // acceptEdits === current, and cycleToMode calls are serialized per-session — see host.ts:1628) —
+      // so this is a trivially-true, timing-independent assertion, not a race against MODE_CYCLE_SETTLE_MS.
       check("(1) setup: boot convergence issued no presses (already at acceptEdits)", countShiftTabs(fake) === 0);
 
       const p = host.setPermissionMode(id, "acceptEdits");
-      await sleep(750); // MODE_CYCLE_SETTLE_MS again (setPermissionMode reuses cycleToMode's own settle)
+      // await the REAL promise (queues behind boot's own cycle if still in flight) instead of a blind
+      // sleep — this is the actual observable completion signal, robust to any settle-timer inflation.
       const landed = await p;
       check("(1) setPermissionMode(acceptEdits→acceptEdits) issued 0 presses", countShiftTabs(fake) === 0);
       check(`(1) setPermissionMode resolves the FEEDBACK-VERIFIED landed mode 'acceptEdits' (got ${landed})`, landed === "acceptEdits");
@@ -93,13 +104,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     {
       const id = "sess-wsm-B";
       const fake = spawnAtAcceptEdits(id);
-      await sleep(750);
       const p = host.setPermissionMode(id, "plan");
-      await sleep(750); // settle + first decide → 1st press
-      check("(2) setPermissionMode(acceptEdits→plan) issued its 1st Shift+Tab", countShiftTabs(fake) === 1);
+      check("(2) setPermissionMode(acceptEdits→plan) issued its 1st Shift+Tab",
+        // boot's own queued cycle (0 presses) + the manual cycle's MODE_CYCLE_SETTLE_MS(700) read — generous bound, not a fixed sleep
+        await waitUntil(() => countShiftTabs(fake) === 1, 3000));
       fake.feed(PLAN_FOOTER); // the press registers
-      await sleep(200);
-      const landed = await p;
+      const landed = await p; // the real observable completion signal — robust to any settle-timer inflation
       check("(2) setPermissionMode(acceptEdits→plan) converged in exactly 1 press", countShiftTabs(fake) === 1);
       check(`(2) landed mode = 'plan' (got ${landed})`, landed === "plan");
     }
@@ -108,19 +118,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     {
       const id = "sess-wsm-C";
       const fake = spawnAtAcceptEdits(id);
-      await sleep(750);
       const p = host.setPermissionMode(id, "auto");
-      await sleep(750);
-      check("(3) setPermissionMode(acceptEdits→auto) issued its 1st Shift+Tab", countShiftTabs(fake) === 1);
+      check("(3) setPermissionMode(acceptEdits→auto) issued its 1st Shift+Tab",
+        await waitUntil(() => countShiftTabs(fake) === 1, 3000));
       fake.feed(PLAN_FOOTER);
-      // 150ms (not 200ms): the change-wait cap here is overridden to ≈120ms (40ms poll × 3) — feeding the
-      // NEXT footer must land inside that window or the 2nd press's own awaitChange gives up first
-      // (mirrors test/pty-mode-convergence.mjs scenario 1's identical timing under the same overrides).
-      await sleep(150);
-      check("(3) the confirmed plan reading issued the 2nd Shift+Tab", countShiftTabs(fake) === 2);
+      // feed as soon as the 1st press is observed — the 2nd press's own change-wait window (overridden to
+      // ≈120ms: 40ms poll × 3) starts from THAT read, mirrors pty-mode-convergence.mjs scenario 1.
+      check("(3) the confirmed plan reading issued the 2nd Shift+Tab",
+        await waitUntil(() => countShiftTabs(fake) === 2, 1000));
       fake.feed(AUTO_FOOTER);
-      await sleep(150);
-      const landed = await p;
+      const landed = await p; // the real observable completion signal — robust to any settle-timer inflation
       check("(3) setPermissionMode(acceptEdits→auto) converged in exactly 2 presses", countShiftTabs(fake) === 2);
       check(`(3) landed mode = 'auto' (got ${landed})`, landed === "auto");
     }

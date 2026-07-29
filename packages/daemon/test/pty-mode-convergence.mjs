@@ -132,9 +132,8 @@ try {
   const fa = spawnFresh(A, "worker");
   fa.feed(ACCEPT_EDITS_FOOTER); // boot footer already painted before SessionStart fires (realistic ordering)
   host.deliverHook(A, { hook_event_name: "SessionStart", session_id: "eng-A" });
-  await sleep(750); // > MODE_CYCLE_SETTLE_MS(700) — first read (acceptEdits) → decide → press #1
   check("1: fresh spawn issued its FIRST Shift+Tab only after reading a real footer (feedback, not blind)",
-    countShiftTabs(fa) === 1);
+    await waitUntil(() => countShiftTabs(fa) === 1, 2500)); // > MODE_CYCLE_SETTLE_MS(700) — first read (acceptEdits) → decide → press #1
   fa.feed(PLAN_FOOTER); // the 1st press registered: footer repaints to plan
   await sleep(150); // > overridden poll (40ms) × a few ticks
   check("1: the confirmed plan reading issued the SECOND Shift+Tab", countShiftTabs(fa) === 2);
@@ -152,8 +151,8 @@ try {
   const fb = spawnFresh(B, "worker");
   fb.feed(ACCEPT_EDITS_FOOTER);
   host.deliverHook(B, { hook_event_name: "SessionStart", session_id: "eng-B" });
-  await sleep(750);
-  check("2: 1st press issued (acceptEdits → plan attempt)", countShiftTabs(fb) === 1);
+  check("2: 1st press issued (acceptEdits → plan attempt)",
+    await waitUntil(() => countShiftTabs(fb) === 1, 2500)); // > MODE_CYCLE_SETTLE_MS(700)
   fb.feed(PLAN_FOOTER); // 1st press registers
   await sleep(150);
   check("2: 2nd press issued (plan → auto attempt)", countShiftTabs(fb) === 2);
@@ -180,11 +179,10 @@ try {
   const fc = spawnFresh(C, "manager");
   fc.feed(ACCEPT_EDITS_FOOTER);
   host.deliverHook(C, { hook_event_name: "SessionStart", session_id: "eng-C" });
-  await sleep(750);
+  await waitUntil(() => countShiftTabs(fc) === 1, 2500); // > MODE_CYCLE_SETTLE_MS(700) — 1st press before feeding the next footer
   fc.feed(PLAN_FOOTER);
-  await sleep(150);
   check("3: manager also confirms 2 cycle presses (identical convergence attempt to a worker)",
-    countShiftTabs(fc) === 2);
+    await waitUntil(() => countShiftTabs(fc) === 2, 1000));
   await sleep(1300); // change-wait cap + MODE_LOG_POLL_MS + slack — enough for a heal to have fired if it would
   check("3: NO auto-heal press for a manager stranded in plan (role-gated — never fights a legitimate plan)",
     countShiftTabs(fc) === 2);
@@ -198,8 +196,8 @@ try {
   const fd = spawnFresh(D, "worker");
   fd.feed(ACCEPT_EDITS_FOOTER);
   host.deliverHook(D, { hook_event_name: "SessionStart", session_id: "eng-D" });
-  await sleep(750);
-  check("4: 1st press issued (acceptEdits → plan attempt)", countShiftTabs(fd) === 1);
+  check("4: 1st press issued (acceptEdits → plan attempt)",
+    await waitUntil(() => countShiftTabs(fd) === 1, 2500)); // > MODE_CYCLE_SETTLE_MS(700)
   // Do NOT feed anything — the 1st press itself never registers, simulating a dropped/mistimed VERY FIRST
   // keystroke. The change-wait cap (overridden ≈120ms) expires and the raw cycler gives up AT acceptEdits
   // (the pre-press mode — `finish` reports whatever `cur` was, and no change was ever confirmed).
@@ -236,8 +234,8 @@ try {
   const fe = spawnFresh(E, "worker", 3); // startupModeCycles:3 → the session's OWN target is "default"
   fe.feed(ACCEPT_EDITS_FOOTER);
   host.deliverHook(E, { hook_event_name: "SessionStart", session_id: "eng-E" });
-  await sleep(750);
-  check("5: 1st press issued (acceptEdits → plan attempt)", countShiftTabs(fe) === 1);
+  check("5: 1st press issued (acceptEdits → plan attempt)",
+    await waitUntil(() => countShiftTabs(fe) === 1, 2500)); // > MODE_CYCLE_SETTLE_MS(700)
   fe.feed(PLAN_FOOTER);
   await sleep(150);
   check("5: 2nd press issued (plan → auto attempt)", countShiftTabs(fe) === 2);
@@ -289,8 +287,8 @@ try {
   const fh = spawnResume(H, "worker", "auto"); // configuredCycles:2 → resumeModeTarget = "auto"
   fh.feed(ACCEPT_EDITS_FOOTER);
   host.deliverHook(H, { hook_event_name: "SessionStart", session_id: "eng-H" });
-  await sleep(750);
-  check("8: main convergence issued its 1st Shift+Tab (acceptEdits → plan attempt)", countShiftTabs(fh) === 1);
+  check("8: main convergence issued its 1st Shift+Tab (acceptEdits → plan attempt)",
+    await waitUntil(() => countShiftTabs(fh) === 1, 2500)); // > MODE_CYCLE_SETTLE_MS(700)
   fh.feed(PLAN_FOOTER); // 1st press registers
   await sleep(150);
   check("8: main convergence issued its 2nd Shift+Tab (plan → auto attempt)", countShiftTabs(fh) === 2);

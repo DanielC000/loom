@@ -21,6 +21,14 @@ import { requireHermeticEnv } from "./_guard.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
+  const start = Date.now();
+  while (!pred()) {
+    if (Date.now() - start > timeoutMs) return false;
+    await sleep(intervalMs);
+  }
+  return true;
+};
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()). Set BEFORE
 // importing host.js — paths.ts reads LOOM_HOME at import time.
@@ -113,8 +121,8 @@ try {
     // Right after stop it is NOT yet exited (the interrupt didn't kill it) — exactly the stuck state.
     check("busy-stuck: still live immediately after stop (interrupt only)", host.isAlive(SID) === true && fake.killCalled === false);
 
-    await sleep(450); // > KILL_MS (300) — let the full escalation run
-    check("busy-stuck: ESCALATED to hard kill (pty.kill called)", fake.killCalled === true);
+    check("busy-stuck: ESCALATED to hard kill (pty.kill called)",
+      await waitUntil(() => fake.killCalled === true, 3000)); // > KILL_MS (300) — generous bound, not a fixed sleep
     check("busy-stuck: session reached EXITED (onExit fired)", host.isAlive(SID) === false && exitLog.length >= 1);
   }
 
@@ -143,11 +151,15 @@ try {
     const fake = spawnReady(SID, 4);
     host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" }); // busy = true
     host.stop(SID, "graceful");
-    await sleep(60); // after Stage 1's two Ctrl-Cs (gap 20), before Stage 2 (retry 80)
+    // Wait for the OBSERVABLE end of Stage 1 (exactly 2 Ctrl-Cs written — the interrupt sequence) instead
+    // of a fixed sleep landing inside the [GAP, RETRY) window: ctrlCCount() is a monotonic counter read
+    // synchronously, so catching it at exactly 2 is a race-free snapshot taken strictly before Stage 2 (at
+    // RETRY_MS) can have added the 3rd/4th Ctrl-C.
+    await waitUntil(() => fake.ctrlCCount() === 2, 2000);
     check("busy-retry: NOT yet exited after the interrupt sequence (turn only interrupted)", host.isAlive(SID) === true);
 
-    await sleep(120); // past RETRY (80) + GAP (20) — Stage 2's re-sent sequence lands the 3rd+4th Ctrl-C
-    check("busy-retry: exited via the RE-SENT exit sequence (Stage 2)", host.isAlive(SID) === false);
+    check("busy-retry: exited via the RE-SENT exit sequence (Stage 2)",
+      await waitUntil(() => host.isAlive(SID) === false, 2000)); // > RETRY (80) + GAP (20), generous bound
     check("busy-retry: did NOT need the hard-kill backstop", fake.killCalled === false);
 
     await sleep(250); // let Stage 3 (kill 300) fire — must be a no-op now (already exited)

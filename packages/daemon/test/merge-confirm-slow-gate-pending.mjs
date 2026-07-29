@@ -90,7 +90,13 @@ try {
   const t0 = Date.now();
   const first = await call(client, "worker_merge_confirm", { workerSessionId: workerId });
   const elapsed1 = Date.now() - t0;
-  check(`(1) the first call blocks ~12s (the sync-wait budget) before returning (elapsed=${elapsed1}ms)`, elapsed1 >= 9_000 && elapsed1 < 14_500);
+  // Only a FLOOR is asserted — proving the call genuinely blocked for roughly the sync-wait budget rather
+  // than returning instantly. NO upper bound: this suite has measured up to 6x timing inflation under
+  // full-suite contention (card 9f3164b8), and this is a NOT-hermetic live-daemon test — exactly where
+  // that inflation applies (the card 0f5ed0ea audit flagged this as the highest-risk site in the whole
+  // inventory). Completion is verified below by POLLING worker_merge_confirm to settlement, never by
+  // timing this first call against a fixed ceiling.
+  check(`(1) the first call blocked for roughly the sync-wait budget before returning (elapsed=${elapsed1}ms)`, elapsed1 >= 9_000);
   check("(1) degrades to a PENDING handle, not a client-timeout dead-end", first.status === "pending" && typeof first.opId === "string" && first.workerSessionId === workerId);
 
   const list = await call(client, "worker_list");
@@ -98,12 +104,17 @@ try {
   check("(2) worker_list shows pendingMerge non-null while the gate is still running", row && row.pendingMerge && row.pendingMerge.state === "running");
 
   const t1 = Date.now();
-  const retry = await call(client, "worker_merge_confirm", { workerSessionId: workerId });
-  const elapsed2 = Date.now() - t1;
+  let retry = await call(client, "worker_merge_confirm", { workerSessionId: workerId });
   check("(3) an IMMEDIATE retry does NOT throw 'already in flight' — it attaches", !("error" in retry) || !/already in flight/i.test(retry.error ?? ""));
-  // The gate started at t≈0 and sleeps 15s total; by t1 (~12s in) it has a few seconds left, well under
-  // the retry's OWN 12s budget, so this retry call should observe the SETTLED result (not a second pending).
-  check(`(3) the retry rides out the remaining time and observes the SETTLED result (elapsed=${elapsed2}ms)`, retry.merged === true);
+  // POLL (retry/backoff) until the merge actually settles — never assume a single attach observes the
+  // settled result via a timing guess. The gate's own remaining runtime, plus full-suite contention (up
+  // to 6x inflation, card 9f3164b8), makes any fixed-elapsed assumption here a latent flake.
+  const pollDeadlineMs = Date.now() + 60_000; // gate sleeps 15s total from t≈0 — generous bound, hang-only backstop
+  while (retry.status === "pending" && Date.now() < pollDeadlineMs) {
+    await sleep(500);
+    retry = await call(client, "worker_merge_confirm", { workerSessionId: workerId });
+  }
+  check(`(3) the retry loop observes the SETTLED result (elapsed=${Date.now() - t1}ms)`, retry.merged === true);
 
   check("(4) the gate ran EXACTLY ONCE across the initial call + the retry (no double-merge)", fs.readFileSync(marker, "utf8") === "x");
   check("(5) file landed on the canonical repo", fs.existsSync(path.join(repo, file)));
