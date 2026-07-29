@@ -37,6 +37,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // completed work) keeps advancing, and only gives up if it genuinely STALLS (no tick completes for
 // `stallTimeoutMs`, generous above this file's own bounded per-tick subprocess timeouts) — an actual hang,
 // not a slow-but-progressing host. See test/codescape-health-probe.mjs scenario (5)'s own history.
+//
+// Card 44d1dfd8 — LIMIT of `stallTimeoutMs`, stated precisely: it bounds LACK OF PROGRESS ON THE SHARED
+// PROBE HEARTBEAT (`tickCounter()`), not on this call's own `cond()`. If the probe keeps ticking —
+// meaning the supervisor is alive and health-probing successfully — while `cond()` never becomes true
+// (the shape of a genuine regression: a restart that never fires, a spawn that never lands), the stall
+// clock keeps resetting on every tick and this does NOT time out. It is bounded only by the test
+// runner's per-file timeout in that case. This is deliberate, not an oversight: a slow, loud hang beats a
+// fast false FAIL on a healthy-but-contended system, which is the defect this helper replaces. Do not
+// read "has a stallTimeoutMs" as "is bounded against its own condition never becoming true" — it isn't.
 async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stallTimeoutMs = 8000 } = {}) {
   let lastTicks = tickCounter();
   let lastProgressAt = Date.now();
@@ -110,7 +119,13 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 
   // 3 consecutive failed probes @300ms apart (~900ms) should trigger a kill -> real exit -> the EXISTING
   // restart path. Poll the calls file (never a blind sleep) for the second 'serve' record.
-  for (let i = 0; i < 100 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  // Card 44d1dfd8 (revised — an earlier "single spawn, genuinely capped" classification here was WRONG,
+  // caught by scenario (2)'s own field failure under 3-way gate contention on the identical shape):
+  // this waits on a real subprocess respawn PLUS the child's own self-report write to callsFile (card
+  // b27f54b0 — reading spawn count from the child's self-report, not the supervisor, is its own known
+  // source of lag). That combined cost is not reliably capped under contention even for a SINGLE
+  // restart. Progress-keyed instead, same as scenario (2).
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
   check("(1) a sustained wedge triggers a restart via the EXISTING death path (a new serve call recorded)",
     readServeCalls(callsFile).length === 2);
   check("(1) restart reused the SAME port", sup.getPort() === portBefore);
@@ -146,16 +161,21 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   // Every spawn here is wedged from birth (env persists across the auto-restarts), so the supervisor
   // itself — never a manual kill — should drive exactly 1 (initial) + backoffMs.length (restarts) real
   // serve spawns before its OWN give-up branch refuses a further attempt.
+  // Card 44d1dfd8: THIS scenario's own field failure (worker d856dec8's gate 4d190a71, zero codescape
+  // changes in its diff, 3 gates contending) is what disproved the "single spawn, genuinely capped"
+  // classification this file used to carry — for this scenario AND for scenario (1)'s identical shape.
+  // Waits on TWO sequential real restarts (spawn + the child's own self-report write to callsFile — card
+  // b27f54b0 flags that self-report lag as its own source of variance), each an independent chance to
+  // exceed a guessed elapsed budget under gate contention. Progress-keyed instead — never widen the
+  // assertion below, which is the actual invariant under test.
   const expectedSpawns = 1 + backoffMs.length;
-  for (let expected = 1; expected <= expectedSpawns; expected++) {
-    for (let i = 0; i < 100 && readServeCalls(callsFile).length < expected; i++) await sleep(50);
-  }
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= expectedSpawns, () => sup.getCompletedProbeTickCount());
   check(`(2) exactly ${expectedSpawns} serve spawns recorded (initial + ${backoffMs.length} health-driven restarts), no more`,
     readServeCalls(callsFile).length === expectedSpawns);
 
   // The (expectedSpawns)-th spawn must ALSO get detected as wedged and killed before give-up is decided
   // (scheduleRestart's give-up branch runs off THAT kill's exit event) — wait for getPort() to settle null.
-  for (let i = 0; i < 100 && sup.getPort() !== null; i++) await sleep(50);
+  await waitForCompletedCondition(() => sup.getPort() === null, () => sup.getCompletedProbeTickCount());
   check("(2) after the health-probe-driven kills exhaust the bounded restart budget, getPort() is null (gave up, not phantom-alive)",
     sup.getPort() === null);
 
@@ -395,7 +415,13 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // deterministic under host load. Wait for several completed ticks (each one re-exercises the
   // diagnostic-latch check), then settle briefly to catch a would-be flood before asserting.
   const MIN_TICKS = 5;
-  for (let i = 0; i < 160 && sup.getCompletedProbeTickCount() < MIN_TICKS; i++) await sleep(50);
+  // Card 44d1dfd8: each completed tick here re-exercises a REAL subprocess round-trip (checkBuildDrift ->
+  // readInstalledBuild), so waiting for 5 of them to land is the SAME repeated-spawn-under-contention
+  // shape as scenario (5)'s driftStabilityMs defect — a fixed elapsed cap over that is still a timing
+  // guess (this site's own guessed margin was tighter than the ~10x that already proved insufficient
+  // there). waitForCompletedCondition has no such cap; cond and tickCounter share the same underlying
+  // counter here, so "progress" and "satisfied" are the same signal.
+  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= MIN_TICKS, () => sup.getCompletedProbeTickCount());
   check(`(8) at least ${MIN_TICKS} probe ticks completed (${installedFailureMode})`,
     sup.getCompletedProbeTickCount() >= MIN_TICKS);
   await sleep(200); // settle window — let a would-be flood happen before checking the counts below
@@ -439,10 +465,13 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // diagnostic can land after its own probe's subprocess round-trip, arbitrarily close to a fixed
   // sleep's boundary), THEN settle an extra window and re-check — catches a FLOOD (more than expected)
   // that a bare "count >= expected" poll would otherwise miss by returning the instant it's satisfied.
-  const waitForDiagCount = async (atLeast, maxWaitMs = 3000) => {
-    const start = Date.now();
-    while (Date.now() - start < maxWaitMs && diagCount() < atLeast) await sleep(50);
-    await sleep(400); // settle window — let a would-be flood happen before we check
+  // Card 44d1dfd8: each diagnostic is gated behind its own completed probe tick (a real subprocess
+  // round-trip) — the same repeated-spawn-under-contention shape as scenario (5)'s driftStabilityMs
+  // defect — so this is progress-keyed off getCompletedProbeTickCount(), not a guessed elapsed budget.
+  // The 400ms settle sleep AFTER satisfaction is a deliberate flood-catch window, not a timing guess.
+  const waitForDiagCount = async (atLeast) => {
+    await waitForCompletedCondition(() => diagCount() >= atLeast, () => sup.getCompletedProbeTickCount());
+    await sleep(400); // deliberate flood-catch window, not a completion guess — diagCount() is already satisfied by the line above
   };
 
   await sup.start(["/fake/repo/drift-installed-unresolved-reason-change"]);
@@ -457,10 +486,10 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     diagCount() === 2);
 
   const recoveryCount = () => warnings.lines.filter((l) => l.includes("drift detection recovered")).length;
-  const waitForRecoveryCount = async (atLeast, maxWaitMs = 3000) => {
-    const start = Date.now();
-    while (Date.now() - start < maxWaitMs && recoveryCount() < atLeast) await sleep(50);
-    await sleep(400); // settle window — let a would-be flood happen before we check
+  // Card 44d1dfd8: same reasoning as waitForDiagCount above — progress-keyed, not elapsed-keyed.
+  const waitForRecoveryCount = async (atLeast) => {
+    await waitForCompletedCondition(() => recoveryCount() >= atLeast, () => sup.getCompletedProbeTickCount());
+    await sleep(400); // deliberate flood-catch window, not a completion guess — recoveryCount() is already satisfied by the line above
   };
 
   process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-old"; // recovers: now matches the running build exactly
@@ -585,15 +614,15 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // restartAttempts->2); kill#3 (vs "build-3", once stable) finds restartAttempts(2) >=
   // backoffMs.length(2) and gives up — no call #4. Each stage now waits out its own stability window
   // (not instant), so the polling loops below are generous (up to 200 x 50ms).
-  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
   check("(10) restart #1 (drift vs the initial installed build, once stable) recorded", readServeCalls(callsFile).length === 2);
 
   process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-2"; // arm the SECOND drift event
-  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 3; i++) await sleep(50);
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 3, () => sup.getCompletedProbeTickCount());
   check("(10) restart #2 (a NEW drift, once stable) recorded", readServeCalls(callsFile).length === 3);
 
   process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-3"; // arm the THIRD drift event — this one exhausts the budget
-  for (let i = 0; i < 200 && sup.getPort() !== null; i++) await sleep(50);
+  await waitForCompletedCondition(() => sup.getPort() === null, () => sup.getCompletedProbeTickCount());
   check("(10) after drift-driven kills exhaust the bounded restart budget, getPort() is null (gave up, not phantom-alive)",
     sup.getPort() === null);
   check("(10) give-up happened WITHOUT a 4th spawn (drift cannot resurrect past the exhausted budget)",
@@ -651,7 +680,7 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     readServeCalls(callsFile).length === 1);
 
   // Now let the FINAL build sit unchanged for the full stability window — exactly one restart follows.
-  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
   let calls = readServeCalls(callsFile);
   check("(11) a burst of 3 distinct installed builds collapses into exactly ONE restart, once the LAST one settles",
     calls.length === 2 && calls[0].pid !== calls[1].pid);
@@ -701,7 +730,7 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   await sup.start(["/fake/repo/drift-unresolved"]);
 
   // Wait for the ONE deliberate restart the one-restart-per-build guard allows (same shape as scenario (5)).
-  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
   check("(12) the drift's one allowed restart fired (initial spawn + one restart on record)",
     readServeCalls(callsFile).length === 2);
 
