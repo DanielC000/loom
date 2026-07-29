@@ -29,6 +29,27 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Card cc43c74d: waits for `cond()` WITHOUT a guessed total-duration budget — a fixed iteration cap
+// (e.g. 200*50ms) can expire while the awaited event (here, a drift restart gated on WALL-CLOCK time via
+// supervisor.ts's own `driftStabilityMs` check) is still legitimately in progress under full-suite
+// contention, turning a real "still working" into a false "failed". Instead this keeps waiting as long as
+// `tickCounter()` (the supervisor's own `getCompletedProbeTickCount` — a real, observable unit of
+// completed work) keeps advancing, and only gives up if it genuinely STALLS (no tick completes for
+// `stallTimeoutMs`, generous above this file's own bounded per-tick subprocess timeouts) — an actual hang,
+// not a slow-but-progressing host. See test/codescape-health-probe.mjs scenario (5)'s own history.
+async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+  let lastTicks = tickCounter();
+  let lastProgressAt = Date.now();
+  while (!cond()) {
+    await sleep(pollMs);
+    if (cond()) break;
+    const ticks = tickCounter();
+    if (ticks !== lastTicks) { lastTicks = ticks; lastProgressAt = Date.now(); }
+    if (Date.now() - lastProgressAt > stallTimeoutMs) return false; // genuinely stalled — no probe-tick progress at all
+  }
+  return true;
+}
+
 // Card 90550a97 review follow-up: an unresolvable installed build must warn LOUDLY but only ONCE per
 // distinct reason (never once per ~30s probe tick forever). Intercepts console.warn for the duration of a
 // scenario (still forwarding to the real console, so failures stay visible in test output) and counts
@@ -244,7 +265,7 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   await sup.start(["/fake/repo/drift"]);
   const portAfterStart = sup.getPort(); // the reserved port is fixed for the instance's lifetime — safe to read anytime
 
-  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
   let calls = readServeCalls(callsFile);
   check("(5) a genuine, STABLE build drift (running != installed, unchanged for the stability window) triggers a restart via the EXISTING death path (initial spawn + one restart on record)",
     calls.length === 2);
@@ -263,7 +284,7 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   // Now the installed build genuinely moves on — a NEW drift event — which must fire its OWN restart,
   // again only once IT has been stable for the full window.
   process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-newer";
-  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 3; i++) await sleep(50);
+  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 3, () => sup.getCompletedProbeTickCount());
   calls = readServeCalls(callsFile);
   check("(5) a NEW drift (installed build changes again) fires its own restart, once stable (a 3rd spawn on record)",
     calls.length === 3 && calls[2].pid !== calls[1].pid);
