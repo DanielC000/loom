@@ -72,14 +72,19 @@ const TEST_TIMEOUT_MS = 120_000;
 // no internal timing assertion of their own; under the full suite's ~540-concurrent-git contention, that
 // real work alone can blow past the blanket TEST_TIMEOUT_MS even though nothing is actually wedged
 // (confirmed: merge-repo-mutex.mjs timed out on an unrelated card's gate, all-green standalone;
-// merge-stranded-backstop.mjs flaked the same way at cap=2/concurrent=2). Raising TEST_TIMEOUT_MS itself
-// would dull fast-fail for the ~296 OTHER hermetic tests that have nothing to do with git contention, so
-// instead this is a small, explicit per-test override — same documented-list shape as NOT_HERMETIC above
-// — giving just these git-heavy tests real headroom. A genuine infinite hang in either still gets killed
-// and reported, just at a ceiling actually sized for their real workload instead of one with zero margin.
+// merge-stranded-backstop.mjs flaked the same way at cap=2/concurrent=2; gate-timeout-circuit-breaker.mjs
+// — card 6436bd5a — timed out under concurrent gate load but measured ~50-52s standalone on a quiet host,
+// 3/3 runs, with every stubbed gate call resolving instantly: its cost is entirely the real
+// `confirmWorkerMerge` union-merges + createWorktree + commits across its 8 blocks, not a hang). Raising
+// TEST_TIMEOUT_MS itself would dull fast-fail for the ~296 OTHER hermetic tests that have nothing to do
+// with git contention, so instead this is a small, explicit per-test override — same documented-list
+// shape as NOT_HERMETIC above — giving just these git-heavy tests real headroom. A genuine infinite hang
+// in any of them still gets killed and reported, just at a ceiling actually sized for their real workload
+// instead of one with zero margin.
 const TEST_TIMEOUT_OVERRIDES = {
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
+  "gate-timeout-circuit-breaker": 300_000, // measured ~50-52s standalone (3 runs); ~6x headroom for 8 blocks x real union-merges/createWorktree/commits under concurrent gate contention
 };
 const tmpRoots = [];
 
