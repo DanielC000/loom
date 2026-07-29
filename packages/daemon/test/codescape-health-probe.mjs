@@ -91,7 +91,6 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 // ===================== (1) sustained wedge (from boot) is detected + restarted =====================
 {
   const homeDir = path.join(tmpHome, "sustained-wedge-home");
-  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
   const wedgeFile = path.join(tmpHome, "sustained-wedge-flag");
   fs.writeFileSync(wedgeFile, "1"); // wedged from the very first probe onward
   process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
@@ -100,34 +99,28 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: [50, 100, 150], // fast — proves the restart without waiting real minutes
     healthyRunMs: 60_000, // a kill-right-after-spawn (wedge) must never count as "healthy"
-    // healthProbeIntervalMs/healthProbeTimeoutMs: NOT shrunk further than this — a REAL respawned child
-    // process needs real wall-clock time just to start up (Node runtime init + ESM resolution) before it
-    // can record its own spawn or bind its port; empirically ~70-85ms on this fixture, occasionally more
-    // under host load. The floor time before a kill is eligible is (threshold-1)*intervalMs — it must stay
-    // safely above that startup latency, or the health monitor can kill a freshly-restarted generation
-    // before it ever gets to run, making it silently vanish from the calls file (card 7a86df32: this exact
-    // under-margin caused scenario (2)'s "exactly N spawns" count to read low nondeterministically).
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
   });
   await sup.start(["/fake/repo/sustained-wedge"]);
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  // Card b27f54b0: spawn presence/count is asserted off the SUPERVISOR's own counter
+  // (`getSpawnCount()`, incremented in `spawnServe()` on the parent side the instant the OS process
+  // exists), never off `readServeCalls(callsFile)` — that file is written by the CHILD about itself, so a
+  // child killed before Node finishes initializing (~70-85ms observed, more under host load) never gets
+  // there and a spawn that genuinely happened silently vanishes from that count. The calls file is still
+  // read below, but only for data the supervisor doesn't have (the fixture's own self-reported fields).
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
   const portBefore = sup.getPort();
-  check("(1) initial serve spawned", readServeCalls(callsFile).length === 1 && typeof pidBefore === "number");
+  check("(1) initial serve spawned", sup.getSpawnCount() === 1 && typeof pidBefore === "number");
 
   // 3 consecutive failed probes @300ms apart (~900ms) should trigger a kill -> real exit -> the EXISTING
-  // restart path. Poll the calls file (never a blind sleep) for the second 'serve' record.
-  // Card 44d1dfd8 (revised — an earlier "single spawn, genuinely capped" classification here was WRONG,
-  // caught by scenario (2)'s own field failure under 3-way gate contention on the identical shape):
-  // this waits on a real subprocess respawn PLUS the child's own self-report write to callsFile (card
-  // b27f54b0 — reading spawn count from the child's self-report, not the supervisor, is its own known
-  // source of lag). That combined cost is not reliably capped under contention even for a SINGLE
-  // restart. Progress-keyed instead, same as scenario (2).
-  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= 2, () => sup.getCompletedProbeTickCount());
-  check("(1) a sustained wedge triggers a restart via the EXISTING death path (a new serve call recorded)",
-    readServeCalls(callsFile).length === 2);
+  // restart path. Progress-keyed (never a blind sleep or a fixed poll budget) off the supervisor's own
+  // spawn counter, which is immune to the child-self-report lag described above.
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 2, () => sup.getCompletedProbeTickCount());
+  check("(1) a sustained wedge triggers a restart via the EXISTING death path (a new serve spawn recorded)",
+    sup.getSpawnCount() === 2);
   check("(1) restart reused the SAME port", sup.getPort() === portBefore);
   check("(1) restart produced a genuinely NEW pid", sup.getPid() !== pidBefore && sup.getPid() !== null);
 
@@ -138,7 +131,6 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
 // ===================== (2) give-up stays terminal under repeated health-driven kills =====================
 {
   const homeDir = path.join(tmpHome, "giveup-wedge-home");
-  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
   const wedgeFile = path.join(tmpHome, "giveup-wedge-flag");
   fs.writeFileSync(wedgeFile, "1"); // wedged forever — every respawn is wedged too (env inherited by spawn)
   process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
@@ -148,12 +140,18 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: backoffMs,
     healthyRunMs: 60_000,
-    // See scenario (1)'s identical comment: intervalMs/timeoutMs must stay safely above real child-process
-    // startup latency (~70-85ms observed), since the floor time before a kill is eligible is
-    // (threshold-1)*intervalMs. This scenario chains THREE respawns back to back (more exposure to the
-    // race than (1)'s single respawn), so it needs the same margin, not a smaller one.
-    healthProbeIntervalMs: 300,
-    healthProbeTimeoutMs: 180,
+    // Card b27f54b0 — DELIBERATELY tightened back BELOW real child-startup latency (~70-85ms observed,
+    // more under host load): floor time before a kill is eligible is (threshold-1)*intervalMs =
+    // (2-1)*60 = 60ms, comfortably under that latency, so a freshly-restarted generation CAN legitimately
+    // get killed before it finishes initializing. Before the spawn-counting fix below, that raced the
+    // child's own self-report write to `fake-codescape-calls.jsonl` and made this scenario's "exactly N
+    // spawns" count read low nondeterministically (the p0 incident, card 7a86df32) — this file used to pad
+    // these values instead (300/180) to dodge the race rather than fix the measurement. Now that spawn
+    // counting reads the SUPERVISOR's own counter (never the child's self-report — see scenario (1)'s
+    // identical comment), these values are back at their original tight setting: a real assertion that the
+    // wall-clock dependency is gone, not just re-padded.
+    healthProbeIntervalMs: 60,
+    healthProbeTimeoutMs: 40,
     healthProbeFailureThreshold: 2,
   });
   await sup.start(["/fake/repo/giveup-wedge"]);
@@ -161,17 +159,15 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   // Every spawn here is wedged from birth (env persists across the auto-restarts), so the supervisor
   // itself — never a manual kill — should drive exactly 1 (initial) + backoffMs.length (restarts) real
   // serve spawns before its OWN give-up branch refuses a further attempt.
-  // Card 44d1dfd8: THIS scenario's own field failure (worker d856dec8's gate 4d190a71, zero codescape
-  // changes in its diff, 3 gates contending) is what disproved the "single spawn, genuinely capped"
-  // classification this file used to carry — for this scenario AND for scenario (1)'s identical shape.
-  // Waits on TWO sequential real restarts (spawn + the child's own self-report write to callsFile — card
-  // b27f54b0 flags that self-report lag as its own source of variance), each an independent chance to
-  // exceed a guessed elapsed budget under gate contention. Progress-keyed instead — never widen the
-  // assertion below, which is the actual invariant under test.
+  // Card b27f54b0: spawn count is read off `sup.getSpawnCount()` (the supervisor's own counter,
+  // incremented on the parent side the instant each OS process exists), NEVER off
+  // `readServeCalls(callsFile)` (the child's own self-report, which a pre-init kill — now routine at the
+  // tightened intervals above — can make vanish). Progress-keyed off completed probe ticks, never a fixed
+  // poll budget — and the assertion itself, the actual invariant under test, is UNCHANGED.
   const expectedSpawns = 1 + backoffMs.length;
-  await waitForCompletedCondition(() => readServeCalls(callsFile).length >= expectedSpawns, () => sup.getCompletedProbeTickCount());
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= expectedSpawns, () => sup.getCompletedProbeTickCount());
   check(`(2) exactly ${expectedSpawns} serve spawns recorded (initial + ${backoffMs.length} health-driven restarts), no more`,
-    readServeCalls(callsFile).length === expectedSpawns);
+    sup.getSpawnCount() === expectedSpawns);
 
   // The (expectedSpawns)-th spawn must ALSO get detected as wedged and killed before give-up is decided
   // (scheduleRestart's give-up branch runs off THAT kill's exit event) — wait for getPort() to settle null.
@@ -179,10 +175,10 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   check("(2) after the health-probe-driven kills exhaust the bounded restart budget, getPort() is null (gave up, not phantom-alive)",
     sup.getPort() === null);
 
-  const callsAtGiveUp = readServeCalls(callsFile).length;
+  const spawnsAtGiveUp = sup.getSpawnCount();
   await sleep(1000); // several more health-probe intervals' worth — a lingering tick must NOT resurrect it
   check("(2) give-up STAYS terminal — no further restart / serve spawn, even with the health-probe timer still ticking",
-    sup.getPort() === null && readServeCalls(callsFile).length === callsAtGiveUp);
+    sup.getPort() === null && sup.getSpawnCount() === spawnsAtGiveUp);
 
   sup.stop();
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;

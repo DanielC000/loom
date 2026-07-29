@@ -407,6 +407,20 @@ export class CodescapeSupervisor {
    */
   private completedProbeTicks = 0;
   /**
+   * Card b27f54b0: count of {@link spawnServe} calls that successfully launched a REAL child process —
+   * incremented on the PARENT side immediately after `spawn()` returns, so it can never be pre-empted by
+   * the child being killed before it finishes initializing (the same shape as {@link completedProbeTicks}:
+   * observe an action from the side that performs it, not a side effect the child might not live long
+   * enough to produce). Before this seam existed, `test/codescape-health-probe.mjs` counted spawns by
+   * reading a file the CHILD writes about itself on startup — a child SIGTERM'd before Node finished
+   * initializing (~70-85ms observed, more under host load) never got there, so a spawn that genuinely
+   * happened silently vanished from that count. A synchronous `spawn()` throw (no child ever came up, see
+   * the `catch` branch below) does NOT increment this — there was no real process to count. Never reset
+   * (not on {@link stop}/{@link start}, matching {@link completedProbeTicks}'s own lifetime scope) — this
+   * instance's own tests always construct a fresh supervisor per scenario.
+   */
+  private spawnCount = 0;
+  /**
    * Card 088afc94 P4 follow-up: codescape's OWN authoritative project id, cached per NORMALIZED (resolved
    * + lowercased — see {@link repoKey}) repoRoot once {@link registerProject} succeeds OR a manifest read
    * inside {@link resolveProjectId} hits — the fast path resolveProjectId checks before ever falling back
@@ -462,6 +476,11 @@ export class CodescapeSupervisor {
   /** Test seam — see {@link completedProbeTicks}. */
   getCompletedProbeTickCount(): number {
     return this.completedProbeTicks;
+  }
+
+  /** Test seam — see {@link spawnCount}. */
+  getSpawnCount(): number {
+    return this.spawnCount;
   }
 
   /**
@@ -620,6 +639,9 @@ export class CodescapeSupervisor {
       this.scheduleRestart(false);
       return;
     }
+    // Count the spawn HERE — the OS-level process now genuinely exists — never from anything the child
+    // itself later does or writes (see {@link spawnCount}'s own doc for why that self-report is unsound).
+    this.spawnCount++;
     this.child = child;
     this.alive = true;
     this.spawnedAt = Date.now();
