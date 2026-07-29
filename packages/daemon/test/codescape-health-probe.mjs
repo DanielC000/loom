@@ -99,6 +99,16 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: [50, 100, 150], // fast — proves the restart without waiting real minutes
     healthyRunMs: 60_000, // a kill-right-after-spawn (wedge) must never count as "healthy"
+    // healthProbeIntervalMs/healthProbeTimeoutMs: card cdbdf742 re-checked whether this pair could be
+    // retightened now that spawn counting reads `getSpawnCount()` (immune to the child-self-report race
+    // this margin ORIGINALLY guarded against — see the comment below). It should NOT be: that
+    // investigation's own load testing found a SEPARATE, still-live reason for this margin — a freshly
+    // spawned child genuinely needs real wall-clock time to start listening (Node runtime init + ESM
+    // resolution), and a probe that lands before it does gets a connection failure indistinguishable from
+    // a real wedge. Under synthetic CPU contention (24 busy-spin processes on a 16-core box, launched at
+    // the same instant as this scenario), even THIS pair — already the widest in the file — produced a
+    // false restart; a tighter pair would only make that worse. 300/180 is the floor this file has
+    // actually run on; not shrinking it further is deliberate, not an oversight.
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
@@ -108,8 +118,9 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   // (`getSpawnCount()`, incremented in `spawnServe()` on the parent side the instant the OS process
   // exists), never off `readServeCalls(callsFile)` — that file is written by the CHILD about itself, so a
   // child killed before Node finishes initializing (~70-85ms observed, more under host load) never gets
-  // there and a spawn that genuinely happened silently vanishes from that count. The calls file is still
-  // read below, but only for data the supervisor doesn't have (the fixture's own self-reported fields).
+  // there and a spawn that genuinely happened silently vanishes from that count. This block itself never
+  // reads the calls file (no `callsFile` const here at all) — it's read further down, by later scenarios
+  // in this file, for data the supervisor doesn't have (the fixture's own self-reported fields).
   await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
   const portBefore = sup.getPort();
@@ -195,25 +206,49 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    healthProbeIntervalMs: 100,
-    healthProbeTimeoutMs: 50,
-    healthProbeFailureThreshold: 3, // needs 3 CONSECUTIVE failures — this window can produce at most 2
+    // Card cdbdf742: healthProbeIntervalMs/healthProbeTimeoutMs deliberately match the 300/180 combo this
+    // file already uses everywhere ELSE (scenarios (1)/(5)/(6)/(7)/(8)/(8b)/(8c)/(9)/(10)/(11)/(12)) — not
+    // an invented number. The 100/50 pair this scenario used to run at gave a failure floor
+    // ((threshold-1)*intervalMs) of only 200ms against a 140ms wedge window: a 60ms real-time buffer,
+    // measured (this card) to reproduce false restarts under real host load — a batch of 15 runs under
+    // synthetic CPU contention (24 busy-spin processes on a 16-core box) restarted 6/15 with the old
+    // 100/50 pair, INCLUDING iterations where the test's own sleep(140) drifted by only ~5-12ms — proving
+    // the false restarts come from the supervisor's OWN probe-interval timer compressing under load, not
+    // solely from this scenario's sleep drifting. At 300/180 the floor becomes 600ms against the same
+    // 140ms window (a 460ms buffer, ~7.7x the old one) and the SAME batch of runs, under the SAME
+    // synthetic load, restarted 0/15. Residual risk: under an even more extreme burst (this scenario's own
+    // process launching 24 fresh CPU-bound children at the exact same instant, not just running alongside
+    // already-warm ones), scenario (1) — already at 300/180 in production today — ALSO produced false
+    // failures in the same measurement session; that edge is this file's existing, already-accepted
+    // contention tolerance (shared by every other scenario here), not something new this change
+    // introduces, and it is far beyond this project's actual gate concurrency (maxConcurrentGates=2).
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3, // needs 3 CONSECUTIVE failures — this window can produce at most 1
   });
   await sup.start(["/fake/repo/blip-wedge"]);
   for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
   const pidBefore = sup.getPid();
 
-  // Wedge for a window shorter than 2 full probe intervals (140ms < 2x100ms), so AT MOST 2 consecutive
-  // probes can land while it's present — never enough to reach the threshold of 3 — then recover.
+  // Wedge for a window well under one probe interval (140ms < 300ms), so realistically at most 1 probe
+  // lands while it's present — never enough to reach the threshold of 3 — then recover.
   fs.writeFileSync(wedgeFile, "1");
   await sleep(140);
   fs.rmSync(wedgeFile);
 
-  // Wait well past what 3 consecutive failures + kill + fastest restart backoff would have needed, to
-  // prove no restart ever happened (the recovering success resets the counter to 0 before threshold).
-  await sleep(600);
+  // Wait well past what 3 consecutive failures + kill + fastest restart backoff would have needed (the
+  // failure floor alone is now 600ms — see the interval/timeout comment above), to prove no restart ever
+  // happened (the recovering success resets the counter to 0 before threshold).
+  await sleep(1000);
+  // Card b27f54b0's fix (verified in scenarios (1)/(2)): the count half reads `sup.getSpawnCount()` (the
+  // supervisor's own parent-side counter, incremented the instant spawn() returns), never
+  // `readServeCalls(callsFile)` (the child's own self-report). In a NEGATIVE assertion like this one, a
+  // child killed before it finishes writing its record would make the calls-file count read LOW — masking
+  // a real restart rather than catching it. `sup.getPid() === pidBefore` stays the load-bearing conjunct
+  // either way (parent-sourced, set synchronously by spawn()); this swap just removes the weaker half's
+  // last child-self-report dependency.
   check("(3) a sub-threshold wedge window that recovers in time does NOT trigger a restart",
-    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+    sup.getSpawnCount() === 1 && sup.getPid() === pidBefore);
 
   sup.stop();
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
