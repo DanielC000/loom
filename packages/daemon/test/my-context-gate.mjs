@@ -207,14 +207,15 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
   // `run_gate` (card 7f96aa09), `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
-  // the worker's own call is scoped to its own ops), and `gate_queue` (card fa359824, MANAGER-ONLY) are
-  // DELIBERATE, reviewed exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's
-  // EXISTING gateCommand (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live
-  // GateSemaphore registry by opId, and `gate_queue` only READS the same live registry's whole
-  // running/queued snapshot (cap/depth/holder) — none of the three ever sets/configures gateCommand, so
-  // the trust boundary this check protects (no agent-writable gateCommand surface) is untouched by any of
-  // them.
-  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue");
+  // the worker's own call is scoped to its own ops), `gate_queue` (card fa359824, MANAGER-ONLY), and
+  // `gate_cancel` (card 8d585277, MANAGER-ONLY) are DELIBERATE, reviewed exceptions to the /gate/i sweep
+  // below: `run_gate` only EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the
+  // GateSemaphore), `gate_status` only READS the live GateSemaphore registry by opId, `gate_queue` only
+  // READS the same live registry's whole running/queued snapshot (cap/depth/holder), and `gate_cancel`
+  // only CANCELS a live gate OP already admitted/queued through that same registry (project-scoped,
+  // refuses cross-project) — none of the four ever sets/configures `gateCommand` itself, so the trust
+  // boundary this check protects (no agent-writable gateCommand surface) is untouched by any of them.
+  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue" && n !== "gate_cancel");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",

@@ -1918,6 +1918,52 @@ export class OrchestrationMcpRouter {
       },
     );
 
+    // gate_cancel (card 8d585277): the manual cancel/supersede escalation for a case auto-supersede-on-
+    // merge does NOT cover — no merge decision exists yet (a known-failing base, a stale/UNVERIFIED
+    // self-check, a force-push, a worker recycled mid-run). Firing `worker_merge_confirm` already
+    // reclaims a QUEUED self-check for free (see confirmWorkerMergeTracked); this tool is for everything
+    // else, and the one case a QUEUED cancel can't help with — an ALREADY-RUNNING worker self-check.
+    server.registerTool(
+      "gate_cancel",
+      {
+        description:
+          "Withdraw/cancel ONE of your OWN project's gate ops, by the `opId` a `run_gate`/" +
+          "`worker_merge_confirm` pending response or `gate_queue` entry already named (full id or an " +
+          "unambiguous prefix). Use this for a case firing `worker_merge_confirm` doesn't already cover — " +
+          "e.g. you've learned the branch's base is known-failing, its last self-check settled " +
+          "`headCurrent:false` (self-reported UNVERIFIED), it was superseded by a new commit, or the worker " +
+          "was recycled mid-run — with no merge decision in sight to auto-reclaim it. Cancellable EITHER " +
+          "queued or running, but ONLY for a worker's own `run_gate` self-check (gateType `worker`) — a " +
+          "merge/deploy gate is not supported in EITHER phase and is refused rather than silently no-op'd " +
+          "(a queued merge/deploy gate's own gate-run has no recovery path for a withdrawn admission, so " +
+          "cancelling one would surface as a misleading crash-shaped failure instead of a clean outcome). " +
+          "A QUEUED self-check cancels with ZERO process risk (nothing was ever spawned for it). " +
+          "Returns {outcome:\"cancelled\", phase:\"queued\"|\"running\", opId, gateType} on success. " +
+          "{outcome:\"refused\", reason} means the op belongs to a DIFFERENT project — you cannot cancel " +
+          "another project's gate op. {outcome:\"not_found\"} covers already-settled or never-existed (rely " +
+          "on the `[loom:gate-*]`/`[loom:merge-*]` nudge for a settled op's real outcome). " +
+          "{outcome:\"ambiguous\", reason} means your opId prefix matches more than one op WITHIN YOUR OWN " +
+          "PROJECT — pass more characters. {outcome:\"not_cancelled\", reason} covers every other miss: it " +
+          "left the queue/finished running in the moments before this call landed (a genuine race with " +
+          "natural completion — never fabricated as cancelled over a real result), a merge/deploy gate in " +
+          "either phase (unsupported, see above), or — the one hazard this tool takes seriously — a " +
+          "RUNNING self-check where the kill was issued but the process tree's death could not be VERIFIED " +
+          "within a bounded window: that is reported as NOT cancelled on purpose (the run continues under " +
+          "its own existing timeout) rather than risking a freed slot over work that may still be running. " +
+          "A cancelled worker self-check settles as a distinct `cancelled` outcome, never a failure — the " +
+          "worker's own `[loom:gate-cancelled]` nudge says so explicitly, so don't read a subsequent " +
+          "gate-cancelled notification as a red to chase.",
+        inputSchema: strictShape({ opId: z.string() }),
+      },
+      async ({ opId }) => {
+        try {
+          return ok(await sessions.cancelGateOp(managerSessionId, opId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
     server.registerTool(
       "daemon_restart",
       {

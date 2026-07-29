@@ -44,7 +44,7 @@ import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudg
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
 import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
-import { GateSemaphore, type GateDescriptor, type GateSnapshotEntry } from "../orchestration/gate-semaphore.js";
+import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
@@ -190,7 +190,15 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  comes with a `headWarning` explaining which of the two shapes it is. Set on every `ran:true` outcome,
  *  same as `validatedHead` — EXCEPT the circuit-breaker short-circuit path (no gate actually ran, no stamp
  *  taken, so neither field is set, same as `validatedHead`/`durationMs` there). */
-type WorkerGateResult = { ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string; validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string };
+type WorkerGateResult = {
+  ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string;
+  validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string;
+  /** Card 8d585277: a distinct "no verdict" outcome — never `passed`/`gateDetail`, never mistakable for a
+   *  real pass or failure. `cancelKind` distinguishes the AUTOMATIC merge-decision supersede from a
+   *  manager's explicit `gate_cancel`; see {@link GateCancelKind}'s own doc. */
+  cancelled?: boolean;
+  cancelKind?: GateCancelKind;
+};
 
 /**
  * A worker's most recent SETTLED `run_gate` self-check outcome (card e50600d2 — reuse a green
@@ -700,6 +708,12 @@ export class SessionService {
    *  window entirely — `0` is falsy, so `PendingOpRegistry.attach`'s `if (opts?.retainMs)` check skips
    *  retention exactly as if `retainMs` were never passed at all. */
   private readonly gateOpRetainMs: number;
+  /** Test-only override for {@link SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS} (mirrors `gateOpRetainMs`
+   *  just above) — how long `cancelGateOp` waits to see a RUNNING worker self-check's kill actually
+   *  verified before giving up and reporting `not_cancelled`. A hermetic test proving the never-verified
+   *  case (an injected `runGate` whose returned promise never settles even after its `cancelSignal`
+   *  aborts) sets this small so the test doesn't have to wait out the real production bound. */
+  private readonly gateCancelVerifyMs: number;
   /**
    * Test-only seam for {@link findNestedGitRepos} (card b6d41db1's follow-up — the shared-chokepoint
    * fix). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real scan. Lets a test
@@ -716,7 +730,7 @@ export class SessionService {
    * real spawn on every OS this daemon runs on).
    */
   private readonly runGate:
-    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean) => Promise<GateSequentialResult>)
+    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal) => Promise<GateSequentialResult>)
     | undefined;
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
@@ -908,6 +922,7 @@ export class SessionService {
       wedgeSweepIntervalMs?: number; wedgeGiveUpAttempts?: number; wedgeGiveUpMs?: number;
       codescape?: CodescapeSupervisor;
       gateOpRetainMs?: number;
+      gateCancelVerifyMs?: number;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -917,6 +932,7 @@ export class SessionService {
     this.findNestedGitReposOverride = opts?.findNestedGitRepos;
     this.runGate = opts?.runGate;
     this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
+    this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -2434,6 +2450,113 @@ export class SessionService {
     const queued: GateQueueEntry[] = [];
     for (const e of snap.entries) (e.phase === "running" ? running : queued).push(toEntry(e));
     return { cap, activeCount: snap.active, queuedCount: snap.queued, running, queued };
+  }
+
+  /** Default bound for `gate_cancel`'s own manager-facing response (card 8d585277) — long enough for a
+   *  genuinely fast tree death (the common case: a shell + a handful of descendants) to be observed, short
+   *  enough that a manager's tool call never hangs anywhere near the underlying `gateTimeoutMs` backstop.
+   *  Not a retry budget — there is exactly one kill attempt (see `runGateStep`'s `onCancel`); this is
+   *  purely how long `cancelGateOp` waits to SEE whether that one attempt was verified. See
+   *  `gateCancelVerifyMs`'s own doc for the test-only override. */
+  private static readonly DEFAULT_GATE_CANCEL_VERIFY_MS = 5_000;
+
+  /**
+   * `gate_cancel` (card 8d585277) — the manual cancel/supersede escalation for a case auto-supersede-on-
+   * merge does NOT cover: no merge decision exists yet (a known-failing base, a stale/UNVERIFIED self-
+   * check, a force-push, a worker recycled mid-run — see the card's own worked instances). Manager-facing,
+   * PROJECT-SCOPED (a caller can only ever cancel an op belonging to their OWN project — `outcome:
+   * "refused"` for anything else, checked BEFORE any mutation), by the same `opId` a `run_gate`/
+   * `worker_merge_confirm` pending response or `gate_queue` entry already names (full id or an unambiguous
+   * prefix, via the same `GateSemaphore.findByOpId` resolution `gate_status` uses).
+   *
+   * QUEUED → zero process risk (see `GateSemaphore.cancelQueued`'s own doc: `fn` was never invoked, there
+   * is nothing to kill) — cancels immediately.
+   *
+   * BOTH QUEUED AND RUNNING → scoped to `gateType:"worker"` ONLY (a worker's own self-check) (Code Review
+   * finding B2-2 — this used to be asymmetric: the running branch refused a non-worker gate, the queued
+   * branch didn't). `run_gate`'s self-check is the ONLY gateType whose `fn` actually reads/forwards
+   * `cancelSignal` into `runGateStep` (see `runWorkerGate`'s wiring); cancelling a QUEUED merge/deploy gate
+   * is ALSO unsupported, not merely a RUNNING one — a queued merge/deploy gate's `runExclusive` call has NO
+   * catch for the `GateCancelledError` a cancelled QUEUED waiter throws (only `runWorkerGate` catches it),
+   * so cancelling one would surface as `[loom:merge-failed] … errored: gate cancelled` — a deliberate
+   * cancel misreported as a crash, potentially AFTER `mergeMainIntoWorktree` has already mutated the
+   * worktree. Refused honestly in BOTH phases, symmetrically, rather than silently issuing a cancel a
+   * caller might mistake for a supported one.
+   *
+   * RUNNING, once past that gate: asks it to stop (`cancelRunning`), then waits UP TO
+   * `GATE_CANCEL_VERIFY_MS` (the ADMISSION clock the underlying op's own settle races against — never a
+   * bare wall-clock guess) for the real settle to land. If it lands in time, the kill was VERIFIED (see
+   * `runGateStep`'s `cancelling` doc — a settle can only be tagged `cancelled` after a genuine close/error
+   * event, never merely because a kill was issued) and this reports `cancelled`. If it DOESN'T land in
+   * time, this reports NOT cancelled — the process tree's death is unverified, so the slot is treated as
+   * still legitimately held rather than freed on an assumption; the run continues under its own
+   * pre-existing `gateTimeoutMs` bound exactly as if no cancel had been attempted. A cancel that can't be
+   * verified is never worse than no cancel at all.
+   *
+   * RACE WITH NATURAL COMPLETION: `cancelRunning` itself no-ops (`false`) if the op already left "running"
+   * by the time this call reaches the semaphore — reported as `not_cancelled` with the real reason, never
+   * a fabricated cancelled/failed outcome over a result that already landed for real.
+   *
+   * AMBIGUITY IS PROJECT-SCOPED TOO (Code Review finding B2-3): the FIRST resolution below is intentionally
+   * UNSCOPED (mirrors the original design) so a clean, unambiguous EXACT global match belonging to another
+   * project still yields the informative `refused` outcome (the caller already typed/knows that one id —
+   * confirming it exists elsewhere and is not theirs is not a new disclosure). But if THAT resolution comes
+   * back `ambiguous`, its `ids` could include other projects' live opIds (a prefix that happens to match
+   * several projects' ops at once) — so on an ambiguous global hit, this RE-RESOLVES scoped to the caller's
+   * OWN project (`scopeProjectId`) before ever returning anything: a clean hit within their own project
+   * proceeds normally (the global ambiguity was irrelevant to them), a still-ambiguous result only ever
+   * names THEIR OWN project's ids, and no match within their own project reports `not_found` — never
+   * `ambiguous` — since none of the globally-ambiguous candidates were even a valid target for this caller.
+   */
+  async cancelGateOp(managerSessionId: string, opId: string): Promise<
+    | { outcome: "cancelled"; phase: "queued" | "running"; opId: string; gateType: GateType }
+    | { outcome: "refused" | "not_found" | "ambiguous" | "not_cancelled"; reason: string; opId: string }
+  > {
+    const caller = this.db.getSession(managerSessionId);
+    let found = this.gateSemaphore.findByOpId(opId);
+    if (found.kind === "ambiguous") {
+      // Re-resolve SCOPED to the caller's own project (see this method's own doc) BEFORE ever returning an
+      // ambiguous result — a caller with no project of their own can never have a legitimate own-project
+      // match, so falls straight through to `none` below.
+      found = caller?.projectId ? this.gateSemaphore.findByOpId(opId, undefined, caller.projectId) : { kind: "none" };
+      if (found.kind === "ambiguous") {
+        return { outcome: "ambiguous", reason: `ambiguous opId prefix '${opId}' — it matches ${found.ids.join(", ")}; pass more characters or the full id`, opId };
+      }
+    }
+    if (found.kind === "none") {
+      return { outcome: "not_found", reason: "no live gate op matches this id — it may have already settled (check the [loom:gate-*]/[loom:merge-*] nudge) or never existed", opId };
+    }
+    const entry = found.record;
+    // PROJECT SCOPE (DoD: cancel of another project's op → refused) — checked BEFORE any mutation, so a
+    // refused call never touches the semaphore at all.
+    if (!caller?.projectId || entry.projectId !== caller.projectId) {
+      return { outcome: "refused", reason: "this op belongs to a different project", opId: entry.opId ?? opId };
+    }
+    // GATETYPE SCOPE (Code Review finding B2-2) — checked for BOTH phases, before either branch below ever
+    // touches the semaphore. See this method's own doc for why a queued merge/deploy gate is JUST as
+    // unsupported as a running one, not merely the running case.
+    if (entry.gateType !== "worker") {
+      return { outcome: "not_cancelled", reason: `cancelling a ${entry.phase} ${entry.gateType} gate is not supported — only a worker self-check (queued or running) can be cancelled`, opId: entry.opId ?? opId };
+    }
+    const detail = `cancelled by manager ${managerSessionId} via gate_cancel`;
+    if (entry.phase === "queued") {
+      const cancelled = this.gateSemaphore.cancelQueued(entry.id, "manual", detail);
+      if (!cancelled) return { outcome: "not_cancelled", reason: "no longer queued (it was admitted or settled moments ago) — re-check gate_queue", opId: entry.opId ?? opId };
+      return { outcome: "cancelled", phase: "queued", opId: entry.opId ?? opId, gateType: entry.gateType };
+    }
+    // RUNNING — gateType already checked above.
+    const aborted = this.gateSemaphore.cancelRunning(entry.id, detail);
+    if (!aborted) return { outcome: "not_cancelled", reason: "no longer running (it settled moments ago)", opId: entry.opId ?? opId };
+    const settled = await this.pendingOps.waitBriefly(`gate:${entry.sessionId}`, this.gateCancelVerifyMs);
+    if (!settled) {
+      return {
+        outcome: "not_cancelled", opId: entry.opId ?? opId,
+        reason: `kill issued but the process tree was not verified dead within ${this.gateCancelVerifyMs}ms — ` +
+          "treating this as NOT cancelled: the slot stays held and the run continues under its own existing " +
+          "timeout rather than risking a freed slot over work that may still be running",
+      };
+    }
+    return { outcome: "cancelled", phase: "running", opId: entry.opId ?? opId, gateType: entry.gateType };
   }
 
   /**
@@ -8575,7 +8698,11 @@ export class SessionService {
       // Card a1c86452: the descriptor surfaces this merge gate on the Gates page's active lane; `startedAt`
       // (admission) drives the `build_gate` event's real run-time `durationMs`, excluding queue wait. "high"
       // priority (card 24642c3d) — see the host-load-guard doc above.
-      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId };
+      // worktreePath (card 8d585277): the SAME worktree the worker's own `run_gate` self-check names below
+      // (both bind to this worker's worktree) — this is what makes the structural per-worktree exclusivity
+      // guard actually serialize a merge gate against that worker's still-running self-check, closing the
+      // EPERM double-op class regardless of whether the auto-supersede-on-merge cancel already fired.
+      const gateDescriptor: GateDescriptor = { gateType: "merge", projectId: project.id, sessionId: workerSessionId, taskId, branch, opId: thisOpId, worktreePath };
       let gateStartedAt = Date.now();
       // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the semaphore's own active-run count at the instant
       // THIS run was admitted (i.e. including itself) — read inside the `fn` callback so it reflects
@@ -8958,10 +9085,53 @@ export class SessionService {
    * running several concurrent merges can always match this nudge back to the `worker_merge_confirm` call
    * that produced it.
    */
+  /**
+   * AUTO-SUPERSEDE (card 8d585277 — the manager's own primary ask, and the live incident: three
+   * gate-green branches serialized behind a single merge lane while each worker's OWN now-moot self-check
+   * still occupied a queue slot). A manager calling `worker_merge_confirm` has, by construction, ALREADY
+   * decided this worker's queued `run_gate` self-check is moot — the merge gate re-validates independently
+   * (or REUSE-A-GREEN-SELF-CHECK reuses a settled one; see `confirmWorkerMerge`'s own doc) either way.
+   * Reclaims that slot the instant the decision is made, unconditional on what this confirm call goes on
+   * to decide (idempotent-already-merged, stranded-work refusal, a gate rejection, or a clean merge all
+   * equally mean the self-check's OWN result is no longer relevant to anyone).
+   *
+   * QUEUED ONLY — DELIBERATE (manager-approved shape, Report-and-STOP checkpoint): if the self-check has
+   * already been ADMITTED (a real process is running), this does NOTHING — no process is ever killed on
+   * this automatic, no-human-judgement path; that would mean this card's easiest-to-get-wrong hazard (a
+   * freed slot over still-running work) firing on every ordinary merge, not just a deliberate escalation.
+   * The structural per-worktree exclusivity guard (`GateDescriptor.worktreePath`, `GateSemaphore`) still
+   * ensures the merge gate can't run CONCURRENTLY with an already-running self-check regardless — it just
+   * queues behind it instead, exactly as it would have without this method existing at all. Cancelling an
+   * ALREADY-RUNNING self-check is the explicit manual `gate_cancel` escalation (`cancelGateOp` below), not
+   * this automatic path.
+   */
+  private supersedeQueuedSelfCheck(workerSessionId: string, callerProjectId: string | null): void {
+    // PROJECT SCOPE (Code Review finding B2-1): this fires BEFORE `confirmWorkerMerge`'s own "not your
+    // worker" ownership check ever runs (that check lives deep in the call chain this method's own caller
+    // invokes LATER — see confirmWorkerMergeTracked below), so it cannot rely on that check having already
+    // authorized the caller. A `null` caller project (an unresolvable managerSessionId) refuses rather
+    // than superseding unscoped — fail closed, matching `cancelGateOp`'s own refusal shape.
+    if (!callerProjectId) return;
+    const gateKey = `gate:${workerSessionId}`;
+    const pending = this.pendingOps.peek(gateKey);
+    if (!pending || pending.state !== "running") return; // nothing outstanding to supersede
+    this.gateSemaphore.cancelQueuedForSession(
+      workerSessionId, "worker", callerProjectId, "superseded-by-merge",
+      "the manager decided to merge — this self-check's result would no longer be used",
+    );
+  }
+
   async confirmWorkerMergeTracked(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
   ): Promise<AttachResult<ConfirmMergeResult>> {
     const key = `merge:${workerSessionId}`;
+    // Unconditional and BEFORE everything else below — see supersedeQueuedSelfCheck's own doc for why this
+    // fires regardless of what this confirm call itself goes on to decide. PROJECT-SCOPED to the CALLING
+    // manager's own project (Code Review finding B2-1) — this does NOT re-derive "is this actually your
+    // worker" (that ownership check still lives, unchanged, inside confirmWorkerMerge below); it only
+    // ensures a caller from a DIFFERENT project can never cancel this worker's queued self-check as a side
+    // effect of even attempting a call that's about to be refused for that same reason.
+    this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
     // DEAD-OWNER RECOVERY (card 27ea069e): an existing RUNNING op for this key whose owning manager
     // session is gone (exited/archived/missing — see isManagerSessionDead) can never settle for a LIVE
     // caller again — its original manager, the only session that could ever have been pushed its
@@ -9305,7 +9475,10 @@ export class SessionService {
           // Card a1c86452: the descriptor surfaces this worker self-check on the Gates page's active lane;
           // `startedAt` (admission) drives the `worker_gate` event's real run-time `durationMs`, excluding
           // queue wait. Set the moment `fn` runs (post-admission), so it's valid even on the throw path below.
-          const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId };
+          // worktreePath (card 8d585277): feeds the structural per-worktree exclusivity guard AND is what
+          // this session's own `merge:${workerSessionId}` op names too — the same physical path, so the
+          // two can never both be admitted concurrently regardless of tier/cap.
+          const gateDescriptor: GateDescriptor = { gateType: "worker", projectId: worker.projectId, sessionId: workerSessionId, taskId: worker.taskId ?? null, branch: worker.branch ?? null, opId, worktreePath };
           let gateStartedAt = 0;
           // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the
           // full rationale — the semaphore's own active count at admission, carried onto every audit event
@@ -9327,15 +9500,26 @@ export class SessionService {
             // above, which this function deliberately does not share).
             gateResult = await this.gateSemaphore.runExclusive(
               gateCap, gateDescriptor,
-              async (startedAt) => {
+              async (startedAt, cancelSignal) => {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE);
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE, undefined, cancelSignal);
               },
               "low",
             );
           } catch (err) {
+            // CANCELLED-WHILE-QUEUED (card 8d585277): thrown by GateSemaphore.runExclusive when THIS op
+            // was withdrawn before it was ever admitted — never a real runner exception, so it must never
+            // fall into the generic error-audit/rethrow path below (that would misreport a deliberate
+            // cancel as a genuine gate crash, and would surface as an ordinary `[loom:gate-failed]` — the
+            // exact "failure wearing a costume" this card exists to prevent). No process was ever spawned
+            // for this op, so there is nothing to sweep/record against the timeout breaker either — return
+            // immediately with a distinct, never-conflated-with-pass/fail shape.
+            if (err instanceof GateCancelledError) {
+              evt({ cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart });
+              return { ran: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId };
+            }
             // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
             // not an ordinary gate FAILURE) used to leave NO audit trail at all — appendEvent was only ever
             // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
@@ -9343,6 +9527,19 @@ export class SessionService {
             // this audit write adds a durable record, it does not change that error-handling behavior.
             evt({ passed: false, error: err instanceof Error ? err.message : String(err), gateCap, concurrentGates: concurrentAtStart, ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
             throw err;
+          }
+          // CANCELLED-WHILE-RUNNING (card 8d585277): unlike the queued case above, this settles as a
+          // NORMAL resolved value (gate-runner.ts's abort handling resolves, it never rejects) — reached
+          // only via the manual `gate_cancel` tool (auto-supersede-on-merge is deliberately queued-only,
+          // see confirmWorkerMergeTracked's own doc), and only once the process tree's death was actually
+          // VERIFIED (see runGateStep's `cancelling` doc) — an unverified kill leaves this promise
+          // unresolved rather than ever reaching here. Same distinct shape as the queued case; skips every
+          // post-gate pass/fail bookkeeping below (post-timeout sweep, the timeout-streak breaker, head-
+          // currency, the reuse-a-green-self-check record) since nothing about this run reached a real
+          // verdict to record.
+          if (gateResult.cancelled) {
+            evt({ cancelled: true, cancelKind: "manual", gateCap, concurrentGates: concurrentAtStart, durationMs: Date.now() - gateStartedAt });
+            return { ran: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager while running", opId };
           }
           if (worker.branch) {
             if (gateResult.failedTimedOut) {
@@ -9424,6 +9621,36 @@ export class SessionService {
         // below wrote, so ONLY a genuine process death (which skips this callback entirely) ever leaves a
         // row for reconcileOrphanedGateOps to find at the next boot.
         this.db.clearPendingGateOp(opId);
+        // CANCELLED (card 8d585277): a distinct "no verdict" settle — never fall through to the pass/fail
+        // nudge below, which would otherwise read as a real gate result. `[loom:gate-superseded]` (the
+        // manager's own merge decision made this self-check moot) vs `[loom:gate-cancelled]` (an explicit
+        // manual gate_cancel) so a worker/manager reading the transcript later can tell WHICH happened
+        // without parsing free text. Routed through `enqueueDurableMessage` (kind:"agent", durably
+        // persisted while held): this nudge is the worker's ONLY signal that its parked run_gate call is
+        // done, and it fires exactly once — a dropped one-shot terminal notification here leaves the
+        // worker parked indefinitely on a result that will never arrive, the same indefinite-park class
+        // this card's own hazard list calls out, so it must go through the durable channel regardless of
+        // what any other call site in this file does. `sender: "system"` (Code Review finding I-1, NOT
+        // `workerSessionId`) — this is a system nudge about the worker's OWN op, never a message FROM the
+        // worker to itself; a self-addressed `sender` would make `handleGiveUpExhausted`'s park branch
+        // (`db.getSession(sender)`, on a give-up/requeue-exhaustion race) push a SECOND, self-addressed
+        // `[loom:redelivery-parked]` notice into this same worker's pty if this nudge itself ever exhausts
+        // — the `"system"` sentinel is what terminates that regress, exactly like every durable settle
+        // nudge elsewhere in this file already relies on.
+        if (outcome.ok && outcome.value.cancelled) {
+          const tag = outcome.value.cancelKind === "superseded-by-merge" ? "gate-superseded" : "gate-cancelled";
+          const target = this.resolveSettleNudgeTarget(workerSessionId);
+          try {
+            this.enqueueDurableMessage(
+              target,
+              `[loom:${tag}] op ${opId} — your gate self-check was cancelled (${outcome.value.reason ?? "cancelled"}). ` +
+                "This is NOT a failure — no verdict was reached, there is nothing to fix." +
+                this.settleNudgeAttribution(target, workerSessionId),
+              { sender: "system", taskId: worker.taskId ?? null },
+            );
+          } catch { /* worker not live — best-effort, mirrors every other completion nudge */ }
+          return;
+        }
         const headSuffix = outcome.ok && outcome.value.validatedHead ? ` (validated ${outcome.value.validatedHead.slice(0, 8)})` : "";
         // Card 39196378: the nudge is the ONLY thing a worker ever sees for an async-settled gate (same
         // reasoning as the gateDetail mirroring below) — so a HEAD-currency warning belongs in the TEXT,

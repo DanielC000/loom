@@ -222,6 +222,21 @@ export class PendingOpRegistry {
     }, retainMs).unref?.();
   }
 
+  /** Wait UP TO `ms` for the op keyed `key` to leave "running" state — the bounded settle-wait
+   *  `gate_cancel` (card 8d585277) needs after asking an already-running gate to stop: a manager-facing
+   *  tool call must answer promptly, never hang for however long the underlying `gateTimeoutMs` backstop
+   *  might take if the kill is never verified. Returns `true` immediately if there's nothing running under
+   *  `key` at all (already settled, or never existed) — nothing to wait for. Reuses the SAME
+   *  `Promise.race(e.settle, sleep(ms))` shape `attach()` itself races against its own `waitMs`, rather
+   *  than inventing a second concurrency primitive. Never consumes (does not evict/read `result`/`error`)
+   *  — the caller that eventually calls `attach()`/`peek()` still gets the real settled value normally. */
+  async waitBriefly(key: string, ms: number): Promise<boolean> {
+    const e = this.entries.get(key);
+    if (!e || e.state !== "running") return true;
+    await Promise.race([e.settle, sleep(ms)]);
+    return e.state !== "running";
+  }
+
   /** Read-only listing of every RUNNING `kind` op owned by `managerSessionId` — for worker_list's
    *  pending-spawn placeholder rows (a pending spawn has no worker row yet to hang `peek()` off of, so
    *  worker_list enumerates by manager instead of by a per-worker key). Settled ops are excluded (evicted

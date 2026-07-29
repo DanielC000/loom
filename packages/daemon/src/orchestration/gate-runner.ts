@@ -163,6 +163,14 @@ export interface GateStepResult {
    *  guess — see {@link extractFailingTest}'s own doc). */
   failingTest?: string;
   decidedAt?: number;
+  /** Card 8d585277: true ONLY when this step's settle followed a `cancelSignal` abort AND the step's own
+   *  `close`/`error` event actually fired afterward (i.e. the kill was VERIFIED, not merely issued — see
+   *  {@link runGateStep}'s `cancelling` doc). A cancel whose kill is never confirmed leaves this step
+   *  unresolved rather than settling with `cancelled:false` — so this field is never a false negative for
+   *  "was a cancel attempted", only ever absent when none was. Distinct from `timedOut` on purpose: a
+   *  caller must never fold a cancellation into the ordinary kill/timeout classification (that would read
+   *  as a real gate failure to a worker/manager who did nothing wrong). */
+  cancelled?: boolean;
 }
 
 /** Real, NON-BLOCKING runner for one gate step (`spawn`, not `spawnSync` — see the note below). Same
@@ -171,7 +179,7 @@ export interface GateStepResult {
  *  bounded ring so a rejection can surface the REAL failure instead of an opaque "gate failed". Injectable
  *  so a hermetic test can prove step-by-step + short-circuit behavior without spawning real processes. */
 export interface GateStepRunner {
-  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean): Promise<GateStepResult>;
+  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal): Promise<GateStepResult>;
 }
 
 /**
@@ -184,7 +192,7 @@ export interface GateStepRunner {
  * other work (and let the sync-wait budget's timer actually fire) while the OS process runs in the
  * background.
  */
-export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true) => new Promise((resolve) => {
+export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true, cancelSignal) => new Promise((resolve) => {
   // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front
   // as newer ones arrive. The final tail() slices to exactly the cap. Same shape as python/venv.ts's
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
@@ -237,12 +245,40 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   let settled = false;
   let extended = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
+  // CANCELLATION (card 8d585277): `cancelling` records that a `cancelSignal` abort fired — set the
+  // instant it does, but NOT itself a settle. The ONLY things that ever settle this promise are (a) the
+  // child's own real `close`/`error` event, or (b) the pre-existing `onTimeout` bound below — both
+  // already wired regardless of cancellation. This is deliberate: a kill signal being ISSUED is not proof
+  // the tree actually died (documented precedent elsewhere in this codebase — a timeout can settle
+  // without its process tree dying), so a cancel must never fabricate a settle on unverified death. Once
+  // one of those two real events does fire, `done()` below tags the result `cancelled:true` — that tag IS
+  // the verification: it can only ever be attached to a genuinely observed close/error, never to the bare
+  // act of asking for one.
+  let cancelling = false;
   const done = (result: Omit<GateStepResult, "outputTail" | "failingTest" | "decidedAt">) => {
     if (settled) return;
     settled = true;
     if (timer) clearTimeout(timer);
-    resolve({ ...result, outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt: performance.now() });
+    resolve({
+      ...result, ...(cancelling ? { cancelled: true } : {}),
+      outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt: performance.now(),
+    });
   };
+  const onCancel = () => {
+    if (settled || cancelling) return;
+    cancelling = true;
+    // A SINGLE kill attempt — never retried in a loop (a retry loop over a hung removal has previously
+    // leaked libuv threadpool threads and wedged this daemon; see the killGateProcessTree call below,
+    // shared verbatim with the timeout path). If the tree doesn't actually die, nothing here forces a
+    // settle: `timer` (this step's own `timeoutMs` bound, untouched by this branch) remains the only other
+    // path that can ever resolve this promise — the slot this run holds stays held for as long as that
+    // takes, rather than being freed over work that may still be running.
+    void killGateProcessTree(child);
+  };
+  if (cancelSignal) {
+    if (cancelSignal.aborted) onCancel();
+    else cancelSignal.addEventListener("abort", onCancel, { once: true });
+  }
   // ONE-TIME AUTO-EXTEND (card 24642c3d — the false-fail-under-fleet-load fix): fires when `timeoutMs` is
   // hit. If the child has been idle (no stdout/stderr byte) for less than GATE_EXTEND_IDLE_MS, it's still
   // actively working, not stalled — give it ONE more full `timeoutMs` window instead of killing it right
@@ -273,7 +309,12 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
       resolve({
         status: null,
         error: new Error(`gate step exceeded ${timeoutMs}ms${extended ? " (after one auto-extend)" : ""}`),
-        signal: "SIGKILL", timedOut: true, outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt,
+        signal: "SIGKILL", timedOut: true,
+        // Card 8d585277: if a cancel was ALSO requested and never verified before this timeout backstop
+        // finally fired, tag it cancelled too — a caller checking `cancelled` must see it even when the
+        // eventual settle came from the timeout path rather than a fresh close/error after the kill.
+        ...(cancelling ? { cancelled: true } : {}),
+        outputTail: tail(), failingTest: failingTestTracker.result(), decidedAt,
       });
     });
   };
@@ -329,6 +370,10 @@ export interface GateSequentialResult {
   /** See {@link GateStepResult.failingTest} — forwarded verbatim from the failing step's own result, so a
    *  caller no longer has to re-derive it (truncation-prone) from `outputTail` itself. */
   failingTest?: string;
+  /** Card 8d585277: forwarded from the cancelled step's own VERIFIED {@link GateStepResult.cancelled} — a
+   *  distinct "no verdict" outcome a caller must never fold into `passed:false`'s ordinary failure
+   *  handling (no retry, no failure classification, no "gate failed" nudge). */
+  cancelled?: boolean;
 }
 
 /**
@@ -347,10 +392,20 @@ export interface GateSequentialResult {
  */
 export async function runGateSequential(
   gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
-  allowExtend?: boolean,
+  allowExtend?: boolean, cancelSignal?: AbortSignal,
 ): Promise<GateSequentialResult> {
   for (const step of splitGateSteps(gate)) {
-    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend);
+    // Card 8d585277: checked BEFORE spawning each step too — a cancel arriving in the gap BETWEEN two
+    // steps (this run has already settled one step and hasn't started the next) must not spawn a step
+    // that was never going to be waited for.
+    if (cancelSignal?.aborted) return { passed: false, cancelled: true, failedStep: step };
+    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal);
+    if (res.cancelled) {
+      return {
+        passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
+        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest,
+      };
+    }
     const passed = res.status === 0 && !res.error;
     if (!passed) {
       return {
