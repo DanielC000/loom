@@ -761,13 +761,25 @@ export async function createWorktree(
 
   const git = simpleGit(repoPath);
   fs.mkdirSync(path.dirname(worktreePath), { recursive: true });
-  await git.raw(["worktree", "prune"]); // drop any stale admin record for a since-deleted dir
-  const branchExists = (await git.raw(["branch", "--list", branch])).trim() !== "";
-  await git.raw(branchExists
-    ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
-    : forkFrom
-      ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
-      : ["worktree", "add", worktreePath, "-b", branch]);         // fresh task → new branch off current HEAD
+  // Card 2fcd5eae: `prune` -> `branch --list` -> `add` is a multi-step read-modify-write against the
+  // SHARED `.git/worktrees/` admin state — serialize ONLY this sequence per canonical repo path, via the
+  // SAME lock `mergeBranch`/`GitWriter` already use (`withCanonicalIndexLock`, repo-lock.ts). Verified
+  // no re-entrancy: createWorktree's one call site (sessions/service.ts spawnWorker) is never reached
+  // while this lock is already held — `mergeBranch` (the lock's other acquirer) always fully returns
+  // (releasing the lock) before its caller goes anywhere near a spawn, and the cap-queue drain that can
+  // follow a merge's finalize is fire-and-forget, never nested inside the lock's callback. Deliberately
+  // does NOT wrap `provisionWorktreeDeps` below (a package-manager install, potentially minutes) — that
+  // would serialize every worker spawn on the daemon behind each other's install.
+  const branchExists = await withCanonicalIndexLock(repoPath, async () => {
+    await git.raw(["worktree", "prune"]); // drop any stale admin record for a since-deleted dir
+    const exists = (await git.raw(["branch", "--list", branch])).trim() !== "";
+    await git.raw(exists
+      ? ["worktree", "add", worktreePath, branch]              // branch survived a worktree removal → re-attach
+      : forkFrom
+        ? ["worktree", "add", worktreePath, "-b", branch, forkFrom] // review spawn → fresh branch off the reviewed tip
+        : ["worktree", "add", worktreePath, "-b", branch]);         // fresh task → new branch off current HEAD
+    return exists;
+  });
   let staleBase: StaleBaseInfo | undefined;
   if (branchExists) {
     // Re-attached an existing branch at its old tip → same re-cut: empty/stale → current main; a
