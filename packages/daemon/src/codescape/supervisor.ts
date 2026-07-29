@@ -373,6 +373,22 @@ export class CodescapeSupervisor {
   /** Epoch ms {@link driftCandidateBuild} was first observed — paired with it, see that field's doc. */
   private driftCandidateFirstSeenAt: number | null = null;
   /**
+   * Card ebd755ab (Gap 1): the `(installedBuild, runningBuild)` pair — joined as a single string key —
+   * for which the exhausted-restart diagnostic (see the `installedBuild === lastDriftRestartInstalledBuild`
+   * branch in {@link checkBuildDrift}) was already announced, or `null` if none. Distinct from
+   * {@link lastDriftRestartInstalledBuild} (which gates the RESTART decision, one per installed build):
+   * this gates the DIAGNOSTIC decision, latched per distinct pair so a permanently-broken deploy (drift
+   * persists forever because its one restart is already spent) logs the "still unresolved" line ONCE, not
+   * on every ~30s probe tick forever — before this field existed, that path returned completely silently,
+   * making an unresolvable drift byte-identical in the log to a healthy no-drift steady state. Same
+   * discriminator-discipline reasoning as {@link lastInstalledBuildFailureReason}. Reset to `null` (and the
+   * reset is ANNOUNCED as a recovery — see the `installedBuild === runningBuild` branch) the moment the
+   * running side catches up to the installed build again; also reset (silently, matching every other
+   * drift-tracking field) on {@link stop}/{@link start} — a fresh supervisor lifetime starts with no
+   * diagnostic memory.
+   */
+  private lastExhaustedDriftAnnounced: string | null = null;
+  /**
    * Card 90550a97 review follow-up: latches the CLASSIFIED reason {@link readInstalledBuild} last failed
    * with, so an unreadable installed build is reported LOUDLY exactly ONCE per distinct reason — not
    * once per 30s probe tick forever (this project's own scar, `16b7c38c`: a silent "can't tell" that
@@ -517,6 +533,7 @@ export class CodescapeSupervisor {
       this.lastInstalledBuildFailureReason = null;
       this.driftCandidateBuild = null;
       this.driftCandidateFirstSeenAt = null;
+      this.lastExhaustedDriftAnnounced = null;
       this.spawnServe();
       this.startHealthMonitor();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
@@ -563,6 +580,7 @@ export class CodescapeSupervisor {
     this.lastInstalledBuildFailureReason = null;
     this.driftCandidateBuild = null;
     this.driftCandidateFirstSeenAt = null;
+    this.lastExhaustedDriftAnnounced = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -788,6 +806,13 @@ export class CodescapeSupervisor {
       }
       return;
     }
+    if (this.lastInstalledBuildFailureReason != null) {
+      // Card ebd755ab (Gap 2): announce the recovery transition — without this, "was inert, now
+      // resolved" logs nothing and reads identically to "still inert" (this already caused a wrong
+      // cross-project diagnosis in production, see the card). Fires only on the was-latched -> clear
+      // transition, never on an ordinary successful read.
+      console.warn(`[codescape] drift detection recovered — installed build id is readable again (was inert: ${this.lastInstalledBuildFailureReason})`);
+    }
     this.lastInstalledBuildFailureReason = null; // any non-failed read (a real build OR an honest null) resets the latch
     if (installed.build == null) return; // an HONEST "no build id available" answer — fail-safe, SILENT: not a failure to report
     const installedBuild = installed.build;
@@ -796,9 +821,26 @@ export class CodescapeSupervisor {
       // Clears any in-progress stability window so a LATER new drift starts a fresh one, not a stale one.
       this.driftCandidateBuild = null;
       this.driftCandidateFirstSeenAt = null;
+      if (this.lastExhaustedDriftAnnounced != null) {
+        // Card ebd755ab (Gap 1 reset): the pair we'd previously announced as permanently unresolved has
+        // now resolved — announce the recovery so it isn't indistinguishable from "still unresolved".
+        console.warn(`[codescape] serve build drift RESOLVED (installed build "${runningBuild}" now matches running) — was unresolved after its one restart was already spent`);
+        this.lastExhaustedDriftAnnounced = null;
+      }
       return;
     }
-    if (installedBuild === this.lastDriftRestartInstalledBuild) return; // already gave THIS installed build its one restart
+    if (installedBuild === this.lastDriftRestartInstalledBuild) {
+      // Card ebd755ab (Gap 1): the one-restart-per-build guard is correct policy (unchanged below) — the
+      // defect was that this path returned silently forever, making a permanently-broken deploy
+      // byte-identical in the log to a healthy no-drift steady state. Latched per distinct
+      // (installedBuild, runningBuild) pair so this fires ONCE, not on every ~30s probe tick.
+      const pairKey = `${installedBuild}|${runningBuild}`;
+      if (this.lastExhaustedDriftAnnounced !== pairKey) {
+        this.lastExhaustedDriftAnnounced = pairKey;
+        console.warn(`[codescape] serve build drift UNRESOLVED (running "${runningBuild}" != installed "${installedBuild}") — its one restart is already spent and will not fire again for this installed build. Will not repeat this diagnostic until the installed build changes.`);
+      }
+      return; // already gave THIS installed build its one restart
+    }
     const now = Date.now();
     if (installedBuild !== this.driftCandidateBuild) {
       // A NEW mismatched build (first sighting, or the watched candidate just changed) — start (or

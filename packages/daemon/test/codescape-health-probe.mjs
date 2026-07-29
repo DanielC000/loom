@@ -435,9 +435,18 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   check("(8b) a CHANGED failure reason produces exactly one MORE diagnostic (not zero, not a flood)",
     diagCount() === 2);
 
+  const recoveryCount = () => warnings.lines.filter((l) => l.includes("drift detection recovered")).length;
+  const waitForRecoveryCount = async (atLeast, maxWaitMs = 3000) => {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs && recoveryCount() < atLeast) await sleep(50);
+    await sleep(400); // settle window — let a would-be flood happen before we check
+  };
+
   process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-old"; // recovers: now matches the running build exactly
-  await sleep(900); // several probe ticks (at the 300ms interval) of a healthy read — must add NO further diagnostics
-  check("(8b) a recovered (successful) installed-build read adds no further diagnostics",
+  await waitForRecoveryCount(1);
+  check("(8b) card ebd755ab (Gap 2): the inert -> recovered transition is announced, exactly ONCE",
+    recoveryCount() === 1);
+  check("(8b) recovery adds no further 'cannot read' diagnostics (still exactly 2, unchanged)",
     diagCount() === 2);
   check("(8b) recovery with a MATCHING build does not restart either", readServeCalls(callsFile).length === 1);
 
@@ -645,6 +654,73 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 }
 
+// ===================== (12) card ebd755ab: drift UNRESOLVED after its one restart is spent is now LOUD (once), and RESOLVING it announces recovery (once) ====
+{
+  const homeDir = path.join(tmpHome, "drift-unresolved-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-stale"; // the running serve never actually picks up the new installed build in this test
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-target";
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as every other scenario in this file: intervalMs/timeoutMs must stay safely above
+    // real child-process startup latency (~70-85ms observed, more under host load).
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 2000,
+    driftStabilityMs: 500,
+  });
+  const warnings = captureWarnings();
+  const unresolvedCount = () => warnings.lines.filter((l) => l.includes("drift UNRESOLVED")).length;
+  const resolvedCount = () => warnings.lines.filter((l) => l.includes("drift RESOLVED")).length;
+
+  await sup.start(["/fake/repo/drift-unresolved"]);
+
+  // Wait for the ONE deliberate restart the one-restart-per-build guard allows (same shape as scenario (5)).
+  for (let i = 0; i < 200 && readServeCalls(callsFile).length < 2; i++) await sleep(50);
+  check("(12) the drift's one allowed restart fired (initial spawn + one restart on record)",
+    readServeCalls(callsFile).length === 2);
+
+  // The respawned child inherits the SAME stale FAKE_CODESCAPE_HEALTH_BUILD, so the mismatch persists —
+  // every later probe tick now hits the exhausted-restart guard. Drive several COMPLETED probe ticks
+  // (never a blind sleep-then-count — probeInFlight legitimately skips ticks, see this file's own header
+  // on why margin and counting are separate axes) and confirm the new diagnostic fires exactly ONCE, not
+  // once per tick and not silently forever (the pre-fix defect this card exists to close).
+  const MIN_TICKS = 5;
+  const ticksAtRestart = sup.getCompletedProbeTickCount();
+  for (let i = 0; i < 160 && sup.getCompletedProbeTickCount() < ticksAtRestart + MIN_TICKS; i++) await sleep(50);
+  check(`(12) at least ${MIN_TICKS} more probe ticks completed after the one allowed restart`,
+    sup.getCompletedProbeTickCount() >= ticksAtRestart + MIN_TICKS);
+  await sleep(200); // settle window — catch a would-be flood before asserting
+  check("(12) drift persisting after its one restart is spent logs the UNRESOLVED diagnostic exactly ONCE (not once per tick, and not silently forever)",
+    unresolvedCount() === 1);
+  check("(12) the exhausted-restart guard itself is UNCHANGED — still no second restart while the SAME installed build persists",
+    readServeCalls(callsFile).length === 2);
+  check("(12) no RESOLVED diagnostic yet — the drift genuinely has not resolved", resolvedCount() === 0);
+
+  // Now the installed side reverts to the value the ALREADY-RUNNING child reports (simulating an operator
+  // fix, or the bad deploy being rolled back) — a genuine recovery, never a restart (the running side
+  // already matches). Assert the recovery transition is announced, exactly once.
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-stale";
+  const ticksAtRecoveryArm = sup.getCompletedProbeTickCount();
+  for (let i = 0; i < 160 && resolvedCount() < 1 && sup.getCompletedProbeTickCount() < ticksAtRecoveryArm + MIN_TICKS; i++) await sleep(50);
+  await sleep(200); // settle window
+  check("(12) the drift RESOLVING (installed build now matches the running build) announces recovery, exactly ONCE",
+    resolvedCount() === 1);
+  check("(12) recovery did not trigger a restart (still exactly 2 spawns on record)",
+    readServeCalls(callsFile).length === 2);
+  check("(12) the UNRESOLVED diagnostic did not re-fire during/after recovery (still exactly ONE)",
+    unresolvedCount() === 1);
+
+  warnings.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -656,6 +732,6 @@ delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; and a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, a successful read (real build OR honest null) resets the latch — claude-free, network-free beyond loopback."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, and (card ebd755ab, Gap 2) a successful read after a latched failure now ALSO announces the recovery transition exactly once (inert -> recovered is no longer indistinguishable from still-inert); and (card ebd755ab, Gap 1) a drift that persists after its ONE allowed restart is already spent is now LOUD exactly once (never silent forever, never once per tick), with its own resolution — the installed side matching the running build again — likewise announced exactly once, and the restart guard itself unchanged throughout — claude-free, network-free beyond loopback."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
