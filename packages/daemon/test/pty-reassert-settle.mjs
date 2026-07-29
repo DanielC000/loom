@@ -32,6 +32,24 @@ async function sleepUntil(t0, targetMs) {
   const remaining = targetMs - (Date.now() - t0);
   if (remaining > 0) await sleep(remaining);
 }
+// Card 2c9582d3: poll for an actual OUTCOME instead of sleeping to a single wall-clock deadline computed
+// by summing nominal constants. The give-up/confirm-settle chain this test exercises is several CHAINED
+// setTimeout hops (verify-timeout -> confirm-settle poll -> writeChunked -> setBusy); under real host
+// scheduling contention each hop's callback can individually fire late, and that per-hop drift
+// accumulates across the chain, blowing through a fixed deadline's small constant slack (measured: this
+// exact double-FAIL reproduces under synthetic sibling-process CPU load with no code change — see the
+// card for the measurement). Waiting for the outcome instead of a guessed total keeps the test correct
+// regardless of how much contention the host is under, without changing what it discriminates: if
+// suppression fired instead of recovery, `predicate` never turns true (nothing in this fake pty ever
+// confirms a hook to flip `enterConfirmed`), so this still fails — just after `timeoutMs` elapses.
+async function waitUntil(predicate, { timeoutMs, pollMs = 20 }) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await sleep(pollMs);
+  }
+  return predicate();
+}
 
 const tmpHome = path.join(os.tmpdir(), `loom-reassertsettle-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -45,11 +63,9 @@ const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 // Card 441499ee: after the verify-timeout elapses with no confirmation, GIVE-UP now takes ONE more short,
 // bounded, OBSERVED wait for `enterConfirmed` (awaitGiveUpConfirmSettle) before actually committing to
 // RECOVERY — nothing in this fake pty ever fires a confirming HOOK (only raw `emitData`, which this file's
-// own probe response is NOT a hook), so that wait always maxes out its bound too; the final deadline below
-// must account for it.
+// own probe response is NOT a hook), so that wait always maxes out its bound too.
 const CONFIRM_SETTLE_POLL = 10;
 const CONFIRM_SETTLE_MAX_POLLS = 5;
-const CONFIRM_SETTLE_BOUND = CONFIRM_SETTLE_POLL * CONFIRM_SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
@@ -123,13 +139,16 @@ try {
   await sleepUntil(t0, reassertWriteAt(MAX_ATTEMPTS) + Math.floor(SETTLE_BOUND / 4));
   fake.emitData("\x1b[<u\x1b[>1u\x1b[>4;2m"); // the probe-observed provoked-response shape; only its timing matters here
 
-  // Give-up (if it were going to fire suppressed OR recovered) is now anchored at
-  // reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT, PLUS the new post-give-up
-  // confirm-settle wait (card 441499ee) before RECOVERY actually commits — wait comfortably past all of it.
-  await sleepUntil(t0, reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT + CONFIRM_SETTLE_BOUND + VERIFY_TIMEOUT / 2);
+  // Give-up (if it were going to fire suppressed OR recovered) is anchored at
+  // reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT, PLUS the post-give-up confirm-settle
+  // wait (card 441499ee) before RECOVERY actually commits. Poll for busy to actually recover instead of
+  // sleeping to that nominal deadline (see waitUntil's doc above) — bounded generously (15s: several
+  // times the ~2s nominal chain, and above what synthetic heavy-contention measurement reproduced) so a
+  // genuine regression back to false-suppression still fails, just not on a hair-trigger margin.
+  const recovered = await waitUntil(() => busyLog[SID].at(-1) === false, { timeoutMs: 15_000, pollMs: 20 });
 
   check("ABSORBED: the settle-window response did NOT cause a suppression — busy recovered to false",
-    busyLog[SID].at(-1) === false);
+    recovered);
   check(`ABSORBED: normal give-up recovery ALSO ran its composer clear — exactly ${TEXT.length} backspaces written`,
     backspaceCount() === TEXT.length);
 
