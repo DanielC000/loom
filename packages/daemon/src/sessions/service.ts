@@ -4804,18 +4804,40 @@ export class SessionService {
     // cancel that very turn.
     const r: RedirectResult = r0.delivered ? r0 : { ...r0, landsAt: "after-interrupt", interrupting: true };
     if (!r.delivered) this.pty.interruptForRedirect(target.id);
-    // `queuedMsgId` links this event to its OWN sibling session_message_queued record (card 02621025) —
-    // present only on the held path, since an immediate delivery (r.delivered) never persists one. Without
-    // this linkage a later staleness check has ONLY `ts` to tell "this redirect's own record" apart from
-    // "a genuinely different, later redirect" — and this event's ts is computed by a SEPARATE `new Date()`
-    // call strictly after enqueueDurableMessage's own, so it is not just possible but TYPICAL for this
-    // event to land at or after its own record's ts. Without the explicit id, that self-comparison would
-    // retire the redirect's own just-queued record as "superseded by itself" — the exact silent-drop
-    // failure this card exists to prevent, just relocated to the redirect arm.
+    // `queuedMsgId` is `r.msgId` — minted by `enqueueDurableMessage` and returned UNCONDITIONALLY (see its
+    // own doc) — stamped here on BOTH paths (card 99339bcd; previously held-only):
+    //  - HELD: links this event to its OWN sibling session_message_queued record (card 02621025). Without
+    //    this linkage a later staleness check has ONLY `ts` to tell "this redirect's own record" apart from
+    //    "a genuinely different, later redirect" — and this event's ts is computed by a SEPARATE `new Date()`
+    //    call strictly after enqueueDurableMessage's own, so it is not just possible but TYPICAL for this
+    //    event to land at or after its own record's ts. Without the explicit id, that self-comparison would
+    //    retire the redirect's own just-queued record as "superseded by itself" — the exact silent-drop
+    //    failure this card exists to prevent, just relocated to the redirect arm.
+    //  - IMMEDIATE: no `session_message_queued` record ever exists for this msgId (enqueueDurableMessage
+    //    only appends one `if (!r.delivered)`), so there is nothing for the id to collide with here —
+    //    stamping it is safe (staleQueuedMessageReason's self-match exclusion, service.ts ~3298-3310, only
+    //    ever matches against a REAL `session_message_queued` event's own msgId). What it buys: an
+    //    immediately-delivered redirect's hand-off can still silently GIVE UP async (card 04de8bbf) exactly
+    //    like a held one can, and `session_message_gave_up` is keyed on this msgId regardless of whether a
+    //    queued record ever existed — so this is the ONLY way that outcome becomes auditable at all.
+    // `turnSeqAtDelivery` mirrors messageWorker's own immediate-path stamp (above) — `target.turnSeq` was
+    // read by the caller (redirectWorker/redirectSessionAsCompanion) before this call and nothing between
+    // then and here touches turn_seq (flushPending/submit don't), so it's still current AT HAND-OFF. Without
+    // this, an immediate redirect that never gives up would stamp a real msgId that
+    // `resolveDirectiveOutcome` (mcp/orchestration.ts) can never resolve to "delivered" — the ROOT msgId's
+    // delivered-check requires `turnSeqAtDelivery` on THIS event, and no OTHER event ever stamps one for an
+    // immediate redirect (`resolveQueuedMessage`'s `session_message_delivered` marker only fires via
+    // `onDeliver`, which is never invoked on the immediate-submit path) — it would misread as `"pending"`
+    // forever instead of `"delivered"`. A populated id that never resolves is worse than the null id it
+    // replaces, so this stamp is not optional.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: opts.eventManagerId, workerSessionId: target.id, taskId: target.taskId ?? null, kind: "redirect_worker",
-      detail: { delivered: r.delivered, superseded: flushed.length, queuedMsgId: r.delivered ? undefined : r.msgId, ...opts.extraDetail },
+      detail: {
+        delivered: r.delivered, superseded: flushed.length, queuedMsgId: r.msgId,
+        ...(r.delivered ? { turnSeqAtDelivery: target.turnSeq ?? 0 } : {}),
+        ...opts.extraDetail,
+      },
     });
     // Surface this on the daemon's own console log too (card 7acee6d4) — before this, confirming a
     // redirect had actually happened required a direct read-only query against orchestration_events;

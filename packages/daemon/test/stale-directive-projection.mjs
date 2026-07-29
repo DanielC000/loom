@@ -12,7 +12,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // positive here is worse than no signal at all (see the card body's anti-goal).
 //
 // Card 0fbb0507 widens the whole projection to ALSO cover `redirect_worker` events (cases (o)-(s) below) —
-// pre-fix, a PARKED redirect (the "land it NOW" escalation) surfaced NOTHING here at all.
+// pre-fix, a PARKED redirect (the "land it NOW" escalation) surfaced NOTHING here at all. Card 99339bcd
+// closes the residual gap 0fbb0507 left on the IMMEDIATE-delivery redirect path (cases (q)-(q3)): before
+// it, an immediately-delivered redirect that silently gave up and parked was UNTRACKABLE (no id to key
+// off at all); (q) still models that pre-fix bare shape for permanent regression coverage of already-
+// persisted legacy rows, (q2)/(q3) prove the fix resolves both the plain-success and give-up/park cases.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -175,11 +179,13 @@ ev("w-multihop-parked", "MGR", "session_message_gave_up", at(15), { msgId: "m-mu
 
 // ============ Card 0fbb0507 — widen the projection to `redirect_worker` (a parked REDIRECT surfaced
 // NOTHING at all pre-fix — this is the RED-first case for that exact defect) ============
-// `redirect_worker`'s own event shape (deliverRedirect, sessions/service.ts) differs from message_worker's:
-// held (delivered:false) stamps `queuedMsgId` (the SAME msgId `enqueueDurableMessage` mints internally,
-// card 02621025) — the give-up/park chain below is keyed to THAT id, exactly like message_worker's own
-// `msgId`. Immediate delivery (delivered:true, worker was idle) stamps NEITHER `queuedMsgId` nor
-// `turnSeqAtDelivery` — deliberately out of scope for this card (see staleDirectiveProjection's own doc).
+// `redirect_worker`'s own event shape (deliverRedirect, sessions/service.ts): held (delivered:false)
+// stamps `queuedMsgId` (the SAME msgId `enqueueDurableMessage` mints internally, card 02621025) — the
+// give-up/park chain below is keyed to THAT id, exactly like message_worker's own `msgId`. As of card
+// 99339bcd, an IMMEDIATE delivery (delivered:true, worker was idle) ALSO stamps `queuedMsgId` (the same
+// msgId, returned unconditionally by `enqueueDurableMessage`) plus `turnSeqAtDelivery` — previously
+// neither was stamped on that path (see case (q) below, which still models that pre-fix bare shape as a
+// permanent regression guard for any already-persisted legacy row).
 
 // (o) FIRES parkedDirective for a PARKED REDIRECT — the reported defect itself. Mirrors (n)'s
 // remint-then-park shape (a root always re-mints at least once before it can park at GIVE_UP_REMINT_LIMIT=1
@@ -198,19 +204,48 @@ seedWorker("w-redirect-held-stale", "MGR", { turnSeq: 4 });
 ev("w-redirect-held-stale", "MGR", "redirect_worker", at(0), { delivered: false, superseded: 1, queuedMsgId: "r-held-stale" });
 ev("w-redirect-held-stale", "MGR", "session_message_delivered", at(1), { msgId: "r-held-stale", turnSeqAtDelivery: 1 });
 
-// (q) an IMMEDIATELY-delivered redirect (worker was idle) carries no `queuedMsgId` at all — the one
-// deliberate residual gap this card documents rather than plumbs around (see worker_redirect's own tool
-// docs). Must NOT crash, and must read as a plain "delivered" with nothing further to track — no
+// (q) LEGACY / PRE-99339bcd SHAPE: an immediately-delivered redirect logged before this card's fix carries
+// no `queuedMsgId` and no `turnSeqAtDelivery` at all (deliverRedirect used to discard `r.msgId` on that
+// path). Production never emits this shape for a FRESH send anymore (see (q2)/(q3) below) — this case is
+// permanent regression coverage for the defensive `!rootMsgId` fallback in staleDirectiveProjection, which
+// deliberately still reads an already-persisted legacy row exactly as it always did (never retroactively
+// reinterpreted). Must NOT crash, and must read as a plain "delivered" with nothing further to track — no
 // staleDirective/parkedDirective, regardless of how far turnSeq has since advanced.
 seedWorker("w-redirect-immediate", "MGR", { turnSeq: 9 });
 ev("w-redirect-immediate", "MGR", "redirect_worker", at(0), { delivered: true, superseded: 1 });
 
+// (q2) FIXED SHAPE — card 99339bcd's actual fix: an immediately-delivered redirect that never gives up
+// now stamps a real `queuedMsgId` + `turnSeqAtDelivery` (mirrors messageWorker's own immediate-path
+// stamp — see redirect-worker.mjs case (4b) for the service-level proof deliverRedirect emits exactly
+// this shape). Resolves to `directive:{state:"delivered", msgId:"ri-tracked"}` — NOT the bare/untracked
+// "delivered" of (q) — and, like a plain message_worker, still goes stale after enough real turns with no
+// report (mirrors case (a)); this is the FIX for the "success path regresses to pending forever" risk this
+// card's own investigation had to rule out (turnSeqAtDelivery is what lets the walk resolve to "delivered"
+// instead of stalling at "pending" — omitting it would have been a real regression, not a neutral no-op).
+seedWorker("w-redirect-immediate-tracked", "MGR", { turnSeq: 3 });
+ev("w-redirect-immediate-tracked", "MGR", "redirect_worker", at(0), { delivered: true, superseded: 0, queuedMsgId: "ri-tracked", turnSeqAtDelivery: 0 });
+
+// (q3) RED-FIRST PROOF — the card's actual DoD: an IMMEDIATELY-delivered redirect whose async hand-off
+// confirmation silently GIVES UP and PARKS (card 04de8bbf: an immediate hand-off can still fail this way
+// exactly like a held one can). Production-faithful remint-then-park shape (two hops, mirrors (o)/(n) —
+// a root always re-mints at least once before GIVE_UP_REMINT_LIMIT=1 lets it park; seeding
+// `msgId === rootMsgId` directly on a park is a shape production can never emit). turnSeq stays 0 — the
+// hand-off's Enter was never actually confirmed, so no real turn ever ran, exactly like (j)'s held-parked
+// case. Pre-99339bcd, this shape was UNREACHABLE from real `deliverRedirect` output (the immediate path
+// stamped no id at all, so this whole chain had nothing to key off of and the directive read as a bare,
+// unalarmed "delivered" like (q) — a parked redirect on this path was invisible). This is what the fix
+// makes auditable.
+seedWorker("w-redirect-immediate-parked", "MGR", { turnSeq: 0 });
+ev("w-redirect-immediate-parked", "MGR", "redirect_worker", at(0), { delivered: true, superseded: 1, queuedMsgId: "ri-parked", turnSeqAtDelivery: 0 });
+ev("w-redirect-immediate-parked", "MGR", "session_message_gave_up", at(5), { msgId: "ri-parked", rootMsgId: "ri-parked", chainDepth: 0, outcome: "reminted", remintedAs: "ri-parked-1" });
+ev("w-redirect-immediate-parked", "MGR", "session_message_gave_up", at(10), { msgId: "ri-parked-1", rootMsgId: "ri-parked", chainDepth: 1, outcome: "parked" });
+
 // (r) latest-wins ACROSS KINDS: an older message_worker followed by a NEWER redirect_worker (delivered
-// immediately) — the redirect becomes the tracked directive even though it carries no msgId of its own,
+// immediately, fixed shape) — the redirect becomes the tracked directive with its OWN real msgId,
 // exactly mirroring how `deliverRedirect` actually flushes/supersedes any queued message at send time.
 seedWorker("w-redirect-supersedes-message", "MGR", { turnSeq: 5 });
 ev("w-redirect-supersedes-message", "MGR", "message_worker", at(0), { msgId: "m-old-for-redirect", turnSeqAtDelivery: 0 });
-ev("w-redirect-supersedes-message", "MGR", "redirect_worker", at(20), { delivered: true, superseded: 1 });
+ev("w-redirect-supersedes-message", "MGR", "redirect_worker", at(20), { delivered: true, superseded: 1, queuedMsgId: "ri-supersedes", turnSeqAtDelivery: 5 });
 
 // (s) latest-wins ACROSS KINDS, the other direction: a PARKED redirect superseded by a NEWER message_worker
 // — clears parkedDirective the same way a newer message_worker clears an OLDER parked message_worker (k2),
@@ -314,15 +349,31 @@ check("(p) FIRES staleDirective for a HELD redirect that later delivers and goes
   && byId["w-redirect-held-stale"]?.staleDirective?.turnsSinceDelivery === 3
   && byId["w-redirect-held-stale"]?.parkedDirective === null);
 
-check("(q) an immediately-delivered redirect has no id to track further: reads delivered/msgId:null, no alarms",
+check("(q) LEGACY pre-99339bcd shape (no queuedMsgId/turnSeqAtDelivery persisted): defensive fallback still reads delivered/msgId:null, no alarms — never retroactively reinterpreted",
   byId["w-redirect-immediate"]?.directive?.state === "delivered"
   && byId["w-redirect-immediate"]?.directive?.msgId === null
   && byId["w-redirect-immediate"]?.staleDirective === null
   && byId["w-redirect-immediate"]?.parkedDirective === null);
 
-check("(r) latest-wins across kinds: a newer immediate redirect supersedes an older outstanding message",
+check("(q2) card 99339bcd FIX: an immediately-delivered redirect that never gives up resolves delivered WITH its real msgId (not null)",
+  byId["w-redirect-immediate-tracked"]?.directive?.state === "delivered"
+  && byId["w-redirect-immediate-tracked"]?.directive?.msgId === "ri-tracked"
+  && byId["w-redirect-immediate-tracked"]?.parkedDirective === null);
+
+check("(q2) and still goes stale like a plain message_worker once enough real turns pass with no report",
+  byId["w-redirect-immediate-tracked"]?.staleDirective !== null
+  && byId["w-redirect-immediate-tracked"]?.staleDirective?.msgId === "ri-tracked"
+  && byId["w-redirect-immediate-tracked"]?.staleDirective?.turnsSinceDelivery === 3);
+
+check("(q3) RED-FIRST PROOF: card 99339bcd FIXES an immediately-delivered redirect that silently gives up and parks — UNREACHABLE from real deliverRedirect output before this fix",
+  byId["w-redirect-immediate-parked"]?.parkedDirective !== null
+  && byId["w-redirect-immediate-parked"]?.parkedDirective?.msgId === "ri-parked"
+  && byId["w-redirect-immediate-parked"]?.staleDirective === null
+  && byId["w-redirect-immediate-parked"]?.directive?.state === "parked");
+
+check("(r) latest-wins across kinds: a newer immediate redirect supersedes an older outstanding message, tracked with its OWN real msgId",
   byId["w-redirect-supersedes-message"]?.directive?.state === "delivered"
-  && byId["w-redirect-supersedes-message"]?.directive?.msgId === null
+  && byId["w-redirect-supersedes-message"]?.directive?.msgId === "ri-supersedes"
   && byId["w-redirect-supersedes-message"]?.directive?.at === at(20)
   && byId["w-redirect-supersedes-message"]?.staleDirective === null);
 
@@ -365,12 +416,15 @@ check("worker_status(w-parked) carries the same parkedDirective as worker_list",
 const sRedirectParked = await status("w-redirect-parked");
 check("worker_status(w-redirect-parked) carries the same parkedDirective as worker_list — the reported defect, mirrored",
   sRedirectParked.parkedDirective?.msgId === "r-parked" && sRedirectParked.staleDirective === null);
+const sRedirectImmediateParked = await status("w-redirect-immediate-parked");
+check("worker_status(w-redirect-immediate-parked) carries the same parkedDirective as worker_list — card 99339bcd's fix, mirrored",
+  sRedirectImmediateParked.parkedDirective?.msgId === "ri-parked" && sRedirectImmediateParked.staleDirective === null);
 
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — staleDirective fires only once a worker_message directive has aged past the turn threshold with no worker_report since delivery (both the immediate and held delivery paths), never fires on a long single turn or once acknowledged by any report, and correctly ignores a still-queued/superseded/never-messaged/superseded-by-a-newer-directive worker. parkedDirective (card 9da2a435) correctly fires for a directive whose give-up chain terminated PARKED — realistic single-hop and multi-hop remint-then-park chains, matching production's GIVE_UP_REMINT_LIMIT=1 shape — is STICKY against an intervening worker_report (opposite epistemics from staleDirective), clears only once superseded by a newer worker_message, stays null while a re-mint is still genuinely in flight, and staleDirective still reports against the ROOT msgId a manager actually recognizes even after a chain resolves via a re-mint. The raw `directive` discriminator (none/pending/delivered/parked) finally distinguishes a never-messaged worker from every other state, which used to be byte-identical. Card 0fbb0507 widens all of the above to `redirect_worker` too: a HELD redirect's give-up chain (keyed to its `queuedMsgId`) parks/delivers/goes-stale exactly like a message's does, an immediately-delivered redirect (no id to track) reads as a bare `delivered` with no alarms — a real, documented residual gap rather than new plumbing — and 'latest wins' now holds ACROSS kinds in both directions (a redirect supersedes an older message; a message clears an older, even parked, redirect)."
+  ? "\n✅ ALL PASS — staleDirective fires only once a worker_message directive has aged past the turn threshold with no worker_report since delivery (both the immediate and held delivery paths), never fires on a long single turn or once acknowledged by any report, and correctly ignores a still-queued/superseded/never-messaged/superseded-by-a-newer-directive worker. parkedDirective (card 9da2a435) correctly fires for a directive whose give-up chain terminated PARKED — realistic single-hop and multi-hop remint-then-park chains, matching production's GIVE_UP_REMINT_LIMIT=1 shape — is STICKY against an intervening worker_report (opposite epistemics from staleDirective), clears only once superseded by a newer worker_message, stays null while a re-mint is still genuinely in flight, and staleDirective still reports against the ROOT msgId a manager actually recognizes even after a chain resolves via a re-mint. The raw `directive` discriminator (none/pending/delivered/parked) finally distinguishes a never-messaged worker from every other state, which used to be byte-identical. Card 0fbb0507 widens all of the above to `redirect_worker` too: a HELD redirect's give-up chain (keyed to its `queuedMsgId`) parks/delivers/goes-stale exactly like a message's does, and 'latest wins' now holds ACROSS kinds in both directions (a redirect supersedes an older message; a message clears an older, even parked, redirect). Card 99339bcd then closes the one residual gap 0fbb0507 left open: an IMMEDIATELY-delivered redirect now ALSO stamps a real correlatable msgId + turnSeqAtDelivery (mirroring messageWorker's own immediate-path stamp), so it resolves to delivered/stale/parked exactly like a held redirect or a plain message — including a give-up that silently parks, previously invisible on this path entirely — while an already-persisted PRE-FIX row (no id at all) still reads exactly as it always did via the defensive fallback, never retroactively reinterpreted."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

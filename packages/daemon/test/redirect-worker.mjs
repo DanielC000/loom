@@ -153,8 +153,17 @@ try {
     check("(4b) idle worker: redirect submitted immediately as a turn (delivered:true)", r.delivered === true);
     check("(4b) idle worker: NOT interrupted (no in-flight turn to cancel)", !pty.interrupts.includes(wkr));
     check("(4b) idle worker: the redirect still reached it, framed", pty.delivered.some((d) => d.id === wkr && d.text.startsWith("[loom:from-manager:redirect]")));
-    check("(4b) idle worker: a redirect_worker event was still recorded", db.listEventsForWorker(wkr).some((e) => e.kind === "redirect_worker"));
+    const evt = db.listEventsForWorker(wkr).find((e) => e.kind === "redirect_worker");
+    check("(4b) idle worker: a redirect_worker event was still recorded", !!evt);
     check("(4b) HONEST FIELDS: an immediate (delivered:true) redirect does NOT claim it's interrupting", !r.interrupting);
+    // Card 99339bcd: an IMMEDIATELY-delivered redirect now stamps a real correlatable id + turnSeqAtDelivery
+    // on its own event (previously ONLY the held path did) — this is what lets a later give-up/park for
+    // THIS exact hand-off be walked by staleDirectiveProjection (mcp/orchestration.ts) instead of vanishing
+    // with no correlatable trace. Mirrors messageWorker's own immediate-path stamp exactly.
+    check("(4b) card 99339bcd: immediate redirect stamps a real queuedMsgId (matches the returned msgId)",
+      typeof evt?.detail?.queuedMsgId === "string" && evt.detail.queuedMsgId === r.msgId);
+    check("(4b) card 99339bcd: immediate redirect stamps turnSeqAtDelivery (worker was at turnSeq 0)",
+      evt?.detail?.turnSeqAtDelivery === 0);
   }
 
   db.close();
