@@ -48,6 +48,19 @@ async function waitUntilGatePhase(sessions, sessionId, phase, label, timeoutMs =
   throw new Error(`${label}: sessionId ${sessionId} never reached phase "${phase}" within ${timeoutMs}ms`);
 }
 
+// Generic poll-until (card acaf37cc): replaces a guessed fixed-wall-clock sleep before asserting on some
+// side effect (an enqueued array, a callback firing) with a bounded poll against the ACTUAL condition.
+// `timeoutMs` is a safety-net backstop against a genuine hang/regression, never part of the correctness
+// logic — same role as `waitUntilGatePhase`'s own `timeoutMs`.
+async function waitUntil(conditionFn, label, timeoutMs = 10000, intervalMs = 20) {
+  const start = performance.now(); // MONOTONIC — avoids the Date.now() CI timing-flake class
+  while (performance.now() - start < timeoutMs) {
+    if (conditionFn()) return;
+    await sleep(intervalMs);
+  }
+  throw new Error(`${label}: condition not met within ${timeoutMs}ms`);
+}
+
 const GIT_ID = "-c user.email=wg@loom -c user.name=wg";
 const now = new Date().toISOString();
 
@@ -130,29 +143,44 @@ async function raceReport(promises, labels, blockLabel) {
 
 try {
   // ── (A) mixed merge-gate + worker-gate calls never exceed the configured cap ────────────────────────
+  // Card acaf37cc: the old version raced both calls behind a fixed 4000ms fake-gate sleep and HOPED that
+  // was wide enough to outlast confirmWorkerMerge's real git prep (stranded-check, union-merge) before the
+  // second call ever reached the semaphore — on a slow enough host the two windows simply fail to overlap,
+  // maxActive===1 holds TRIVIALLY, and the cap-blocks-concurrency property goes untested while the test
+  // still reads green. Fixed the same STRUCTURAL way as sibling block (J): the first call is held open by
+  // an externally-controlled promise, released ONLY once `waitUntilGatePhase` has structurally confirmed
+  // the second call actually reached the semaphore and is genuinely QUEUED behind it — real contention for
+  // the cap-1 slot, not a guessed wall-clock margin. If that contention never happens (e.g. a slow host, or
+  // a regression that lets the second call skip queueing), `waitUntilGatePhase` throws and this block — and
+  // the whole file — fails loudly: an untested cap can no longer read as a passing cap.
   {
     const sfx = `a-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-a-${sfx}`);
     const { db, mgrId, mergeWorkerId, gateWorkerId } = await seedWorkers(sfx, reposDir);
 
     let active = 0, maxActive = 0, calls = 0;
+    let releaseGate1;
+    const gate1Wait = new Promise((res) => { releaseGate1 = res; });
     const fakeGate = async () => {
       calls++; active++; maxActive = Math.max(maxActive, active);
-      // WIDE overlap window: confirmWorkerMerge does real git prep (stranded-check, union-merge) BEFORE
-      // it ever reaches the gate call, while runWorkerGate has none of that — so the two calls' actual
-      // gate windows start skewed in real wall-clock time (empirically measured ~1.1s of real git-subprocess
-      // overhead locally). 4000ms comfortably dwarfs that skew (with margin for a slower/loaded host) so the
-      // two windows reliably overlap regardless of which starts first.
-      await sleep(4000);
+      if (calls === 1) await gate1Wait; // hold the FIRST call open until contention is structurally confirmed
       active--;
       return { passed: true };
     };
     const { stub } = ptyStub();
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: fakeGate });
 
-    const [mergeResult, gateResult] = await raceReport(
-      [sessions.confirmWorkerMerge(mgrId, mergeWorkerId), sessions.runWorkerGate(gateWorkerId)],
-      ["confirmWorkerMerge", "runWorkerGate"],
+    const gatePromise = sessions.runWorkerGate(gateWorkerId);
+    await waitUntilGatePhase(sessions, gateWorkerId, "running", "(A) gate");
+    const mergePromise = sessions.confirmWorkerMerge(mgrId, mergeWorkerId);
+    // POSITIVE CONTROL on the test's own premise: fails the file if the merge never genuinely contends
+    // for the cap-1 slot, instead of letting an unproven "no overlap happened" read as a passing cap.
+    await waitUntilGatePhase(sessions, mergeWorkerId, "queued", "(A) merge");
+    releaseGate1(); // only now — the second call is structurally confirmed queued behind the first
+
+    const [gateResult, mergeResult] = await raceReport(
+      [gatePromise, mergePromise],
+      ["runWorkerGate", "confirmWorkerMerge"],
       "A",
     );
     check("(A) both the merge gate and the worker gate actually ran", calls === 2);
@@ -271,7 +299,15 @@ try {
       (outcome, opId) => { enqueued.push([opId, outcome]); },
     );
     check("(E) a slow op degrades to {settled:false, op}", short.settled === false && typeof short.op.opId === "string");
-    await sleep(400); // let the underlying op actually settle
+    // "exactly one" is a prove-a-negative property (no SECOND settle callback) — gating on the arrival of
+    // the FIRST push would shrink the window a duplicate could still be observed in to ~zero (the (A)
+    // false-pass shape). Instead poll the registry's OWN terminal signal: no `retainMs` was passed to this
+    // `attach()` call, so `peek()` EVICTS TO undefined the instant the entry settles (see pending-ops.ts's
+    // "EVICT-ON-SETTLE" class doc) — and that eviction happens synchronously, in the SAME un-awaited
+    // callback turn as the `onSettledAfterPending` push below it, so by the time this observes the entry
+    // gone, the (sole legitimate) push has already happened. Counting only AFTER that structural terminal
+    // state is reached is sound, unlike counting the instant the first push lands.
+    await waitUntil(() => registry.peek("gate:manual-test") === undefined, "(E) settle callback");
     check("(E) the terminal settle callback eventually fired", enqueued.length === 1 && enqueued[0][0] === short.op.opId);
   }
 
@@ -475,9 +511,20 @@ try {
 
     const pending = await sessions.runWorkerGate(gateWorkerId);
     check("(K) the slow gate degrades to the pending shape", pending.settled === false);
-    await sleep(600); // let the fake's own remaining sleep (~300ms past the budget) finish and settle
+    const isGateFailedMsg = (args) => args[0] === gateWorkerId && typeof args[1] === "string" && args[1].includes("[loom:gate-failed]");
+    // "exactly ONE" is a prove-a-negative property — gating on the arrival of the first matching push (as
+    // opposed to a fixed sleep) would shrink the window a genuine DUPLICATE nudge could still be caught in
+    // to ~zero, the same false-pass shape (A) was carded for. Instead poll runWorkerGate's OWN pending op
+    // for its terminal settle: `state !== "running"` means the op has left PendingOpRegistry's `entries`
+    // map for good (runWorkerGate passes `retainMs`, so it lands in the RETAINED view rather than
+    // evicting to `undefined` — see pending-ops.ts's "EVICT-ON-SETTLE"/"RETAINED TERMINAL VIEW" class doc)
+    // — and that transition happens synchronously, in the SAME un-awaited callback turn as the
+    // `onSettledAfterPending` push that sends this nudge, so by the time this observes the terminal state,
+    // the (sole legitimate) push has already landed. Same seam an existing sibling test already uses for
+    // this exact purpose — see run-gate-result-consumption.mjs's own `sessions.pendingOps.peek(...)` wait.
+    await waitUntil(() => sessions.pendingOps.peek(`gate:${gateWorkerId}`)?.state !== "running", "(K) gate op settle");
 
-    const gateFailedMsgs = enqueued.filter((args) => args[0] === gateWorkerId && typeof args[1] === "string" && args[1].includes("[loom:gate-failed]"));
+    const gateFailedMsgs = enqueued.filter(isGateFailedMsg);
     check("(K) exactly ONE [loom:gate-failed] nudge reached the worker's own pty", gateFailedMsgs.length === 1);
     const text = gateFailedMsgs[0]?.[1] ?? "";
     check("(K) the nudge names the failed step (not just a raw tail)", text.includes("step: pnpm test"));
