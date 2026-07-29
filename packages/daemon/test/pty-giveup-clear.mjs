@@ -41,17 +41,16 @@ const VERIFY_TIMEOUT = 600; // mirrors LOOM_SUBMIT_VERIFY_TIMEOUT_MS
 const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
 // Card b64b3726 Half 1: the FINAL attempt now waits (bounded, observed) for its own paste-reassert to
 // settle BEFORE writing Enter. In this fake-pty harness NOTHING ever bumps lastOutputAt on its own (no
-// emitData calls below), so that wait always maxes out its bound — giveUpAt() must account for it.
+// emitData calls below), so that wait always maxes out its bound (~50ms) — shrunk via env so the retry
+// chain still finishes quickly; see GIVE_UP_POLL_TIMEOUT_MS below for how completion is actually detected.
 const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
-const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
 // Card 441499ee: after the verify-timeout elapses with no confirmation, GIVE-UP now takes ONE more short,
 // bounded, OBSERVED wait for `enterConfirmed` (awaitGiveUpConfirmSettle) before actually committing to
-// RECOVERY — nothing in this fake pty ever fires a confirming hook, so that wait always maxes out its
-// bound too, exactly like SETTLE_BOUND above. giveUpAt() must account for it.
+// RECOVERY — nothing in this fake pty ever fires a confirming hook, so that wait too always maxes out its
+// bound (~50ms), shrunk via env for the same reason as SETTLE_POLL above.
 const CONFIRM_SETTLE_POLL = 10;
 const CONFIRM_SETTLE_MAX_POLLS = 5;
-const CONFIRM_SETTLE_BOUND = CONFIRM_SETTLE_POLL * CONFIRM_SETTLE_MAX_POLLS; // 50ms
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
@@ -59,8 +58,20 @@ process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
-const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
-const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT + CONFIRM_SETTLE_BOUND;
+
+// Card 259c15fa: give-up's real completion is the sum of ~14 chained setTimeout hops (the first-attempt
+// delay, two retry verify-timeouts, a settle-poll burst, a third verify-timeout, a confirm-settle-poll
+// burst) — Node's setTimeout guarantees only a MINIMUM delay per hop, so real completion routinely lands
+// tens to a few hundred ms past a hand-computed sum of the nominal delays (measured directly on a quiet
+// host: 90-304ms of overshoot across 15 samples, one of which already exceeded this test's prior fixed
+// 300ms margin). A fixed sleep-then-assert keyed to that computed deadline is a TIMING GUESS and flaked
+// ~6-13% standalone for exactly this reason. Poll for the OBSERVED busy=false transition instead (mirrors
+// scenario (4) below, which never had this problem) — this bound only guards against a genuine hang.
+const GIVE_UP_POLL_MS = 20;
+const GIVE_UP_POLL_TIMEOUT_MS = 15_000;
+async function waitForBusyFalse(sessionId, t0) {
+  while (busyLog[sessionId].at(-1) !== false && Date.now() - t0 < GIVE_UP_POLL_TIMEOUT_MS) await sleep(GIVE_UP_POLL_MS);
+}
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
@@ -127,9 +138,10 @@ try {
     check("(1) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
     // Never deliver ANY confirming hook, and never touch the raw composer (composerLen stays 0 the whole
-    // time — the daemon's own pty.write from submit() never counts toward it). Wait past give-up.
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
-    check("(1) GIVE-UP RECOVERY: busy fell back to false", busyLog[SID].at(-1) === false);
+    // time — the daemon's own pty.write from submit() never counts toward it). Wait for give-up to
+    // ACTUALLY land (observed, bounded — see GIVE_UP_POLL_TIMEOUT_MS's doc).
+    await waitForBusyFalse(SID, t0);
+    check("(1) GIVE-UP RECOVERY: busy fell back to false (bounded poll didn't time out)", busyLog[SID].at(-1) === false);
     check(`(1) CLEAR: exactly ${TEXT.length} backspaces were written to un-type the stranded injection`,
       backspaceCount() === TEXT.length);
     // Sanity: the clear bytes land AFTER the give-up point in the write stream (not mixed into the retry
@@ -153,11 +165,11 @@ try {
     // draft) even though what's actually in the real TUI composer right now is the daemon's OWN stranded
     // paste (writeStdin can't distinguish the two — that's the whole point of the composerLen===0 gate:
     // it conservatively assumes a human might be mid-edit and refuses to touch the box at all).
-    await sleepUntil(t0, writeAt(1) + VERIFY_TIMEOUT / 2);
+    await sleepUntil(t0, ENTER_DELAY + VERIFY_TIMEOUT / 2);
     host.writeStdin(SID, "h"); // one printable char → composerLen becomes 1 ("composer-dirty")
 
-    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
-    check("(2) GIVE-UP RECOVERY: busy still falls back to false even when dirty", busyLog[SID].at(-1) === false);
+    await waitForBusyFalse(SID, t0);
+    check("(2) GIVE-UP RECOVERY: busy still falls back to false even when dirty (bounded poll didn't time out)", busyLog[SID].at(-1) === false);
     check("(2) HUMAN-DRAFT SAFETY: NO backspace clear was written while composerLen > 0",
       backspaceCount() === 0);
     check("(2) sanity: the human's own keystroke DID reach the pty (writeStdin never withholds real human bytes)",
