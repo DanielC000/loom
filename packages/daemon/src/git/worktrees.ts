@@ -3085,17 +3085,19 @@ export async function mergeMainIntoWorktree(
 
 export async function mergeBranch(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
+  gateBaseBranchHead?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
   // MUTEX (card e076d2a2, widened to GitWriter by e41dbb58): the whole residue-clear→squash→conflict-check
   // →commit sequence below reads and writes the CANONICAL repo's shared git index — serialize it per
   // canonical repo path so a concurrent merge for a DIFFERENT branch of the SAME repo, or a concurrent
   // GitWriter.commit/checkout/createBranch against the same repo, can never interleave with this one. See
   // the lock's own doc (git/repo-lock.ts) for the exact corruption this closes.
-  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead));
+  return withCanonicalIndexLock(repoPath, () => mergeBranchLocked(repoPath, branch, taskTitle, deps, requireCanonicalHead, gateBaseBranchHead));
 }
 
 async function mergeBranchLocked(
   repoPath: string, branch: string, taskTitle?: string, deps: BoundedGitDeps = {}, requireCanonicalHead?: string,
+  gateBaseBranchHead?: string,
 ): Promise<{ ok: boolean; conflict?: boolean; sha?: string; subject?: string; noop?: boolean; reason?: string; emptyKind?: MergeEmptyKind; gateBaseInvalidated?: boolean }> {
   // BOUNDED + NON-INTERACTIVE (board card 44c28799): this is the repo's highest-consequence git write
   // (see boundedMergeGit's own doc), so it gets the same block-timeout + withTimeout race as every other
@@ -3124,17 +3126,71 @@ async function mergeBranchLocked(
   // whenever no gate ran at all (no gateCommand configured), in which case this check is skipped entirely
   // — byte-identical to before either fix existed.
   //
-  // ⚠️ KNOWN RESIDUAL GAP, deliberately NOT closed by this card (CR follow-up, tracked on a separate
-  // board card): when the branch's squash has ALREADY landed on main but its worktree survived and gained
-  // new commits since, confirmWorkerMerge SKIPS the union-merge entirely (`preLanded`, in the caller) —
-  // that skip predates this fix and exists to protect ALREADY_MERGED re-confirm classification, not to
-  // opt out of gating, so a REAL gate still runs (`gateRan:true`) even though nothing threaded
-  // `requireCanonicalHead` through this time, making the re-check below vacuous for that one path. This is
-  // NOT hypothetical: such a worktree stages a genuinely non-empty diff, and the `!staged` branch further
-  // down falls straight through to the commit. Fixing it means deciding how to reconcile "protect
-  // ALREADY_MERGED classification" with "gate-base-verify a preLanded squash" — a separate decision from
-  // this card's mechanism, left to that follow-up.
-  if (requireCanonicalHead) {
+  // ⚠️ THE ALREADY-LANDED CASE (card b0ab78d6, closing a gap this doc used to describe as open): when the
+  // branch's squash has ALREADY landed on main, confirmWorkerMerge SKIPS the union-merge entirely
+  // (`preLanded`, in the caller) — that skip predates this fix and exists to protect ALREADY_MERGED
+  // re-confirm classification, not to opt out of gating, so a REAL gate still runs (`gateRan:true`). This
+  // used to leave `requireCanonicalHead` unset for the whole duration of that gate, making this re-check
+  // vacuous for that path — NOT hypothetical: the concrete danger is a branch gaining a genuinely NEW
+  // commit WHILE that gate is in flight (a redirected/still-active worker keeps committing before being
+  // told to stand down — the worker's pty is not stopped until AFTER confirmWorkerMerge returns), which
+  // the eventual squash then stages and lands, un-verified against whatever main did in the same window.
+  // `confirmWorkerMerge` now threads a `requireCanonicalHead` through this path too, so this re-check DOES
+  // run here: it proves canonical main hasn't moved since the gate started, exactly like the ordinary union
+  // path above. What it does NOT prove, on this path specifically: the gate here validated the branch's own
+  // tree in isolation, never unioned with main (that union is exactly what's skipped, to protect
+  // classification), so a genuinely new commit's *integration* with main's current content is unverified
+  // either way — this re-check closes the "main moved" race, not the narrower "never union-tested" gap,
+  // which stays open by design (closing it would mean union-merging here, which is exactly what corrupts
+  // ALREADY_MERGED classification). See `confirmWorkerMerge`'s own `gateBaseMainHead` doc for the full
+  // three-producer picture (union / reuse / preLanded).
+  //
+  // ⚠️ REGRESSION FOUND AND CLOSED BEFORE MERGE (same card, second CR follow-up): enforcing
+  // `requireCanonicalHead` UNCONDITIONALLY on the preLanded path over-refuses. The COMMON case on this path
+  // is the opposite of the danger above — a pure re-confirm with genuinely NOTHING new to squash (a
+  // stale/racing confirm, see the early-idempotency doc further up) — and that case is IDEMPOTENT by
+  // design: main moving elsewhere during its gate is routine on an active fleet and harmless to it, since
+  // nothing from this branch is landing either way. Refusing every time main so much as twitches during an
+  // 8-14min gate turned that routine idempotent success into a routine refusal (empirically reproduced:
+  // same scenario, `{merged:true, emptyKind:"ALREADY_MERGED"}` before this fix, `{merged:false,
+  // gateBaseInvalidated:true}` after it, main's movement the only variable) — strictly worse than the gap
+  // this card exists to close, on the path's MORE common case.
+  //
+  // `gateBaseBranchHead`, when supplied, is the fix: it's the branch's OWN tip sha, captured by the
+  // preLanded producer at the exact same moment as `requireCanonicalHead` (see confirmWorkerMerge's own
+  // doc). Re-read fresh HERE, inside the lock — if the branch's CURRENT tip still matches it, the
+  // `requireCanonicalHead` enforcement below is SKIPPED entirely; only a branch that has itself moved since
+  // capture falls through to it. This is the correct discriminator, not merely a convenient one: the
+  // hazard above requires NEW content on the branch — main moving alone is harmless when the branch is
+  // provably unchanged. And it IS provable, not assumed: `preLanded` already established (via
+  // `branchContentLandedInCommit`) that this branch's content matched what's already landed AT the capture
+  // moment; a commit sha is content-addressed, so an UNCHANGED tip proves that match still holds now,
+  // regardless of anything main did meanwhile. Given that, the eventual squash below can only land as a
+  // true no-op (safe — proceeds to the ALREADY_MERGED classification ~200 lines down, unaffected by this
+  // skip) or hit a genuine line-level conflict on the branch's own already-landed paths (already handled
+  // separately below, fails loud, zero side effects) — never silently land unverified new content. An
+  // alternative considered and rejected: deferring the ENTIRE `requireCanonicalHead` check until the
+  // squash's staged set is known (only refuse when there's actually something to protect) — correct in
+  // spirit, but it would move this check out of its "first thing after the lock, zero side effects"
+  // position, a property this doc has leaned on since e50600d2/eda70da6 and true for EVERY caller, not just
+  // this one. Reading the branch's tip is cheaper and preserves that position untouched.
+  //
+  // FAIL-CLOSED: `gateBaseBranchHead` is `undefined` for the union and reuse producers (see
+  // confirmWorkerMerge's single call site) — this whole pre-check is skipped for them and
+  // `requireCanonicalHead` enforces exactly as it always has, byte-identical. On the preLanded producer, a
+  // failed fresh read of the branch's tip (a git error/timeout) is treated as "no stability proof
+  // available", NOT as "assume unchanged" — it falls through to the ordinary enforcement below, same as a
+  // branch that provably moved.
+  let branchStableSinceGateBase = false;
+  if (gateBaseBranchHead) {
+    try {
+      const currentBranchHead = (await withTimeout(
+        git.raw(["rev-parse", "--verify", `${branch}^{commit}`]), timeoutMs, "git rev-parse branch (gate-base branch-stability check)",
+      )).trim();
+      branchStableSinceGateBase = currentBranchHead === gateBaseBranchHead;
+    } catch { /* fail closed: couldn't verify branch stability — fall through to enforcing the check below */ }
+  }
+  if (requireCanonicalHead && !branchStableSinceGateBase) {
     let currentHead: string;
     try {
       currentHead = (await withTimeout(git.raw(["rev-parse", "HEAD"]), timeoutMs, "git rev-parse HEAD (canonical, gate-base check)")).trim();

@@ -8083,21 +8083,59 @@ export class SessionService {
     // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
     // HEAD is at squash time (`git merge --squash branch`, entirely independent of the worktree's own
     // unioned tree) — so THIS sha, not any later read, is what ties the squash back to what actually got
-    // tested. Two distinct producers feed this ONE var, never both (mutually exclusive on `gateRan`):
+    // tested. Three distinct producers feed this ONE var, never more than one per merge (mutually
+    // exclusive on `gateRan`; the preLanded producer can itself be overwritten by the reuse producer, see
+    // below):
     //   - REUSE path (card e50600d2 CR follow-up): the sha `confirmWorkerMerge` observed at the moment it
     //     decided to skip a redundant gate run — proven safe because `freshBehindMain === 0`, checked
     //     moments earlier, already shows main is an ancestor of the branch.
-    //   - REAL gate-run path (card eda70da6): the sha {@link mergeMainIntoWorktree}'s own union-merge
-    //     actually unioned into the worktree — captured AT THAT CALL, not later at gate admission. The gap
-    //     between the union-merge and admission is unbounded SEMAPHORE QUEUE WAIT (routinely 10+ minutes
-    //     at `maxConcurrentGates=2` with an 8-14min gate, easily longer than the gate's own run time) — an
-    //     admission-time capture leaves that entire window open, closing only the smaller admission→squash
-    //     half of it (a real gap found on review of this card's first attempt). Capturing at the
-    //     union-merge instead closes the FULL window: union-merge → [queue wait] → gate run → squash lock.
-    // `undefined` whenever no gate ran at all (no gateCommand configured) or the branch had already landed
-    // (the union-merge itself skipped — see `preLanded` below), in which case `mergeBranch` skips the
-    // re-check entirely (byte-identical to before either fix existed).
+    //   - REAL gate-run path, union-merged (card eda70da6): the sha {@link mergeMainIntoWorktree}'s own
+    //     union-merge actually unioned into the worktree — captured AT THAT CALL, not later at gate
+    //     admission. The gap between the union-merge and admission is unbounded SEMAPHORE QUEUE WAIT
+    //     (routinely 10+ minutes at `maxConcurrentGates=2` with an 8-14min gate, easily longer than the
+    //     gate's own run time) — an admission-time capture leaves that entire window open, closing only
+    //     the smaller admission→squash half of it (a real gap found on review of this card's first
+    //     attempt). Capturing at the union-merge instead closes the FULL window: union-merge → [queue
+    //     wait] → gate run → squash lock.
+    //   - REAL gate-run path, preLanded (card b0ab78d6): the union-merge above is deliberately SKIPPED for
+    //     a branch whose squash already landed on main (see `preLanded` below), so there is no unioned sha
+    //     to capture — instead this captures a plain `resolveGitRef(repoPath, "HEAD", ...)` at the same
+    //     point the union would have run. This proves only that canonical main hasn't moved since the gate
+    //     started, NOT that the gate validated this branch's content together with main's (it never did,
+    //     on this path) — see the capture site's own doc for the full distinction. Paired with a SECOND
+    //     capture, `gateBaseBranchHead` (below) — see that variable's own doc for why the preLanded
+    //     producer needs a companion signal the other two producers don't.
+    // `undefined` only when no gate ran at all (no gateCommand configured), or — solely on the preLanded
+    // producer above — canonical HEAD couldn't be resolved (a git error/timeout), in which case
+    // `mergeBranch` skips the re-check entirely rather than re-checking against a bad sha.
     let gateBaseMainHead: string | undefined;
+    // Companion to `gateBaseMainHead`, set ONLY by the preLanded producer above (the union and reuse
+    // producers leave this `undefined`, at the single `mergeBranch` call site below — see that call's own
+    // doc for why `undefined` there is byte-identical to today's behavior). WHY THIS EXISTS (card b0ab78d6,
+    // CR follow-up): a bare `gateBaseMainHead` capture on the preLanded path over-refuses. A preLanded
+    // re-confirm with genuinely NOTHING new to squash is IDEMPOTENT by design (see the `preLanded` doc
+    // below) — main moving elsewhere during its gate is routine on an active fleet and harmless to it,
+    // since nothing from this branch is landing either way. Enforcing `requireCanonicalHead`
+    // UNCONDITIONALLY there — refusing every time main so much as twitches during an 8-14min gate —
+    // regresses that idempotency into a routine refusal for the COMMON case, not the dangerous one.
+    // `gateBaseBranchHead`, captured as the branch's OWN tip sha at the same moment as `gateBaseMainHead`,
+    // is the fix: `mergeBranch` re-reads the branch's CURRENT tip inside its own lock and, if it still
+    // matches this captured sha, SKIPS the `requireCanonicalHead` enforcement entirely rather than
+    // re-checking main. This is sound, not just convenient — `preLanded` already proved (via
+    // `branchContentLandedInCommit`) that this branch's content matched what's landed AT the capture
+    // moment; a commit sha is content-addressed, so an UNCHANGED tip proves that match still holds now,
+    // regardless of anything main did meanwhile. Given that, the eventual squash can only land as a true
+    // no-op (safe) or hit a genuine line-level conflict on the branch's own already-landed paths (already
+    // handled elsewhere, fails loud, zero side effects) — never silently land unverified new content. Only
+    // when the branch itself has moved since capture (new commits landed during the gate — see
+    // `gateBaseMainHead`'s preLanded doc above for that race) does this signal no longer apply, and
+    // `mergeBranch` falls through to the ordinary `requireCanonicalHead` check, protecting exactly the
+    // content this card's mechanism exists to protect. This also keeps `requireCanonicalHead`'s own
+    // re-check sitting in its documented "first thing after the lock, zero side effects" position for
+    // EVERY caller (see `mergeBranchLocked`'s own doc) — a candidate fix that instead deferred the check
+    // until the squash's staged set was known would have needed to move it there, or to duplicate/reorder
+    // that side-effect-free guarantee. This is cheaper AND leaves that property untouched.
+    let gateBaseBranchHead: string | undefined;
     if (gate) {
       // PRE-GATE CLEANUP (finding c21487e8 — Windows EPERM): a lingering dev-server/build process the
       // worker left running (an escaped vite/esbuild that detached from the pty's process tree) can hold
@@ -8176,6 +8214,45 @@ export class SessionService {
         // (a distinct, independently-proven invariant) when reuse is decided instead; left as this union
         // sha whenever the gate ends up actually running for real.
         gateBaseMainHead = union.mainSha;
+      } else {
+        // GATE-BASE CAPTURE, preLanded path (card b0ab78d6): the union-merge above is skipped on THIS
+        // branch — deliberately, to protect ALREADY_MERGED classification (see the doc above) — so there
+        // is no "sha the gate's tree was unioned from" to capture. What we CAN still capture, at this same
+        // point, is canonical main's CURRENT tip: the gate about to run (if the reuse path below doesn't
+        // short-circuit it) validates whatever the worktree already holds, UN-unioned, and the eventual
+        // squash re-derives fresh against canonical HEAD at squash time. Threading THIS sha through as
+        // `gateBaseMainHead` proves, inside mergeBranch's own lock, that canonical main has not moved
+        // between "we decided to treat this branch as preLanded and started gating it" and "we squash" —
+        // closing the same class of race (main advancing during an 8-14min gate + unbounded semaphore
+        // queue wait) that the union-merge capture above closes for the normal path, via the identical
+        // `requireCanonicalHead` re-check.
+        //
+        // ⚠️ WHAT THIS DOES NOT PROVE: unlike the union path, the gate here never validated this branch's
+        // content TOGETHER with main's — only that main itself didn't move. A preLanded branch that gains a
+        // genuinely new commit (the concrete race: a redirected/still-active worker keeps committing WHILE
+        // the gate is in flight — the worker's pty is not stopped until AFTER this method returns) is
+        // gate-tested in isolation, not as a union; whether that new commit integrates cleanly with main's
+        // (unchanged, but never union-tested) current content is unverified either way. That gap is
+        // inherent to skipping the union-merge and predates this card — this capture closes the "un-gated
+        // content lands on an advanced main" race the DoD names, not the narrower "new work never
+        // integration-tested" gap, which stays open by design (fixing THAT would mean union-merging here,
+        // which is exactly what corrupts ALREADY_MERGED classification above).
+        //
+        // Fail-safe: `resolveGitRef` returning null (a git error/timeout) leaves `gateBaseMainHead`
+        // `undefined` — same as before this capture existed for this path — rather than passing a bad sha
+        // through. Possibly overwritten below by the reuse path's own capture, exactly like the union
+        // branch's capture above.
+        gateBaseMainHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
+        // COMPANION CAPTURE (card b0ab78d6, CR follow-up): the branch's OWN current tip, at this exact same
+        // moment — see `gateBaseBranchHead`'s own doc (above, alongside its declaration) for the full
+        // reasoning. Short version: this branch is a pure re-confirm right now (that's what `preLanded`
+        // just proved) and, PROVIDED it stays exactly this commit through the gate, main moving elsewhere
+        // is harmless to it — so `mergeBranch` only needs to enforce `gateBaseMainHead` above when this
+        // branch itself has moved since this capture (the race described just above). Same fail-safe as
+        // `gateBaseMainHead`: a failed resolve leaves this `undefined`, which `mergeBranch` reads as "no
+        // stability proof available" and falls through to enforcing the ordinary check — never as "assume
+        // unchanged".
+        gateBaseBranchHead = await resolveGitRef(repoPath, branch, { timeoutMs: this.gitOpMs }) ?? undefined;
       }
 
       // CIRCUIT BREAKER (card 3564fd1e): a branch that has already timed out GATE_TIMEOUT_BREAKER_THRESHOLD
@@ -8249,6 +8326,16 @@ export class SessionService {
           // refuse instead of silently landing an unverified merge. See mergeBranchLocked's own doc for the
           // actual guarantee.
           gateBaseMainHead = freshHead;
+          // DEFENSIVE RESET: the reuse proof above (freshBehindMain === 0, i.e. main is already an
+          // ancestor of the branch) and `preLanded` truthy are mutually exclusive in practice — if main
+          // were an ancestor of branch, the landed-squash trailer commit would be too, which is exactly
+          // `findLandedSquashCommit`'s re-task guard and would have made `preLanded` null, not truthy. So
+          // `gateBaseBranchHead` should never actually be set here. Reset it anyway, explicitly, rather
+          // than leaving it to that invariant: the reuse producer's own proof is self-sufficient and wants
+          // FULL `requireCanonicalHead` enforcement (exactly as merge-gate-reuse.mjs (I)/(L) already test) —
+          // a stray preLanded-producer value must never silently soften that if the invariant above is ever
+          // violated by a future change.
+          gateBaseBranchHead = undefined;
           reuseResult = { passed: true };
           reusedOpId = lastCheck.opId;
         }
@@ -8431,12 +8518,17 @@ export class SessionService {
     // Squash-merge as ONE clean commit. The subject comes from the task title (mergeBranch falls back to
     // the branch name); the commit carries the deterministic `Loom-Worker-Branch` trailer used downstream.
     const taskTitle = taskId ? this.db.getTask(taskId)?.title ?? undefined : undefined;
-    // `gateBaseMainHead` is set whenever a gate ran for this merge — either the REUSE path (card e50600d2,
-    // a skipped redundant re-gate) or the REAL gate-run path (card eda70da6, the sha the union-merge
-    // actually unioned into the worktree BEFORE the gate ran) — with the canonical main sha the gate's
-    // validated tree is provably based on, so mergeBranch can re-verify (INSIDE its own lock, before
-    // touching anything) that main provably hasn't moved since.
-    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead);
+    // `gateBaseMainHead` is set whenever a gate ran for this merge — the REUSE path (card e50600d2, a
+    // skipped redundant re-gate), the union REAL gate-run path (card eda70da6, the sha the union-merge
+    // actually unioned into the worktree BEFORE the gate ran), or the preLanded REAL gate-run path (card
+    // b0ab78d6) — with the canonical main sha the gate's validated tree is provably based on, so
+    // mergeBranch can re-verify (INSIDE its own lock, before touching anything) that main provably hasn't
+    // moved since. `gateBaseBranchHead` rides alongside it, set ONLY by the preLanded producer (see its own
+    // doc above); the union and reuse producers leave it `undefined` here, which `mergeBranch` reads as "no
+    // stability proof supplied" and enforces `requireCanonicalHead` exactly as it always has — this call
+    // site is the ONLY place `gateBaseBranchHead` is read, so that `undefined` is what keeps both other
+    // producers byte-identical to their pre-b0ab78d6 behavior.
+    const merge = await mergeBranch(repoPath, branch, taskTitle, { timeoutMs: this.gitOpMs }, gateBaseMainHead, gateBaseBranchHead);
     if (!merge.ok) {
       if (merge.gateBaseInvalidated) {
         // BENIGN RACE, NOT A REAL MERGE FAILURE: canonical main advanced since this merge's gate-validated

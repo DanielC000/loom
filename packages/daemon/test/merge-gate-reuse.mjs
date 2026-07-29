@@ -554,6 +554,135 @@ try {
     const okResult = await mergeBranch(L.repo, branch, "MGRU-L ok", {}, mainHeadAfterAdvance);
     check("(L) the same pattern proceeds normally once the captured head matches main's actual current tip", okResult.ok === true);
   }
+  // ── (M) ALREADY-LANDED (preLanded) BRANCH GAINS NEW COMMITS DURING THE GATE — card b0ab78d6. The
+  //        union-merge is deliberately SKIPPED once a branch's squash already landed on main (`preLanded`,
+  //        to protect ALREADY_MERGED re-confirm classification — see confirmWorkerMerge's own doc), so
+  //        BEFORE this fix `gateBaseMainHead` was never captured on this path even though a REAL gate still
+  //        runs. If the worktree's branch gains a genuinely new commit WHILE that gate is in flight (a
+  //        redirected/still-active worker keeps committing before being told to stand down — the worker's
+  //        pty is not stopped until AFTER this method returns), the squash re-derives fresh at squash time
+  //        and stages that new commit's diff — content no gate ever validated together with main. Pre-fix,
+  //        with `gateBaseMainHead` left `undefined`, mergeBranch's in-lock re-check was skipped entirely and
+  //        this landed SILENTLY even with main having ALSO advanced in the same window — exactly eda70da6's
+  //        DoD prohibition, on the one path its fix didn't reach. Post-fix, the preLanded branch captures
+  //        canonical HEAD at the same point the union-merge would have run, so the SAME in-lock
+  //        `requireCanonicalHead` re-check now fires here too and refuses instead of silently squashing.
+  {
+    const M = mk("m", "feature-m.txt");
+    makeRepo(M);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+    const { worktreePath, branch } = await createWorktree(M.repo, M.projId, M.taskId);
+    M.worktreePath = worktreePath; M.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, M.file), "work for M\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${M.file}"`, { cwd: worktreePath });
+
+    // Precondition: this branch's squash already landed on main — worktree deliberately retained (a
+    // stale/racing confirm, or a manager holding it open for follow-up work), mirroring merge-union-gate.mjs
+    // scenario (D)'s own setup.
+    const landed = await mergeBranch(M.repo, branch, "MGRU-M initial land");
+    check("(M) precondition: branch's initial work already landed in main", landed.ok === true);
+
+    let calls = 0;
+    const fakeGate = async () => {
+      calls++;
+      if (calls === 1) {
+        // Simulates the worktree SURVIVING the earlier land and gaining a genuinely new commit WHILE the
+        // gate is in flight — the "not merely theoretical" case the card names.
+        fs.writeFileSync(path.join(worktreePath, "m-followup.txt"), "new work after the earlier land\n");
+        execSync(`git add . && git ${GIT_ID} commit -q -m "m followup during gate"`, { cwd: worktreePath });
+        // Main ALSO advances in the same window (a sibling merge, or a human REST commit) — the concrete
+        // race `gateBaseMainHead` exists to catch.
+        fs.writeFileSync(path.join(M.repo, "main-advance-during-gate-m.txt"), "main moved during the gate\n");
+        execSync(`git add . && git ${GIT_ID} commit -q -m "main advance during gate m"`, { cwd: M.repo });
+      }
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seed(db, M, "pnpm gate");
+
+    const mainHeadBeforeConfirm = execSync("git rev-parse HEAD", { cwd: M.repo }).toString().trim();
+    const confirm = await sessions.confirmWorkerMerge(M.mgrId, M.workerId);
+    check("(M) the gate ran for real (a real gate on the preLanded path, not the reuse path)", calls === 1);
+    check("(M) gateRan:true", confirm.gateRan === true);
+    check("(M) confirmWorkerMerge REFUSES rather than silently squashing the new commit onto an advanced main", confirm.merged === false);
+    check("(M) the refusal reads as a benign, retryable race, not a real merge/gate failure", /benign race|advanced/i.test(confirm.reason ?? ""));
+    const commitsAheadOfBaseline = execSync(`git rev-list --count ${mainHeadBeforeConfirm}..HEAD`, { cwd: M.repo }).toString().trim();
+    check("(M) canonical repo gained ONLY the mid-gate advance commit — no squash landed on top of it (zero side effects)", commitsAheadOfBaseline === "1");
+    const stagedAfterRefusal = execSync("git diff --cached --name-only", { cwd: M.repo }).toString().trim();
+    check("(M) canonical repo index carries no residue from the refused attempt", stagedAfterRefusal === "");
+    check("(M) worktree retained for a retry (not torn down on this refusal)", fs.existsSync(worktreePath) === true);
+
+    // RETRY: main holds still through this second real gate run — re-confirming re-derives everything
+    // fresh (the branch is no longer a pure preLanded duplicate, so this retry takes the ordinary
+    // union-merge path) and actually lands the follow-up commit. Guarded on the refusal actually having
+    // happened (worktree still present): on a regression (the first confirm silently merged instead of
+    // refusing) the worktree is ALREADY torn down by finalizeMerge, and a retry against a gone worktree
+    // would throw a raw GitConstructError, masking the real failure with an unrelated crash — the checks
+    // above already recorded that regression, so just skip the retry rather than compounding it.
+    if (confirm.merged === false && fs.existsSync(worktreePath)) {
+      const retry = await sessions.confirmWorkerMerge(M.mgrId, M.workerId);
+      check("(M) a retry re-confirm succeeds once main stops moving mid-gate", retry.merged === true);
+      check("(M) task moved to done on the retry", db.getTask(M.taskId).columnKey === "done");
+    } else {
+      check("(M) retry skipped — the first confirm did not refuse as expected, so there is no clean retry to prove", false);
+    }
+  }
+  // ── (N) ALREADY-LANDED (preLanded) PURE RE-CONFIRM STAYS IDEMPOTENT WHEN ONLY MAIN MOVES — card
+  //        b0ab78d6, regression found and closed before merge. (M) above and this scenario are a
+  //        DISCRIMINATING PAIR, not two independent tests: (M) proves the fix still refuses when the
+  //        branch itself gains new content during the gate; (N) proves it does NOT refuse when the branch
+  //        is a TRUE pure duplicate and only main moves elsewhere. Only together do they prove the new
+  //        `gateBaseBranchHead` branch-stability check can actually tell the two cases apart — (N) alone
+  //        would not catch a fix that simply stopped enforcing `requireCanonicalHead` altogether on this
+  //        path (which would also make (N) pass, while quietly breaking (M)). Identical setup to (M) EXCEPT
+  //        the worktree/branch gains NOTHING new during the gate — this is the COMMON case on the preLanded
+  //        path (a stale/racing re-confirm, see the early-idempotency doc in worktrees.ts), and was
+  //        idempotent (`ALREADY_MERGED`, `merged:true`) before `gateBaseMainHead` existed on this path at
+  //        all. A bare `gateBaseMainHead` capture (no branch-stability discriminator) regresses this into a
+  //        refusal purely because main moved elsewhere — routine on an active fleet, and harmless here since
+  //        nothing from this branch is landing either way.
+  {
+    const N = mk("n", "feature-n.txt");
+    makeRepo(N);
+    const db = new Db(); dbs.push(db);
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const { mergeBranch } = await import("../dist/git/worktrees.js");
+    const { worktreePath, branch } = await createWorktree(N.repo, N.projId, N.taskId);
+    N.worktreePath = worktreePath; N.branch = branch; worktrees.push(worktreePath);
+    fs.writeFileSync(path.join(worktreePath, N.file), "work for N\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m "${N.file}"`, { cwd: worktreePath });
+
+    const landed = await mergeBranch(N.repo, branch, "MGRU-N initial land");
+    check("(N) precondition: branch's initial work already landed in main", landed.ok === true);
+
+    let calls = 0;
+    const fakeGate = async () => {
+      calls++;
+      if (calls === 1) {
+        // Main advances mid-gate — UNRELATED to this branch (a sibling merge, a human REST commit).
+        // Nothing whatsoever is added to the worktree/branch — the discriminator this scenario exists to
+        // prove: a TRUE pure duplicate must stay idempotent regardless of what main does elsewhere.
+        fs.writeFileSync(path.join(N.repo, "unrelated-main-advance-n.txt"), "some other merge landed\n");
+        execSync(`git add . && git ${GIT_ID} commit -q -m "unrelated main advance n"`, { cwd: N.repo });
+      }
+      return { passed: true };
+    };
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    seed(db, N, "pnpm gate");
+
+    const confirm = await sessions.confirmWorkerMerge(N.mgrId, N.workerId);
+    // `calls === 1` is this scenario's own proof that a real gate ran (not the reuse path) — unlike (M)'s
+    // refusal, the ALREADY_MERGED success path returns via `finishAlreadyMerged`, whose result never
+    // carries `gateRan` at all (confirmed: merge-union-gate.mjs scenario D doesn't assert it either), so
+    // there is no `confirm.gateRan` field to check here.
+    check("(N) the gate ran for real (a real gate on the preLanded path, not the reuse path)", calls === 1);
+    check("(N) confirmWorkerMerge STAYS IDEMPOTENT — merged:true despite main moving mid-gate", confirm.merged === true);
+    check("(N) emptyKind === 'ALREADY_MERGED' (a benign no-op, not a gateBaseInvalidated refusal)", confirm.emptyKind === "ALREADY_MERGED");
+    check("(N) task moved to done", db.getTask(N.taskId).columnKey === "done");
+    check("(N) worktree removed (idempotent cleanup completed, not left retained by a false refusal)", !fs.existsSync(worktreePath));
+  }
 } finally {
   for (const db of dbs) try { db.close(); } catch { /* ignore */ }
   for (const wt of worktrees) try { fs.rmSync(wt, { recursive: true, force: true }); } catch { /* ignore */ }
