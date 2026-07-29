@@ -3510,8 +3510,19 @@ export class PtyHost {
    * proactive watchers (CompanionHeartbeatWatcher, CompanionReminderWatcher, AttentionPushWatcher) pass
    * `true`, so their fired turn's `getActiveTurnIsProactive` reads true and the companion's chat_reply can
    * tag its outbound frame + persisted history row for the web chat's amber event-line render.
+   *
+   * `giveUpHeldUntil` (card 9e27f4d2) is an OPTIONAL trailing arg, appended last for the same byte-
+   * identical-by-default reason — every existing caller omits it. The ONLY caller that passes it is
+   * `resumeFleetOnBoot`'s restart-intent replay, restoring a give-up-requeued entry's hold deadline
+   * (see `getPersistablePending`/`getPersistablePendingHolds`) onto the freshly re-enqueued entry so a
+   * restart landing mid-hold-window doesn't skip the hold entirely. `stillGiveUpHeld` below pushes that
+   * invariant into THIS shared unit rather than leaning on caller ordering: code review on this same
+   * card flagged that safety here depended only on `replayPending` always running before readiness (true
+   * today, but nothing enforces it) — a still-in-the-future `giveUpHeldUntil` now forces the held-push
+   * path even if the session happens to already be idle-ready, so the hold can never silently evaporate
+   * just because some future caller/reorder takes the immediate branch instead.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null): EnqueueResult {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number): EnqueueResult {
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -3534,10 +3545,16 @@ export class PtyHost {
       console.warn(`[pty] ${sessionId} a "warning"-kind system nudge is missing its [loom:*] tag (delivering anyway — this sender should be tagged): ${JSON.stringify(text.slice(0, 200))}`);
     }
     this.healIfStuck(live, sessionId);
+    // Card 9e27f4d2 (code review follow-up): a restored give-up hold still in the future must NEVER take
+    // the immediate-submit branch below — that branch delivers unconditionally, with no hold check at
+    // all, so a caller-ordering change that reached this call while already idle-ready would silently
+    // deliver a "held" entry as if it had never been held. Computed once, reused by both the immediate
+    // gate below and the held-push at the bottom.
+    const stillGiveUpHeld = giveUpHeldUntil !== undefined && Date.now() < giveUpHeldUntil;
     // `ready` gate: a freshly (re)spawned pty is not ready until SessionStart. Submitting before then
     // writes into a still-booting TUI — the Enter is swallowed and the text strands in the composer
     // (the 2026-06-03 restart bug). Hold it FIFO; markReady drains it once the engine is up.
-    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live)) {
+    if (live.ready && !live.busy && !live.stopping && !live.rateLimited && !live.drainHeld && !this.deferForHumanDraft(live) && !stillGiveUpHeld) {
       // M2 GUARD: reaching the idle (busy=false) submit path while a turn is being finalized means an
       // `await` leaked into deliverHook's lower-busy→drain window (see the M2 box there). In correct,
       // synchronous code this is unreachable — enqueueStdin runs as its own event-loop task, never
@@ -3564,10 +3581,14 @@ export class PtyHost {
       // also keeps the load-bearing M1/M2 window byte-identical: no extra work on the synchronous submit.
       return { delivered: true };
     }
-    // Held (busy / not-ready / composer-dirty / rate-limit parked). Carry the optional delivery callback so that when this
-    // entry is finally handed to the recipient (drainPending or consumePending), the durable queued
-    // message can be marked delivered. Undefined for every existing (non-messaging) caller → a no-op.
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId });
+    // Held (busy / not-ready / composer-dirty / rate-limit parked / still give-up-held). Carry the optional
+    // delivery callback so that when this entry is finally handed to the recipient (drainPending or
+    // consumePending), the durable queued message can be marked delivered. Undefined for every existing
+    // (non-messaging) caller → a no-op. `giveUpHeldUntil` is likewise undefined for every existing caller
+    // — only the boot restart-replay seam passes it, to restore a give-up hold onto the freshly re-enqueued
+    // entry (card 9e27f4d2). Stamped whenever the caller supplied it (even an already-expired deadline —
+    // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
+    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}) });
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary), instead of leaving a `delivered:false` reader to
     // wonder whether it's a drop. `busyForMs` is only meaningful while the hold is actually busy-caused
@@ -3698,9 +3719,50 @@ export class PtyHost {
    * (recoverUndeliveredMessagesOnBoot) owns re-enqueueing those on boot, so snapshotting them into
    * intent.pending too would deliver them TWICE on a normal restart. Non-durable held items (worker
    * reports, idle/resume nudges) carry no callback and stay in the snapshot, replayed exactly as before.
+   *
+   * FIXED (card 9e27f4d2, closing `purgeConfirmedGiveUpRequeue`'s residual (3)): a still-`isGiveUpHeld`
+   * entry (see that method) used to snapshot as its TEXT ONLY, so a restart landing mid-hold-window
+   * replayed it on boot as an ordinary fresh message — no hold, no purge correlation — and delivered the
+   * duplicate UNCONDITIONALLY, regardless of how much of the hold window was actually left. That bypassed
+   * the exact protection card 73d5c34a added. This method's OWN return shape is UNCHANGED (still bare
+   * `string[]`) — see `getPersistablePendingHolds` (its sibling) for where the hold deadline actually goes.
+   *
+   * ⚠️ WHY NOT WIDEN THIS METHOD'S ELEMENT TYPE (code review, first attempt at this fix did exactly that
+   * and was rejected): `RestartIntent.pending` is un-versioned JSON on disk (`readRestartIntent` is a bare
+   * `JSON.parse(...) as RestartIntent`, no schema check) that an OLDER daemon can read — a second stable
+   * daemon sharing `~/.loom` from a separate checkout (this project's own documented pattern), or a
+   * rollback landing between this daemon's exit-75 and the supervisor's relaunch. An older daemon's
+   * `replayPending` calls `enqueueStdin(id, m, ...)` expecting `m` to be a plain string; handed
+   * `{text, giveUpHeldUntil}` instead, `kind:"agent"` short-circuits BOTH shape guards
+   * (`sanitizeLoneSurrogates`/`isUntaggedSystemNudge`) before either inspects the value, and the object is
+   * silently string-coerced to `"[object Object]"` by the eventual `.map(m=>m.text).join()` — the actual
+   * message TEXT is gone, no throw, no log. That is the exact LOSS class this card's own constraint
+   * forbids ("fail toward a duplicate, never a loss"), reintroduced by the FIX for a duplicate. Keeping
+   * `pending` a bare `string[]` and adding the hold as a wholly separate, ADDITIVE sibling field means an
+   * older daemon reading a newer intent sees only strings it already knows how to handle — an unheld
+   * duplicate (bad, but the ALREADY-ACCEPTED pre-this-card behavior), never a garbled loss.
    */
   getPersistablePending(sessionId: string): string[] {
     return (this.live.get(sessionId)?.pending ?? []).filter((m) => !m.onDeliver).map((m) => m.text);
+  }
+
+  /**
+   * Sibling of `getPersistablePending` (card 9e27f4d2) — the hold-state half of the same snapshot, kept
+   * in a SEPARATE, additive structure rather than widening `getPersistablePending`'s own element type (see
+   * that method's doc for why: an older daemon reading a newer on-disk intent must see nothing it doesn't
+   * already understand). Returns `{index: giveUpHeldUntil}` for every entry in the SAME filtered
+   * (`!onDeliver`), SAME-ORDER array `getPersistablePending` would return for this session, keyed by
+   * that entry's position in THAT array — a caller must call both against the same live state (no await
+   * between them) for the indices to line up, exactly as `requestDaemonRestart` does. Only entries
+   * currently `isGiveUpHeld` appear; an ordinary entry has no key at all (byte-identical-by-omission for
+   * the common case). Returns `{}` for a dead/unknown session or one with nothing held.
+   */
+  getPersistablePendingHolds(sessionId: string): Record<number, number> {
+    const holds: Record<number, number> = {};
+    (this.live.get(sessionId)?.pending ?? [])
+      .filter((m) => !m.onDeliver)
+      .forEach((m, i) => { if (this.isGiveUpHeld(m)) holds[i] = m.giveUpHeldUntil!; });
+    return holds;
   }
 
   /**
@@ -3744,6 +3806,14 @@ export class PtyHost {
    * an unknown session. The auto-drain (drainPending/reconcile) safety net is unaffected — a manager
    * that never pulls still gets every message delivered the normal way; a pulled message is gone from
    * the same `live.pending`, so it can't also drain.
+   *
+   * DELIBERATELY splices EVERY entry, including one still `isGiveUpHeld` (card 9e27f4d2 assessed this
+   * against `drainPending`'s hold-respecting skip and left it as-is): the hold exists to keep a
+   * BACKGROUND drain/reconcile tick from resubmitting a possibly-already-delivered entry before a late
+   * confirming hook can prove it. `inbox_pull` is not a background tick — it is the recipient itself
+   * explicitly asking for its own inbox right now, which is exactly the kind of affirmative act the hold
+   * is meant to yield to, not protect against. Treating a held entry as delivered here is therefore a
+   * reasoned choice, not an accidental bypass.
    */
   consumePending(sessionId: string): string[] {
     const live = this.live.get(sessionId);
@@ -4694,17 +4764,43 @@ export class PtyHost {
    * resubmitted under its own new generation, so the turn it originally came from would double-deliver.
    * `requeueGiveUpOrigin`'s `giveUpHeldUntil` stamp plus `drainPending`'s `isGiveUpHeld` skip close THAT
    * specific race (a reconcile tick can no longer resubmit a still-held entry out from under this purge).
-   * They do NOT make double-delivery structurally impossible — three real bypasses remain, deliberately
-   * left as residuals rather than "fixed": (1) a confirming hook arriving LATER than `GIVE_UP_HOLD_MS`
-   * still double-delivers — the hold is a best-effort window, not a guarantee, and the `Stop`-only path
-   * (both hooks lost) fires at TURN END, which a genuinely long-running turn (a manager mid-orchestration)
+   * They do NOT make double-delivery structurally impossible — real bypasses remain, deliberately left
+   * as residuals rather than "fixed": (1) a confirming hook arriving LATER than `GIVE_UP_HOLD_MS` still
+   * double-delivers — the hold is a best-effort window, not a guarantee, and the `Stop`-only path (both
+   * hooks lost) fires at TURN END, which a genuinely long-running turn (a manager mid-orchestration)
    * routinely exceeds; (2) `consumePending`/`inbox_pull` splices the WHOLE queue, held entries included,
-   * treating them as delivered regardless of hold state; (3) `getPersistablePending` snapshots a held
-   * entry's TEXT ONLY (no `giveUpGen`/`giveUpHeldUntil`) into the daemon-restart intent, replayed on boot
-   * as a plain fresh message with neither this purge's protection nor the hold — tracked as its own
-   * follow-up card, not fixed here. The underlying discriminator decision (RECOVERY-vs-SUPPRESSED) this
-   * purge is a safety net FOR is untouched and stays `04de8bbf`'s open question; this card only narrows a
-   * wrong decision's consequence, it does not eliminate it.
+   * treating them as delivered regardless of hold state — ASSESSED (card 9e27f4d2) and left as-is: unlike
+   * a background drain/reconcile tick (which acts on a timer with no signal that the ambiguity has been
+   * resolved), an `inbox_pull` caller has explicitly asked for its own inbox NOW — that is itself a
+   * deliberate act by the very recipient the hold exists to protect, so treating the held entry as
+   * delivered here is a reasonable, intentional choice, not an accidental bypass of the hold's purpose.
+   * (3) FIXED (card 9e27f4d2): `getPersistablePending` used to snapshot a held entry's TEXT ONLY, dropping
+   * `giveUpHeldUntil`, so a daemon-restart landing mid-hold-window replayed it on boot as a plain fresh
+   * message with no hold at all — an unconditional immediate duplicate, strictly worse than residual (1).
+   * The fix persists the deadline in a SEPARATE, additive sibling structure (`getPersistablePendingHolds`
+   * — kept out of `getPersistablePending`'s own return shape deliberately; see that method's doc for the
+   * backward-compat reason) and `resumeFleetOnBoot` restores it via `enqueueStdin`'s `giveUpHeldUntil`
+   * param, so a restart during the hold degrades to the SAME delayed-duplicate SHAPE as residual (1) —
+   * but NOT identically: residual (1) is a race the hold can still WIN (a confirming hook merely arrives
+   * late but before some other purge/expiry); post-restart nothing can ever win it (no hook can reach a
+   * dead process's generation, and `giveUpConfirmQueue` resets empty, so `purgeConfirmedGiveUpRequeue`
+   * itself early-returns at its very first line) — so the restart case's duplicate is CERTAIN once the
+   * hold expires, not merely probable. Same shape, higher (P=1 vs P<1) probability — an improvement over
+   * the pre-fix immediate-unconditional case, not a promotion to residual (1)'s own odds. `giveUpGen` and
+   * `giveUpConfirmQueue` are deliberately NOT restored TOGETHER — restoring `giveUpGen` ALONE is inert (the
+   * only reader is this purge, gated on a non-empty `giveUpConfirmQueue`, which a fresh restart never has)
+   * — but restoring THE PAIR would let a fresh post-restart generation collide with a resurrected `gen`
+   * (`live.submitGeneration` restarts from its own initial value, so a small restored `gen` will often
+   * equal it) and cause THIS purge to delete a genuinely-unconfirmed entry: the silent-loss failure this
+   * whole file exists to avoid. The underlying discriminator decision (RECOVERY-vs-SUPPRESSED) this purge
+   * is a safety net FOR is untouched and stays `04de8bbf`'s open question; this card only narrows a wrong
+   * decision's consequence, it does not eliminate it. ⚠️ This residual list is NOT exhaustive even after
+   * (3): the give-up hold has OTHER carry paths besides a daemon restart (recycle/successor handoff —
+   * `SessionService.carryPendingToSuccessor` and its callers) that ALSO don't yet restore `giveUpHeldUntil`
+   * onto the carried entry — a separate, deliberately NOT-fixed-here gap (card 9e27f4d2 scoped to the
+   * restart path only; the carry paths are tracked as their own follow-up). Don't read (1)-(3) as "every
+   * bypass is covered" — check the carry paths' own call sites before assuming this file's hold survives
+   * every hand-off.
    *
    * THE GUARD BELOW (card 73d5c34a, code review follow-up): the FIFO-front correlation above assumes the
    * NEXT hook to arrive, whatever it is, most likely confirms the OLDEST still-ambiguous generation — true

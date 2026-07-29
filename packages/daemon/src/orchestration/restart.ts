@@ -99,9 +99,34 @@ export interface RestartIntent {
    * Per-session snapshot (sessionId → its in-memory pending inbound FIFO) taken at restart time, so the
    * undelivered queue survives the process death and is replayed on boot (index.ts) — the persisted
    * analogue of recycle's in-process carriedPending. Only non-empty FIFOs of resumed sessions are
-   * included; absent when nothing was queued.
+   * included; absent when nothing was queued. Element type is a bare `string[]` — see `pendingHolds`
+   * (card 9e27f4d2) for why this field's own shape must never change to carry more than that.
    */
   pending?: Record<string, string[]>;
+  /**
+   * Card 9e27f4d2 — the give-up HOLD half of `pending`'s snapshot, kept in a wholly separate, ADDITIVE
+   * field rather than folding it into `pending`'s own element type. `pending[id][i]` still within its
+   * post-give-up hold window (host.ts's `isGiveUpHeld`/`GIVE_UP_HOLD_MS`) has its `giveUpHeldUntil`
+   * deadline recorded here as `pendingHolds[id][i]` — SAME session key, SAME index into that session's
+   * `pending` array — instead of on the entry itself.
+   *
+   * WHY NOT JUST WIDEN `pending`'S ELEMENT TYPE (code review on this same card measured the alternative
+   * and rejected it): `RestartIntent` is un-versioned JSON on disk (`readRestartIntent` is a bare
+   * `JSON.parse(...) as RestartIntent`, no schema/version check) that an OLDER daemon binary can read —
+   * this project's own documented pattern of running a second stable daemon from a separate checkout
+   * sharing `~/.loom`, or a rollback landing in the gap between this daemon's exit-75 and the supervisor's
+   * relaunch. An older daemon's replay expects `pending[id][i]` to always be a plain string; handed an
+   * object instead, `enqueueStdin`'s `kind:"agent"` path short-circuits BOTH pre-fix shape guards
+   * (`sanitizeLoneSurrogates`/`isUntaggedSystemNudge`) before either inspects the value, and the eventual
+   * `.map(m=>m.text).join()` silently string-coerces it to `"[object Object]"` — the real message TEXT is
+   * gone, with no throw and no log. That is exactly the LOSS class this card's own constraint forbids
+   * ("fail toward a duplicate, never a loss"), reintroduced by the FIX meant to prevent a duplicate.
+   * Keeping `pending` a bare `string[]` and carrying the hold as this wholly separate, additive field
+   * means an older daemon reading a newer intent sees only strings it already knows how to handle — an
+   * unheld duplicate (the ALREADY-ACCEPTED pre-this-card behavior), never a garbled loss. Absent when
+   * nothing captured was still held (the overwhelmingly common case).
+   */
+  pendingHolds?: Record<string, Record<number, number>>;
   requestedAt: string;
 }
 

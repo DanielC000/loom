@@ -2105,15 +2105,30 @@ export class SessionService {
     //   because the boot scan (recoverUndeliveredMessagesOnBoot) is their single re-enqueue owner. Were
     //   they in BOTH stores, a normal daemon_restart would deliver them TWICE. Non-durable held items
     //   (worker reports, idle/resume nudges) carry no callback → stay in the snapshot, replayed as before.
+    //   Card 9e27f4d2: an entry still within its post-give-up hold window carries a `giveUpHeldUntil`
+    //   deadline, recorded in the SEPARATE, additive `pendingHolds` field (see its doc on RestartIntent
+    //   for why `pending` itself must stay a bare `string[]`) rather than on the entry. `pendingHolds`
+    //   is keyed by each entry's INDEX into `pending[sessionId]` — the filter/truncate below has to keep
+    //   `rawHolds`' indices lined up against `rawTexts` before re-deriving them against the FINAL
+    //   (filtered + truncated) array, since a dropped-for-length or truncated-away entry must not leave a
+    //   stale index pointing at the wrong (or a nonexistent) surviving entry.
     const PENDING_MAX_MSGS = 50;
     const PENDING_MAX_MSG_LEN = 100_000;
     const pending: Record<string, string[]> = {};
+    const pendingHolds: Record<string, Record<number, number>> = {};
     for (const { sessionId } of resume) {
-      const snap = this.pty
-        .getPersistablePending(sessionId)
-        .filter((m) => m.length <= PENDING_MAX_MSG_LEN)
+      const rawTexts = this.pty.getPersistablePending(sessionId);
+      const rawHolds = this.pty.getPersistablePendingHolds(sessionId);
+      const kept = rawTexts
+        .map((text, i) => ({ text, heldUntil: rawHolds[i] }))
+        .filter((e) => e.text.length <= PENDING_MAX_MSG_LEN)
         .slice(0, PENDING_MAX_MSGS);
-      if (snap.length > 0) pending[sessionId] = snap;
+      if (kept.length > 0) {
+        pending[sessionId] = kept.map((e) => e.text);
+        const holds: Record<number, number> = {};
+        kept.forEach((e, i) => { if (e.heldUntil !== undefined) holds[i] = e.heldUntil; });
+        if (Object.keys(holds).length > 0) pendingHolds[sessionId] = holds;
+      }
     }
     // Crash/shutdown transcript backstop (same as the SIGTERM/SIGINT path): snapshot every LIVE
     // session's engine transcript before we exit. The restart kills every pty; resume re-attaches the
@@ -2127,6 +2142,7 @@ export class SessionService {
       resume,
       requestedAt: new Date().toISOString(),
       ...(Object.keys(pending).length > 0 ? { pending } : {}),
+      ...(Object.keys(pendingHolds).length > 0 ? { pendingHolds } : {}),
     });
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
@@ -2532,8 +2548,40 @@ export class SessionService {
     // of worker reports / manager direction (agent) and idle/resume nudges (warning) that were pending at
     // restart. Ambiguous ⇒ bias to "agent" per the classification's own rule — a warning wrongly replayed
     // one-per-turn is a few extra benign turns, never a coalesced-away agent message.
+    //
+    // Card 9e27f4d2: `intent.pendingHolds[id]` carries, by INDEX into `intent.pending[id]`, the
+    // `giveUpHeldUntil` deadline of any entry that was still within its give-up hold window at capture
+    // time (a SEPARATE, additive field — see RestartIntent's doc for why `pending` itself stays a bare
+    // `string[]` rather than folding this in). Restoring it via enqueueStdin's `giveUpHeldUntil` param
+    // keeps `isGiveUpHeld` honoring the hold until it naturally expires post-boot, instead of the entry
+    // landing as an ordinary, unheld, immediately-drainable message. Logged distinguishably (the DoD's own
+    // "explicit, logged, justified choice" clause) — since no confirming hook can ever reach a dead
+    // process's generation, this entry's eventual delivery is a CERTAIN duplicate once the hold expires,
+    // not a maybe; the log is what makes that duplicate identifiable to an operator instead of mysterious.
+    //
+    // DEFENSIVE per-entry: `intent` is un-versioned on-disk JSON an older/future daemon binary could also
+    // write or partially write (see RestartIntent's doc) — a malformed entry (wrong type, a stray index in
+    // `pendingHolds` with no live counterpart) must never throw here. `resumeFleetOnBoot` has no per-call
+    // try/catch of its own and `clearRestartIntent()` has already run by the time this fires (index.ts), so
+    // an uncaught throw here would abort resuming every LATER session in the fleet with the intent file
+    // already gone — nothing left to retry from. Skip-and-log beats fail-fast for this one caller.
     const replayPending = (id: string): void => {
-      for (const m of intent.pending?.[id] ?? []) this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent");
+      const holds = intent.pendingHolds?.[id] ?? {};
+      (intent.pending?.[id] ?? []).forEach((m, i) => {
+        try {
+          if (typeof m !== "string") {
+            console.warn(`[restart] ${id} skipped a malformed pending entry at index ${i} (expected string, got ${typeof m}) — a corrupted or foreign-version restart-intent file`);
+            return;
+          }
+          const giveUpHeldUntil = typeof holds[i] === "number" ? holds[i] : undefined;
+          if (giveUpHeldUntil !== undefined) {
+            console.log(`[restart] ${id} restoring a give-up hold onto a replayed entry (~${Math.max(0, giveUpHeldUntil - Date.now())}ms remaining) — this entry will still deliver as a duplicate once the hold expires (no confirming hook can reach a dead process's generation), held from drain until then; card 9e27f4d2`);
+          }
+          this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, giveUpHeldUntil);
+        } catch (e) {
+          console.warn(`[restart] ${id} failed to replay a pending entry at index ${i}: ${(e as Error)?.message ?? e}`);
+        }
+      });
     };
     const isParked = (id: string): boolean => {
       const s = this.db.getSession(id);
