@@ -75,16 +75,27 @@ const TEST_TIMEOUT_MS = 120_000;
 // merge-stranded-backstop.mjs flaked the same way at cap=2/concurrent=2; gate-timeout-circuit-breaker.mjs
 // — card 6436bd5a — timed out under concurrent gate load but measured ~50-52s standalone on a quiet host,
 // 3/3 runs, with every stubbed gate call resolving instantly: its cost is entirely the real
-// `confirmWorkerMerge` union-merges + createWorktree + commits across its 8 blocks, not a hang). Raising
-// TEST_TIMEOUT_MS itself would dull fast-fail for the ~296 OTHER hermetic tests that have nothing to do
-// with git contention, so instead this is a small, explicit per-test override — same documented-list
+// `confirmWorkerMerge` union-merges + createWorktree + commits across its 8 blocks, not a hang;
+// merge-gate-reuse.mjs — card 2bb7a114 — rejected an innocent card's merge gate with `exit timeout`
+// despite being the HEAVIEST of these by real git-work volume (50 git invocations · 52
+// createWorktree/confirmWorkerMerge calls); measured 7/7 standalone runs on a quiet host: 6 clustered
+// 52-58s, but one (immediately after a fresh build) spiked to 130s — already past the blanket ceiling
+// even standalone, before any concurrent-gate contention is added on top; merge-confirm-completion-nudge.mjs
+// — same sweep — measured a rock-steady 83-84s across 3 standalone runs, by design: 6 scenarios each
+// deliberately wait out a real `confirmWorkerMergeTracked` gate rather than stub it, so ~78s of its ~84s
+// is genuine wall-clock wait, not host contention — already 70% of the blanket budget on an idle host).
+// Raising TEST_TIMEOUT_MS itself would dull fast-fail for the ~296 OTHER hermetic tests that have nothing
+// to do with git contention, so instead this is a small, explicit per-test override — same documented-list
 // shape as NOT_HERMETIC above — giving just these git-heavy tests real headroom. A genuine infinite hang
-// in any of them still gets killed and reported, just at a ceiling actually sized for their real workload
-// instead of one with zero margin.
+// in any of them still gets killed and reported (verified: the same kill-and-report path fires and
+// reports `status:"timeout"` regardless of the ceiling value), just at a ceiling actually sized for their
+// real workload instead of one with zero margin.
 const TEST_TIMEOUT_OVERRIDES = {
   "merge-repo-mutex": 300_000, // 15 trials x 2 concurrent real merges + a full content-integrity sweep
   "merge-stranded-backstop": 300_000, // 2x createWorktree + reviewWorkerMerge/confirmWorkerMerge, all real git
   "gate-timeout-circuit-breaker": 300_000, // measured ~50-52s standalone (3 runs); ~6x headroom for 8 blocks x real union-merges/createWorktree/commits under concurrent gate contention
+  "merge-gate-reuse": 360_000, // measured 52-58s x6 + one 130s outlier (7 standalone runs, quiet host); heaviest of these by git+merge-call volume and the one that actually timed out in production (card 2bb7a114) — ~6.7x the steady median / ~2.8x the observed outlier
+  "merge-confirm-completion-nudge": 240_000, // measured 83-84s x3 (quiet host, low variance — dominated by 6 deliberate real-gate waits, not contention); ~2.9x headroom over its steady measured cost
 };
 const tmpRoots = [];
 
