@@ -141,6 +141,21 @@ const GIVE_UP_CONFIRM_SETTLE_POLL_MS = Number(process.env.LOOM_GIVE_UP_CONFIRM_S
 const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) || 20;
 
 /**
+ * Card 73d5c34a: how long a GIVE-UP-requeued entry stays INELIGIBLE for `drainPending` after
+ * `requeueGiveUpOrigin` puts it back on `live.pending`, giving a late confirming hook a fair window to
+ * `purgeConfirmedGiveUpRequeue` it before anything can resubmit it a second time — see that method's doc
+ * for the race this closes (a ~10s reconcile tick beating a merely-late hook to the punch). Sized well
+ * past one reconcile tick (`watchers.reconcileMs`, daemon-default 10_000ms) so an ordinary reconcile pass
+ * can never win the race outright; NOT tied to the live reconcile interval itself (this file has no
+ * access to that daemon-resolved config, and coupling to it would make the bound implicit and
+ * un-overridable in isolation). Still a HARD bound, never infinite: a genuine give-up (no hook ever
+ * arrives) is held only this long before falling through to the pre-existing recovery-and-drain behavior
+ * (card 441499ee) — the silent-drop protection that bound exists to preserve. Env-overridable so a
+ * hermetic test can shrink it instead of waiting real seconds.
+ */
+const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
+
+/**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
  * worker reports and pastes arriving cut off in the receiving session. Split big writes into
  * paced chunks so the console host drains between them. Keystroke-sized writes take one chunk.
@@ -1318,8 +1333,13 @@ export type QueuedMessageKind = "warning" | "agent";
  * started (see `purgeConfirmedGiveUpRequeue`) — so this is the correlation a late confirmation uses to
  * find and purge the now-redundant requeued copy before it can ever drain and double-deliver the same
  * text. undefined for every entry that was never requeued.
+ *
+ * `giveUpHeldUntil` (card 73d5c34a) is the epoch-ms deadline before which this SAME requeued entry is
+ * ineligible for `drainPending` — see `isGiveUpHeld`/`GIVE_UP_HOLD_MS`. Stamped alongside `giveUpGen` in
+ * `requeueGiveUpOrigin`, never elsewhere; undefined for every entry that was never requeued (so a normal
+ * message's drain eligibility is untouched — `isGiveUpHeld` is false whenever this is undefined).
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number };
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -4059,6 +4079,16 @@ export class PtyHost {
    *
    * STILL one submit per drain in EITHER mode: the splice + concat + submit are SYNCHRONOUS in one tick,
    * so the load-bearing M1/M2 busy-gate invariants are untouched. Daemon-wide, no role special-casing.
+   *
+   * Card 73d5c34a: a GIVE-UP-requeued entry that is still `isGiveUpHeld` (see that method) is skipped when
+   * choosing what to drain — it stays in `pending` at its current position, untouched, while the search
+   * for an eligible head continues past it. This is what stops a held entry (unshifted to the FRONT by
+   * `requeueGiveUpOrigin`) from stalling every unrelated queued message behind it: the FIRST non-held
+   * entry becomes this drain's effective head, and the same route/kind run-collection below additionally
+   * stops at the next held entry it meets (never folding a still-ambiguous entry into a run). If EVERY
+   * pending entry is held, this call is a no-op — exactly as if the queue were empty — and the reconcile
+   * tick that called us will simply find the same thing next time until a hook purges the hold or it
+   * expires (`GIVE_UP_HOLD_MS`).
    */
   private drainPending(sessionId: string): void {
     const live = this.live.get(sessionId);
@@ -4079,11 +4109,15 @@ export class PtyHost {
     // turn the caller's own `pty.stop()` would then kill with no way to recapture it.
     if (live.drainHeld) return;
     if (this.deferForHumanDraft(live)) return; // HOLD while the human's raw composer is dirty — never land on half-typed text
-    const head = live.pending[0]!;
+    // Find the first entry NOT currently held by an unresolved give-up requeue (card 73d5c34a) — held
+    // entries stay in place, ineligible, so they can never be the effective head of this drain.
+    const startIdx = live.pending.findIndex((m) => !this.isGiveUpHeld(m));
+    if (startIdx === -1) return; // every pending entry is held — nothing eligible to drain yet
+    const head = live.pending[startIdx]!;
     let drained: QueuedMessage[];
     if (!this.coalesceAgentMessages && head.kind === "agent") {
       // One-per-turn (default): an agent-authored message never shares a turn with anything else.
-      drained = live.pending.splice(0, 1);
+      drained = live.pending.splice(startIdx, 1);
     } else {
       // ROUTE-KEYED coalescing (Loom Companion multi-channel): coalesce ONLY the LEADING run of pending
       // messages that share the FIRST entry's route key. Messages with NO route (the manager→worker direction
@@ -4092,15 +4126,18 @@ export class PtyHost {
       // DISTINCT next turn on the next Stop. So EVERY turn has EXACTLY ONE originating route ⇒ chat_reply
       // resolves it unambiguously and cross-delivery is impossible by construction (no runtime check needed).
       // ALSO bounded to same-KIND entries (never mix a warning and an agent message into one turn) UNLESS
-      // coalesceAgentMessages is on, in which case kind is ignored (today's legacy full-coalesce).
+      // coalesceAgentMessages is on, in which case kind is ignored (today's legacy full-coalesce). ALSO
+      // bounded to non-held entries (card 73d5c34a) — a held entry immediately past the head stops the run
+      // rather than being folded into it, same reasoning as `startIdx` above.
       const key = routeKeyOf(head.route);
       let n = 1;
       while (
-        n < live.pending.length
-        && routeKeyOf(live.pending[n]!.route) === key
-        && (this.coalesceAgentMessages || live.pending[n]!.kind === head.kind)
+        startIdx + n < live.pending.length
+        && !this.isGiveUpHeld(live.pending[startIdx + n]!)
+        && routeKeyOf(live.pending[startIdx + n]!.route) === key
+        && (this.coalesceAgentMessages || live.pending[startIdx + n]!.kind === head.kind)
       ) n++;
-      drained = live.pending.splice(0, n); // the leading same-route (+ same-kind, unless toggled) run
+      drained = live.pending.splice(startIdx, n); // the leading eligible same-route (+ same-kind, unless toggled) run
     }
     this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
@@ -4579,6 +4616,11 @@ export class PtyHost {
    * is ALSO pushed onto `live.giveUpConfirmQueue` (only when something was actually kept/requeued — a
    * budget-exhausted drop has nothing left to purge later) — that queue, not `live.submitGeneration`, is
    * what `purgeConfirmedGiveUpRequeue` correlates a late hook against; see its doc for why.
+   *
+   * Card 73d5c34a: each kept entry is ALSO stamped `giveUpHeldUntil` (now + `GIVE_UP_HOLD_MS`) — this is
+   * what makes `drainPending` treat it as ineligible until a confirming hook purges it OR the hold expires
+   * (see `isGiveUpHeld`), instead of the entry sitting at the front of `pending` as ordinary drainable
+   * content that a reconcile tick could resubmit before a late hook ever gets to purge it.
    */
   private requeueGiveUpOrigin(sessionId: string, gen: number): void {
     const live = this.live.get(sessionId);
@@ -4594,14 +4636,25 @@ export class PtyHost {
         console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — dropping for real instead of requeuing again`);
         continue;
       }
-      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen });
+      kept.push({ ...m, giveUpRequeues: requeues, giveUpGen: gen, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS });
     }
     if (kept.length > 0) {
       live.pending.unshift(...kept);
       live.giveUpConfirmQueue.push(gen);
       // eslint-disable-next-line no-console
-      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending — will drain on the next Stop/reconcile`);
+      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${GIVE_UP_HOLD_MS}ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
     }
+  }
+
+  /**
+   * Card 73d5c34a: is this requeued entry still within its post-give-up hold window (see
+   * `requeueGiveUpOrigin`'s `giveUpHeldUntil` stamp)? `drainPending` treats a held entry as ineligible —
+   * it must not be resubmitted while a late confirming hook could still arrive and prove the ORIGINAL
+   * (already-delivered) turn actually ran, which is exactly the race `purgeConfirmedGiveUpRequeue` used to
+   * lose against a reconcile tick. `undefined` (never requeued, i.e. almost every entry) is never held.
+   */
+  private isGiveUpHeld(entry: QueuedMessage): boolean {
+    return entry.giveUpHeldUntil !== undefined && Date.now() < entry.giveUpHeldUntil;
   }
 
   /**
@@ -4635,24 +4688,66 @@ export class PtyHost {
    * one-per-real-turn end signal — advances past the front, purging first (covering the case where
    * `UserPromptSubmit` for it was itself lost, per this file's "either hook is definitive" convention).
    *
-   * Residual (unchanged from before this card, out of scope, tracked by 04de8bbf): if a reconcile tick
-   * beats a merely-late hook to the punch and resubmits the requeued entry FIRST (bumping the generation
-   * before the confirmation arrives), this purge no longer finds anything to remove for that generation —
-   * the entry is already out being resubmitted under its own new generation. That ordering needs the
-   * discriminator itself fixed, not a bigger purge window.
+   * IMPROVED, NOT CLOSED (card 73d5c34a): a reconcile tick used to be able to beat a merely-late hook to
+   * the punch and resubmit the requeued entry FIRST (bumping the generation before the confirmation
+   * arrived), leaving this purge nothing to remove for that generation — the entry was already out being
+   * resubmitted under its own new generation, so the turn it originally came from would double-deliver.
+   * `requeueGiveUpOrigin`'s `giveUpHeldUntil` stamp plus `drainPending`'s `isGiveUpHeld` skip close THAT
+   * specific race (a reconcile tick can no longer resubmit a still-held entry out from under this purge).
+   * They do NOT make double-delivery structurally impossible — three real bypasses remain, deliberately
+   * left as residuals rather than "fixed": (1) a confirming hook arriving LATER than `GIVE_UP_HOLD_MS`
+   * still double-delivers — the hold is a best-effort window, not a guarantee, and the `Stop`-only path
+   * (both hooks lost) fires at TURN END, which a genuinely long-running turn (a manager mid-orchestration)
+   * routinely exceeds; (2) `consumePending`/`inbox_pull` splices the WHOLE queue, held entries included,
+   * treating them as delivered regardless of hold state; (3) `getPersistablePending` snapshots a held
+   * entry's TEXT ONLY (no `giveUpGen`/`giveUpHeldUntil`) into the daemon-restart intent, replayed on boot
+   * as a plain fresh message with neither this purge's protection nor the hold — tracked as its own
+   * follow-up card, not fixed here. The underlying discriminator decision (RECOVERY-vs-SUPPRESSED) this
+   * purge is a safety net FOR is untouched and stays `04de8bbf`'s open question; this card only narrows a
+   * wrong decision's consequence, it does not eliminate it.
+   *
+   * THE GUARD BELOW (card 73d5c34a, code review follow-up): the FIFO-front correlation above assumes the
+   * NEXT hook to arrive, whatever it is, most likely confirms the OLDEST still-ambiguous generation — true
+   * when every generation since `gen` has ALSO given up (this method's own established cross-generation
+   * case, still handled exactly as before). It stops being true the instant a genuinely FRESH, never-
+   * ambiguous generation is issued (e.g. an unrelated inbound message taking `enqueueStdin`'s idle
+   * immediate-submit path while `gen`'s requeued entry sits held) and that fresh generation confirms
+   * quickly and normally: THIS hook almost certainly proves the FRESH generation's own turn, not `gen`'s —
+   * yet unconditional correlation would still attribute it to `gen` and DELETE `gen`'s still-genuinely-
+   * unconfirmed entry, a SILENT LOSS worse than the duplicate this whole file exists to avoid ("fail
+   * toward a duplicate, never a loss" — a lost message is invisible to both sides; a duplicate is at least
+   * visible and was, in fact, how this very card's specimen was caught). So: only run the DESTRUCTIVE
+   * delete loop when `live.submitGeneration` is EITHER still `gen` itself (nothing new has been issued —
+   * the common, single-ambiguity case) OR is itself present in `giveUpConfirmQueue` (the current
+   * generation is ALSO an ambiguous give-up, i.e. the established cross-generation case) — otherwise a
+   * demonstrably fresh, non-ambiguous generation has taken over, and this hook is left for it: `gen`'s
+   * entry survives, un-purged, to resolve via its own bounded hold (a duplicate at worst) instead of being
+   * deleted on a misattributed guess. The `turnEnded` shift is left UNCONDITIONAL either way — it only
+   * ever discards BOOKKEEPING (which generation is "next to maybe-confirm"), never a `pending` entry, so
+   * there is no data-loss risk in still advancing past `gen` even when this hook wasn't really about it;
+   * leaving it un-advanced instead would leak `gen` in `giveUpConfirmQueue` forever once its entry has
+   * already drained under some later identity.
    */
   private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean): void {
     if (live.giveUpConfirmQueue.length === 0) return;
     const gen = live.giveUpConfirmQueue[0]!;
-    for (let i = live.pending.length - 1; i >= 0; i--) {
-      if (live.pending[i]!.giveUpGen === gen) {
-        const [dropped] = live.pending.splice(i, 1);
-        // eslint-disable-next-line no-console
-        console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative — a confirming hook proves generation ${gen}'s turn actually started; purged the requeued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
+    const genIsCurrentOrAlsoAmbiguous = live.submitGeneration === gen || live.giveUpConfirmQueue.includes(live.submitGeneration);
+    if (genIsCurrentOrAlsoAmbiguous) {
+      for (let i = live.pending.length - 1; i >= 0; i--) {
+        if (live.pending[i]!.giveUpGen === gen) {
+          const [dropped] = live.pending.splice(i, 1);
+          // eslint-disable-next-line no-console
+          console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative — a confirming hook proves generation ${gen}'s turn actually started; purged the requeued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
+        }
       }
+    } else {
+      // eslint-disable-next-line no-console
+      console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: a confirming hook arrived while generation ${gen} is still ambiguous, but generation ${live.submitGeneration} (a fresh, non-ambiguous submit) is now current — leaving generation ${gen}'s requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold`);
     }
     // Stop/StopFailure definitively closes this generation's ambiguity window — advance past it so the
     // NEXT hook (if any) correlates against whatever generation gave up after this one, not this one again.
+    // Unconditional even when the branch above declined to delete anything (see the method doc): this only
+    // discards bookkeeping, never a pending entry.
     if (turnEnded) live.giveUpConfirmQueue.shift();
   }
 

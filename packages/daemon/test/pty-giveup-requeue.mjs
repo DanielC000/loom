@@ -103,6 +103,14 @@ process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_PO
 // The bound this suite is guarding — pinned explicitly so the test doesn't silently drift if the default
 // constant is ever retuned.
 process.env.LOOM_GIVE_UP_REQUEUE_LIMIT = "1";
+// Card 73d5c34a: a GIVE-UP-requeued entry is now HELD from drain until a confirming hook purges it or this
+// bounded hold expires (see pty-giveup-hold-until-confirmed.mjs for that mechanism's own coverage). This
+// suite isn't exercising the hold itself — it wants the plain eventual-recovery-via-reconcile behavior
+// that predates it — so pin it small and wait past it (HOLD_WAIT below) before any reconcile() call that's
+// meant to actually drain an already-requeued entry.
+const HOLD_MS = 10;
+process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
+const HOLD_WAIT = HOLD_MS + 20;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
@@ -176,7 +184,10 @@ try {
       busyLog[SID].at(-1) === false);
 
     // Simulate the daemon's own periodic reconcile tick (wired externally in production — see
-    // PtyHost.reconcile's doc) — this is the real mechanism that would eventually pick this back up.
+    // PtyHost.reconcile's doc) — this is the real mechanism that would eventually pick this back up. Wait
+    // past the card 73d5c34a hold first: no confirming hook is coming in this suite, so the entry only
+    // becomes drain-eligible once its (pinned-small) hold expires.
+    await sleep(HOLD_WAIT);
     host.reconcile();
     check("(1) reconcile drained the requeued message: busy re-armed", busyLog[SID].at(-1) === true);
 
@@ -226,6 +237,10 @@ try {
       afterGiveUp.length === 2 && afterGiveUp[0].text === TEXT1 && afterGiveUp[1].text === TEXT2);
 
     // Drain (reconcile) — one-per-turn agent draining means only the HEAD (TEXT1) goes out, never TEXT2.
+    // Wait past TEXT1's card 73d5c34a hold first (no confirming hook is coming) so it's eligible again —
+    // otherwise this reconcile would correctly skip the still-held TEXT1 and drain TEXT2 instead (that
+    // no-stall behavior is pty-giveup-hold-until-confirmed.mjs's own scenario, not this suite's).
+    await sleep(HOLD_WAIT);
     host.reconcile();
     check("(2) ORDERING: draining resubmits TEXT1 (not TEXT2) — its body appears a SECOND time",
       written().split(TEXT1).length - 1 === 2 && !written().includes(TEXT2));

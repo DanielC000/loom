@@ -77,6 +77,14 @@ process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_FIRST_TURN_STALE_MS = String(FIRST_TURN_STALE);
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+// Card 73d5c34a: the restore healIfStuck triggers goes through the SAME `requeueGiveUpOrigin` the normal
+// give-up path uses, so the restored entry is now HELD from drain until a confirming hook purges it or
+// this bounded hold expires (see pty-giveup-hold-until-confirmed.mjs for that mechanism's own coverage).
+// This suite isn't exercising the hold itself — pin it small and wait past it (HOLD_WAIT) before the extra
+// reconcile() call that now performs the redrain (no longer atomic with the CLEAR's own reconcile() call).
+const HOLD_MS = 10;
+process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
+const HOLD_WAIT = HOLD_MS + 20;
 const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 
@@ -155,12 +163,12 @@ try {
       backspaceCount() === 0);
 
     // Now let healIfStuck's stale-busy window elapse and drive the periodic heal directly — mirrors
-    // index.ts's real setInterval-wired reconcile(). NOTE: reconcile() calls healIfStuck() then
-    // drainPending() for the SAME session in the SAME pass — for a short burst like TEXT here,
-    // writeChunked's completion (and so the restore-and-requeue below) resolves synchronously within this
-    // one reconcile() call, so the restored message is ALREADY re-drained (busy re-armed, pending empty
-    // again) by the time reconcile() returns. That cascade is itself proof the restore is real and live —
-    // a discarded message could never re-arm busy or write TEXT a second time.
+    // index.ts's real setInterval-wired reconcile(). reconcile() calls healIfStuck() then drainPending()
+    // for the SAME session in the SAME pass, so the CLEAR (backspace burst) and the restore-via-
+    // requeueGiveUpOrigin both fire from this one call — but card 73d5c34a now HOLDS that restored entry
+    // from drain until a confirming hook purges it or its (pinned-small, HOLD_WAIT-bounded) hold expires,
+    // so the redrain itself is no longer atomic with this same reconcile() call; a SECOND reconcile() call
+    // after waiting past the hold performs it below.
     const bodyOccurrences = () => fake.writes.join("").split(TEXT).length - 1;
     const beforeHeal = bodyOccurrences();
     await sleepUntil(t0, giveUpAt() + FIRST_TURN_STALE + FIRST_TURN_STALE / 2);
@@ -169,10 +177,14 @@ try {
       backspaceCount() === TEXT.length);
 
     // Card 2c3c4aff: THE FIX — the cleared text must not simply vanish. `requeueGiveUpOrigin` fired (the
-    // SAME mechanism the normal give-up path uses) and the restored entry was genuinely re-delivered to
-    // the pty a SECOND time, rather than being discarded after the composer clear.
+    // SAME mechanism the normal give-up path uses) — restored (held) rather than discarded.
     check("(1) THE FIX: healIfStuck's clear triggered the SAME give-up restore the normal path uses",
       requeueLinesFor(SID).length === 1);
+
+    // Card 73d5c34a: no confirming hook is coming in this suite — wait past the pinned-small hold, then
+    // reconcile again to actually redrain the now-eligible restored entry.
+    await sleep(HOLD_WAIT);
+    host.reconcile();
     check("(1) THE RESTORE IS LIVE: the restored text was actually re-submitted to the pty a second time",
       bodyOccurrences() === beforeHeal + 1); // beforeHeal already counts the original (suppressed) submit; +1 is the restore-redrain
     check("(1) busy re-armed from the restore's own redrain (proves it wasn't just queued and forgotten)",
@@ -206,8 +218,9 @@ try {
     await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
     check("(2) GIVE-UP SUPPRESSED on turn 2 too", busyLog[SID].at(-1) === true);
 
-    // Same reconcile()-cascade note as scenario (1): heal + restore-and-redrain both resolve inside this
-    // one reconcile() call for a short burst like SECOND_TEXT.
+    // Same reconcile()-cascade note as scenario (1): heal fires from this call, but card 73d5c34a HOLDS
+    // the restored entry from drain until a confirming hook purges it or its hold expires — the redrain
+    // itself now needs a second reconcile() call after waiting past the (pinned-small) hold.
     const bodyOccurrences2 = () => fake.writes.join("").split(SECOND_TEXT).length - 1;
     const beforeHeal2 = bodyOccurrences2();
     await sleepUntil(t0, giveUpAt() + BUSY_STALE_MS + BUSY_STALE_MS / 2);
@@ -218,6 +231,9 @@ try {
     // Card 2c3c4aff: the restore fires on the busyStaleMs path too — not just the FIRST_TURN_STALE_MS path.
     check("(2) THE FIX applies on the busyStaleMs path too: the give-up restore mechanism fired",
       requeueLinesFor(SID).length === 1);
+
+    await sleep(HOLD_WAIT);
+    host.reconcile();
     check("(2) THE RESTORE IS LIVE on the busyStaleMs path too: re-submitted to the pty a second time",
       bodyOccurrences2() === beforeHeal2 + 1);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
