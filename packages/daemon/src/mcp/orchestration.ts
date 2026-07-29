@@ -5,7 +5,7 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
@@ -995,6 +995,19 @@ export class OrchestrationMcpRouter {
       return { staleDirective: { msgId, deliveredAt, turnsSinceDelivery } };
     };
 
+    // Card ae0b7891: "archived without report" — the archived counterpart to reportedState's "awaiting
+    // review" signal above. A worker whose pty exits without ever calling worker_report is archived by
+    // archiveOnExit (sessions/service.ts) exactly like a worker that DID report and cleanly retired —
+    // reportedState alone can't tell them apart (see reportedProjection's own freshness doc above: ANY
+    // later event, including the noChanges auto-retire path's own bookkeeping stop_worker event, reads
+    // reportedState back to null even after a genuine report). sessions.isArchivedWithoutReport reuses
+    // notifyManagerOfExitedWorker's own gate instead (a durable worker_exited_without_report event,
+    // written ONLY for a genuinely-unreported exit — never for an auto-retire's deliberate/`intended`
+    // stop), re-checked live so it self-clears once the manager resolves it.
+    const archivedWithoutReport = (workerSessionId: string): { archivedWithoutReport: boolean } => (
+      { archivedWithoutReport: sessions.isArchivedWithoutReport(workerSessionId) }
+    );
+
     // Card 93609ef3: a recycled SUCCESSOR manager (fresh sessionId via recycleManager) must still be able
     // to READ a worker its PREDECESSOR spawned — `recycleManager` only re-parents LIVE workers
     // (reparentLiveWorkers), so a worker that had already reported done/blocked/exited before the recycle
@@ -1092,6 +1105,7 @@ export class OrchestrationMcpRouter {
         rateLimitDeadline: w.rateLimitDeadline ?? null,
         ...reportedProjection(w.id),
         ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
+        ...archivedWithoutReport(w.id),
       }));
       const pendingSpawns = sessions.listPendingSpawns(managerSessionId).map((op) => ({
         workerSessionId: null,
@@ -1110,6 +1124,7 @@ export class OrchestrationMcpRouter {
         reportedState: null,
         awaitingReview: false,
         staleDirective: null,
+        archivedWithoutReport: false,
       }));
       // A worker_spawn REJECTED purely because the concurrency cap was full gets its own ADDITIVE
       // placeholder row — distinct from `pendingSpawn` above (which is an IN-FLIGHT spawn still
@@ -1135,20 +1150,57 @@ export class OrchestrationMcpRouter {
         reportedState: null,
         awaitingReview: false,
         staleDirective: null,
+        archivedWithoutReport: false,
       }));
-      return [...workers, ...pendingSpawns, ...capQueued];
+      // Archived-without-report workers (card ae0b7891): the archived counterpart to the three
+      // categories above — a worker that genuinely vanished (exited without ever calling worker_report)
+      // instead of silently disappearing from the fleet view once archiveOnExit stamps archivedAt.
+      // listWorkerSessionIdsWithEventKind is the existing "which sessions ever had event kind X" lookup
+      // (built for the crash-recovery watcher, already indexed) — reused here rather than adding a new
+      // SQL join. Bounded/self-clearing: isArchivedWithoutReport re-checks live, so this only ever holds
+      // workers still worth the manager's attention (see its own doc for why).
+      //
+      // LINEAGE, not exact parent match (card 93609ef3's own reasoning applies verbatim here): an
+      // archived-without-report worker is by definition exited and was never re-parented by
+      // reparentLiveWorkers (which only moves LIVE workers on recycle), so after a manager recycle it
+      // keeps parentSessionId pointing at the now-retired predecessor. An exact match would silently
+      // hide it from the successor manager — exactly the finding this category exists to surface. Unlike
+      // the real `workers` list above (deliberately exact-match, per workerReadableByManager's own doc),
+      // this NEW category has no such precedent to preserve, so it uses the lineage-tolerant read guard.
+      const archivedUnreported = db.listWorkerSessionIdsWithEventKind(["worker_exited_without_report"])
+        .map((id) => db.getSession(id))
+        .filter((w): w is Session => !!w && workerReadableByManager(w) && sessions.isArchivedWithoutReport(w.id))
+        .map((w) => ({
+          workerSessionId: w.id,
+          taskId: w.taskId ?? null,
+          processState: w.processState,
+          busy: false,
+          branch: w.branch ?? null,
+          ctxInputTokens: w.ctxInputTokens ?? null,
+          model: w.model ?? null,
+          lastActivity: w.lastActivity,
+          lastEngineOutputAt: null,
+          pendingMerge: null,
+          rateLimitedUntil: null,
+          rateLimitDeadline: null,
+          reportedState: null,
+          awaitingReview: false,
+          staleDirective: null,
+          archivedWithoutReport: true,
+        }));
+      return [...workers, ...pendingSpawns, ...capQueued, ...archivedUnreported];
     };
 
     server.registerTool(
       "worker_list",
-      { description: "List the workers you (this manager) have spawned — your direct children. `staleDirective` (non-null: `{msgId, deliveredAt, turnsSinceDelivery}`) flags a worker_message directive that was DELIVERED but has no worker_report since — distinct from the `{delivered:true}` worker_message itself returns, which only proves the text was submitted/queued, never that it was acted on. Fires only once the worker has completed several of its OWN real turns with no report at all since delivery (never on a single long-running turn, however long); clears the instant any worker_report lands, or once you send a newer worker_message (tracking always follows your MOST RECENT one — `worker_redirect` is a separate channel this does not track). `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all. It AUTO-FIRES on its own (FIFO — oldest queued first) the next time a concurrency slot on this manager actually frees, with no re-call needed; you can still re-`worker_spawn` the same taskId/agentId by hand if you don't want to wait, which clears the marker the same way it always did. If an auto-fire attempt itself fails for a real reason (its task went terminal/held, its worktree couldn't be created, …) you get a `[loom:cap-queue-autofire-failed]` message naming the opId/task/agent — the entry is dropped at that point and needs a fresh worker_spawn. To withdraw a queued entry BEFORE it fires, call `worker_stop({opId})` (see worker_stop's own docs) — it never auto-dispatches after that. Never count either placeholder as live or awaiting review.", inputSchema: strictShape({}) },
+      { description: "List the workers you (this manager) have spawned — your direct children. `staleDirective` (non-null: `{msgId, deliveredAt, turnsSinceDelivery}`) flags a worker_message directive that was DELIVERED but has no worker_report since — distinct from the `{delivered:true}` worker_message itself returns, which only proves the text was submitted/queued, never that it was acted on. Fires only once the worker has completed several of its OWN real turns with no report at all since delivery (never on a single long-running turn, however long); clears the instant any worker_report lands, or once you send a newer worker_message (tracking always follows your MOST RECENT one — `worker_redirect` is a separate channel this does not track). `reportedState` (done|blocked|null) + `awaitingReview` flag a worker that has called worker_report and is sitting idle awaiting your review (cleared once it resumes a turn / is merged). `archivedWithoutReport:true` flags a worker whose pty EXITED WITHOUT EVER CALLING worker_report — it no longer counts against your concurrency cap, but it did NOT silently vanish: this row is a distinct ADDITIVE category (a real worker row, `processState` reflects its actual exit state) that appears ONLY for a genuinely-unreported strand, never for a worker that reported (even `noChanges`) and cleanly auto-retired — pull `worker_transcript` to see what it did, then `worker_merge` to review/merge any committed work, or re-dispatch the task. It clears on its own once you resolve it (move the task off its active lane, or spawn/recycle a successor). `pendingMerge` (non-null) on a row means a worker_merge_confirm for it is either still in flight (`state:\"running\"` — poll here or re-call worker_merge_confirm to fetch the result once ready) OR has JUST settled (`state:\"done\"|\"failed\"` with an `outcome` of `\"merged\"|\"rejected\"|\"failed\"` — a brief retained view of the terminal result, visible here for a few seconds after settling so you don't have to re-call to see it). Once `state` is no longer `\"running\"` the merge is ALREADY DONE — read `outcome` here directly, no need to re-call worker_merge_confirm just to learn it (re-calling it anyway while this view is still showing is safe — see worker_merge_confirm's own docs for why). A genuine RE-RUN (retry after a rejection, or completing a nested-repo worktree cleanup) needs either this retained view to expire first, or forceRemoveWorktree:true on the re-call (an explicit escalation that always runs for real). `rateLimitedUntil`/`rateLimitDeadline` (non-null) mean the worker is PARKED ON A USAGE CAP — busy will read false but this is NOT a healthy idle worker; it resumes on its own once `rateLimitedUntil` passes (`rateLimitDeadline` is the give-up horizon). `lastEngineOutputAt` is an INTRA-TURN liveness signal, distinct from `lastActivity` (which only moves at turn boundaries): it advances on every chunk of engine output, so it keeps moving THROUGH a single long turn — a recent `lastEngineOutputAt` on a `busy:true` row means the engine is actively producing (busy + progressing); a stale one means it may be wedged. Cheaper than a worker_transcript pull just to check liveness. `null` means the session isn't live in this daemon process. A worker_spawn still running past the sync-wait budget shows up as an ADDITIVE placeholder row: `workerSessionId:null`, `pendingSpawn:{opId,startedAt}`, `processState:\"starting\"` — not a real worker yet, so don't count it as live or awaiting review; poll here or re-call worker_spawn (same taskId/agentId/kickoffPrompt) to fetch the result. A worker_spawn REJECTED outright because the concurrency cap was full ALSO shows up as an ADDITIVE placeholder row — distinct from the pending one above: `workerSessionId:null`, `processState:\"cap-queued\"`, `capQueued:{opId,agentId,taskId,kickoffLabel,queuedAt}` — the intent never started at all. It AUTO-FIRES on its own (FIFO — oldest queued first) the next time a concurrency slot on this manager actually frees, with no re-call needed; you can still re-`worker_spawn` the same taskId/agentId by hand if you don't want to wait, which clears the marker the same way it always did. If an auto-fire attempt itself fails for a real reason (its task went terminal/held, its worktree couldn't be created, …) you get a `[loom:cap-queue-autofire-failed]` message naming the opId/task/agent — the entry is dropped at that point and needs a fresh worker_spawn. To withdraw a queued entry BEFORE it fires, call `worker_stop({opId})` (see worker_stop's own docs) — it never auto-dispatches after that. Never count either placeholder as live or awaiting review.", inputSchema: strictShape({}) },
       async () => ok(fleetView()),
     );
 
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `staleDirective` (see worker_list) — a delivered worker_message with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent vs. `lastActivity` tells you whether a busy worker is actively progressing or possibly wedged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
+        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `archivedWithoutReport` (see worker_list) — true only when this worker's pty EXITED WITHOUT EVER CALLING worker_report and the strand is still unresolved; NEVER true for a worker that reported (even `noChanges`) and cleanly auto-retired. Also includes `staleDirective` (see worker_list) — a delivered worker_message with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent vs. `lastActivity` tells you whether a busy worker is actively progressing or possibly wedged. Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
         inputSchema: strictShape({ workerSessionId: z.string().optional() }),
       },
       async ({ workerSessionId }) => {
@@ -1162,6 +1214,7 @@ export class OrchestrationMcpRouter {
           pendingMerge: sessions.peekPendingMerge(w.id) ?? null,
           ...reportedProjection(w.id),
           ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
+          ...archivedWithoutReport(w.id),
         });
       },
     );

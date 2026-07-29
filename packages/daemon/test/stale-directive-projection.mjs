@@ -106,6 +106,7 @@ const router = new OrchestrationMcpRouter(db, /** @type {any} */ ({
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
   listCapQueuedSpawns() { return []; },
+  isArchivedWithoutReport() { return false; }, // card ae0b7891: no archived-without-report worker in this test
 }));
 const server = router.buildServer("MGR", "manager");
 const [clientT, serverT] = InMemoryTransport.createLinkedPair();

@@ -49,6 +49,7 @@ const sessionsStub = {
   peekPendingMerge(workerSessionId) { return workerSessionId === "w-merging" ? PENDING_MERGE_VIEW : undefined; },
   listPendingSpawns(managerSessionId) { return managerSessionId === "mgr" ? [PENDING_SPAWN] : []; },
   listCapQueuedSpawns() { return []; }, // no cap-queued markers in this stub's scenario — exercised for real in worker-spawn-cap-queue.mjs
+  isArchivedWithoutReport() { return false; }, // card ae0b7891: no archived-without-report worker in this stub's scenario
 };
 
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));

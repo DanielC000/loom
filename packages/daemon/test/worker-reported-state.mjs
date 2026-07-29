@@ -94,11 +94,14 @@ ev("w-other", "MGR2", "worker_report", at(10), { status: "done", summary: "not y
 
 // --- drive the REAL manager MCP tools in-process. fleetView/worker_status read `pendingMerge`/pending
 // spawns off `sessions` (card fb8df559 Part 1) — no pending ops in this test, so no-ops mirroring
-// PendingOpRegistry's "nothing tracked" shape; otherwise the stub is unused by worker_list/worker_status. ---
+// PendingOpRegistry's "nothing tracked" shape; otherwise the stub is unused by worker_list/worker_status.
+// isArchivedWithoutReport (card ae0b7891) is a separate, additive projection this file doesn't exercise
+// (every worker seeded here is live, never archived) — stubbed false so the call doesn't throw. ---
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ ({
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
   listCapQueuedSpawns() { return []; },
+  isArchivedWithoutReport() { return false; },
 }));
 const server = router.buildServer("MGR", "manager");
 const [clientT, serverT] = InMemoryTransport.createLinkedPair();

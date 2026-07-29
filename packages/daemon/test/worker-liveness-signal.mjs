@@ -87,6 +87,7 @@ const sessionsStub = {
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
   listCapQueuedSpawns() { return []; },
+  isArchivedWithoutReport() { return false; }, // card ae0b7891: no archived-without-report worker in this test
 };
 
 const host = new TestPtyHost(events);

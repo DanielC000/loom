@@ -6504,6 +6504,33 @@ export class SessionService {
   }
 
   /**
+   * True while a worker's exit is a genuinely-unreported strand still worth the manager's attention
+   * (card ae0b7891) — the archived counterpart to reportedState's "awaiting review" signal
+   * (mcp/orchestration.ts reportedProjection). reportedState:null is AMBIGUOUS between "never reported"
+   * and "reported, then a LATER event pushed it back to null" (e.g. the noChanges auto-retire path's own
+   * `stop_worker` bookkeeping event in workerReport — see that method's autoRetireNoCommit branch), so
+   * this deliberately does NOT derive from reportedState at all. It reuses
+   * notifyManagerOfExitedWorker's own gate instead: that method already writes a durable
+   * `worker_exited_without_report` event, and ONLY for a genuinely-unreported exit (gated on
+   * `intended:false` — never a Loom-issued pty.stop, which is exactly what auto-retire's own teardown
+   * uses, and on the task still sitting in the active lane — a noChanges report already moves it before
+   * any of this runs). Re-checked LIVE (not just "did the event ever fire") so the signal SELF-CLEARS
+   * once the manager resolves it — moves the task off the active lane, or a successor lands — instead of
+   * nagging forever from a stale historical event. The `archivedAt` check additionally guards against a
+   * flagged worker later being crash-resumed (restoreSession clears archivedAt) — it's live again, not
+   * "archived without report" anymore.
+   */
+  isArchivedWithoutReport(workerSessionId: string): boolean {
+    const w = this.db.getSession(workerSessionId);
+    if (!w || !w.taskId || !w.archivedAt) return false;
+    if (this.db.hasSuccessor(workerSessionId)) return false;
+    if (!this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_exited_without_report")) return false;
+    const task = this.db.getTask(w.taskId);
+    const activeKey = this.columnKeyForProjectRole(w.projectId, "active");
+    return !!task && task.columnKey === activeKey;
+  }
+
+  /**
    * Recycle a worker whose context has grown too large (phase-2 §A4). Close the old worker and
    * spawn a FRESH one in the SAME retained worktree, seeded with the manager-supplied handoff:
    * the worktree carries CODE state forward, the handoff carries INTENT — and we spawn fresh

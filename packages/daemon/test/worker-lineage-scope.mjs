@@ -87,6 +87,9 @@ const sessionsStub = {
   // test, so read-only no-ops mirroring PendingOpRegistry's "nothing tracked" shape.
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
+  listCapQueuedSpawns() { return []; },
+  // card ae0b7891: worker_status now also reads this — no archived-without-report worker in this test.
+  isArchivedWithoutReport() { return false; },
 };
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));
 const server = router.buildServer("NEW", "manager");
