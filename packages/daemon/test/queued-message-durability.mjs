@@ -21,6 +21,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         + resolves on the recipient's next turn.
 //     (c) UNDELIVERED OUTBOUND → a held message whose recipient isn't live at boot is SURFACED to the resumed
 //         (live) sender so it can re-send; a message to a RECYCLED/superseded recipient is RETIRED (bounded).
+//     (e)+(f)+(g)+(h) DISPATCH SEMANTICS SURVIVE A REDRIVE (card 129efe74) → the persisted
+//         session_message_queued detail carries kind/rootMsgId/chainDepth/giveUpHeldUntil, so a redrive
+//         preserves a "warning" classification and an in-flight give-up hold instead of silently resetting
+//         them to "agent"/no-hold/fresh-chain — and a LEGACY record (written before this card) still gets
+//         exactly the old hardcoded defaults, never something else.
 //
 // Run: 1) build daemon, 2) node test/queued-message-durability.mjs
 import fs from "node:fs";
@@ -102,19 +107,35 @@ try {
   // one delivers immediately (and, like the host, does NOT fire onDeliver). drainOne() simulates a turn
   // boundary: it hands the FIFO head to the recipient and fires its onDeliver.
   class PtyStub {
-    constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); }
+    constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); this.sent = []; }
     setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }
     setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
-    enqueueStdin(id, text, _source = "system", onDeliver) {
+    // Widened to the REAL enqueueStdin's positional shape (card 129efe74): captures `kind` per call (in
+    // `sent`, regardless of outcome) and models the REAL `stillGiveUpHeld` gate (pty/host.ts) so a redrive
+    // carrying a still-in-the-future `giveUpHeldUntil` is held even for an otherwise-idle recipient — without
+    // this the stub could never exercise the symptom this card fixes (a lost hold silently taking the
+    // immediate-delivery branch).
+    enqueueStdin(id, text, _source = "system", onDeliver, _route, kind = "warning", _questionId, _ownerText, _proactive, _senderId, giveUpHeldUntil, onGiveUpExhausted) {
+      this.sent.push({ id, text, kind });
       if (!this.live.has(id)) return { delivered: false };          // not alive → dropped (no position)
-      if (!this.busy.has(id)) return { delivered: true };           // idle → immediate (onDeliver NOT fired)
-      const a = this.q.get(id) ?? []; a.push({ text, onDeliver }); this.q.set(id, a);
+      const stillGiveUpHeld = giveUpHeldUntil !== undefined && Date.now() < giveUpHeldUntil;
+      if (!this.busy.has(id) && !stillGiveUpHeld) return { delivered: true }; // idle AND not held → immediate (onDeliver NOT fired)
+      const a = this.q.get(id) ?? []; a.push({ text, onDeliver, kind, giveUpHeldUntil, onGiveUpExhausted }); this.q.set(id, a);
       return { delivered: false, position: a.length };
     }
     drainOne(id) { const a = this.q.get(id) ?? []; const m = a.shift(); if (m?.onDeliver) m.onDeliver(); return m?.text; }
     // SUPERSEDE the head (as a redirectWorker flush does): pop it and fire its onDeliver WITH a reason,
     // so the durable record resolves annotated (e.g. "superseded") rather than as a plain delivery.
     supersedeHead(id, reason) { const a = this.q.get(id) ?? []; const m = a.shift(); if (m?.onDeliver) m.onDeliver(reason); return m?.text; }
+    // Simulates the REAL host's terminal give-up branch (mirrors give-up-exhausted-durable.mjs's own stub):
+    // pops the head and fires onDeliver (the pre-existing premature "delivered" marker) THEN onGiveUpExhausted.
+    giveUpOn(id) {
+      const a = this.q.get(id) ?? []; const m = a.shift();
+      if (!m) return undefined;
+      if (m.onDeliver) m.onDeliver();
+      if (m.onGiveUpExhausted) m.onGiveUpExhausted();
+      return m.text;
+    }
     getPending(id) { return (this.q.get(id) ?? []).map((m) => m.text); }
     getPersistablePending(id) { return (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text); }
     waitForMcpSeen() { return Promise.resolve(true); } // card df5e37e7 — see mcp-ready-gate.mjs for the primitive's own timing
@@ -263,12 +284,112 @@ try {
     check("(B-c) the recycled-recipient message is no longer in the undelivered set (bounded)", !db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("RECYCLED DISPATCH")));
   }
 
+  // ---- (B-e) SYMPTOM 1 (card 129efe74): a kind:"warning" durable dispatch round-trips as "warning" through
+  // BOTH halves of the fix — the WRITE side (enqueueDurableMessage persists ctx.kind in `detail`) and the
+  // READ side (redriveQueuedMessage reads it back instead of hardcoding "agent"). Pre-fix, the persisted
+  // detail carried no `kind` at all and the redrive unconditionally passed "agent" to enqueueStdin — both
+  // checks below fail red against that code.
+  {
+    const ptyPre = new PtyStub();
+    const sessionsPre = new SessionService(db, ptyPre, new OrchestrationControl());
+    const wkr = `qmd-e-wkr-${sfx}`;
+    mkSession({ id: wkr, role: "worker" });
+    ptyPre.setLive(wkr); ptyPre.setBusy(wkr); // busy → HELD (durable record)
+
+    const r = sessionsPre.enqueueDurableMessage(wkr, "[loom:gate-failed] warning-kind settle nudge", { sender: "system", taskId: null, kind: "warning" });
+    check("(B-e) setup: the warning-kind dispatch was HELD with a real msgId", r.delivered === false && typeof r.msgId === "string");
+    const rec = db.listUndeliveredQueuedMessages().find((e) => e.detail?.msgId === r.msgId);
+    check("(B-e) THE FIX (write side): the persisted session_message_queued record carries kind:\"warning\" (pre-fix: the field was absent entirely)", rec?.detail?.kind === "warning");
+
+    // Daemon restart: NEW pty, SAME db. Recipient resumes BUSY, so the redrive is HELD (observable in `sent`).
+    const ptyPost = new PtyStub();
+    const sessionsPost = new SessionService(db, ptyPost, new OrchestrationControl());
+    ptyPost.setLive(wkr); ptyPost.setBusy(wkr);
+    const m = sessionsPost.recoverUndeliveredMessagesOnBoot();
+    check("(B-e) boot scan re-enqueued the warning-kind message", m.reEnqueued === 1);
+    const sentEntry = ptyPost.sent.find((s) => s.id === wkr && s.text.includes("warning-kind settle nudge"));
+    check("(B-e) THE FIX (read side): the redrive passed kind:\"warning\" through to enqueueStdin (pre-fix: hardcoded \"agent\" here)", sentEntry?.kind === "warning");
+  }
+
+  // ---- (B-f) SYMPTOM 2 (card 129efe74): a re-mint's giveUpHeldUntil survives a restart — the redrive of
+  // that re-mint record must NOT take the immediate-delivery branch inside the hold window, even though the
+  // resumed recipient is otherwise idle. Pre-fix, `giveUpHeldUntil` was never persisted, so a restart landing
+  // mid-hold degraded the hold to nothing and the redrive delivered immediately — a duplicate turn.
+  {
+    const ptyPre = new PtyStub();
+    const sessionsPre = new SessionService(db, ptyPre, new OrchestrationControl());
+    const mgr = `qmd-f-mgr-${sfx}`, wkr = `qmd-f-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    ptyPre.setLive(mgr); ptyPre.setLive(wkr); ptyPre.setBusy(wkr); // busy → the dispatch is HELD (durable)
+
+    sessionsPre.messageWorker(mgr, wkr, "GIVES_UP_THEN_RESTARTS_MID_HOLD");
+    // Give up on the held message → handleGiveUpExhausted RE-MINTS it with giveUpHeldUntil = now + GIVE_UP_HOLD_MS.
+    ptyPre.giveUpOn(wkr);
+    const remintRec = db.listUndeliveredQueuedMessages().find((e) => e.workerSessionId === wkr && e.detail?.text?.includes("GIVES_UP_THEN_RESTARTS_MID_HOLD"));
+    check("(B-f) setup: the re-mint created its own undelivered durable record", !!remintRec);
+    check("(B-f) THE FIX (write side): the re-mint's record persists a still-future giveUpHeldUntil (pre-fix: the field was absent entirely)", typeof remintRec?.detail?.giveUpHeldUntil === "number" && remintRec.detail.giveUpHeldUntil > Date.now());
+
+    // Daemon restart mid-hold-window: NEW pty, SAME db. Recipient resumes and, crucially, goes IDLE (not
+    // busy) — the ONLY thing that should keep the redrive from delivering immediately is the persisted hold.
+    const ptyPost = new PtyStub();
+    const sessionsPost = new SessionService(db, ptyPost, new OrchestrationControl());
+    ptyPost.setLive(wkr); // idle, not busy
+    const m = sessionsPost.recoverUndeliveredMessagesOnBoot();
+    check("(B-f) boot scan re-enqueued the re-mint", m.reEnqueued === 1);
+    check("(B-f) THE FIX (read side): the redrive did NOT deliver immediately inside the hold window — it is still sitting HELD",
+      ptyPost.getPending(wkr).some((t) => t.includes("GIVES_UP_THEN_RESTARTS_MID_HOLD")));
+    const sentEntry = ptyPost.sent.find((s) => s.id === wkr && s.text.includes("GIVES_UP_THEN_RESTARTS_MID_HOLD"));
+    check("(B-f) DISCRIMINATING CONTROL: enqueueStdin really was attempted for this recipient (this isn't a no-op/skip masquerading as \"still held\")", !!sentEntry);
+  }
+
+  // ---- (B-g)/(B-h) LEGACY ROWS (card 129efe74 non-negotiable #2): a session_message_queued record written
+  // BEFORE this fix carries none of kind/giveUpHeldUntil/rootMsgId/chainDepth. The redrive must apply the
+  // EXACT defaults that reproduce this method's pre-fix behavior — never let a missing field silently become
+  // something OTHER than what pre-fix code always did (that is how this bug class arrived in the first place).
+  {
+    // (B-g) idle recipient → kind default + no-accidental-hold default.
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const wkr = `qmd-g-wkr-${sfx}`;
+    mkSession({ id: wkr, role: "worker" });
+    db.appendEvent({
+      id: `legacy-g-evt-${sfx}`, ts: now, managerSessionId: "legacy-sender", workerSessionId: wkr, taskId: null,
+      kind: "session_message_queued", detail: { msgId: `legacy-g-${sfx}`, text: "LEGACY_ROW_IDLE", sender: "legacy-sender" },
+    });
+    pty.setLive(wkr); // idle, no busy
+    const m = sessions.recoverUndeliveredMessagesOnBoot();
+    check("(B-g) the legacy record redrove", m.reEnqueued === 1);
+    const sentEntry = pty.sent.find((s) => s.text === "LEGACY_ROW_IDLE");
+    check("(B-g) DEFAULT kind → \"agent\" for a legacy record with no persisted kind", sentEntry?.kind === "agent");
+    check("(B-g) DEFAULT no hold → an idle recipient gets it delivered immediately (giveUpHeldUntil defaulted to undefined, not an accidental hold)", pty.getPending(wkr).length === 0);
+  }
+  {
+    // (B-h) busy recipient → rootMsgId/chainDepth defaults, proven via the resulting give-up event.
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const wkr = `qmd-h-wkr-${sfx}`;
+    mkSession({ id: wkr, role: "worker" });
+    const legacyMsgId = `legacy-h-${sfx}`;
+    db.appendEvent({
+      id: `legacy-h-evt-${sfx}`, ts: now, managerSessionId: "legacy-sender", workerSessionId: wkr, taskId: null,
+      kind: "session_message_queued", detail: { msgId: legacyMsgId, text: "LEGACY_ROW_BUSY", sender: "legacy-sender" },
+    });
+    pty.setLive(wkr); pty.setBusy(wkr); // held → observable in the FIFO, giveUpOn-able
+    const m = sessions.recoverUndeliveredMessagesOnBoot();
+    check("(B-h) the legacy record redrove HELD (busy recipient)", m.reEnqueued === 1 && pty.getPending(wkr).some((t) => t === "LEGACY_ROW_BUSY"));
+    pty.giveUpOn(wkr); // exhaust the (redriven) legacy message's in-session budget → re-mint
+    const gaveUpEvt = db.listEventsForWorker(wkr).find((e) => e.kind === "session_message_gave_up" && e.detail?.msgId === legacyMsgId);
+    check("(B-h) DEFAULT rootMsgId → self-rooted at the legacy record's OWN msgId (never recoverable, so it starts a fresh chain here)", gaveUpEvt?.detail?.rootMsgId === legacyMsgId);
+    check("(B-h) DEFAULT chainDepth → 0 (a legacy redrive is treated as a fresh dispatch)", gaveUpEvt?.detail?.chainDepth === 0);
+  }
+
   db.close();
 } finally {
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a queued (delivered:false) session_message is persisted to a durable inbox, survives sender death AND a daemon restart, re-enqueues EXACTLY once on boot (no double with intent.pending), delivers + resolves on the recipient's turn boundary, and surfaces still-undelivered outbound to a resumed sender (recycled recipients retired)."
+  ? "\n✅ ALL PASS — a queued (delivered:false) session_message is persisted to a durable inbox, survives sender death AND a daemon restart, re-enqueues EXACTLY once on boot (no double with intent.pending), delivers + resolves on the recipient's turn boundary, surfaces still-undelivered outbound to a resumed sender (recycled recipients retired), and a redrive reconstructs its ORIGINAL kind/give-up-hold/chain instead of resetting them — with a legacy pre-fix record still redriving under the old hardcoded defaults."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

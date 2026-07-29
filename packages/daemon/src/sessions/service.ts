@@ -3213,28 +3213,35 @@ export class SessionService {
       // it in-flight FIRST so the overlapping path skips it; the onDeliver wrapper clears the mark AND
       // resolves the durable record the instant the held message is finally handed to the recipient.
       this.redriveInFlightMsgIds.add(msgId);
-      // Re-driving a `session_message_queued` record — every such record originated from
-      // enqueueDurableMessage's kind:"agent" enqueue, so the redrive preserves that classification.
+      // Re-driving a `session_message_queued` record — read back the kind/hold/chain fields THIS record
+      // itself persisted (card 129efe74). Before that card this method hardcoded kind:"agent", dropped any
+      // in-flight give-up hold, and reset the chain to depth 0 on EVERY redrive — silently reclassifying a
+      // "warning" settle-nudge as "agent" and letting a restart mid-hold-window deliver a duplicate
+      // immediately. LEGACY ROWS (appended before card 129efe74) carry none of these fields — each default
+      // below reproduces this method's PRE-FIX behavior exactly, so an old undelivered record still redrives
+      // unchanged:
+      //   kind            → "agent"   (the only classification this method ever hardcoded before the fix)
+      //   giveUpHeldUntil → undefined (no hold — this method never passed one before the fix)
+      //   rootMsgId       → this record's own msgId (self-rooted — matches the old hardcoded 4th arg below)
+      //   chainDepth      → 0         (matches the old hardcoded 5th arg below)
       // CR follow-up (card ccb407eb, BLOCKING finding [2]): this call used to have NO onGiveUpExhausted at
       // all — a redriven message (the exact path a crashed/wedged session actually takes) that then gave up
       // hit the pre-card bare-drop branch: no re-mint, no park, no event, no sender surface, AND its
       // onDeliver had already fired (see resolveQueuedMessage's doc) so it would never be redriven again
       // either — Specimen Z's exact failure, intact, on this one path. Wired to the SAME handleGiveUpExhausted
       // policy as every other durable dispatch. `sender` mirrors recoverUndeliveredMessagesOnBoot's own
-      // fallback (`e.detail.sender`, else `e.managerSessionId`). `rootMsgId`/`chainDepth` are NOT recoverable
-      // here — session_message_queued's own detail never persisted them (only the in-memory
-      // enqueueDurableMessage/handleGiveUpExhausted closure chain carries them) — so a redrive is treated as
-      // a FRESH chainDepth-0 dispatch, self-rooted at `msgId`. This mirrors the project's existing precedent
-      // for in-memory give-up state that doesn't survive a restart: `giveUpGen`/`giveUpConfirmQueue` are
-      // likewise deliberately NOT reconstructed across one (see requeueGiveUpOrigin's own doc) — resetting
-      // rather than guessing at lost state, not a new gap this card introduces.
+      // fallback (`e.detail.sender`, else `e.managerSessionId`).
+      const kind: QueuedMessageKind = e.detail?.kind === "warning" ? "warning" : "agent";
+      const giveUpHeldUntil = typeof e.detail?.giveUpHeldUntil === "number" ? e.detail.giveUpHeldUntil : undefined;
+      const rootMsgId = typeof e.detail?.rootMsgId === "string" ? e.detail.rootMsgId : msgId;
+      const chainDepth = typeof e.detail?.chainDepth === "number" ? e.detail.chainDepth : 0;
       const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
       const r = this.pty.enqueueStdin(
         recipientId, text, "system", (reason?: string) => {
           this.redriveInFlightMsgIds.delete(msgId);
           this.resolveQueuedMessage(msgId, { recipientId, reason });
-        }, undefined, "agent", undefined, undefined, undefined, undefined, undefined,
-        () => this.handleGiveUpExhausted(recipientId, text, msgId, msgId, 0, sender, e.taskId ?? null, "agent"),
+        }, undefined, kind, undefined, undefined, undefined, undefined, giveUpHeldUntil,
+        () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
       );
       if (r.delivered || r.position !== undefined) return "reEnqueued";
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
@@ -4934,10 +4941,16 @@ export class SessionService {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
       // means "recipient not live": we still record it, so the boot scan re-drives it once the recipient
       // is resumed (never silently lost), and surfaces it to the sender if it stays stuck.
+      // Card 129efe74: also persist `kind`/`rootMsgId`/`chainDepth`/`giveUpHeldUntil` — this record is the
+      // ONLY thing a redrive (across a restart) has to reconstruct dispatch semantics from. Before this fix
+      // NONE of the four were persisted, so redriveQueuedMessage had to hardcode a classification, drop any
+      // in-flight give-up hold, and reset the chain — see that method's own doc for the legacy-row defaults
+      // this now enables (a record from before this fix still redrives exactly as it always did).
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
-        kind: "session_message_queued", detail: { msgId, text: framedText, sender: ctx.sender },
+        kind: "session_message_queued",
+        detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil },
       });
     }
     // msgId is returned UNCONDITIONALLY (not just on the held path) so a caller that needs to correlate

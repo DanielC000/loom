@@ -68,8 +68,11 @@ function seed(p) {
   db.insertSession({ id: p.workerId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: p.mgrId, taskId: p.taskId, worktreePath: p.worktreePath, branch: p.branch });
 }
 
-// Mirror enqueueDurableMessage's persisted shape: a HELD message is a `session_message_queued` event with
-// detail {msgId, text, sender}. Optionally append the matching delivered marker to RESOLVE it.
+// Mirror the MINIMAL subset of enqueueDurableMessage's persisted shape this guard's own checks need:
+// {msgId, text, sender}. Since card 129efe74 the real shape also carries kind/rootMsgId/chainDepth/
+// giveUpHeldUntil — irrelevant to the pending-direction guard under test here, deliberately omitted (this
+// also doubles as a LEGACY-row fixture: the guard must work identically whether or not those fields exist).
+// Optionally append the matching delivered marker to RESOLVE it.
 function queueFromManager(p, { sender, resolved = false, text = "[loom:from-manager]\nSTOP — the design changed, redo it" } = {}) {
   const msgId = randomUUID();
   db.appendEvent({
