@@ -147,6 +147,21 @@ class SilentTestPtyHost extends PtyHost {
 }
 const host = new SilentTestPtyHost(events);
 
+// Card 231e0c0f: sessionId -> Date.now() the FIRST TIME `awaitGiveUpConfirmSettle` runs for that session
+// (polls===0) — i.e. the true, OBSERVED moment the give-up branch actually entered the confirm-settle
+// wait. host.ts exposes no public signal (log line or otherwise) for this entry — only its two EXITS
+// (the SUPPRESSED/RECOVERY log lines) — so scenario (5) below intercepts the method itself, entirely
+// within this test file, rather than computing a guessed wall-clock offset from the Enter-write log and
+// hoping it lands inside the (narrow, chain-drift-prone) confirm-settle window.
+const confirmSettleEnteredAt = {};
+class SettleObservedTestPtyHost extends PtyHost {
+  createPty() { return makeSilentFakePty(); }
+  awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled) {
+    if (polls === 0) confirmSettleEnteredAt[sessionId] = Date.now();
+    return super.awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled);
+  }
+}
+
 function spawnReady(sessionId, targetHost = host) {
   targetHost.spawn({
     sessionId, cwd: tmpHome,
@@ -357,22 +372,26 @@ try {
   {
     const SID = "sess-requeue-confirm-during-settle";
     const TEXT = "CONFIRMED_JUST_IN_TIME";
-    const { bodyCount, entryCount } = spawnReady(SID);
-    const r = host.enqueueStdin(SID, TEXT);
+    const settleHost = new SettleObservedTestPtyHost(events);
+    const { bodyCount } = spawnReady(SID, settleHost);
+    const r = settleHost.enqueueStdin(SID, TEXT);
     check("(5) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    // Let the final attempt's verify-timeout elapse (all attempts written), then fire the confirming hook
-    // WHILE still inside the confirm-settle window (bounded at CONFIRM_SETTLE_BOUND after the verify-timeout
-    // elapses) — landing roughly at its midpoint for comfortable margin — BEFORE GIVE-UP RECOVERY would
-    // otherwise have committed to a requeue.
-    await waitUntil(() => entryCount() === MAX_ATTEMPTS);
-    await sleep(VERIFY_TIMEOUT + Math.floor(CONFIRM_SETTLE_BOUND / 2));
-    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
+    // Card 231e0c0f: wait for the OBSERVED entry into confirm-settle (set by SettleObservedTestPtyHost's
+    // override, above) instead of computing a guessed wall-clock offset (VERIFY_TIMEOUT + half the 150ms
+    // bound) from the Enter-write log and hoping it lands inside a window whose CLOSE edge drifts more
+    // under host jitter than its OPEN edge (15 chained settle-polls vs. one verify-timeout hop) — the old
+    // ~75ms-each-side margin could flip the scenario into GIVE-UP RECOVERY instead of the settle-suppress
+    // branch this scenario means to exercise. Firing the instant entry is OBSERVED (rather than guessed)
+    // is both start-edge safe (can never fire before the branch has actually committed to waiting) and
+    // leaves maximal margin — nearly the full CONFIRM_SETTLE_BOUND — before the close edge.
+    await waitUntil(() => confirmSettleEnteredAt[SID] != null);
+    settleHost.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
 
     check("(5) THE INVERSION: busy reflects the hook's own rising edge (the turn IS actually running)",
       busyLog[SID].at(-1) === true);
     check("(5) THE INVERSION: the message was NEVER requeued — pending stayed empty the whole time",
-      host.getPendingEntries(SID).length === 0);
+      settleHost.getPendingEntries(SID).length === 0);
     // The strong version of the above two checks: prove this via the ACTUAL branch that fired, not just
     // the end state — a requeued-then-purged message (scenario (4)'s path) would ALSO end up with empty
     // pending and one written body, so those checks alone can't tell the two mechanisms apart. The settle
@@ -390,11 +409,11 @@ try {
     check("(5) NO DUPLICATE, NO CLEAR: the message body was written exactly once, no backspace clear either",
       bodyCount(TEXT) === 1);
     check("(5) still nothing queued and busy still reflects the running turn",
-      host.getPendingEntries(SID).length === 0 && busyLog[SID].at(-1) === true);
+      settleHost.getPendingEntries(SID).length === 0 && busyLog[SID].at(-1) === true);
 
-    host.deliverHook(SID, { hook_event_name: "Stop" });
-    check("(5) the turn finalizes cleanly", busyLog[SID].at(-1) === false && host.getPendingEntries(SID).length === 0);
-    try { host.stop(SID, "hard"); } catch { /* ignore */ }
+    settleHost.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(5) the turn finalizes cleanly", busyLog[SID].at(-1) === false && settleHost.getPendingEntries(SID).length === 0);
+    try { settleHost.stop(SID, "hard"); } catch { /* ignore */ }
   }
 } finally {
   for (const sid of ["sess-requeue-basic", "sess-requeue-order"]) {

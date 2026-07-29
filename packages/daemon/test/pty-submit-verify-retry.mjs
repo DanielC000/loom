@@ -259,17 +259,35 @@ try {
     check("(5) sanity: confirmed B comfortably before its own stale-check deadline",
       (tC0 - tB0) < writeAt(1) + VERIFY_TIMEOUT / 2);
 
-    // Checkpoint strictly between B's STALE verify-check (tB0+writeAt(1)+VERIFY_TIMEOUT) and C's OWN first
-    // verify-check (tC0+writeAt(1)+VERIFY_TIMEOUT) — the exact window where the bug would show: B's obsolete
-    // chain firing an EXTRA spurious Enter into C's still-unconfirmed turn, or wrongly clearing busy under it.
-    const bStaleCheckAt = tB0 + writeAt(1) + VERIFY_TIMEOUT;
+    // Window where the bug would show: from now (B's write 1 already landed, confirmed above) until C's OWN
+    // first verify-check (tC0+writeAt(1)+VERIFY_TIMEOUT) — B's obsolete chain firing an EXTRA spurious Enter
+    // into C's still-unconfirmed turn, or wrongly clearing busy under it, at its own stale-check deadline
+    // (tB0+writeAt(1)+VERIFY_TIMEOUT), which falls somewhere inside this same span.
     const cOwnCheckAt = tC0 + writeAt(1) + VERIFY_TIMEOUT;
-    const midpointOffsetFromTB0 = (bStaleCheckAt + cOwnCheckAt) / 2 - tB0;
-    await sleepUntil(tB0, midpointOffsetFromTB0);
+    // Card 231e0c0f: a single sample at a computed MIDPOINT between the two deadlines only catches the bug
+    // if host jitter happens to leave that guess still inside the (thin, ~100ms-each-side) margin — the
+    // same guessed-wall-clock-offset shape as the STIMULUS side of pty-reassert-settle.mjs. Watch
+    // CONTINUOUSLY across the whole window instead of sampling once: strictly more sensitive (catches a
+    // spurious write/busy-clear landing ANYWHERE in the real window, not just near a guessed middle) and
+    // needs no offset guess at all — it starts from the already-OBSERVED state right after B's write 1 and
+    // watches until the OBSERVED wall-clock boundary where C's own legitimate retry becomes due.
+    // `lastCount` tracks the last value observed STRICTLY inside the watched window — the post-loop check
+    // reads that, never a fresh sample taken after crossing `cOwnCheckAt`, since a fresh sample AT/AFTER
+    // that boundary races C's own legitimate retry the exact same way the old midpoint sample raced it.
+    let spuriousEnter = false;
+    let busyWronglyCleared = false;
+    let lastCount = countOf(ENTER);
+    while (Date.now() < cOwnCheckAt) {
+      lastCount = countOf(ENTER);
+      if (lastCount > 2) spuriousEnter = true;
+      if (busyLog[SID].at(-1) === false) busyWronglyCleared = true;
+      if (spuriousEnter || busyWronglyCleared) break;
+      await sleep(5);
+    }
     check("(5) NO extra Enter from B's stale chain (only B's 1 + C's 1 attempt — no spurious 3rd write)",
-      countOf(ENTER) === 2);
+      !spuriousEnter && lastCount === 2);
     check("(5) busy was NOT wrongly cleared by B's stale chain — C's turn is still presumed in flight",
-      busyLog[SID].at(-1) === true);
+      !busyWronglyCleared);
 
     // C's OWN verify-check (a real, non-stale chain) fires next since we still haven't confirmed C — this
     // proves the fix didn't also break legitimate retries for the turn that comes AFTER an overlap.

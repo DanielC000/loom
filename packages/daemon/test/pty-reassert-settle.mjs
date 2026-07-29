@@ -28,10 +28,6 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function sleepUntil(t0, targetMs) {
-  const remaining = targetMs - (Date.now() - t0);
-  if (remaining > 0) await sleep(remaining);
-}
 // Card 2c9582d3: poll for an actual OUTCOME instead of sleeping to a single wall-clock deadline computed
 // by summing nominal constants. The give-up/confirm-settle chain this test exercises is several CHAINED
 // setTimeout hops (verify-timeout -> confirm-settle poll -> writeChunked -> setBusy); under real host
@@ -73,9 +69,12 @@ process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
-// The FINAL attempt's own re-assert is written at this (pre-settle-wait) point — same as every attempt's
-// write point pre-Half-1. Its Enter, post-Half-1, is written only after the settle wait resolves.
-const reassertWriteAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT;
+// The exact bytes `sendEnterAndVerify` writes for every retry's (attempt > 1) paste-reassert — see
+// host.ts's own `BRACKET_PASTE_START + BRACKET_PASTE_END` write in that method. Attempts 2..MAX_ATTEMPTS
+// each write ONE of these (MAX_ATTEMPTS - 1 total across a full give-up chain); the LAST one written is
+// the FINAL attempt's — the one whose settle window this test targets.
+const REASSERT_PASTE = "\x1b[200~\x1b[201~";
+const FINAL_REASSERT_COUNT = MAX_ATTEMPTS - 1;
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
@@ -130,18 +129,28 @@ try {
   const SID = "sess-reassert-absorbed";
   const TEXT = "STRANDED_BUT_RECOVERABLE_BODY";
   const { fake, backspaceCount } = spawnReady(host, SID);
-  const t0 = Date.now();
   const r = host.enqueueStdin(SID, TEXT);
   check("setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-  // Fire shortly after the FINAL attempt's re-assert is written, well INSIDE the settle window (which
-  // spans [reassertWriteAt, reassertWriteAt + SETTLE_BOUND)).
-  await sleepUntil(t0, reassertWriteAt(MAX_ATTEMPTS) + Math.floor(SETTLE_BOUND / 4));
+  // Card 231e0c0f: converting the CHECK below to `waitUntil` (card 2c9582d3) fixed only the OBSERVATION
+  // half of this test's timing dependency. The STIMULUS — firing the provoked response — is the half that
+  // PRODUCES the outcome being checked, and a blind computed-offset `sleepUntil` here would still be an
+  // independent wall-clock guess at when the FINAL attempt's reassert lands, racing the same settle window
+  // the CHECK now waits on correctly. The generalizable lesson: a "fixed" timing test needs BOTH halves
+  // examined — the assertion AND whatever drives the system before it. Fix: wait for the FINAL attempt's
+  // own paste-reassert to actually land on the fake pty's `writes` (an OBSERVED condition), then fire
+  // immediately — this guarantees landing inside the settle window (which starts exactly when that write
+  // lands) regardless of host scheduling contention, instead of merely being likely to.
+  const reasserted = await waitUntil(
+    () => fake.writes.filter((w) => w === REASSERT_PASTE).length >= FINAL_REASSERT_COUNT,
+    { timeoutMs: 10_000, pollMs: 2 },
+  );
+  check("setup: the final attempt's own paste-reassert landed on the wire", reasserted);
   fake.emitData("\x1b[<u\x1b[>1u\x1b[>4;2m"); // the probe-observed provoked-response shape; only its timing matters here
 
-  // Give-up (if it were going to fire suppressed OR recovered) is anchored at
-  // reassertWriteAt(MAX_ATTEMPTS) + SETTLE_BOUND + VERIFY_TIMEOUT, PLUS the post-give-up confirm-settle
-  // wait (card 441499ee) before RECOVERY actually commits. Poll for busy to actually recover instead of
+  // Give-up (if it were going to fire suppressed OR recovered) is anchored at the FINAL attempt's own
+  // reassert write time + SETTLE_BOUND + VERIFY_TIMEOUT, PLUS the post-give-up confirm-settle wait (card
+  // 441499ee) before RECOVERY actually commits. Poll for busy to actually recover instead of
   // sleeping to that nominal deadline (see waitUntil's doc above) — bounded generously (15s: several
   // times the ~2s nominal chain, and above what synthetic heavy-contention measurement reproduced) so a
   // genuine regression back to false-suppression still fails, just not on a hair-trigger margin.
