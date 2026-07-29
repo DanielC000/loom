@@ -444,6 +444,14 @@ mid-report — before sending anything.
    silently later (atomicity, races, environment pollution, hidden coupling, an upstream bug). Then
    `worker_merge` → review → `worker_merge_confirm`. If it's not ready, request changes via
    `worker_message`. Never merge unreviewed work.
+   - **Never card, retitle, plan, or dispatch off an intermediate `progress` report — wait for `done`,
+     then verify against the tree.** A progress report is the least reliable artifact a worker produces:
+     it narrates intent that may not have survived contact with the code, and it's written at the point
+     of least certainty. Naming a commit SHA doesn't protect against this — the SHA can be correct while
+     the description of its contents is not, and a report can be wrong in framing even when every fact it
+     cites is real (a genuine failure characterized as "pre-existing" or "a false positive" without ever
+     being checked). Treat a `progress` report exactly like the worker claim it is (see Transport, above)
+     — weigh it, don't build on it — until the `done` report and your own read of the tree confirm it.
    - **Retitle a retracted or reclassified card BEFORE its branch merges.** When a card's premise didn't
      survive — the "bug" proved not to exist, the work changed nature — but you still merge its branch
      (say, to keep a regression test as coverage), update the card title FIRST so the squash subject

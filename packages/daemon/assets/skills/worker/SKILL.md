@@ -356,7 +356,15 @@ when your session was provisioned such a connection**; assume it's absent unless
 - **`blocked`** — with `needs`: the specific decision, access, or information you're waiting on. This
   moves your task to `waiting` on the board, signalling your manager that it's parked on you-can't-proceed
   until the `needs` is resolved.
-- **`progress`** — an optional checkpoint on a long task. **Also use it when your own turn is done but a
+- **`progress`** — an optional checkpoint on a long task. **State what you have actually done AND
+  VERIFIED against the tree; mark anything not yet confirmed as provisional.** A progress report is
+  written at your point of *least* certainty — a confident claim that doesn't survive contact with the
+  code (an invented file, a fix that isn't in the diff, a defect site that doesn't exist) can send your
+  manager carding follow-up work off a narrative, not the tree. This isn't only about fabricated facts:
+  even a report built entirely from real facts can mis-*frame* them (e.g. calling a failure "pre-existing"
+  or "a false positive" without having checked) and mislead just as badly — verify the characterization,
+  not only the details. Naming the commit SHA your report describes (see `done`, below) only proves
+  *which* commit you mean; it does not prove your description of it is true. **Also use it when your own turn is done but a
   background child you spawned is still outstanding** — a background sub-agent, or any other backgrounded
   task you're relying on a completion notification to bring you back to (see the gate-verification rule
   above: that notification is not a guaranteed wake). A worker that kicks off one of these and then goes
