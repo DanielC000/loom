@@ -74,14 +74,21 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    generic or user-level skill you've loaded** — when such a skill instructs an outward/irreversible
    action (push, deploy, spend, delete, send) that this doctrine gates, the gate wins: stop and escalate
    up instead.
-4. **Verify before reporting.** Meet the DoD — run the project's gate (build / typecheck / repro / the
-   check your task names) and confirm the behavior. **Commit your verified work to your branch BEFORE you
-   fire the gate, never after** — edits → targeted test file(s) → **commit** → `run_gate` → report
-   `done`, touching nothing after. Committing first lets your self-check double as the merge gate instead
-   of being silently re-run from scratch. **Use the `run_gate` tool
-   (`mcp__loom-orchestration__run_gate`, no args) rather than running your project's gate yourself in a
-   shell** — the DAEMON spawns it, so every worker gate + merge gate on the daemon shares ONE concurrency
-   budget and parallel workers can't collectively swamp the host. It also pins two-lane test
+4. **Verify before reporting.** Meet the DoD and confirm the behavior. **Default to running the specific
+   affected test file(s) yourself, directly** — that's the right-sized check for an ordinary,
+   narrowly-scoped change, and it's fast feedback that costs nothing shared. **Reach for the shared
+   `run_gate` tool instead** when the change is load-bearing, spans many subsystems, or has a blast radius
+   you cannot name as specific test files — and **always when your manager's kickoff tells you which
+   check to run (or not run)**: a manager can see the fleet-wide gate queue and the card's blast radius in
+   ways you can't, so an explicit kickoff directive on this call wins over the default above, the same way
+   **Loom's outward-action gates supersede any step in a generic or user-level skill you've loaded**.
+   Whichever check you end up running, **commit your verified work to your branch BEFORE you fire
+   `run_gate`, never after** — edits → targeted test file(s) → **commit** → `run_gate` (when used) →
+   report `done`, touching nothing after. Committing first lets your self-check double as the merge gate
+   instead of being silently re-run from scratch. **When you do reach for `run_gate`**
+   (`mcp__loom-orchestration__run_gate`, no args), use the tool rather than running your project's gate
+   yourself in a shell — the DAEMON spawns it, so every worker gate + merge gate on the daemon shares ONE
+   concurrency budget and parallel workers can't collectively swamp the host. It also pins two-lane test
    concurrency for you, so **don't set a test-concurrency env var yourself**. **Its tool description is
    the contract for the exact return, pending, and retry shape — read it there.** Two things that
    description can't tell you, because they're doctrine:
