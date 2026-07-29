@@ -325,11 +325,21 @@ export class GateSemaphore {
    *  holds it and resolves it as cancelled instead of granted. Zero process risk BY CONSTRUCTION: a queued
    *  entry has never had `fn` invoked, so there is no child process this could ever need to kill. Returns
    *  `false` (no-op) if `id` isn't currently queued — already admitted, already settled, or never existed
-   *  — the caller's own `runExclusive` throw/return path is what actually produces the visible outcome. */
+   *  — the caller's own `runExclusive` throw/return path is what actually produces the visible outcome.
+   *
+   *  ⚠️ `gateType !== "worker"` (Code Review re-review of 8d585277, card 8f58c354): refuses to cancel a
+   *  non-worker (merge/deploy) entry EVEN IF it's found queued — mirroring `SessionService.cancelGateOp`'s
+   *  own caller-side check (a queued merge/deploy gate's `runExclusive` has no `GateCancelledError` catch,
+   *  so cancelling one would surface as a deliberate cancel misreported as a crash). Enforced HERE, at the
+   *  primitive, so a future third caller of this method inherits the guarantee automatically instead of
+   *  having to remember to re-derive it — the existing caller-side guards (`cancelGateOp`,
+   *  `cancelQueuedForSession`'s own `gateType` match) stay in place; this is defence-in-depth, not a
+   *  replacement for them. */
   cancelQueued(id: string, kind: GateCancelKind, detail: string): boolean {
     for (const tier of [this.highWaiters, this.lowWaiters]) {
       const idx = tier.findIndex((w) => w.id === id);
       if (idx !== -1) {
+        if (tier[idx]!.entry.descriptor.gateType !== "worker") return false;
         const [w] = tier.splice(idx, 1);
         w!.cancel(kind, detail);
         return true;

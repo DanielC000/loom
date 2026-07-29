@@ -148,6 +148,40 @@ function makeRepo(repo) {
   check("(auto-supersede) registry empty after both settle", sem.snapshot().entries.length === 0);
 }
 
+// ── Card 8f58c354 Half 2: `cancelQueued`'s OWN gateType constraint, exercised DIRECTLY on the primitive —
+//    a synthetic non-worker (merge) entry that IS genuinely queued must still be refused. This proves the
+//    guard lives in cancelQueued itself, not merely in cancelGateOp's caller-side check above it (a third
+//    caller added later would inherit this for free). Positive-controlled: the same entry is later let
+//    through admission for real, so a REFUSED cancel is shown against a control that COULD have cancelled
+//    (this isn't a queue that never advances) — a check that can't fail either way is not evidence.
+{
+  const sem = new GateSemaphore();
+  let releaseHolder;
+  const holder = new Promise((res) => { releaseHolder = res; });
+  // Saturate cap 1 with a WORKER entry so the synthetic merge entry below genuinely queues.
+  const pHolder = sem.runExclusive(1, { gateType: "worker", projectId: "p", sessionId: "holder-1", worktreePath: "/wt/z" }, async () => { await holder; return "holder"; });
+  await sleep(10);
+  let mergeAdmitted = false;
+  const pQueuedMerge = sem.runExclusive(
+    1, { gateType: "merge", projectId: "p", sessionId: "mgr-2" },
+    async () => { mergeAdmitted = true; return "merge-ran-for-real"; },
+    "high",
+  );
+  await sleep(10); // let it genuinely queue
+  check("(primitive gateType guard) the synthetic merge entry is queued, not yet admitted", !mergeAdmitted);
+  const queuedMerge = sem.snapshot().entries.find((e) => e.gateType === "merge" && e.phase === "queued");
+  check("(primitive gateType guard) found the queued merge entry via snapshot", !!queuedMerge);
+  const cancelled = sem.cancelQueued(queuedMerge.id, "manual", "should be refused — not a worker gate");
+  check("(primitive gateType guard) cancelQueued REFUSES a queued non-worker entry", cancelled === false);
+  check("(primitive gateType guard) the merge entry is STILL queued after the refused cancel attempt",
+    sem.snapshot().entries.some((e) => e.id === queuedMerge.id && e.phase === "queued"));
+  releaseHolder("go");
+  const [holderResult, mergeResult] = await Promise.all([pHolder, pQueuedMerge]);
+  check("(primitive gateType guard) positive control — the never-cancelled entry WAS admitted and ran for real",
+    mergeAdmitted === true && mergeResult === "merge-ran-for-real");
+  check("(primitive gateType guard) the holder completed normally too", holderResult === "holder");
+}
+
 // ── (1) End-to-end via SessionService: queued self-check + worker_merge_confirm on the SAME worktree ────
 // -> single admission (only the merge gate actually runs the fake gate); the self-check settles cancelled.
 {
@@ -286,6 +320,10 @@ function makeRepo(repo) {
 
   const cancelFromA = await sessions.cancelGateOp(mgrA, liveEntry.opId);
   check("(refuse) a DIFFERENT project's manager is REFUSED", cancelFromA.outcome === "refused");
+  // Pin the REASON, not just the outcome (card 8f58c354) — a future refusal branch could produce the same
+  // "refused" outcome for a different reason (e.g. an auth check unrelated to project scope) and this
+  // assertion would read green while no longer proving cross-project scoping actually fired.
+  check("(refuse) the reason names project scope specifically", /different project/i.test(cancelFromA.reason ?? ""));
   // The actual same-project running-op cancel path (accept + verify) is covered by the never-settling
   // test below, which also exercises cancelGateOp's RUNNING branch end to end.
 
@@ -432,6 +470,14 @@ function makeRepo(repo) {
 
   const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
   check("(B2-2) cancelling a QUEUED merge gate is refused, never silently succeeds", cancelResult.outcome === "not_cancelled");
+  // Pin the REASON (card 8f58c354): "not_cancelled" also fires from a genuinely DIFFERENT branch — a
+  // "no longer queued" admission/settle race (see the never-settling-kill block below for that reason's
+  // own text). Without pinning which branch produced it, a future race there would produce the SAME
+  // coarse outcome this assertion checks, and this test would keep reading green while no longer
+  // exercising the gateType guard it exists to cover — precisely the false-green shape card 8d585277 was
+  // fixed for, one level up in its own regression coverage.
+  check("(B2-2) the reason names the gateType-scope refusal, not a 'no longer queued' race",
+    /gate is not supported/i.test(cancelResult.reason ?? "") && !/no longer queued/i.test(cancelResult.reason ?? ""));
 
   releaseHolder("go");
   await pHolderRun.catch(() => {});
