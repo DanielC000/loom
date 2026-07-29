@@ -232,16 +232,51 @@ try {
     // upgrade respawn would silently lose its attestation and refuse a legitimate owner confirm.
     const ownerGap = host.enqueueStdin(sessionId, "CONFIRM ABC123", "human", undefined, undefined, "agent", undefined, "CONFIRM ABC123");
     check("mid-gap: the owner-attested message is also HELD", ownerGap.delivered === false && ownerGap.reason === "held");
+    // Card f25bf3bf: a message still within its post-give-up hold window (as `requeueGiveUpOrigin` in
+    // host.ts stamps it) must PRESERVE that hold across this SAME carry-forward — this re-pin respawn
+    // reconnects to the SAME engine session via `--resume` (proven below by `resumeId === engineId`), so a
+    // still-held entry replaying as an immediate, unheld duplicate the instant the resumed process comes
+    // back up is precisely the confusing-duplicate shape the hold exists to delay.
+    const heldGap = host.enqueueStdin(sessionId, "STILL_GIVE_UP_HELD: mid-gap", "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, Date.now() + 60_000);
+    check("mid-gap: the still-give-up-held message is also HELD", heldGap.delivered === false && heldGap.reason === "held");
+    // Card f25bf3bf follow-up: threading `giveUpHeldUntil` through this SAME positional call also required
+    // filling the two params ahead of it, `proactive` and `senderId` — previously always omitted (defaulted
+    // false/undefined) here. That's a real behavior change, not incidental filler: `senderId` feeds
+    // `pty.getActiveTurnSenderId`, which `companion/capabilities.ts` uses to key a GROUP route's per-sender
+    // Trust Window AND to decide its DM-only fail-closed branch (non-null ⇒ "this is a group route, handle
+    // it stricter") — a GROUP message whose `senderId` gets silently nulled on carry-forward would
+    // misreport as DM-shaped to that gate. `proactive` feeds `pty.getActiveTurnIsProactive`, which tags a
+    // heartbeat/reminder/attention-push reply's amber event-line in the web chat. A message carrying BOTH,
+    // still queued when the re-pin's old pty is "stopping", must arrive with BOTH intact.
+    const groupGap = host.enqueueStdin(sessionId, "GROUP_MSG: mid-gap", "system", undefined, undefined, "agent", undefined, undefined, true, "sender-alice");
+    check("mid-gap: the group/proactive-tagged message is also HELD", groupGap.delivered === false && groupGap.reason === "held");
     await upgradePromise;
     check("mid-gap: the message was captured and redelivered onto the FRESH pty (not lost to the old pty's FIFO wipe on exit)", host.getPending(sessionId).includes("URGENT: hi during the gap"));
     check("mid-gap: the owner-attested message was also redelivered", host.getPending(sessionId).includes("CONFIRM ABC123"));
-    // flushPending exposes the FULL QueuedMessage (incl. ownerText) — getPending/getPendingEntries both
-    // strip it, so this is the one public seam that can prove the field actually survived the carry.
+    check("mid-gap: the still-give-up-held message was also redelivered", host.getPending(sessionId).includes("STILL_GIVE_UP_HELD: mid-gap"));
+    check("mid-gap: the group/proactive-tagged message was also redelivered", host.getPending(sessionId).includes("GROUP_MSG: mid-gap"));
+    // flushPending exposes the FULL QueuedMessage (incl. ownerText/giveUpHeldUntil/proactive/senderId) —
+    // getPending/getPendingEntries both strip these fields, so this is the one public seam that can prove
+    // they actually survived the carry.
     const freshPending = host.flushPending(sessionId);
     const preserved = freshPending.find((m) => m.text === "CONFIRM ABC123");
     const plain = freshPending.find((m) => m.text === "URGENT: hi during the gap");
+    const stillHeld = freshPending.find((m) => m.text === "STILL_GIVE_UP_HELD: mid-gap");
+    const groupMsg = freshPending.find((m) => m.text === "GROUP_MSG: mid-gap");
     check("(CR follow-up) ownerText SURVIVES the capability-upgrade carry-forward (was silently dropped before this fix)", preserved?.ownerText === "CONFIRM ABC123");
     check("(CR follow-up, refuse-path) a message with no ownerText still carries none through the SAME carry-forward — the fix doesn't fabricate attestation", plain !== undefined && plain.ownerText === undefined);
+    check(
+      "(card f25bf3bf) PRESERVE, not deliver: giveUpHeldUntil SURVIVES the capability-upgrade carry-forward — a re-pin respawn reconnects the SAME engine session, so a still-held entry stays held rather than replaying as an immediate duplicate",
+      typeof stillHeld?.giveUpHeldUntil === "number" && stillHeld.giveUpHeldUntil > Date.now(),
+    );
+    check(
+      "(card f25bf3bf follow-up, capability-gating-relevant) senderId SURVIVES the capability-upgrade carry-forward — a nulled senderId would misreport a GROUP message as DM-shaped to capabilities.ts's fail-closed DM/group branch",
+      groupMsg?.senderId === "sender-alice",
+    );
+    check(
+      "(card f25bf3bf follow-up) proactive SURVIVES the capability-upgrade carry-forward — a dropped proactive flag would mistag the replayed turn's amber event-line in the web chat",
+      groupMsg?.proactive === true,
+    );
   }
 
   // ===================== SELF-HEAL RACE (CR fix): the wait loop must LATCH death, never re-read =====================

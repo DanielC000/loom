@@ -2015,7 +2015,11 @@ export class SessionService {
           // The pty is STILL alive — push everything we drained OUT of its FIFO back onto it before aborting
           // (nothing else will redeliver them; resume() below never runs on this path). The capability re-pin
           // above already landed durably — a later manual restart/resume picks it up.
-          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText);
+          //
+          // PRESERVE the hold (card f25bf3bf): this is the SAME session/process, never stopped — any
+          // still-held give-up requeue (`msg.giveUpHeldUntil`) is exactly as ambiguous as it was the
+          // instant we drained it, so putting it back with the hold intact just restores the status quo.
+          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil);
           throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
         }
       } finally {
@@ -2027,9 +2031,21 @@ export class SessionService {
     // FIFO was wiped, so without this the captured entries would simply vanish despite being "queued". A
     // durable entry (onDeliver set) is SKIPPED — resume()'s own redrive (just above) already re-delivers it;
     // redelivering it here too would double it.
+    //
+    // PRESERVE the hold (card f25bf3bf, deciding what 9e27f4d2 left open for this path): `resume()` above
+    // reconnects to the SAME engine session via --resume (this is a re-pin respawn, not a fresh successor —
+    // the recipient session id is unchanged), so the resumed conversation's transcript already reflects
+    // whatever the predecessor's engine actually did before it was stopped. If the original give-up was a
+    // false negative (the turn had already run), replaying the same text into that SAME continuing
+    // conversation immediately is precisely the confusing-duplicate shape the hold exists to delay — the
+    // restart path's own reasoning (9e27f4d2), not the recycle path's (`carryPendingToSuccessor` above
+    // DELIVERS instead — see its doc for why a fresh, non-resumed successor differs). The purge can never
+    // actually fire here either (this respawn's own `giveUpConfirmQueue` starts empty, same as a restart),
+    // so this only ever delays delivery — but a delayed, possibly-superseded duplicate beats an immediate,
+    // certain one landing the instant the resumed process is back up.
     for (const msg of carried) {
       if (msg.onDeliver) continue;
-      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText);
+      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil);
     }
     return resumed;
   }
@@ -4753,17 +4769,43 @@ export class SessionService {
   }
 
   /**
-   * Re-drive a recycled predecessor's held inbound queue onto its FRESH successor, preserving BOTH the
-   * source classification AND durable crash-survival. `flushed` is the predecessor's spliced FIFO (from
-   * pty.flushPending — onDeliver + source intact); `durableRecords` is a snapshot of its unresolved
-   * `session_message_queued` records taken BEFORE this runs (the durable inbox).
+   * Re-drive a recycled predecessor's held inbound queue onto its FRESH successor, preserving the source
+   * classification, the kind classification, AND durable crash-survival. `flushed` is the predecessor's
+   * spliced FIFO (from pty.flushPending — onDeliver + source intact); `durableRecords` is a snapshot of
+   * its unresolved `session_message_queued` records taken BEFORE this runs (the durable inbox).
    *
    * Why not the old `getPending` + bare `enqueueStdin` (text only):
    *  - SOURCE — a held 'human' turn re-enqueued with the default 'system' source would be silently
    *    reclassified, so the human-only queue mutators could no longer touch it. We carry m.source.
+   *  - KIND — a held 'agent'-kind entry re-enqueued at the default 'warning' kind would start coalescing
+   *    with unrelated operational nudges instead of draining one-per-turn. We carry m.kind.
    *  - CRASH-SURVIVAL — a durable message's record still names the OLD recipient; on the next boot the
    *    recovery scan RETIRES it as superseded (the predecessor hasSuccessor), so a bare carry that drops
    *    the durable channel loses the message if the daemon restarts before the successor drains it.
+   *
+   * A FOURTH field, `giveUpHeldUntil` (card f25bf3bf, deciding what 9e27f4d2 deliberately left open for
+   * this path), is NOT in that list — and that omission is DELIBERATE, not an oversight to fix. A recycle
+   * spawns the successor FRESH, with NO `--resume` (see recycleWorker/recycleManager/recyclePlatformLead —
+   * "NOT --resume, which would carry the old context forward and defeat the recycle"), so the successor's
+   * conversation never saw whatever the predecessor's engine may have already done with a still-held
+   * entry's text — there is no shared transcript for a re-delivered duplicate to confuse, unlike the
+   * restart/companion-re-pin cases (9e27f4d2; see `upgradeCompanionCapabilities` below). And the hold's
+   * purge could never fire here regardless of whether we preserved it: the successor's own
+   * `giveUpConfirmQueue` starts empty, exactly like a post-restart session, so
+   * `purgeConfirmedGiveUpRequeue` would early-return on it forever. Preserving the hold would therefore
+   * only ever stall the successor's first real instruction for up to `GIVE_UP_HOLD_MS`, with zero chance
+   * of the entry ever being purged instead of delivered — a pure cost with no offsetting benefit. So this
+   * method DELIVERS a still-held entry immediately (below), never carrying `giveUpHeldUntil` onto the
+   * successor's `enqueueStdin` call. See `upgradeCompanionCapabilities` for the SAME decision landing the
+   * other way, and why.
+   *
+   * The carry below ALSO omits `proactive`/`senderId` (both companion-only QueuedMessage fields) — a
+   * DIFFERENT kind of "not in the list" than `giveUpHeldUntil` above. `giveUpHeldUntil` COULD be preserved
+   * here but would yield no benefit (the reasoning above). `proactive`/`senderId` CAN'T ever be non-default
+   * on this path at all: they're stamped only by companion-exclusive senders (the three proactive
+   * watchers; the companion inbound submit path), which only ever target an assistant-role session —
+   * never a worker/manager/platform-lead, the only roles a recycle successor can be. Different reasons,
+   * same "nothing to fix" conclusion (card f25bf3bf).
    *
    * So, exactly like `redirectWorker`: SUPERSEDE each carried durable record (fire its onDeliver with
    * "superseded" — resolves the old record so the boot scan + done-guard never re-drive it), then re-MINT
@@ -4782,7 +4824,9 @@ export class SessionService {
       } else {
         // Non-durable (nudge / raw human turn): carry the text, source, AND kind so a 'human'/'agent' entry
         // stays classified exactly as it was (a warning nudge doesn't become one-per-turn, an agent message
-        // doesn't start coalescing).
+        // doesn't start coalescing). DELIVER, never hold — deliberately omit `m.giveUpHeldUntil` even when
+        // set: see this method's own doc above for why a fresh, non-resumed successor gets none of the
+        // benefit a hold would provide on a restarted/resumed SAME conversation, only the needless delay.
         this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind);
       }
     }

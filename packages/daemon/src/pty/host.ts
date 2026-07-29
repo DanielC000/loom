@@ -3512,10 +3512,14 @@ export class PtyHost {
    * tag its outbound frame + persisted history row for the web chat's amber event-line render.
    *
    * `giveUpHeldUntil` (card 9e27f4d2) is an OPTIONAL trailing arg, appended last for the same byte-
-   * identical-by-default reason — every existing caller omits it. The ONLY caller that passes it is
-   * `resumeFleetOnBoot`'s restart-intent replay, restoring a give-up-requeued entry's hold deadline
-   * (see `getPersistablePending`/`getPersistablePendingHolds`) onto the freshly re-enqueued entry so a
-   * restart landing mid-hold-window doesn't skip the hold entirely. `stillGiveUpHeld` below pushes that
+   * identical-by-default reason — every existing caller omits it by default. `resumeFleetOnBoot`'s
+   * restart-intent replay passes it, restoring a give-up-requeued entry's hold deadline (see
+   * `getPersistablePending`/`getPersistablePendingHolds`) onto the freshly re-enqueued entry so a restart
+   * landing mid-hold-window doesn't skip the hold entirely. Card f25bf3bf's companion capability re-pin
+   * respawn (`SessionService.upgradeCompanionCapabilities`) passes it too, for the same reason — it also
+   * reconnects the SAME engine session via `--resume`. `SessionService.carryPendingToSuccessor` (the
+   * recycle carry path, same card) deliberately does NOT — see its own doc for why a fresh, non-resumed
+   * successor doesn't need the hold. `stillGiveUpHeld` below pushes that
    * invariant into THIS shared unit rather than leaning on caller ordering: code review on this same
    * card flagged that safety here depended only on `replayPending` always running before readiness (true
    * today, but nothing enforces it) — a still-in-the-future `giveUpHeldUntil` now forces the held-push
@@ -4794,13 +4798,17 @@ export class PtyHost {
    * equal it) and cause THIS purge to delete a genuinely-unconfirmed entry: the silent-loss failure this
    * whole file exists to avoid. The underlying discriminator decision (RECOVERY-vs-SUPPRESSED) this purge
    * is a safety net FOR is untouched and stays `04de8bbf`'s open question; this card only narrows a wrong
-   * decision's consequence, it does not eliminate it. ⚠️ This residual list is NOT exhaustive even after
-   * (3): the give-up hold has OTHER carry paths besides a daemon restart (recycle/successor handoff —
-   * `SessionService.carryPendingToSuccessor` and its callers) that ALSO don't yet restore `giveUpHeldUntil`
-   * onto the carried entry — a separate, deliberately NOT-fixed-here gap (card 9e27f4d2 scoped to the
-   * restart path only; the carry paths are tracked as their own follow-up). Don't read (1)-(3) as "every
-   * bypass is covered" — check the carry paths' own call sites before assuming this file's hold survives
-   * every hand-off.
+   * decision's consequence, it does not eliminate it. This residual list enumerates DAEMON-RESTART-shaped
+   * bypasses of THIS purge specifically, not every place `giveUpHeldUntil` could apply. CLOSED (card
+   * f25bf3bf): the give-up hold's OTHER carry paths besides a daemon restart — recycle/successor handoff
+   * (`SessionService.carryPendingToSuccessor` and its three callers) and the companion capability re-pin
+   * respawn (`SessionService.upgradeCompanionCapabilities`) — were assessed and decided, each on its own
+   * merits, following on from this card. `carryPendingToSuccessor` DELIVERS deliberately (no hold carried)
+   * — a recycle spawns its successor FRESH with no `--resume`, so there is no shared transcript for a
+   * re-delivered duplicate to confuse, and the purge could never fire there regardless. The companion
+   * re-pin respawn PRESERVES the hold instead — it reconnects the SAME engine session via `--resume`, the
+   * same shape as this restart path. See each site's own doc comment for the full reasoning; don't read
+   * (1)-(3) above as "every daemon-restart-shaped bypass is covered" independent of this paragraph.
    *
    * THE GUARD BELOW (card 73d5c34a, code review follow-up): the FIFO-front correlation above assumes the
    * NEXT hook to arrive, whatever it is, most likely confirms the OLDEST still-ambiguous generation — true
