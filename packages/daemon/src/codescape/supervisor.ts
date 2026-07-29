@@ -74,6 +74,17 @@ const DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD = 3;
  */
 const DEFAULT_VERSION_PROBE_TIMEOUT_MS = 5_000;
 /**
+ * Card 9e6f984d: how long the INSTALLED build id must sit UNCHANGED before a detected drift is allowed
+ * to fire a restart. Without this, a burst of N distinct rebuilds on the codescape side (their own
+ * legitimate rebuild cadence) becomes N legitimately-distinct drift events, each restarting `serve` and
+ * dropping any MCP request that happened to be in flight — a control loop where a peer project's build
+ * cadence drives OUR process lifecycle. 15 minutes: long enough that a realistic rebuild burst settles
+ * inside one window (collapsing to a single restart once the dust settles), short enough that a
+ * genuinely-stable new build still gets picked up promptly. Never urgent — a stale serve is harmless; a
+ * restart that drops an in-flight request is not, so when in doubt this waits longer, not less.
+ */
+const DEFAULT_DRIFT_STABILITY_MS = 15 * 60_000;
+/**
  * CR follow-up (card 088afc94): how long a `resolveProjectId` MISS (no in-memory cache entry, no manifest
  * entry either) is remembered before the next call is allowed to re-read the manifest. Without this, a
  * repo that boot registration never covered (a project created, or `codescape.enabled` toggled on, after
@@ -110,6 +121,8 @@ export interface CodescapeSupervisorOpts {
   healthProbeFailureThreshold?: number;
   /** Test seam: shrink/lengthen {@link DEFAULT_VERSION_PROBE_TIMEOUT_MS}. */
   versionProbeTimeoutMs?: number;
+  /** Test seam: shrink/lengthen {@link DEFAULT_DRIFT_STABILITY_MS} so a stability-window test doesn't wait real minutes. */
+  driftStabilityMs?: number;
 }
 
 export interface CodescapeRequestResult {
@@ -294,6 +307,7 @@ export class CodescapeSupervisor {
   private readonly healthProbeTimeoutMs: number;
   private readonly healthProbeFailureThreshold: number;
   private readonly versionProbeTimeoutMs: number;
+  private readonly driftStabilityMs: number;
 
   /**
    * Card b8de5876: the DB-persisted `integrations.codescape.path` override, threaded in by {@link start}
@@ -345,6 +359,20 @@ export class CodescapeSupervisor {
    */
   private lastDriftRestartInstalledBuild: string | null = null;
   /**
+   * Card 9e6f984d: the installed build id currently being WATCHED for stability, or `null` when no
+   * drift is pending. Set the moment {@link checkBuildDrift} first sees a mismatch against a NEW
+   * installed build (distinct from whatever was previously being watched); cleared once that build
+   * either stabilizes long enough to fire a restart, or the running side catches up to it (drift
+   * resolves on its own — nothing left to watch). A DIFFERENT installed build showing up while one is
+   * already being watched replaces it and restarts the window from scratch — this is what collapses a
+   * burst of N distinct rebuilds into a single eventual restart: the window only ever completes against
+   * whichever build turns out to be the LAST one in the burst. Reset on {@link stop}/{@link start}, same
+   * as {@link lastDriftRestartInstalledBuild}.
+   */
+  private driftCandidateBuild: string | null = null;
+  /** Epoch ms {@link driftCandidateBuild} was first observed — paired with it, see that field's doc. */
+  private driftCandidateFirstSeenAt: number | null = null;
+  /**
    * Card 90550a97 review follow-up: latches the CLASSIFIED reason {@link readInstalledBuild} last failed
    * with, so an unreadable installed build is reported LOUDLY exactly ONCE per distinct reason — not
    * once per 30s probe tick forever (this project's own scar, `16b7c38c`: a silent "can't tell" that
@@ -390,6 +418,7 @@ export class CodescapeSupervisor {
     this.healthProbeTimeoutMs = opts?.healthProbeTimeoutMs ?? DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
     this.healthProbeFailureThreshold = opts?.healthProbeFailureThreshold ?? DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD;
     this.versionProbeTimeoutMs = opts?.versionProbeTimeoutMs ?? DEFAULT_VERSION_PROBE_TIMEOUT_MS;
+    this.driftStabilityMs = opts?.driftStabilityMs ?? DEFAULT_DRIFT_STABILITY_MS;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
       this.port = opts.port;
@@ -486,6 +515,8 @@ export class CodescapeSupervisor {
       this.restartAttempts = 0;
       this.lastDriftRestartInstalledBuild = null;
       this.lastInstalledBuildFailureReason = null;
+      this.driftCandidateBuild = null;
+      this.driftCandidateFirstSeenAt = null;
       this.spawnServe();
       this.startHealthMonitor();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
@@ -530,6 +561,8 @@ export class CodescapeSupervisor {
     this.consecutiveHealthFailures = 0;
     this.lastDriftRestartInstalledBuild = null;
     this.lastInstalledBuildFailureReason = null;
+    this.driftCandidateBuild = null;
+    this.driftCandidateFirstSeenAt = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -712,6 +745,20 @@ export class CodescapeSupervisor {
    * subsequent probe tick — that guard is what stops an endless restart cycle when the new build can't
    * come up. A restart fires again only once the installed build itself changes to something new.
    *
+   * Card 9e6f984d — STABILITY WINDOW, a precondition layered ON TOP of the guard above (does not
+   * replace it): a genuine mismatch does not restart immediately. The installed build must first sit
+   * UNCHANGED for {@link driftStabilityMs} before a restart fires, tracked as `(build, firstSeenAt)` on
+   * {@link driftCandidateBuild}/{@link driftCandidateFirstSeenAt}. A NEW mismatched build (different from
+   * whatever was already being watched) replaces the candidate and restarts the window — so a burst of N
+   * distinct rebuilds inside the window collapses into exactly ONE eventual restart, fired only once the
+   * LAST build in the burst has been stable for the full window. This is what stops the codescape
+   * project's own rebuild cadence from becoming our serve-restart cadence: their build action drives our
+   * process lifecycle across a boundary where neither side can see the other's activity, so a quiet
+   * period is the cheap, coupling-free way to tell "mid-churn" apart from "settled". Deferral is LOGGED
+   * ONCE per new candidate (not once per tick while waiting) — a `console.warn` distinct from both the
+   * eventual restart line and total silence, so "serve didn't restart" is never indistinguishable from
+   * "no drift detected" (same discriminator discipline as the rest of this feature).
+   *
    * Review follow-up (card 90550a97): a genuine couldn't-read on the installed side is loud, not silent —
    * "no drift" and "can't tell if there's drift" must never look identical (the `16b7c38c` lesson: a
    * `finish([])` that couldn't tell "enumeration failed" from "nothing found" silently disabled worktree
@@ -744,10 +791,29 @@ export class CodescapeSupervisor {
     this.lastInstalledBuildFailureReason = null; // any non-failed read (a real build OR an honest null) resets the latch
     if (installed.build == null) return; // an HONEST "no build id available" answer — fail-safe, SILENT: not a failure to report
     const installedBuild = installed.build;
-    if (installedBuild === runningBuild) return; // no drift
+    if (installedBuild === runningBuild) {
+      // The running side has caught up (or the installed side moved back to it) — nothing left to watch.
+      // Clears any in-progress stability window so a LATER new drift starts a fresh one, not a stale one.
+      this.driftCandidateBuild = null;
+      this.driftCandidateFirstSeenAt = null;
+      return;
+    }
     if (installedBuild === this.lastDriftRestartInstalledBuild) return; // already gave THIS installed build its one restart
-    console.warn(`[codescape] serve build drift detected (running "${runningBuild}" != installed "${installedBuild}") — killing for restart`);
+    const now = Date.now();
+    if (installedBuild !== this.driftCandidateBuild) {
+      // A NEW mismatched build (first sighting, or the watched candidate just changed) — start (or
+      // restart) the stability window; do not restart yet. Logged ONCE here, not on every tick spent
+      // waiting for the window to elapse below.
+      this.driftCandidateBuild = installedBuild;
+      this.driftCandidateFirstSeenAt = now;
+      console.warn(`[codescape] serve build drift detected (running "${runningBuild}" != installed "${installedBuild}") — deferring restart until the installed build has been stable for ${this.driftStabilityMs}ms`);
+      return;
+    }
+    if (now - (this.driftCandidateFirstSeenAt ?? now) < this.driftStabilityMs) return; // still within the stability window
+    console.warn(`[codescape] serve build drift STABLE (running "${runningBuild}" != installed "${installedBuild}", unchanged for >= ${this.driftStabilityMs}ms) — killing for restart`);
     this.lastDriftRestartInstalledBuild = installedBuild;
+    this.driftCandidateBuild = null;
+    this.driftCandidateFirstSeenAt = null;
     const child = this.child;
     if (child) { try { child.kill(); } catch { /* the exit/error handler still drives the restart path if the signal lands */ } }
   }
