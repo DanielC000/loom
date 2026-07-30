@@ -462,7 +462,11 @@ async function main(): Promise<void> {
   // watcher). BOOT-BOUND cadence from the resolved platform config (LOOM_WAKE_INTERVAL_MS env is read,
   // floor-clamped, inside resolveConfig; default 60s).
   const wakeIntervalMs = watchers.wakeMs;
-  const wakes = new WakeService({ db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs });
+  const wakes = new WakeService({
+    db, pty, resume: (id) => sessions.resume(id), intervalMs: wakeIntervalMs,
+    // Card 61a012ce: durable fire dispatch — see WakeServiceDeps.enqueueDurable's own doc.
+    enqueueDurable: (id, text, ctx) => sessions.enqueueSystemNudge(id, text, ctx),
+  });
   // The task MCP hosts the universal wake tools, so it takes the WakeService.
   const mcp = new TaskMcpRouter(db, wakes);
   // PollService (local poll-job triggers, agent-tooling epic P3) — ALWAYS ON like WakeService: with zero
@@ -483,6 +487,8 @@ async function main(): Promise<void> {
     resume: (id) => sessions.resume(id),
     spawn: (agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt }),
     intervalMs: pollIntervalMs,
+    // Card 61a012ce: durable fire dispatch — see PollServiceDeps.enqueueDurable's own doc.
+    enqueueDurable: (id, text, ctx) => sessions.enqueueSystemNudge(id, text, ctx),
   });
   // EventTriggerService (local event triggers, Loom Event Triggers subsystem T2) — ALWAYS ON like
   // PollService: with zero event_triggers rows every tick is a no-op, byte-identical to today until a

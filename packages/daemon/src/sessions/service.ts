@@ -7,7 +7,7 @@ import {
   type Session, type StopMode, type OrchestrationEvent, type Task,
   type Agent, type SessionRole, type ResolvedConfig, type PermissionPolicy, type Schedule,
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
-  type GatesActive, type GateRun, type GateType,
+  type GatesActive, type GateRun, type GateType, type CompanionRoute,
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
@@ -3240,11 +3240,17 @@ export class SessionService {
       const rootMsgId = typeof e.detail?.rootMsgId === "string" ? e.detail.rootMsgId : msgId;
       const chainDepth = typeof e.detail?.chainDepth === "number" ? e.detail.chainDepth : 0;
       const sender = typeof e.detail?.sender === "string" ? e.detail.sender : e.managerSessionId;
+      // Card 61a012ce: read back `route` the SAME way as kind/giveUpHeldUntil/rootMsgId/chainDepth above —
+      // a legacy record (appended before this card) carries no `route` key, so this defaults to undefined
+      // and redrives as a plain nudge exactly as it always has.
+      const routeDetail = e.detail?.route as { channel?: unknown; chatId?: unknown } | undefined;
+      const route: CompanionRoute | undefined = routeDetail && typeof routeDetail.channel === "string" && typeof routeDetail.chatId === "string"
+        ? { channel: routeDetail.channel, chatId: routeDetail.chatId } : undefined;
       const r = this.pty.enqueueStdin(
         recipientId, text, "system", (reason?: string) => {
           this.redriveInFlightMsgIds.delete(msgId);
           this.resolveQueuedMessage(msgId, { recipientId, reason });
-        }, undefined, kind, undefined, undefined, undefined, undefined, giveUpHeldUntil,
+        }, route, kind, undefined, undefined, undefined, undefined, giveUpHeldUntil,
         () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
         rootMsgId, // logicalId (card 4a0af485 CR follow-up #6) — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
       );
@@ -4961,10 +4967,16 @@ export class SessionService {
    * (skipping it lets the re-mint take `enqueueStdin`'s IMMEDIATE-SUBMIT branch and re-hammer a session the
    * give-up detector just showed wedged, in the SAME synchronous chain that detected the wedge). Every other
    * caller omits it, byte-identical to before this field existed.
+   *
+   * `ctx.route` (card 61a012ce) is the fifth field in the SAME 129efe74 pattern below: a durable record is
+   * the only thing a redrive has to reconstruct dispatch semantics from, so a companion-routed dispatch
+   * (e.g. a `wake_me` fired back through a captured chat route) needs its route persisted too, or a
+   * restart-triggered redrive would silently deliver it as a plain (routeless) nudge instead. Every caller
+   * that omits it (the overwhelming majority) is byte-identical to before this field existed.
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string,
-    ctx: { sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; resendOf?: string; chainDepth?: number; giveUpHeldUntil?: number },
+    ctx: { sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; resendOf?: string; chainDepth?: number; giveUpHeldUntil?: number; route?: CompanionRoute },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
     const kind: QueuedMessageKind = ctx.kind ?? "agent";
@@ -5008,7 +5020,7 @@ export class SessionService {
     // records WHY the durable record closed without being delivered as a turn.
     const r = this.pty.enqueueStdin(
       recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }),
-      undefined, kind, undefined, undefined, undefined, undefined, ctx.giveUpHeldUntil,
+      ctx.route, kind, undefined, undefined, undefined, undefined, ctx.giveUpHeldUntil,
       () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
       rootMsgId, // logicalId (card 4a0af485) — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
     );
@@ -5020,18 +5032,34 @@ export class SessionService {
       // ONLY thing a redrive (across a restart) has to reconstruct dispatch semantics from. Before this fix
       // NONE of the four were persisted, so redriveQueuedMessage had to hardcode a classification, drop any
       // in-flight give-up hold, and reset the chain — see that method's own doc for the legacy-row defaults
-      // this now enables (a record from before this fix still redrives exactly as it always did).
+      // this now enables (a record from before this fix still redrives exactly as it always did). Card
+      // 61a012ce: `route` joins that list as a fifth field, same reasoning — a legacy record (or any caller
+      // that omits it) has no `route` key once JSON-serialized (undefined values are dropped), so it
+      // redrives as a plain nudge exactly as it always has.
       this.db.appendEvent({
         id: randomUUID(), ts: new Date().toISOString(),
         managerSessionId: ctx.sender, workerSessionId: recipientId, taskId: ctx.taskId ?? null,
         kind: "session_message_queued",
-        detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil },
+        detail: { msgId, text: framedText, sender: ctx.sender, kind, rootMsgId, chainDepth, giveUpHeldUntil: ctx.giveUpHeldUntil, route: ctx.route },
       });
     }
     // msgId is returned UNCONDITIONALLY (not just on the held path) so a caller that needs to correlate
     // its OWN follow-up event to this exact enqueue attempt (deliverRedirect's redirect_worker event, card
     // 02621025) always has it to hand — cheap, since it's already minted above regardless of outcome.
     return { ...r, msgId };
+  }
+
+  /**
+   * Card 61a012ce: PUBLIC, narrow wrapper around {@link enqueueDurableMessage} for a daemon-originated
+   * ("system"-sender) one-shot nudge dispatched from OUTSIDE this class — e.g. WakeService/PollService,
+   * which hold only a narrow pty slice + injected fns (mirroring how `resume` is already wired to them)
+   * and have no access to the private durable-enqueue machinery. Every existing internal "system"-sender
+   * one-shot call site (settle-nudges, etc.) already goes through `enqueueDurableMessage` directly; this
+   * is the SAME dispatch, just exposed for a cross-class caller instead of duplicating the persistence +
+   * give-up-handling logic at each new call site.
+   */
+  enqueueSystemNudge(sessionId: string, text: string, ctx: { kind: QueuedMessageKind; route?: CompanionRoute; taskId?: string | null }): EnqueueResult {
+    return this.enqueueDurableMessage(sessionId, text, { sender: "system", kind: ctx.kind, route: ctx.route, taskId: ctx.taskId ?? null });
   }
 
   /**

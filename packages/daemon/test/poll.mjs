@@ -7,11 +7,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // backoff on a fetch failure (never disables), the misconfig id-guard (no re-fire storm on an unusable
 // idPath), the structural disable (deleted connection/session/agent), the whole-tick usage-limit gate,
 // and that a delivery failure (not a fetch failure) preserves the cursor so the SAME fresh item retries.
+// Card 61a012ce: a HELD wake-mode fire (busy target) now dispatches through the injected `enqueueDurable`
+// fn (prod: SessionService.enqueueSystemNudge) instead of a bare `pty.enqueueStdin` — `tick()`'s
+// cursor-commit-after-fire timing is unchanged, but the delivery itself is now durable independent of
+// that timing, so a held-then-restart-lost item no longer relies on it to survive.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/poll.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { Db } from "../dist/db.js";
 import { PollService, MIN_POLL_INTERVAL_MS } from "../dist/orchestration/poll.js";
@@ -49,7 +54,14 @@ function makeEnv(opts = {}) {
 
   const pty = {
     isAlive: (id) => alive.has(id),
-    enqueueStdin: (id, text, source, onDeliver, route, kind) => { enqueued.push({ sessionId: id, text, source, route, kind }); return { delivered: true }; },
+    enqueueStdin: (id, text, source, onDeliver, route, kind) => {
+      enqueued.push({ sessionId: id, text, source, route, kind });
+      // opts.heldTarget simulates a busy wake-mode target: HELD (delivered:false), not thrown — the
+      // exact branch the card 61a012ce bug lived in (tick() commits the cursor once fire() doesn't
+      // throw, but "didn't throw" never meant "delivered").
+      if (opts.heldTarget) return { delivered: false, position: 1 };
+      return { delivered: true };
+    },
   };
   const resume = async (id) => {
     resumed.push(id);
@@ -68,12 +80,28 @@ function makeEnv(opts = {}) {
     if (!next) return { ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [] }) };
     return next;
   };
+  // enqueueDurable mirrors sessions/service.ts's real enqueueDurableMessage CONTRACT closely enough to
+  // test PollService's OWN delegation (forward to enqueueStdin; persist a session_message_queued record
+  // on a held outcome) — see wake.mjs's identical stub for why this isn't a full redrive-machinery
+  // re-implementation.
+  const enqueueDurable = (id, text, ctx) => {
+    const r = pty.enqueueStdin(id, text, "system", undefined, undefined, ctx.kind);
+    if (!r.delivered) {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: "system", workerSessionId: id, taskId: null,
+        kind: "session_message_queued",
+        detail: { msgId: randomUUID(), text, sender: "system", kind: ctx.kind },
+      });
+    }
+    return r;
+  };
 
   const control = new OrchestrationControl();
   if (opts.globalPaused) control.pause("global");
 
   const poll = new PollService({
-    db, pty, control, resume, spawn, request,
+    db, pty, control, resume, spawn, request, enqueueDurable,
     isUsageLimited: () => !!opts.usageLimited,
   });
 
@@ -406,7 +434,27 @@ const seedSpawnJob = (e, id, over = {}) => seedWakeJob(e, id, { mode: "spawn", s
     dataRegion2 === JSON.stringify(guessingItems, null, 2));
 }
 
+// --- Card 61a012ce: a HELD wake-mode fire (busy target, NOT a throw) now leaves a durable trace ---
+// Before this fix, fire()'s bare enqueueStdin held-not-delivered outcome left NOTHING behind: tick()
+// still commits the cursor (fire() didn't throw), so a restart before the held item ever drained would
+// silently skip it forever with zero record anywhere. This proves the durable record now exists.
+{
+  const e = makeEnv({ heldTarget: true });
+  seedWakeJob(e, "job-held");
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [] }) }]); // baseline
+  await e.poll.tick(new Date());
+  e.db.claimPollJob("job-held", new Date(Date.now() - 1000).toISOString());
+  e.setResponses([{ ok: true, status: 200, headers: {}, body: JSON.stringify({ items: [{ id: "n1" }] }) }]);
+  await e.poll.tick(new Date());
+  check("held-fire: dispatched via enqueueDurable (recorded in the enqueue log)", e.enqueued.length === 1);
+  check("held-fire: the cursor STILL advances (fire() did not throw — unchanged timing)", JSON.parse(e.db.getPollJob("job-held").cursorJson).includes("n1"));
+  const undelivered = e.db.listUndeliveredQueuedMessages();
+  check("held-fire: a durable session_message_queued record now exists (the actual fix)",
+    undelivered.length === 1 && undelivered[0].detail.text.includes('"n1"') && undelivered[0].detail.kind === "agent");
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PollService seeds a baseline (fires nothing) on a job's first poll, snapshot-diffs to fire ONLY genuinely new items (never re-firing seen ones), frames every fire (wake + spawn) as explicit untrusted DATA naming the source host, backs off (never disables) on a fetch failure, disables a structurally-dead job (connection/session/agent gone), trips a distinct guard instead of re-fire-storming on an unusable idPath, defers the whole tick under a known usage limit, and never loses an item to a delivery failure (the cursor only advances once delivery succeeds)."
+  ? "\n✅ ALL PASS — PollService seeds a baseline (fires nothing) on a job's first poll, snapshot-diffs to fire ONLY genuinely new items (never re-firing seen ones), frames every fire (wake + spawn) as explicit untrusted DATA naming the source host, backs off (never disables) on a fetch failure, disables a structurally-dead job (connection/session/agent gone), trips a distinct guard instead of re-fire-storming on an unusable idPath, defers the whole tick under a known usage limit, never loses an item to a delivery failure (the cursor only advances once delivery succeeds), and a HELD (busy, non-throwing) wake-mode fire now leaves a durable trace instead of vanishing on a restart before drain (card 61a012ce)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

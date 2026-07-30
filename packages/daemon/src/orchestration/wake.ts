@@ -40,6 +40,18 @@ export interface WakeServiceDeps {
    * the tick treats that as "drop the wake". The test injects a recording stub (keeps this claude-free).
    */
   resume: (sessionId: string) => unknown;
+  /**
+   * Card 61a012ce: dispatch a fired wake's nudge DURABLY instead of via a bare `pty.enqueueStdin` — a
+   * held-then-restart-lost wake used to be unrecoverable (the wake row is already deleted by the time
+   * this runs — see tick()'s claim-first comment — so a bare enqueue that then never drained left NO
+   * durable trace at all). Prod-wired to `SessionService.enqueueSystemNudge`, which persists a
+   * `session_message_queued` record on the held path (redriven by `recoverUndeliveredMessagesOnBoot`
+   * across a restart) — the SAME durable path every other agent-directed dispatch in this codebase uses.
+   * REQUIRED (not optional): an omitted dep here would silently reintroduce the exact bug this card
+   * fixes, so a missing wiring is a compile error rather than a latent regression. The test injects a
+   * recording stub (keeps this claude-free, mirrors `resume`).
+   */
+  enqueueDurable: (sessionId: string, text: string, ctx: { kind: "warning" | "agent"; route?: CompanionRoute }) => { delivered: boolean; position?: number };
   /** Tick cadence; defaults to 60s. Injectable so a test can drive tick() directly. */
   intervalMs?: number;
   /**
@@ -153,8 +165,10 @@ export class WakeService {
 
   /**
    * One trigger pass: deliver every due wake. CLAIM-FIRST (delete before any side effect, per the
-   * Scheduler's finding-2) so a throwing delivery can't re-fire the same wake next tick.
-   *   - live           → enqueue the nudge.
+   * Scheduler's finding-2) so a throwing delivery can't re-fire the same wake next tick. Claim-first
+   * guards ONLY against a re-fire loop — it says nothing about whether the delivery itself survives a
+   * restart before it drains; that's a SEPARATE guarantee `enqueueDurable` provides (card 61a012ce).
+   *   - live           → enqueue the nudge (durably — see `enqueueDurable`'s own doc).
    *   - not live + usage-limited → DEFER (re-insert; don't auto-resume into a known cap).
    *   - not live + ok  → auto-resume, then enqueue.
    *   - unresumable (resume throws) → drop (wake_dropped event).
@@ -176,16 +190,23 @@ export class WakeService {
         }
         // Route-aware fire: a companion-origin wake (route captured at schedule time) delivers a
         // [loom:reminder] turn through the SAME per-turn route path the heartbeat uses — carrying the
-        // route into enqueueStdin so a later chat_reply resolves back to this exact chat. Every OTHER
-        // wake (route undefined — the overwhelming majority) takes the EXACT plain enqueueStdin call
-        // that ran before this feature existed: byte-identical.
+        // route into enqueueDurable so a later chat_reply resolves back to this exact chat. Every OTHER
+        // wake (route undefined — the overwhelming majority) takes the EXACT plain dispatch that ran
+        // before this feature existed, modulo the card 61a012ce durability fix below: byte-identical
+        // otherwise.
         // kind:"agent" — a scheduled wake-up carries the agent's own arbitrary, specific note-to-self
         // (or, when routed, a companion reminder); it must land as its own turn, never mashed with
         // anything else queued behind it.
+        // Card 61a012ce: DURABLE dispatch (was a bare `pty.enqueueStdin`) — the wake row is already
+        // deleted above (claim-first, so a re-fire loop is impossible), which used to mean a HELD
+        // delivery (busy target) lost to a restart before drain had NO surviving record anywhere. This
+        // now persists a `session_message_queued` record on the held path, redriven by
+        // `recoverUndeliveredMessagesOnBoot` — the wake row's lifecycle (anti-re-fire) and the message's
+        // durability (anti-loss) are now separate, orthogonal mechanisms.
         if (w.route) {
-          this.deps.pty.enqueueStdin(w.sessionId, framedReminder(w), "system", undefined, w.route, "agent");
+          this.deps.enqueueDurable(w.sessionId, framedReminder(w), { kind: "agent", route: w.route });
         } else {
-          this.deps.pty.enqueueStdin(w.sessionId, framedNote(w), "system", undefined, undefined, "agent");
+          this.deps.enqueueDurable(w.sessionId, framedNote(w), { kind: "agent" });
         }
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
@@ -193,7 +214,12 @@ export class WakeService {
           detail: { wakeId: w.id, wakeAt: w.wakeAt },
         });
       } catch (e) {
-        // Unresumable / delivery failed — the session is gone. Drop the wake (already claimed) + record.
+        // This catch covers ONLY a THROW: `isAlive` (never throws) or `resume()` (throws for an
+        // unresumable/dead-transcript session — the "session is gone" case this event is named for).
+        // Card 61a012ce: it does NOT, and never did, cover a held-but-undelivered delivery — `enqueueDurable`
+        // (like the bare `pty.enqueueStdin` it replaced) returns normally with `delivered:false` when the
+        // target is merely busy; that is not an error and must not be misread as one. Drop the wake
+        // (already claimed above) + record why.
         this.deps.db.appendEvent({
           id: randomUUID(), ts: now.toISOString(),
           managerSessionId: w.sessionId, kind: "wake_dropped",

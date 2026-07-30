@@ -3,14 +3,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // resume fn, so the tick tests use RECORDING STUBS and drive tick()/start() directly. Hermetic:
 // each env gets its OWN temp .db (never the daemon's). Covers: schedule validation (floor/horizon/
 // cap/note/exactly-one), live-fire, non-due, not-live auto-resume, usage-limited defer, unresumable
-// drop, cancel scoping, start() past-due fire-once reconcile, and the route-aware fire path
+// drop, cancel scoping, start() past-due fire-once reconcile, the route-aware fire path
 // (companion-origin wake fires its [loom:reminder] back through the captured route; a non-companion
 // wake fires [loom:wake], no route). Card 706cc6fb: every fire carries kind:"agent" (a scheduled
 // wake-up is the agent's own arbitrary note-to-self / companion reminder — one-per-turn, never
-// coalesced with anything else queued behind it).
+// coalesced with anything else queued behind it). Card 61a012ce: a HELD fire (busy target) now
+// dispatches through the injected `enqueueDurable` fn (prod: SessionService.enqueueSystemNudge)
+// instead of a bare `pty.enqueueStdin` — the wake row is STILL deleted first (claim-before-act,
+// anti-re-fire, unchanged), but the message itself is now durable independent of that row's
+// lifecycle. `enqueueDurable`'s test stub mirrors enqueueDurableMessage's OWN contract (forward to
+// enqueueStdin; on a held outcome, persist a `session_message_queued` record) closely enough to prove
+// WakeService's delegation is correct; `wake-poll-durable-route.mjs` proves the REAL SessionService
+// plumbing (route persistence + boot redrive) end-to-end.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 import { Db } from "../dist/db.js";
 import { WakeService } from "../dist/orchestration/wake.js";
 
@@ -38,7 +46,14 @@ function makeEnv(opts = {}) {
   let origin = opts.origin ?? null; // mutable: getActiveTurnOrigin() reads THIS at schedule time
   const pty = {
     isAlive: (id) => alive.has(id),
-    enqueueStdin: (id, text, source, onDeliver, route, kind) => { enqueued.push({ sessionId: id, text, source, route, kind }); return { delivered: true }; },
+    enqueueStdin: (id, text, source, onDeliver, route, kind) => {
+      enqueued.push({ sessionId: id, text, source, route, kind });
+      // opts.heldTarget simulates a busy recipient: enqueueStdin returns HELD (delivered:false) instead
+      // of the default always-delivered stub — the exact branch the card 61a012ce bug lived in (a held
+      // enqueue does NOT throw, so the old bare-enqueueStdin code had no durable trace of it at all).
+      if (opts.heldTarget) return { delivered: false, position: 1 };
+      return { delivered: true };
+    },
     getActiveTurnOrigin: (id) => (id === sessId ? origin : null),
   };
   const resume = async (id) => {
@@ -46,8 +61,25 @@ function makeEnv(opts = {}) {
     if (opts.resumeThrows) throw new Error("session is no longer resumable (engine transcript missing)");
     alive.add(id); // a successful resume brings the pty back
   };
+  // enqueueDurable mirrors sessions/service.ts's real enqueueDurableMessage CONTRACT closely enough to
+  // test WakeService's OWN delegation: forward to enqueueStdin, and on a held (delivered:false) outcome
+  // persist a `session_message_queued` record (the durable inbox row a restart-recovery boot scan reads
+  // via db.listUndeliveredQueuedMessages()) — NOT a re-implementation of the real give-up/redrive
+  // machinery, which `wake-poll-durable-route.mjs` exercises against the REAL SessionService instead.
+  const enqueueDurable = (id, text, ctx) => {
+    const r = pty.enqueueStdin(id, text, "system", undefined, ctx.route, ctx.kind);
+    if (!r.delivered) {
+      db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(),
+        managerSessionId: "system", workerSessionId: id, taskId: null,
+        kind: "session_message_queued",
+        detail: { msgId: randomUUID(), text, sender: "system", kind: ctx.kind, route: ctx.route },
+      });
+    }
+    return r;
+  };
   const wakes = new WakeService({
-    db, pty, resume,
+    db, pty, resume, enqueueDurable,
     isUsageLimited: () => !!opts.usageLimited,
   });
   return {
@@ -233,7 +265,41 @@ const events = (e, kind) => e.db.listEvents(e.sessId).filter((ev) => ev.kind ===
   cleanupEnv(e);
 }
 
+// Card 61a012ce — HELD fire is now DURABLE: a busy target still gets the wake row deleted (claim-first,
+// anti-re-fire unchanged) but the dispatch now goes through enqueueDurable, which persists a
+// session_message_queued record instead of vanishing with no trace when a restart hits before drain.
+{
+  const e = makeEnv({ heldTarget: true });
+  const t0 = new Date();
+  const { wakeId } = e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "check the deploy" }, t0);
+  await e.wakes.tick(new Date(t0.getTime() + 61_000));
+  check("held-fire: the wake row is STILL deleted (claim-first preserved — no re-fire loop)", e.db.getWake(wakeId) === undefined);
+  check("held-fire: wake_fired is still emitted (fire is attempted regardless of delivery outcome)", events(e, "wake_fired").length === 1);
+  check("held-fire: dispatched via enqueueDurable (recorded in the enqueue log)", e.enqueued.length === 1 && e.enqueued[0].sessionId === e.sessId);
+  const undelivered = e.db.listUndeliveredQueuedMessages();
+  check("held-fire: a durable session_message_queued record now exists (the actual fix — nothing existed here before)",
+    undelivered.length === 1 && undelivered[0].detail.text.includes("check the deploy"));
+  check("held-fire: the durable record carries kind:\"agent\"", undelivered[0].detail.kind === "agent");
+  cleanupEnv(e);
+}
+
+// Card 61a012ce — companion-origin HELD fire: the durable record carries the ROUTE too (not just the
+// note), so a restart-recovery redrive of a companion reminder still lands back on the right chat.
+{
+  const e = makeEnv({ heldTarget: true });
+  const route = { channel: "telegram", chatId: "999" };
+  e.setOrigin(route);
+  const t0 = new Date();
+  e.wakes.schedule(e.sessId, { delaySeconds: 60, note: "circle back" }, t0);
+  e.setOrigin(null);
+  await e.wakes.tick(new Date(t0.getTime() + 61_000));
+  const undelivered = e.db.listUndeliveredQueuedMessages();
+  check("held-fire+route: the durable record's OWN detail carries the captured route (not dropped)",
+    undelivered.length === 1 && JSON.stringify(undelivered[0].detail.route) === JSON.stringify(route));
+  cleanupEnv(e);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — WakeService validates+schedules, fires due wakes (live + auto-resume), defers under usage-limit, drops the unresumable, scopes cancel, reconciles past-due on start, routes a companion-origin wake's [loom:reminder] back through its captured route, and every fire carries kind:\"agent\" (card 706cc6fb)."
+  ? "\n✅ ALL PASS — WakeService validates+schedules, fires due wakes (live + auto-resume), defers under usage-limit, drops the unresumable, scopes cancel, reconciles past-due on start, routes a companion-origin wake's [loom:reminder] back through its captured route, every fire carries kind:\"agent\" (card 706cc6fb), and a HELD fire (busy target) is now durably recorded (route included) instead of vanishing on a restart before drain (card 61a012ce)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

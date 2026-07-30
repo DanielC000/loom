@@ -43,6 +43,16 @@ export interface PollServiceDeps {
   /** Re-spawn a stopped-but-resumable wake-mode target. Prod-wired to SessionService.resume. */
   resume: (sessionId: string) => unknown;
   /**
+   * Card 61a012ce: dispatch a wake-mode fire's nudge DURABLY instead of via a bare `pty.enqueueStdin` —
+   * `tick()` commits the poll cursor once `fire()` returns without throwing, but a HELD (busy target)
+   * delivery doesn't throw, so a held-then-restart-lost item used to be silently skipped forever (the
+   * cursor had already advanced past it). Prod-wired to `SessionService.enqueueSystemNudge`, mirroring
+   * WakeService's identical fix — persists a `session_message_queued` record on the held path, redriven
+   * by `recoverUndeliveredMessagesOnBoot`. REQUIRED (not optional), same reasoning as WakeService's dep:
+   * an omitted wiring would silently reintroduce this bug rather than fail to compile.
+   */
+  enqueueDurable: (sessionId: string, text: string, ctx: { kind: "warning" | "agent" }) => { delivered: boolean; position?: number };
+  /**
    * Spawn a fresh spawn-mode session, handing it `kickoffPrompt` (the untrusted-framed DATA block, as
    * plain text — NOT yet composed with the agent's own brief) as its kickoff. Prod-wired to
    * `(agentId, kickoffPrompt) => sessions.startNew(agentId, { kickoffPrompt })`, which composes it with
@@ -234,8 +244,12 @@ export class PollService {
     if (job.mode === "wake") {
       const sessionId = job.sessionId!;
       if (!this.deps.pty.isAlive(sessionId)) await this.deps.resume(sessionId); // throws → caller's backoff path
-      // kind:"agent" — a poll-triggered nudge is its own turn, never mashed with anything else queued.
-      this.deps.pty.enqueueStdin(sessionId, `[loom:poll] New item(s) detected by a poll job.\n\n${block}`, "system", undefined, undefined, "agent");
+      // kind:"agent" — a poll-triggered nudge carries a specific external item the target must reason
+      // about as its own turn, never mashed with anything else queued behind it.
+      // Card 61a012ce: DURABLE dispatch (was a bare `pty.enqueueStdin`) — see `enqueueDurable`'s doc.
+      // `fire()` still throws on genuine failure (caller's backoff path), but a HELD (busy) delivery no
+      // longer relies on the cursor-commit timing alone to survive a restart before it drains.
+      this.deps.enqueueDurable(sessionId, `[loom:poll] New item(s) detected by a poll job.\n\n${block}`, { kind: "agent" });
       return { sessionId };
     }
 
