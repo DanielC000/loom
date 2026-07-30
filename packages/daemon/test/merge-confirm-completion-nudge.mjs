@@ -226,12 +226,24 @@ try {
   // merge-reject-notify-suppress.mjs's scenario (C). shouldSuppressMergeReject reconciles the rich
   // [loom:merge-rejected] away (notified:false); the manager must still hear SOMETHING about this async
   // op, so onSettledAfterPending must NOT skip the generic [loom:merge-failed] echo here.
+  //
+  // Card 522cf573 (the "merge-FAILED carries no gateDetail" bug — the SAME shape this scenario already
+  // exercises): the gate command below PRINTS a `FAIL <name>` marker before exiting non-zero (mirroring a
+  // real test-runner failure, unlike the earlier scenarios' silent `process.exit(1)`), so `failingTest` is
+  // actually populated — the DoD's single highest-value field, per both real incidents on the card. The
+  // checks below assert the generic [loom:merge-failed] echo carries that failingTest line PLUS the
+  // squash-phase-began state and the canonical-repo-state clause — i.e. the SAME richness the rich
+  // [loom:merge-rejected] notify would have carried, not the bare "build gate failed" the card's two
+  // incidents actually received. POSITIVE-CONTROLLED (per /worker doctrine): verified by hand that these
+  // exact assertions go RED against the pre-fix dist (the old code only echoed `outcome.value.reason`,
+  // i.e. bare "build gate failed" — see the card) and GREEN against the post-fix dist built from this
+  // change.
   {
     const P = "mcn-suppressed", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t4");
     fs.writeFileSync(path.join(worktreePath, "feat4.txt"), "work\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m feat4`, { cwd: worktreePath });
-    seedProject(P, repo, `node -e "setTimeout(()=>process.exit(1), 13000)"`);
+    seedProject(P, repo, `node -e "setTimeout(()=>{console.log('FAIL mcn-scenario4-marker'); process.exit(1)}, 13000)"`);
     const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
     // "done" is the project's default terminal column key (no custom kanbanColumns configured) — same
     // convention merge-reject-notify-suppress.mjs's scenario (C) relies on.
@@ -251,6 +263,23 @@ try {
     check("(4) carries the task id AND the SAME opId the pending response returned (the generic echo is stamped too, not just the rich path)",
       failedNudges[0] && failedNudges[0].text.includes("task t4") && failedNudges[0].text.includes(pendingOpId4));
     check("(4) pushed with kind:\"warning\"", failedNudges[0] && failedNudges[0].kind === "warning");
+    // Card 522cf573 DoD 1: failingTest — the single highest-value field per the card — is actually
+    // propagated into the GENERIC echo, not just the (suppressed, never-delivered) rich notify.
+    check("(4) carries the actual failingTest marker (card 522cf573 — the field both real incidents needed)",
+      failedNudges[0] && failedNudges[0].text.includes("failing: FAIL mcn-scenario4-marker"));
+    // Card 522cf573 DoD 4: states whether the squash phase had begun — a gate rejection always precedes
+    // the squash, so this must read "never reached", never a silent omission.
+    check("(4) states the squash phase never reached (card 522cf573 DoD 4)",
+      failedNudges[0] && failedNudges[0].text.includes("squash phase never reached"));
+    // Card 522cf573 DoD 1: ALWAYS the canonical-repo-state clause — merge-rejected already carried this;
+    // merge-failed used to drop it silently.
+    check("(4) carries the canonical-repo-state clause (card 522cf573 DoD 1 — merge-rejected already had this, merge-failed used to drop it)",
+      failedNudges[0] && failedNudges[0].text.includes("canonical repo untouched"));
+    // Card 522cf573: the bug this whole card is about — the generic echo used to be JUST the bare headline
+    // ("build gate failed"), discarding every other field gateDetail actually carried. Assert the message
+    // is genuinely richer than that bare string, not merely non-empty.
+    check("(4) is NOT the bare 'build gate failed' string this card's two incidents actually received (must carry more)",
+      failedNudges[0] && !/— build gate failed$/.test(failedNudges[0].text.trim()) && failedNudges[0].text.length > `[loom:merge-failed] worker ${workerId} (task t4) [op ${pendingOpId4}] — build gate failed`.length + 20);
     worktrees.push([repo, worktreePath]);
   }
 

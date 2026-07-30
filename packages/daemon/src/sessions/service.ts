@@ -166,7 +166,20 @@ type GateRejectionDetail = {
  *  trace the reused result back to the specific run that produced it. Absent entirely on a rejection
  *  path that never reached the reuse decision (stranded work, union conflict, circuit breaker) — those
  *  never ran or skipped a gate, so the field would be meaningless noise there. */
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string; gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[] };
+type ConfirmMergeResult = {
+  merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
+  warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
+  gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
+  /** Card 522cf573: the FULL rejection detail suffix (everything after "— " in the rich
+   *  `[loom:merge-rejected]` pty text this same rejection would have sent, incl. the squash-phase-began
+   *  state and the canonical-repo-state clause) — captured verbatim at EVERY `merged:false` return site so
+   *  `confirmWorkerMergeTracked`'s generic `[loom:merge-failed]` echo (fired when the rich notify above was
+   *  itself reconciled away by `shouldSuppressMergeReject`) can carry the SAME diagnostic richness instead
+   *  of falling back to the bare `reason` string. Single source of truth BY CONSTRUCTION: both the rich
+   *  notify and this field are built from the identical local variable at each site, so they can never
+   *  drift apart. `undefined` only for the plain GREEN merge return (there is no rejection detail to carry). */
+  detailText?: string;
+};
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
  *  PendingOpRegistry's doc) after {@link SessionService.confirmWorkerMergeTracked} settles it — long
@@ -8742,9 +8755,12 @@ export class SessionService {
     // untouched so the manager can recover the commit.
     const stranded = await detectStrandedWork(repoPath, worktreePath, branch, { timeoutMs: this.gitOpMs });
     if (stranded.stranded) {
-      const suppressed = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`);
+      // Card 522cf573 DoD 4: squash phase never reached — this refusal fires BEFORE the gate or the squash
+      // itself ever runs.
+      const detailText = `STRANDED WORK: commits are on '${stranded.branch}' (tip ${stranded.commit}, ${stranded.ahead} ahead), not the assigned branch '${branch}' (empty). Refusing the empty merge so the work isn't lost; squash phase never reached, canonical repo untouched, worktree retained. Re-point '${branch}' to ${stranded.commit} (or cherry-pick it), then re-confirm.`;
+      const suppressed = await rejectNotify("stranded", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: "stranded", strandedBranch: stranded.branch, strandedCommit: stranded.commit, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging`, notified: !suppressed, opId: thisOpId };
+      return { merged: false, reason: `stranded work on '${stranded.branch}' (tip ${stranded.commit}); assigned branch '${branch}' is empty — re-point or cherry-pick before merging`, detailText, notified: !suppressed, opId: thisOpId };
     }
 
     // Build/DoD gate (fail-closed): run the configured command in the WORKTREE; non-zero rejects.
@@ -8901,9 +8917,12 @@ export class SessionService {
         if (!union.ok) {
           const why = union.conflict ? "branch conflicts with current main — rebase/resolve before merge" : (union.reason ?? "union merge failed");
           const failReason = union.conflict ? "union_conflict" : "union_merge_failed";
-          const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo untouched, worktree retained.`);
+          // Card 522cf573 DoD 4: squash phase never reached — the union-merge (a pre-gate step) failed
+          // before the gate or the squash itself ever ran.
+          const detailText = `${why}; squash phase never reached, canonical repo untouched, worktree retained.`;
+          const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
           evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
-          return { merged: false, reason: why, notified: !suppressed, opId: thisOpId };
+          return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId };
         }
         // GATE-BASE CAPTURE (card eda70da6): `union.mainSha` is the canonical main tip THIS union-merge
         // itself read and unioned into the worktree — the exact sha the tree the gate is about to validate
@@ -8962,10 +8981,13 @@ export class SessionService {
       // not one more before the distinct message appears.
       if (await this.checkGateTimeoutBreaker(branch, worktreePath)) {
         const msg = `gate repeatedly times out on this branch (${GATE_TIMEOUT_BREAKER_THRESHOLD} consecutive timeouts at this commit) — likely a hanging test, not retrying; push a new commit to re-enable gating`;
-        const suppressed = await rejectNotify("gate_timeout_circuit_broken", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${msg}; canonical repo untouched, worktree retained.`);
+        // Card 522cf573 DoD 4: squash phase never reached — the breaker short-circuits BEFORE spawning
+        // another gate at all, let alone reaching the squash.
+        const detailText = `${msg}; squash phase never reached, canonical repo untouched, worktree retained.`;
+        const suppressed = await rejectNotify("gate_timeout_circuit_broken", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "gate_timeout_circuit_broken", ...(suppressed ? { suppressed: true } : {}) });
         return {
-          merged: false, reason: msg,
+          merged: false, reason: msg, detailText,
           gateDetail: { timedOut: true, circuitBroken: true },
           notified: !suppressed, opId: thisOpId,
         };
@@ -9205,7 +9227,15 @@ export class SessionService {
           failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
-        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${headline}${detailBits ? ` (${detailBits})` : ""}; canonical repo untouched, worktree retained.${tailBlock}`);
+        // Card 522cf573 DoD 1/4: this IS the rich detail — headline + detailBits (incl. `failingTest`, the
+        // single highest-value field per the card) + the squash-phase-began state + the canonical-repo
+        // clause + the raw output tail. Captured into ONE variable so BOTH the rich `[loom:merge-rejected]`
+        // notify below AND the generic `[loom:merge-failed]` completion echo (fired instead, whenever this
+        // notify is reconciled away by shouldSuppressMergeReject — confirmWorkerMergeTracked's onSettle
+        // callback reads `detailText` off the return) carry the IDENTICAL detail, by construction. The gate
+        // runs strictly before the squash, so squash phase never reached is always true here.
+        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${tailBlock}`;
+        const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", {
           reason: "gate", phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
@@ -9213,9 +9243,18 @@ export class SessionService {
           gateCap, concurrentGates: concurrentAtStart,
           ...(suppressed ? { suppressed: true } : {}),
         });
+        // Card 522cf573 DoD 3: correlate this settled op's gate output to its opId in the daemon's own
+        // rotating stdout log (`<LOOM_HOME>/logs/daemon-output.log`, teed by scripts/daemon-supervisor.mjs)
+        // — so an op that has already scrolled out of the pty transcript / past its retention window can
+        // still be diagnosed after the fact by grepping this opId. Deliberately a SEPARATE console.log from
+        // the pty notify above (which can be suppressed) — this line always fires when a real gate failure
+        // was observed, independent of whether the manager was notified. Includes `tailBlock` (the same
+        // bounded ~4KB output tail the rich notify carries) — the actual gate stderr, not just the summary
+        // bits, so a settled op can be diagnosed from the log alone without needing the pty transcript.
+        console.log(`[gate opId=${thisOpId}] branch=${branch} task=${taskId ?? "none"} passed=false ${detailBits}${tailBlock}`);
         return {
           merged: false,
-          reason: headline,
+          reason: headline, detailText,
           gateDetail: {
             phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
             exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
@@ -9250,15 +9289,22 @@ export class SessionService {
         // investigation — a re-confirm re-derives everything fresh against the new main and either reuses
         // validly, gates for real, or (for a gate that already ran for real) simply re-gates again.
         const why = merge.reason ?? "canonical main advanced since this merge's gate-validated tree was fixed — re-confirm to re-gate against the current tree";
-        const suppressed = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo AND worktree untouched — just re-run worker_merge_confirm.`);
+        // Card 522cf573 DoD 4: caught INSIDE mergeBranch's own lock before it touches anything — squash
+        // was never attempted.
+        const detailText = `${why}; squash phase aborted before writing — canonical repo AND worktree untouched — just re-run worker_merge_confirm.`;
+        const suppressed = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "gate_base_invalidated", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: why, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       const failReason = merge.conflict ? "conflict" : "merge_failed";
-      const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${why}; canonical repo untouched, worktree retained. Re-task a rebase.`);
+      // Card 522cf573 DoD 4: `git merge --squash` was attempted (and, on a conflict, staged) but never
+      // reached its commit step — mergeBranchLocked resets/cleans any staged residue before returning, so
+      // no commit ever lands on a rejection here.
+      const detailText = `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
+      const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, notified: !suppressed, opId: thisOpId };
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId };
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
@@ -9273,11 +9319,14 @@ export class SessionService {
         // orphaned done sail through before.
         const reported = this.workerReportedComplete(workerSessionId);
         if (reported) {
-          const suppressed = await rejectNotify("orphaned_zero_ahead", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ORPHANED WORK (HARD): your worker REPORTED ${reported} but its assigned branch '${branch}' is 0 commits ahead of main — there is NOTHING on the branch to merge. The reported work was almost certainly committed to MAIN directly (or another branch); a later main sync can ORPHAN it and lose it silently. Refusing the empty merge. RECOVER it: 'git --no-pager log main' to find the commit, cherry-pick it onto '${branch}', then re-confirm — or if the report was mistaken, re-task. (Workers must NEVER commit to main — commit only to the assigned branch.)`);
+          // Card 522cf573 DoD 4: the squash STAGED nothing (0 diff) — no commit was ever made.
+          const detailText = `ORPHANED WORK (HARD): your worker REPORTED ${reported} but its assigned branch '${branch}' is 0 commits ahead of main — there is NOTHING on the branch to merge. The reported work was almost certainly committed to MAIN directly (or another branch); a later main sync can ORPHAN it and lose it silently. Refusing the empty merge (squash staged nothing, no commit made, canonical repo untouched). RECOVER it: 'git --no-pager log main' to find the commit, cherry-pick it onto '${branch}', then re-confirm — or if the report was mistaken, re-task. (Workers must NEVER commit to main — commit only to the assigned branch.)`;
+          const suppressed = await rejectNotify("orphaned_zero_ahead", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
           evt("merge_rejected", { reason: "orphaned_zero_ahead", reportedState: reported, ...(suppressed ? { suppressed: true } : {}) });
           return {
             merged: false,
             reason: `orphaned work: assigned branch '${branch}' is 0 commits ahead of main but the worker reported ${reported} — the committed work is not on the branch (likely committed straight to main); recover the commit onto '${branch}' before merging`,
+            detailText,
             emptyKind: "STAGE_EMPTY_RETRY",
             hardError: true,
             reportedState: reported,
@@ -9287,9 +9336,11 @@ export class SessionService {
         }
         // No report of work → a genuine empty no-op. Fail-closed (worktree retained so the manager can see
         // why the worker produced no change, task stays in review) but soft — no alarm.
-        const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — STAGE_EMPTY_RETRY: the branch has no diff to merge; canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.`);
+        // Card 522cf573 DoD 4: same as above — squash staged nothing, no commit made.
+        const detailText = "STAGE_EMPTY_RETRY: the branch has no diff to merge (squash staged nothing, no commit made); canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.";
+        const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "stage_empty", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId };
+        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", detailText, emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses. `merge.sha`
@@ -9572,11 +9623,30 @@ export class SessionService {
         const stepsLine = outcome.ok && outcome.value.merged && outcome.value.gateSteps
           ? ` ${formatGateStepsDiagnostic(outcome.value.gateSteps)}`
           : "";
+        // Card 522cf573 DoD 1: this is the "genuinely hard" case — a `merge-failed` echo fires ONLY when
+        // the rich `[loom:merge-rejected]`/`[loom:already-merged]` push above was itself suppressed
+        // (shouldSuppressMergeReject reconciled it away) or never ran at all (a thrown error). Use
+        // `outcome.value.detailText` — the SAME rich suffix (headline/step/phase/failingTest/exitCode/
+        // signal/timedOut/stderrTail, the squash-phase-began state, and the canonical-repo-state clause)
+        // the rich notify would have carried, captured verbatim at every rejection return site — instead of
+        // the bare `reason` string, so this echo is never the empty "build gate failed" the card's two
+        // incidents were about. Falls back to `reason` only for a return site that predates `detailText`
+        // (none currently exist — this is a belt-and-suspenders honest-degrade, not an expected path).
         const msg = outcome.ok
           ? (outcome.value.merged
             ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}`
-            : `[loom:merge-failed] ${who(opId)} — ${outcome.value.reason ?? "merge did not complete"}`)
-          : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
+            : `[loom:merge-failed] ${who(opId)} — ${outcome.value.detailText ?? outcome.value.reason ?? "merge did not complete (no diagnostic detail was captured for this rejection — this is itself a gap; report it)"}`)
+          // DoD 2: a THROWN exception can strike at literally any point inside confirmWorkerMerge — including
+          // AFTER mergeBranch's own squash commit succeeded, during finalizeMerge's worktree/branch cleanup —
+          // so this branch must NEVER claim "canonical repo untouched"; say plainly that it's unknown and name
+          // the concrete next step, rather than a bare "build gate failed"-shaped string.
+          : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}; canonical repo / squash-phase state UNKNOWN — the error struck at an indeterminate point, possibly after the squash committed; check 'git --no-pager log <repo>' for a squash commit carrying a Loom-Worker-Branch trailer for this branch before assuming nothing landed.`;
+        // Card 522cf573 DoD 3: correlate this settled op's OWN failure detail to its opId in the daemon's
+        // rotating stdout log, independent of whether the pty push above landed or was suppressed — an
+        // operator can grep `daemon-output.log` for `opId=<id>` to recover this after the fact.
+        if (!outcome.ok || (outcome.ok && !outcome.value.merged)) {
+          console.log(`[merge opId=${opId}] worker ${workerSessionId} task ${taskId ?? "none"} settled failed — ${msg}`);
+        }
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in managerSessionId's
         // recycle lineage at settle time — not the (possibly long-recycled) asking manager captured when
         // this op started. See resolveSettleNudgeTarget's doc for the incident this fixes. Attributed to
