@@ -158,8 +158,11 @@ try {
 
   check("ABSORBED: the settle-window response did NOT cause a suppression — busy recovered to false",
     recovered);
-  check(`ABSORBED: normal give-up recovery ALSO ran its composer clear — exactly ${TEXT.length} backspaces written`,
-    backspaceCount() === TEXT.length);
+  // Card 3ce3fa39: RECOVERY no longer clears immediately at give-up time (deferred to the next submit —
+  // see pty-giveup-clear.mjs for that proof in full); this test only needs to confirm recovery genuinely
+  // ran (not suppression), which the busy=false transition above already establishes.
+  check("ABSORBED: normal give-up recovery ran (not suppression) — no backspace yet, the clear is deferred",
+    backspaceCount() === 0);
 
   try { host.stop(SID, "hard"); } catch { /* ignore */ }
 } finally {

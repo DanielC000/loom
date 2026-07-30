@@ -1,19 +1,24 @@
 // Regression test for card 9ed20572 (pty/host.ts writeChunked): `done` must fire on EVERY exit path,
 // including "session died mid-burst" — pre-fix, `writeChunked` skipped `done` on its two not-alive
-// paths (entry + mid-step). That was harmless while `done` was optional bookkeeping, but card
-// b64b3726 Half 2 threads `healIfStuck`'s / the give-up-recovery clear's `setBusy(sessionId, false)`
-// THROUGH `done` (see sendEnterAndVerify's GIVE-UP RECOVERY branch) — so a session that dies mid
-// Backspace-clear-burst never got `busy` cleared, stranding it stuck busy=true forever with no
-// further self-heal (this IS the last-resort recovery path).
+// paths (entry + mid-step). That was harmless while `done` was optional bookkeeping, but card b64b3726
+// Half 2 threaded `healIfStuck`'s / the give-up-recovery clear's `setBusy(sessionId, false)` THROUGH
+// `done` — so a session that died mid Backspace-clear-burst never got `busy` cleared, stranding it stuck
+// busy=true forever with no further self-heal.
 //
-// This test drives the SAME give-up-recovery clear path pty-giveup-clear.mjs scenario (4) already
-// covers for the happy path (a large multi-chunk backspace burst that completes normally) — but here
-// the pty is killed PARTWAY through that burst instead of letting it finish, proving `busy` still
-// recovers to false even though the burst never completes.
+// Card 3ce3fa39 MOVED the Backspace-clear burst: give-up itself no longer writes one at all (it only
+// marks the composer possibly-dirty and clears busy synchronously — nothing async to die mid-burst
+// there anymore). The burst now lives in submit()'s own DEFERRED clear-prefix — written immediately
+// before a subsequent turn's paste, threaded through writeChunked's `done` into `writeNewTurn` (the
+// closure that then writes the REAL paste). This test now drives THAT path instead: cause a give-up to
+// mark dirty, let the redrain start its clear-prefix burst, then kill the pty PARTWAY through it —
+// proving (a) `writeChunked`'s not-alive `done?.()` guarantee still holds (submit()'s chain doesn't hang
+// silently), and (b) `writeNewTurn` correctly re-checks aliveness before writing the real paste, so a
+// session dying mid-clear-prefix never write to a dead pty (the exact gap this refactor could have
+// reintroduced — `writeNewTurn` deferred what used to be submit()'s own always-synchronous-and-therefore-
+// always-alive first write into an async `done` callback that can now fire post-death).
 //
-// FALSIFIES on pre-fix code: reverting writeChunked's two `done?.()` calls on its not-alive paths
-// reproduces this exact hang — busy stays true forever once the session dies mid-burst, verified by
-// hand against the pre-fix source during development of this fix.
+// FALSIFIES on pre-fix-of-THIS-card code: removing `writeNewTurn`'s own `if (!l?.alive) return;` guard
+// reproduces a stray post-death `ptyWrite` call (verified by hand against that gap during development).
 //
 // RUN (no daemon needed): node test/pty-writechunked-done-on-death.mjs
 //   Requires the daemon built first (reads ../dist/pty/host.js): from packages/daemon, run `pnpm build`.
@@ -44,10 +49,16 @@ process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
+// Card 3ce3fa39: the deferred clear rides the requeued entry's own next redrain, HELD from drain for
+// GIVE_UP_HOLD_MS pending a confirming hook — pinned small for this hermetic suite.
+const HOLD_MS = 10;
+const HOLD_WAIT = HOLD_MS + 20;
+process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
 const BACKSPACE = "\x7f";
+const BRACKET_PASTE_START = "\x1b[200~";
 
 const fakes = [];
 function makeFakePty() {
@@ -103,29 +114,49 @@ try {
   const r = host.enqueueStdin(SID, TEXT);
   check("setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-  // Wait for give-up's Backspace-clear burst to actually START (3 failed attempts, composerLen===0,
-  // lastPrompt set — the same give-up path pty-giveup-clear.mjs scenario 4 exercises), then kill the
-  // pty PARTWAY through the burst — never letting it finish naturally.
+  // Never confirm — exhaust every attempt, GIVE-UP RECOVERY marks the composer possibly-dirty (card
+  // 3ce3fa39 — no burst written HERE anymore, busy just clears synchronously) and requeues TEXT.
+  const giveUpDeadline = Date.now() + 15_000;
+  while (busyLog[SID].at(-1) !== false && Date.now() < giveUpDeadline) await sleep(20);
+  check("give-up recovered busy", busyLog[SID].at(-1) === false);
+  check("card 3ce3fa39: no backspace yet — give-up itself never writes the burst", backspaceCount() === 0);
+
+  // Wait past the (pinned-small) hold, then drive the redrain directly. This redrain's OWN submit() now
+  // carries the deferred clear-prefix — a large multi-chunk Backspace burst threaded through
+  // writeChunked's `done` into `writeNewTurn` (which then writes the REAL paste).
+  await sleep(HOLD_WAIT);
+  host.reconcile();
+
+  // Wait for the clear-prefix burst to actually START, then kill the pty PARTWAY through it.
   const startDeadline = Date.now() + 15_000;
   while (backspaceCount() === 0 && Date.now() < startDeadline) await sleep(20);
-  check("sanity: the backspace-clear burst genuinely started", backspaceCount() > 0);
+  check("sanity: the deferred clear-prefix burst genuinely started", backspaceCount() > 0);
   check("sanity: killing NOW is genuinely mid-burst, not after completion", backspaceCount() < TEXT.length);
 
   const countAtCrash = backspaceCount();
+  const writesAtCrash = fake.writes.length;
   fake.simulateCrash(); // the session dies mid-burst — mirrors an unexpected pty exit
 
-  // Give the (now-dead) burst's pending setTimeout chain a chance to fire its next tick and bail.
+  // Give the (now-dead) burst's pending setTimeout chain a chance to fire its next tick and bail, AND
+  // give writeChunked's `done` callback (writeNewTurn) a chance to run if it were going to misbehave.
   await sleep(200);
 
-  check("THE FIX: busy recovers to false even though the burst never completed", busyLog[SID].at(-1) === false);
   check("sanity: the burst genuinely never completed (proves this exercised the not-alive bail, not a race that just finished naturally)",
     backspaceCount() < TEXT.length && backspaceCount() >= countAtCrash);
+  // THE FIX (this card): writeChunked's `done?.()` guarantee (card 9ed20572) still fires `writeNewTurn`
+  // on the not-alive path — but `writeNewTurn` must itself re-check aliveness (it's now REACHABLE
+  // asynchronously post-death, unlike its pre-refactor shape which only ever ran synchronously while
+  // submit()'s own entry guard was still fresh) and bail WITHOUT writing the real paste's bracket-start
+  // to the dead pty.
+  const writesAfterCrash = fake.writes.slice(writesAtCrash);
+  check("THE FIX: writeNewTurn did NOT write a stray bracket-start (or anything else) to the dead pty",
+    !writesAfterCrash.some((w) => w.includes(BRACKET_PASTE_START)));
 } finally {
   try { host.stop(SID, "hard"); } catch { /* ignore */ }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — writeChunked invokes `done` exactly once on every exit path, including mid-burst death, so setBusy(false) threaded through it (the give-up-recovery clear) is never skipped."
+  ? "\n✅ ALL PASS — writeChunked invokes `done` exactly once on every exit path, including mid-burst death (card 9ed20572); the deferred clear-prefix's `writeNewTurn` continuation (card 3ce3fa39) re-checks aliveness itself and never writes to a dead pty when reached post-death."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

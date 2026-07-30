@@ -111,11 +111,16 @@ const MAX_ATTEMPTS = 3;     // mirrors LOOM_SUBMIT_MAX_ATTEMPTS
 const SETTLE_POLL = 10;
 const SETTLE_MAX_POLLS = 5;
 const SETTLE_BOUND = SETTLE_POLL * SETTLE_MAX_POLLS; // 50ms
+// Card 3ce3fa39: the deferred clear rides the requeued entry's own next redrain, HELD from drain for
+// GIVE_UP_HOLD_MS pending a confirming hook (card 73d5c34a) — pinned small for this hermetic suite.
+const HOLD_MS = 10;
+const HOLD_WAIT = HOLD_MS + 20;
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
+process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEMPTS && k > 1 ? SETTLE_BOUND : 0);
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 
@@ -237,8 +242,8 @@ try {
     check("(2) all attempts written (bounded retries)", entryCount() === MAX_ATTEMPTS);
     check("(2) GIVE-UP RECOVERY: busy fell back to false — genuine drops are still recovered, unchanged",
       busyLog[SID].at(-1) === false);
-    check(`(2) CLEAR: exactly ${TEXT.length} backspaces were written to un-type the stranded injection`,
-      backspaceCount() === TEXT.length);
+    check("(2) card 3ce3fa39: the clear is DEFERRED — no backspace written at give-up time itself (see pty-giveup-clear.mjs for the deferred-clear proof)",
+      backspaceCount() === 0);
   }
 
   // ===================== (3) ANCHOR CORRECTNESS: output after an EARLIER attempt only → still recovers ===
@@ -263,11 +268,62 @@ try {
     check("(3) all attempts written", entryCount() === MAX_ATTEMPTS);
     check("(3) GIVE-UP RECOVERY still fires: stale pre-final-attempt output does NOT suppress give-up",
       busyLog[SID].at(-1) === false);
-    check(`(3) CLEAR still runs: exactly ${TEXT.length} backspaces written (the anchor is the FINAL attempt, not an earlier one)`,
+    check("(3) card 3ce3fa39: still deferred (anchor correctness is orthogonal to WHEN the clear runs) — no backspace at give-up time",
+      backspaceCount() === 0);
+  }
+
+  // ===================== (4) card 3ce3fa39 — a WRONG suppression, specimen B's exact real-world shape: ====
+  // ===================== the discriminator is fooled, NO confirming hook EVER arrives for the generation ==
+  // ===================== that actually suppressed, and an UNRELATED hook (belonging to no submit() of ours)
+  // ===================== fires in between — the composer must still get cleared before the NEXT distinct, =
+  // ===================== genuinely-delivered message. This is the wire-level, non-tautological coverage for
+  // ===================== the daemon's own DECISION to defensively clear — not a claim about whether a real =
+  // ===================== engine's composer ends up empty (a fake pty can't model that; see card 3ce3fa39's =
+  // ===================== own note on why that assertion would be circular). Pre-fix, this goes RED (zero ===
+  // ===================== backspaces, ever) — proving the regression is real, not assumed.
+  {
+    const SID = "sess-suppress-wrong";
+    const TEXT = "STRANDED_LIKE_SPECIMEN_B";
+    const SECOND_TEXT = "A_LATER_UNRELATED_MESSAGE";
+    const { fake, written, backspaceCount, entryCount } = spawnReady(SID);
+    const t0 = Date.now();
+    const r = host.enqueueStdin(SID, TEXT);
+    check("(4) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
+
+    // Force the SAME fooled discriminator as scenario (1).
+    await waitForCount(entryCount, MAX_ATTEMPTS);
+    await awaitClockPast(fake.enterWriteTimes[MAX_ATTEMPTS - 1]);
+    fake.emitOutput("spinner-tick-after-final-enter");
+    await sleepUntil(t0, giveUpAt() + VERIFY_TIMEOUT / 2);
+    check("(4) GIVE-UP SUPPRESSED (same fooled discriminator as scenario 1)", busyLog[SID].at(-1) === true);
+    check("(4) no backspace at suppression time itself", backspaceCount() === 0);
+
+    // UNLIKE scenario (1): NO confirming hook ever arrives for THIS generation — `enterConfirmed` stays
+    // false forever for it, exactly the real specimen (the discriminator's own false-positive population,
+    // first-hand confirmed in production). Instead, some UNRELATED hook activity (no submit() of ours in
+    // flight) resolves busy — modelling the mystery UserPromptSubmit that fired 327ms after the real
+    // specimen's suppression, provably belonging to neither the stuck generation nor any other submit().
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(4) an UNRELATED hook resolves busy — WITHOUT ever confirming the stuck generation's own Enter",
+      busyLog[SID].at(-1) === false);
+
+    // Now a genuinely distinct message is delivered — busy is false, so this lands via enqueueStdin's own
+    // immediate-submit path. THE GATE (composerDirtyLenClearedByGen) is what proves out here: if the
+    // Stop hook above had wrongly reset composerDirtyLen (an ungated design), this submit would see
+    // dirtyLen===0 and skip the clear-prefix entirely — the very regression this scenario exists to catch.
+    const r2 = host.enqueueStdin(SID, SECOND_TEXT);
+    check("(4) setup: the second, distinct message was delivered", r2.delivered === true);
+    await waitUntil(() => written().includes(SECOND_TEXT));
+
+    check(`(4) THE FIX: the second message's own submit carried a defensive clear — exactly ${TEXT.length} backspaces written`,
       backspaceCount() === TEXT.length);
+    const firstBodyEnd = written().indexOf(TEXT) + TEXT.length;
+    const secondBodyStart = written().indexOf(SECOND_TEXT);
+    check("(4) the clear sits AFTER the stranded first message and BEFORE the second message's own paste",
+      written().indexOf(BACKSPACE) > firstBodyEnd && written().lastIndexOf(BACKSPACE) < secondBodyStart);
   }
 } finally {
-  for (const sid of ["sess-suppress", "sess-genuine-drop", "sess-stale-output"]) {
+  for (const sid of ["sess-suppress", "sess-genuine-drop", "sess-stale-output", "sess-suppress-wrong"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
   }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }

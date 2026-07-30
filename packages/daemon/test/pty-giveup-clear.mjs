@@ -1,11 +1,21 @@
-// Hermetic regression test for the give-up CLEAR (pty/host.ts sendEnterAndVerify, card ee082fbb).
+// Hermetic regression test for the give-up CLEAR (pty/host.ts sendEnterAndVerify + submit(), cards
+// ee082fbb and 3ce3fa39).
 //
 // When submit()'s Enter never confirms after SUBMIT_MAX_ATTEMPTS, the session gives up and recovers
-// busy (card 9549e322) — but until now it left the stranded injection sitting in the composer, so the
-// NEXT turn would concatenate onto it. This test guards the fix: on give-up, the host writes an exact
-// Backspace(`\x7f`) burst — one per character of the injected text (`live.lastPrompt`) — to un-type it,
-// but ONLY when `composerLen === 0` proves the composer holds NOTHING but that stranded injection (no
-// human draft was ever touched, so the human-draft-preservation guard, card e1829591, is never at risk).
+// busy (card 9549e322) — but if it left the stranded injection sitting in the composer, the NEXT turn
+// would concatenate onto it. Card ee082fbb's original fix cleared it immediately, AT give-up time, with an
+// exact Backspace(`\x7f`) burst. Card 3ce3fa39 found that immediate clear unreliable in production (three
+// first-hand specimens: an abandoned message's clear-burst landed, per the daemon's own bookkeeping, yet
+// the ORIGINAL text resurfaced — once doubled — glued onto a much later, unrelated submit) — give-up's own
+// trigger condition ("the engine produced no output during the whole retry window") is exactly the
+// condition under which a raw backspace burst is LEAST likely to be read and interpreted correctly.
+//
+// THE FIX (card 3ce3fa39): defer the clear. Give-up now only marks the composer POSSIBLY-DIRTY
+// (`live.composerDirtyLen`, additive) and recovers busy immediately (synchronously — no burst to thread
+// through). The actual clear is issued by submit() itself, immediately before ANY subsequent write's own
+// paste — the one moment real corroboration exists for free (if that write's own Enter goes on to confirm,
+// the engine demonstrably read the whole ordered stream, clear-prefix included). Still gated on
+// `composerLen === 0` (card e1829591 — never risk a real human draft).
 //
 // The exact clear MECHANISM (why exact-backspace, not a blind Ctrl-U/Esc) was validated against a REAL
 // claude engine — see test/_probe-composer-clear.mjs and _probe-composer-clear-2.mjs (manual, not part
@@ -13,11 +23,15 @@
 // sendEnterAndVerify doc comment: the TUI collapses a long/multi-line paste into a single placeholder
 // token; Ctrl-U cleared that placeholder but SILENTLY STRANDED earlier lines of a short un-collapsed
 // multi-line paste (confirmed via the engine's own transcript); Esc needed a second press and left the
-// composer worse off combined with another key; exact-backspace reliably emptied every case tested.
+// composer worse off combined with another key; exact-backspace reliably emptied every case tested — but
+// that probe exercised a RESPONSIVE engine, never the "wasn't reading at all" regime give-up fires in,
+// which is exactly the gap 3ce3fa39 closes by moving the clear to a moment that regime doesn't apply.
 //
 // This hermetic test can only assert the BYTES-WRITTEN half (a fake pty can't model Ink's paste/composer
-// state machine) — it proves the daemon writes the RIGHT clear byte count IFF composerLen===0, and never
-// touches the pty on a give-up while a human draft is present. The real-engine half is the probe above.
+// state machine, and can't prove a clear was EFFECTIVE — see card 3ce3fa39's own note on why a fake-pty
+// effectiveness assertion is tautological) — it proves the daemon writes the RIGHT clear byte count at the
+// RIGHT moment (deferred to the next write, not at give-up time) IFF composerLen===0, and never touches the
+// pty while a human draft is present. The real-engine half is the probe above.
 //
 // RUN (no daemon needed): node test/pty-giveup-clear.mjs
 //   Requires the daemon built first (reads ../dist/pty/host.js): from packages/daemon, run `pnpm build`.
@@ -51,6 +65,11 @@ const SETTLE_MAX_POLLS = 5;
 // bound (~50ms), shrunk via env for the same reason as SETTLE_POLL above.
 const CONFIRM_SETTLE_POLL = 10;
 const CONFIRM_SETTLE_MAX_POLLS = 5;
+// Card 3ce3fa39: the deferred clear rides the requeued entry's own next redrain, which — like every
+// give-up requeue — is HELD from drain for GIVE_UP_HOLD_MS pending a confirming hook (card 73d5c34a).
+// Pinned small so this hermetic suite doesn't wait the production default (20s) to observe it.
+const HOLD_MS = 10;
+const HOLD_WAIT = HOLD_MS + 20;
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = String(ENTER_DELAY);
 process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = String(VERIFY_TIMEOUT);
 process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
@@ -58,6 +77,7 @@ process.env.LOOM_REASSERT_SETTLE_POLL_MS = String(SETTLE_POLL);
 process.env.LOOM_REASSERT_SETTLE_MAX_POLLS = String(SETTLE_MAX_POLLS);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_POLL_MS = String(CONFIRM_SETTLE_POLL);
 process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_POLLS);
+process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 
 // Card 259c15fa: give-up's real completion is the sum of ~14 chained setTimeout hops (the first-attempt
 // delay, two retry verify-timeouts, a settle-poll burst, a third verify-timeout, a confirm-settle-poll
@@ -76,6 +96,8 @@ async function waitForBusyFalse(sessionId, t0) {
 const { PtyHost } = await import("../dist/pty/host.js");
 
 const BACKSPACE = "\x7f";
+const BRACKET_PASTE_START = "\x1b[200~";
+const BRACKET_PASTE_END = "\x1b[201~";
 
 const fakes = [];
 function makeFakePty() {
@@ -98,17 +120,9 @@ class TestPtyHost extends PtyHost {
 }
 
 const busyLog = {};
-// Deterministic (non-timing-based) capture for scenario (4): when armed for a session id, records the
-// backspace count AT THE EXACT MOMENT each onBusy event fires for it — synchronous with the event, so it
-// can never race wall-clock scheduling. `getCount` is set per-scenario (a fresh closure over that
-// scenario's own fake pty), avoided globally since each scenario spawns its own fake.
-const busySnapshot = { sid: null, getCount: null, events: [] };
 const events = {
   onEngineSessionId() {},
-  onBusy(id, busy) {
-    (busyLog[id] ??= []).push(busy);
-    if (id === busySnapshot.sid) busySnapshot.events.push({ busy, count: busySnapshot.getCount() });
-  },
+  onBusy(id, busy) { (busyLog[id] ??= []).push(busy); },
   onContextStats() {},
   onRateLimited() {},
   onExit() {},
@@ -128,10 +142,11 @@ function spawnReady(sessionId) {
 }
 
 try {
-  // ===================== (1) composer-clean give-up → the stranded injection IS cleared =====================
+  // ===================== (1) composer-clean give-up → DEFERRED: marked possibly-dirty, NOT cleared here; ===
+  // ===================== the requeued entry's own next redrain carries the clear-prefix before its paste ==
   {
     const SID = "sess-giveup-clean";
-    const TEXT = "STRANDED_REPORT_BODY"; // 20 chars — the exact count the clear must un-type
+    const TEXT = "STRANDED_REPORT_BODY"; // 20 chars — the exact count the deferred clear must un-type
     const { written, backspaceCount } = spawnReady(SID);
     const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
@@ -142,13 +157,38 @@ try {
     // ACTUALLY land (observed, bounded — see GIVE_UP_POLL_TIMEOUT_MS's doc).
     await waitForBusyFalse(SID, t0);
     check("(1) GIVE-UP RECOVERY: busy fell back to false (bounded poll didn't time out)", busyLog[SID].at(-1) === false);
-    check(`(1) CLEAR: exactly ${TEXT.length} backspaces were written to un-type the stranded injection`,
+    check("(1) card 3ce3fa39: the clear is DEFERRED — no backspace written yet at give-up time itself",
+      backspaceCount() === 0);
+
+    // Card 441499ee/73d5c34a: give-up requeued TEXT at the front of pending, HELD from drain for
+    // GIVE_UP_HOLD_MS. Wait past the (pinned-small) hold, then drive the redrain directly — this redrain IS
+    // "the next submit" that must now carry the deferred clear-prefix before its own paste.
+    const busyLenBeforeRedrain = busyLog[SID].length;
+    await sleep(HOLD_WAIT);
+    host.reconcile();
+    const t1 = Date.now();
+    while (!(busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === false) && Date.now() - t1 < GIVE_UP_POLL_TIMEOUT_MS) {
+      await sleep(GIVE_UP_POLL_MS);
+    }
+    check("(1) the redrain itself also gave up (nothing in this harness ever confirms) — the deferred clear fired regardless",
+      busyLog[SID].at(-1) === false);
+    check(`(1) DEFERRED CLEAR: exactly ${TEXT.length} backspaces were written — by the REDRAIN, not by give-up itself`,
       backspaceCount() === TEXT.length);
-    // Sanity: the clear bytes land AFTER the give-up point in the write stream (not mixed into the retry
-    // Enters/paste-reasserts that preceded it).
-    const giveUpTailIdx = written().lastIndexOf(TEXT) + TEXT.length; // rough anchor: after the body's last occurrence
+    // The redrained paste is the SAME text (a requeue re-sends the identical original) — TEXT now occurs
+    // twice in the write stream (the abandoned first attempt, then the redrain). The backspace burst must
+    // sit strictly BETWEEN those two occurrences: after the first paste's own retry noise, before the
+    // second (redrained) paste begins.
+    const firstBodyEnd = written().indexOf(TEXT) + TEXT.length;
+    const secondBodyStart = written().indexOf(TEXT, firstBodyEnd);
     const firstBackspaceIdx = written().indexOf(BACKSPACE);
-    check("(1) the backspace burst appears AFTER the turn body in the write stream", firstBackspaceIdx > giveUpTailIdx - TEXT.length);
+    check("(1) sanity: the redrain genuinely re-pasted the body a second time", secondBodyStart > firstBodyEnd);
+    check("(1) the backspace burst sits AFTER the first (abandoned) paste and BEFORE the redrain's own paste",
+      firstBackspaceIdx > firstBodyEnd && firstBackspaceIdx < secondBodyStart);
+    // A force-close reassert (fresh zero-length START+END) must precede the backspaces, closing any paste
+    // left open by the abandoned write before the raw \x7f bytes can be safely interpreted as edits.
+    const reassertIdx = written().lastIndexOf(BRACKET_PASTE_START + BRACKET_PASTE_END, firstBackspaceIdx);
+    check("(1) a force-close paste-reassert precedes the backspace burst",
+      reassertIdx > firstBodyEnd && reassertIdx < firstBackspaceIdx);
   }
 
   // ===================== (2) HUMAN-DRAFT SAFETY: composer-dirty give-up → NEVER cleared =====================
@@ -191,40 +231,54 @@ try {
       backspaceCount() === 0);
   }
 
-  // ===================== (4) LARGE injection (multi-chunk burst) → busy stays true until the WHOLE =====
-  // ===================== backspace burst finishes, not just its first chunk (card ee082fbb CR item ①) ===
-  // writeChunked (host.ts) is only SYNCHRONOUS up to PTY_WRITE_CHUNK_BYTES (1024, not env-overridable) —
-  // a larger burst spans multiple 8ms-apart ticks. The fix threads setBusy(false) through writeChunked's
-  // `done` callback (fired after the LAST chunk) instead of calling it alongside the (non-blocking) burst
-  // kickoff — otherwise busy would drop mid-burst, reopening enqueueStdin's immediate-submit gate onto a
-  // pty FIFO that still has trailing backspace chunks queued behind it (a silent interleaved-turn race).
+  // ===================== (4) LARGE possibly-dirty amount → the deferred clear-prefix's multi-chunk burst ===
+  // ===================== lands COMPLETELY and IN ORDER before the redrain's own paste, and busy (already ==
+  // ===================== true synchronously at submit()'s own start — card M1) blocks a concurrent enqueue
+  // ===================== from interleaving mid-burst (the race card ee082fbb CR item ① originally guarded,
+  // ===================== now against the NEW deferred-clear write site instead of give-up's old one) ======
+  // writeChunked (host.ts) is only SYNCHRONOUS up to PTY_WRITE_CHUNK_BYTES (1024, not env-overridable) — a
+  // larger burst spans multiple 8ms-apart ticks. Give-up itself no longer writes any burst at all under
+  // card 3ce3fa39 (busy clears synchronously, no writeChunked to race) — the burst now lives entirely
+  // inside the NEXT submit(), which sets busy=true synchronously BEFORE kicking off the (non-blocking)
+  // clear-prefix + paste chain, so a concurrent enqueue can never land mid-burst.
   {
     const SID = "sess-giveup-large";
     const TEXT = "X".repeat(50 * 1024); // 50 chunks of 1024 — several event-loop ticks worth of burst
-    const { backspaceCount } = spawnReady(SID);
-    // Arm the deterministic snapshot for THIS session: onBusy(SID, *) will now also record the backspace
-    // count synchronous with the event itself — no wall-clock guessing needed (a fixed offset would have
-    // to account for pasteSettleExtraMs's paste-size-scaled initial delay AND the chunk-pacing timers,
-    // and would still be racy under host jitter; this is exact regardless of either).
-    busySnapshot.sid = SID;
-    busySnapshot.getCount = backspaceCount;
+    const { written, backspaceCount } = spawnReady(SID);
+    const t0 = Date.now();
     const r = host.enqueueStdin(SID, TEXT);
     check("(4) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
 
-    // Poll (generously bounded, not timing-precise) until give-up's busy=false has landed.
-    const t0 = Date.now();
-    while (busyLog[SID].at(-1) !== false && Date.now() - t0 < 15_000) await sleep(50);
+    await waitForBusyFalse(SID, t0);
     check("(4) give-up eventually recovered busy (bounded poll didn't time out)", busyLog[SID].at(-1) === false);
+    check("(4) DEFERRED: give-up itself never writes the (large) burst", backspaceCount() === 0);
 
-    check("(4) the FULL burst landed by the time give-up completed (all TEXT.length backspaces written)",
+    const busyLenBeforeRedrain = busyLog[SID].length;
+    await sleep(HOLD_WAIT);
+    host.reconcile(); // drives the redrain — its submit() now carries the large deferred clear-prefix
+    // Immediately (same synchronous continuation as reconcile() returning — no await between) try to
+    // enqueue a THIRD, unrelated message: busy is already true (set synchronously at submit()'s own start,
+    // card M1) the instant reconcile() returns, so this must queue rather than interleave into the
+    // still-draining clear-prefix/paste chunks on the pty's FIFO.
+    const r3 = host.enqueueStdin(SID, "UNRELATED_THIRD_MESSAGE");
+    check("(4) a message enqueued WHILE the large clear-prefix is still draining is queued, not delivered immediately",
+      r3.delivered === false);
+
+    const t1 = Date.now();
+    while (!(busyLog[SID].length > busyLenBeforeRedrain && busyLog[SID].at(-1) === false) && Date.now() - t1 < GIVE_UP_POLL_TIMEOUT_MS) {
+      await sleep(GIVE_UP_POLL_MS);
+    }
+    check("(4) the redrain itself also gave up (harness never confirms) — busy fell back to false again",
+      busyLog[SID].at(-1) === false);
+    check(`(4) the FULL burst landed: exactly ${TEXT.length} backspaces written despite spanning many chunks`,
       backspaceCount() === TEXT.length);
-    const falseEvents = busySnapshot.events.filter((e) => e.busy === false);
-    check("(4) exactly one busy=false event was recorded for this session", falseEvents.length === 1);
-    check("(4) busy is cleared ONLY AFTER the burst fully completes (setBusy threaded through writeChunked's done) — " +
-      `snapshot at the busy=false event showed ${falseEvents[0]?.count} of ${TEXT.length} backspaces`,
-      falseEvents[0]?.count === TEXT.length);
-    // Sanity: this is a MULTI-chunk burst (proves the snapshot mechanism is actually exercising the race
-    // window this test guards, not trivially passing because the whole burst fit in one synchronous chunk).
+    const firstBodyEnd = written().indexOf(TEXT) + TEXT.length;
+    const secondBodyStart = written().indexOf(TEXT, firstBodyEnd);
+    check("(4) sanity: the redrain genuinely re-pasted the body a second time", secondBodyStart > firstBodyEnd);
+    check("(4) the full burst lands strictly BEFORE the redrain's own (second) paste begins",
+      written().indexOf(BACKSPACE) > firstBodyEnd && written().lastIndexOf(BACKSPACE) < secondBodyStart);
+    // Sanity: this is a MULTI-chunk burst (proves the ordering assertion above is actually exercising the
+    // race window this test guards, not trivially passing because the whole burst fit in one sync chunk).
     check("(4) sanity: the burst genuinely spanned multiple chunks (TEXT exceeds one PTY_WRITE_CHUNK_BYTES)",
       TEXT.length > 1024);
   }
@@ -236,6 +290,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — give-up clears the stranded injection with an exact-count Backspace burst IFF composerLen===0 (a human draft mid-retry is NEVER touched), and a normally-confirmed turn never triggers a clear."
+  ? "\n✅ ALL PASS — give-up marks the composer possibly-dirty instead of clearing immediately; the NEXT submit (not give-up itself) issues the exact-count Backspace burst, force-closed first, IFF composerLen===0 (a human draft mid-retry is NEVER touched); a normally-confirmed turn never triggers a clear; a large deferred burst lands fully and in order, with busy blocking any concurrent enqueue from interleaving mid-burst."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -170,13 +170,15 @@ try {
     check("(c) retries still re-asserted the pair (this fix applies through give-up, not just early retries)",
       countOf(REASSERT) === MAX_ATTEMPTS - 1);
     check("(c) GIVE-UP: busy recovered to false (session not wedged)", busyLog[SID].at(-1) === false);
-    // card ee082fbb: give-up now clears the stranded injection (composerLen stayed 0 the whole scenario —
-    // never touched via writeStdin) via an exact-count Backspace burst — see test/pty-giveup-clear.mjs for
-    // the dedicated coverage of both this and the composerLen>0 human-draft hold. Re-confirmed here: the
-    // mechanism is STILL never Ctrl-U (\x15) — the real-claude spike found Ctrl-U silently strands earlier
-    // lines of an un-collapsed multi-line paste, which is why Backspace was adopted instead.
+    // Card 3ce3fa39 (superseding card ee082fbb's immediate clear): give-up no longer clears AT give-up
+    // time at all — it marks the composer possibly-dirty and DEFERS the clear to the next submit()'s own
+    // clear-prefix (see that method's doc, and test/pty-giveup-clear.mjs for the dedicated coverage of the
+    // deferred clear itself, both this mechanism and the composerLen>0 human-draft hold). Re-confirmed
+    // here: give-up itself still writes NO Ctrl-U / kill-line byte (trivially true with no clear attempted
+    // yet) — the mechanism, WHENEVER it does run, is exact-count Backspace, never Ctrl-U (the real-claude
+    // spike found Ctrl-U silently strands earlier lines of an un-collapsed multi-line paste).
     check("(c) give-up wrote NO Ctrl-U / kill-line byte (Backspace, not Ctrl-U, is the clear mechanism)", countOf("\x15") === 0);
-    check("(c) give-up DID clear the stranded injection (composerLen was 0 throughout)", countOf("\x7f") === TEXT.length);
+    check("(c) give-up itself writes NO backspace either — the clear is deferred to the next submit", countOf("\x7f") === 0);
   }
 } finally {
   for (const sid of ["sess-pasteend-retry", "sess-pasteend-giveup"]) { try { host.stop(sid, "hard"); } catch { /* ignore */ } }

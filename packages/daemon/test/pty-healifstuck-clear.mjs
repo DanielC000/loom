@@ -21,10 +21,13 @@
 // that can synthetically fire an output chunk lets us make `lastOutputAt > enterWrittenAt` true for the
 // FINAL Enter attempt without ever confirming the turn, exactly modelling the suppressed case. It then
 // proves (1) pre-fix the composer is left stranded (busy clears, backspaces === 0) and (2) post-fix
-// `healIfStuck` completes the clear (busy clears, backspaces === lastPrompt.length) AND restores the text
-// to `live.pending` for a real re-delivery — plus the most important non-regression case: a session that
-// legitimately went on to submit (a late but real UserPromptSubmit before the stale window elapses) must
-// NEVER be heal-cleared.
+// `healIfStuck` marks the composer possibly-dirty (busy clears, backspaces STILL === 0 — card 3ce3fa39
+// defers the actual clear to the restored entry's own next redrain, never to heal time itself; see that
+// card's own doc for why an immediate clear here is unreliable) AND restores the text to `live.pending` for
+// a real re-delivery, whose OWN submit() then carries the deferred clear-prefix (backspaces ===
+// lastPrompt.length, verified AFTER the redrain) — plus the most important non-regression case: a session
+// that legitimately went on to submit (a late but real UserPromptSubmit before the stale window elapses)
+// must NEVER be heal-marked-dirty at all.
 //
 // Card b64b3726 Half 1 (sendEnterAndVerify's own reassert-settle sequencing) ABSORBS the FAST case of the
 // false-suppress vector this test used to exercise — a response landing DURING the pre-Enter settle wait no
@@ -173,22 +176,25 @@ try {
     const beforeHeal = bodyOccurrences();
     await sleepUntil(t0, giveUpAt() + FIRST_TURN_STALE + FIRST_TURN_STALE / 2);
     host.reconcile();
-    check(`(1) COMPLETED BACKSTOP: healIfStuck wrote exactly ${TEXT.length} backspaces to clear the orphaned injection`,
-      backspaceCount() === TEXT.length);
+    check("(1) card 3ce3fa39: DEFERRED — healIfStuck marks possibly-dirty but writes NO backspace itself",
+      backspaceCount() === 0);
 
-    // Card 2c3c4aff: THE FIX — the cleared text must not simply vanish. `requeueGiveUpOrigin` fired (the
-    // SAME mechanism the normal give-up path uses) — restored (held) rather than discarded.
-    check("(1) THE FIX: healIfStuck's clear triggered the SAME give-up restore the normal path uses",
+    // Card 2c3c4aff: THE FIX — the marked-dirty text must not simply vanish. `requeueGiveUpOrigin` fired
+    // (the SAME mechanism the normal give-up path uses) — restored (held) rather than discarded.
+    check("(1) THE FIX: healIfStuck's mark-dirty triggered the SAME give-up restore the normal path uses",
       requeueLinesFor(SID).length === 1);
 
     // Card 73d5c34a: no confirming hook is coming in this suite — wait past the pinned-small hold, then
-    // reconcile again to actually redrain the now-eligible restored entry.
+    // reconcile again to actually redrain the now-eligible restored entry. THIS redrain's own submit() is
+    // where the deferred clear-prefix (card 3ce3fa39) now actually fires — before its own paste.
     await sleep(HOLD_WAIT);
     host.reconcile();
     check("(1) THE RESTORE IS LIVE: the restored text was actually re-submitted to the pty a second time",
       bodyOccurrences() === beforeHeal + 1); // beforeHeal already counts the original (suppressed) submit; +1 is the restore-redrain
     check("(1) busy re-armed from the restore's own redrain (proves it wasn't just queued and forgotten)",
       busyLog[SID].at(-1) === true);
+    check(`(1) THE DEFERRED CLEAR: the restore's own redrain carried the clear-prefix — exactly ${TEXT.length} backspaces written`,
+      backspaceCount() === TEXT.length);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -225,8 +231,8 @@ try {
     const beforeHeal2 = bodyOccurrences2();
     await sleepUntil(t0, giveUpAt() + BUSY_STALE_MS + BUSY_STALE_MS / 2);
     host.reconcile();
-    check(`(2) COMPLETED BACKSTOP on the busyStaleMs path too: exactly ${SECOND_TEXT.length} backspaces written`,
-      backspaceCount() === SECOND_TEXT.length);
+    check("(2) card 3ce3fa39: DEFERRED on the busyStaleMs path too — no backspace written by healIfStuck itself",
+      backspaceCount() === 0);
 
     // Card 2c3c4aff: the restore fires on the busyStaleMs path too — not just the FIRST_TURN_STALE_MS path.
     check("(2) THE FIX applies on the busyStaleMs path too: the give-up restore mechanism fired",
@@ -236,6 +242,8 @@ try {
     host.reconcile();
     check("(2) THE RESTORE IS LIVE on the busyStaleMs path too: re-submitted to the pty a second time",
       bodyOccurrences2() === beforeHeal2 + 1);
+    check(`(2) THE DEFERRED CLEAR on the busyStaleMs path too: exactly ${SECOND_TEXT.length} backspaces written by the restore's own redrain`,
+      backspaceCount() === SECOND_TEXT.length);
     try { host.stop(SID, "hard"); } catch { /* ignore */ }
   }
 
@@ -283,6 +291,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — healIfStuck completes the give-up backstop (clears an orphaned composer left by a false suppression AND restores the cleared text to pending for real redelivery, on both the first-turn and later-turn stale paths) without ever touching a session that legitimately went on to submit."
+  ? "\n✅ ALL PASS — healIfStuck completes the give-up backstop (marks an orphaned composer left by a false suppression possibly-dirty — WITHOUT double-counting a suppression that already self-marked at give-up time — AND restores the cleared text to pending for real redelivery, on both the first-turn and later-turn stale paths; the restore's own next redrain carries the deferred clear-prefix) without ever touching a session that legitimately went on to submit."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

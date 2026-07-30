@@ -1514,6 +1514,31 @@ interface Live {
   // nextComposerLen's parsing), tracked ONLY so writeStdin can capture the composed text into
   // `lastRawSubmit` at the moment of a genuine Enter-submit. Never read outside writeStdin.
   rawDraftText: string;
+  // Card 3ce3fa39: cumulative count of characters that MAY still be physically sitting in the composer from
+  // an earlier submit() whose give-up (RECOVERY or SUPPRESSED) or heal-if-stuck clear was never CONFIRMED
+  // to have actually landed — see submit()'s own doc for why the clear is deliberately DEFERRED to the next
+  // submit() rather than attempted at give-up time. ADDITIVE, never overwritten by a give-up: a second
+  // unresolved give-up on top of an already-dirty composer must not lose track of the first.
+  composerDirtyLen: number;
+  // Card 3ce3fa39: the `submitGeneration` whose submit() most recently issued a defensive clear-prefix for
+  // `composerDirtyLen` — null when no clear-prefix is currently outstanding. GATES the reset: a confirming
+  // hook resets `composerDirtyLen` to 0 ONLY when it fires while `submitGeneration` still equals THIS value
+  // (i.e. the confirmation genuinely belongs to the submit that attempted the clear). This is NOT redundant
+  // with `enterConfirmed` alone — first-hand confirmed in production: a wrongly-SUPPRESSED give-up leaves
+  // `enterConfirmed` false, and a hook belonging to unrelated concurrent engine activity can still fire and
+  // flip it true WITHOUT any submit() (let alone one carrying our clear-prefix) ever having run in between.
+  // An ungated reset on that hook would silently un-mark the composer as dirty before the clear it's
+  // supposedly proof of was ever even attempted — reopening exactly the hole this card closes.
+  composerDirtyLenClearedByGen: number | null;
+  // Card 3ce3fa39: the `submitGeneration` (captured BEFORE any out-of-band bump) whose give-up has already
+  // contributed to `composerDirtyLen` — null when the current outstanding generation hasn't been marked
+  // yet. GATES the mark side the same way `composerDirtyLenClearedByGen` gates the reset side: a wrongly-
+  // SUPPRESSED give-up marks dirty immediately (see `fireEnterAndVerify` — it's the ONLY chance to catch a
+  // suppression whose busy later resolves via unrelated activity well before any staleness window, exactly
+  // specimen B's real shape), and `busy` deliberately stays true afterward — so `healIfStuck` can ALSO
+  // observe the SAME still-unconfirmed generation later (its own backstop for a suppression staleness
+  // itself never resolves). Without this guard both sites would mark the identical abandoned text twice.
+  composerDirtyMarkedForGen: number | null;
   pending: QueuedMessage[]; // FIFO of messages held while busy / while the human types — drained on Stop + reconcile. Each carries a stable id so the UI can delete/edit/reorder a specific entry safely (an id op is a no-op once that entry has drained).
   stopping: boolean;    // a Stop is in flight — SUPPRESS drain/submit so a queued turn can't re-arm busy past it
   // Card d88163b7 (CR fix): a CALLER-held drain suppression — SUPPRESS drain/submit (mirrors `stopping`,
@@ -2749,6 +2774,9 @@ export class PtyHost {
       busySince: null,
       lastOutputAt: Date.now(),
       composerLen: 0,
+      composerDirtyLen: 0,
+      composerDirtyLenClearedByGen: null,
+      composerDirtyMarkedForGen: null,
       rawDraftText: "",
       pending: [],
       stopping: false,
@@ -2916,7 +2944,7 @@ export class PtyHost {
       // hook/readiness/drain paths), but the Live shape is shared, so seed neutral values.
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -2992,7 +3020,7 @@ export class PtyHost {
       logBroken: false,
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
-      lastOutputAt: Date.now(), composerLen: 0, rawDraftText: "",
+      lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, rawDraftText: "",
       pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
@@ -3325,6 +3353,15 @@ export class PtyHost {
         //     words the human typed for some other (possibly never-realized) turn. Discard, don't attribute.
         const submitWasOutstanding = !live.enterConfirmed;
         live.enterConfirmed = true; // proof the outstanding submit()'s Enter registered — cancels sendEnterAndVerify's retry loop (card 9549e322)
+        // Card 3ce3fa39: GATED reset — only when THIS hook fires while `submitGeneration` still equals the
+        // generation that actually issued the clear-prefix (see `composerDirtyLenClearedByGen`'s doc). An
+        // ungated reset here would be WRONG: a hook belonging to unrelated engine activity (no submit() of
+        // ours in flight) can still land and flip enterConfirmed true — first-hand confirmed in production —
+        // and must NOT be read as proof our clear-prefix (which may not even have been attempted yet) landed.
+        if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
+          live.composerDirtyLen = 0;
+          live.composerDirtyLenClearedByGen = null;
+        }
         this.purgeConfirmedGiveUpRequeue(sessionId, live, false); // card 441499ee/09e655d5 — see the method doc; UserPromptSubmit purges without advancing the queue
         // Card b4b9b707: attribute a raw-terminal-typed line to THIS turn's ownerText. SECURITY INVARIANT
         // (see Live.pendingRawOwnerSubmit's doc): submit() clears this field FIRST, before writing a byte,
@@ -3448,6 +3485,11 @@ export class PtyHost {
         // outstanding submit()'s Enter registered — even on the rare path where UserPromptSubmit's own
         // hook was lost. Neutralize any still-pending verify-retry BEFORE the M2 window below.
         live.enterConfirmed = true;
+        // Card 3ce3fa39: same GATED reset as UserPromptSubmit's — see composerDirtyLenClearedByGen's doc.
+        if (live.composerDirtyLenClearedByGen === live.submitGeneration) {
+          live.composerDirtyLen = 0;
+          live.composerDirtyLenClearedByGen = null;
+        }
         this.purgeConfirmedGiveUpRequeue(sessionId, live, true); // card 441499ee/09e655d5 — see the method doc; before any early park-break below on purpose; Stop/StopFailure advances the queue past its front
         this.finalizingTurn = true;
         try {
@@ -4256,18 +4298,29 @@ export class PtyHost {
       // retry-Enter'ing (or give-up→setBusy(false)'ing) into whatever submits next. See submitGeneration.
       live.submitGeneration++;
       if (!live.enterConfirmed && live.composerLen === 0 && live.lastPrompt) {
-        // eslint-disable-next-line no-console
-        console.log(`[heal] ${sessionId} clearing an orphaned give-up injection (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
-        // Card 2c3c4aff: this out-of-band clear is exactly a give-up that never reached
-        // fireEnterAndVerify's own GIVE-UP RECOVERY branch (e.g. wrongly SUPPRESSED) — `live.giveUpOrigin`
-        // still holds the original QueuedMessage(s) this stranded text came from (nothing could have
-        // overwritten it: submit() is the sole writer and it never ran again while busy stayed stuck true).
-        // Restore it via the SAME identity-preserving mechanism card 441499ee hardened the normal give-up
-        // path with, instead of silently discarding the cleared text.
-        this.writeChunked(sessionId, BACKSPACE.repeat(live.lastPrompt.length), () => {
-          this.setBusy(sessionId, false, "heal-if-stuck-clear");
-          this.requeueGiveUpOrigin(sessionId, gen);
-        });
+        // Card 3ce3fa39 (superseding card b64b3726's immediate clear): mark possibly-dirty instead of
+        // clearing HERE — same reasoning as fireEnterAndVerify's give-up branch. This path is reached ONLY
+        // after output has been stale for a FULL staleMs window, i.e. the engine demonstrably isn't reading
+        // right now — exactly when an immediate backspace burst is least trustworthy. The next submit()'s
+        // own clear-prefix (see its doc) handles it once the engine is provably about to read again.
+        // GATED on composerDirtyMarkedForGen (using `gen`, captured BEFORE this method's own bump above) —
+        // a wrongly-SUPPRESSED give-up already marks dirty immediately at suppression time; without this
+        // guard, THIS backstop firing later for the SAME still-unconfirmed generation would double-count
+        // the identical abandoned text (see the field's doc).
+        if (live.composerDirtyMarkedForGen !== gen) {
+          // eslint-disable-next-line no-console
+          console.log(`[heal] ${sessionId} marking an orphaned give-up injection possibly-dirty (${live.lastPrompt.length} chars, composer otherwise empty) while healing stuck busy`);
+          live.composerDirtyLen += live.lastPrompt.length;
+          live.composerDirtyMarkedForGen = gen;
+        }
+        // Card 2c3c4aff: this out-of-band path is exactly a give-up that never reached fireEnterAndVerify's
+        // own GIVE-UP RECOVERY branch (e.g. wrongly SUPPRESSED) — `live.giveUpOrigin` still holds the
+        // original QueuedMessage(s) this stranded text came from (nothing could have overwritten it:
+        // submit() is the sole writer and it never ran again while busy stayed stuck true). Restore it via
+        // the SAME identity-preserving mechanism card 441499ee hardened the normal give-up path with,
+        // instead of silently discarding the cleared text.
+        this.setBusy(sessionId, false, "heal-if-stuck-clear");
+        this.requeueGiveUpOrigin(sessionId, gen);
       } else {
         this.setBusy(sessionId, false, "heal-if-stuck-stale");
       }
@@ -4527,16 +4580,56 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
-    this.ptyWrite(sessionId, live, BRACKET_PASTE_START, "bracket-start");
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
-    this.writeChunked(sessionId, text, () => {
+    const writeNewTurn = (): void => {
+      // Card 3ce3fa39: re-check aliveness here — unlike the original inline shape this was factored out
+      // of (where this write was always the FIRST synchronous thing submit() did, covered by submit()'s
+      // own entry guard), `writeNewTurn` can now also run as writeChunked's `done` callback for the
+      // defensive clear-prefix below — i.e. ASYNCHRONOUSLY, after the session may have died mid-burst
+      // (writeChunked fires `done` on its not-alive path too — card 9ed20572). `ptyWrite` itself performs
+      // no aliveness check (every caller is expected to), so skipping this guard would write to a dead pty.
       const l = this.live.get(sessionId);
       if (!l?.alive) return;
-      this.ptyWrite(sessionId, l, BRACKET_PASTE_END, "bracket-end");
-      const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
-      setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
-    });
+      this.ptyWrite(sessionId, l, BRACKET_PASTE_START, "bracket-start");
+      this.writeChunked(sessionId, text, () => {
+        const l2 = this.live.get(sessionId);
+        if (!l2?.alive) return;
+        this.ptyWrite(sessionId, l2, BRACKET_PASTE_END, "bracket-end");
+        const delay = SUBMIT_ENTER_DELAY_MS + pasteSettleExtraMs(text.length); // scale the first attempt's gap with paste size
+        setTimeout(() => this.sendEnterAndVerify(sessionId, 1, gen), delay);
+      });
+    };
+    // Card 3ce3fa39 (the frame-splice bug): `composerDirtyLen` is a possibly-stranded amount an EARLIER
+    // submit's give-up/heal-if-stuck left unresolved — see the field's doc for why the clear is deferred
+    // here rather than attempted at give-up time. THIS is the moment to actually address it: unlike give-up
+    // time (whose whole trigger condition is "the engine wasn't reading"), a fresh submit is the one point
+    // where we get real corroboration for free — if THIS write's own Enter goes on to confirm, that proves
+    // the engine read the entire ordered byte stream, clear-prefix included, in order. Gated on
+    // `composerLen === 0` for the SAME reason every other clear in this file is (card e1829591 — never risk
+    // a real human draft); if a human is mid-draft, skip the defensive clear and fall back to the historical
+    // stray-concatenation risk in that one already-rare edge case, unchanged from before this card.
+    // Force-close first (a fresh zero-length START+END pair, the SAME bytes sendEnterAndVerify's own retry
+    // reassert uses — card 97558183: idle → true no-op, still-open → closes with only a small stray tail)
+    // so the backspace burst that follows can never be swallowed as literal paste content from an earlier
+    // write whose own closing END marker may have been the thing that dropped.
+    // Deliberately NOT reset to 0 here (only a genuine confirmation resets it — see the field's doc): if
+    // THIS write also gives up unconfirmed, the give-up branch must keep compounding on top of whatever was
+    // already unresolved, not overwrite it — that compounding is exactly what specimen A/C's doubled/singled
+    // residue measured.
+    if (live.composerDirtyLen > 0 && live.composerLen === 0) {
+      const dirty = live.composerDirtyLen;
+      // Stamp WHICH generation is attempting this clear — the confirming-hook sites only reset
+      // composerDirtyLen when they observe THIS SAME generation still current (see the field's doc); an
+      // unrelated hook firing before this generation's own Enter confirms must never reset it.
+      live.composerDirtyLenClearedByGen = gen;
+      // eslint-disable-next-line no-console
+      console.log(`[submit] ${sessionId} composer possibly dirty from an earlier unconfirmed give-up (${dirty} chars) — clearing defensively before this write`);
+      this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
+      this.writeChunked(sessionId, BACKSPACE.repeat(dirty), writeNewTurn);
+    } else {
+      writeNewTurn();
+    }
     this.setBusy(sessionId, true, reason); // M1: optimistic, SYNCHRONOUS — see the M1 INVARIANT note above. Keep last; keep sync.
   }
 
@@ -4742,6 +4835,20 @@ export class PtyHost {
         if (l.lastOutputAt > enterWrittenAt) {
           // eslint-disable-next-line no-console
           console.log(`[submit] ${sessionId} GIVE-UP SUPPRESSED after ${attempt} Enter attempts — engine produced output after the final Enter write (turn likely already running; hook confirmation just late); leaving busy=true for the real Stop/UserPromptSubmit to finalize`);
+          // Card 3ce3fa39: this discriminator is a heuristic, not proof — observed output after our Enter
+          // write can belong to unrelated concurrent activity rather than THIS write's own turn actually
+          // starting (first-hand confirmed: a specimen stayed suppressed here, a real Stop fired 64.5s later
+          // for something else, and this exact text resurfaced intact 646s afterward, concatenated onto the
+          // next genuine submit). Mark it possibly-dirty defensively — a correct suppression costs nothing
+          // (the next submit's clear-prefix floors to a safe no-op against an already-empty composer); a
+          // wrong one is now covered instead of silently corrupting a later, unrelated turn. Same
+          // composerLen===0 human-draft gate as every other clear in this file (card e1829591). Stamp
+          // `composerDirtyMarkedForGen` so healIfStuck's OWN later backstop (if this generation's busy
+          // never resolves any other way) doesn't double-count the identical text — see that field's doc.
+          if (l.composerLen === 0 && l.lastPrompt && l.composerDirtyMarkedForGen !== gen) {
+            l.composerDirtyLen += l.lastPrompt.length;
+            l.composerDirtyMarkedForGen = gen;
+          }
           return;
         }
         // Card 441499ee (hardening — card 04de8bbf measured ~86% of give-ups reaching THIS point are
@@ -4762,43 +4869,31 @@ export class PtyHost {
           if (!l2?.alive || l2.enterConfirmed || l2.submitGeneration !== gen) return; // re-check: state may have changed during the settle wait
           // eslint-disable-next-line no-console
           console.error(`[submit] ${sessionId} GIVE-UP RECOVERY after ${attempt} Enter attempts — no engine output observed since the final Enter write; turn never confirmed started; recovering busy so the session doesn't wedge`);
-          // card ee082fbb: clear the stranded injection — ONLY when the composer holds nothing but it (no
-          // human draft started during the failed retries; see the class doc above for the composerLen===0
-          // safety reasoning and the real-claude findings behind exact-backspace as the clear mechanism).
+          // Card 3ce3fa39 (superseding card ee082fbb's immediate clear): do NOT attempt the clear HERE.
+          // Give-up firing at all means the engine produced no output during the ENTIRE retry window — i.e.
+          // it wasn't reading — which is exactly the condition under which a raw backspace burst is LEAST
+          // likely to be safely interpreted (first-hand confirmed: two specimens' abandoned text survived a
+          // backspace-clear attempted at THIS point fully intact, only to resurface — once doubled — glued
+          // onto a much later, unrelated submit). Mark the amount possibly-stranded instead (ADDITIVE — see
+          // `composerDirtyLen`'s doc: a second unresolved give-up on top of an already-dirty composer must
+          // not lose track of the first) and let the NEXT submit() clear it right before writing fresh
+          // content, when the engine is demonstrably about to read again. Same composerLen===0 human-draft
+          // gate as before (card e1829591).
           //
-          // `attempt > 1` (always true at give-up in production — SUBMIT_MAX_ATTEMPTS defaults to 4) is a
-          // CHEAP proxy for "the paste bracket is closed": THIS attempt's own `if (attempt > 1)` re-assert
-          // above already wrote a fresh START+END pair immediately before ITS Enter (card 97558183's
-          // documented behavior — idle → true no-op, still-open → closes it with a small stray tail), so by
-          // the time this verify-timeout elapses a paste-close was already attempted for this exact attempt.
-          // Skip the clear (fall back to the pre-fix stray-text behavior) when that never happened — a
-          // degenerate SUBMIT_MAX_ATTEMPTS=1 (env-only, never true in production) reaches give-up at
-          // attempt===1 with NO re-assert ever sent, so paste-open is unverified there; sending raw `\x7f`
-          // bytes into a genuinely-still-open paste would fold them in AS PASTE CONTENT (composer becomes
-          // `lastPrompt + backspaces` — strictly worse than the documented pre-fix concatenation). Residual
-          // risk even when attempt>1: that SAME re-assert write could itself also drop (a second, independent
-          // ConPTY drop stacked on the original Enter drop) — not mitigated further here; a paste-markers-
-          // then-Backspace sequence was outside the real-claude probe's validated scope (only START+END+Enter
-          // was probed), so we don't stack another unverified re-assert on top of the burst.
-          if (l2.composerLen === 0 && l2.lastPrompt && attempt > 1) {
-            // eslint-disable-next-line no-console
-            console.log(`[submit] ${sessionId} clearing the stranded give-up injection (${l2.lastPrompt.length} chars, composer otherwise empty)`);
-            // Thread setBusy(false) through the burst's OWN completion, not fired alongside it: writeChunked
-            // is only synchronous for text ≤ PTY_WRITE_CHUNK_BYTES — a large lastPrompt (a worker report /
-            // manager direction routinely exceeds it) becomes N chunks across event-loop ticks, and busy
-            // gates enqueueStdin's immediate-submit path (~this.enqueueStdin's `!live.busy` check). Clearing
-            // busy before the burst finishes would reopen that gate mid-burst: an inbound message landing in
-            // the window would submit a NEW turn whose own BRACKET_PASTE_START+chunks interleave with our
-            // still-draining backspaces on the pty's FIFO — a silent, corrupted/truncated turn. submit() itself
-            // follows this same discipline (its own post-write Enter is gated behind writeChunked's `done`).
-            this.writeChunked(sessionId, BACKSPACE.repeat(l2.lastPrompt.length), () => {
-              this.setBusy(sessionId, false, "give-up-recovery-cleared");
-              this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
-            });
-          } else {
-            this.setBusy(sessionId, false, "give-up-recovery");
-            this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
+          // No more `attempt > 1` gate: that used to be a cheap proxy for "the paste bracket is closed"
+          // (only a retried attempt had sent its own re-assert first), skipping the clear entirely at
+          // attempt===1 to avoid folding raw backspaces in as literal paste content. submit()'s own
+          // defensive clear-prefix ALWAYS force-closes via a fresh START+END pair immediately before
+          // backspacing, regardless of how this give-up happened — so that residual risk (card ee082fbb CR
+          // item ②, guarded by pty-giveup-clear-single-attempt.mjs) is now covered structurally instead of
+          // by this proxy, and skipping the mark here would just reintroduce the original stray-text bug for
+          // the attempt===1 case.
+          if (l2.composerLen === 0 && l2.lastPrompt && l2.composerDirtyMarkedForGen !== gen) {
+            l2.composerDirtyLen += l2.lastPrompt.length;
+            l2.composerDirtyMarkedForGen = gen;
           }
+          this.setBusy(sessionId, false, "give-up-recovery");
+          this.requeueGiveUpOrigin(sessionId, gen); // card 441499ee — see the method doc
         });
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
