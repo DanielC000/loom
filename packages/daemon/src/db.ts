@@ -1,8 +1,9 @@
 import os from "node:os";
 import path from "node:path";
+import fs from "node:fs";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
-import { DB_PATH } from "./paths.js";
+import { DB_PATH, DAEMON_TEST_DIR } from "./paths.js";
 
 /**
  * The REAL production database — `~/.loom/loom.db`, independent of any LOOM_HOME override. A worker
@@ -17,15 +18,46 @@ export function inTestMode(): boolean {
 }
 
 /**
- * Prod-guard: under a test marker, REFUSE to open the real prod DB. A hermetic test sets
- * LOOM_HOME=<temp> so DB_PATH resolves to a throwaway db and this is a no-op; only a stray
- * default-path `new Db()` with no isolation trips it. The prod daemon (no test marker) is unaffected.
+ * True when THIS process's own entry script (`process.argv[1]`) resolves inside
+ * `packages/daemon/test/` — i.e. it looks like a direct `node test/<file>.mjs` run. Deliberately
+ * independent of every env var: `inTestMode()` only reports true once something (a test file's own
+ * `import "./_guard.mjs"`, or the `test:daemon` runner) has already SET LOOM_TEST/NODE_ENV — which is
+ * exactly the opt-in step a brand-new test file can forget. This check instead looks at WHAT is
+ * running, not at any flag a caller had to remember to raise, so it holds even for a test file that
+ * imports nothing and sets nothing — the precise shape of the 2026-06-04 incident (a bare `node
+ * test/<file>.mjs`, no env at all). A production boot's entry script is the built `dist/index.js`,
+ * which never resolves under this dir, so this is a no-op outside the test suite.
+ */
+function looksLikeDirectTestInvocation(): boolean {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const resolvedEntry = realpathOrResolve(entry);
+  const resolvedTestDir = realpathOrResolve(DAEMON_TEST_DIR);
+  const rel = path.relative(resolvedTestDir, resolvedEntry);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
+function realpathOrResolve(p: string): string {
+  try {
+    return fs.realpathSync.native(p);
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * Prod-guard: REFUSE to open the real prod DB from under a test marker OR from what looks like a
+ * direct test-file invocation (see {@link looksLikeDirectTestInvocation} — the structural half of this
+ * check, which needs no caller-set marker at all). A hermetic test sets LOOM_HOME=<temp> so DB_PATH
+ * resolves to a throwaway db and this is a no-op; only a stray default-path `new Db()` with no
+ * isolation trips it. The prod daemon (entry script is `dist/index.js`, never under `test/`, and never
+ * carries a test marker) is unaffected either way.
  */
 function assertNotProdDbInTest(file: string): void {
-  if (inTestMode() && path.resolve(file) === REAL_PROD_DB) {
+  if ((inTestMode() || looksLikeDirectTestInvocation()) && path.resolve(file) === REAL_PROD_DB) {
     throw new Error(
-      "refusing to open the prod DB (~/.loom/loom.db) under a test marker (LOOM_TEST/NODE_ENV=test) — " +
-        "set LOOM_HOME=<temp> so tests get an isolated database",
+      "refusing to open the prod DB (~/.loom/loom.db) from a daemon test (LOOM_TEST/NODE_ENV=test, or a " +
+        "direct `node test/*.mjs` invocation) — set LOOM_HOME=<temp> so tests get an isolated database",
     );
   }
 }

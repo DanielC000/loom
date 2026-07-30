@@ -30,6 +30,15 @@ export function expandTilde(p: string): string {
 export const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
 export const DB_PATH = path.join(LOOM_HOME, "loom.db");
 /**
+ * The daemon's own test directory (`packages/daemon/test/`), resolved from the built file's own
+ * location — mirrors `scripts/test-daemon.mjs`'s own `TEST_DIR` derivation, so the two always agree.
+ * Exported so `db.ts`'s prod-guard can tell "this process's entry script is a daemon test file" from
+ * `process.argv[1]` alone, with NO dependence on any env var a test author might forget to set (see
+ * that guard's own comment for why this matters — it's what turns the LOOM_TEST-gated check from
+ * opt-in into something that holds even for a completely bare `node test/<file>.mjs` invocation).
+ */
+export const DAEMON_TEST_DIR = path.resolve(__dirname, "..", "test");
+/**
  * The local 32-byte master key for the recoverable-secret envelope helper (`keys/envelope.ts`).
  * A recoverable OUTWARD credential — e.g. the companion bot token the daemon must DECRYPT to call
  * Telegram — is stored AES-256-GCM-encrypted at rest (in loom.db, which is backed up + syncable);
