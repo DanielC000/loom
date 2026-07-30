@@ -109,26 +109,65 @@ const taskB = randomUUID();
 const worktrees = [];
 
 // Constraint 1 (board card 2fcd5eae): the lock must NOT wrap `provisionWorktreeDeps`. Tested directly via
-// the injectable `deps.provision` seam — a slow (but in-memory, subprocess-free — so it can't be
-// contaminated by host/spawn jitter the way a wall-clock budget on real subprocess timing would be) fake
-// installer that records its OWN start/end, tagged by worktreePath (its first arg). NOTE: since each
-// call's OWN provisioning necessarily runs only AFTER that SAME call's OWN (now-serialized) git sequence
-// finishes, the two calls' provision windows are naturally staggered too — that staggering alone does
-// NOT prove the bug. The actual proof: whichever call's git sequence runs SECOND (queued behind the
-// FIRST call's lock) must be able to START its locked git sequence WHILE the FIRST call's provisioning is
-// still in flight — proving the first call's provisioning never held the lock the second call is queued
-// on. If the fix wrongly swept provisioning into the lock, the second call could not acquire the lock
-// until the first call's provisioning (not just its git sequence) had also finished.
-const PROVISION_DELAY_MS = 1500;
-const provisionEvents = {}; // worktreePath -> {start, end}
-function slowProvision(worktreePath) {
-  const start = Date.now();
-  return new Promise((resolve) => {
-    setTimeout(() => {
-      provisionEvents[worktreePath] = { start, end: Date.now() };
-      resolve({ ok: true });
-    }, PROVISION_DELAY_MS);
+// the injectable `deps.provision` seam — an in-memory, subprocess-free fake installer (so it can't be
+// contaminated by host/spawn jitter the way a wall-clock budget on real subprocess timing would be) that
+// records its OWN start/end, tagged by worktreePath (its first arg).
+//
+// DIAGNOSED 2026-07-30 (card 37640fd2, off a prior 5-run diagnosis by worker 52f578e8): this seam used to
+// be a FIXED synthetic delay (`setTimeout(1500)`), compared by wall clock against the SECOND call's REAL
+// `worktree add` subprocess start. That pits a load-INSENSITIVE synthetic timer against a load-SENSITIVE
+// real subprocess — B's own unlocked pre-checkout git housekeeping measured 390-550ms quiet vs up to
+// 2340ms under a loaded gate host, a 4-6x stretch the fixed 1500ms window doesn't survive. Below, the
+// seam instead WAITS FOR THE REAL EVENT (the other call's post-checkout hook START line actually landing
+// in the shared hook log) before resolving — removing the race instead of widening it, per the class this
+// belongs to (see `975956b2`). A bounded ceiling (`PROVISION_WAIT_CEILING_MS`) exists ONLY to break the
+// genuine deadlock a broken fix would create (see below) — it is a deadlock-breaker, not a budget, and
+// raising it is never the right response to a red run here.
+//
+// NOTE: since each call's OWN provisioning necessarily runs only AFTER that SAME call's OWN
+// (now-serialized) git sequence finishes, the two calls' provision windows are naturally staggered too —
+// that staggering alone does NOT prove the bug. The actual proof: whichever call's git sequence runs
+// SECOND (queued behind the FIRST call's lock) must be able to START its locked git sequence WHILE the
+// FIRST call's provisioning is still in flight — proving the first call's provisioning never held the
+// lock the second call is queued on. Observing the second call's checkout-start event from INSIDE the
+// first call's still-unresolved provisioning promise is direct, positive proof of exactly that ordering.
+//
+// If the fix wrongly swept provisioning into the lock, the second call could not even BEGIN its own git
+// sequence (so its checkout-start hook line can never appear) until the first call's provisioning — which
+// is itself waiting on that same line — has also finished: a genuine deadlock, broken only by the
+// ceiling below, after which the second call's checkout-start is necessarily later than the first call's
+// (timed-out) provisioning end, and the assertion correctly reds. Verified: see this card's
+// positive-control run (deliberately wrapping `provisionWorktreeDeps` inside the lock reds this exact
+// check via ceiling timeout, not a hang).
+const PROVISION_WAIT_CEILING_MS = 15_000; // ~6x the worst real-host stretch observed (2340ms) — a
+  // deadlock-breaker safety net, not a target for tuning; a red caused by hitting this ceiling means the
+  // property under test is false (or the host is catastrophically overloaded), not that this number is
+  // too small.
+const provisionEvents = {}; // worktreePath -> {start, end, timedOut}
+
+function otherBranchCheckoutHasStarted(ownBranch) {
+  if (!fs.existsSync(hookLog)) return false;
+  const lines = fs.readFileSync(hookLog, "utf8").split("\n").filter(Boolean);
+  return lines.some((line) => {
+    const m = line.match(/^START\s+(\S+)\s+\d+$/);
+    return !!m && m[1] !== ownBranch;
   });
+}
+
+async function slowProvision(worktreePath) {
+  const start = Date.now();
+  const ownBranch = `loom/${path.basename(worktreePath)}`;
+  const deadline = start + PROVISION_WAIT_CEILING_MS;
+  let timedOut = false;
+  // Resolve IMMEDIATELY if the other call's checkout has already started by the time we get here — never
+  // wait on a condition that may already be satisfied (the `events.once()` trap).
+  while (!otherBranchCheckoutHasStarted(ownBranch)) {
+    if (Date.now() >= deadline) { timedOut = true; break; }
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  const end = Date.now();
+  provisionEvents[worktreePath] = { start, end, timedOut };
+  return { ok: true };
 }
 
 try {
@@ -186,7 +225,9 @@ try {
     const [firstBranch, firstProv, secondWin] = winA.start <= winB.start
       ? ["A", provA, winB]
       : ["B", provB, winA];
-    console.log(`  first=${firstBranch} provision:[${firstProv.start}, ${firstProv.end}]  second git-window start=${secondWin.start}`);
+    console.log(`  first=${firstBranch} provision:[${firstProv.start}, ${firstProv.end}]` +
+      `${firstProv.timedOut ? " (CEILING HIT — never observed the other call's checkout start)" : ""}` +
+      `  second git-window start=${secondWin.start}`);
     check(
       `[constraint 1] the SECOND call's locked git sequence started (at ${secondWin.start}) WHILE the ` +
       `FIRST call's (${firstBranch}) provisioning was still running (ends ${firstProv.end}) — ` +
