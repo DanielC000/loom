@@ -1,5 +1,9 @@
+import path from "node:path";
 import type { Db } from "../db.js";
-import type { SessionRole } from "@loom/shared";
+import type { SessionRole, CapabilityGrant } from "@loom/shared";
+import { buildMcpServers, buildSpawnArgs, windowsCommandLine, disallowedToolsForSpawn, WINDOWS_COMMAND_LINE_LIMIT } from "../pty/host.js";
+import { resolveExecutable } from "../pty/resolve-bin.js";
+import { SETTINGS_DIR, PORT } from "../paths.js";
 
 /**
  * Warn (never block) at agent create/update time when a startupPrompt names a tool that is NOT on
@@ -133,6 +137,11 @@ export interface ToolSurfaceProfile {
   documentConversion?: boolean | null;
   vaultWrite?: boolean | null;
   connections?: readonly string[] | null;
+  /** Owner-added registry capability grants (agent-tooling P4) — carried through ONLY for the
+   *  spawn-budget estimate's "not modeled" caveat count (see {@link spawnFixedOverheadChars}'s doc);
+   *  never resolved here (resolving a python-venv/github-binary grant can trigger a background
+   *  provisioning KICK, a real side effect this read-only lint must never cause). */
+  capabilities?: CapabilityGrant[] | null;
 }
 
 /** Resolve the known bare tool names on a profile's actual surface (Layer A role→server selection
@@ -183,6 +192,7 @@ export function toolSurfaceProfileForAgentProfile(db: Db, profileId: string | nu
     documentConversion: profile.documentConversion,
     vaultWrite: profile.vaultWrite,
     connections: profile.connections,
+    capabilities: profile.capabilities,
   };
 }
 
@@ -228,7 +238,7 @@ export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string 
   const profile = toolSurfaceProfileForAgentProfile(db, args.profileId);
   const warnings = [
     toolSurfaceWarning(lintStartupPromptToolSurface(args.startupPrompt, profile)),
-    spawnBudgetWarning(args.startupPrompt),
+    spawnBudgetWarning(args.startupPrompt, profile),
   ].filter((w): w is string => w != null);
   return warnings.length ? warnings.join("\n") : null;
 }
@@ -246,49 +256,111 @@ export function agentUpdatePromptWarning(
   const profile = toolSurfaceProfileForAgentProfile(db, effectiveProfileId);
   const warnings = [
     toolSurfaceWarning(lintStartupPromptToolSurface(effectivePrompt, profile)),
-    spawnBudgetWarning(effectivePrompt),
+    spawnBudgetWarning(effectivePrompt, profile),
   ].filter((w): w is string => w != null);
   return warnings.length ? warnings.join("\n") : null;
 }
 
 /**
- * Card abcf0eba part (b): warn (never block — same guardrail class as {@link toolSurfaceWarning}) at
- * agent create/update time when a base brief ALONE already consumes a large share of a worker spawn's
- * command-line budget — the silent cumulative trap the card is about: every byte added to a brief
- * permanently shrinks every FUTURE spawn's kickoff headroom on that agent, and today nothing signals
- * that at the moment the brief is edited; the failure only surfaces LATER, on an unrelated card, as an
- * opaque Windows `error code: 206` (see {@link preflightWindowsCommandLine} in pty/host.ts for the
- * exact, real-spawn-time check this is the early-warning cousin of).
+ * Card abcf0eba part (b) / card 08723d94 fix: warn (never block — same guardrail class as
+ * {@link toolSurfaceWarning}) at agent create/update time when a base brief ALONE already consumes a
+ * large share of a worker spawn's command-line budget — the silent cumulative trap the card is about:
+ * every byte added to a brief permanently shrinks every FUTURE spawn's kickoff headroom on that agent,
+ * and today nothing signals that at the moment the brief is edited; the failure only surfaces LATER, on
+ * an unrelated card, as an opaque Windows `error code: 206` (see {@link preflightWindowsCommandLine} in
+ * pty/host.ts for the exact, real-spawn-time check this is the early-warning cousin of).
  *
- * `SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS` is an ESTIMATE, not the measured limit: at agent_update/create
- * time we don't yet know the eventual kickoffPrompt, nor the exact per-spawn overhead (settings path,
- * `--mcp-config` JSON, `--disallowedTools`, session name — all threaded through `WINDOWS_COMMAND_LINE_LIMIT`
- * in pty/host.ts, which IS measured exactly against the real command line at actual spawn time). A
- * real worker's own non-prompt overhead measures ~560 chars for a plain worker spawn, but a session
- * with more capabilities/connections/a larger skills set carries more — so this budget is deliberately
- * conservative (well under `WINDOWS_COMMAND_LINE_LIMIT`), leaving generous headroom for that variance
- * AND for a real kickoffPrompt on top of the brief. Warn once the brief alone exceeds HALF of that
- * conservative estimate — past that point, well over half of every future spawn's remaining budget is
- * already spent before the manager ever writes a kickoff.
+ * Card 08723d94: this used to hand-roll its OWN overhead constant (`SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS =
+ * 24_000`, implying ~8.8KB of fixed overhead) — a SECOND computation of the same budget
+ * `preflightWindowsCommandLine` already computes exactly, and it silently drifted ~8KB into the UNSAFE
+ * direction (measured real overhead for one live agent: ~16.5KB) while still calling itself
+ * "conservative". Fixed by DERIVING the fixed overhead from the SAME arithmetic the real spawn uses —
+ * {@link buildMcpServers}/{@link buildSpawnArgs}/{@link windowsCommandLine}, the exact functions
+ * `preflightWindowsCommandLine` calls — for a REPRESENTATIVE argv built from this agent's own resolved
+ * role + browserTesting flag (see {@link spawnFixedOverheadChars}). One arithmetic path now backs both
+ * the advisory and the enforcement: a future argv change (a new flag threaded through
+ * `buildSpawnArgs`) reaches this estimate automatically, because it calls that function directly rather
+ * than re-deriving its shape from memory.
  */
-export const SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS = 24_000;
 const SPAWN_BUDGET_WARN_FRACTION = 0.5;
 
-/** Render the spawn-budget warning for a startupPrompt (brief), or null if it's comfortably under
- *  budget. Never throws. Exported for the hermetic test. */
-export function spawnBudgetWarning(startupPrompt: string | null | undefined): string | null {
+/** A representative session id (real ids are randomly-generated UUIDv4, always 36 chars) — used ONLY to
+ *  size the per-session components of the fixed overhead (the settings-file path, the mcp-config server
+ *  URLs); never an actual session, never written to disk. */
+const REPRESENTATIVE_SESSION_ID = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Compute the fixed (non-prompt) spawn overhead — bin + every flag `buildSpawnArgs` emits, Windows-quoted
+ * via {@link windowsCommandLine} — for a REPRESENTATIVE argv built from this profile's resolved role and
+ * `browserTesting` flag, using the exact same {@link buildMcpServers}/{@link buildSpawnArgs}/
+ * {@link windowsCommandLine} functions `pty/host.ts`'s `preflightWindowsCommandLine` calls at real spawn
+ * time (see that function's own doc). This is card 08723d94's fix: previously this number was a
+ * hand-rolled constant that could silently drift from what the real spawn actually produces; now it IS
+ * that computation, just run early and without a real session.
+ *
+ * Deliberately does NOT call the real `documentConversion` (markitdown) or owner-added-capability
+ * resolution: `markitdownMcpServer`/a `python-venv` or `github-binary` capability grant can each trigger a
+ * BACKGROUND PROVISIONING KICK (a real side effect — see their own docs in pty/host.ts and
+ * capabilities/registry.ts) when the target isn't already provisioned, and this lint runs on every
+ * `agent_create`/`agent_update` call, not just a real spawn — it must never cause one of those as a
+ * side effect of a prompt edit. `browserTesting` (Playwright) IS included: resolving it
+ * (`resolvePlaywrightCli`) is a pure `require.resolve` lookup with no provisioning path.
+ *
+ * NOT modeled (accepted approximation gaps — every one of these, if present, makes the REAL overhead
+ * LARGER than what this returns, never smaller, so this function can still UNDER-count for a
+ * heavily-provisioned agent): `documentConversion`, owner-added registry capabilities, a per-project
+ * code-graph MCP mount, a pinned model override, and a resume/fork session name. See
+ * {@link spawnBudgetWarning}'s caveat wording, which names the ones countable from `profile` alone.
+ */
+export function spawnFixedOverheadChars(profile: ToolSurfaceProfile): number {
+  const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+  const role = profile.role ?? undefined;
+  const mcpServers = buildMcpServers({
+    sessionId: REPRESENTATIVE_SESSION_ID,
+    port: PORT,
+    role,
+    browserTesting: profile.browserTesting ?? false,
+  });
+  const disallowedTools = disallowedToolsForSpawn(profile.role ?? null, false, false, !!mcpServers.playwright);
+  const settingsPath = path.join(SETTINGS_DIR, `${REPRESENTATIVE_SESSION_ID}.json`);
+  // A real spawn ALWAYS carries a non-empty startupPrompt (brief+kickoff), which is what makes
+  // buildSpawnArgs push the trailing "--" end-of-options separator ahead of it — an omitted
+  // startupPrompt here would silently exclude that separator (and its surrounding join-spaces) from the
+  // measured overhead, under-counting the very thing this function exists to get right. So probe with a
+  // single-char placeholder ("X" has no space/tab, so windowsCommandLine never quotes/escapes it — it
+  // contributes EXACTLY 1 char) and subtract that 1 back out, isolating "every char that isn't the
+  // prompt's own text" — the same probe technique test/spawn-command-line-preflight.mjs already uses to
+  // measure this exactly.
+  const args = buildSpawnArgs({ settingsPath, mode: "acceptEdits", mcpServers, disallowedTools, startupPrompt: "X" });
+  return windowsCommandLine(bin, args).length - 1;
+}
+
+/** Render the spawn-budget warning for a startupPrompt (brief) against this agent's resolved profile, or
+ *  null if it's comfortably under budget. Never throws. Exported for the hermetic test. */
+export function spawnBudgetWarning(startupPrompt: string | null | undefined, profile: ToolSurfaceProfile): string | null {
   const chars = startupPrompt?.length ?? 0;
-  const threshold = SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS * SPAWN_BUDGET_WARN_FRACTION;
+  const fixedOverhead = spawnFixedOverheadChars(profile);
+  const budget = WINDOWS_COMMAND_LINE_LIMIT - fixedOverhead;
+  const threshold = budget * SPAWN_BUDGET_WARN_FRACTION;
   if (chars <= threshold) return null;
-  const headroomChars = Math.max(0, SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS - chars);
+  const headroomChars = Math.max(0, budget - chars);
   const briefKb = (chars / 1024).toFixed(1);
   const headroomKb = (headroomChars / 1024).toFixed(1);
+  const unmodeled: string[] = [];
+  if (profile.documentConversion) unmodeled.push("document conversion");
+  if (profile.capabilities && profile.capabilities.length) unmodeled.push(`${profile.capabilities.length} owner-added capabilit${profile.capabilities.length === 1 ? "y" : "ies"}`);
+  const gapNote = unmodeled.length
+    ? ` This agent also has ${unmodeled.join(" and ")} enabled, which this estimate does NOT account for — each ADDS to the real overhead, so real headroom is smaller than reported here, never larger.`
+    : "";
   return (
     `startupPrompt (this agent's base brief) is now ${chars} chars (~${briefKb} KB) — ` +
     `leaves ~${headroomChars} chars (~${headroomKb} KB) of ESTIMATED headroom for a ` +
-    "worker_spawn kickoffPrompt before a spawn risks the Windows command-line ceiling (this estimate is " +
-    "conservative and approximate; the exact, real-spawn-time check is pty/host.ts's " +
-    "preflightWindowsCommandLine, which will refuse an actually-oversized spawn actionably regardless of " +
-    "this warning). Every future worker_spawn on this agent inherits this brief — consider trimming it if " +
-    "it's carrying content that could live in the project's own CLAUDE.md or a skill instead.");
+    "worker_spawn kickoffPrompt before a spawn risks the Windows command-line ceiling (this estimate derives " +
+    `the fixed spawn overhead (~${fixedOverhead} chars) from this agent's own resolved role/browser-testing ` +
+    "surface via the SAME real-spawn arithmetic pty/host.ts's preflightWindowsCommandLine uses — it is NOT a " +
+    "hand-rolled guess, but it can still UNDER-state the real overhead for anything it doesn't model (see below); " +
+    "the exact, real-spawn-time check is pty/host.ts's preflightWindowsCommandLine, which will refuse an " +
+    `actually-oversized spawn actionably regardless of this warning).${gapNote} Every future worker_spawn on ` +
+    "this agent inherits this brief — consider trimming it if it's carrying content that could live in the " +
+    "project's own CLAUDE.md or a skill instead.");
 }

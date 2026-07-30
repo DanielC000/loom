@@ -62,9 +62,11 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
-const { PtyHost, windowsCommandLine, preflightWindowsCommandLine, WINDOWS_COMMAND_LINE_LIMIT, buildSpawnArgs } =
+const { PtyHost, windowsCommandLine, preflightWindowsCommandLine, WINDOWS_COMMAND_LINE_LIMIT, buildSpawnArgs, disallowedToolsForSpawn } =
   await import("../dist/pty/host.js");
-const { spawnBudgetWarning, SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS } = await import("../dist/agents/promptLint.js");
+const { resolveExecutable } = await import("../dist/pty/resolve-bin.js");
+const { SETTINGS_DIR, PORT } = await import("../dist/paths.js");
+const { spawnBudgetWarning, spawnFixedOverheadChars } = await import("../dist/agents/promptLint.js");
 
 // ===================== Part A: pure quoting + preflight (cross-platform) =====================
 
@@ -136,15 +138,125 @@ check("WINDOWS_COMMAND_LINE_LIMIT is the empirically-confirmed 32766 (not a roun
 }
 
 // ===================== Part (b): agent_create/agent_update spawn-budget warning =====================
+// Card 08723d94: this warning used to compute its OWN hand-rolled overhead constant
+// (SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS = 24_000, implying a fixed spawn overhead of exactly
+// WINDOWS_COMMAND_LINE_LIMIT-24_000 = 8766 chars) — a SECOND, independent computation of the same
+// budget `preflightWindowsCommandLine` already computes exactly from the real argv. That second
+// computation silently drifted ~8KB into the UNSAFE direction (a live agent's measured real overhead:
+// ~16.5KB) while still labelling itself "conservative". Fixed: `spawnFixedOverheadChars` DERIVES the
+// fixed overhead from the SAME buildMcpServers/buildSpawnArgs/windowsCommandLine arithmetic
+// `preflightWindowsCommandLine` calls, for a representative argv built from the agent's own resolved
+// role + browserTesting flag — one source of truth instead of two.
 {
-  check("a short brief: no budget warning", spawnBudgetWarning("a short worker brief") === null);
-  check("empty/absent brief: no budget warning", spawnBudgetWarning(undefined) === null && spawnBudgetWarning("") === null);
-  const bigBrief = "X".repeat(SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS * 0.6); // over the 50% warn threshold
-  const warning = spawnBudgetWarning(bigBrief);
+  const workerProfile = { role: "worker" };
+  check("a short brief: no budget warning", spawnBudgetWarning("a short worker brief", workerProfile) === null);
+  check("empty/absent brief: no budget warning", spawnBudgetWarning(undefined, workerProfile) === null && spawnBudgetWarning("", workerProfile) === null);
+
+  const fixedOverhead = spawnFixedOverheadChars(workerProfile);
+  const budget = WINDOWS_COMMAND_LINE_LIMIT - fixedOverhead;
+  console.log(`\n[measured] spawnFixedOverheadChars({role:"worker"}) = ${fixedOverhead} chars → derived budget = ${budget} chars (vs the OLD hand-rolled advisory's assumed overhead of ${WINDOWS_COMMAND_LINE_LIMIT - 24_000} chars)`);
+
+  const bigBrief = "X".repeat(Math.round(budget * 0.6)); // over the 50% warn threshold
+  const warning = spawnBudgetWarning(bigBrief, workerProfile);
   check("a brief over the warn threshold: returns a warning", typeof warning === "string");
   check("warning names the brief's own size", warning.includes(String(bigBrief.length)));
   check("warning is framed as an ESTIMATE (never presented as the exact limit)", /estimate/i.test(warning));
   check("warning points at the real, exact check (pty/host.ts preflightWindowsCommandLine)", warning.includes("preflightWindowsCommandLine"));
+  check("warning no longer calls itself 'conservative' (card 08723d94: it wasn't)", !/\bconservative\b/i.test(warning));
+  check("warning names the derived fixed-overhead figure it's using", warning.includes(String(fixedOverhead)));
+
+  // A profile carrying owner-added capabilities gets an explicit "not modeled, real headroom is
+  // smaller" caveat rather than a false confident number for the dimension this can't safely compute
+  // (resolving a real capability could kick a background provisioning install — see spawnFixedOverheadChars's
+  // own doc for why that's never done from this lint path).
+  const capProfile = { role: "worker", capabilities: [{ slug: "cap-a" }, { slug: "cap-b" }] };
+  const capWarning = spawnBudgetWarning(bigBrief, capProfile);
+  check("a profile with owner-added capabilities: warning names the gap and says headroom is smaller, never larger",
+    typeof capWarning === "string" && capWarning.includes("2 owner-added capabilities") && /smaller than reported/i.test(capWarning));
+
+  // --- DoD 1: reproduce the exact divergence shape the card reported. Simulate a heavily-provisioned
+  // worker (many owner-added stdio capabilities mounted, each a realistic node subprocess entry) via a
+  // literal mcpServers map — NOT via the real capability-catalog resolver (which could kick a real
+  // provisioning install; see above) — fed through the SAME buildSpawnArgs/windowsCommandLine the real
+  // spawn uses. This reproduces, side-effect-free, what a real heavily-provisioned agent's fixed
+  // overhead looks like. ---
+  const longCapabilityPath = ["C:", "Users", "example", "AppData", "Local", "pnpm", "global", "v9",
+    "node_modules", ".pnpm", "some-capability-package@1.2.3", "node_modules", "some-capability-package",
+    "dist", "cli.js"].join("\\");
+  const heavyMcpServers = {
+    "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" },
+    "loom-orchestration": { type: "http", url: "http://127.0.0.1:4317/mcp-orch/s1" },
+  };
+  const CAPABILITY_COUNT = 50; // sized to land near the peer's own reported ~16.5KB real overhead
+  for (let i = 0; i < CAPABILITY_COUNT; i++) {
+    heavyMcpServers[`owner-cap-${i}`] = {
+      type: "stdio",
+      command: "C:\\Program Files\\nodejs\\node.exe",
+      args: [longCapabilityPath, "--flag-one", "--flag-two", "value"],
+    };
+  }
+  const heavyDisallowed = disallowedToolsForSpawn("worker", false, false, false);
+  const heavyBin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+  const heavySettingsPath = path.join(SETTINGS_DIR, "s1.json");
+  const heavyArgsNoPrompt = buildSpawnArgs({ settingsPath: heavySettingsPath, mode: "acceptEdits", mcpServers: heavyMcpServers, disallowedTools: heavyDisallowed });
+  const heavyFixedOverhead = windowsCommandLine(heavyBin, heavyArgsNoPrompt).length;
+  const OLD_ASSUMED_OVERHEAD = WINDOWS_COMMAND_LINE_LIMIT - 24_000; // the card's own arithmetic: 8766
+  console.log(`[measured] synthetic heavily-provisioned worker (${CAPABILITY_COUNT} owner capabilities): REAL fixed overhead = ${heavyFixedOverhead} chars, vs the OLD hand-rolled advisory's assumed overhead = ${OLD_ASSUMED_OVERHEAD} chars`);
+  check("DoD1 repro: a realistically-provisioned agent's REAL fixed overhead exceeds the OLD advisory's assumed overhead (the exact unsafe divergence the card reported)",
+    heavyFixedOverhead > OLD_ASSUMED_OVERHEAD);
+
+  // The OLD code would have reported (24_000 - briefChars) chars of headroom for an agent like this —
+  // headroom a same-sized real spawn cannot actually fit, because the real fixed overhead is bigger
+  // than the old code ever accounted for. Prove it: size a brief+kickoff pair the OLD formula would
+  // have called comfortably safe, then show the REAL preflight — fed this agent's REAL argv — refuses it.
+  const oldSafeBriefChars = 20_000; // OLD formula: reported headroom = 24_000-20_000 = 4_000 chars
+  const oldSafeKickoffChars = 3_500; // comfortably UNDER that old ~4_000-char reported headroom
+  const combinedPrompt = "X".repeat(oldSafeBriefChars + oldSafeKickoffChars);
+  const heavyArgsWithPrompt = buildSpawnArgs({ settingsPath: heavySettingsPath, mode: "acceptEdits", mcpServers: heavyMcpServers, disallowedTools: heavyDisallowed, startupPrompt: combinedPrompt });
+  const heavyTotalLen = windowsCommandLine(heavyBin, heavyArgsWithPrompt).length;
+  const heavyPreflight = preflightWindowsCommandLine(heavyBin, heavyArgsWithPrompt);
+  console.log(`[measured] a brief+kickoff pair (${oldSafeBriefChars}+${oldSafeKickoffChars}=${oldSafeBriefChars + oldSafeKickoffChars} chars) the OLD advisory's arithmetic would have called "~4KB of headroom left, safe": REAL composed command line = ${heavyTotalLen} chars vs limit ${WINDOWS_COMMAND_LINE_LIMIT} → preflight ${heavyPreflight.ok ? "ACCEPTS" : "REFUSES"} it`);
+  check("DoD1 repro: the REAL preflight refuses a spawn the OLD advisory's arithmetic would have called safe",
+    heavyPreflight.ok === false);
+}
+
+// --- DoD 3: the advisory and the preflight can never diverge again for what the advisory DOES model —
+// they are now literally the SAME buildMcpServers/buildSpawnArgs/windowsCommandLine computation. Prove
+// it structurally: the exact headroom spawnFixedOverheadChars derives is the exact real pass/fail
+// boundary preflightWindowsCommandLine enforces for that SAME representative argv (mirrors this file's
+// own atLimitArgs/overLimitArgs technique in Part A, now applied to the advisory's own derived budget
+// rather than a hand-picked one). If a future change reintroduces a second, independent overhead
+// computation for either side, this boundary equality is what breaks. ---
+{
+  const workerProfile = { role: "worker" };
+  const fixedOverhead = spawnFixedOverheadChars(workerProfile);
+  const budget = WINDOWS_COMMAND_LINE_LIMIT - fixedOverhead;
+
+  // Reconstruct the exact representative argv spawnFixedOverheadChars builds internally (same session
+  // id, same role, same browserTesting:false, and the REAL PORT it reads — NOT a hardcoded literal:
+  // the gate runs every test on its own non-4317 LOOM_PORT (scripts/test-daemon.mjs assigns 4400+lane),
+  // and a hardcoded port here would silently desync from spawnFixedOverheadChars' own computation
+  // whenever the real port's digit count differs from the literal's), so a real startupPrompt can be
+  // preflighted against it.
+  const sessionId = "00000000-0000-0000-0000-000000000000";
+  const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
+  const mcpServers = {
+    "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${sessionId}` },
+    "loom-orchestration": { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${sessionId}` },
+  };
+  const disallowedTools = disallowedToolsForSpawn("worker", false, false, false);
+  const settingsPath = path.join(SETTINGS_DIR, `${sessionId}.json`);
+
+  const atBudgetPrompt = "X".repeat(budget); // no space/tab → contributes exactly its own char count
+  const overBudgetPrompt = "X".repeat(budget + 1);
+  const atBudgetArgs = buildSpawnArgs({ settingsPath, mode: "acceptEdits", mcpServers, disallowedTools, startupPrompt: atBudgetPrompt });
+  const overBudgetArgs = buildSpawnArgs({ settingsPath, mode: "acceptEdits", mcpServers, disallowedTools, startupPrompt: overBudgetPrompt });
+  const atBudgetPreflight = preflightWindowsCommandLine(bin, atBudgetArgs);
+  const overBudgetPreflight = preflightWindowsCommandLine(bin, overBudgetArgs);
+  check("DoD3: a prompt sized EXACTLY at the advisory's derived budget is accepted by the REAL preflight",
+    atBudgetPreflight.ok === true);
+  check("DoD3: one char OVER the advisory's derived budget is refused by the REAL preflight",
+    overBudgetPreflight.ok === false);
 }
 
 // ===================== Part B: real createPty wiring (Windows-only — the preflight is win32-gated) =====================
