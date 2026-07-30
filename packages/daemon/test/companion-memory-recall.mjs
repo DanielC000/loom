@@ -25,14 +25,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs). Set BEFORE importing dist.
-const tmpHome = path.join(os.tmpdir(), `loom-mem-recall-${Date.now()}-${process.pid}`);
+const tmpHome = useOwnLoomHome("loom-mem-recall-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
-process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -307,6 +307,8 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
     const oR = optsFor(hostR, sMgr.id);
     check("non-companion: resume() carries role=manager, still no startup prompt", oR?.role === "manager" && oR?.startupPrompt === undefined);
   }
+
+  db.close(); // was never closed — left the sqlite handle open, which blocked the LOOM_HOME cleanup below (EBUSY on loom.db)
 }
 
 console.log(failures === 0

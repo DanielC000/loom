@@ -6,12 +6,9 @@
 //   (chokepoint) Db.appendEvent invokes the listener AND a listener that THROWS never breaks the audit write;
 //   (security) the AGENT config validator REJECTS orchestration.alertWebhook while the HUMAN validator ACCEPTS it.
 // Run: 1) build the daemon, 2) node test/alert-webhook.mjs
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-alertwh-${Date.now()}`);
-fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+useOwnLoomHome("loom-alertwh-");
 const now = new Date().toISOString();
 
 let failures = 0;

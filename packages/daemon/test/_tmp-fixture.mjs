@@ -175,6 +175,24 @@ export function registerForCleanup(p) {
 }
 
 /**
+ * Install this process's LOOM_HOME, cleanup-by-construction (card 08638e79). `scripts/test-daemon.mjs`
+ * spawns each test file with its OWN fresh, RUNNER-tracked `LOOM_HOME` — a file that then hand-assigns
+ * `process.env.LOOM_HOME` to a second, `os.tmpdir()`-based path SILENTLY REPLACES the runner-assigned one
+ * with a runner-INVISIBLE one nothing ever sweeps. This closes that gap the same way it was already
+ * closed once, ad hoc, in claude-version-prewarm.mjs: if LOOM_HOME is ALREADY set (the runner — or any
+ * parent harness — owns and cleans its own assigned home), REUSE it unchanged, never override it. Only
+ * when it's unset (this file run directly, outside the runner) does this create its OWN dir, via
+ * `mkdtempManaged` — so "created" and "registered for guaranteed cleanup" happen in the same call and
+ * there is no ordering in which a self-assigned home can escape tracking.
+ * @param {string} prefix used only when this process creates its own home (LOOM_HOME was unset)
+ * @returns {string} the LOOM_HOME now in effect — the pre-existing one, or the newly created one
+ */
+export function useOwnLoomHome(prefix) {
+  if (!process.env.LOOM_HOME) process.env.LOOM_HOME = mkdtempManaged(prefix);
+  return process.env.LOOM_HOME;
+}
+
+/**
  * Release a path from the registry — but ONLY after the caller has PROVEN it is actually gone (e.g.
  * `fs.existsSync(p) === false`). This is NOT optional bookkeeping: deregistering a path whose removal
  * FAILED (EBUSY/EPERM) silently discards the exit backstop in exactly the case it exists for — a caller

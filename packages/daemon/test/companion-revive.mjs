@@ -19,16 +19,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      returns the ORIGINAL dead result unchanged with NO second submit call.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-revive.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- Hermetic LOOM_HOME (not actually touched by this module, but every daemon test sets it). ---
-const tmpHome = path.join(os.tmpdir(), `loom-companion-revive-${Date.now()}-${process.pid}`);
+const tmpHome = useOwnLoomHome("loom-companion-revive-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
-process.env.LOOM_HOME = tmpHome;
 
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv();

@@ -36,14 +36,14 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
+import { useOwnLoomHome } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- Hermetic LOOM_HOME + sandboxed HOME. Set BEFORE importing dist (paths.ts reads LOOM_HOME at import). ---
-const tmpHome = path.join(os.tmpdir(), `loom-companion-lead-mode-${Date.now()}-${process.pid}`);
+const tmpHome = useOwnLoomHome("loom-companion-lead-mode-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
-process.env.LOOM_HOME = tmpHome;
 const sandboxHome = path.join(tmpHome, "home");
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome;
