@@ -2250,21 +2250,42 @@ export function buildSpawnArgs(o: {
  * abcf0eba): a command line of exactly 32766 characters (as computed by {@link windowsCommandLine})
  * spawns successfully; 32767 fails with `Cannot create process, error code: 206`
  * (`ERROR_FILENAME_EXCED_RANGE`) — confirming both the constant AND that {@link windowsCommandLine}
- * below reproduces node-pty's own quoting byte-for-byte at the real OS boundary. So `> WINDOWS_COMMAND_LINE_LIMIT`
- * is the exact refusal threshold, not a padded guess.
+ * below matches node-pty's own quoting at the real OS boundary, for the array-args inputs this daemon
+ * actually passes (see that function's own doc: it's a behaviourally-equivalent ADAPTATION, not a
+ * byte-for-byte port — card 9fea4196). So `> WINDOWS_COMMAND_LINE_LIMIT` is the exact refusal
+ * threshold, not a padded guess.
  */
 export const WINDOWS_COMMAND_LINE_LIMIT = 32766;
 
 /**
- * Reproduce node-pty's OWN argv→command-line quoting (ported from its `windowsPtyAgent.ts`
- * `argsToCommandLine`, MIT-licensed, itself documented as following the `CommandLineToArgvW` MSDN
- * convention) so the preflight below measures the EXACT string `node-pty` is about to hand
- * `CreateProcess` — not an approximation. Deliberately NOT imported from the `node-pty` package: that
- * function lives under its compiled `lib/` path, not the package's public entrypoint, so importing it
- * would pin us to an unsupported internal surface that a future node-pty bump could silently move or
- * change. This is our OWN copy, used purely to COMPUTE a length — it never spawns anything itself.
+ * A behaviourally-equivalent ADAPTATION of node-pty's own argv→command-line quoting (its
+ * `windowsPtyAgent.ts` `argsToCommandLine`, MIT-licensed, itself documented as following the
+ * `CommandLineToArgvW` MSDN convention) — **not a byte-for-byte port** (measured: 935 chars theirs vs
+ * 831 ours, source-normalised, against node-pty@1.1.0 — card 9fea4196). It covers ONLY the array-args
+ * path node-pty takes when `args` is an array, which is every call this daemon ever makes. node-pty's
+ * `isCommandLine` branch — `args` passed as a raw STRING, handled as
+ * `` argsToCommandLine(file, []) + " " + args `` with no per-character quoting/escaping at all — is
+ * deliberately NOT implemented here; the runtime guard below turns that unimplemented case into a
+ * loud, named error instead of silently mis-quoting it (a `readonly string[]` TYPE alone doesn't
+ * protect this function: it's exported and reachable from compiled JS, where the type has already
+ * erased). On the array-args path, this adaptation is verified byte-identical to node-pty's real
+ * output over a branch-derived corpus (test/node-pty-quoting-parity.mjs, Windows-only) — a
+ * hand-maintained copy, not an import, precisely so a future node-pty quoting change reds that TEST
+ * instead of silently drifting or moving a build-time import (see the test's own header). Deliberately
+ * NOT imported from the `node-pty` package in PRODUCTION: that function lives under its compiled
+ * `lib/` path, not the package's public entrypoint, so importing it here would pin the real spawn path
+ * to an unsupported internal surface a future node-pty bump could silently move or change. This is our
+ * OWN copy, used purely to COMPUTE a length — it never spawns anything itself.
  */
 export function windowsCommandLine(file: string, args: readonly string[]): string {
+  // node-pty's isCommandLine branch (raw string args) is not implemented here — see this function's
+  // own doc. A TS type is compile-time only; this function is reachable from compiled JS where the
+  // type has erased, so the array-only assumption needs a real runtime check, not just a signature.
+  if (!Array.isArray(args)) {
+    throw new Error(
+      "windowsCommandLine: array args only — node-pty's isCommandLine (raw string args) branch is not implemented here (see card 9fea4196)",
+    );
+  }
   const argv = [file, ...args];
   let result = "";
   for (let argIndex = 0; argIndex < argv.length; argIndex++) {

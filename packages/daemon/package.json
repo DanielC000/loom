@@ -95,6 +95,9 @@
     "ws": "^8.18.0",
     "zod": "^4.4.0"
   },
+  "dependencyNotes": {
+    "node-pty": "windowsCommandLine in src/pty/host.ts is a hand-maintained adaptation of this package's internal argsToCommandLine (not imported — that lives under lib/, an unsupported internal surface); a bump can silently change its quoting rules. test/node-pty-quoting-parity.mjs (Windows-only) checks parity against the real function on every build. See card 9fea4196."
+  },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.0",
     "@types/node": "^22.10.0",

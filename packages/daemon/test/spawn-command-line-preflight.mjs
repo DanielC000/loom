@@ -2,21 +2,24 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card abcf0eba part (a) — the Windows CreateProcess command-line ceiling (raw, unactionable
 // "error code: 206" / ERROR_FILENAME_EXCED_RANGE) preflighted at the REAL createPty spawn chokepoint.
 //
-// WINDOWS_COMMAND_LINE_LIMIT and windowsCommandLine (the ported node-pty argv->command-line quoting
-// algorithm) are NOT guessed: they were empirically re-derived against the REAL node-pty dependency
-// this daemon spawns through, via a binary search over real `node.exe` spawns on this Windows dev box.
-// The result: a command line of computed length 32766 spawns successfully; 32767 fails with the raw
-// "Cannot create process, error code: 206" — confirming BOTH the constant AND that windowsCommandLine
-// reproduces node-pty's own quoting byte-for-byte at the real OS boundary (this is the RED repro this
-// card's verification demands; not re-run here as a hermetic assertion — it needs a real OS spawn and
-// was performed manually against this exact dependency version). This test proves the GREEN half:
-// wired correctly, the preflight refuses BEFORE any process is created, with an actionable message.
+// WINDOWS_COMMAND_LINE_LIMIT and windowsCommandLine (a behaviourally-equivalent ADAPTATION of node-pty's
+// argv->command-line quoting for ARRAY args — NOT a byte-for-byte port; see windowsCommandLine's own doc
+// in pty/host.ts and test/node-pty-quoting-parity.mjs for the measured comparison, card 9fea4196) are NOT
+// guessed: they were empirically re-derived against the REAL node-pty dependency this daemon spawns
+// through, via a binary search over real `node.exe` spawns on this Windows dev box. The result: a command
+// line of computed length 32766 spawns successfully; 32767 fails with the raw "Cannot create process,
+// error code: 206" — confirming BOTH the constant AND that windowsCommandLine matches node-pty's own
+// quoting at the real OS boundary, for the array-args inputs this daemon actually passes (this is the RED
+// repro this card's verification demands; not re-run here as a hermetic assertion — it needs a real OS
+// spawn and was performed manually against this exact dependency version). This test proves the GREEN
+// half: wired correctly, the preflight refuses BEFORE any process is created, with an actionable message.
 //
 // UNITS (stated explicitly, per manager review): the preflight measures a JS string's `.length` —
 // i.e. UTF-16 CODE UNITS — of the FULL composed command line: the binary path + EVERY flag/value
 // (--settings <path>, --permission-mode, --model if any, --disallowedTools if any, -n if any,
 // --strict-mcp-config --mcp-config <json>) + the startupPrompt, ALL joined and Windows-quoted/escaped
-// exactly as node-pty's own argsToCommandLine would (windowsCommandLine is a byte-for-byte port of it)
+// the same way node-pty's own argsToCommandLine would for array args (windowsCommandLine is a
+// behaviourally-equivalent ADAPTATION of it, not a byte-for-byte port — see that function's own doc)
 // — i.e. POST-escaping, not a raw pre-escaped argv sum. This is deliberately the SAME unit
 // `CreateProcessW`'s documented "32,767 characters, including the terminating null" ceiling uses: a
 // JS string is natively UTF-16, so `.length` counts UTF-16 code units with no re-encoding step — the
