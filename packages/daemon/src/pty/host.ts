@@ -1925,6 +1925,15 @@ export interface SpawnOpts {
    * buildSpawnArgs, so an old claude's argv is byte-identical regardless of what the caller passed.
    */
   sessionName?: string;
+  /**
+   * Card abcf0eba part (a): OPTIONAL labeled breakdown of `startupPrompt`'s own contributors (e.g. a
+   * worker's agent base brief vs its kickoffPrompt), used ONLY to name "which knob to shorten" in the
+   * command-line-length preflight's refusal message (see {@link PromptSizePart} /
+   * {@link preflightWindowsCommandLine}) — never affects the actual argv. Omitted (every existing spawn
+   * path) ⇒ the preflight still refuses correctly on an oversized command line, just without the
+   * per-part split in the message.
+   */
+  startupPromptParts?: readonly PromptSizePart[];
 }
 
 export interface PtyHostEvents {
@@ -2232,6 +2241,116 @@ export function buildSpawnArgs(o: {
   args.push("--strict-mcp-config", "--mcp-config", o.mcpConfigPath ?? JSON.stringify({ mcpServers: o.mcpServers }));
   if (o.startupPrompt) args.push("--", o.startupPrompt);
   return args;
+}
+
+/**
+ * Windows `CreateProcess`'s command-line ceiling (MSDN: "the maximum length of this string is 32,767
+ * characters, including the Unicode terminating null character"). Empirically re-derived against the
+ * REAL `node-pty` dependency this daemon spawns through (a binary-searched `node.exe` spawn, card
+ * abcf0eba): a command line of exactly 32766 characters (as computed by {@link windowsCommandLine})
+ * spawns successfully; 32767 fails with `Cannot create process, error code: 206`
+ * (`ERROR_FILENAME_EXCED_RANGE`) — confirming both the constant AND that {@link windowsCommandLine}
+ * below reproduces node-pty's own quoting byte-for-byte at the real OS boundary. So `> WINDOWS_COMMAND_LINE_LIMIT`
+ * is the exact refusal threshold, not a padded guess.
+ */
+export const WINDOWS_COMMAND_LINE_LIMIT = 32766;
+
+/**
+ * Reproduce node-pty's OWN argv→command-line quoting (ported from its `windowsPtyAgent.ts`
+ * `argsToCommandLine`, MIT-licensed, itself documented as following the `CommandLineToArgvW` MSDN
+ * convention) so the preflight below measures the EXACT string `node-pty` is about to hand
+ * `CreateProcess` — not an approximation. Deliberately NOT imported from the `node-pty` package: that
+ * function lives under its compiled `lib/` path, not the package's public entrypoint, so importing it
+ * would pin us to an unsupported internal surface that a future node-pty bump could silently move or
+ * change. This is our OWN copy, used purely to COMPUTE a length — it never spawns anything itself.
+ */
+export function windowsCommandLine(file: string, args: readonly string[]): string {
+  const argv = [file, ...args];
+  let result = "";
+  for (let argIndex = 0; argIndex < argv.length; argIndex++) {
+    if (argIndex > 0) result += " ";
+    const arg = argv[argIndex] ?? "";
+    const hasLopsidedEnclosingQuote = (arg[0] !== "\"") !== (arg[arg.length - 1] !== "\"");
+    const hasNoEnclosingQuotes = arg[0] !== "\"" && arg[arg.length - 1] !== "\"";
+    const quote = arg === "" || ((arg.indexOf(" ") !== -1 || arg.indexOf("\t") !== -1) &&
+      arg.length > 1 && (hasLopsidedEnclosingQuote || hasNoEnclosingQuotes));
+    if (quote) result += "\"";
+    let bsCount = 0;
+    for (let i = 0; i < arg.length; i++) {
+      const p = arg[i];
+      if (p === "\\") {
+        bsCount++;
+      } else if (p === "\"") {
+        result += "\\".repeat(bsCount * 2 + 1);
+        result += "\"";
+        bsCount = 0;
+      } else {
+        result += "\\".repeat(bsCount);
+        bsCount = 0;
+        result += p;
+      }
+    }
+    if (quote) {
+      result += "\\".repeat(bsCount * 2);
+      result += "\"";
+    } else {
+      result += "\\".repeat(bsCount);
+    }
+  }
+  return result;
+}
+
+/**
+ * A labeled chunk of a spawn's startupPrompt, purely for an ACTIONABLE refusal message — e.g. a
+ * worker's "agent base brief" vs "this spawn's kickoffPrompt". Optional and additive: a caller that
+ * omits it (every non-worker spawn path today) still gets a correct refusal, just without the
+ * per-part breakdown (see {@link preflightWindowsCommandLine}'s doc).
+ */
+export interface PromptSizePart {
+  label: string;
+  chars: number;
+}
+
+/**
+ * Card abcf0eba part (a): preflight the EXACT, post-escaping, platform-aware command-line length a
+ * spawn is about to produce, and fail ACTIONABLY instead of letting a bare Windows `CreateProcess`
+ * `error code: 206` reach the caller with no indication of what's oversized (see WINDOWS_COMMAND_LINE_LIMIT's
+ * doc for how this constant was grounded — an exact, empirically-confirmed boundary, not a guess).
+ *
+ * Takes the REAL `bin`+`args` this spawn is about to hand `node-pty` (computed by the SAME
+ * `buildSpawnArgs` call the real spawn uses) so there is no risk of the preflight and the actual spawn
+ * ever disagreeing about what "the command line" is — one measurement, reused for both the check and
+ * (if it passes) the real spawn.
+ *
+ * Windows-only: POSIX `execve`'s argv/environ ceiling (`ARG_MAX`) is measured differently (combined
+ * argv+environ bytes) and is typically several MB — multiple orders of magnitude above anything a
+ * prompt-sized startupPrompt could reach — so this is deliberately NOT enforced on POSIX; the caller
+ * gates this function on `process.platform === "win32"` (see `createPty`).
+ *
+ * `parts` (optional) is a breakdown of the startupPrompt's own contributors (e.g. agent brief vs
+ * kickoffPrompt) for naming "which knob to shorten" in the message — omitted, the message still names
+ * the total command-line length, the limit, and how far over it is, just without the per-part split.
+ */
+export function preflightWindowsCommandLine(
+  bin: string,
+  args: readonly string[],
+  parts?: readonly PromptSizePart[],
+): { ok: true } | { ok: false; message: string } {
+  const cmdLine = windowsCommandLine(bin, args);
+  if (cmdLine.length <= WINDOWS_COMMAND_LINE_LIMIT) return { ok: true };
+  const over = cmdLine.length - WINDOWS_COMMAND_LINE_LIMIT;
+  const breakdown = parts && parts.length
+    ? " Breakdown: " + parts.map((p) => `${p.label} is ${p.chars} chars`).join(", ") + "."
+    : "";
+  const knob = parts && parts.length
+    ? ` Shorten the largest contributor above${parts.length > 1 ? ` (currently "${[...parts].sort((a, b) => b.chars - a.chars)[0]!.label}")` : ""} — the whole spawn is refused until the combined command line fits.`
+    : " Shorten the startup prompt (the agent's base brief and/or this spawn's kickoff/dynamic text) — the whole spawn is refused until the combined command line fits.";
+  return {
+    ok: false,
+    message: `Spawn refused: the assembled command line is ${cmdLine.length} characters, ` +
+      `${over} over the Windows CreateProcess limit of ${WINDOWS_COMMAND_LINE_LIMIT} ` +
+      `(this is what produces the raw, unhelpful "Cannot create process, error code: 206" OS failure).${breakdown}${knob}`,
+  };
 }
 
 /**
@@ -3321,6 +3440,19 @@ export class PtyHost {
     const capabilitySecrets = collectMcpEnvSecrets(mcpServers);
     const mcpConfigPath = capabilitySecrets.length ? writeSessionMcpConfig(opts.sessionId, mcpServers) : undefined;
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools, sessionName });
+
+    // Card abcf0eba part (a): preflight the EXACT command line this spawn is about to hand node-pty —
+    // Windows-only (see preflightWindowsCommandLine's doc: POSIX's ARG_MAX is orders of magnitude larger
+    // and not a realistic ceiling for a prompt-sized startupPrompt). Uses the SAME bin+args the real
+    // spawn below uses, so the check and the spawn can never disagree about "the command line". Thrown
+    // SYNCHRONOUSLY, before any process is created — the caller's existing try/catch around
+    // `this.pty.spawn(...)` (sessions/service.ts spawnWorker, card ae6c24e1) already reconciles a
+    // synchronous createPty throw to processState:'exited' instead of leaving a live phantom, so this
+    // refusal gets that same honest handling for free.
+    if (process.platform === "win32") {
+      const preflight = preflightWindowsCommandLine(bin, args, opts.startupPromptParts);
+      if (!preflight.ok) throw new Error(preflight.message);
+    }
 
     // Inherited env (CLAUDE_*/CLAUDECODE scrubbed) + sessionEnv merge + the three git-safety vars that
     // keep an unattended worker pty from wedging on a pager / credential prompt, plus LOOM_WORKTREE (the

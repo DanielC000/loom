@@ -226,7 +226,11 @@ export function toolSurfaceWarning(offendingTools: readonly string[]): string | 
  *  profileId. Never throws. */
 export function agentCreatePromptWarning(db: Db, args: { startupPrompt?: string | null; profileId?: string | null }): string | null {
   const profile = toolSurfaceProfileForAgentProfile(db, args.profileId);
-  return toolSurfaceWarning(lintStartupPromptToolSurface(args.startupPrompt, profile));
+  const warnings = [
+    toolSurfaceWarning(lintStartupPromptToolSurface(args.startupPrompt, profile)),
+    spawnBudgetWarning(args.startupPrompt),
+  ].filter((w): w is string => w != null);
+  return warnings.length ? warnings.join("\n") : null;
 }
 
 /** Convenience for an agent_update-shaped PATCH: lint the EFFECTIVE prompt/profile (the patch's
@@ -240,5 +244,51 @@ export function agentUpdatePromptWarning(
   const effectivePrompt = patch.startupPrompt !== undefined ? patch.startupPrompt : existing.startupPrompt;
   const effectiveProfileId = patch.profileId !== undefined ? patch.profileId : existing.profileId;
   const profile = toolSurfaceProfileForAgentProfile(db, effectiveProfileId);
-  return toolSurfaceWarning(lintStartupPromptToolSurface(effectivePrompt, profile));
+  const warnings = [
+    toolSurfaceWarning(lintStartupPromptToolSurface(effectivePrompt, profile)),
+    spawnBudgetWarning(effectivePrompt),
+  ].filter((w): w is string => w != null);
+  return warnings.length ? warnings.join("\n") : null;
+}
+
+/**
+ * Card abcf0eba part (b): warn (never block — same guardrail class as {@link toolSurfaceWarning}) at
+ * agent create/update time when a base brief ALONE already consumes a large share of a worker spawn's
+ * command-line budget — the silent cumulative trap the card is about: every byte added to a brief
+ * permanently shrinks every FUTURE spawn's kickoff headroom on that agent, and today nothing signals
+ * that at the moment the brief is edited; the failure only surfaces LATER, on an unrelated card, as an
+ * opaque Windows `error code: 206` (see {@link preflightWindowsCommandLine} in pty/host.ts for the
+ * exact, real-spawn-time check this is the early-warning cousin of).
+ *
+ * `SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS` is an ESTIMATE, not the measured limit: at agent_update/create
+ * time we don't yet know the eventual kickoffPrompt, nor the exact per-spawn overhead (settings path,
+ * `--mcp-config` JSON, `--disallowedTools`, session name — all threaded through `WINDOWS_COMMAND_LINE_LIMIT`
+ * in pty/host.ts, which IS measured exactly against the real command line at actual spawn time). A
+ * real worker's own non-prompt overhead measures ~560 chars for a plain worker spawn, but a session
+ * with more capabilities/connections/a larger skills set carries more — so this budget is deliberately
+ * conservative (well under `WINDOWS_COMMAND_LINE_LIMIT`), leaving generous headroom for that variance
+ * AND for a real kickoffPrompt on top of the brief. Warn once the brief alone exceeds HALF of that
+ * conservative estimate — past that point, well over half of every future spawn's remaining budget is
+ * already spent before the manager ever writes a kickoff.
+ */
+export const SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS = 24_000;
+const SPAWN_BUDGET_WARN_FRACTION = 0.5;
+
+/** Render the spawn-budget warning for a startupPrompt (brief), or null if it's comfortably under
+ *  budget. Never throws. Exported for the hermetic test. */
+export function spawnBudgetWarning(startupPrompt: string | null | undefined): string | null {
+  const chars = startupPrompt?.length ?? 0;
+  const threshold = SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS * SPAWN_BUDGET_WARN_FRACTION;
+  if (chars <= threshold) return null;
+  const headroomChars = Math.max(0, SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS - chars);
+  const briefKb = (chars / 1024).toFixed(1);
+  const headroomKb = (headroomChars / 1024).toFixed(1);
+  return (
+    `startupPrompt (this agent's base brief) is now ${chars} chars (~${briefKb} KB) — ` +
+    `leaves ~${headroomChars} chars (~${headroomKb} KB) of ESTIMATED headroom for a ` +
+    "worker_spawn kickoffPrompt before a spawn risks the Windows command-line ceiling (this estimate is " +
+    "conservative and approximate; the exact, real-spawn-time check is pty/host.ts's " +
+    "preflightWindowsCommandLine, which will refuse an actually-oversized spawn actionably regardless of " +
+    "this warning). Every future worker_spawn on this agent inherits this brief — consider trimming it if " +
+    "it's carrying content that could live in the project's own CLAUDE.md or a skill instead.");
 }
