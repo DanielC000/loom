@@ -123,12 +123,69 @@ try {
   // The Lead's OWN home was NOT touched by a pTarget create (true cross-project isolation).
   check("the create did NOT leak onto the Lead's home board", db.listTasks("pHome").length === 0);
 
+  // ===================== (1b) M1 (card 0ef0270b) — project_task_create runs the SAME cross-channel =====
+  // duplicate check as the in-project tasks_create, checked against the TARGET (pTarget) board — NOT
+  // the Lead's own pHome board. This closes the gap where a duplicate filed via project_task_create was
+  // never caught (only the in-project tasks_create side was checked before this card).
+  const M1_A_TITLE = "fix(orchestration): phantom session after spawn failure";
+  const M1_A_BODY = "session e7f1a2b3-9c4d-4e5f-8a6b-1c2d3e4f5a6b on branch loom/1a2b3c4d5e6f never got an engine.";
+  const M1_B_TITLE = "fix(orchestration): worker_stop lies about a phantom session";
+  const M1_B_BODY = "same defect — session e7f1a2b3-9c4d-4e5f-8a6b-1c2d3e4f5a6b, branch loom/1a2b3c4d5e6f — worker_stop returned stopped:true anyway.";
+
+  // Seed the FIRST card directly on pTarget's board (as if a peer manager had already filed it there via
+  // its own in-project tasks_create) — createProjectTaskChecked/db.insertTask both work for this seed.
+  const m1First = await call("project_task_create", { projectId: "pTarget", title: M1_A_TITLE, body: M1_A_BODY });
+  check("(1b) M1 setup: the first card of the pair lands cleanly", !m1First.error && !!m1First.id);
+
+  const nBeforeM1 = db.listTasks("pTarget").length;
+  const m1Refused = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY });
+  check("(1b) M1: project_task_create REFUSES a suspected duplicate, naming the counterpart id",
+    typeof m1Refused.error === "string" && m1Refused.error.includes(m1First.id));
+  check("(1b) M1: the refused create inserted NO card on the target board", db.listTasks("pTarget").length === nBeforeM1);
+
+  // allowDuplicate:true overrides the refusal, same as the in-project tool.
+  const m1Overridden = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY, allowDuplicate: true });
+  check("(1b) M1: allowDuplicate:true creates it anyway", !m1Overridden.error && !!m1Overridden.id);
+  check("(1b) M1: the board now has both cards", db.listTasks("pTarget").length === nBeforeM1 + 1);
+
+  // m7 (card 0ef0270b): supersedes bypasses the refusal AND back-links BOTH cards, reached via the
+  // Lead's cross-project channel — not just the in-project tasks_create channel (already covered in
+  // task-dedupe.mjs).
+  const m1Superseded = await call("project_task_create", { projectId: "pTarget", title: M1_B_TITLE, body: M1_B_BODY, supersedes: m1First.id });
+  check("(1b/m7) M1: supersedes:<id> bypasses the refusal via project_task_create", !m1Superseded.error && !!m1Superseded.id);
+  check("(1b/m7) M1: the NEW card's body records the relationship", db.getTask(m1Superseded.id).body.includes(`Supersedes: ${m1First.id}`));
+  check("(1b/m7) M1: the SUPERSEDED (loser) card's body is back-noted with a pointer to the new card",
+    db.getTask(m1First.id).body.includes(`Superseded by: ${m1Superseded.id}`));
+
+  // ⚠️ Cross-project corpus check (card 0ef0270b): the duplicate check must run against the TARGET
+  // project's board, never the Lead's OWN home board. Seed pHome with a card sharing the SAME rare
+  // identifiers as a fresh candidate filed against pTarget (which has no such card) — if the checker
+  // wrongly consulted pHome's corpus (or, worse, consulted nothing at all and silently no-op'd), this
+  // candidate would either be wrongly refused (wrong board) or the whole check would be untestable
+  // (silent no-op reads identically to "no duplicate"). Asserting it creates cleanly here, THEN checking
+  // it against a genuine pTarget duplicate below, is what makes a wrong-board check observable rather than
+  // looking like it's working.
+  const M1_XPROJECT_TITLE = "fix(pty): a third, unrelated phantom-session repro";
+  const M1_XPROJECT_BODY = "session cccccccc-dddd-eeee-ffff-000011112222 on branch loom/abcdefabcdef — distinct repro, home-board only.";
+  const homeSeed = await call("project_task_create", { projectId: "pHome", title: M1_XPROJECT_TITLE, body: M1_XPROJECT_BODY });
+  check("(1b) cross-project-corpus setup: seed card lands on pHome", !homeSeed.error && !!homeSeed.id);
+  const xprojClean = await call("project_task_create", { projectId: "pTarget", title: "fix(pty): a fourth phantom-session repro (pTarget)", body: M1_XPROJECT_BODY });
+  check("(1b) cross-project-corpus: a candidate sharing identifiers ONLY with a pHome (not pTarget) card creates CLEANLY on pTarget — proves the check consulted pTarget's board, not pHome's",
+    !xprojClean.error && !!xprojClean.id);
+  // Now the REAL positive control on the SAME target board: a second candidate sharing those same
+  // identifiers with the one we just landed ON pTarget IS refused — proving the check is live (not a
+  // silent no-op) and scoped to the right board.
+  const xprojRefused = await call("project_task_create", { projectId: "pTarget", title: "fix(pty): a fifth phantom-session repro (pTarget)", body: M1_XPROJECT_BODY });
+  check("(1b) cross-project-corpus: a candidate duplicating the pTarget card (not the pHome one) IS refused, naming the pTarget counterpart",
+    typeof xprojRefused.error === "string" && xprojRefused.error.includes(xprojClean.id));
+
   // ===================== (2) bad/nonexistent projectId is rejected, nothing created =====================
   const nTargetNow = db.listTasks("pTarget").length;
+  const nHomeNow = db.listTasks("pHome").length; // non-zero here: (1b)'s cross-project-corpus check seeded pHome deliberately
   const bad = await call("project_task_create", { projectId: "ghost", title: "should not exist" });
   check("(2) nonexistent projectId rejected ('project not found')", bad.error === "project not found" && !bad.id);
   check("(2) the rejected create boarded NO card anywhere",
-    db.listTasks("pTarget").length === nTargetNow && db.listTasks("pHome").length === 0);
+    db.listTasks("pTarget").length === nTargetNow && db.listTasks("pHome").length === nHomeNow);
 
   // ===================== (4) cross-project task READ / UPDATE / LIST — the finish-the-surface tools ==========
   const platTools4 = (await client.listTools()).tools.map((t) => t.name);
@@ -392,6 +449,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Lead's cross-project task surface is complete: project_task_create boards a card on a DIFFERENT project's board, and project_task_get/update + list_all_tasks let the Lead read→move→re-prioritize it end-to-end (column-existence guard on move — shared with in-project tasks_update; cross-project + unknown-project guards; done-excluded summary aggregate). tasks_list / list_all_tasks paginate (limit/offset) and cap the default read. Enumeration is filled (list_all_profiles/list_all_schedules + schedule_get/delete) and project_configure can unset (dot-path) / replace. All new tools are present ONLY on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface — so no agent surface gains cross-project write."
+  ? "\n✅ ALL PASS — the Lead's cross-project task surface is complete: project_task_create boards a card on a DIFFERENT project's board, and project_task_get/update + list_all_tasks let the Lead read→move→re-prioritize it end-to-end (column-existence guard on move — shared with in-project tasks_update; cross-project + unknown-project guards; done-excluded summary aggregate). project_task_create ALSO runs the SAME cross-channel duplicate check as the in-project tasks_create (M1, card 0ef0270b) — checked against the TARGET project's board (not the Lead's own pHome), overridable via allowDuplicate/supersedes/relatedTo, and a supersedes override back-links the superseded card too (m7). tasks_list / list_all_tasks paginate (limit/offset) and cap the default read. Enumeration is filled (list_all_profiles/list_all_schedules + schedule_get/delete) and project_configure can unset (dot-path) / replace. All new tools are present ONLY on loom-platform — ABSENT from loom-setup, loom-orchestration (manager + worker), and the in-project loom-tasks surface — so no agent surface gains cross-project write."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

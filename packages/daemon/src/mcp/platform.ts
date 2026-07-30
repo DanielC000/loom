@@ -40,7 +40,7 @@ import { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } 
  *  query, while an explicit `limit` can still page up to MAX_EVENTS_SEARCH_PAGE. */
 export const DEFAULT_EVENTS_SEARCH_CAP = 50;
 import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from "../setup/templates.js";
-import { createProjectTask, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
+import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
@@ -1800,13 +1800,22 @@ export class PlatformMcpRouter {
 
     // --- cross-project task boarding (PL Auditor finding #4). The Lead stands ABOVE all boards, so it can
     //     board a card DIRECTLY onto ANOTHER project's board instead of spawn-and-narrate (~24 cards + ~40
-    //     reconcile calls for a 12-fix batch). REUSES createProjectTask VERBATIM — the EXACT path loom-tasks
-    //     uses — so title/body/priority/column (incl. the role-resolved defaultLanding fallback) behave
-    //     identically to a card boarded from inside the project. TRUST: cross-project WRITE is inherently a
-    //     PLATFORM (cross-project admin) capability — it lives ONLY on this platform-role-gated router. It is
-    //     deliberately ABSENT from the agent-facing surfaces (loom-orchestration manager/worker, loom-setup
-    //     operator): a project orchestrator/worker/setup-operator stays confined to its OWN board (those
-    //     surfaces resolve the projectId SERVER-SIDE and never take one), so none can gain cross-project write. ---
+    //     reconcile calls for a 12-fix batch). Uses createProjectTaskChecked (card 0ef0270b, Code Review
+    //     M1) — NOT the raw createProjectTask every other automated boarding path reuses — because the
+    //     Lead is itself an AGENT reading a tool result: it can act on a refusal (retry with
+    //     allowDuplicate/supersedes/relatedTo, or drop it), which is exactly the §SCOPE FENCE criterion in
+    //     createProjectTaskChecked's own doc (mcp/tasks.ts). This closes the one gap left in `5b221bf2`'s
+    //     original fence: it deduped the agent-facing in-project `tasks_create` but left the Lead's OWN
+    //     cross-project filing tool unchecked, so whichever side (a peer manager via `tasks_create`, or
+    //     the Lead via this tool) filed a duplicate SECOND was only ever caught if it happened to be the
+    //     peer manager — `project_task_create` is how the founding duplicate pairs on this very board were
+    //     actually filed. Checked against the DESTINATION project's board (the resolved `project.id`
+    //     below), never the Lead's own — a corpus mismatch here would be a silent no-op that looks like it
+    //     works. TRUST: cross-project WRITE is inherently a PLATFORM (cross-project admin) capability — it
+    //     lives ONLY on this platform-role-gated router. It is deliberately ABSENT from the agent-facing
+    //     surfaces (loom-orchestration manager/worker, loom-setup operator): a project
+    //     orchestrator/worker/setup-operator stays confined to its OWN board (those surfaces resolve the
+    //     projectId SERVER-SIDE and never take one), so none can gain cross-project write. ---
     server.registerTool(
       "project_task_create",
       {
@@ -1816,8 +1825,17 @@ export class PlatformMcpRouter {
           "title (required), body?, priority? (p0|p1|p2|p3, low number = higher priority, default p2), and an " +
           "optional columnKey (omit to land in the project's role-resolved defaultLanding column). Optional " +
           "repoKey (multi-repo epic) targets one of the destination project's registered `repos` — omit (or " +
-          "pass \"primary\") for its primary repo; an unknown key is rejected with {error}. Reuses the " +
-          "SAME create path the in-project loom-tasks tasks_create uses, so columns/priorities behave identically. " +
+          "pass \"primary\") for its primary repo; an unknown key is rejected with {error}. Reuses the SAME " +
+          "create path (createProjectTaskChecked) the in-project loom-tasks tasks_create uses, so " +
+          "columns/priorities AND the cross-channel duplicate check (card 0ef0270b) behave identically — " +
+          "checked against the DESTINATION project's board, not the Lead's own. If this card's title+body " +
+          "shares rare identifiers (a session id, a branch, a named error constant, a file:line, a code " +
+          "symbol — NOT prose/title similarity) with an existing card on the destination board, the create " +
+          "is REFUSED with {error} naming the suspected counterpart — never a silent drop or auto-merge. " +
+          "Pass allowDuplicate:true to create anyway, or supersedes/relatedTo:\"<taskId>\" (full id or " +
+          "unambiguous prefix, resolved on the DESTINATION board) to both bypass the refusal AND note the " +
+          "relationship on the new card's body — the superseded/related card's OWN body is back-noted too " +
+          "(\"Superseded by: <newId>\" / \"Related to: <newId>\"), so either card is discoverable from the other. " +
           "projectId accepts the full id OR an unambiguous 8-char id-prefix (mirrors project_get). Error if the " +
           "id is unknown or an ambiguous prefix (the error names the candidate ids). Returns the created Task row.",
         inputSchema: strictShape({
@@ -1827,12 +1845,17 @@ export class PlatformMcpRouter {
           priority: prioritySchema.optional(),
           columnKey: z.string().optional(),
           repoKey: z.string().nullable().optional(),
+          allowDuplicate: z.boolean().optional(),
+          supersedes: z.string().optional(),
+          relatedTo: z.string().optional(),
         }),
       },
-      async ({ projectId, title, body, priority, columnKey, repoKey }) => {
+      async ({ projectId, title, body, priority, columnKey, repoKey, allowDuplicate, supersedes, relatedTo }) => {
         const project = getByIdPrefix(projectId, (id) => db.getProject(id), () => db.listAllProjects(), "project");
         if ("error" in project) return ok(project);
-        return ok(createProjectTask(db, project.id, { title, body, priority, columnKey, repoKey }));
+        return ok(createProjectTaskChecked(
+          db, project.id, { title, body, priority, columnKey, repoKey }, { allowDuplicate, supersedes, relatedTo },
+        ));
       },
     );
 

@@ -272,6 +272,22 @@ try {
   check("(tool) supersedes:<id> bypasses the refusal", !superseded.error && !!superseded.id);
   check("(tool) the new card's body records the relationship", db.getTask(superseded.id).body.includes(`Supersedes: ${p2First.id}`));
 
+  // m7 (card 0ef0270b): the relationship is discoverable from BOTH directions — the LOSER card (p2First)
+  // must also carry a pointer FORWARD to the new card, not just the new card pointing back at it. This is
+  // the exact harm the parent card was filed about: a reader landing directly on the superseded card had
+  // no way to tell it had been superseded.
+  check("(m7) the SUPERSEDED (loser) card's body is back-noted with a pointer to the new card",
+    db.getTask(p2First.id).body.includes(`Superseded by: ${superseded.id}`));
+
+  // relatedTo back-links too, with the distinct "Related to" wording (not "Superseded by") on both sides.
+  const relBase = await call("tasks_create", { title: "feat(x): related-base card for m7", body: "loom/deadbeefcafe" });
+  check("(m7) related-base card created normally", !relBase.error && !!relBase.id);
+  const relNew = await call("tasks_create", { title: "feat(x): related-new card for m7", body: "loom/deadbeefcafe", relatedTo: relBase.id });
+  check("(m7) relatedTo:<id> bypasses the refusal", !relNew.error && !!relNew.id);
+  check("(m7) the NEW card's body records 'Related to' (not 'Supersedes')", db.getTask(relNew.id).body.includes(`Related to: ${relBase.id}`));
+  check("(m7) the RELATED (base) card's body is back-noted with 'Related to' pointing at the new card",
+    db.getTask(relBase.id).body.includes(`Related to: ${relNew.id}`));
+
   // an unresolvable supersedes/relatedTo target is rejected outright (typo protection), nothing written.
   const beforeBadTarget = db.listTasks(PROJECT_ID).length;
   const badTarget = await call("tasks_create", { title: "x", body: "y", supersedes: "00000000" });
@@ -369,6 +385,6 @@ try {
 for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL/handle retry (Windows) */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — findSuspectedDuplicate flags both real duplicate pairs (47340c82/dde0ce24 via session id + branch, abcf0eba/bc91e86c via ERROR_FILENAME_EXCED_RANGE + CreateProcess) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) are each regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2), the rarity-threshold boundary (m5), and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool refuses a suspected duplicate naming the counterpart id, is overridable via allowDuplicate/supersedes/relatedTo, and rejects passing both supersedes+relatedTo together (m3); and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."
+  ? "\n✅ ALL PASS — findSuspectedDuplicate flags both real duplicate pairs (47340c82/dde0ce24 via session id + branch, abcf0eba/bc91e86c via ERROR_FILENAME_EXCED_RANGE + CreateProcess) in BOTH directions and does NOT flag the genuinely distinct negative-control pair (522cf573/66d91a11); the three Code-Review-round-2 false-positive mechanisms (ALL-CAPS-as-PascalCase, single-weak-token-sufficient, file:line-single-hit-sufficient) are each regression-tested with a minimal pair (plus one REAL verbatim specimen, aa4e24ff/7acee6d4); ranking (M2), the rarity-threshold boundary (m5), and the bounded shared-identifier list (n8) are covered; the tasks_create MCP tool refuses a suspected duplicate naming the counterpart id, is overridable via allowDuplicate/supersedes/relatedTo, and rejects passing both supersedes+relatedTo together (m3); a supersedes/relatedTo override back-links BOTH cards, not just the new one (m7, card 0ef0270b) — the superseded/related (loser) card's own body is back-noted with a pointer to the new card, so either card is discoverable from the other; and every automated boarding path (createProjectTask directly, peer_message boarding, platform-escalation landing) still lands a duplicate card with no refusal — claude-free, network-free."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

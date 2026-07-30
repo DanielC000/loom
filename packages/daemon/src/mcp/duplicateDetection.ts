@@ -158,6 +158,29 @@ export interface DuplicateMatch {
  * counterpart, and correctable in one call via `allowDuplicate`/`relatedTo`. That is the intended
  * escape hatch for exactly this shape of edge case, not a silent failure.
  *
+ * ⚠️ SECOND DISCLOSED LIMITATION (card 0ef0270b, measured against the real ~1687-card board) — the
+ * "meta-document citing another incident's OWN identifiers" class above is NOT the whole set of residual
+ * false positives. A second, distinct class: two cards about SUBSTANTIVELY UNRELATED work can share a
+ * code LANDMARK (a `file.ts:line` each cites for its own unrelated reason — one as its actual defect
+ * site, the other as an incidental example/query target) or an established, codebase-wide CONVENTION
+ * name (a shared pattern/field name used correctly by two unrelated features, not evidence either one
+ * is about the other). Unlike the first class, neither card here cites the other's id — this is a
+ * coincidental-landmark collision, not a citation. Two REAL specimen pairs from the 0ef0270b measurement
+ * (below) illustrate it: `166e3536` (a Platform Lead singleton bug) flagged against `f3917f96` (an
+ * unrelated graphify A/B spike) on a shared symbol + shared `service.ts:490`; `fae919b3` (a PresetForm
+ * `meta.inlineError` bug) flagged against `378d250b` (an unrelated companion-create-flow code review) on
+ * shared `inlineError`/`MutationCache` vocabulary — the review confirms an unrelated feature already
+ * correctly uses the same established convention the bug wants extended elsewhere. Also NOT tuned around,
+ * for the same reason as the first class: both are rare, individually characterisable (a reader can
+ * dismiss either in one glance, unlike a random nonsense match), and correctable via the same
+ * `allowDuplicate`/`relatedTo` escape hatch. Measured rate (0ef0270b, 5 seeded 40-card draws of the real
+ * board, pooled n=200): 8.5% raw-flag rate; separating the 3 flags that were ACTUAL known duplicates
+ * (true positives, not false positives — including this detector's own founding specimen `47340c82`/
+ * `dde0ce24`) leaves 14 genuine false positives, of which 12 were near-miss (genuinely related work) and
+ * 2 were this second, absurd/coincidental-landmark class. Any number cited from this measurement must
+ * carry this same scoping (draw count, pool size, true-positive-separated) — a bare percentage on its own
+ * is exactly the kind of claim this project has separately catalogued going stale by re-citation.
+ *
  * Returns the single BEST-qualifying match — ranked by strong-hit count first, then weak-category
  * count, then total weak token count as a final tie-break — or null if none clears the bar. Never
  * mutates, never reads a DB directly — the caller supplies the candidate corpus (typically
