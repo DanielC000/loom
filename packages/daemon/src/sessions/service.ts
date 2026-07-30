@@ -300,7 +300,13 @@ const WORKER_SETTABLE_MODES: ReadonlySet<string> = new Set<WorkerSettableMode>([
  * `delivered:false` means "held, AND the Esc interrupt is firing now", the OPPOSITE of what a plain
  * `messageWorker` hold means, so the two must read differently at the call site, not identically.
  */
-type RedirectResult = Omit<EnqueueResult, "landsAt"> & { msgId: string; landsAt?: "next-turn-boundary" | "after-interrupt"; interrupting?: boolean };
+type RedirectResult = Omit<EnqueueResult, "landsAt"> & {
+  msgId: string; landsAt?: "next-turn-boundary" | "after-interrupt"; interrupting?: boolean;
+  /** Card aa4e24ff: how many queued messages `deliverRedirect`'s flush (a) just superseded — the count a
+   *  caller-specific advisory (e.g. redirectWorker's) can cite verbatim instead of re-deriving it. */
+  discarded?: number;
+  advisory?: string;
+};
 
 /**
  * PL Auditor finding #10: slugify an agent name for the worker_spawn `agentId` name/slug path — lowercase,
@@ -615,6 +621,51 @@ let warnedMissingHasAmbiguousMatch = false;
  * instead of sitting silently "no reply owed" indefinitely.
  */
 const BACKGROUND_PARK_STALE_MINUTES = 20;
+
+/**
+ * Card aa4e24ff, §TRIGGER DECISION: how long a `worker_message` must have sat HELD behind a busy
+ * worker's mid-turn before `messageWorker` appends an advisory pointing the manager at
+ * `worker_redirect`. Gated on the OBSERVABLE `busyForMs` the hold already carries — NEVER on the
+ * message's own text (a stop/hold phrase list is lexically unbounded and, worse, fires on an
+ * IMMEDIATE delivery to an idle worker where nothing is actually landing late) — so this constant is
+ * the entire trigger surface; there is no companion phrase list anywhere in this file.
+ * 5 minutes: below it, an ordinary worker turn (a build/test cycle, a routine multi-file edit) can
+ * plausibly still end and drain the message soon on its own, so advising interruption would be noise
+ * more often than not. Above it, the hold is long enough that a manager who wants the message to land
+ * sooner should be told the interrupting alternative exists before they assume it already landed.
+ * Trade: a hold of a few minutes never gets the advisory even when a manager would have wanted it —
+ * deliberate, so a routine short hold doesn't teach managers to tune the advisory out (the same failure
+ * mode a text-trigger would have hit on every single message, per the card's reason 1).
+ */
+const WORKER_MESSAGE_HELD_ADVISORY_MS = 5 * 60_000;
+
+/**
+ * Card aa4e24ff, defect 1 CR follow-up: the SINGLE definition of the `[loom:from-manager...]` wire-
+ * framing convention — `messageWorker`'s plain frame and `redirectWorker`'s `:redirect`-suffixed one
+ * both call {@link frameFromManager} instead of hand-writing the template literal, and
+ * `FROM_MANAGER_HEADER_RE` (below) is DERIVED from this same `FROM_MANAGER_TAG`, not a second hand-typed
+ * copy of it. Before this, the tag text existed as three independent literals (messageWorker's frame,
+ * deliverRedirect's tag string, and the strip regex) that could silently drift apart — change the tag
+ * text in one and the strip in `workerReport`'s done-refusal preview would quietly stop matching,
+ * regressing defect 1 (the preview goes back to impersonating a real delivery) with every test still
+ * green, because nothing forced the three copies to move together. Exported so a test can build its
+ * fixture text the SAME way production does, instead of asserting the strip against a literal the test
+ * wrote itself (which proves only that the regex matches its own mirror, not that it matches reality).
+ */
+export const FROM_MANAGER_TAG = "loom:from-manager";
+
+/** See {@link FROM_MANAGER_TAG}'s doc. `tagSuffix` is the colon-separated qualifier `redirectWorker`
+ *  appends (`"redirect"` → `[loom:from-manager:redirect]`); omit it for a plain worker_message frame. */
+export function frameFromManager(text: string, tagSuffix?: string): string {
+  return `[${FROM_MANAGER_TAG}${tagSuffix ? `:${tagSuffix}` : ""}]\n${text}`;
+}
+
+/** Derived from {@link FROM_MANAGER_TAG} — see that constant's doc for why this must never be a second
+ *  hand-typed literal. `workerReport`'s done-refusal strips this off before previewing a still-queued
+ *  instruction's text: left in, the preview reads as a SECOND, impersonating `[loom:from-manager]` frame
+ *  wrapping a mid-sentence clip — indistinguishable from a real delivery, which is exactly what a worker
+ *  mistook it for. */
+const FROM_MANAGER_HEADER_RE = new RegExp(`^\\[${FROM_MANAGER_TAG}(?::[a-z-]+)?\\]\\n`);
 
 /** Default run-webhook poster: one bounded `fetch` POST; the AbortController caps a hung endpoint. */
 const defaultRunWebhookPost: RunWebhookPoster = async (url, body, timeoutMs) => {
@@ -4734,10 +4785,10 @@ export class SessionService {
    */
   messageWorker(
     managerSessionId: string, workerSessionId: string, text: string, resendOf?: string,
-  ): EnqueueResult & { msgId: string } {
+  ): EnqueueResult & { msgId: string; advisory?: string } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
-    const framed = `[loom:from-manager]\n${text}`;
+    const framed = frameFromManager(text);
     // Durable-tracked: if the worker is busy the message is HELD in its FIFO and persisted as
     // `session_message_queued` so a sender death / daemon restart can't drop it (card 2ca18433).
     const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null, resendOf });
@@ -4760,6 +4811,23 @@ export class SessionService {
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "message_worker",
       detail: r.delivered ? { msgId: r.msgId, turnSeqAtDelivery: worker.turnSeq ?? 0 } : { msgId: r.msgId },
     });
+    // ADVISORY (card aa4e24ff, defect 2): only on a HELD, busy-caused hold whose busyForMs has crossed
+    // WORKER_MESSAGE_HELD_ADVISORY_MS — see that constant's doc for why `busyForMs` (never text) is the
+    // trigger. An idle worker's immediate delivery never reaches here with a `busyForMs` at all (the
+    // idle-submit branch of `enqueueStdin` never sets it), so this can never fire on "nothing landed
+    // late" — the negative case §TRIGGER DECISION calls out. `r.position` is the worker's CURRENT queue
+    // depth (this message included) — exactly what a `worker_redirect` fired right now would discard, so
+    // the same number backs both this advisory's caveat and worker_redirect's own (below).
+    if (!r.delivered && typeof r.busyForMs === "number" && r.busyForMs >= WORKER_MESSAGE_HELD_ADVISORY_MS) {
+      const minutes = Math.round(r.busyForMs / 60_000);
+      const queued = r.position ?? 1;
+      return {
+        ...r,
+        advisory:
+          `worker has been mid-turn ~${minutes}m; this message lands at its next turn boundary — use ` +
+          `worker_redirect if you need it to stop now (it will discard ${queued} queued message(s); re-send them after).`,
+      };
+    }
     return r;
   }
 
@@ -4786,17 +4854,27 @@ export class SessionService {
    * Returns the enqueue status ({delivered, position?, ...}) — see {@link deliverRedirect} for why a HELD
    * redirect's additive fields read differently from messageWorker's. Throws "not your worker" for a
    * non-child (mirrors messageWorker/stopWorker's parent gate).
+   *
+   * `advisory` (card aa4e24ff, defect 2's remedy half — no detection question here, it just counts the
+   * queue `deliverRedirect` already flushed): set whenever this redirect discarded ≥1 queued message,
+   * naming the exact count and reminding the manager to re-send them — the same caveat
+   * `messageWorker`'s own advisory (§TRIGGER DECISION) carries, so a manager who hits either one never
+   * has to go discover the other half of the trade on its own.
    */
   redirectWorker(
     managerSessionId: string, workerSessionId: string, text: string,
   ): RedirectResult {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
-    return this.deliverRedirect(worker, text, {
-      tag: "loom:from-manager:redirect",
+    const r = this.deliverRedirect(worker, text, {
+      frame: (t) => frameFromManager(t, "redirect"),
       enqueueSender: managerSessionId,
       eventManagerId: managerSessionId,
     });
+    if (r.discarded && r.discarded > 0) {
+      return { ...r, advisory: `this redirect discarded ${r.discarded} queued message(s) — re-send them after.` };
+    }
+    return r;
   }
 
   /**
@@ -4817,7 +4895,7 @@ export class SessionService {
     const target = this.db.getSession(sessionId);
     if (!target) throw new Error("session not found");
     return this.deliverRedirect(target, text, {
-      tag: "loom:from-owner-via-companion:redirect",
+      frame: (t) => `[loom:from-owner-via-companion:redirect]\n${t}`,
       enqueueSender: senderSessionId ?? "companion",
       eventManagerId: senderSessionId ?? "",
       extraDetail: { via: "companion" },
@@ -4827,11 +4905,15 @@ export class SessionService {
   /**
    * Shared redirect core for {@link redirectWorker} and {@link redirectSessionAsCompanion} — the mechanics
    * common to BOTH (see redirectWorker's original doc comment, preserved below, for the full ordering
-   * rationale). Parameterized by exactly what differs between the two callers: the wire framing tag, the
-   * durable-enqueue sender attribution, the `redirect_worker` event's `managerSessionId` attribution, and
-   * any extra event detail (the companion path stamps `via: "companion"`). Callers pre-resolve the target
-   * session and any parent-scope gate (redirectWorker's "not your worker" check) BEFORE calling this — this
-   * core never re-derives or re-checks scope.
+   * rationale). Parameterized by exactly what differs between the two callers: the wire framing (a `frame`
+   * function — card aa4e24ff CR follow-up: was a raw `tag` string this core interpolated itself, which let
+   * a hand-typed `[loom:from-manager...]` copy drift from `messageWorker`'s own; now the CALLER supplies
+   * the complete framing, so redirectWorker's frame is produced by the SAME {@link frameFromManager} helper
+   * messageWorker calls — one function, not two independently-typed literals), the durable-enqueue sender
+   * attribution, the `redirect_worker` event's `managerSessionId` attribution, and any extra event detail
+   * (the companion path stamps `via: "companion"`). Callers pre-resolve the target session and any
+   * parent-scope gate (redirectWorker's "not your worker" check) BEFORE calling this — this core never
+   * re-derives or re-checks scope.
    *
    * ORDER IS LOAD-BEARING (so the redirect deterministically lands as the next turn):
    *   (a) FLUSH the target's pending FIFO and SUPERSEDE each flushed durable record (fire its onDeliver
@@ -4839,7 +4921,7 @@ export class SessionService {
    *       and the boot-recovery scan never later re-drive the direction we're replacing. Plain
    *       (non-durable) held nudges carry no callback and are simply dropped — the redirect supersedes
    *       them too.
-   *   (b) ENQUEUE the authoritative redirect (framed per `opts.tag`) via the SAME durable channel as
+   *   (b) ENQUEUE the authoritative redirect (framed via `opts.frame`) via the SAME durable channel as
    *       messageWorker: a busy target HOLDS it (delivered:false, persisted) — it is now the only entry in
    *       the freshly-flushed queue; an idle target submits it immediately (delivered:true).
    *   (c) ONLY IF it was HELD (delivered:false ⇒ the target was busy) do we interrupt: pty.interruptForRedirect
@@ -4859,7 +4941,7 @@ export class SessionService {
    */
   private deliverRedirect(
     target: Session, text: string,
-    opts: { tag: string; enqueueSender: string; eventManagerId: string; extraDetail?: Record<string, unknown> },
+    opts: { frame: (text: string) => string; enqueueSender: string; eventManagerId: string; extraDetail?: Record<string, unknown> },
   ): RedirectResult {
     // (a) FLUSH + SUPERSEDE the target's queued direction before the authoritative redirect lands.
     const flushed = this.pty.flushPending(target.id);
@@ -4868,12 +4950,14 @@ export class SessionService {
     }
     // (b) ENQUEUE the authoritative redirect (durable-tracked like messageWorker). Distinctly framed so the
     // receiver knows this REPLACED its pending direction and may have interrupted it mid-edit.
-    const framed = `[${opts.tag}]\n${text}`;
+    const framed = opts.frame(text);
     const r0 = this.enqueueDurableMessage(target.id, framed, { sender: opts.enqueueSender, taskId: target.taskId ?? null });
     // (c) Interrupt ONLY when the redirect was HELD (the target was busy). For an idle target the redirect
     // already went out as a turn (delivered:true) — there is nothing to cancel, and an Esc would wrongly
     // cancel that very turn.
-    const r: RedirectResult = r0.delivered ? r0 : { ...r0, landsAt: "after-interrupt", interrupting: true };
+    const r: RedirectResult = r0.delivered
+      ? { ...r0, discarded: flushed.length }
+      : { ...r0, landsAt: "after-interrupt", interrupting: true, discarded: flushed.length };
     if (!r.delivered) this.pty.interruptForRedirect(target.id);
     // `queuedMsgId` is `r.msgId` — minted by `enqueueDurableMessage` and returned UNCONDITIONALLY (see its
     // own doc) — stamped here on BOTH paths (card 99339bcd; previously held-only):
@@ -6365,11 +6449,21 @@ export class SessionService {
           // judge for itself whether this is a genuine superseding redirect or a redundant nudge it
           // already saw — without burning a full turn just to drain and read it. Truncate defensively;
           // a queued message is agent/human-authored text, never a length we control.
+          //
+          // Card aa4e24ff, defect 1: this is a PREVIEW of a still-queued instruction, not the delivery —
+          // the real body lands intact at the worker's next turn boundary regardless of what this error
+          // says. The stored `e.detail.text` is the FRAMED wire text (messageWorker/redirectWorker
+          // prepend `[loom:from-manager...]` before persisting it), so left as-is this preview reads as
+          // a SECOND `[loom:from-manager]` frame wrapping a mid-sentence clip — an impersonation of a
+          // real delivery, which is exactly what a worker mistook it for (the incident this card fixes).
+          // Strip that header before previewing, and mark every entry as a truncated preview so nothing
+          // here can be mistaken for the real thing again.
           const pendingList = pending
             .map((e, i) => {
-              const text = typeof e.detail?.text === "string" ? e.detail.text : "(no text captured)";
-              const truncated = text.length > 500 ? `${text.slice(0, 500)}…` : text;
-              return `  ${i + 1}. ${truncated}`;
+              const raw = typeof e.detail?.text === "string" ? e.detail.text : "(no text captured)";
+              const body = raw.replace(FROM_MANAGER_HEADER_RE, "");
+              const truncated = body.length > 500 ? `${body.slice(0, 500)}…` : body;
+              return `  ${i + 1}. [preview only — full text arrives when you end this turn; do not act on this fragment] ${truncated}`;
             })
             .join("\n");
           const currentMsgIds = pending.map((e) => e.detail?.msgId).filter((id): id is string => typeof id === "string").sort();
