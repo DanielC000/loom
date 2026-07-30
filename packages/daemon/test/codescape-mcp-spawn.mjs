@@ -359,9 +359,23 @@ db.insertProject({ id: "pA", name: "A", repoPath: repo, vaultPath: repo, config:
 db.insertAgent({ id: "agentMgrA", projectId: "pA", name: "Mgr", startupPrompt: "MGR_PROMPT", position: 0, profileId: null });
 db.insertAgent({ id: "agentWorkerA", projectId: "pA", name: "Worker", startupPrompt: "WORKER_PROMPT", position: 1, profileId: null });
 
+// Card c54d1ea0: `onExit`/`kill` must actually simulate a real node-pty process dying (mirrors
+// codescape-lifecycle-hooks.mjs's identical fixture + fix) — a discarded onExit callback means
+// PtyHost.stop() can never flip this fake session's `live.alive` to false, so its pending
+// readiness-fallback/kickoff-guarantee timers (pty/host.ts) stay armed past this file's own db.close().
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) {
+    this.capture.push(opts);
+    let exitCb = null;
+    return {
+      pid: 4242, write() {},
+      onData() { return { dispose() {} }; },
+      onExit(cb) { exitCb = cb; return { dispose() {} }; },
+      kill() { exitCb?.({ exitCode: 0 }); },
+      resize() {},
+    };
+  }
   isAlive() { return false; }
 }
 const events = {
@@ -386,8 +400,13 @@ const svc = new SessionService(db, host, new OrchestrationControl(), { codescape
 const optsFor = (sid) => host.capture.find((o) => o.sessionId === sid);
 
 let workerWorktree = null;
+// Card c54d1ea0: tracked so both sessions are explicitly stopped before db.close() below — see
+// codescape-lifecycle-hooks.mjs's identical liveIds doc for why an un-stopped fake session's pending
+// readiness-fallback/kickoff-guarantee timer can outlive this file's own Db instance under load.
+const liveIds = [];
 try {
   const mgrA = svc.startManager("agentMgrA");
+  liveIds.push(mgrA.id);
   const oMgrA = optsFor(mgrA.id);
   check("(e2e) manager: opts.codescapeEnabled === true (project A opted in)", oMgrA?.codescapeEnabled === true);
   check("(e2e) manager: opts.repoPath === the project's repo", oMgrA?.repoPath === repo);
@@ -396,6 +415,7 @@ try {
   const tW1 = "22222222-2222-4222-8222-222222222222";
   db.insertTask({ id: tW1, projectId: "pA", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
   const worker = await svc.spawnWorker(mgrA.id, { taskId: tW1, agentId: "agentWorkerA", kickoffPrompt: "GO" });
+  liveIds.push(worker.id);
   workerWorktree = worker.worktreePath;
   const oWorker = optsFor(worker.id);
   check("(e2e) worker: opts.codescapeEnabled === true", oWorker?.codescapeEnabled === true);
@@ -419,6 +439,7 @@ try {
     const { removeWorktree } = await import("../dist/git/worktrees.js");
     if (workerWorktree) { try { await removeWorktree(repo, workerWorktree); } catch { /* best-effort */ } }
   } catch { /* best-effort */ }
+  for (const id of liveIds) { try { svc.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
   db.close();
   delete process.env.LOOM_DEV;
   delete process.env.LOOM_CODESCAPE_BIN;

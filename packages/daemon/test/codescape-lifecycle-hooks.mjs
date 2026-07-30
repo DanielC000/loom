@@ -141,9 +141,27 @@ function seedProject(db, p) {
 // `orderLog` (card f11f3aae, optional — see makeFakeCodescape's identical doc): createPty appends
 // "spawn" to it at the exact moment `PtyHost.spawn()` calls it — that call is `createPty`'s FIRST
 // synchronous action (host.ts), so this tags the true moment claude's own process would be launched.
+//
+// Card c54d1ea0: `onExit`/`kill` must actually simulate a real node-pty process dying — a discarded
+// onExit callback means `PtyHost.stop()` can NEVER flip this fake session's `live.alive` to false, so
+// its pending readiness-fallback/kickoff-guarantee timers (pty/host.ts) stay armed forever regardless of
+// how many times `stop()` is called on it. `kill()` now invokes the SAME callback host.ts registered via
+// `pty.onExit(cb)`, exactly like a real process exiting synchronously on kill — this is what lets every
+// existing `pty.stop(id, "hard")` call in spawnWorker/confirmWorkerMerge/recycleWorker genuinely retire
+// the fake session instead of leaving it "live" with unkillable timers.
 class SeamHost extends PtyHost {
   constructor(events, orderLog) { super(events); this.orderLog = orderLog; }
-  createPty(opts) { this.orderLog?.push("spawn"); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) {
+    this.orderLog?.push("spawn");
+    let exitCb = null;
+    return {
+      pid: 4242, write() {},
+      onData() { return { dispose() {} }; },
+      onExit(cb) { exitCb = cb; return { dispose() {} }; },
+      kill() { exitCb?.({ exitCode: 0 }); },
+      resize() {},
+    };
+  }
   isAlive() { return false; }
 }
 function makeHost(db, orderLog) {
@@ -197,13 +215,23 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
   });
   seedProject(db, P);
 
+  // Card c54d1ea0: every session id spawned below is tracked here and explicitly stopped in the
+  // `finally` BEFORE db.close() — a session left live (never merged/recycled) carries its own pending
+  // readiness-fallback/kickoff-guarantee timer (pty/host.ts) that fires `Db.setBusy` on whatever `Db`
+  // instance its `events.onBusy` closure still references; under load this block's real wall-clock (many
+  // real git worktree ops) can outlast those timers' ~30s combined window, well past this block's own
+  // db.close(). A redundant stop() on an already-retired session (e.g. one confirmWorkerMerge or
+  // recycleWorker already stopped) is a safe no-op (PtyHost.stop guards on live.alive).
+  const liveIds = [];
   try {
     const mgr = sessions.startManager(P.mgrAgentId);
+    liveIds.push(mgr.id);
 
     // --- (1) register-worktree fires on a TASKED spawn's create-worktree path ---
     const taskId = `clh-task-${sfx}`;
     db.insertTask({ id: taskId, projectId: P.projId, title: "CLH task", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: P.workerAgentId, kickoffPrompt: "GO" });
+    liveIds.push(worker.id);
 
     check("(1) register-worktree fired at least once for the tasked spawn", await waitFor(() => fake.calls.register.length >= 1));
     const reg = fake.calls.register[0];
@@ -215,6 +243,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     // --- (1b) a TASKLESS spawn does NOT register at all — no stable id to register under ---
     const registerCountBeforeTaskless = fake.calls.register.length;
     const taskless = await sessions.spawnWorker(mgr.id, { agentId: P.workerAgentId, kickoffPrompt: "SPIKE" });
+    liveIds.push(taskless.id);
     await sleep(150);
     check("(1b) a taskless spawn never fires register-worktree (no stable worktreeId)", fake.calls.register.length === registerCountBeforeTaskless);
     // cleanup the taskless worker's worktree by hand (not merged in this test)
@@ -225,6 +254,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     db.insertTask({ id: taskId2, projectId: P.projId, title: "CLH task 2", body: "", columnKey: "backlog", position: 2, priority: "p2", createdAt: now, updatedAt: now });
     const registerCountBeforeSecond = fake.calls.register.length;
     const worker1b = await sessions.spawnWorker(mgr.id, { taskId: taskId2, agentId: P.workerAgentId, kickoffPrompt: "GO" });
+    liveIds.push(worker1b.id);
     check("(1c) a second tasked spawn registers its OWN worktree entry too", await waitFor(() => fake.calls.register.length === registerCountBeforeSecond + 1));
     const reg2 = fake.calls.register[fake.calls.register.length - 1];
     check("(1c) the second registration's worktreeId differs from the first's", reg2?.worktreeId !== reg?.worktreeId);
@@ -266,11 +296,13 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     const taskId3 = `clh-task3-${sfx}`;
     db.insertTask({ id: taskId3, projectId: P.projId, title: "CLH task 3", body: "", columnKey: "backlog", position: 3, priority: "p2", createdAt: now, updatedAt: now });
     const worker3 = await sessions.spawnWorker(mgr.id, { taskId: taskId3, agentId: P.workerAgentId, kickoffPrompt: "GO" });
+    liveIds.push(worker3.id);
     check("(4) worker3's own spawn-time register-worktree call lands first", await waitFor(() => fake.calls.register.length > 0 && fake.calls.register[fake.calls.register.length - 1]?.path === worker3.worktreePath));
     const worker3RegisteredWorktreeId = fake.calls.register[fake.calls.register.length - 1]?.worktreeId;
     const registerCountBeforeRecycle = fake.calls.register.length;
     const dropCountBeforeRecycle = fake.calls.drop.length;
-    await sessions.recycleWorker(mgr.id, worker3.id, "handoff: continue the work");
+    const worker3Successor = await sessions.recycleWorker(mgr.id, worker3.id, "handoff: continue the work");
+    liveIds.push(worker3Successor.id);
     check("(4) recycleWorker RE-FIRES register-worktree (CR fix — codescape's registry is in-memory, never persisted)",
       await waitFor(() => fake.calls.register.length === registerCountBeforeRecycle + 1));
     const recycleReg = fake.calls.register[fake.calls.register.length - 1];
@@ -293,6 +325,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     const taskId4 = `clh-task4-${sfx}`;
     db.insertTask({ id: taskId4, projectId: P.projId, title: "CLH task 4", body: "", columnKey: "backlog", position: 4, priority: "p2", createdAt: now, updatedAt: now });
     const worker4 = await sessions.spawnWorker(mgr.id, { taskId: taskId4, agentId: P.workerAgentId, kickoffPrompt: "GO" });
+    liveIds.push(worker4.id);
     check("(7) worker4's own spawn-time register-worktree call lands first", await waitFor(() => fake.calls.register.length > 0 && fake.calls.register[fake.calls.register.length - 1]?.path === worker4.worktreePath));
     const worker4WorktreeId = fake.calls.register[fake.calls.register.length - 1]?.worktreeId;
 
@@ -318,6 +351,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     //     non-null worktreeId, unlike a manager's) — proves the fix generalizes past resume/recycle.
     const registerCountBeforeFork = fake.calls.register.length;
     const forked = sessions.forkSession(worker4.id);
+    liveIds.push(forked.id);
     check("(7b) forkSession() RE-FIRES register-worktree too (same fix, same reasoning)", await waitFor(() => fake.calls.register.length === registerCountBeforeFork + 1));
     const forkReg = fake.calls.register[fake.calls.register.length - 1];
     check("(7b) the fork's re-registration carries the SOURCE's (worker4's) worktree path", forkReg?.path === worker4.worktreePath);
@@ -356,6 +390,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     db.insertTask({ id: taskId5, projectId: P.projId, title: "CLH task 5", body: "", columnKey: "backlog", position: 5, priority: "p2", createdAt: now, updatedAt: now });
     let orderStart = orderLog.length;
     const worker5 = await sessions.spawnWorker(mgr.id, { taskId: taskId5, agentId: P.workerAgentId, kickoffPrompt: "GO" });
+    liveIds.push(worker5.id);
     await assertRegisterBeforeSpawn(orderLog, "fresh spawn (spawnWorker)", orderStart);
 
     // Give worker5 a real engine transcript so resume()'s/forkSession()'s resumability guards pass
@@ -372,16 +407,21 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
 
     orderStart = orderLog.length;
     const forked5 = sessions.forkSession(worker5.id);
+    liveIds.push(forked5.id);
     await assertRegisterBeforeSpawn(orderLog, "forkSession", orderStart);
     void forked5;
 
     orderStart = orderLog.length;
-    await sessions.recycleWorker(mgr.id, worker5.id, "handoff: ordering guard");
+    const worker5Successor = await sessions.recycleWorker(mgr.id, worker5.id, "handoff: ordering guard");
+    liveIds.push(worker5Successor.id);
     await assertRegisterBeforeSpawn(orderLog, "recycleWorker", orderStart);
 
     // cleanup worker5's worktree by hand (not merged in this test)
     try { fs.rmSync(worker5.worktreePath, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
   } finally {
+    // Card c54d1ea0: stop every tracked session BEFORE db.close() — see liveIds' own doc above for why
+    // this can't be skipped even for sessions confirmWorkerMerge/recycleWorker already stopped.
+    for (const id of liveIds) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
     db.close();
     try { fs.rmSync(P.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
     delete process.env.LOOM_DEV;
@@ -404,11 +444,14 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     reapWorktreeProcesses: async () => ({ killedPids: [] }),
   });
   seedProject(db, N);
+  const liveIdsN = []; // card c54d1ea0 — see the positive block's liveIds doc above for why this matters
   try {
     const mgr = sessions.startManager(N.mgrAgentId);
+    liveIdsN.push(mgr.id);
     const taskId = `clh-neg-devoff-task-${sfx}`;
     db.insertTask({ id: taskId, projectId: N.projId, title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: N.workerAgentId, kickoffPrompt: "GO" });
+    liveIdsN.push(worker.id);
     fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: worker.worktreePath });
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
@@ -417,6 +460,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     check("(5) LOOM_DEV off: no supervisor call ever fired (spawn+merge+gc lifecycle)",
       !fs.existsSync(worker.worktreePath) && fake.calls.register.length === 0 && fake.calls.reingest.length === 0 && fake.calls.drop.length === 0);
   } finally {
+    for (const id of liveIdsN) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
     db.close();
     try { fs.rmSync(N.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
   }
@@ -437,11 +481,14 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     reapWorktreeProcesses: async () => ({ killedPids: [] }),
   });
   seedProject(db, N);
+  const liveIdsN6 = []; // card c54d1ea0 — see the positive block's liveIds doc above for why this matters
   try {
     const mgr = sessions.startManager(N.mgrAgentId);
+    liveIdsN6.push(mgr.id);
     const taskId = `clh-neg-notenabled-task-${sfx}`;
     db.insertTask({ id: taskId, projectId: N.projId, title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
     const worker = await sessions.spawnWorker(mgr.id, { taskId, agentId: N.workerAgentId, kickoffPrompt: "GO" });
+    liveIdsN6.push(worker.id);
     fs.writeFileSync(path.join(worker.worktreePath, "change.txt"), "worker change\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m "change.txt"`, { cwd: worker.worktreePath });
     const confirm = await sessions.confirmWorkerMerge(mgr.id, worker.id);
@@ -450,6 +497,7 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     check("(6) project not enabled: no supervisor call ever fired (spawn+merge+gc lifecycle)",
       !fs.existsSync(worker.worktreePath) && fake.calls.register.length === 0 && fake.calls.reingest.length === 0 && fake.calls.drop.length === 0);
   } finally {
+    for (const id of liveIdsN6) { try { sessions.stopSession(id, "hard"); } catch { /* already gone / not found */ } }
     db.close();
     try { fs.rmSync(N.repo, { recursive: true, force: true }); } catch { /* best-effort */ }
     delete process.env.LOOM_DEV;
