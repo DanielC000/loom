@@ -4218,43 +4218,62 @@ export class SessionService {
       // worker's FIRST resume compares against what this fresh spawn just showed it.
       const workerProjectMemoryFramed = retrieveProjectMemoryForKickoff(this.db, project.id, opts.kickoffPrompt);
       this.stampProjectMemoryDigest(worker.id, workerProjectMemoryFramed);
-      this.pty.spawn({
-        sessionId: worker.id,
-        cwd: worktreePath,
-        permission: workerSpawn.permission, // layered allowDelta from the worker profile (was bare config.permission — dropped the profile allowlist)
-        geometry: config.pty,
-        sessionEnv: config.sessionEnv,
-        vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
-        codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
-        projectId: project.id,
-        repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
-        // A taskless spawn has no stable id (codescapeWorktreeId(null) -> null), so it falls back to the
-        // bare /mcp/<codescapeId> project route — same as a manager. Matches ensure-graph's own
-        // existence-gated-not-taskless-gated posture: this is a degrade, not a correctness bug.
-        worktreeId: codescapeWorktreeId(taskId),
-        // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
-        // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
-        // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
-        // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
-        startupPrompt: appendMemoryRecallToStartupPrompt(
-          // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
-          // session row above — the same resolution, so the prompt can never disagree with the worktree.
-          composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
-          workerProjectMemoryFramed,
-        ),
-        role: "worker", // gives the worker the orchestration surface (worker_report only)
-        browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
-        documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
-        capabilities, // inject any registry-capability MCP(s) iff this worker's profile opted in
-        restrictedTools, // union the dangerous-native-tool disallow into --disallowedTools iff this worker's profile opted in
-        model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
-        skills, // deliver only the worker profile's skill subset (null ⇒ all)
-        // Card f9b47cd1: `loom-<project>-<agent>-<taskslug>` (or "-adhoc" for a taskless spawn), collision
-        // suffix appended only if it matches a currently-live sibling worker under this same manager.
-        // EXCLUDE worker.id itself — the row is already inserted+live by this point (M5 ordering above),
-        // so listWorkers would otherwise see this very spawn as its own "collision" (code review fix).
-        sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
-      });
+      try {
+        this.pty.spawn({
+          sessionId: worker.id,
+          cwd: worktreePath,
+          permission: workerSpawn.permission, // layered allowDelta from the worker profile (was bare config.permission — dropped the profile allowlist)
+          geometry: config.pty,
+          sessionEnv: config.sessionEnv,
+          vaultPath: config.docLint ? project.vaultPath : undefined, // Pillar D: scope the vault-lint hook
+          codescapeEnabled: resolveCodescapeConfig(project.config).enabled, // card C2: Codescape MCP wiring, per-project opt-in
+          projectId: project.id,
+          repoPath: project.repoPath, // P4 wiring (088afc94): resolves codescape's OWN project id via its manifest
+          // A taskless spawn has no stable id (codescapeWorktreeId(null) -> null), so it falls back to the
+          // bare /mcp/<codescapeId> project route — same as a manager. Matches ensure-graph's own
+          // existence-gated-not-taskless-gated posture: this is a degrade, not a correctness bug.
+          worktreeId: codescapeWorktreeId(taskId),
+          // Compose the worker's opening: a worktree LOCATION block first (names this worktree as the edit
+          // dir so the worker can't leak edits into the main checkout), then its agent BASE BRIEF (Dev/Bugfix/
+          // etc. doctrine — run `/worker`, CLAUDE.md is law), then the manager's kickoff. An empty brief
+          // degrades to the block + kickoff. Without this, the agent brief was dead config for workers.
+          startupPrompt: appendMemoryRecallToStartupPrompt(
+            // `targetRepo` is the repo this worktree was JUST cut from and whose key is stamped on the
+            // session row above — the same resolution, so the prompt can never disagree with the worktree.
+            composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
+            workerProjectMemoryFramed,
+          ),
+          role: "worker", // gives the worker the orchestration surface (worker_report only)
+          browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
+          documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in
+          capabilities, // inject any registry-capability MCP(s) iff this worker's profile opted in
+          restrictedTools, // union the dangerous-native-tool disallow into --disallowedTools iff this worker's profile opted in
+          model: workerSpawn.model, // profile-pinned model → `--model` (undefined ⇒ no `--model`); was dropped — workers never honored a profile model pin
+          skills, // deliver only the worker profile's skill subset (null ⇒ all)
+          // Card f9b47cd1: `loom-<project>-<agent>-<taskslug>` (or "-adhoc" for a taskless spawn), collision
+          // suffix appended only if it matches a currently-live sibling worker under this same manager.
+          // EXCLUDE worker.id itself — the row is already inserted+live by this point (M5 ordering above),
+          // so listWorkers would otherwise see this very spawn as its own "collision" (code review fix).
+          sessionName: composeWorkerSessionName(project.name, workerAgent.name, taskTitle, worker.id, this.siblingWorkerSessionNames(managerSessionId, project.name, new Set([worker.id]))),
+        });
+      } catch (e) {
+        // createPty (node-pty's own spawn) can throw SYNCHRONOUSLY — before any Live entry is ever
+        // registered — on a genuine process-creation failure (e.g. Windows CreateProcess `error code:
+        // 206` from an oversized command line, card bc91e86c). Without this catch the row stamped
+        // 'live' above NEVER gets reconciled: the pty's own onExit chokepoint (which normally flips a
+        // dead session back to 'exited') can only fire for a process that actually started, so this
+        // path is the ONLY way such a failure is ever observed. Left uncaught, it's a phantom —
+        // engineSessionId stays null, turnSeq stays 0 — that holds liveSessionIdForTask's per-task
+        // mutex forever (that guard keys on process_state alone) and that pty.stop() can't touch
+        // (it no-ops on a session with no Live entry — see PtyHost.stop), so a stale
+        // {stopped:true} from worker_stop would report success without having stopped anything.
+        // Reconciling to 'exited' HERE — the one place that knows the spawn never produced an
+        // engine — releases the mutex immediately and lets a re-spawn (or worker_recycle, which
+        // reuses this same worktree/branch and never checks processState) proceed normally.
+        this.db.setProcessState(worker.id, "exited");
+        this.db.setLastError(worker.id, `process creation failed: ${e instanceof Error ? e.message : String(e)}`);
+        throw e;
+      }
       // Move the task into the `active` lane (role-resolved off the manager-project config, not the
       // hardcoded "in_progress" key). If the board has no active lane, leave the card where it is rather
       // than inventing a key — the invariant: a move never points a task at a non-existent column. A
@@ -4640,16 +4659,33 @@ export class SessionService {
     }
   }
 
-  /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it). */
-  stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): void {
+  /** Stop one of a manager's workers (parent-scoped). Worktree is RETAINED (merge/recycle own it).
+   *  Returns whether a live pty actually existed to stop — NEVER `{stopped:true}` unconditionally.
+   *  `pty.stop()` silently no-ops when there's no in-memory Live entry for this session (a phantom
+   *  row left by a spawn that failed before ever wiring a pty — see spawnWorker's createPty catch —
+   *  or any other cause of a DB row stuck 'live' with nothing actually running), so calling it and
+   *  always reporting success is exactly the lying `stopped:true` this fixes (card dde0ce24): a
+   *  manager that trusts it believes the task is unblocked, re-spawns, and gets refused with no
+   *  signal explaining why. Check liveness FIRST (captured BEFORE the reap/event side effects below,
+   *  which stay unconditional — a worktree can carry stray descendant processes worth reaping, and
+   *  this call worth recording, even when the main pty was never actually alive) and report honestly:
+   *  a stale 'live' row with nothing actually running is reconciled to 'exited' right here — which is
+   *  also what releases `liveSessionIdForTask`'s mutex for a phantom that predates this fix. */
+  stopWorker(managerSessionId: string, workerSessionId: string, mode: StopMode): { stopped: boolean; reason?: string } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
-    this.pty.stop(workerSessionId, mode);
+    const wasAlive = this.pty.isAlive(workerSessionId);
+    if (wasAlive) {
+      this.pty.stop(workerSessionId, mode);
+    } else if (worker.processState === "live") {
+      this.db.setProcessState(workerSessionId, "exited");
+    }
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "stop_worker",
     });
     this.sweepWorktreeStrays(worker);
+    return wasAlive ? { stopped: true } : { stopped: false, reason: "no live pty for this session" };
   }
 
   /**
