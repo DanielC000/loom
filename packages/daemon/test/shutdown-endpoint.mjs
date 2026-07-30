@@ -8,14 +8,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (b) trust posture matches /internal/hook EXACTLY — a NON-loopback caller gets 403 and the shutdown
 //       is NOT invoked (it is loopback-only and unreachable by any agent; never an MCP tool).
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-shutdown-ep-"));
+const TMP = mkdtempManaged("loom-shutdown-ep-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45331";
 const sandboxHome = path.join(TMP, "home");
@@ -68,10 +68,7 @@ try {
   db.close();
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — POST /internal/shutdown is loopback-only (403 otherwise), acks 202, and triggers the graceful shutdown path exactly once. Same trust boundary as /internal/hook; never an agent surface."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

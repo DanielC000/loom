@@ -10,11 +10,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) NO dist present        → the daemon STILL boots and the API still responds (dist is optional).
 // The dev vite-proxy flow (`pnpm web`, :5317) is untouched — this only ADDS a second way to reach the UI.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-web-static-"));
+const TMP = mkdtempManaged("loom-web-static-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45319";
 const sandboxHome = path.join(TMP, "home");
@@ -100,10 +100,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
 }
 delete process.env.LOOM_WEB_DIST;
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — the daemon serves the prebuilt web viewport at / with an SPA fallback (deep links → index.html), serves built assets with the right content-type, keeps unknown /api/* as JSON 404s (never swallowed by the fallback), and still boots API/WS-only when no web dist is present."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

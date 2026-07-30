@@ -5,11 +5,11 @@
 // RUN (in-process; sets its OWN temp LOOM_HOME so the prod-guard is satisfied):
 //   LOOM_HOME=<temp> LOOM_PORT=5399 node test/usage-status.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 
 import "./_guard.mjs"; // arms the Db prod-guard (LOOM_TEST=1)
-if (!process.env.LOOM_HOME) process.env.LOOM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "loom-usage-"));
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+if (!process.env.LOOM_HOME) process.env.LOOM_HOME = mkdtempManaged("loom-usage-");
 import { requireHermeticEnv } from "./_guard.mjs";
 requireHermeticEnv(); // LOOM_HOME must be a temp dir
 
@@ -18,7 +18,7 @@ const { readOAuthToken, parseUsagePayload, UsageStatusPoller } = await import(".
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "loom-usage-test-"));
+const tmp = mkdtempManaged("loom-usage-test-");
 const credPath = (name, obj) => { const p = path.join(tmp, name); fs.writeFileSync(p, typeof obj === "string" ? obj : JSON.stringify(obj)); return p; };
 
 // A representative live payload (captured from the real endpoint): per-model can be null, a window can
@@ -147,9 +147,10 @@ const LIVE = {
   pIdem.stop();
 }
 
-fs.rmSync(tmp, { recursive: true, force: true });
+// tmp's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup at
+// process exit — this bare call previously sat unguarded at file scope (card 995be21f).
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — token read (missing/malformed/expired/valid), payload parse (valid/optional-null/schema-drift), and the poller's graceful failure modes (no-token / 401 / network) all hold, with the load-bearing headers (incl. User-Agent: claude-code/<version>) sent on success."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

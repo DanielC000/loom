@@ -8,13 +8,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (B) the gate-command timeout the call-site reads is `resolveConfig(...).orchestration.gateCommandTimeoutMs`
 //       (default + per-project override) — the value service.ts now passes to spawnSync.
 //   (C) usage-awareness recency window is parameterized: the SAME state reads near/not-near by window.
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 // Isolated LOOM_HOME (usage-awareness reads/writes a state file under it at module-eval / call time).
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-config-rewire-"));
+const TMP = mkdtempManaged("loom-config-rewire-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45318";
 requireHermeticEnv();
@@ -94,4 +92,4 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 console.log(failures === 0
   ? "\n✅ ALL PASS — the rewired call-sites read the RESOLVED config: usage-limit park/deadline math responds to a RateLimitConfig override (and the resolved platform.rateLimit flows through), the gate timeout is resolveConfig(...).orchestration.gateCommandTimeoutMs (default + override), and the usage-awareness recency window is parameterized."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

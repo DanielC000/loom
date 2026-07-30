@@ -5,9 +5,9 @@
 //
 // Fully hermetic — no daemon, no claude, just fs + the real discovery function.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -16,8 +16,8 @@ const { discoverHermeticTests } = await import(
   pathToFileURL(path.join(import.meta.dirname, "..", "scripts", "test-daemon.mjs")).href
 );
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-test-daemon-discovery-"));
-try {
+const dir = mkdtempManaged("loom-test-daemon-discovery-");
+{
   // A genuine test-shaped file — must be discovered and allowlisted.
   fs.writeFileSync(
     path.join(dir, "real-test.mjs"),
@@ -54,9 +54,9 @@ try {
   // NOT_HERMETIC set removes e.g. "integration-e2e".
   const { hermetic: withDenylist } = discoverHermeticTests(dir, new Set(["real-test"]));
   check("the notHermetic denylist still removes a genuine test by name", !withDenylist.includes("real-test"));
-} finally {
-  fs.rmSync(dir, { recursive: true, force: true });
 }
+// dir's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-discovery: ${failures} check(s) failed.`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

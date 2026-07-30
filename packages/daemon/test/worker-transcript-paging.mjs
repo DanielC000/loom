@@ -32,12 +32,13 @@ import { OrchestrationMcpRouter } from "../dist/mcp/orchestration.js";
 import { engineTranscriptPath, TRANSCRIPT_AGGREGATE_CHAR_BUDGET } from "../dist/sessions/transcript.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- sandbox HOME so engineTranscriptPath's ~/.claude/projects/... never touches the real one ---
-const sandboxHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-wtp-home-"));
+const sandboxHome = mkdtempManaged("loom-wtp-home-");
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
@@ -220,9 +221,11 @@ check("worker_transcript(W-BIG, lastN:2) still works under the strict schema",
 await client.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
-try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
+// sandboxHome's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed
+// cleanup at process exit (card 995be21f). dbFile above is a DIFFERENT, out-of-scope Family-2 site
+// (a hand-rolled Date.now()/random suffix, not fs.mkdtempSync — tracked separately in 09db9357).
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — worker_transcript pages a large transcript in bounded envelopes (no overflow), offset paging covers the whole transcript with no gaps/overlaps, a small transcript stays backward-compatible, lastN still works and takes precedence (and is itself budget-bounded), a sequential offset-walk of a huge transcript is capped in aggregate instead of re-ingesting it whole, and a mistyped/unknown param is hard-rejected naming the bad key + the real params instead of silently defaulting."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

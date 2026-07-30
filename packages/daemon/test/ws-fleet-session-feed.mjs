@@ -19,11 +19,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      completeness gap fixed after the first pass: INSERT + every UPDATE were instrumented, but not the
 //      3 hard-DELETE sites) also emits exactly one session:remove — not just the archive path.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-ws-fleet-sf-"));
+const TMP = mkdtempManaged("loom-ws-fleet-sf-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45346"; // distinct from trust-tier.mjs(45342)/ws-fleet.mjs(45343)/ws-json-hardening.mjs(45345)
 const sandboxHome = path.join(TMP, "home");
@@ -160,10 +160,11 @@ try {
 } finally {
   await app.close();
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  // TMP's own trailing cleanup loop removed here: mkdtempManaged already registered it for guaranteed
+  // cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — the Db session change-feed is inert with no fleet socket connected; a connected socket receives exactly one coalesced session:upsert (correctly shaped, pendingMerge folded in) per debounce window regardless of how many mutations landed in it; archiving AND hard-deleting a session both emit session:remove."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

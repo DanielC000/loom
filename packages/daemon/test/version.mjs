@@ -8,17 +8,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       that value from the SAME built module, which a baked-in constant could never reflect.
 // (a)+(b) are the DoD; (c) is what actually defeats a drift-prone hardcoded copy.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = path.join(__dirname, "..", "..", ".."); // packages/daemon/test → repo root
 const DIST_VERSION = path.join(__dirname, "..", "dist", "version.js");
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-version-"));
+const TMP = mkdtempManaged("loom-version-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45330";
 const sandboxHome = path.join(TMP, "home");
@@ -75,7 +75,7 @@ try {
 // whose root package.json is named "loom") and WITHOUT LOOM_VERSION so the override can't mask it.
 {
   const PKG_VERSION = "7.7.7-loomctl-packaged";
-  const stageRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-pkgform-"));
+  const stageRoot = mkdtempManaged("loom-pkgform-");
   fs.writeFileSync(path.join(stageRoot, "package.json"), JSON.stringify({ name: "loomctl", version: PKG_VERSION }) + "\n");
   const stageDist = path.join(stageRoot, "dist");
   fs.mkdirSync(stageDist, { recursive: true });
@@ -90,13 +90,9 @@ try {
   ], { env, encoding: "utf8" });
   check("(d) packaged-form child resolved without error", child.status === 0);
   check(`(d) walk-up resolves the published "loomctl" package version, not "0.0.0" (got "${(child.stdout || "").trim()}")`, (child.stdout || "").trim() === PKG_VERSION);
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(stageRoot, { recursive: true, force: true }); break; } catch { /* retry */ } }
 }
-
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — GET /api/version returns the umbrella package version, stays in sync with package.json (not a hardcoded literal), resolves at runtime, and the walk-up handles BOTH the monorepo (`loom`) and packaged-npm (`loomctl`) forms."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

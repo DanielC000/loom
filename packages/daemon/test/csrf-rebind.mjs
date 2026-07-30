@@ -12,14 +12,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   5. a Run-API-key-shaped client (no Origin, loopback Host, an Authorization header) still succeeds;
 //   6. uniform coverage — the hook guards a real side-effect POST route, not just reads.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-csrf-"));
+const TMP = mkdtempManaged("loom-csrf-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45337";
 const PORT = process.env.LOOM_PORT;
@@ -99,10 +99,7 @@ try {
   db.close();
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — the onRequest hook refuses cross-origin Origins + non-loopback Hosts (403), allows loopback origins (incl. the dev cross-port proxy) and absent-Origin clients, and short-circuits cross-origin side-effect POSTs before the handler."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

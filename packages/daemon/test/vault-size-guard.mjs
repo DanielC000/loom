@@ -5,20 +5,20 @@
 // Uses a tiny opts.maxFileBytes so the test doesn't need a real 95MB fixture. Claude-free, no network.
 // Run after build: node test/vault-size-guard.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitVault } from "../dist/vault/versioner.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-vault-size-guard-")));
+const root = fs.realpathSync(mkdtempManaged("loom-vault-size-guard-"));
 const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
 const MAX_BYTES = 1024; // 1KB threshold for the test — real default is ~95MB
 
-try {
+{
   git("init");
   git("config", "user.email", "loom-test@example.com");
   git("config", "user.name", "loom-test");
@@ -62,9 +62,9 @@ try {
   fs.writeFileSync(path.join(root, "normal.md"), "# ordinary vault doc\n");
   const committedDefault = await commitVault(root, "loom: auto-commit 5 (default threshold)");
   check("default (~95MB) threshold commits an ordinary small file normally", committedDefault === true);
-} finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 }
+// root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 console.log(failures === 0 ? "\nALL PASS — commitVault refuses/skips oversized files, commits the rest." : `\n${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

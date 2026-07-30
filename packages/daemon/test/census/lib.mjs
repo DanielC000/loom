@@ -6,6 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync, spawn } from "node:child_process";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtempManaged, unregister } from "../_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 export const DAEMON_DIR = path.join(__dirname, "..", "..");
@@ -74,8 +75,8 @@ function runOneTimed(name, lane, { port, sourceDirs, tmpRoots, timeoutOverrides 
     const file = resolveFile(name, sourceDirs);
     if (!fs.existsSync(file)) { resolve({ name, ok: true, skipped: true }); return; }
 
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-census-${name}-`));
-    tmpRoots.push(home);
+    const home = mkdtempManaged(`loom-census-${name}-`);
+    tmpRoots.push(home); // kept for diagnostics only — mkdtempManaged already owns guaranteed cleanup
 
     let stdout = "";
     let stderr = "";
@@ -137,8 +138,15 @@ export async function runCensusBatch({ names, poolSize, sourceDirs, basePort = 4
       runLane(lane, names, nextIndex, results, { port: basePort + lane, sourceDirs, tmpRoots, timeoutOverrides })),
   );
   const durationMs = Date.now() - start;
+  // Early release, not the sole guarantee: a long multi-batch census run wants dirs freed per-batch, not
+  // deferred to final process exit (unlike a single daemon test file, this lib can be called many times in
+  // one process). mkdtempManaged already registered every root; only unregister on PROVEN removal so a
+  // FAILED attempt here still leaves the exit-hook backstop to retry it later (card 995be21f §THE
+  // COMPOSITION BUG — never deregister on an unverified removal).
   for (const root of tmpRoots) {
-    for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
+    try { fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${root} — ${err}`); }
+    if (!fs.existsSync(root)) unregister(root);
   }
   return { results, durationMs, poolSize };
 }

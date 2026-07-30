@@ -20,12 +20,10 @@
 //       hook-carries-reset path is BYTE-IDENTICAL (usage status never consulted); status-unavailable
 //       path is BYTE-IDENTICAL (5h default backoff, 6h no-reset deadline).
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-rl-weekly-"));
+const TMP = mkdtempManaged("loom-rl-weekly-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45327";
 requireHermeticEnv();
@@ -202,4 +200,4 @@ function resolveWiring(hookResetsAtSeconds, status, now, cfg) {
 console.log(failures === 0
   ? "\n✅ ALL PASS — resumeResetFromUsageStatus derives a real reset from the polled plan-usage status (weekly-exhausted, latest-of-both, per-model windows, threshold-tunable, past-reset-ignored), and the onRateLimited wiring resumes AT that reset with a deadline past it instead of looping into a flat 5h/6h fallback — while the hook-carries-reset and status-unavailable paths stay byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

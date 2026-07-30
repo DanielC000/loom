@@ -11,16 +11,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // REAL spawn (a real `node` child), no daemon/DB — drives orchestration/gate-runner.js directly.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-runner-failing-test-truncation.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const { runGateStep, runGateSequential, extractFailingTest, createFailingTestTracker } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gr-trunc-"));
-try {
+const dir = mkdtempManaged("loom-gr-trunc-");
+{
   // Prints the failing-test marker FIRST, then floods ~80KB of unrelated trailing output — well past the
   // 4096-byte tail cap — before exiting non-zero. Mirrors a real runner (e.g. test-daemon.mjs) whose own
   // PASS/FAIL-by-name summary prints BEFORE a noisy trailing pnpm/warning epilogue.
@@ -116,11 +116,11 @@ try {
         tracker.result() === undefined);
     }
   }
-} finally {
-  fs.rmSync(dir, { recursive: true, force: true });
 }
+// dir's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a failing-test marker buried by trailing output beyond the tail budget still survives via the live per-step scan, independent of outputTail's own truncation; a genuinely unrecognizable failure reports an honest undefined, never a guess; a heavy bare-\\r progress stream still resolves a marker correctly and stays bounded; a delimiter-free blob far exceeding the carry cap correctly evicts an early marker."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

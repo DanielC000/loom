@@ -40,13 +40,14 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- sandbox HOME so engineTranscriptPath's ~/.claude/projects/... never touches the real one, AND so
 // sessionScratchDir's ~/.loom/tmp/scratch/... spill files land in a throwaway LOOM_HOME. ---
-const sandboxHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-tts-home-"));
+const sandboxHome = mkdtempManaged("loom-tts-home-");
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 process.env.LOOM_HOME = path.join(sandboxHome, ".loom");
@@ -234,7 +235,9 @@ await auditClient.close();
 
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
-try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
+// sandboxHome's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed
+// cleanup at process exit (card 995be21f). dbFile above is a DIFFERENT, out-of-scope Family-2 site
+// (a hand-rolled Date.now()/random suffix, not fs.mkdtempSync — tracked separately in 09db9357).
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — an oversized single transcript turn (the pageTranscript \"always take >=1\" edge case) " +
@@ -242,4 +245,4 @@ console.log(failures === 0
     "spill it to the RECIPIENT's own scratch dir as real, UTF-8, line-scoped grep/Read-pageable plain text via " +
     "the SAME shared spillableTurnsResponse — below-cap responses stay byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

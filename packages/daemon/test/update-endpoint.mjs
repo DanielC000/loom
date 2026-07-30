@@ -10,15 +10,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       REST route — same boundary as the vault/git writers + /internal/shutdown).
 // The packaged/source gate is flipped with the LOOM_PACKAGED override (the same seam version.ts documents).
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const MCP_DIST_DIR = path.join(__dirname, "..", "dist", "mcp");
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-update-ep-"));
+const TMP = mkdtempManaged("loom-update-ep-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45333";
 const sandboxHome = path.join(TMP, "home");
@@ -102,9 +102,7 @@ try {
   check("(d) scan sees the benign data tools (e.g. tasks_update)", names.includes("tasks_update"));
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — POST /internal/update is loopback-only (403 otherwise), packaged-only (409 on a source daemon), acks 202 + triggers the self-update exactly once, and is NOT exposed as any agent MCP tool. Same trust boundary as /internal/shutdown."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

@@ -10,11 +10,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) 404 on an unknown project; read-only (no write/forget counterpart on this path).
 // Run after build: node test/memory-rest.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-memory-rest-"));
+const TMP = mkdtempManaged("loom-memory-rest-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45361";
 const sandboxHome = path.join(TMP, "home");
@@ -87,10 +87,7 @@ try {
   db.close();
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — GET /api/projects/:id/memory is project-scoped (A never leaks B and vice-versa), returns the pinned/retrievalCount/updatedAt shape with note content, orders pinned-first, and 404s an unknown project."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

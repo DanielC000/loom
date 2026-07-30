@@ -5,16 +5,16 @@ import "./_guard.mjs"; // FIRST: strips GIT_PAGER/PAGER before GitWriter's simpl
 // folds into it via GitWriter.push(). Claude-free, no network: the "remote" is a local bare repo.
 // Run after build: node test/vault-push-status.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { checkVaultPushStatus, logVaultPushStatus, VaultPushStatusWatcher } from "../dist/vault/versioner.js";
 import { GitWriter } from "../dist/git/writer.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-vault-push-")));
+const root = fs.realpathSync(mkdtempManaged("loom-vault-push-"));
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
 // A vault repo WITH a configured upstream: a bare "remote", a clone tracking it (origin/main), then a
@@ -46,7 +46,7 @@ fs.writeFileSync(path.join(noUpstream, "doc.md"), "# solo\n");
 git(noUpstream, "add", ".");
 git(noUpstream, "commit", "-m", "solo");
 
-try {
+{
   // 1. Freshly pushed repo (0 ahead) → checkVaultPushStatus reports the upstream but ahead:0.
   const clean = await checkVaultPushStatus(withUpstream);
   check("upstream detected right after push", clean !== null && clean.upstream === "origin/main");
@@ -129,9 +129,9 @@ try {
   check("a subsequent successful push clears the failure", okPush.ok === true);
   const statusAfterSuccess = await checkVaultPushStatus(pushRecordRoot);
   check("checkVaultPushStatus no longer reports a failure after the successful push", statusAfterSuccess !== null && statusAfterSuccess.ahead === 0 && statusAfterSuccess.lastFailure === undefined);
-} finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 }
+// root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 console.log(failures === 0 ? "\nALL PASS — vault push-status is read-only and visible, never pushes." : `\n${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

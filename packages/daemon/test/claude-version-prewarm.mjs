@@ -8,11 +8,11 @@
 //
 // Run (after a build): node test/claude-version-prewarm.mjs
 import "./_guard.mjs";
-import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-if (!process.env.LOOM_HOME) process.env.LOOM_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "loom-cvp-"));
+if (!process.env.LOOM_HOME) process.env.LOOM_HOME = mkdtempManaged("loom-cvp-");
 const { requireHermeticEnv } = await import("./_guard.mjs");
 requireHermeticEnv();
 
@@ -70,4 +70,4 @@ check("cold cache: the version gate fails closed on a null cache (no -n)", meets
 console.log(failures === 0
   ? "\n✅ ALL PASS — the claude-version cache stays null (never hangs/throws) on a failed probe, warms asynchronously via a REAL execFile call on success, and a second prewarm once warm is a no-op."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

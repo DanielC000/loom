@@ -17,6 +17,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-vv-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -29,7 +30,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // realpath so paths match `git rev-parse --show-toplevel` (symlinked tmp on macOS, drive-letter case on
 // Windows) — otherwise the start()/flushSync externally-managed check could misfire.
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-vv-")));
+const root = fs.realpathSync(mkdtempManaged("loom-vv-"));
 const git = (cwd, args) => execSync(`git ${args}`, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString();
 function initVault(dir) {
   fs.mkdirSync(dir, { recursive: true });
@@ -200,8 +201,10 @@ try {
   await vor.stop();
 } finally {
   for (const v of versioners) { try { await v.stop(); } catch { /* best-effort */ } }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
+  // root's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup
+  // at process exit (card 995be21f). versioner.stop() above is UNRELATED to root's cleanup and stays —
+  // it releases each chokidar watcher's file handles, which matters regardless of who removes the dir.
 }
 
 console.log(failures === 0 ? "\nALL PASS — VaultVersioner is wired + flushes on shutdown." : `\n${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

@@ -10,10 +10,10 @@
 //
 // HERMETIC: git + fs only — no daemon, no build required. Run: node test/no-nul-in-tracked-ts.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { mkdtempManaged, unregister, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -36,7 +36,7 @@ function findNulBytesInTrackedTs(repoRoot) {
 
 // --- (A) the detector actually detects an injected NUL — proven against a REAL fixture git repo ----
 {
-  const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-nul-lint-fixture-"));
+  const fixtureRoot = mkdtempManaged("loom-nul-lint-fixture-");
   try {
     const git = (...args) => execFileSync("git", args, { cwd: fixtureRoot });
     git("init", "-q");
@@ -53,7 +53,9 @@ function findNulBytesInTrackedTs(repoRoot) {
     check("(fixture) detector does NOT flag the clean sibling file", !offenders.some((o) => o.file === "clean.ts"));
     check("(fixture) exactly one offender found", offenders.length === 1);
   } finally {
-    fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    try { fs.rmSync(fixtureRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${fixtureRoot} — ${err}`); }
+    if (!fs.existsSync(fixtureRoot)) unregister(fixtureRoot);
   }
 }
 
@@ -71,4 +73,4 @@ function findNulBytesInTrackedTs(repoRoot) {
 console.log(failures === 0
   ? "\n✅ ALL PASS — the NUL-byte detector correctly flags an injected NUL in a fixture repo, and this repo's tracked *.ts files are clean."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

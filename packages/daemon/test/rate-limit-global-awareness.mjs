@@ -17,12 +17,10 @@
 //   (4) status unavailable / nothing exhausted → unchanged legacy behavior (no lastResetsAt, pure
 //       recency-window awareness — byte-identical to before this fix).
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-rl-global-"));
+const TMP = mkdtempManaged("loom-rl-global-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45329";
 requireHermeticEnv();
@@ -133,4 +131,4 @@ clearClaudeRateLimit();
 console.log(failures === 0
   ? "\n✅ ALL PASS — the derived reset (weekly-exhausted or an explicit far hook reset) now reaches GLOBAL usage awareness, holding the Scheduler/worker_spawn gate to the REAL reset instead of relaxing after the old ~6h recency heuristic; a derived reset that would SHORTEN the hold below that heuristic is guarded out, and the unavailable/nothing-exhausted paths stay byte-identical."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

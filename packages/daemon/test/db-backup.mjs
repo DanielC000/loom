@@ -19,17 +19,17 @@
 // The boot + pre-restart triggers are thin wrappers that call takeBackup({reason}) — covered by (1).
 // Run: 1) build daemon, 2) node test/db-backup.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { Db } from "../dist/db.js";
 import { takeBackup, rotateBackups, snapshotFilename, DbBackupWatcher } from "../dist/orchestration/db-backup.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Our OWN brand-new temp dir — never ~/.loom. All artifacts (DB + backups) live under here.
-const root = fs.mkdtempSync(path.join(os.tmpdir(), "loom-db-backup-"));
+const root = mkdtempManaged("loom-db-backup-");
 const dbFile = path.join(root, "loom.db");
 const destDir = path.join(root, "backups", "auto");
 const now = new Date().toISOString();
@@ -39,7 +39,7 @@ const rowCount = (file, table) => {
   try { return c.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get().n; } finally { c.close(); }
 };
 
-try {
+{
   // --- seed a temp DB and KEEP the writer open (data sits in the WAL) -------------------------------
   const db = new Db(dbFile);
   db.insertProject({ id: "projA", name: "Alpha", repoPath: "C:/a", vaultPath: "C:/a", config: {}, createdAt: now, archivedAt: null });
@@ -123,11 +123,11 @@ try {
   const zeroWatcher = new DbBackupWatcher({ enabled: true, intervalMinutes: 0, keep: 48, srcDbPath: dbFile, destDir: path.join(root, "nope2") });
   check("interval-0 watcher.tick() is a no-op (null)", (await zeroWatcher.tick(new Date())) === null);
   check("no-op watchers wrote nothing", !fs.existsSync(path.join(root, "nope1")) && !fs.existsSync(path.join(root, "nope2")));
-} finally {
-  fs.rmSync(root, { recursive: true, force: true });
 }
+// root's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup
+// at process exit (card 995be21f).
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — online backup captures WAL'd data into a valid snapshot (restore-verify), rotation keeps newest-N loom-*.db and spares non-loom files, failures are best-effort no-throws, and the periodic watcher snapshots when enabled / no-ops when off."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

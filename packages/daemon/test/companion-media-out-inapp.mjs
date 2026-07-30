@@ -19,10 +19,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      attachment card instead of inlining it — the client-side rendering split is driven by this field.
 // Run: 1) build (turbo builds shared first), 2) node test/companion-media-out-inapp.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { ChatGateway } from "../dist/companion/chat-gateway.js";
 import { InAppChannel, IN_APP_CHANNEL, IN_APP_MEDIA_MAX_BYTES } from "../dist/companion/in-app.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -31,7 +31,7 @@ const makeClient = () => { const frames = []; return { frames, client: { deliver
 const inAppBinding = (sessionId) => ({ sessionId, channel: IN_APP_CHANNEL, chatId: sessionId, scope: "dm" });
 
 try {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-media-inapp-"));
+  const dir = mkdtempManaged("loom-media-inapp-");
 
   // ================= 1 — sendMedia pushes a { type:"media" } frame with the right shape =================
   {
@@ -133,7 +133,9 @@ try {
     check("5: mimeType does not start with image/ — the panel renders this as an attachment card", !frames[0].mimeType.startsWith("image/"));
   }
 
-  fs.rmSync(dir, { recursive: true, force: true });
+  // dir's own manual cleanup call removed here: mkdtempManaged already registered it for guaranteed
+  // cleanup at process exit — it previously sat at the end of this `try` with no `finally`, so an
+  // unexpected throw above skipped it and leaked (card 995be21f).
 } catch (err) {
   console.error(err);
   failures++;
@@ -142,4 +144,4 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — the in-app channel now DELIVERS media (card 9ec79b52): sendMedia base64-inlines a file into a { type:'media' } WS frame (correct mimeType-by-extension + fileName), never records it to chat history and never store-and-forwards with zero attached clients, throws (never silently truncates) over the size cap, and ChatGateway.deliverMedia reaches it end-to-end exactly like deliverReply's own target resolution."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

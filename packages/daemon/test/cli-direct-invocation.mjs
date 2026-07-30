@@ -11,9 +11,9 @@ import "./_guard.mjs"; // suite consistency (sets LOOM_TEST=1); this test touche
 //   - FALSE for an unrelated path (the import-by-a-test case);
 //   - the realpath-throws fallback (a non-existent argv1 → plain href compare).
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, "..", "..", "..", "bin", "loom.mjs"); // packages/daemon/test → repo root
@@ -26,7 +26,9 @@ check("isDirectInvocation is exported", typeof isDirectInvocation === "function"
 
 // Build a temp tree: a real file + a symlink/junction pointing at its directory, so we can reach the
 // SAME real file by two different paths (the realpath and a symlinked path) — exactly the fnm shape.
-const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "loom-direct-inv-"));
+const tmp = mkdtempManaged("loom-direct-inv-");
+// NOT separately registered: nested under `tmp` (mkdtempManaged only mints directly under os.tmpdir()),
+// so tmp's own recursive removal already covers this dir — see card 995be21f DoD 8.
 const realDir = fs.realpathSync(fs.mkdtempSync(path.join(tmp, "pkg-")));
 const realFile = path.join(realDir, "loom.mjs");
 fs.writeFileSync(realFile, "// stand-in for loom.mjs\n");
@@ -79,10 +81,7 @@ check("FALSE: undefined argv1", isDirectInvocation(undefined, pathToFileURL(real
     isDirectInvocation(ghost, pathToFileURL(realFile).href) === false);
 }
 
-// Cleanup (best-effort; the suite also nukes temp roots).
-try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — isDirectInvocation is symlink-robust: TRUE across symlinked/realpath path pairs, FALSE for unrelated/imported paths, with a working realpath-throws fallback."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

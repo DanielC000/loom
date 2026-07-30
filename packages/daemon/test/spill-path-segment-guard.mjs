@@ -28,13 +28,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //         the cap, and a real spilled file above it.
 // Run: 1) build daemon (pnpm build), 2) node test/spill-path-segment-guard.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const sandboxHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-spill-guard-"));
+const sandboxHome = mkdtempManaged("loom-spill-guard-");
 process.env.LOOM_HOME = path.join(sandboxHome, ".loom");
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
@@ -119,11 +119,12 @@ for (const reserved of [".", ".."]) {
   check("(D) spilled file content matches", fs.existsSync(spillResult.file) && fs.readFileSync(spillResult.file, "utf8") === bigText);
 }
 
-try { fs.rmSync(sandboxHome, { recursive: true, force: true }); } catch { /* ignore */ }
+// sandboxHome's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed
+// cleanup at process exit — this bare call previously sat unguarded at file scope (card 995be21f).
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — spillTextIfLarge rejects a `..`/separator-laden key or subdir before any mkdirSync/" +
     "writeFileSync, mirroring the repoKey filesystem-path-segment convention; every legitimate caller's " +
     "shape (dashes, numeric offsets) is unaffected."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

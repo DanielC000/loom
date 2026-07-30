@@ -8,9 +8,9 @@ import "./_guard.mjs"; // suite consistency (sets LOOM_TEST=1); this test touche
 //   - stable → loomctl@latest, beta → loomctl@beta (npm dist-tag mapping);
 //   - readChannel defaults to stable when unset/malformed; writeChannel persists + readChannel reads it.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { mkdtempManaged, unregister, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const BIN = path.join(__dirname, "..", "..", "..", "bin", "loom.mjs");           // → repo root
@@ -47,7 +47,7 @@ check("channels + default", CHANNELS.length === 2 && DEFAULT_CHANNEL === "stable
 
 // (5) persistence round-trip against a throwaway temp home.
 {
-  const home = fs.mkdtempSync(path.join(os.tmpdir(), "loom-chan-"));
+  const home = mkdtempManaged("loom-chan-");
   try {
     check("readChannel defaults to stable when unset", readChannel(home) === "stable");
     check("writeChannel(beta) returns beta", writeChannel(home, "beta") === "beta");
@@ -62,11 +62,13 @@ check("channels + default", CHANNELS.length === 2 && DEFAULT_CHANNEL === "stable
     try { writeChannel(home, "dev"); } catch { threw = true; }
     check("writeChannel rejects bad channel", threw);
   } finally {
-    fs.rmSync(home, { recursive: true, force: true });
+    try { fs.rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${home} — ${err}`); }
+    if (!fs.existsSync(home)) unregister(home);
   }
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — `loom update` parses + validates --channel; channel persists/reads under LOOM_HOME; dist-tags map (stable→latest, beta→beta)."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

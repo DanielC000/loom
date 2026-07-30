@@ -19,12 +19,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       reachable path is the loopback REST route (never an agent MCP tool).
 // Run: 1) build (turbo builds shared first), 2) node test/setup-project-init-rest.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-setup-project-init-rest-"));
+const TMP = mkdtempManaged("loom-setup-project-init-rest-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45320";
 const sandboxHome = path.join(TMP, "home");
@@ -169,10 +169,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   check("(7) no MCP router file references the /api/setup/project-init REST path", !leaked);
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — POST /api/setup/project-init creates a confined, git-initialized project dir under the sanctioned WORKSPACE_ROOT (or a plain vault folder), rejects a traversal/absolute dirName and a name clash with nothing written, and no MCP router exposes this REST path (human-only)."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

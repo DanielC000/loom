@@ -8,15 +8,15 @@ import "./_guard.mjs"; // FIRST: arms LOOM_TEST=1 + strips GIT_PAGER/PAGER befor
 //   - FAIL-SAFE: a detection error (no origin) yields NO warning and NEVER blocks the push
 // Run after build: node test/git-identity-warning.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { GitWriter } from "../dist/git/writer.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-git-id-warn-")));
+const root = fs.realpathSync(mkdtempManaged("loom-git-id-warn-"));
 
 // Build a fresh repo with the given commit identity. The branch tracks a REAL bare remote ("upstream")
 // so the writer's plain `git push` succeeds offline; `origin` is set to the host-under-test URL purely
@@ -49,7 +49,7 @@ function makeRepo(name, { email, originUrl }) {
   return { repo, writer: new GitWriter(repo), branch, bare };
 }
 
-try {
+{
   // 1. SELF-HOSTED origin (Forgejo, scp-like SSH URL) + GitHub-noreply identity → WARN.
   {
     const { writer, branch } = makeRepo("forgejo-noreply", {
@@ -127,9 +127,9 @@ try {
     check("no-origin: push still succeeds (detection failure never blocks)", r.ok === true && r.branch === branch);
     check("no-origin: NO warning on detection error (fail-safe)", r.warning === undefined);
   }
-} finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
 }
+// root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 console.log(failures === 0 ? "\nALL PASS — host↔identity mismatch warning + fail-safe hold." : `\n${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

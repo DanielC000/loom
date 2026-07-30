@@ -21,14 +21,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (9) P5b hardening follow-ups (card 80e2093f): isAllInterfacesBindHost (0.0.0.0/:: bind-posture
 //       visibility) and GATEWAY_LOG_SERIALIZERS (the Authorization/Sec-WebSocket-Protocol redaction seam).
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-remote-bind-"));
+const TMP = mkdtempManaged("loom-remote-bind-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45343";
 const PORT = process.env.LOOM_PORT;
@@ -348,10 +348,7 @@ try {
   check("(9) GATEWAY_LOG_SERIALIZERS.req is a no-op when no sensitive header is present", reqNoAuth.headers.authorization === undefined && reqNoAuth.headers["sec-websocket-protocol"] === undefined);
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — canOpenRemoteListener refuses a non-loopback bind without a token or (off-tailnet) without TLS while a tailnet bypasses the TLS mandate; the remote rate limiter locks out repeated wrong-token 401s and caps a sliding request window while never touching an absent-token first contact or the loopback interface; the CSRF hook accepts a remote Host/Origin matching the configured bindHost while still refusing a mismatched one; the tightened validator enforces bindHost shape + rateLimit bounds; and only the human-only platform override (never the agent-reachable project override) can set remoteAccess."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

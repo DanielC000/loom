@@ -34,11 +34,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 // packages/shared/dist to all exist):
 //   pnpm build && node packages/daemon/test/codescape-privacy-guard.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { curateSkillDirs } from "../../../scripts/curate-release-skills.mjs";
 import { PACKAGED_ROOTS, repoRoot } from "../../../scripts/build-npm-package.mjs";
+import { mkdtempManaged, unregister, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -126,7 +126,7 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
   // --- Falsification FIRST — prove the scanner can actually catch a leak before trusting its "clean"
   // result below. A synthetic temp skill dir with an injected mention, structurally identical to a real
   // shipped skill (a SKILL.md + a nested references/*.md, mirroring e.g. the worker skill's layout). ---
-  const fakeRoot = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codescape-guard-"));
+  const fakeRoot = mkdtempManaged("loom-codescape-guard-");
   try {
     fs.mkdirSync(path.join(fakeRoot, "references"), { recursive: true });
     fs.mkdirSync(path.join(fakeRoot, "scripts"), { recursive: true });
@@ -165,7 +165,9 @@ function scanSkillDirForCodescapeMentions(skillRootDir) {
     );
     check("[falsification] scanner does not crash scanning a non-UTF-8 file", fakeHits.length === 3);
   } finally {
-    fs.rmSync(fakeRoot, { recursive: true, force: true });
+    try { fs.rmSync(fakeRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${fakeRoot} — ${err}`); }
+    if (!fs.existsSync(fakeRoot)) unregister(fakeRoot);
   }
 
   // --- The real assertion: every skill that actually SHIPS (core + any non-dev-only) must be clean. ---
@@ -360,7 +362,7 @@ function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
     return;
   }
 
-  const fakeDist = fs.mkdtempSync(path.join(os.tmpdir(), "loom-codescape-bundle-guard-"));
+  const fakeDist = mkdtempManaged("loom-codescape-bundle-guard-");
   try {
     fs.writeFileSync(path.join(fakeDist, "index.js"), 'const x = 1;\n');
     fs.writeFileSync(path.join(fakeDist, "favicon.svg"), "<svg><!-- Codescape mark --></svg>\n");
@@ -378,7 +380,9 @@ function checkRootForCodescapeLeaks(label, rootDir, { realFiles } = {}) {
       !fakeHits.includes(path.join(fakeDist, "logo.png"))
     );
   } finally {
-    fs.rmSync(fakeDist, { recursive: true, force: true });
+    try { fs.rmSync(fakeDist, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${fakeDist} — ${err}`); }
+    if (!fs.existsSync(fakeDist)) unregister(fakeDist);
   }
 
   // --- The real assertion: scan every file this root actually ships, splitting accepted
@@ -429,4 +433,4 @@ if (observedKnownLeaks.length > 0) {
 console.log(failures === 0
   ? "\n✅ ALL PASS — no codescape-named string reaches a user-visible surface, and the compiled-internal footprint matches the accepted baseline."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

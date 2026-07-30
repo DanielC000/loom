@@ -17,8 +17,8 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Run: 1) build (turbo builds shared first), 2) node test/companion-voice-web-inbound.mjs
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { randomUUID } from "node:crypto";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 import { ChatGateway } from "../dist/companion/chat-gateway.js";
 import { InAppChannel, IN_APP_CHANNEL, decodeInAppAudioToTempFile, IN_APP_AUDIO_MAX_BYTES } from "../dist/companion/in-app.js";
 import { CompanionController } from "../dist/companion/controller.js";
@@ -78,7 +78,7 @@ try {
   // ================= 2 — InAppChannel.adapter.downloadAttachment: local pass-through, no network =========
   {
     const inApp = new InAppChannel();
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-voice-web-"));
+    const dir = mkdtempManaged("loom-voice-web-");
     const filePath = path.join(dir, `${randomUUID()}.webm`);
     fs.writeFileSync(filePath, "already-local-bytes");
 
@@ -93,7 +93,7 @@ try {
 
   // ================= 3 — controller.handleInAppAudioInbound: transcribe → record → mirror → live echo ====
   {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-voice-web-"));
+    const dir = mkdtempManaged("loom-voice-web-");
     const audioPath = path.join(dir, "clip.webm");
     fs.writeFileSync(audioPath, "clip bytes");
 
@@ -130,7 +130,7 @@ try {
 
   // ================= 4 — byte-identical when off: no transcribe dep injected ==============================
   {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-voice-web-"));
+    const dir = mkdtempManaged("loom-voice-web-");
     const audioPath = path.join(dir, "clip.webm");
     fs.writeFileSync(audioPath, "clip bytes");
 
@@ -164,7 +164,7 @@ try {
   // proved for Telegram, reused unchanged for in-app via adapter.send (recorded + framed as a companion
   // reply the sender's own client sees), never a silent vanish and never a broken UI.
   {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-voice-web-"));
+    const dir = mkdtempManaged("loom-voice-web-");
     const audioPath = path.join(dir, "clip.webm");
     fs.writeFileSync(audioPath, "clip bytes");
 
@@ -202,4 +202,4 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — VOICE-P4 inbound: web-mic audio decodes to a server-generated temp file (never a client-supplied path) and transcribes through the SAME STT pipeline VOICE-P2 proved, recording the transcript (not empty audio) and live-echoing it back to the sender distinctly from a companion reply."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

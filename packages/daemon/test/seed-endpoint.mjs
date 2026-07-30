@@ -19,14 +19,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       replay that all round-trip through the Db's own readers / PtyHost.subscribe (and the companion's
 //       own REST reads), and 400s on a malformed payload.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-seed-ep-"));
+const TMP = mkdtempManaged("loom-seed-ep-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45332";
 const sandboxHome = path.join(TMP, "home");
@@ -334,10 +334,7 @@ try {
   db.close();
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — POST /internal/test/seed is ABSENT in normal mode, and under LOOM_TEST=1 is loopback-gated, validates its payload, and seeds usage samples + run rows + a companion + live sessions/wakes that round-trip through the Db."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

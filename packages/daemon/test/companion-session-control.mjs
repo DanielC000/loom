@@ -30,6 +30,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -260,7 +261,7 @@ try {
     const proj = `proj-lifecycle-${randomUUID()}`;
     const companionSess = `companion-lifecycle-${randomUUID()}`;
     const target = `target-lifecycle-${randomUUID()}`;
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-sc-cwd-"));
+    const cwd = mkdtempManaged("loom-sc-cwd-");
     const engineSessionId = `eng-${randomUUID()}`;
     plantEngineTranscript(cwd, engineSessionId);
     const { db, pty, orch } = setup(companionSess, proj);
@@ -288,7 +289,8 @@ try {
 
     await client.close();
     db.close();
-    fs.rmSync(cwd, { recursive: true, force: true });
+    // cwd's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup
+    // — this bare call previously sat with no finally, so an earlier throw would have skipped it (995be21f).
   }
 
   // ============ session_resume: a RECYCLED session (successor exists) is rejected ============
@@ -297,7 +299,7 @@ try {
     const companionSess = `companion-recycled-${randomUUID()}`;
     const predecessor = `target-recycled-old-${randomUUID()}`;
     const successor = `target-recycled-new-${randomUUID()}`;
-    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "loom-sc-recycled-"));
+    const cwd = mkdtempManaged("loom-sc-recycled-");
     const engineSessionId = `eng-${randomUUID()}`;
     plantEngineTranscript(cwd, engineSessionId);
     const { db, pty, orch } = setup(companionSess, proj);
@@ -313,7 +315,8 @@ try {
 
     await client.close();
     db.close();
-    fs.rmSync(cwd, { recursive: true, force: true });
+    // cwd's own manual rmSync removed here: mkdtempManaged already registered it for guaranteed cleanup
+    // — this bare call previously sat with no finally, so an earlier throw would have skipped it (995be21f).
   }
 
   // ============ scope: read-only-granted project rejects, for ALL FOUR tools ============
@@ -483,4 +486,4 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — session_message/session_steer/session_stop/session_resume each drive the REAL scoped SessionService rail (durable delivery, flush+supersede+interrupt, actual pty stop, actual respawn with DB processState flipping live); a read-only-granted or ungranted target project rejects all four, as does any proactive (no-owner-text) turn (Primitive A); an optional roleFilter restricts by role while an unconfigured one admits every role; delivered message/steer text is always framed [loom:from-owner-via-companion]; NO Primitive C — every action commits on the first call; a recycled (superseded) target's resume is refused; and the whole tool surface is unregistered under a read-only or absent grant."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

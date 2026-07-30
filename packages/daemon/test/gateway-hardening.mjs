@@ -9,12 +9,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      a non-reserved repoPath change still succeeds and a benign metadata edit (name) on a reserved
 //      project still succeeds.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-gwhard-"));
+const TMP = mkdtempManaged("loom-gwhard-");
 process.env.LOOM_HOME = TMP;
 // No real socket is ever bound in this file — buildServer + app.inject() is HERMETIC/NETWORK-FREE (see
 // header comment), and the CSRF/DNS-rebind onRequest hook matches Host/Origin by HOSTNAME only
@@ -107,9 +107,7 @@ try {
   db.close();
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — REST task create/update re-key a bogus columnKey to the landing lane (no phantom lane), and a reserved project refuses a repoPath rebind while benign metadata + non-reserved rebinds still work."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

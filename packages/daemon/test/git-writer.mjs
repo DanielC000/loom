@@ -3,10 +3,10 @@ import "./_guard.mjs"; // FIRST: arms LOOM_TEST=1 + strips GIT_PAGER/PAGER befor
 // non-interactive guarantee. Claude-free: imports the compiled module and runs real git on a temp
 // repo. Run after build: node test/git-writer.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { GitWriter, nonInteractiveEnv } from "../dist/git/writer.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -30,7 +30,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   if (savedLang === undefined) delete process.env.LANG; else process.env.LANG = savedLang;
 }
 
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-git-writer-")));
+const root = fs.realpathSync(mkdtempManaged("loom-git-writer-"));
 const repo = path.join(root, "repo");
 fs.mkdirSync(repo);
 const git = (...args) => execFileSync("git", args, { cwd: repo, stdio: ["ignore", "pipe", "pipe"] }).toString();
@@ -47,7 +47,7 @@ const baseBranch = git("rev-parse", "--abbrev-ref", "HEAD").trim();
 
 const w = new GitWriter(repo);
 
-try {
+{
   // 1. createBranch: makes + switches to a new branch off HEAD.
   const cb = await w.createBranch("feature/x");
   check("createBranch returns ok", cb.ok === true && cb.branch === "feature/x");
@@ -166,9 +166,9 @@ try {
   fs.writeFileSync(path.join(repo, "small.txt"), "small\n");
   const smallCommit = await w.commit("add a normal-sized file", { maxFileBytes: 1024 });
   check("normal-sized commit carries no warning", smallCommit.ok === true && smallCommit.warning === undefined);
-} finally {
-  fs.rmSync(root, { recursive: true, force: true });
 }
+// root's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 // 9. Concurrent-writer contention (owner sign-off on card a3c3ade8's design: the companion `git-push`
 //    lever's "vault" target shares its repo with Loom's own vault auto-committer + sibling project
@@ -176,7 +176,7 @@ try {
 //    retryable structured error, never a wedge or a partial commit). A FRESH repo, isolated from the
 //    branch/remote churn above.
 {
-  const contentionRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-git-writer-contention-")));
+  const contentionRoot = fs.realpathSync(mkdtempManaged("loom-git-writer-contention-"));
   const contRepo = path.join(contentionRoot, "repo");
   fs.mkdirSync(contRepo);
   const cgit = (...args) => execFileSync("git", args, { cwd: contRepo, stdio: ["ignore", "pipe", "pipe"] }).toString();
@@ -188,7 +188,7 @@ try {
   cgit("add", "-A");
   cgit("commit", "-m", "initial");
 
-  try {
+  {
     // (a) A STALE index.lock (simulating another process's git operation mid-flight, e.g. Loom's own
     //     vault auto-committer) must make commit() fail STRUCTURED + FAST, never hang or throw.
     const lockPath = path.join(contRepo, ".git", "index.lock");
@@ -241,10 +241,10 @@ try {
     if (failedOne) {
       check("contention (real race): the LOSING call's failure is structured (never a throw)", typeof failedOne.error === "string" && failedOne.error.length > 0);
     }
-  } finally {
-    fs.rmSync(contentionRoot, { recursive: true, force: true });
   }
+  // contentionRoot's own manual finally-block rmSync removed here: mkdtempManaged already registered it
+  // for guaranteed cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0 ? "\nALL PASS — git writer + bounded/non-interactive guards hold, incl. concurrent-writer/index.lock contention degrading to a clean structured error, never a wedge." : `\n${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

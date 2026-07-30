@@ -7,11 +7,11 @@
 //   Requires the daemon built first (reads ../dist/crashlog.js): from packages/daemon run `pnpm build`.
 import "./_guard.mjs";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -40,12 +40,7 @@ if (scenario) {
   let failures = 0;
   const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-  const tmpRoots = [];
-  const freshHome = (tag) => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-crashlog-${tag}-`));
-    tmpRoots.push(home);
-    return home;
-  };
+  const freshHome = (tag) => mkdtempManaged(`loom-crashlog-${tag}-`);
 
   // Spawn this same file as a child with the given scenario + its own LOOM_HOME; return { code, home }.
   const runChild = (tag, sc) => {
@@ -64,7 +59,7 @@ if (scenario) {
     return { raw, json: JSON.parse(raw) };
   };
 
-  try {
+  {
     // ── A: direct in-process writeCrashlog → a non-empty record with every diagnostic field ─────────
     {
       const home = freshHome("direct");
@@ -184,14 +179,12 @@ if (scenario) {
       check("cycle: prior crash preserved as crash.log.prev", prev?.error?.message === "child uncaught boom");
       check("cycle: current crash.log still present after rotation", current?.json?.kind === "uncaughtException");
     }
-  } finally {
-    for (const root of tmpRoots) {
-      for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry (Windows WAL/handle) */ } }
-    }
   }
+  // per-tag homes' own trailing cleanup loop removed here: freshHome now creates via mkdtempManaged,
+  // which already registered each one for guaranteed cleanup (card 995be21f).
 
   console.log(failures === 0
     ? "\n✅ ALL PASS — a fatal always leaves a diagnosable crashlog; clean/restart exits do not."
     : `\n❌ ${failures} FAILURE(S).`);
-  process.exit(failures === 0 ? 0 : 1);
+  await finishAndExit(failures === 0 ? 0 : 1);
 }

@@ -22,6 +22,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -184,7 +185,7 @@ try {
     const { client, frames } = makeClient();
     inApp.attach(sess, client);
 
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-proactive-voice-"));
+    const dir = mkdtempManaged("loom-proactive-voice-");
     const audioPath = path.join(dir, "reply.ogg");
     const audioBytes = Buffer.from("fake ogg/opus reply bytes");
     fs.writeFileSync(audioPath, audioBytes);
@@ -217,4 +218,4 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — a proactive-origin reply's outbound frame + persisted history row are BOTH tagged proactive (in-app text AND voice, and — via the generic recorder + cross-channel live push — Telegram too), and an ordinary reply is never mistagged."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

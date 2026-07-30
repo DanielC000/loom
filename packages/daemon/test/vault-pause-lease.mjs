@@ -6,18 +6,18 @@
 // network, no real timers (drives commit()/flushSync() directly rather than waiting on the debounce).
 // Run after build: node test/vault-pause-lease.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { VaultVersioner, pauseVaultAutoCommit, resumeVaultAutoCommit } from "../dist/vault/versioner.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-vault-pause-lease-")));
+const root = fs.realpathSync(mkdtempManaged("loom-vault-pause-lease-"));
 const git = (...args) => execFileSync("git", args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
-try {
+{
   git("init");
   git("config", "user.email", "loom-test@example.com");
   git("config", "user.name", "loom-test");
@@ -90,9 +90,9 @@ try {
   );
 
   await versioner.stop();
-} finally {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { await new Promise((r) => setTimeout(r, 100)); } }
 }
+// root's own manual finally-block cleanup loop removed here: mkdtempManaged already registered it for
+// guaranteed cleanup at process exit (card 995be21f).
 
 console.log(failures === 0 ? "\nALL PASS — the advisory pause lease is respected by commit() and flushSync(), and self-expires." : `\n${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

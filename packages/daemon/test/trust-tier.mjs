@@ -25,14 +25,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      ws@8's default handleProtocols echoed the first client-offered entry (which used to BE the token)
 //      verbatim into the 101 response's Sec-WebSocket-Protocol header.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-trust-tier-"));
+const TMP = mkdtempManaged("loom-trust-tier-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45342";
 const PORT = process.env.LOOM_PORT;
@@ -401,10 +401,7 @@ try {
   dbOn.close();
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — routeTier default-denies every non-listed real route, the hook stays dormant (byte-identical) when remoteAccess is disabled, a loopback request is unchanged when enabled, and a remote request 403s Tier-0 / 401s-then-200s Tier-1 by token."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

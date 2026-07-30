@@ -29,13 +29,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (5) History is also recorded correctly on setProjectConfigSafe's RE-KEY path (a kanbanColumns
 //       key-set change), not just the blind path.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import Database from "better-sqlite3";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-projcfghist-"));
+const TMP = mkdtempManaged("loom-projcfghist-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45320";
 const sandboxHome = path.join(TMP, "home");
@@ -238,10 +238,11 @@ try {
 } finally {
   try { if (app) await app.close(); } catch { /* ignore */ }
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry WAL handle on Windows */ } }
+  // TMP's own trailing cleanup loop removed here: mkdtempManaged already registered it for guaranteed
+  // cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — project_config_history (card a0cafef2): the DB-level ring buffer records changed-keys/prior/next/actor/timestamp per write, a no-op records nothing, and eviction is scoped PER PROJECT (a busy project's churn never evicts a quiet sibling's history, unlike platform_config's single shared ring); setProjectConfigSafe threads a TRUTHFUL, per-surface-distinguishable actor across all four real writers — the human REST PATCH (\"human\"), the Platform Lead's project_configure (\"platform:<sessionId>\"), the Setup Assistant's project_configure AND project_update (\"setup:<sessionId>\"), and the manager's project_update (\"manager:<sessionId>\") — never hardcoding \"human\" for an agent write; a rejected/no-op write on any surface records nothing; GET /api/projects/:id/config/history (human-only REST) reflects the recorded entries newest-first, 404s on an unknown project, and empty-array's a fresh one; and history is recorded correctly on BOTH of setProjectConfigSafe's paths — the blind path and the column re-key path."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

@@ -8,11 +8,11 @@
 //   Requires the daemon built first (reads ../dist/shutdown-marker.js): from packages/daemon run `pnpm build`.
 import "./_guard.mjs";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 
@@ -58,12 +58,7 @@ if (scenario) {
   let failures = 0;
   const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-  const tmpRoots = [];
-  const freshHome = (tag) => {
-    const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-shutdownmarker-${tag}-`));
-    tmpRoots.push(home);
-    return home;
-  };
+  const freshHome = (tag) => mkdtempManaged(`loom-shutdownmarker-${tag}-`);
   const runChild = (tag, sc, homeOverride) => {
     const home = homeOverride ?? freshHome(tag);
     const r = spawnSync(process.execPath, [__filename], {
@@ -83,7 +78,7 @@ if (scenario) {
     return JSON.parse(fs.readFileSync(p, "utf8"));
   };
 
-  try {
+  {
     // ── A: direct in-process writeShutdownMarker → a well-formed "signal" record ─────────────────────
     {
       const home = freshHome("direct");
@@ -195,14 +190,12 @@ if (scenario) {
       check("read-intentional: signal is null", r?.first?.signal === null);
       check("read-intentional: detail carries the raw reason string", r?.first?.detail === "POST /internal/shutdown");
     }
-  } finally {
-    for (const root of tmpRoots) {
-      for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry (Windows WAL/handle) */ } }
-    }
   }
+  // per-tag homes' own trailing cleanup loop removed here: freshHome now creates via mkdtempManaged,
+  // which already registered each one for guaranteed cleanup (card 995be21f).
 
   console.log(failures === 0
     ? "\n✅ ALL PASS — a signal/intentional stop always leaves a diagnosable shutdown marker; crash.log/restart-intent.json are untouched; the marker is consumed (deleted) on read so it can never mislabel a later crash as clean."
     : `\n❌ ${failures} FAILURE(S).`);
-  process.exit(failures === 0 ? 0 : 1);
+  await finishAndExit(failures === 0 ? 0 : 1);
 }

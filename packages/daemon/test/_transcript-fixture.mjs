@@ -13,6 +13,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { encodeProjectDir } from "../dist/sessions/transcript.js";
+import { mkdtempManaged, registerForCleanup, unregister } from "./_tmp-fixture.mjs";
 
 /**
  * @param {{ prefix: string, engineSessionId: string, fileContent: string }} opts
@@ -22,22 +23,31 @@ import { encodeProjectDir } from "../dist/sessions/transcript.js";
  * @param {(cwd: string) => any} fn  run against the fabricated fixture; receives the fixture's cwd.
  */
 export function withEngineTranscriptFixture({ prefix, engineSessionId, fileContent }, fn) {
-  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+  const tmpRoot = mkdtempManaged(prefix);
   const cwd = path.join(tmpRoot, "repo");
   fs.mkdirSync(cwd, { recursive: true });
 
   const engineDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(path.resolve(cwd)));
   fs.mkdirSync(engineDir, { recursive: true });
+  // engineDir lives under the REAL ~/.claude, not under tmpRoot — fold it into the SAME guaranteed-
+  // cleanup registry as a defense-in-depth backstop, on top of (never instead of) the explicit
+  // survival-check finally below (card 995be21f).
+  registerForCleanup(engineDir);
   const file = path.join(engineDir, `${engineSessionId}.jsonl`);
   fs.writeFileSync(file, fileContent);
 
   try {
     return fn(cwd);
   } finally {
-    fs.rmSync(tmpRoot, { recursive: true, force: true });
-    fs.rmSync(engineDir, { recursive: true, force: true });
+    try { fs.rmSync(tmpRoot, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${tmpRoot} — ${err}`); }
+    if (!fs.existsSync(tmpRoot)) unregister(tmpRoot);
+
+    try { fs.rmSync(engineDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }); }
+    catch (err) { console.error(`[tmp] retained for backstop: ${engineDir} — ${err}`); }
     if (fs.existsSync(engineDir)) {
       throw new Error(`withEngineTranscriptFixture: engineDir survived teardown: ${engineDir}`);
     }
+    unregister(engineDir);
   }
 }

@@ -11,11 +11,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       (constructor default) as {available:false}, and an unsuppressed/already-polled poller's cache
 //       passes through unmodified — proving the fix is boot-gating alone, no route-level override needed.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-usage-poller-suppress-"));
+const TMP = mkdtempManaged("loom-usage-poller-suppress-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45333";
 const sandboxHome = path.join(TMP, "home");
@@ -116,9 +116,7 @@ async function bootGate() {
   }
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — LOOM_SUPPRESS_USAGE_POLLER=1 keeps the plan-usage poller from ever starting (no credentials read, no fetch), and GET /api/usage/limits correctly serves available:false as a result."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

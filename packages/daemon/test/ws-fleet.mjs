@@ -20,11 +20,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via @fastify/websocket's injectWS, like
 // trust-tier.mjs's own WS coverage) — the loopback path needs no gateway token.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-ws-fleet-"));
+const TMP = mkdtempManaged("loom-ws-fleet-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45343"; // distinct from trust-tier.mjs's 45342 — no port collision if run concurrently
 const sandboxHome = path.join(TMP, "home");
@@ -170,10 +170,11 @@ try {
 } finally {
   await app.close();
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  // TMP's own trailing cleanup loop removed here: mkdtempManaged already registered it for guaranteed
+  // cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — /ws/fleet sends hello + registers on the hub; sub:events/unsub:events record/clear the subscription (proven behaviorally via broadcastEvent); unknown message types are ignored; closing removes the socket."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

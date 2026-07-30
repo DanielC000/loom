@@ -43,6 +43,7 @@ import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -121,7 +122,7 @@ function seedSession(db, id, projectId, role) {
 const tmpDb = () => new Db(path.join(tmpHome, `${randomUUID()}.db`));
 
 // --- Real git fixtures (mirrors test/git-writer.mjs's own style) ---
-const fixturesRoot = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "loom-git-push-fixtures-")));
+const fixturesRoot = fs.realpathSync(mkdtempManaged("loom-git-push-fixtures-"));
 const git = (cwd, ...args) => execFileSync("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] }).toString();
 
 /** A real, identity-configured git repo at `dir` with one seed commit. */
@@ -694,10 +695,12 @@ try {
   }
 } finally {
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* WAL handle retry */ } }
-  try { fs.rmSync(fixturesRoot, { recursive: true, force: true }); } catch { /* best-effort */ }
+  // fixturesRoot's own manual cleanup line removed here: mkdtempManaged already registered it for
+  // guaranteed cleanup at process exit (card 995be21f). tmpHome above is OUT OF SCOPE for this card (a
+  // hand-rolled Date.now()/pid dir, not fs.mkdtempSync — Family 2, tracked separately in 09db9357).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — git-push (git_commit Tier A / git_push Tier X) is registered only under an act-mode grant; a configured targets allowlist gates which repo a call may touch, per-target (a vault-only grant rejects \"repo\" and vice versa); the vault target resolves to the GOVERNING repo root (never a raw subfolder path, never Obsidian-Git-managed, never auto-inited); the repo target resolves directly to project.repoPath (an unset repoPath is a structured error) and commits/pushes end-to-end for real; git_commit's message defaults to requiring a verbatim owner quote (relaxed only by an explicit per-project authoredContent:true); a cold Tier-A window steps up once and ARMS itself so a later commit applies directly, while git_push's Tier X ALWAYS proposes first (even inside that same warm window) with a bounded ahead-count+latest-subject confirm disclosure and never arms/extends the window on commit; token-mismatch is retryable and a propose→confirm payload mismatch is rejected without committing; a clean tree surfaces GitWriter's own structured error; Primitive A / no-route / failed-delivery all fail closed; a live per-request row-read gates BOTH grant AND revoke (deleting the grant removes both tools on the very next buildServer/request); and the surface is fully additive with no grant."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

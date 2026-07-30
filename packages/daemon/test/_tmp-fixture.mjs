@@ -175,9 +175,10 @@ export function registerForCleanup(p) {
 }
 
 /**
- * Optional early release for a path the caller already tore down itself (e.g. via `removeWorktree`) —
- * avoids a harmless, wasted cleanup attempt at exit. Never required for correctness (`force:true`
- * already tolerates a path that's already gone).
+ * Release a path from the registry — but ONLY after the caller has PROVEN it is actually gone (e.g.
+ * `fs.existsSync(p) === false`). This is NOT optional bookkeeping: deregistering a path whose removal
+ * FAILED (EBUSY/EPERM) silently discards the exit backstop in exactly the case it exists for — a caller
+ * must never call this unconditionally from a `finally`. See card 995be21f §THE COMPOSITION BUG.
  * @param {string} p
  */
 export function unregister(p) {

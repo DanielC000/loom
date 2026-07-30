@@ -18,11 +18,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // HERMETIC + CLAUDE-FREE + NETWORK-FREE (Db + buildServer via @fastify/websocket's injectWS, like
 // ws-fleet.mjs / trust-tier.mjs's own WS coverage) — the loopback path needs no gateway token.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-ws-json-hardening-"));
+const TMP = mkdtempManaged("loom-ws-json-hardening-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45345"; // distinct from trust-tier.mjs's 45342 and ws-fleet.mjs's 45343
 const sandboxHome = path.join(TMP, "home");
@@ -109,10 +109,11 @@ try {
 } finally {
   await app.close();
   db.close();
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  // TMP's own trailing cleanup loop removed here: mkdtempManaged already registered it for guaranteed
+  // cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — /ws/term and /ws/companion survive malformed (null/number/string/array) JSON frames; a valid frame on the same socket afterward is still handled; the daemon process stays up."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

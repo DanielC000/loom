@@ -19,11 +19,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (d) `stop` on a directory with no tracked server is a safe no-op (exit 0, no error);
 //   (e) `start` refuses to double-track a still-alive server for the same dir.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 requireHermeticEnv();
 
@@ -49,12 +49,12 @@ const waitUntil = async (predicate, timeoutMs = 5000, stepMs = 50) => {
 // Its liveness is externally observable via both process.kill(pid,0) and the heartbeat file's mtime
 // advancing — two independent signals a mis-scoped or no-op kill would fail to reproduce.
 const heartbeatSrc = "const f=process.argv[2];setInterval(()=>{try{require('fs').writeFileSync(f,String(Date.now()))}catch{}},100);";
-const fixtureDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-dev-server-fixture-"));
+const fixtureDir = mkdtempManaged("loom-dev-server-fixture-");
 const heartbeatScript = path.join(fixtureDir, "heartbeat.cjs");
 fs.writeFileSync(heartbeatScript, heartbeatSrc);
 
-const workDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-dev-server-work-"));
-const otherWorkDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-dev-server-other-"));
+const workDir = mkdtempManaged("loom-dev-server-work-");
+const otherWorkDir = mkdtempManaged("loom-dev-server-other-");
 const heartbeatOut = path.join(workDir, "heartbeat.txt");
 const controlOut = path.join(otherWorkDir, "control.txt");
 
@@ -108,12 +108,11 @@ try {
 } finally {
   if (trackedPid != null && isAlive(trackedPid)) { try { process.kill(trackedPid, "SIGKILL"); } catch { /* best effort */ } }
   if (controlChild) { try { controlChild.kill("SIGKILL"); } catch { /* best effort */ } }
-  for (const d of [fixtureDir, workDir, otherWorkDir]) {
-    for (let i = 0; i < 5; i++) { try { fs.rmSync(d, { recursive: true, force: true }); break; } catch { /* retry */ } }
-  }
+  // fixtureDir/workDir/otherWorkDir's own trailing cleanup loop removed here: mkdtempManaged already
+  // registered each one for guaranteed cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — dev-server.mjs starts a tracked dev-server and tears it down by its exact pid, leaving unrelated processes untouched."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

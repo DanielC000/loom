@@ -14,11 +14,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       returns "Getting Started" + its Setup Assistant agent — the name-scoped lookups never cross.
 // Run: 1) build (turbo builds shared first), 2) node test/platform-home-rest.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-platform-home-rest-"));
+const TMP = mkdtempManaged("loom-platform-home-rest-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45318";
 process.env.LOOM_DEV = "1"; // the Platform layer is dev-gated; this test seeds + reaches the home, so enable it
@@ -187,10 +187,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   }
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — GET /api/platform/home returns the reserved 'Loom Platform' home + its Lead/Auditor agents, the ordinary picker still hides the reserved project (no P1 regression), both discovery routes 404 rather than inventing a home when none is seeded, liveSessions surfaces LIVE sessions over recency (a stopped Lead can't mask a live one — the duplicate-singleton guard), and with BOTH reserved homes seeded the name-scoped lookups never cross: /api/platform/home → 'Loom Platform', /api/setup/home → 'Getting Started' + its Setup Assistant agent."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

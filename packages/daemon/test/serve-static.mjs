@@ -27,12 +27,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       tracking file; a `stop` with nothing tracked is a safe no-op — mirrors dev-server.mjs's own
 //       tracked-pid lifecycle (see test/dev-server.mjs), never a port/name search.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 requireHermeticEnv();
 
@@ -54,12 +54,12 @@ check(
 
 // A small static-artifact fixture to serve, plus an out-of-root secret and a symlink inside `dir`
 // pointing at it — the exfil shape the symlink-follow guard must stop.
-const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-serve-static-"));
+const dir = mkdtempManaged("loom-serve-static-");
 fs.writeFileSync(path.join(dir, "index.html"), "<html><body>hello static</body></html>");
 fs.mkdirSync(path.join(dir, "sub"));
 fs.writeFileSync(path.join(dir, "sub", "style.css"), "body { color: red; }");
 
-const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-serve-static-outside-"));
+const outsideDir = mkdtempManaged("loom-serve-static-outside-");
 const secretPath = path.join(outsideDir, "secret.txt");
 fs.writeFileSync(secretPath, "top secret — must never be served");
 
@@ -143,8 +143,8 @@ try {
 } finally {
   child.kill("SIGTERM");
   if (stderr.trim()) console.log(`[serve-static stderr]: ${stderr.trim()}`);
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { /* retry */ } }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(outsideDir, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  // dir/outsideDir's own trailing cleanup loops removed here: mkdtempManaged already registered each
+  // one for guaranteed cleanup at process exit (card 995be21f).
 }
 
 // (h) tracked-pid start/stop lifecycle — REAL child-process spawn/kill, per the repo's "mocking the
@@ -159,7 +159,7 @@ const waitUntilLifecycle = async (predicate, timeoutMs = 5000, stepMs = 50) => {
   return false;
 };
 
-const ssDir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-serve-static-lifecycle-"));
+const ssDir = mkdtempManaged("loom-serve-static-lifecycle-");
 fs.writeFileSync(path.join(ssDir, "index.html"), "<html><body>lifecycle</body></html>");
 let ssPid = null;
 let ssPort = null;
@@ -206,10 +206,11 @@ try {
   failures++;
 } finally {
   if (ssPid != null && isAlivePid(ssPid)) { try { process.kill(ssPid, "SIGKILL"); } catch { /* best effort */ } }
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(ssDir, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  // ssDir's own trailing cleanup loop removed here: mkdtempManaged already registered it for
+  // guaranteed cleanup at process exit (card 995be21f).
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — serve-static.mjs serves a static dir over loopback (nested files, 404 on miss, traversal-safe), the web-design/orchestrate copies stay identical, and the tracked-pid start/stop lifecycle works end-to-end."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

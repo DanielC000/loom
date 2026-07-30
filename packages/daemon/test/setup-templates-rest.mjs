@@ -15,12 +15,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       not just asserted by comment) — the only reachable path is the loopback REST route.
 // Run: 1) build (turbo builds shared first), 2) node test/setup-templates-rest.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-setup-templates-rest-"));
+const TMP = mkdtempManaged("loom-setup-templates-rest-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45319";
 const sandboxHome = path.join(TMP, "home");
@@ -162,10 +162,7 @@ const buildApp = (db) => buildServer({ db, pty: stub, sessions: stub, mcp: stub,
   check("(5) no MCP router file references the /api/setup/templates REST path", !leaked);
 }
 
-// cleanup (retry for the WAL handle on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — GET /api/setup/templates lists the bundled presets, POST /api/setup/templates/apply stands up a preset's roster + starter card on a real project via ordinary agent-create/task-insert rows, an unknown template or project is rejected with nothing written, and no MCP router exposes these REST paths (human-only)."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

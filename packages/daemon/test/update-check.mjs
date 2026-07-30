@@ -8,16 +8,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (e) packaged-vs-source DETECTION both ways (resolveUmbrellaPackage on a staged tree + the LOOM_PACKAGED
 //       override), and the isNewer semver-lite edges.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { spawnSync } from "node:child_process";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const DIST_VERSION = path.join(__dirname, "..", "dist", "version.js");
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-update-check-"));
+const TMP = mkdtempManaged("loom-update-check-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45332";
 const sandboxHome = path.join(TMP, "home");
@@ -134,20 +134,19 @@ check("(e) unparseable → never newer (no false banner)", isNewer("not-a-versio
 
 // (e2) channel read tolerance: missing/garbage update-config → defaults to stable.
 {
-  const emptyHome = fs.mkdtempSync(path.join(os.tmpdir(), "loom-uc-empty-"));
+  const emptyHome = mkdtempManaged("loom-uc-empty-");
   check("(e2) missing update-config → stable", readUpdateChannel(emptyHome) === "stable");
   fs.writeFileSync(path.join(emptyHome, "update-config.json"), "{ not json");
   check("(e2) malformed update-config → stable", readUpdateChannel(emptyHome) === "stable");
   fs.writeFileSync(path.join(emptyHome, "update-config.json"), JSON.stringify({ channel: "beta" }));
   check("(e2) persisted beta is read back", readUpdateChannel(emptyHome) === "beta");
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(emptyHome, { recursive: true, force: true }); break; } catch { /* retry */ } }
 }
 
 // (f) packaged-vs-source DETECTION both ways — resolveUmbrellaPackage on a STAGED tree (mirrors version.mjs
 //     (d)). A "loomctl" root → packaged; a "loom" root → source. Run in a child against the staged dist so
 //     the walk-up starts there (NOT in this repo, whose root is named "loom").
 function detectName(rootPkgName, rootPkgVersion) {
-  const stageRoot = fs.mkdtempSync(path.join(os.tmpdir(), `loom-detect-${rootPkgName}-`));
+  const stageRoot = mkdtempManaged(`loom-detect-${rootPkgName}-`);
   fs.writeFileSync(path.join(stageRoot, "package.json"), JSON.stringify({ name: rootPkgName, version: rootPkgVersion }) + "\n");
   const stageDist = path.join(stageRoot, "dist");
   fs.mkdirSync(stageDist, { recursive: true });
@@ -159,7 +158,6 @@ function detectName(rootPkgName, rootPkgVersion) {
     "--input-type=module", "-e",
     `import { isPackagedInstall, umbrellaRootDir } from ${JSON.stringify(staged)}; process.stdout.write(JSON.stringify({ packaged: isPackagedInstall(), dir: umbrellaRootDir() }));`,
   ], { env, encoding: "utf8" });
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(stageRoot, { recursive: true, force: true }); break; } catch { /* retry */ } }
   return { code: child.status, out: (child.stdout || "").trim(), stageRoot };
 }
 {
@@ -172,12 +170,11 @@ function detectName(rootPkgName, rootPkgVersion) {
   check("(f) a `loom` (monorepo) root → isPackagedInstall() false", JSON.parse(src.out || "{}").packaged === false);
 
   // also confirm the in-process resolver classifies the staged trees (sanity on resolveUmbrellaPackage)
-  const t = fs.mkdtempSync(path.join(os.tmpdir(), "loom-resolve-"));
+  const t = mkdtempManaged("loom-resolve-");
   fs.writeFileSync(path.join(t, "package.json"), JSON.stringify({ name: "loomctl", version: "9.9.9" }));
   const sub = path.join(t, "dist", "deep"); fs.mkdirSync(sub, { recursive: true });
   const r = resolveUmbrellaPackage(sub);
   check("(f) resolveUmbrellaPackage finds the loomctl root via walk-up", r && r.name === "loomctl" && r.version === "9.9.9");
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(t, { recursive: true, force: true }); break; } catch { /* retry */ } }
 }
 
 // (g) the LOOM_PACKAGED override flips detection both ways in-process.
@@ -194,9 +191,7 @@ function detectName(rootPkgName, rootPkgVersion) {
   check("(g) LOOM_PACKAGED=0 → packaged false", o.off === false);
 }
 
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — the update-check surfaces 'behind' from a MOCKED registry, gates the banner to packaged installs (source never fetches), serves read-only via /api/update-status, and detects packaged-vs-source both ways."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);

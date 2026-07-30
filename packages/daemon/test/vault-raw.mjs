@@ -11,11 +11,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (6) the >cap file → 413 (a sparse file just over VAULT_RAW_MAX_BYTES; never streamed).
 // Run after build: node test/vault-raw.mjs
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), "loom-vault-raw-"));
+const TMP = mkdtempManaged("loom-vault-raw-");
 process.env.LOOM_HOME = TMP;
 process.env.LOOM_PORT = "45331";
 const sandboxHome = path.join(TMP, "home");
@@ -121,10 +121,7 @@ try {
   db.close();
 }
 
-// cleanup (retry for the WAL handle + any junction on Windows)
-for (let i = 0; i < 5; i++) { try { fs.rmSync(TMP, { recursive: true, force: true }); break; } catch { /* retry */ } }
-
 console.log(failures === 0
   ? "\n✅ ALL PASS — /vault/raw serves binaries byte-exact with the right Content-Type + nosniff, streams under a 50 MB cap (413 over), and rejects ../ / absolute / symlink-escape with 404."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1);
