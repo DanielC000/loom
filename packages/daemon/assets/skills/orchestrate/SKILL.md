@@ -643,10 +643,15 @@ mid-report — before sending anything.
    correct. **Assert the fixture's identity** (a count, a sentinel string, an id — something that fails
    loudly if the underlying data swapped), not just that the page rendered.
 
-   **Positive-control any verification instrument before trusting its green**: show it can go red on a
-   known-bad case. A uniform result proves little by itself — validate the check against a contrasting
-   known-good case too, so a clean result means the instrument can tell the two apart, not merely that it
-   fired. Where you can, prefer evidence that doesn't depend on the instrument at all.
+   **Pick the control by the POLARITY of the check — whenever the answer you expect is the same answer a
+   BROKEN instrument would also produce, the check is silent-failing** (also true of an absence-asserting
+   test, or a control whose informative branch never fires). Checking something **added** (expect ≥1): a
+   known-bad-case negative control is enough — a zero is surprising and gets investigated. Checking
+   something **removed** (expect zero): a negative control only shows your query CAN return zero, which
+   is what you already believed — it can't tell "removed" from "never matched." **Run the pattern where
+   the token is KNOWN PRESENT (the pre-change state) first; a zero there means the pattern is broken, not
+   the target gone.** Use a definition/use-form pattern only when you've READ the real declaration, never
+   one you inferred; keep bare-token enumeration (list, don't count, the matching lines) as the fail-safe.
 
    To eyeball a **static on-disk HTML artifact**, to launch a **live dev server** against a worker's
    worktree, to print served HTML to **PDF**, or to keep a screenshot **as a file** — read

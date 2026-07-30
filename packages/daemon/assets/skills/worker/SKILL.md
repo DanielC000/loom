@@ -213,9 +213,16 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    holding the default port would silently verify the wrong thing and report a false pass). Even the
    right port isn't proof of the right data — a server can fall back onto another live default and serve
    someone else's data with everything still rendering correctly, so **assert the fixture's identity** (a
-   count, sentinel, or id) rather than just that the page looks right, and **positive-control any check**
-   — including against a contrasting known-good case, not just a known-bad one — before trusting its
-   green. **Stop any dev server (or other long-running process) you started BEFORE you
+   count, sentinel, or id) rather than just that the page looks right. **Pick the control by the POLARITY
+   of what you're checking — whenever the answer you expect is the same answer a broken check would also
+   produce, the check is silent-failing.** Confirming something now PRESENT (≥1): a known-bad-case
+   negative control is enough — a zero is surprising and gets investigated. Confirming something now
+   ABSENT (zero): a negative control only proves your check CAN return zero, which is what you already
+   expected — run the same check where the target is KNOWN PRESENT (e.g. before your change) first, and
+   treat a zero THERE as a broken check, never as green. The same trap catches a grep for a
+   definition/use-form pattern you only GUESSED at — read the real declaration before relying on one, and
+   keep bare-token enumeration (list, don't count, the matches) as the fail-safe. **Stop any dev server
+   (or other long-running process) you started BEFORE you
    `worker_report done` — and stop it SAFELY.** Terminate it via the handle you started it with (the child
    process YOU spawned); don't re-discover it by process name or port. A stray dev server holds OS file
    locks on its own `node_modules` (on Windows a live Vite/esbuild binary can't be unlinked), so the merge
