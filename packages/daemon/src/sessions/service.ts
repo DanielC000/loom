@@ -43,7 +43,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepRunner } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -123,7 +123,11 @@ export interface GateQueueSnapshot {
  *  `opId` (card 369d8824): the correlation stamp threaded from {@link PendingOpRegistry.attach} (or
  *  minted fresh for a caller outside that registry, e.g. the human REST merge route) — carried on every
  *  return so a manager juggling several concurrent merges can match this outcome back to the specific
- *  `worker_merge_confirm` call that produced it. */
+ *  `worker_merge_confirm` call that produced it.
+ *  `gateSteps` (card a2873f7e): per-step `{step, durationMs, status}` from the gate that just ran, forwarded
+ *  from {@link GateSequentialResult.steps} on the GREEN path — `undefined` when the gate was reused (never
+ *  actually spawned, see the reuse-a-green-self-check path) or when there's no gate configured at all.
+ *  PURELY DIAGNOSTIC — see {@link formatGateStepsDiagnostic}'s doc; never branch on it. */
 /** Diagnostic detail for a `reason:"gate"` rejection (card 4b8f2b6e) — populated ONLY when a configured
  *  gateCommand step actually failed, so a manager can tell a real test failure apart from an fs teardown
  *  flake or a self-wiped node_modules TS2688 without re-running the gate blind. `signal`/`timedOut` are
@@ -145,6 +149,13 @@ type GateRejectionDetail = {
    *  spawning another gate at all — distinct from an ordinary `timedOut:true` rejection, which reports a
    *  gate that actually ran and timed out. See SessionService's `checkGateTimeoutBreaker`. */
   circuitBroken?: boolean;
+  /** Card a2873f7e: per-step `{step, durationMs, status}` forwarded verbatim from {@link
+   *  GateSequentialResult.steps} — the SAME shape the green path's `ConfirmMergeResult.steps` carries, so a
+   *  step's duration is comparable ACROSS a green run and a red one. Absent (not `[]`) when the rejection
+   *  never reached a real gate run at all (the circuit breaker, a union/merge-conflict rejection) — there is
+   *  no step list to report there, distinct from a real run that spawned zero steps. Diagnostic only — see
+   *  {@link formatGateStepsDiagnostic}'s doc; never branch on this. */
+  steps?: GateStepDuration[];
 };
 
 /** `confirmWorkerMerge`'s explicit record of WHICH path a merge's gate took (card e50600d2 — reuse a
@@ -155,7 +166,7 @@ type GateRejectionDetail = {
  *  trace the reused result back to the specific run that produced it. Absent entirely on a rejection
  *  path that never reached the reuse decision (stranded work, union conflict, circuit breaker) — those
  *  never ran or skipped a gate, so the field would be meaningless noise there. */
-type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string; gateRan?: boolean; reusedOpId?: string };
+type ConfirmMergeResult = { merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked"; warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string; gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[] };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
  *  PendingOpRegistry's doc) after {@link SessionService.confirmWorkerMergeTracked} settles it — long
@@ -8608,6 +8619,11 @@ export class SessionService {
     // doesn't need to.
     let gateRan = false;
     let reusedOpId: string | undefined;
+    // Card a2873f7e: per-step durations from whichever gate run actually settles below (the first attempt,
+    // or the transient-kill retry if one fires) — declared at THIS outer scope for the same reason `gateRan`
+    // is: the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined`
+    // for a gateless project (no gate ran) and for a REUSED gate (nothing spawned, see `reuseResult` above).
+    let gateStepsResult: GateStepDuration[] | undefined;
     // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
     // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
     // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
@@ -8866,7 +8882,9 @@ export class SessionService {
           // a stray preLanded-producer value must never silently soften that if the invariant above is ever
           // violated by a future change.
           gateBaseBranchHead = undefined;
-          reuseResult = { passed: true };
+          // Card a2873f7e: `steps:[]` — this result never actually spawned a step (it's a reuse of an
+          // already-settled self-check), so there is nothing to report a per-step duration for.
+          reuseResult = { passed: true, steps: [] };
           reusedOpId = lastCheck.opId;
         }
       }
@@ -8963,6 +8981,12 @@ export class SessionService {
         }
         await this.recordGateTimeoutOutcome(branch, worktreePath, !!gateResult.failedTimedOut);
       }
+      // Card a2873f7e: whichever gateResult is FINAL (the first attempt, or the retry above if one fired)
+      // is what gets reported — `undefined` (not `[]`) when nothing actually spawned (a REUSED result), and
+      // ALSO `undefined` for a `runGate` test double (this.runGate, the injectable seam above) that predates
+      // this card and returns a bare `{passed:true}` with no `steps` field at all — `?.` so those hermetic
+      // doubles keep working byte-identical rather than throwing on a field they were never asked to supply.
+      gateStepsResult = gateResult.steps?.length ? gateResult.steps : undefined;
       if (!gateResult.passed) {
         // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
         // failing phase/step, the first failing test/assertion, and the child's own output — a manager
@@ -9042,6 +9066,7 @@ export class SessionService {
           gateDetail: {
             phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
             exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
+            steps: gateStepsResult,
           },
           notified: !suppressed,
           opId: thisOpId,
@@ -9169,8 +9194,8 @@ export class SessionService {
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}) };
   }
 
   /**
@@ -9383,9 +9408,15 @@ export class SessionService {
         // away, or an unexpected error means rejectNotify never ran at all) — so the manager still gets
         // exactly one terminal signal per async confirm.
         if (outcome.ok && outcome.value.notified) return;
+        // Card a2873f7e: fold the per-step durations onto the GREEN echo, self-labelled diagnostic-only IN
+        // THE TEXT (formatGateStepsDiagnostic's own doc) — absent when the gate was reused/gateless
+        // (outcome.value.gateSteps only ever set non-empty, see confirmWorkerMerge's `gateStepsResult`).
+        const stepsLine = outcome.ok && outcome.value.merged && outcome.value.gateSteps
+          ? ` ${formatGateStepsDiagnostic(outcome.value.gateSteps)}`
+          : "";
         const msg = outcome.ok
           ? (outcome.value.merged
-            ? `[loom:merge-done] ${who(opId)} merged.`
+            ? `[loom:merge-done] ${who(opId)} merged.${stepsLine}`
             : `[loom:merge-failed] ${who(opId)} — ${outcome.value.reason ?? "merge did not complete"}`)
           : `[loom:merge-failed] ${who(opId)} — merge confirm errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in managerSessionId's

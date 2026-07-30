@@ -357,6 +357,21 @@ function killGateProcessTree(child: ChildProcess): Promise<void> {
   });
 }
 
+/** Card a2873f7e: one step's WALL-CLOCK duration — `decidedAt` (see {@link GateStepResult.decidedAt}) minus
+ *  the `performance.now()` captured immediately before {@link runGateSequential} invoked `runStep` for it.
+ *  Computed for EVERY step that actually spawned, on BOTH the green and rejected path (a step that never
+ *  spawned — e.g. a step after the one that failed, or one skipped by an early cancel — has no entry at
+ *  all, never a fabricated one). `durationMs` is `null`, never `0`, when it can't be derived (a step whose
+ *  `GateStepResult` never got a `decidedAt` — should not happen in practice, but this is the honest-null
+ *  discipline the rest of this file already follows for `failingTest`). PURELY DIAGNOSTIC: nothing in this
+ *  file or its callers may branch, assert, or retry on this value — see {@link formatGateStepsDiagnostic}'s
+ *  doc for why. */
+export interface GateStepDuration {
+  step: string;
+  durationMs: number | null;
+  status: number | null;
+}
+
 /** What {@link runGateSequential} resolves. On a rejection, carries enough to make the failure
  *  diagnosable instead of opaque: which step failed, its exit code/signal/timeout, and its bounded
  *  output tail (a caller derives a coarse phase + a best-effort failing-test line from these). */
@@ -374,6 +389,40 @@ export interface GateSequentialResult {
    *  distinct "no verdict" outcome a caller must never fold into `passed:false`'s ordinary failure
    *  handling (no retry, no failure classification, no "gate failed" nudge). */
   cancelled?: boolean;
+  /** Card a2873f7e: per-step `{step, durationMs, status}` for every step that actually spawned — the SAME
+   *  shape on the green path and every rejection path (cancelled, failed, timed out), so a caller can
+   *  compare a step's duration ACROSS outcomes ("this step took 40s green and 11 min red") instead of only
+   *  ever seeing it on one side. Empty (`[]`), never absent, when no step spawned at all (e.g. a cancel
+   *  observed before the first step). This value was already computed for the internal auto-extend
+   *  decision and thrown away before this card — it is now forwarded, not newly derived. */
+  steps: GateStepDuration[];
+}
+
+/** Format one {@link GateStepDuration.durationMs} as `<m>m<s>s` (or bare `<s>s` under a minute) —
+ *  `"n/a"` for `null`, never a fabricated `0s`. */
+function formatStepDurationMs(ms: number | null): string {
+  if (ms == null) return "n/a";
+  const totalSec = Math.round(ms / 1000);
+  const m = Math.floor(totalSec / 60);
+  const s = totalSec % 60;
+  return m > 0 ? `${m}m${s}s` : `${s}s`;
+}
+
+/**
+ * Card a2873f7e: render a gate's {@link GateSequentialResult.steps} as ONE human-readable line, self-
+ * labelled diagnostic-only IN THE TEXT ITSELF — not just a code comment — because this string is what a
+ * reader sees later, out of context, with no access to the reasoning that produced it. `undefined` for an
+ * empty step list (nothing to show) so a caller can omit the line entirely rather than print a vacuous one.
+ *
+ * ⛔ NEVER compare the numbers this renders against a threshold, "expected" range, or each other to decide
+ * anything — see this card's own doc: a duration is a load-variable constant (measured solo-vs-in-suite
+ * stretch on this repo: 2.15×) that FAILS TOWARD THE UNOBSERVED DIRECTION (a suite that silently skips
+ * work finishes EARLY, which reads as good news, not a warning). This is a prompt to look, never evidence
+ * on its own — the real guard is the harness asserting it executed something (card b122c7d4).
+ */
+export function formatGateStepsDiagnostic(steps: GateStepDuration[]): string | undefined {
+  if (steps.length === 0) return undefined;
+  return `steps (diagnostic only — not a pass/fail signal): ${steps.map((s) => `${s.step} ${formatStepDurationMs(s.durationMs)}`).join(" · ")}`;
 }
 
 /**
@@ -394,27 +443,33 @@ export async function runGateSequential(
   gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
   allowExtend?: boolean, cancelSignal?: AbortSignal,
 ): Promise<GateSequentialResult> {
+  // Card a2873f7e: per-step {step, durationMs, status} accumulated as each step settles — forwarded
+  // verbatim on EVERY return below (green or rejected), same shape either way.
+  const steps: GateStepDuration[] = [];
   for (const step of splitGateSteps(gate)) {
     // Card 8d585277: checked BEFORE spawning each step too — a cancel arriving in the gap BETWEEN two
     // steps (this run has already settled one step and hasn't started the next) must not spawn a step
     // that was never going to be waited for.
-    if (cancelSignal?.aborted) return { passed: false, cancelled: true, failedStep: step };
+    if (cancelSignal?.aborted) return { passed: false, cancelled: true, failedStep: step, steps };
+    const startedAt = performance.now();
     const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal);
+    const durationMs = res.decidedAt != null ? res.decidedAt - startedAt : null;
+    steps.push({ step, durationMs, status: res.status });
     if (res.cancelled) {
       return {
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest,
+        failedTimedOut: false, outputTail: res.outputTail, failingTest: res.failingTest, steps,
       };
     }
     const passed = res.status === 0 && !res.error;
     if (!passed) {
       return {
         passed: false, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
-        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest,
+        failedTimedOut: res.timedOut ?? false, outputTail: res.outputTail, failingTest: res.failingTest, steps,
       };
     }
   }
-  return { passed: true };
+  return { passed: true, steps };
 }
 
 /**

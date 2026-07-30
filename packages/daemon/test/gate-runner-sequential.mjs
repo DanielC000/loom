@@ -8,6 +8,7 @@
 // synchronous functions; `await`ing a non-Promise value is a no-op pass-through, so they exercise the
 // same short-circuit/ordering logic without needing to spawn anything real.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/gate-runner-sequential.mjs
+import { performance } from "node:perf_hooks";
 import { splitGateSteps, runGateSequential } from "../dist/orchestration/gate-runner.js";
 
 let failures = 0;
@@ -62,6 +63,34 @@ check("(allowExtend) explicit false is forwarded to every step", extendCalls.eve
 extendCalls.length = 0;
 await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, extendRecordingRunner);
 check("(allowExtend) omitted defaults to undefined (runStep's own default of true then applies)", extendCalls.every((c) => c.allowExtend === undefined));
+
+// --- per-step durations (card a2873f7e): `steps: [{step, durationMs, status}, ...]` for EVERY step that
+// actually spawned, derived from decidedAt — computed for the internal auto-extend decision and, before
+// this card, thrown away before any caller saw it. Same shape on the green path and the rejected path
+// (the comparison that diagnoses a flake is ACROSS outcomes), and a step whose runner never sets
+// decidedAt reports durationMs:null, never a fabricated 0. ---
+check("(durations) a green 3-step gate (okRunner never sets decidedAt) reports one entry per step, honest null durations",
+  green.steps.length === 3 &&
+  JSON.stringify(green.steps.map((s) => s.step)) === JSON.stringify(["pnpm lint", "pnpm test", "pnpm build"]) &&
+  green.steps.every((s) => s.durationMs === null && s.status === 0));
+
+const timedRunner = (command) => ({ status: command === "pnpm test" ? 1 : 0, decidedAt: performance.now() });
+const greenTimed = await runGateSequential("pnpm lint && pnpm build", "/work/tree", 5000, (command) => ({ status: 0, decidedAt: performance.now() }));
+check("(durations) a runner that DOES set decidedAt reports a real numeric durationMs (never negative)",
+  greenTimed.steps.length === 2 && greenTimed.steps.every((s) => typeof s.durationMs === "number" && s.durationMs >= 0));
+
+const redTimed = await runGateSequential("pnpm lint && pnpm test && pnpm build", "/work/tree", 5000, timedRunner);
+check("(durations) green and rejected report the SAME per-step shape — {step,durationMs,status} on both, not two different shapes",
+  redTimed.passed === false &&
+  redTimed.steps.length === 2 && // the third step never spawned — short-circuited before it
+  redTimed.steps.every((s) => Object.keys(s).sort().join(",") === "durationMs,status,step") &&
+  greenTimed.steps.every((s) => Object.keys(s).sort().join(",") === "durationMs,status,step") &&
+  redTimed.steps[0].status === 0 && redTimed.steps[1].status === 1);
+
+const singleGreen = await runGateSequential("pnpm build", "/work/tree", 5000, okRunner);
+check("(durations) a single-step (no `&&`) gate behaves identically — one entry, same shape",
+  singleGreen.steps.length === 1 &&
+  singleGreen.steps[0].step === "pnpm build" && singleGreen.steps[0].status === 0 && singleGreen.steps[0].durationMs === null);
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — a `&&`-chained gate runs as separate sequential processes (memory frees between steps) and still fails closed on the first non-zero/errored step."
