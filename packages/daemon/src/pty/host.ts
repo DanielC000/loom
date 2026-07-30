@@ -72,6 +72,29 @@ function fnv1a32(s: string): string {
 }
 
 /**
+ * Card 4a0af485: the MINIMAL signature `Live.ambiguousDispatches` stores per still-ambiguous generation —
+ * length + the SAME cheap `fnv1a32` hash `ptyWrite`'s own log line already uses, never the full text (see
+ * that map's own doc for why).
+ *
+ * ⚠️ CODE REVIEW CORRECTION (an earlier draft of this comment claimed a collision is "never a false-
+ * positive purge" — WRONG, and the real vector needs no collision at all): a 32-bit hash collision between
+ * two genuinely DIFFERENT texts is ~2⁻³² and not worth carding on its own. But `purgeConfirmedGiveUpRequeue`
+ * purges EVERY entry whose signature matches, by design (a coalesced drain seeds several logicalIds with
+ * the identical joined signature on purpose — see `requeueGiveUpOrigin`'s doc) — so two GENUINELY DISTINCT
+ * messages that happen to carry byte-IDENTICAL text (P=1 if they coexist, no collision needed) are
+ * indistinguishable from a coalesced batch by signature alone, and one confirming hook would purge BOTH,
+ * including a still-undelivered one that never should have been touched. `Live.ambiguousDispatches`'
+ * aggressive cleanup-on-every-resolution-path (see this map's own doc, and `purgeConfirmedGiveUpRequeue`'s)
+ * is what keeps the window for two such entries to coexist as narrow as the underlying give-up rate allows
+ * — it does not make the case structurally impossible. A non-byte-identical engine echo, separately, is
+ * still only ever a false-negative MISS (a real duplicate this map could have purged is left for the
+ * FIFO-position fallback instead) — that half of the original claim holds.
+ */
+function textSignature(text: string): { len: number; hash: string } {
+  return { len: text.length, hash: fnv1a32(text) };
+}
+
+/**
  * How long to wait for `UserPromptSubmit` (or a Stop/StopFailure, either of which proves a turn ran)
  * to confirm a written Enter actually registered, before re-sending it. Bounds the verify-and-retry
  * loop in `sendEnterAndVerify`. Env-overridable so tests can shrink it instead of waiting real seconds.
@@ -158,6 +181,29 @@ const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM
  * means literally sharing the bound, not maintaining a second one that could drift from it.
  */
 export const GIVE_UP_HOLD_MS = Number(process.env.LOOM_GIVE_UP_HOLD_MS) || 20_000;
+
+/**
+ * Card 4a0af485: bounds `Live.ambiguousDispatches` by COUNT, deliberately NOT by elapsed time — the whole
+ * point of that map is to keep listening for a late confirmation for as long as the session lives, since a
+ * real engine-confirmation lag has no known upper bound (232s measured, no ceiling established). This is an
+ * OBSERVATION-WINDOW bound, not a retry DEADLINE — `SUBMIT_VERIFY_TIMEOUT_MS`/`GIVE_UP_REQUEUE_LIMIT` (the
+ * actual retry cadence) are untouched by this card.
+ *
+ * ⚠️ CODE REVIEW CORRECTION (an earlier draft claimed this cap is "expected to almost never actually
+ * evict" because "real ambiguity is rare" — WRONG as originally reasoned): the map tracks EVER-given-up
+ * generations, not CURRENTLY-ambiguous ones — with no cleanup on resolution, it grows MONOTONICALLY with
+ * every give-up event for the session's whole life, and this card's own body measures give-ups at
+ * 79%/~86% false-negative rates under load; 20 distinct give-ups in one long session is ordinary, not rare.
+ * The cap's actual safety net is `purgeConfirmedGiveUpRequeue`/`drainPending` DELETING an entry the MOMENT
+ * its own ambiguity resolves (content match, the FIFO-position fallback's own purge, or a `giveUpGen`-
+ * tagged entry's successful re-drain — see each site's own comment) — cleaned up promptly like that, the
+ * map commonly WILL stay near-empty in practice, but that is a CONSEQUENCE of the cleanup discipline, not
+ * an independent claim about how rarely a session gives up. This cap is the memory-safety BACKSTOP for
+ * whatever manages to outlive that cleanup (e.g. a session that gives up dozens of times with no confirming
+ * hook ever arriving for any of them) — eviction only ever discards the OLDEST entry, oldest-first being
+ * correct precisely BECAUSE cleanup keeps the map append-only-but-current, not append-only-and-stale.
+ */
+const AMBIGUOUS_DISPATCH_CAP = 20;
 
 /**
  * A single large `pty.write` is truncated by Windows ConPTY's input buffer — observed as long
@@ -1357,7 +1403,20 @@ export type QueuedMessageKind = "warning" | "agent";
  * every other durability guarantee. undefined for every entry that never had one wired (every existing
  * caller, and any `enqueueStdin` caller that doesn't need durability) — a strict no-op, never invoked.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void };
+/**
+ * `logicalId` (card 4a0af485) is the STABLE identity of the logical content this entry carries, unified
+ * across two id spaces that used to be separate: PtyHost's own per-enqueue `id` (above — regenerated on
+ * every enqueue, including a remint) and sessions/service.ts's cross-remint `rootMsgId` (which already
+ * survives a remint, but PtyHost never saw it). `enqueueStdin` defaults `logicalId` to the entry's own
+ * freshly-minted `id` when a caller doesn't supply one — every existing caller (that never plumbs a
+ * logicalId) still gets a valid, unique-to-itself value, so this is fully additive. `enqueueDurableMessage`
+ * (sessions/service.ts) is the one caller that supplies its OWN `rootMsgId` here instead, so a value that
+ * survives across an automatic re-mint OR an auto-joined manual resend (see `hasAmbiguousMatch`) is the
+ * SAME value PtyHost tracks in `Live.ambiguousDispatches` — this is what lets a late confirmation purge a
+ * duplicate copy that arrived via a completely different dispatch (a remint, or a manager's own resend),
+ * not just a same-generation retry.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -1636,6 +1695,33 @@ interface Live {
   // session with no outstanding give-up ambiguity — i.e. almost always — so the common path stays a single
   // length check.
   giveUpConfirmQueue: number[];
+  // Card 4a0af485: epoch-ms of the CURRENT generation's FIRST Enter write (`fireEnterAndVerify`'s
+  // `attempt===1` only — never overwritten by a retry) — reset to null at the top of every fresh submit().
+  // The reference point `CONFIRMED ... latencyMs=` logging measures against; separate from `giveUpOrigin`
+  // because it must survive a give-up (the give-up branch doesn't clear it) so `requeueGiveUpOrigin` can
+  // stamp an accurate `writtenAt` onto `ambiguousDispatches` for the generation that just gave up.
+  currentGenFirstWrittenAt: number | null;
+  // Card 4a0af485: logicalId → a cheap content signature (never the full text — see the field's own
+  // memory-safety note below) for every generation that has EVER given up and is still awaiting a possible
+  // late confirmation, keyed by `QueuedMessage.logicalId` (NOT `submitGeneration` — a logicalId survives a
+  // cross-remint re-mint at sessions/service.ts, a bare generation number does not). Populated by
+  // `requeueGiveUpOrigin` for EVERY message it processes (both the kept-and-requeued branch and the
+  // budget-exhausted-to-onGiveUpExhausted branch — the latter is exactly the PARKED case whose late
+  // confirmation this exists to still catch, since PtyHost's OWN `pending` retains nothing for it past that
+  // point). Consulted by `purgeConfirmedGiveUpRequeue` (a confirming hook's `hook.prompt`, when present, is
+  // matched against every entry here BEFORE falling back to the old FIFO-position logic) and by
+  // `hasAmbiguousMatch` (sessions/service.ts's `enqueueDurableMessage` auto-join check for a manual resend
+  // with no explicit `resendOf`). MEMORY-SAFETY: bounded by COUNT (`AMBIGUOUS_DISPATCH_CAP`), never by
+  // elapsed time — a real ambiguity is rare, so this is expected to almost never approach the cap; see
+  // `capAmbiguousDispatches`. Stores `{len, hash}` (an `fnv1a32` signature, the SAME cheap hash `ptyWrite`'s
+  // own log line already uses), never the message's full text — the text itself is ALREADY retained for
+  // free wherever it still needs to be (live.pending, or the DB's `session_message_queued` row), so this
+  // map adds no new full-text retention on the most load-bearing path. A signature collision (or an
+  // engine-echo that isn't byte-identical to what Loom wrote — untested as of this card; see the pre-
+  // registered prediction at the prompt-mismatch site) is a FALSE-NEGATIVE MISS for this map, never a
+  // false-positive purge: a miss just falls through to the existing FIFO-position fallback, no worse than
+  // before this card existed.
+  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number }>;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
   // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
@@ -2797,6 +2883,8 @@ export class PtyHost {
       writeSeq: 0,
       giveUpOrigin: null,
       giveUpConfirmQueue: [],
+      currentGenFirstWrittenAt: null,
+      ambiguousDispatches: new Map(),
       activeTurnRoute: null,
       lastPromptRoute: null,
       activeTurnOwnerText: null,
@@ -2953,6 +3041,8 @@ export class PtyHost {
       writeSeq: 0,
       giveUpOrigin: null,
       giveUpConfirmQueue: [],
+      currentGenFirstWrittenAt: null,
+      ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -3029,6 +3119,8 @@ export class PtyHost {
       writeSeq: 0,
       giveUpOrigin: null,
       giveUpConfirmQueue: [],
+      currentGenFirstWrittenAt: null,
+      ambiguousDispatches: new Map(),
       activeTurnRoute: null, lastPromptRoute: null,
       activeTurnOwnerText: null, lastPromptOwnerText: null, recentOwnerTurns: [],
       activeTurnSenderId: null, lastPromptSenderId: null,
@@ -3362,7 +3454,14 @@ export class PtyHost {
           live.composerDirtyLen = 0;
           live.composerDirtyLenClearedByGen = null;
         }
-        this.purgeConfirmedGiveUpRequeue(sessionId, live, false); // card 441499ee/09e655d5 — see the method doc; UserPromptSubmit purges without advancing the queue
+        // Card 4a0af485: captured BEFORE the purge call below, which can itself delete an entry — if there
+        // was NO ambiguity at all before this hook fired, this hook can only be about the CURRENT
+        // generation (nothing else it could possibly be confirming), which is what makes the CONFIRMED log
+        // below safe. (If ambiguity DID exist, whether this hook is about the current generation or an
+        // older ambiguous one is exactly the question the purge call resolves — see its own return value.)
+        const hadNoAmbiguityBeforeThisHook = live.ambiguousDispatches.size === 0;
+        const reportedPromptForPurge = typeof hook.prompt === "string" ? hook.prompt : undefined;
+        const resolvedByContentMatch = this.purgeConfirmedGiveUpRequeue(sessionId, live, false, reportedPromptForPurge); // card 441499ee/09e655d5/4a0af485 — see the method doc; UserPromptSubmit purges without advancing the queue
         // Card b4b9b707: attribute a raw-terminal-typed line to THIS turn's ownerText. SECURITY INVARIANT
         // (see Live.pendingRawOwnerSubmit's doc): submit() clears this field FIRST, before writing a byte,
         // so a non-null value here can ONLY have originated from writeStdin — never from any Loom-issued
@@ -3431,6 +3530,18 @@ export class PtyHost {
         // honest while no data exists yet — left unedited after the data arrives, it becomes exactly the
         // false-reassurance shape (a confident claim nobody re-checks) this project keeps paying for.
         if (submitWasOutstanding) {
+          // Card 4a0af485 (DoD#4 — measure the engine-confirmation lag distribution): only when there was
+          // NO ambiguity at all before this hook fired (see `hadNoAmbiguityBeforeThisHook`'s own comment
+          // above) and the content-match purge above didn't ALREADY attribute this hook to some OTHER,
+          // older generation — otherwise this hook's `CONFIRMED` line would have already been logged there,
+          // against the generation it actually belongs to, and logging it again here against the CURRENT
+          // generation would double-count one real confirmation as two.
+          if (hadNoAmbiguityBeforeThisHook && !resolvedByContentMatch) {
+            const logicalId = live.giveUpOrigin?.[0]?.logicalId ?? null;
+            const latencyMs = live.currentGenFirstWrittenAt !== null ? Date.now() - live.currentGenFirstWrittenAt : null;
+            // eslint-disable-next-line no-console
+            console.log(`[submit] ${sessionId} CONFIRMED gen=${live.submitGeneration} logicalId=${logicalId ?? "unknown"} latencyMs=${latencyMs ?? "unknown"}`);
+          }
           if (typeof hook.prompt !== "string") {
             // SELF-DIAGNOSING (card 7114838d): whether UserPromptSubmit's hook payload actually carries the
             // prompt text at all was, until now, an UNCONFIRMED premise — Loom had simply never looked. Say
@@ -3443,27 +3554,57 @@ export class PtyHost {
               // eslint-disable-next-line no-console
               console.log(`[prompt-mismatch] ${sessionId} UserPromptSubmit carried no usable 'prompt' field (keys=${JSON.stringify(Object.keys(hook))}) — card 7114838d's premise is UNCONFIRMED for this session; the detector cannot compare and will stay silent`);
             }
-          } else if (hook.prompt !== live.lastPrompt) {
-            // live.lastPrompt is non-null here: submit() always writes it BEFORE ever setting
-            // enterConfirmed=false, and submitWasOutstanding===true means exactly that write already
-            // happened for this in-flight turn — the `?? ""` below is defensive only, never expected to fire.
-            const reported = hook.prompt;
-            const intended = live.lastPrompt ?? "";
-            let i = 0;
-            const max = Math.min(reported.length, intended.length);
-            while (i < max && reported[i] === intended[i]) i++;
-            // Show WHERE the divergence starts, not just that one exists — the known specimens all splice
-            // mid-token, so a bare "mismatch: true" would satisfy the letter of this and be useless in practice.
-            // ALSO make the log SELF-CLASSIFYING (manager review, card 7114838d): a systematic BENIGN mismatch
-            // (framing/normalization) would otherwise look identical to a real splice at a glance. `lenDelta`
-            // and the two tail lengths let a reader tell them apart without doing arithmetic — a splice makes
-            // `reported` longer by roughly a whole stranded message with a LARGE tail on both sides at the
-            // divergence point; a trailing-whitespace/normalization artifact diverges near the very END, so
-            // both tails are tiny (near 0) regardless of `lenDelta`; wholly different strings diverge at
-            // `divergesAtChar=0`.
-            const around = (s: string, at: number) => JSON.stringify(s.slice(Math.max(0, at - 20), at + 40));
+          } else {
+            // Card 4a0af485 (manager directive #3): an ALWAYS-ON happy-path diagnostic — the mismatch-only
+            // block below can go quiet for two entirely different reasons ("always matching" vs "this
+            // branch is simply never reached"), and content-matching's own tests all pass regardless of
+            // which is true because they synthesize an echo that matches BY CONSTRUCTION. Every content
+            // match in this file (hasAmbiguousMatch, purgeConfirmedGiveUpRequeue) depends on ONE premise:
+            // does the engine echo `hook.prompt` byte-identically to what Loom wrote? This line measures
+            // that premise directly, on every confirmed turn, match or mismatch alike.
+            // PREDICTION, stated before real data exists (this file's own pre-registration convention, card
+            // 7114838d): if the engine echoes verbatim on a FAST/current-generation confirmation (this is
+            // exactly that case — `submitWasOutstanding` means THIS hook confirms the CURRENT generation),
+            // there is no known mechanism by which the SAME engine would echo differently for a SLOW/late
+            // confirmation of an older, ambiguous generation — but that inference is UNCONFIRMED until real
+            // pairs land. A systematic `byteIdentical=false` here would mean the content-match mechanism can
+            // never fire in production even though every hermetic test passes — the exact "green you cannot
+            // fail" the manager flagged.
+            const sigReported = textSignature(hook.prompt);
+            const sigWritten = textSignature(live.lastPrompt ?? "");
+            // Code Review follow-up (card 4a0af485, Major 4): `byteIdentical`/the two signatures above
+            // compare against `live.lastPrompt` — the CURRENT generation's (possibly JOINED) text — which
+            // validates only HALF the premise the content-match mechanism depends on. This ALSO reports
+            // whether `hook.prompt`'s signature matches ANY entry still tracked in `Live.ambiguousDispatches`
+            // (a read-only check — resolving/purging a real match is `purgeConfirmedGiveUpRequeue`'s job,
+            // called separately from the same hook), so a reader can tell "the current generation's own echo
+            // is byte-identical" apart from "an OLDER, ambiguous generation's echo was ALSO recognized" —
+            // the second is the actual, specific premise DoD#2/#3's purge needs validated.
+            const ambiguousMatch = [...live.ambiguousDispatches.values()].some((e) => e.len === sigReported.len && e.hash === sigReported.hash);
             // eslint-disable-next-line no-console
-            console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
+            console.log(`[prompt-echo] ${sessionId} gen=${live.submitGeneration} byteIdentical=${hook.prompt === live.lastPrompt} reportedLen=${hook.prompt.length} writtenLen=${(live.lastPrompt ?? "").length} reportedHash=${sigReported.hash} writtenHash=${sigWritten.hash} ambiguousMatch=${ambiguousMatch}`);
+            if (hook.prompt !== live.lastPrompt) {
+              // live.lastPrompt is non-null here: submit() always writes it BEFORE ever setting
+              // enterConfirmed=false, and submitWasOutstanding===true means exactly that write already
+              // happened for this in-flight turn — the `?? ""` below is defensive only, never expected to fire.
+              const reported = hook.prompt;
+              const intended = live.lastPrompt ?? "";
+              let i = 0;
+              const max = Math.min(reported.length, intended.length);
+              while (i < max && reported[i] === intended[i]) i++;
+              // Show WHERE the divergence starts, not just that one exists — the known specimens all splice
+              // mid-token, so a bare "mismatch: true" would satisfy the letter of this and be useless in practice.
+              // ALSO make the log SELF-CLASSIFYING (manager review, card 7114838d): a systematic BENIGN mismatch
+              // (framing/normalization) would otherwise look identical to a real splice at a glance. `lenDelta`
+              // and the two tail lengths let a reader tell them apart without doing arithmetic — a splice makes
+              // `reported` longer by roughly a whole stranded message with a LARGE tail on both sides at the
+              // divergence point; a trailing-whitespace/normalization artifact diverges near the very END, so
+              // both tails are tiny (near 0) regardless of `lenDelta`; wholly different strings diverge at
+              // `divergesAtChar=0`.
+              const around = (s: string, at: number) => JSON.stringify(s.slice(Math.max(0, at - 20), at + 40));
+              // eslint-disable-next-line no-console
+              console.log(`[prompt-mismatch] ${sessionId} engine-reported submitted prompt DIVERGES from what Loom intended to write — possible frame splice (diagnostic only, does not fix 3ce3fa39). reportedLen=${reported.length} intendedLen=${intended.length} lenDelta=${reported.length - intended.length} divergesAtChar=${i} tailReportedLen=${reported.length - i} tailIntendedLen=${intended.length - i} reportedAround=${around(reported, i)} intendedAround=${around(intended, i)}`);
+            }
           }
         }
         this.setBusy(sessionId, true, "user-prompt-submit-hook"); // rising edge — fires for the startup-prompt arg and injected prompts alike
@@ -3591,7 +3732,12 @@ export class PtyHost {
               // whole deliverHook call (through the `finally` below) has returned control to the event
               // loop, so `finalizingTurn` is guaranteed false by the time this runs.
               const recoveryText = buildPasteRecoveryText(submittedText!);
-              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent"); }, 0);
+              // Card 4a0af485 (adopting the shared primitive for 38c687bb, the paste-recovery site named
+              // there as "carries no id in EITHER space" — that card's own recipient-side consumption
+              // check is its own scope, not this one): mint a logicalId so this re-injection is no longer
+              // untracked. Fresh, not derived from the original turn — a raw human/agent-authored turn that
+              // collapsed has no durable msgId of its own to inherit.
+              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID()); }, 0);
             }
           }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
@@ -3711,7 +3857,7 @@ export class PtyHost {
    * or re-mint through, however it happened to be delivered. See {@link QueuedMessage}'s own doc for why
    * this is a distinct hook from `onDeliver`.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void): EnqueueResult {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string): EnqueueResult {
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -3756,8 +3902,11 @@ export class PtyHost {
       // synthesized origin entry (fresh id — this message was never queued before) carrying every field a
       // held entry would have, so a give-up can restore it onto `live.pending` by identity instead of
       // discarding it after this call already returns `delivered:true`.
-      this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate",
-        [{ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) }]);
+      {
+        const id = randomUUID();
+        this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate",
+          [{ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) }]);
+      }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
       // is still false here, a future refactor deferred the set behind an await/callback — fail loud.
@@ -3781,7 +3930,10 @@ export class PtyHost {
     // — only the boot restart-replay seam passes it, to restore a give-up hold onto the freshly re-enqueued
     // entry (card 9e27f4d2). Stamped whenever the caller supplied it (even an already-expired deadline —
     // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
-    live.pending.push({ id: randomUUID(), text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) });
+    {
+      const id = randomUUID();
+      live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) });
+    }
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary), instead of leaving a `delivered:false` reader to
     // wonder whether it's a drop. `busyForMs` is only meaningful while the hold is actually busy-caused
@@ -3966,10 +4118,13 @@ export class PtyHost {
    * renders read-only. Returns [] for an unknown session. Entries are shallow-copied so a caller can't
    * mutate the live FIFO through them.
    */
-  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source" | "kind">> {
+  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source" | "kind" | "giveUpGen">> {
     // Strip the internal `onDeliver` callback — the UI only needs {id,text,source,kind}, and a function
     // must never escape the host (it isn't serializable and is meaningless outside this process).
-    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source, kind }) => ({ id, text, source, kind }));
+    // `giveUpGen` (card 4a0af485 CR follow-up #7) is additive — small, serializable debugging metadata (was
+    // this entry ever itself given up, and under which generation) that lets a test assert the REAL
+    // give-up-tag state of an entry instead of hardcoding an assumption about it.
+    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source, kind, giveUpGen }) => ({ id, text, source, kind, giveUpGen }));
   }
 
   /**
@@ -4413,6 +4568,14 @@ export class PtyHost {
       ) n++;
       drained = live.pending.splice(startIdx, n); // the leading eligible same-route (+ same-kind, unless toggled) run
     }
+    // Card 4a0af485 Major 2: a `giveUpGen`-tagged entry actually being RE-DRAINED (its hold expired or was
+    // purged elsewhere, and it's now eligible again) is a fresh, deliberate resubmission attempt — the OLD
+    // tracked ambiguity (seeded from its FIRST failed write) is moot the instant this happens. Clear it so
+    // it can never linger to wrongly `hasAmbiguousMatch`-join a LATER, unrelated same-content directive; if
+    // THIS fresh attempt also gives up, `requeueGiveUpOrigin` re-seeds it with an accurate, fresh
+    // `writtenAt`. Scoped to `giveUpGen !== undefined` only (an entry that never itself gave up, e.g. an
+    // auto-joined resend that never became ambiguous on its own, has nothing stale to clear here).
+    for (const m of drained) { if (m.giveUpGen !== undefined) live.ambiguousDispatches.delete(m.logicalId); }
     this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
@@ -4580,6 +4743,9 @@ export class PtyHost {
     // it's stale and bails instead of acting on this turn's `enterConfirmed`/`busy` state (CR-caught
     // overlap, card 9549e322 review — see the field doc on `Live.submitGeneration`).
     const gen = ++live.submitGeneration;
+    // Card 4a0af485: reset for THIS fresh generation — stamped for real by `fireEnterAndVerify`'s first
+    // attempt once the actual Enter write happens (not here — this is only the paste, not the Enter yet).
+    live.currentGenFirstWrittenAt = null;
     // Chunk the text — a long turn (e.g. a worker report) sent as one pty.write is truncated by
     // ConPTY. Close the paste + send Enter only AFTER the last chunk lands, else it submits a partial.
     const writeNewTurn = (): void => {
@@ -4790,6 +4956,11 @@ export class PtyHost {
     // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
     // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.
     const enterWrittenAt = Date.now();
+    // Card 4a0af485: stamp the ORIGINAL (attempt 1 only) write time for THIS generation — a retry
+    // (attempt>1) must never overwrite it, or a give-up's own reassert/retry writes would keep resetting
+    // the clock and understate the true confirmation lag. Read by the CONFIRMED logging below and by
+    // `requeueGiveUpOrigin` (to stamp an accurate `writtenAt` onto `ambiguousDispatches`).
+    if (attempt === 1) live.currentGenFirstWrittenAt = enterWrittenAt;
     // Card 04de8bbf's investigation: this line previously carried no generation/message id, so no
     // analysis (or future live reconciliation fix on 4a0af485) could join a submit to its true confirming
     // hook — only an approximate time-order pairing, which breaks down across a give-up cascade (several
@@ -4965,8 +5136,30 @@ export class PtyHost {
     const origin = live.giveUpOrigin;
     live.giveUpOrigin = null;
     if (!origin || origin.length === 0) return;
+    // Code Review Major finding (card 4a0af485, Major 4): seed the signature from the text ACTUALLY
+    // SUBMITTED, never each message's own individual `.text` — `drainPending` may have COALESCED several
+    // origin messages into ONE physical write (`drained.map(m => m.text).join(DRAIN_SEPARATOR)`, mirrored
+    // exactly here), and `live.lastPrompt`/the engine's echo reflect that JOINED text, not any one member's
+    // own. Seeding from the individual text meant NO stored signature could ever match a coalesced turn's
+    // real confirmation — content matching silently never fired for the default `warning`-kind drain path,
+    // nor for ANY `agent` message once the daemon-global `coalesceAgentMessages` setting is on. A
+    // single-element `origin` (the common case — one message, one turn) is unaffected: joining one element
+    // with a separator is that element itself, byte-identical to before this fix.
+    const submittedText = origin.map((m) => m.text).join(DRAIN_SEPARATOR);
+    const submittedSig = textSignature(submittedText);
     const kept: QueuedMessage[] = [];
     for (const m of origin) {
+      // Card 4a0af485: seed/refresh `ambiguousDispatches` for THIS message's logicalId regardless of which
+      // branch below runs — the budget-exhausted branch (onGiveUpExhausted, ultimately PARK at
+      // sessions/service.ts) is exactly the case whose late confirmation this map exists to still catch,
+      // since nothing survives in `live.pending` for it past that point. `writtenAt` uses
+      // `currentGenFirstWrittenAt` (this generation's own original Enter-write time, still valid here —
+      // nothing has re-submitted between the give-up firing and this call) so `latencyMs` logging is exact.
+      // EVERY member of a coalesced origin is seeded with the SAME joined signature (not its own) — see
+      // `purgeConfirmedGiveUpRequeue`'s "collect every match" handling for why that's the correct pairing,
+      // not a bug: one confirming hook legitimately confirms the whole coalesced batch at once.
+      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now() });
+      this.capAmbiguousDispatches(live);
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
         // eslint-disable-next-line no-console
@@ -4988,6 +5181,38 @@ export class PtyHost {
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: re-queued ${kept.length} message(s) at the front of pending, HELD from drain for up to ${GIVE_UP_HOLD_MS}ms pending a confirming hook — see purgeConfirmedGiveUpRequeue/isGiveUpHeld`);
     }
+  }
+
+  /** Card 4a0af485: evict the OLDEST entry until back at `AMBIGUOUS_DISPATCH_CAP` — a count bound, never a
+   *  time bound (see that constant's own doc for why). `Map` iterates insertion order, so `.next().value`
+   *  is always the oldest key. */
+  private capAmbiguousDispatches(live: Live): void {
+    while (live.ambiguousDispatches.size > AMBIGUOUS_DISPATCH_CAP) {
+      const oldest = live.ambiguousDispatches.keys().next().value;
+      if (oldest === undefined) break;
+      live.ambiguousDispatches.delete(oldest);
+    }
+  }
+
+  /**
+   * Card 4a0af485, Requirement A (manager directive: "defend at the resource, not the caller"): does
+   * `text` exactly content-match a still-ambiguous (given-up, possibly PARKED) prior dispatch for this
+   * session? Called by sessions/service.ts's `enqueueDurableMessage` BEFORE minting a fresh, self-rooted
+   * `rootMsgId` — a manual resend (a manager reacting to a "could not be confirmed delivered" notice, with
+   * no idea what msgId to cite) whose text matches gets AUTO-JOINED to the original logical chain instead
+   * of starting a disconnected one, with no caller opt-in required. Returns the matching `logicalId`, or
+   * null if there's no ambiguity for this session or nothing matches. Read-only; does not consume/delete
+   * the entry (only an actual confirming hook, via `purgeConfirmedGiveUpRequeue`, resolves it) — a caller
+   * may legitimately query this more than once before the ambiguity actually resolves.
+   */
+  hasAmbiguousMatch(sessionId: string, text: string): string | null {
+    const live = this.live.get(sessionId);
+    if (!live || live.ambiguousDispatches.size === 0) return null;
+    const sig = textSignature(text);
+    for (const [logicalId, entry] of live.ambiguousDispatches) {
+      if (entry.len === sig.len && entry.hash === sig.hash) return logicalId;
+    }
+    return null;
   }
 
   /**
@@ -5113,9 +5338,107 @@ export class PtyHost {
    * there is no data-loss risk in still advancing past `gen` even when this hook wasn't really about it;
    * leaving it un-advanced instead would leak `gen` in `giveUpConfirmQueue` forever once its entry has
    * already drained under some later identity.
+   *
+   * CARD 4a0af485 — CONTENT-MATCH RESOLUTION (closes residual (4) above, for the STILL-QUEUED population
+   * ONLY; read the scope note below before assuming more than that): everything above this paragraph is
+   * the PRE-EXISTING FIFO-POSITION fallback, UNCHANGED — it still runs verbatim whenever content matching
+   * can't apply (see below). NEW: when the caller supplies `reportedPrompt` (the confirming hook's own
+   * `hook.prompt` — only ever passed at the `UserPromptSubmit` call site; `Stop`/`StopFailure` hooks carry
+   * no such field, so that call site is untouched and always takes the fallback below, exactly per
+   * Requirement C — "no worse than today's behaviour" when a prompt is absent), THIS method first checks
+   * `reportedPrompt`'s `{len, hash}` signature against EVERY entry in `Live.ambiguousDispatches` (keyed by
+   * `logicalId`, not `submitGeneration` — see that map's own doc) and resolves ALL that match, not just the
+   * first — a coalesced drain (see `requeueGiveUpOrigin`'s own doc) seeds several member logicalIds with
+   * the IDENTICAL joined signature, and a single confirming hook legitimately confirms all of them at once.
+   * A match resolves the CORRECT generation(s) DIRECTLY, by CONTENT, instead of guessing from queue
+   * position — this is what closes residual (4): a cross-remint re-mint (or an auto-joined manual resend,
+   * see `hasAmbiguousMatch`) is now enrolled by `logicalId` regardless of whether
+   * `giveUpConfirmQueue`/`giveUpGen` ever applied to it, so a late confirmation can find and purge it too.
+   * Every purged entry ALSO fires its own `onDeliver` (Code Review CRITICAL finding, card 4a0af485) — a
+   * splice alone leaves an unresolved durable row behind for an entry that was purged before ever being
+   * handed off (the auto-joined resend, or a still-held cross-remint re-mint), permanently wedging the
+   * `worker_report done`-guard and inviting a boot/live-flip redrive to re-deliver the very duplicate this
+   * purge exists to prevent; idempotent for an entry whose hand-off (and thus `onDeliver`) already happened
+   * before it ever gave up. A MISS (no `reportedPrompt`, or none of the tracked signatures match — e.g. the
+   * map is empty, or the engine's echo isn't byte-identical to what Loom wrote; see `textSignature`'s doc)
+   * falls straight through to the untouched fallback below — a false-negative MISS here is by construction
+   * never worse than the pre-card behaviour, only ever a no-op improvement missed.
+   *
+   * ⚠️ SCOPE — WHAT THIS DOES NOT CLOSE (Requirement D; state this precisely, per this project's own
+   * "a comment is a claim" rule — a claim of "duplicates prevented" here would be exactly the false-
+   * safety-by-omission shape that rule warns about): this purge only ever removes an entry that is STILL
+   * SITTING, UNDISPATCHED, in `live.pending`. Once TWO full paste+Enter writes are ALREADY physically
+   * sitting, validly formed, in the pty FIFO — e.g. the give-up's own in-session retry already fired before
+   * this resolution could run — Loom cannot un-write either of them (the same "nothing downstream can
+   * preempt an earlier write" invariant that refuted this card's original composer-clear hypothesis), and
+   * the engine will read BOTH as genuinely separate turns once it catches up. This is an ACCEPTED residual,
+   * not a gap to rediscover: DoD#2 (a re-send cannot deliver a duplicate) is closed for the common,
+   * still-queued case a RED test can assert on — never claimed closed for the already-dispatched case.
+   * (Code Review correction: an earlier draft of this same paragraph claimed the still-queued case was
+   * closed BEFORE the `onDeliver` fix above existed — it was not: a splice with no `onDeliver` left the
+   * durable row unresolved, so a boot/live-flip redrive brought the "purged" duplicate right back. The
+   * claim above is accurate only as of the `onDeliver` fix landing alongside it, not before.)
+   * `Live.ambiguousDispatches` is ALSO cleaned up on every resolution path — the content-match purge above,
+   * the FIFO-position fallback's own purge below, and a `giveUpGen`-tagged entry's successful re-drain
+   * (`drainPending`) — never left to linger past its own resolution (Code Review Major finding): a stale
+   * entry that outlives its resolution can wrongly `hasAmbiguousMatch`-join a LATER, entirely unrelated
+   * same-content directive, and a subsequent confirming hook would then purge THAT unrelated directive
+   * instead — a real, undelivered-message LOSS, not merely a residual duplicate. See each cleanup site's
+   * own comment; this is why the map's own doc no longer claims eviction "almost never" happens under the
+   * count cap — cleaned up promptly, it commonly WILL stay near-empty, but that is a consequence of the
+   * cleanup discipline, not an independent claim about how rarely sessions give up.
    */
-  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean): void {
-    if (live.giveUpConfirmQueue.length === 0) return;
+  private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
+    if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && live.ambiguousDispatches.size > 0) {
+      const sig = textSignature(reportedPrompt);
+      // Code Reviewer follow-up (card 4a0af485, Major 4): a COALESCED drain seeds MULTIPLE member
+      // logicalIds with the SAME joined signature (see `requeueGiveUpOrigin`'s own doc) — a single hook can
+      // therefore legitimately confirm more than one logicalId at once. Collect every match instead of
+      // stopping at the first, or the other coalesced members' duplicates would survive unpurged. RESIDUAL
+      // (accepted, narrowed by Major 2's cleanup discipline below): two INDEPENDENTLY-ambiguous, never-
+      // coalesced messages that happen to carry byte-identical text would ALSO both match here and both
+      // get purged — genuinely-distinct-but-same-text is indistinguishable from coalesced-together by
+      // signature alone. Major 2's aggressive cleanup (deleting an entry the MOMENT its own ambiguity
+      // resolves, on every resolution path) keeps the window for two such entries to coexist as narrow as
+      // the underlying give-up rate allows; it does not make the collision structurally impossible.
+      const matchedLogicalIds: string[] = [];
+      for (const [logicalId, entry] of live.ambiguousDispatches) {
+        if (entry.len === sig.len && entry.hash === sig.hash) matchedLogicalIds.push(logicalId);
+      }
+      if (matchedLogicalIds.length > 0) {
+        for (const logicalId of matchedLogicalIds) {
+          const entry = live.ambiguousDispatches.get(logicalId)!;
+          const latencyMs = Date.now() - entry.writtenAt;
+          // eslint-disable-next-line no-console
+          console.log(`[submit] ${sessionId} CONFIRMED logicalId=${logicalId} latencyMs=${latencyMs} (content-matched — resolving any still-queued duplicate copies)`);
+          live.ambiguousDispatches.delete(logicalId); // Major 2: resolved — never lingers to wrongly auto-join a LATER, unrelated same-text directive
+        }
+        const matchedSet = new Set(matchedLogicalIds);
+        for (let i = live.pending.length - 1; i >= 0; i--) {
+          if (matchedSet.has(live.pending[i]!.logicalId)) {
+            const [dropped] = live.pending.splice(i, 1);
+            // eslint-disable-next-line no-console
+            console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative (content-matched) — a confirming hook proves logicalId=${dropped!.logicalId}'s turn actually started; purged a still-queued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
+            // CODE REVIEW CRITICAL FINDING (card 4a0af485): a splice alone removes the FIFO entry but never
+            // resolves its durable `session_message_queued` row — `onDeliver` is PtyHost's ONLY channel for
+            // that (see `QueuedMessage`'s own doc; `flushPending`/`drainPending` both fire it on every path
+            // that removes an entry without actually submitting it, precisely so the boot-recovery scan and
+            // the `worker_report done`-guard never re-drive it — see `flushPending`'s doc). Without this, an
+            // entry purged HERE (never yet handed off — the auto-joined resend, or a cross-remint re-mint
+            // still sitting held) leaves its durable row unresolved FOREVER (the done-guard's own query has
+            // no time bound), permanently wedging `worker_report(done)`, AND a later boot/live-flip redrive
+            // re-enqueues the exact duplicate this purge exists to prevent. Idempotent for an entry whose
+            // onDeliver ALREADY fired at its own original hand-off (gen 1's own giveUpGen-tagged requeue,
+            // say) — `resolveQueuedMessage`'s `isQueuedMessageDelivered` guard makes a repeat call a no-op.
+            dropped!.onDeliver?.("duplicate-of-confirmed-original");
+          }
+        }
+        return true; // resolved by content — do NOT also run the FIFO-position fallback below for this hook, and tell the caller not to ALSO attribute this hook to the current generation (it just proved this hook is about a DIFFERENT, older one)
+      }
+    }
+    // FALLBACK — UNCHANGED pre-card FIFO-position logic (Requirement C: identical to today whenever
+    // content matching didn't apply above).
+    if (live.giveUpConfirmQueue.length === 0) return false;
     const gen = live.giveUpConfirmQueue[0]!;
     const genIsCurrentOrAlsoAmbiguous = live.submitGeneration === gen || live.giveUpConfirmQueue.includes(live.submitGeneration);
     if (genIsCurrentOrAlsoAmbiguous) {
@@ -5124,6 +5447,12 @@ export class PtyHost {
           const [dropped] = live.pending.splice(i, 1);
           // eslint-disable-next-line no-console
           console.warn(`[submit] ${sessionId} GIVE-UP RECOVERY was a false negative — a confirming hook proves generation ${gen}'s turn actually started; purged the requeued duplicate (${dropped!.text.length} chars) instead of letting it double-deliver`);
+          // Card 4a0af485 Major 2: this generation's ambiguity is now resolved by THIS path too (not just
+          // the content-match branch above) — clear its tracked signature, or a stale entry outlives its
+          // own resolution and can wrongly auto-join / cross-purge a LATER, unrelated same-text directive.
+          // This entry's own `onDeliver` already fired at its original hand-off, before it ever gave up
+          // (see the content-match branch's own comment on this) — no additional resolution needed here.
+          live.ambiguousDispatches.delete(dropped!.logicalId);
         }
       }
     } else {
@@ -5135,6 +5464,7 @@ export class PtyHost {
     // Unconditional even when the branch above declined to delete anything (see the method doc): this only
     // discards bookkeeping, never a pending entry.
     if (turnEnded) live.giveUpConfirmQueue.shift();
+    return false; // this fallback path never definitively attributes to a SPECIFIC generation by content — see the method doc
   }
 
   /**

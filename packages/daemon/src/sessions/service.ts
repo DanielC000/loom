@@ -588,6 +588,10 @@ const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_M
  */
 const GIVE_UP_REMINT_LIMIT = Number(process.env.LOOM_GIVE_UP_REMINT_LIMIT) || 1;
 
+/** Card 4a0af485: one-time process-wide latch for `enqueueDurableMessage`'s degraded-branch warn — see
+ *  that call site's own comment for why this should be statically unreachable in production. */
+let warnedMissingHasAmbiguousMatch = false;
+
 /**
  * classifyIdleWorker's `parked-background`/`parked-gate` decay window: how long a worker's
  * self-attributed `worker_report({awaiting:"background"})`, OR (card 8e0bd254) a live `PendingOpRegistry`
@@ -3242,6 +3246,7 @@ export class SessionService {
           this.resolveQueuedMessage(msgId, { recipientId, reason });
         }, undefined, kind, undefined, undefined, undefined, undefined, giveUpHeldUntil,
         () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
+        rootMsgId, // logicalId (card 4a0af485 CR follow-up #6) — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
       );
       if (r.delivered || r.position !== undefined) return "reEnqueued";
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
@@ -4660,16 +4665,22 @@ export class SessionService {
    * A `delivered:false` result reports honestly via `enqueueDurableMessage`'s additive fields
    * (see {@link EnqueueResult}, plus `msgId`) — a held message is a SUCCESS (`queued:true`, will land
    * at `landsAt`), distinct from `reason:"session-dead"` (a real drop).
+   *
+   * `resendOf` (card 4a0af485, Requirement A) is an OPTIONAL explicit disambiguator: a manager who knows
+   * the exact `msgId`/`rootMsgId` of an earlier directive this message is RE-SENDING can cite it to force
+   * the join. It is NOT the mechanism, only an override — `enqueueDurableMessage` ALSO auto-detects the
+   * common case (a resend with no id at all, content-matched against a still-ambiguous prior dispatch) via
+   * `hasAmbiguousMatch`, so the safety does not depend on a manager remembering to pass this.
    */
   messageWorker(
-    managerSessionId: string, workerSessionId: string, text: string,
+    managerSessionId: string, workerSessionId: string, text: string, resendOf?: string,
   ): EnqueueResult & { msgId: string } {
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     const framed = `[loom:from-manager]\n${text}`;
     // Durable-tracked: if the worker is busy the message is HELD in its FIFO and persisted as
     // `session_message_queued` so a sender death / daemon restart can't drop it (card 2ca18433).
-    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null });
+    const r = this.enqueueDurableMessage(workerSessionId, framed, { sender: managerSessionId, taskId: worker.taskId ?? null, resendOf });
     // Card 343441bd: `msgId` (always minted — see enqueueDurableMessage's doc) lets the staleDirective
     // projection find THIS directive later. `turnSeqAtDelivery` is stamped HERE only on the immediate-
     // delivery path (r.delivered — `worker.turnSeq` was already read above and submit() itself never
@@ -4953,12 +4964,45 @@ export class SessionService {
    */
   private enqueueDurableMessage(
     recipientId: string, framedText: string,
-    ctx: { sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; chainDepth?: number; giveUpHeldUntil?: number },
+    ctx: { sender: string; taskId?: string | null; kind?: QueuedMessageKind; rootMsgId?: string; resendOf?: string; chainDepth?: number; giveUpHeldUntil?: number },
   ): EnqueueResult & { msgId: string } {
     const msgId = randomUUID();
     const kind: QueuedMessageKind = ctx.kind ?? "agent";
     const chainDepth = ctx.chainDepth ?? 0;
-    const rootMsgId = ctx.rootMsgId ?? msgId; // self-root on a fresh (non-remint) dispatch
+    // Card 4a0af485, Requirement A: JOIN this dispatch to an existing logical chain instead of self-
+    // rooting, in priority order — an explicit `ctx.rootMsgId` (an automatic system re-mint, already
+    // continuing its own chain) or `ctx.resendOf` (a caller who KNOWS the id to cite) always wins over the
+    // INFERRED join below. `hasAmbiguousMatch` is the "defend at the resource, not the caller" half: a
+    // manual resend with NO id at all (a manager reacting to a scary PARKED notice, in no state to go
+    // thread an id through) still gets joined automatically, purely because its TEXT matches a still-
+    // ambiguous prior dispatch to this SAME recipient — no caller opt-in required. A miss (nothing
+    // ambiguous, or no match) self-roots exactly as before this card.
+    // Defensive `typeof` guard (NOT just an explicit-id check). Code Review correction: an earlier draft of
+    // this comment called `this.pty` "a narrow interface in production" — WRONG; it is typed as the
+    // CONCRETE `PtyHost` class (`private pty: PtyHost`), so TypeScript statically GUARANTEES this method
+    // exists on every production instance — the degraded branch below is statically UNREACHABLE in
+    // production, by nominal typing, not merely unlikely. The guard exists ONLY because this codebase's
+    // test suite is riddled with hermetic PtyStub fakes (17+ files, plain untyped .mjs) that duck-type only
+    // the subset of the contract their own scenario needs — an unguarded call would throw "not a function"
+    // on every one of them the instant it exercises this default (no-rootMsgId, no-resendOf) path, which is
+    // nearly every existing call site in every existing test. Missing the method degrades to exactly the
+    // pre-card self-rooting behavior — never a regression, never a hard dependency a stub must opt into.
+    // The one-time warn below exists so a REAL production gap (should this typing guarantee ever actually
+    // break — a future refactor widening `this.pty`'s type to an interface, say) is loud rather than a
+    // silent, permanent feature degradation nobody notices.
+    if (typeof this.pty.hasAmbiguousMatch !== "function" && !warnedMissingHasAmbiguousMatch) {
+      warnedMissingHasAmbiguousMatch = true;
+      // eslint-disable-next-line no-console
+      console.warn(`[give-up] this.pty does not implement hasAmbiguousMatch — auto-join (card 4a0af485, Requirement A) is DISABLED for every dispatch from this process; a manual resend after a give-up/PARKED notice can now duplicate. Expected only in a test harness using a hermetic PtyStub, never in production (this.pty is statically typed as the concrete PtyHost).`);
+    }
+    const autoJoinedId = (ctx.rootMsgId || ctx.resendOf || typeof this.pty.hasAmbiguousMatch !== "function")
+      ? undefined
+      : this.pty.hasAmbiguousMatch(recipientId, framedText);
+    if (autoJoinedId) {
+      // eslint-disable-next-line no-console
+      console.log(`[give-up] ${recipientId} a fresh dispatch's content auto-matched still-ambiguous logicalId=${autoJoinedId} — joining that chain instead of self-rooting a disconnected one`);
+    }
+    const rootMsgId = ctx.rootMsgId ?? ctx.resendOf ?? autoJoinedId ?? msgId; // self-root only when nothing above applies
     // onDeliver carries an OPTIONAL reason: the normal drain/pull paths fire it with no arg (a plain
     // delivery); a flush/SUPERSEDE caller (redirectWorker) passes "superseded" so the resolution event
     // records WHY the durable record closed without being delivered as a turn.
@@ -4966,6 +5010,7 @@ export class SessionService {
       recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }),
       undefined, kind, undefined, undefined, undefined, undefined, ctx.giveUpHeldUntil,
       () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
+      rootMsgId, // logicalId (card 4a0af485) — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
     );
     if (!r.delivered) {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
@@ -5074,10 +5119,23 @@ export class SessionService {
     // ("system")` is still falsy regardless — the sentinel has no session ROW, live or not.
     const senderSession = this.db.getSession(sender);
     if (senderSession) {
+      // Card 4a0af485 (DoD#1 — honest 3-state reporting): the OLD text here asserted "could not be
+      // confirmed delivered" and recommended the one action ("re-send it") that causes a duplicate — a
+      // FALSE NEGATIVE, since PARKED means Loom's OWN retry budget is exhausted, never that the engine
+      // proved non-delivery. The engine can confirm a write MINUTES late under load (232s measured, no
+      // known ceiling) — the original write may still be sitting validly queued, about to land. State the
+      // real three-way uncertainty (confirmed / unconfirmed-pending / dropped) honestly instead of
+      // asserting the middle case as if it were the last: PARKED ⇒ Loom stopped its OWN automatic retries,
+      // NOT proof of non-delivery. A resend of the IDENTICAL content is now safe by construction — see
+      // `hasAmbiguousMatch`/`enqueueDurableMessage`'s auto-join (card 4a0af485) — so this notice can
+      // recommend it without recommending a duplicate.
       const note =
         `[loom:redelivery-parked] a message you sent to ${recipientId.slice(0, 8)} (head: ${JSON.stringify(text.slice(0, 60))}) ` +
-        `could not be confirmed delivered after ${GIVE_UP_REMINT_LIMIT} redelivery attempts and has been PARKED — Loom will not ` +
-        `retry it automatically. Re-send it if it's still needed, or check on ${recipientId.slice(0, 8)}'s session state.`;
+        `has been PARKED after ${GIVE_UP_REMINT_LIMIT} redelivery attempts — Loom has STOPPED retrying it automatically. This is ` +
+        `NOT proof it was never received: the engine can confirm a write minutes late under load, so the original may still land ` +
+        `on its own. Check ${recipientId.slice(0, 8)}'s transcript/state before assuming it's gone. If you do resend the SAME ` +
+        `content, Loom recognizes and joins it to this original automatically — no duplicate turn; a reworded resend is treated ` +
+        `as genuinely new.`;
       // CR follow-up (card ccb407eb): this notice is ITSELF a one-shot terminal signal — by the exact
       // criterion this card applied to the six settle-nudge sites above, it must not be a bare enqueueStdin
       // a give-up could silently swallow one level up. Routed through enqueueDurableMessage exactly like
