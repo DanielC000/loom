@@ -124,11 +124,13 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      `elapsedMs` — WITHOUT starting anything. It only ever shows YOU your own op; there's nothing to
      configure. Re-calling `run_gate` itself is a real ACTION, not a free status check: it can attach to
      your still-in-flight run and hand back a result you must then discard (`staleAgainstWorktree`) —
-     wasting a turn to learn what `gate_status` would have told you for free. Compare the `elapsedMs` it
-     reports against how long this project's gate normally takes before concluding it's wedged; a long
-     wait behind a shared concurrency cap is routine, not proof of a stall. This is a CHECK, not a
-     replacement for the nudge — don't poll it on a timer; use it when you're genuinely deciding whether to
-     keep waiting or escalate.
+     wasting a turn to learn what `gate_status` would have told you for free. `elapsedMs` is scoped to
+     whichever phase `state` currently reports — time WAITING while `queued`, re-basing to time RUNNING the
+     moment it flips to `running` — so read `state` first: a large `elapsedMs` while still `queued` is queue
+     depth, not a stuck run. Compare it against how long this project's gate normally takes in that SAME
+     phase before concluding it's wedged; a long wait behind a shared concurrency cap is routine, not proof
+     of a stall. This is a CHECK, not a replacement for the nudge — don't poll it on a timer; use it when
+     you're genuinely deciding whether to keep waiting or escalate.
    - **If it reports your project has no gate command configured**, only then fall back to running your
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report

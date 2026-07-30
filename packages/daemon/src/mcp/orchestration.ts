@@ -68,6 +68,15 @@ const STALE_DIRECTIVE_TURN_THRESHOLD = 3;
  * and why there's no live output tail). `opId` accepts a full id or an unambiguous 8-char prefix (card
  * 225bc7bd — the exact-match-only lookup this replaced silently reported a live op as `not_found` for a
  * valid prefix, indistinguishable from a genuinely settled/nonexistent op).
+ *
+ * `elapsedMs` here and `gate_queue`'s `since`/`elapsedMs` read the SAME underlying value
+ * (`GateSnapshotEntry.since`, set by `GateSemaphore.snapshot`'s `toEntry`) — both are PHASE-SCOPED, not a
+ * fixed admission clock: `enqueuedAt` while `queued`, RE-BASING to `startedAt` the moment the entry is
+ * admitted. Card 5450ed3e (Codescape peer mgr #5, corroborated from Loom's own reads of the same
+ * transition): a reader who assumes `since`/`elapsedMs` measure time-since-admission will misread a
+ * deeply-queued entry's large `elapsedMs` as "this has been running a long time" when it hasn't started —
+ * the exact wrong-direction misread that invites cancelling a healthy gate. Both tools document this
+ * explicitly in their descriptions below; keep them in sync if either changes.
  */
 function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string): void {
   const forWorker = scopeSessionId != null;
@@ -86,10 +95,14 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`[loom:gate-failed]` nudge for the actual outcome), \"never existed\", AND \"belongs to another " +
       "session\" — this tool never reports a terminal result itself, only live run state. `ambiguous` (with " +
       "`error` naming the matching opIds, among YOUR OWN ops only) means your prefix matches more than one " +
-      "of your own live ops — pass more characters or the full id. A large `elapsedMs` alone doesn't mean " +
-      "you're stuck — compare it against how long this project's gate normally takes before concluding it's " +
-      "wedged and re-firing. Still not a replacement for the completion nudge — check this when you're " +
-      "unsure whether to keep waiting, don't poll it on a timer."
+      "of your own live ops — pass more characters or the full id. `elapsedMs` is PHASE-SCOPED to `state`, " +
+      "the SAME way `gate_queue`'s `since`/`elapsedMs` are (this reads the identical live entry): while " +
+      "`state` is `queued` it measures time WAITING (since enqueue); the moment it flips to `running` the " +
+      "SAME field RE-BASES to admission time and measures time RUNNING instead. So a large `elapsedMs` alone " +
+      "doesn't mean you're stuck — check `state` first: a big number while still `queued` is queue depth, not " +
+      "a hung run; compare it against how long this project's gate normally takes (in whichever phase `state` " +
+      "reports) before concluding it's wedged and re-firing. Still not a replacement for the completion " +
+      "nudge — check this when you're unsure whether to keep waiting, don't poll it on a timer."
     : "Read-only LIVE status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
       "{status:\"pending\"} response returned — lets you check whether that run is still queued behind the " +
       "daemon's gate concurrency cap or actually executing, and for how long, WITHOUT waiting for the " +
@@ -100,9 +113,13 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "`[loom:merge-failed]` nudge for the actual outcome) and \"never existed\" — this tool never reports a " +
       "terminal result itself, only live run state. `ambiguous` (with `error` naming the matching opIds) " +
       "means your prefix matches more than one LIVE op — pass more characters or the full id; it is a " +
-      "DISTINCT outcome from `not_found`, never fold the two together. Use this when a merge has been " +
-      "pending for a long time and you want to confirm it's genuinely still working (a large elapsedMs " +
-      "alone doesn't mean it's stuck — check it against how long the project's gate normally takes) rather " +
+      "DISTINCT outcome from `not_found`, never fold the two together. `elapsedMs` is PHASE-SCOPED to " +
+      "`state`, the SAME way `gate_queue`'s `since`/`elapsedMs` are (this reads the identical live entry): " +
+      "while `state` is `queued` it measures time WAITING (since enqueue); the moment it flips to `running` " +
+      "the SAME field RE-BASES to admission time and measures time RUNNING instead — never read a `queued` " +
+      "entry's `elapsedMs` as run time. Use this when a merge has been pending for a long time and you want " +
+      "to confirm it's genuinely still working (a large `elapsedMs` alone doesn't mean it's stuck — check " +
+      "`state` first, then compare against how long the project's gate normally takes IN THAT PHASE) rather " +
       "than concluding it's wedged.";
   server.registerTool(
     "gate_status",
@@ -2033,8 +2050,16 @@ export class OrchestrationMcpRouter {
           "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
           "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
           "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, queuePosition} — " +
-          "`opId` is the SAME id `gate_status(opId)` accepts (full or an unambiguous 8-char prefix), so you " +
-          "can chain into a live per-op read if you want one. An entry belonging to YOUR OWN project ALSO " +
+          "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
+          "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
+          "SAME entry RE-BASES to admission time and they measure time RUNNING instead. Don't read a `queued` " +
+          "entry's `elapsedMs` as run time — a deeply-queued op can show a large `elapsedMs` while it has done " +
+          "zero seconds of actual work, and mistaking that for a hung run is exactly backwards: it lands " +
+          "hardest on the op that's MOST expensive to wrongly cancel. A large `elapsedMs` on a `queued` entry " +
+          "is evidence of queue depth/contention, not of a wedged run; only a `running` entry's `elapsedMs` " +
+          "is evidence about run duration. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
+          "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
+          "belonging to YOUR OWN project ALSO " +
           "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
           "DIFFERENT project omits those three fields entirely (never redacted-to-null) — named only by " +
           "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +

@@ -478,9 +478,14 @@ mid-report — before sending anything.
      with the same `workerSessionId` (or reading `worker_list`'s `pendingMerge` field) is a safe fallback if
      you need the answer sooner, but don't fall back to `git log` guesswork while waiting.
    - **A gate that never resolves is a defect to diagnose, never a license to merge around it.** Silence
-     alone is not evidence the gate is "wedged" or "flaky, not your code" — check the elapsed time (or a
-     `gate_status` read tool, if your platform exposes one) before concluding that, and never hand-roll a
-     squash-merge past a gate that hasn't reported a terminal signal.
+     alone is not evidence the gate is "wedged" or "flaky, not your code" — check its live state (or a
+     `gate_status`/`gate_queue` read tool, if your platform exposes one) before concluding that, and never
+     hand-roll a squash-merge past a gate that hasn't reported a terminal signal. **If that live state
+     carries a phase (queued vs. running) alongside an elapsed time, the elapsed figure is scoped to
+     WHICHEVER phase it's currently in, not a fixed clock since it was first requested** — a large elapsed
+     time on a still-QUEUED entry means it has been waiting a long time, not running a long time; only a
+     RUNNING entry's elapsed time is evidence about how long the actual gate command has been executing.
+     Read the phase before drawing a conclusion from the number.
    - **Can't tell healthy contention from a leaked slot? Read the whole queue, don't guess.** `gate_status`
      only ever answers "what is MY op doing" — it has no view of the daemon-wide picture. If your platform
      exposes a `gate_queue` read tool, call it: ONE read returns the resolved concurrency cap plus every
