@@ -115,6 +115,28 @@ const SPEC = {
 };
 const text = (s) => `${s.title}\n${s.body}`;
 
+// Card abdaecda's legibility fixtures — a WEAK-ONLY match (shared file:line + camelCase symbol, no
+// strong session-id/branch) mirroring the real 166e3536/f3917f96 absurd-specimen shape, and a STRONG
+// match (shared UUID) as the negative control for the weak-only caveat.
+const WEAKONLY_A = {
+  title: "chore(examples): illustrate liveFleetResumeSet usage patterns",
+  body: "Worked example only — queries liveFleetResumeSet via service.ts:490 as a sample call site, " +
+    "unrelated to any specific incident.",
+};
+const WEAKONLY_B = {
+  title: "fix(sessions): correct an unrelated liveFleetResumeSet edge case",
+  body: "Distinct bug: liveFleetResumeSet mishandles a corner case at service.ts:490 in an entirely " +
+    "different code path.",
+};
+const STRONG_A = {
+  title: "fix(x): alpha report for a live-incident session",
+  body: "Session abcdef12-3456-7890-abcd-ef1234567890 hit an issue.",
+};
+const STRONG_B = {
+  title: "fix(x): beta report for the same live-incident session",
+  body: "Same session id abcdef12-3456-7890-abcd-ef1234567890 confirmed independently.",
+};
+
 try {
   // ===================== GATE 2 — POSITIVE CONTROL on the real specimens =====================
   const m1 = findSuspectedDuplicate([{ id: "dde0ce24", ...SPEC.p1b }], text(SPEC.p1a));
@@ -226,6 +248,17 @@ try {
   const manyMatch = findSuspectedDuplicate([{ id: "many", title: "many", body: manySharedWeak }], `candidate\n${manySharedWeak}`);
   check("(n8) sharedIdentifiers is bounded, not a raw dump of every shared token",
     manyMatch !== null && manyMatch.sharedIdentifiers.length <= 9 && manyMatch.sharedIdentifiers.some((s) => s.startsWith("and ")));
+
+  // ===================== card abdaecda — strongMatch/weakCategories legibility fields =====================
+  const weakOnlyMatch = findSuspectedDuplicate([{ id: "weakOnlyExisting", ...WEAKONLY_A }], text(WEAKONLY_B));
+  check("(abdaecda, pos) a weak-only match (shared file:line + camelCase symbol, no strong id) reports strongMatch:false",
+    weakOnlyMatch !== null && weakOnlyMatch.strongMatch === false);
+  check("(abdaecda, pos) ...and names the contributing weak categories",
+    weakOnlyMatch !== null && weakOnlyMatch.weakCategories.includes("camel_case") && weakOnlyMatch.weakCategories.includes("file_line"));
+
+  const strongFieldMatch = findSuspectedDuplicate([{ id: "strongExisting", ...STRONG_A }], text(STRONG_B));
+  check("(abdaecda, neg control) a strong (shared UUID) match reports strongMatch:true",
+    strongFieldMatch !== null && strongFieldMatch.strongMatch === true);
 } catch (e) {
   check(`pure-function section threw: ${e.stack}`, false);
 }
@@ -307,6 +340,25 @@ try {
   const negSecond = await call("tasks_create", { title: SPEC.neg2.title, body: SPEC.neg2.body });
   check("(tool, neg) two genuinely distinct cards with similar wording BOTH create with no refusal",
     !negFirst.error && !negSecond.error && negFirst.id !== negSecond.id);
+
+  // ===================== card abdaecda — refusal message names both titles + the weak-only caveat =====================
+  const weakOnlyFirst = await call("tasks_create", { title: WEAKONLY_A.title, body: WEAKONLY_A.body });
+  check("(abdaecda) weak-only fixture's first card creates normally", !weakOnlyFirst.error && !!weakOnlyFirst.id);
+  const weakOnlyRefused = await call("tasks_create", { title: WEAKONLY_B.title, body: WEAKONLY_B.body });
+  check("(abdaecda) weak-only match is refused naming BOTH card titles",
+    typeof weakOnlyRefused.error === "string"
+      && weakOnlyRefused.error.includes(WEAKONLY_B.title) && weakOnlyRefused.error.includes(WEAKONLY_A.title));
+  check("(abdaecda) weak-only refusal carries the coincidental-collision caveat",
+    typeof weakOnlyRefused.error === "string" && weakOnlyRefused.error.includes("coincidentally collide"));
+
+  const strongFirst = await call("tasks_create", { title: STRONG_A.title, body: STRONG_A.body });
+  check("(abdaecda) strong fixture's first card creates normally", !strongFirst.error && !!strongFirst.id);
+  const strongRefused = await call("tasks_create", { title: STRONG_B.title, body: STRONG_B.body });
+  check("(abdaecda) strong match is refused naming both card titles",
+    typeof strongRefused.error === "string"
+      && strongRefused.error.includes(STRONG_B.title) && strongRefused.error.includes(STRONG_A.title));
+  check("(abdaecda, neg control) a strong match's refusal does NOT carry the weak-only caveat",
+    typeof strongRefused.error === "string" && !strongRefused.error.includes("coincidentally collide"));
 
   await client.close();
   db.close();

@@ -458,8 +458,17 @@ export function createProjectTaskChecked(
     const candidateText = `${input.title}\n${body}`;
     const suspect = findSuspectedDuplicate(db.listTasks(projectId), candidateText);
     if (suspect) {
+      // Legibility, not narrowing (card abdaecda) — a match that qualified on weak evidence alone (no
+      // strong session-id/branch hit) is exactly the shape that can coincidentally collide on a shared
+      // code landmark or naming convention between substantively unrelated cards (see
+      // findSuspectedDuplicate's SECOND DISCLOSED LIMITATION). Naming that explicitly, alongside BOTH
+      // card titles, makes an absurd flag dismissible in one read instead of a mysterious "shared: X, Y".
+      const weakOnlyCaveat = suspect.strongMatch
+        ? ""
+        : ` — matched only on ${suspect.weakCategories.join("+")} (a shared code location and/or naming ` +
+          `convention can coincidentally collide between unrelated cards; verify before assuming duplication)`;
       return {
-        error: `suspected duplicate of task ${suspect.taskId} ("${suspect.title}") — shared: ` +
+        error: `"${input.title}" suspected duplicate of task ${suspect.taskId} ("${suspect.title}")${weakOnlyCaveat} — shared: ` +
           `${suspect.sharedIdentifiers.join(", ")}. Pass allowDuplicate:true, or supersedes/relatedTo:"${suspect.taskId}" to create anyway.`,
       };
     }

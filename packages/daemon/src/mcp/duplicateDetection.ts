@@ -111,6 +111,18 @@ export function extractIdentifiers(text: string): Set<string> {
 export interface DuplicateMatch {
   taskId: string;
   title: string;
+  /** True when a STRONG identifier (session id, branch — near-impossible to share by coincidence)
+   *  contributed. False means the match qualified on WEAK evidence alone (>= {@link MIN_WEAK_CATEGORIES}
+   *  shared categories, e.g. a `file:line` landmark plus a naming convention) — the shape the module
+   *  doc's second disclosed limitation shows CAN coincidentally collide between substantively unrelated
+   *  cards. Surfaced so the caller can flag a weak-only match as more skeptically read. */
+  strongMatch: boolean;
+  /** Which WEAK categories (see {@link WEAK_CATEGORIES}) contributed evidence, e.g. `["file_line",
+   *  "camel_case"]` — named so a reader can see AT A GLANCE whether the shared evidence is a code
+   *  location / naming convention (the coincidental-collision-prone shape) rather than something more
+   *  incident-specific. Empty when the match qualified on strong evidence with no weak category also
+   *  clearing the rarity bar. */
+  weakCategories: string[];
   /** The rare identifiers this task shares with the candidate — surfaced in the refusal so the
    *  caller can see WHY it was flagged, not just that it was. Bounded — see the caller. */
   sharedIdentifiers: string[];
@@ -181,6 +193,29 @@ export interface DuplicateMatch {
  * carry this same scoping (draw count, pool size, true-positive-separated) — a bare percentage on its own
  * is exactly the kind of claim this project has separately catalogued going stale by re-citation.
  *
+ * ⚠️ NEITHER disclosed class above is "fixed" by card abdaecda either. Re-measured against the SAME
+ * real board (5 seeded 40-card draws, seeds 1001/2002/3003/4004/5005, pooled n=200, drawn 2026-07-30):
+ * 10.0% pooled raw-flag rate, per-draw range 5.0%–15.0% — corroborates the 0ef0270b measurement's
+ * 8.5% / 2.5%–15% rather than replacing it (a different random draw off a board that grew ~1687→~1693
+ * cards in the interim). Of the 20 flags: 1 was an actual known duplicate (true positive — `aec00d02`,
+ * literally titled "duplicate of b8de5876"), 2 were the SAME known absurd specimen drawn in both
+ * directions (`166e3536`↔`f3917f96`, unchanged — see the table on card abdaecda), and the remaining 17
+ * were near-miss (genuinely related work, e.g. a build card sharing its branch id with its own Code
+ * Review companion card — a recurring, EXPECTED pattern on this board, not a defect). ⛔ DELIBERATELY
+ * NOT narrowed: card abdaecda forbids narrowing the weak-category bar on the strength of 2 observations
+ * against a measured 2.5%–15% per-draw range — a false negative here is silent and permanent (it can
+ * kill a TRUE positive, including this detector's own founding specimen) while a false positive costs
+ * one `allowDuplicate` retry; the asymmetry favours over-firing. **What DID change: legibility, not
+ * detection.** A match
+ * that qualifies on WEAK evidence alone (no STRONG session-id/branch hit — exactly the shape both
+ * absurd specimens are) is now surfaced to the caller as `strongMatch:false` with the contributing
+ * `weakCategories` named (e.g. `["file_line", "camel_case"]`), and the `tasks_create` refusal message
+ * (mcp/tasks.ts) names BOTH card titles plus, for a weak-only match, an explicit caveat that the shared
+ * evidence may be a coincidentally-collided code landmark or naming convention rather than a genuine
+ * duplicate. An absurd flag is now dismissible in one read instead of a mysterious "shared: X, Y" — the
+ * SAME mitigation the module doc already prescribed for the first disclosed class (a legible refusal
+ * naming the wrong-but-related counterpart) extended to cover the second.
+ *
  * Returns the single BEST-qualifying match — ranked by strong-hit count first, then weak-category
  * count, then total weak token count as a final tie-break — or null if none clears the bar. Never
  * mutates, never reads a DB directly — the caller supplies the candidate corpus (typically
@@ -243,7 +278,7 @@ export function findSuspectedDuplicate(
     }
   }
 
-  let best: { taskId: string; strong: string[]; weakCategoryCount: number; weakTokens: string[] } | null = null;
+  let best: { taskId: string; strong: string[]; weakCategoryCount: number; weakCategoryNames: string[]; weakTokens: string[] } | null = null;
   for (const [taskId, { strong, weakByCategory }] of byTask) {
     const weakCategoryCount = weakByCategory.size;
     if (strong.length === 0 && weakCategoryCount < MIN_WEAK_CATEGORIES) continue; // doesn't clear the bar
@@ -252,7 +287,7 @@ export function findSuspectedDuplicate(
       || strong.length > best.strong.length
       || (strong.length === best.strong.length && weakCategoryCount > best.weakCategoryCount)
       || (strong.length === best.strong.length && weakCategoryCount === best.weakCategoryCount && weakTokens.length > best.weakTokens.length);
-    if (better) best = { taskId, strong, weakCategoryCount, weakTokens };
+    if (better) best = { taskId, strong, weakCategoryCount, weakCategoryNames: [...weakByCategory.keys()], weakTokens };
   }
   if (!best) return null;
   const task = extracted.find((t) => t.id === best!.taskId);
@@ -261,5 +296,11 @@ export function findSuspectedDuplicate(
   const sharedIdentifiers = allShared.length > MAX_REPORTED
     ? [...allShared.slice(0, MAX_REPORTED), `and ${allShared.length - MAX_REPORTED} more`]
     : allShared;
-  return { taskId: best.taskId, title: task?.title ?? "", sharedIdentifiers };
+  return {
+    taskId: best.taskId,
+    title: task?.title ?? "",
+    strongMatch: best.strong.length > 0,
+    weakCategories: best.weakCategoryNames,
+    sharedIdentifiers,
+  };
 }
