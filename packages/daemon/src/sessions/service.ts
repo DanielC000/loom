@@ -6353,8 +6353,16 @@ export class SessionService {
         framed += ` | auto-retired (${why}, 0 commits ahead — its concurrency slot is freed, no worker_stop needed)`;
       }
       // kind:"agent" — a worker→manager report is a distinct directive the manager must individually
-      // process, never mashed with a sibling worker's report into one wall of text.
-      const r = this.pty.enqueueStdin(managerSessionId, framed, "system", undefined, undefined, "agent");
+      // process, never mashed with a sibling worker's report into one wall of text. DURABLE (card 829f4f8f,
+      // the seventh site of ccb407eb's class the original enumeration missed): a bare `pty.enqueueStdin`
+      // here meant a report held behind a busy/wedged manager, or one issued into the restart window,
+      // lived ONLY in the in-memory FIFO — a daemon restart before the manager's next turn boundary silently
+      // dropped it, with no durable record for the boot scan to redrive. `enqueueDurableMessage` persists a
+      // `session_message_queued` record on the held path and survives exactly that gap, matching the other
+      // six converted sites. `sender: workerSessionId` (this report's real origin, not the "system" sentinel
+      // the one-shot settle-nudge callers use) lets recoverUndeliveredMessagesOnBoot surface a still-stuck
+      // report to the WORKER if its manager never comes back live.
+      const r = this.enqueueDurableMessage(managerSessionId, framed, { sender: workerSessionId, taskId, kind: "agent" });
       deliveryStatus = this.deliveryStatusFor(r);
       // STRAND BACKSTOP (incident 22a44352, broadened by card fc9a27d5): if the report reached no LIVE
       // FIFO at all — `delivered:false` with NO queue position (the manager's pty isn't alive: it idle-
