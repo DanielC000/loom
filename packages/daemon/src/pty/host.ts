@@ -5316,8 +5316,13 @@ export class PtyHost {
       this.capAmbiguousDispatches(live);
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
+        // Card d4f60cc1: this line is now durably captured (daemon stdout is teed to a rotated file), so
+        // it can no longer carry message CONTENT the way a console-only line safely could — log a
+        // content-free signature (len+hash, same shape `textSignature` already gives prompt-echo) instead
+        // of a text preview.
+        const sig = textSignature(m.text);
         // eslint-disable-next-line no-console
-        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${m.text.length} chars, head=${JSON.stringify(m.text.slice(0, 60))}) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — handing off to onGiveUpExhausted (${m.onGiveUpExhausted ? "wired" : "none — non-durable entry, nothing further to preserve"}) instead of a bare drop`);
+        console.error(`[submit] ${sessionId} GIVE-UP RECOVERY: message ${m.id} (${sig.len} chars, hash=${sig.hash}) exhausted its requeue budget (${GIVE_UP_REQUEUE_LIMIT}) after repeated give-ups — handing off to onGiveUpExhausted (${m.onGiveUpExhausted ? "wired" : "none — non-durable entry, nothing further to preserve"}) instead of a bare drop`);
         // CR follow-up (card ccb407eb, finding [7]): a give-up-exhausted fault must never break GIVE-UP
         // RECOVERY itself, but swallowing it SILENTLY would also eat a deliberately-loud M1/M2 invariant
         // throw from deep inside handleGiveUpExhausted's re-mint path (enqueueStdin → submit). Log it.
