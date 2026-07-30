@@ -7,7 +7,7 @@ import { resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import type { WakeService } from "../orchestration/wake.js";
 import {
-  listProjectTasks, getProjectTask, createProjectTask, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
+  listProjectTasks, getProjectTask, createProjectTaskChecked, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP,
   listProjectTaskRequests, getProjectTaskRequest,
 } from "./tasks.js";
 import { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } from "./memory.js";
@@ -219,10 +219,13 @@ export class TaskMcpRouter {
       server.registerTool(
         "tasks_create",
         {
-          description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2. Optional repoKey (multi-repo epic) targets one of this project's registered `repos` — omit (or pass \"primary\") for the project's primary repo; an unknown key is rejected with {error}.",
-          inputSchema: strictShape({ title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional(), repoKey: z.string().nullable().optional() }),
+          description: "Create a task on this project's board. priority p0|p1|p2|p3 (low number = higher priority), default p2. Optional repoKey (multi-repo epic) targets one of this project's registered `repos` — omit (or pass \"primary\") for the project's primary repo; an unknown key is rejected with {error}. CROSS-CHANNEL DUPLICATE CHECK (card 5b221bf2): if this card's title+body shares rare identifiers (a session id, a branch, a named error constant, a file:line, a code symbol — NOT prose/title similarity) with an existing card on this board, the create is REFUSED with {error} naming the suspected counterpart — never a silent drop or auto-merge. Pass allowDuplicate:true to create anyway, or supersedes/relatedTo:\"<taskId>\" (full id or unambiguous prefix) to both bypass the refusal AND note the relationship on the new card's body.",
+          inputSchema: strictShape({
+            title: z.string(), body: z.string().optional(), columnKey: z.string().optional(), priority: prioritySchema.optional(), repoKey: z.string().nullable().optional(),
+            allowDuplicate: z.boolean().optional(), supersedes: z.string().optional(), relatedTo: z.string().optional(),
+          }),
         },
-        async (args) => ok(createProjectTask(db, projectId, args)),
+        async ({ allowDuplicate, supersedes, relatedTo, ...args }) => ok(createProjectTaskChecked(db, projectId, args, { allowDuplicate, supersedes, relatedTo })),
       );
       server.registerTool(
         "tasks_update",

@@ -8,6 +8,7 @@ import { getTaskMergedInfo, type MergedCommitInfo } from "../git/worktrees.js";
 import { resolveRepo, UnknownRepoKeyError } from "../projects/resolve-repo.js";
 import { resolveRepoKeyOrError } from "../projects/repos.js";
 import { checkTaskRepoKeyRebind } from "../projects/rebind.js";
+import { findSuspectedDuplicate } from "./duplicateDetection.js";
 
 // Task-tool business logic. EVERY function takes the projectId resolved SERVER-SIDE from the
 // session id — the agent never passes a projectId, so cross-project access is impossible.
@@ -380,6 +381,72 @@ export function createProjectTask(
   };
   db.insertTask(task);
   return task;
+}
+
+/** {@link createProjectTaskChecked}'s override params — any ONE of these skips the duplicate refusal. */
+export interface CreateTaskDedupeOptions {
+  /** Explicit "yes, I know, create it anyway." */
+  allowDuplicate?: boolean;
+  /** This new card supersedes an existing one (full id or an unambiguous prefix) — noted on the new
+   *  card's body. Skips the refusal like `allowDuplicate`. */
+  supersedes?: string;
+  /** This new card is related to (but not a straight duplicate of) an existing one — same effect as
+   *  `supersedes`, different relationship recorded on the body. */
+  relatedTo?: string;
+}
+
+/**
+ * ⛔ §SCOPE FENCE (board card 5b221bf2) — this wraps {@link createProjectTask} with a cross-channel
+ * duplicate check, and is called from EXACTLY ONE place: the agent-facing `tasks_create` MCP tool
+ * (mcp/server.ts). It must NEVER be substituted for `createProjectTask` on any other path.
+ * `createProjectTask` itself is a SHARED helper — reached not only from `tasks_create` but also from
+ * the Platform Lead's cross-project `project_task_create` (mcp/platform.ts) and the companion's
+ * `board_create` (companion/capabilities.ts) — and, transitively through it, from every automated
+ * BOARDING path that calls `db.insertTask` directly with a delivery guarantee (`peer_message`
+ * boarding, platform-escalation landing, workspace-audit suggestions, project seeding, human REST
+ * card creation). A refusal on any of those silently drops a message instead of failing an agent
+ * call an agent can read and retry — see the card for the full enumeration. Do not "simplify" this
+ * by moving the check into `createProjectTask` or `db.insertTask`; that would be exactly the
+ * regression DoD 8 tests against.
+ *
+ * Refuses (returns `{error}`, inserts nothing) when {@link findSuspectedDuplicate} flags an existing
+ * task as a likely duplicate of `input`, UNLESS `dedupe.allowDuplicate`/`supersedes`/`relatedTo` is
+ * given — an explicit assertion the caller had to type, never a silent auto-merge or auto-drop. A
+ * `supersedes`/`relatedTo` target is resolved the same way every other task-id param on this surface
+ * is (full id or unambiguous 8-char prefix) and noted on the new card's body; an unresolvable target
+ * is rejected (whole create rejected, nothing written) rather than silently ignored.
+ */
+export function createProjectTaskChecked(
+  db: Db, projectId: string,
+  input: { title: string; body?: string; columnKey?: string; priority?: TaskPriority; repoKey?: string | null },
+  dedupe?: CreateTaskDedupeOptions,
+): Task | { error: string } {
+  let body = input.body ?? "";
+  let relationNote: string | undefined;
+  if (dedupe?.supersedes && dedupe?.relatedTo) {
+    // Never silently prefer one over the other (house "never silently ignore" posture) — a caller
+    // that passed both meant something distinct by each; ask them to pick one instead of guessing.
+    return { error: "pass only ONE of supersedes/relatedTo, not both" };
+  }
+  if (dedupe?.supersedes || dedupe?.relatedTo) {
+    const targetId = dedupe.supersedes ?? dedupe.relatedTo;
+    const resolved = resolveProjectTaskId(db, projectId, targetId as string);
+    if ("error" in resolved) return resolved;
+    relationNote = dedupe.supersedes ? `Supersedes: ${resolved.id}` : `Related to: ${resolved.id}`;
+  }
+  const bypassed = !!(dedupe?.allowDuplicate || dedupe?.supersedes || dedupe?.relatedTo);
+  if (!bypassed) {
+    const candidateText = `${input.title}\n${body}`;
+    const suspect = findSuspectedDuplicate(db.listTasks(projectId), candidateText);
+    if (suspect) {
+      return {
+        error: `suspected duplicate of task ${suspect.taskId} ("${suspect.title}") — shared: ` +
+          `${suspect.sharedIdentifiers.join(", ")}. Pass allowDuplicate:true, or supersedes/relatedTo:"${suspect.taskId}" to create anyway.`,
+      };
+    }
+  }
+  if (relationNote) body = body ? `${body}\n\n${relationNote}` : relationNote;
+  return createProjectTask(db, projectId, { ...input, body });
 }
 
 /**
