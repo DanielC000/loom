@@ -11,12 +11,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //      ONE audio-bearing chat frame with the correct base64 + mimeType; plain adapter.send is NEVER called.
 // (Inbound mic → STT is VOICE-P4's other half — see companion-voice-web-inbound.mjs.)
 // Run: 1) build (turbo builds shared first), 2) node test/companion-voice-web-outbound.mjs
+//
+// PILOT CONVERSION (card 995be21f, Shape 2 — this file mkdtemp'd a dir per scenario and never cleaned up
+// the dir OR the file inside it at all). Prefix unchanged byte-for-byte ("loom-voice-web-");
+// mkdtempManaged registers each dir for guaranteed cleanup in the same call that creates it.
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import { ChatGateway } from "../dist/companion/chat-gateway.js";
 import { InAppChannel, IN_APP_CHANNEL } from "../dist/companion/in-app.js";
 import { inMemoryVoicePrefs } from "../dist/companion/voice-prefs.js";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -42,7 +46,7 @@ function makeSynthesizer({ ready = true, filePath } = {}) {
 try {
   // ================= 5 — InAppChannel.adapter.sendVoice: records history AND delivers the audio frame ====
   {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-voice-web-"));
+    const dir = mkdtempManaged("loom-voice-web-");
     const audioPath = path.join(dir, "reply.ogg");
     const audioBytes = Buffer.from("fake ogg/opus reply bytes");
     fs.writeFileSync(audioPath, audioBytes);
@@ -80,7 +84,7 @@ try {
 
   // ================= 7 — end-to-end deliverReply: voice succeeds, adapter.send is NEVER called ============
   {
-    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "loom-voice-web-"));
+    const dir = mkdtempManaged("loom-voice-web-");
     const audioPath = path.join(dir, "reply.ogg");
     const audioBytes = Buffer.from("real-ish ogg reply bytes");
     fs.writeFileSync(audioPath, audioBytes);
@@ -114,4 +118,4 @@ try {
 console.log(failures === 0
   ? "\n✅ ALL PASS — VOICE-P4 outbound: a synthesized voice reply records history + delivers its own audio-bearing frame (sendVoice replaces send on this channel, so both jobs happen there), degrading cleanly to plain text on any failure with no double-record."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1); // awaits real cleanup, then exits deterministically — no hang-on-drain risk

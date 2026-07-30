@@ -29,10 +29,17 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       pending opId, no [loom:gate-failed] ever arrived") — proving the generic onSettledAfterPending
 //       wiring (verified by (1)/(2) above) also holds for THIS specific cause, not just a clean non-zero exit.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/worker-run-gate-completion-nudge.mjs
+//
+// PILOT CONVERSION (card 995be21f, Shape 1 — this file's `repo` fixtures were tracked in the `worktrees`
+// tuple but only ever passed to removeWorktree(), a git op; the bare repo DIRECTORY was never
+// fs.rmSync'd, leaking 4 repos/run). Prefixes unchanged byte-for-byte ("loom-wgn-", "loom-wgn-repo-");
+// mkdtempManaged replaces the hand-rolled Date.now()/pid suffixing with a real kernel-unique
+// fs.mkdtempSync AND registers each dir for guaranteed cleanup in the same call — so the repo dir is now
+// cleaned up regardless of whether the `worktrees` bookkeeping below is complete or correct.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 // Disables runGateStep's one-time auto-extend (card 24642c3d) for the WHOLE file — a module-load-time
 // constant, so this must be set before gate-runner.js is ever imported (transitively, via service.js
@@ -60,7 +67,7 @@ async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
   return predicate();
 }
 
-const tmpHome = path.join(os.tmpdir(), `loom-wgn-${Date.now()}-${process.pid}`);
+const tmpHome = mkdtempManaged("loom-wgn-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 const sandboxHome = path.join(tmpHome, "home");
@@ -100,8 +107,7 @@ const host = new SpyHost(events);
 const svc = new SessionService(db, host, new OrchestrationControl());
 
 function makeRepo() {
-  const repo = path.join(os.tmpdir(), `loom-wgn-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
-  fs.mkdirSync(repo, { recursive: true });
+  const repo = mkdtempManaged("loom-wgn-repo-");
   fs.writeFileSync(path.join(repo, "README.md"), "# wgn\n");
   execSync(`git init -q && git config user.email wgn@loom && git config user.name wgn && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   return repo;
@@ -203,12 +209,14 @@ try {
     worktrees.push([repo, worktreePath]);
   }
 } finally {
+  // removeWorktree is still needed here — it's a git-level operation (branch/worktree bookkeeping), not
+  // just a directory removal. The `repo` DIRECTORY itself no longer depends on this loop being complete
+  // or correct: mkdtempManaged already registered it for guaranteed cleanup at process exit.
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
-  try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0
   ? "\n✅ ALL PASS — runWorkerGate's REAL onSettledAfterPending closure formats + delivers exactly one [loom:gate-done]/[loom:gate-failed] completion nudge into the calling WORKER's own session, kind:\"warning\", stamped with the correlation opId, on a genuinely async (>SYNC_ATTACH_BUDGET_MS) gate — including a REAL SIGKILL timeout, not just a plain non-zero exit — and pushes nothing at all on the already-fast synchronous path."
   : `\n❌ ${failures} FAILURE(S).`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1); // awaits real cleanup, then exits deterministically — no hang-on-drain risk

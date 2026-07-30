@@ -6,13 +6,19 @@
 // swept up another agent's uncommitted WIP). LOOM_HOME is set to a temp dir BEFORE importing dist/
 // paths.js (paths.ts reads LOOM_HOME at module load) and is git-inited here to simulate that self-hosting
 // layout. Run: 1) build daemon, 2) node test/worktrees-base-isolation.mjs
+//
+// PILOT CONVERSION (card 995be21f, Shape 3 — this file had NO cleanup code at all before this change;
+// LOOM_HOME + WORKTREES_DIR leaked on literally every run). Prefix string unchanged byte-for-byte
+// ("loom-wtbase-home-"); mkdtempManaged replaces the hand-rolled `Date.now()`-suffixed mkdirSync with a
+// real, kernel-unique fs.mkdtempSync AND registers it for guaranteed cleanup in the same call.
+// WORKTREES_DIR is created by production code (ensureDirs()), not by this file — registerForCleanup
+// hands its path to the SAME guaranteed-cleanup registry once it's known.
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { mkdtempManaged, registerForCleanup, finishAndExit } from "./_tmp-fixture.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wtbase-home-${Date.now()}`);
-fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
+process.env.LOOM_HOME = mkdtempManaged("loom-wtbase-home-");
 // Simulate the self-hosting layout: LOOM_HOME is ITSELF a git repo (cross-agent state).
 execSync("git init -q && git config user.email t@loom && git config user.name t", { cwd: process.env.LOOM_HOME });
 
@@ -30,6 +36,7 @@ check("(a) WORKTREES_DIR shares LOOM_HOME's parent directory",
 
 // (b) ensureDirs() creates it.
 ensureDirs();
+registerForCleanup(WORKTREES_DIR); // production code created this, not this file — register it for cleanup too
 check("(b) WORKTREES_DIR exists after ensureDirs()", fs.existsSync(WORKTREES_DIR));
 
 // (c) no `.git` in ANY ancestor of WORKTREES_DIR, walking up to (and including) LOOM_HOME's parent — the
@@ -61,4 +68,4 @@ check("(d) WORKTREES_DIR does not resolve into the LOOM_HOME git repo",
   toplevel === null || norm(toplevel) !== norm(LOOM_HOME));
 
 console.log(`\n${failures === 0 ? "PASS" : "FAIL"}  worktrees-base-isolation (${failures} failures)`);
-process.exit(failures === 0 ? 0 : 1);
+await finishAndExit(failures === 0 ? 0 : 1); // awaits real cleanup, then exits deterministically — no hang-on-drain risk
