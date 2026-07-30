@@ -415,19 +415,23 @@ export class GateSemaphore {
     return { active: this.active, queued: this.highWaiters.length + this.lowWaiters.length, entries };
   }
 
-  /** Look up ONE live (running or queued) gate run by its {@link GateDescriptor.opId} — the read path for
-   *  `gate_status(opId)` (card edc1ec12; prefix support added by card 225bc7bd). Accepts EITHER a full
-   *  opId OR an unambiguous id-PREFIX (the 8-char short id Loom displays everywhere else — the same
+  /** Look up ONE live (running or queued) gate run by its {@link GateDescriptor.opId} — the LIVE-registry
+   *  half of `gate_status(opId)` (card edc1ec12; prefix support added by card 225bc7bd). Accepts EITHER a
+   *  full opId OR an unambiguous id-PREFIX (the 8-char short id Loom displays everywhere else — the same
    *  `resolveIdPrefix` resolution `agent_get`/`worker_spawn` already use), so a caller pasting the short id
    *  it was shown gets a real answer instead of a spurious miss. `kind:"found"` on a unique match;
    *  `kind:"ambiguous"` (with the matching opIds) when the prefix matches more than one LIVE entry —
    *  callers must surface this distinctly, never fold it into "not found"; `kind:"none"` when nothing
-   *  matches at all — either the op already settled (the caller should instead rely on the eventual
-   *  `[loom:gate-*]`/`[loom:merge-*]` nudge) or it never existed; this lookup genuinely cannot tell those
-   *  two apart, but BOTH are a real "no live run", unlike the ambiguous case. Entries with no `opId` (a run
-   *  whose descriptor never carried a correlating one) are excluded from the candidate set entirely, so
-   *  they can never spuriously satisfy a prefix match. O(n) over the live registry, which is bounded by
-   *  `maxConcurrentGates` + queue depth — never large enough to matter.
+   *  matches at all — either the op already settled, it never existed, or it hasn't registered with this
+   *  semaphore yet; this lookup, being LIVE-ONLY, genuinely cannot tell those apart on its own, but BOTH
+   *  are a real "no live run", unlike the ambiguous case. Card e3e40167: `SessionService.gateStatus`, the
+   *  caller of this method, now resolves that ambiguity itself — a `kind:"none"` here falls through to a
+   *  SECOND, identically-scoped lookup against the durable `pending_gate_ops` tombstone table
+   *  (`Db.findPendingGateOpByOpId`), which DOES distinguish settled/evicted/orphaned/never-minted. This
+   *  method's own contract is unchanged by that — it still only ever answers about the LIVE registry.
+   *  Entries with no `opId` (a run whose descriptor never carried a correlating one) are excluded from the
+   *  candidate set entirely, so they can never spuriously satisfy a prefix match. O(n) over the live
+   *  registry, which is bounded by `maxConcurrentGates` + queue depth — never large enough to matter.
    *
    *  `scopeSessionId` (card fc243a43 — the worker-facing `gate_status`) restricts the CANDIDATE SET itself
    *  to entries whose `descriptor.sessionId` matches, BEFORE prefix resolution runs — not just a post-hoc
@@ -444,8 +448,10 @@ export class GateSemaphore {
    *  otherwise expose (prefix-probing could otherwise enumerate other projects' live opIds via the
    *  `ambiguous` error's `ids` list) — see its own doc for why the first (unscoped) call is still made too,
    *  to preserve the informative `refused` outcome for a clean EXACT/unambiguous cross-project match.
-   *  Independent of `scopeSessionId` (both apply as separate, AND-combined filters if both are given, though
-   *  no caller passes both today). Omitted, this is byte-identical to before the param existed. */
+   *  Independent of `scopeSessionId` (both apply as separate, AND-combined filters) — since card e3e40167,
+   *  the worker-facing `gate_status` call site DOES pass both together (session AND its own project), so
+   *  this is no longer merely a theoretical combination. Omitted, this is byte-identical to before the
+   *  param existed. */
   findByOpId(opId: string, scopeSessionId?: string, scopeProjectId?: string): IdPrefixResult<GateSnapshotEntry> {
     const candidates = this.snapshot().entries
       .filter((e): e is GateSnapshotEntry & { opId: string } => e.opId != null)

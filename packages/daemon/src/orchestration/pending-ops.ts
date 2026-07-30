@@ -391,6 +391,26 @@ export class PendingOpRegistry {
       bypassRetained?: boolean;
       isRetainedResultUsable?: (value: T) => boolean;
       onSurfacedPending?: (op: PendingOpView, opId: string) => void;
+      /** Fires SYNCHRONOUSLY, exactly once per genuinely fresh entry — right after it's minted (registered
+       *  under `key`, opId assigned), strictly before `run()` is ever invoked. Unlike `onSurfacedPending`
+       *  (which only fires for an op that loses its race against `waitMs`), this fires for EVERY fresh op,
+       *  fast or slow — a caller durably recording "this op exists" (card e3e40167 — a fast op that settles
+       *  within `waitMs` never surfaces pending, so `onSurfacedPending` alone can't be used to mint a durable
+       *  row for it) needs a mint-time hook, not a surfaced-time one. Never fires on a retry that merely
+       *  attaches to an already-running entry, and never on a retained-cache hit (no fresh entry is minted
+       *  in either case). */
+      onOpMinted?: (opId: string) => void;
+      /** Fires from inside the SAME identity-guarded settle branch as the RETAINED-view write and
+       *  `onSettledAfterPending` (see the class doc) — i.e. ONLY for the entry-creating call's own `run()`,
+       *  and NEVER for an entry an `evictDeadOwner()` call force-removed (that op's late settle finds a
+       *  different object under `key` and this branch is skipped entirely, by design — see the class doc's
+       *  DEAD-OWNER RECOVERY note). UNLIKE `onSettledAfterPending`, fires regardless of `surfacedPending` —
+       *  a caller that needs to know "this op is DONE" durably (as opposed to "a caller is owed an async
+       *  nudge") needs both the fast and the surfaced-pending path covered, not just the latter. Fires
+       *  BEFORE `onSettledAfterPending` in the same synchronous callback, so a caller pairing "mark settled
+       *  here, push the terminal nudge there" sees its own durable state already updated by the time the
+       *  nudge goes out. */
+      onSettle?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }, opId: string) => void;
     },
   ): Promise<AttachResult<T>> {
     let e = this.entries.get(key) as Entry<T> | undefined;
@@ -424,6 +444,10 @@ export class PendingOpRegistry {
         state: "running", settle: Promise.resolve(), surfacedPending: false,
       };
       this.entries.set(key, fresh);
+      // MINT HOOK (card e3e40167): fires here, synchronously, before `run()` is ever invoked — see
+      // `opts.onOpMinted`'s own doc for why this must be unconditional (not gated on surfacedPending like
+      // onSurfacedPending below) and why it fires for every fresh entry, not just this one branch's own.
+      opts?.onOpMinted?.(fresh.opId);
       // IDENTITY-GUARDED delete (card 27ea069e CR finding): a bare `this.entries.delete(key)` here was
       // safe ONLY under the old invariant that a new entry could never be created under `key` while an
       // older one for that same key was still settling — evictDeadOwner breaks that invariant on purpose
@@ -445,6 +469,7 @@ export class PendingOpRegistry {
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value });
+            opts?.onSettle?.({ ok: true, value }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
           }
         },
@@ -454,6 +479,7 @@ export class PendingOpRegistry {
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err });
+            opts?.onSettle?.({ ok: false, error: err }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
           }
         },

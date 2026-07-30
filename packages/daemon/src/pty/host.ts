@@ -1489,10 +1489,11 @@ export type EnqueueResult = {
  * real stall hazard, not just defense-in-depth: the async `run_gate` FAILURE nudge (sessions/service.ts,
  * kind:"warning") embeds `gateDetail.stderrTail`, a raw CODE-UNIT slice of captured gate stdout/stderr
  * (gate-runner.ts). If that stderr contains a non-BMP character (an emoji in a test name/assertion/diff)
- * split exactly at the slice boundary, the tail begins with a lone surrogate — and `clearPendingGateOp`
- * runs immediately BEFORE this enqueue, so a dropped nudge here would leave NO durable pending-op for
- * `reconcileOrphanedGateOps` to recover: a worker parked on its gate-completion nudge would stall
- * indefinitely with no path back. That is the exact silent-stall class the `/worker` doctrine warns
+ * split exactly at the slice boundary, the tail begins with a lone surrogate — and the durable
+ * `pending_gate_ops` row is already marked `state:"settled"` (via `PendingOpRegistry.attach`'s `onSettle`
+ * hook) BEFORE this enqueue, so a dropped nudge here is the ONLY remaining path to the result: a worker
+ * parked on its gate-completion nudge would stall indefinitely with no way back. That is the exact
+ * silent-stall class the `/worker` doctrine warns
  * about, in the very machinery this card exists to harden — so dropping is never an acceptable outcome
  * for this guard, however corrupted the shape. Sanitizing removes the hazard entirely while still fixing
  * the byte-level corruption (the delivered message is always well-formed).

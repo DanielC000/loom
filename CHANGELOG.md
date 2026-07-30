@@ -4,6 +4,18 @@ All notable changes to Loom (the umbrella `loom` package) are recorded here. The
 
 ## [Unreleased]
 
+### Fixed
+- **`gate_status` no longer conflates a settled gate/merge op with one that never existed.** The durable
+  op record (`pending_gate_ops`) is now written at OP CREATION — covering a fast op that settles inline,
+  not just one that was surfaced pending — and is never pruned; a live-registry miss now falls back to
+  that durable record, reporting a real terminal classification (`settled`, `evicted-dead-owner`, or
+  `orphaned-by-restart`) instead of a bare `not_found` that used to mean "settled or never existed, can't
+  tell". A genuinely bogus opId now reads `never_existed` (a positive assertion, not a shrug) from an
+  unscoped manager query; the worker-scoped variant reads `unknown` instead for the same case — a scoped
+  caller can never distinguish "never existed" from "exists, but isn't yours", so it gets an honest
+  ambiguity sink rather than a false non-existence claim. The boot-time restart-orphan sweep no longer
+  risks a false failure nudge for a fast op that already settled cleanly before a crash.
+
 ## [0.25.0] — 2026-07-24
 
 **A multi-repo, merge-integrity, and reliability release.** Projects can now register and route work across **multiple repositories**; a deep **git-integrity hardening pass** closes a class of concurrent-squash-merge corruption and a daemon-wide event-loop **freeze**; **permission-request scope/expiry** is persisted structurally; managers gain **gate-queue observability**; and the **vault-optional** onboarding story is completed end-to-end.

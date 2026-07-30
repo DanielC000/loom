@@ -131,6 +131,14 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      phase before concluding it's wedged; a long wait behind a shared concurrency cap is routine, not proof
      of a stall. This is a CHECK, not a replacement for the nudge — don't poll it on a timer; use it when
      you're genuinely deciding whether to keep waiting or escalate.
+   - **A parked `run_gate` can end in a cancelled/superseded nudge instead of a pass/fail — that is NOT a
+     failure.** Your manager can cancel a gate op it can see is now redundant (e.g. it already decided to
+     merge, making your self-check moot) — you'll get a distinct nudge for this rather than an ordinary
+     `[loom:gate-done]`/`[loom:gate-failed]`, saying plainly that no verdict was reached because the run
+     was cancelled, not because anything failed. **You have no cancel tool of your own for this** — if you
+     believe a running self-check has become pointless (e.g. you realize a different check would answer
+     the question, or your manager already told you it's merging), say so in your next report and let your
+     manager decide whether to cancel it; don't try to work around a parked gate yourself.
    - **If it reports your project has no gate command configured**, only then fall back to running your
      own build/test command — under the foreground rules below, pinning single-lane concurrency yourself
      if your project's docs name such a knob, since that raw run is outside the daemon's budget. Report

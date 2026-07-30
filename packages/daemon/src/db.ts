@@ -83,6 +83,7 @@ import { computeFailureUpdate, isLockedOut, type LockoutState } from "./security
 // the companion/* modules that import `Db` from here. CompanionReminder.route reuses THIS module's
 // CompanionRoute (never a duplicate route type, unlike Wake/CompanionBinding's shared/types.ts twins).
 import type { CompanionReminder } from "./companion/types.js";
+import { resolveIdPrefix, type IdPrefixResult } from "./id-prefix.js";
 
 /**
  * The atomic result of a companion pairing-code redemption (db layer). A single silent `rejected` covers
@@ -529,16 +530,30 @@ CREATE TABLE IF NOT EXISTS wakes (
   -- default (fires via plain enqueueStdin, exactly as before this column existed).
   route TEXT
 );
--- Durable marker for a gate/merge PendingOpRegistry op that has been surfaced "pending" to a caller (card
--- edc1ec12, Platform-Audit finding 7afa6ea9): PendingOpRegistry itself is purely in-memory and is wiped by
--- an actual daemon process death (a crash or the daemon_restart exit-75 self-restart), so a session already
--- told {settled:false, opId} and waiting on the async [loom:gate-done|failed]/[loom:merge-*] completion
--- nudge would otherwise wait FOREVER — nothing durable ever recorded that it was owed one. A row is written
--- (upserted) the moment a "gate"/"merge" op is first surfaced pending, and deleted the moment it settles
--- normally (see SessionService.runWorkerGate/confirmWorkerMergeTracked) — so a row here ONLY ever survives
--- a genuine process death. Boot (SessionService.reconcileOrphanedGateOps) reads every surviving row, pushes
--- a synthetic terminal nudge to owner_session_id, and clears it. Brand-new table => this CREATE TABLE IF
--- NOT EXISTS is itself the additive migration (no ALTER needed), exactly like wakes/poll_jobs above.
+-- Durable record of a gate/merge PendingOpRegistry op — a queryable TOMBSTONE, not just a "surfaced
+-- pending" marker (card e3e40167, superseding the original edc1ec12/7afa6ea9 shape below). A row is
+-- INSERTED the moment a "gate"/"merge" op is MINTED (SessionService's onOpMinted hook — see
+-- PendingOpRegistry.attach's own doc), covering BOTH a fast op that settles inline within the sync-attach
+-- budget and a slow one that degrades to pending — the original shape only ever wrote a row for the LATTER
+-- (via onSurfacedPending), which made a fast op's opId indistinguishable from "never existed" once settled
+-- (card e3e40167's central defect). surfaced_pending flips to 1 the moment a caller is actually told
+-- "pending" (mirrors the old row-existence signal); state starts "pending" and moves to exactly one
+-- TERMINAL value — "settled" (a normal settle, fast or surfaced), "evicted-dead-owner" (force-removed by
+-- evictDeadOwner because its owning manager died — the run() may still be executing, unreachable; this is
+-- NOT a verdict), or "orphaned-by-restart" (reconcileOrphanedGateOps found it still surfaced_pending AND
+-- still "pending" at boot after a real process death) — NEVER DELETED on any of these transitions (see
+-- gate_status's tombstone read). reconcileOrphanedGateOps' boot sweep only ever selects rows that are BOTH
+-- surfaced_pending=1 AND still state='pending' — a fast op that settled cleanly before a crash must never
+-- resurface a false [loom:gate-failed]. project_id is the scope anchor gate_status's tombstone read
+-- filters on (mirroring GateSemaphore.findByOpId's session/project candidate-set filter — a stranger
+-- session/project must get the SAME "not found" family of answer a live op gives them, never "settled").
+-- Rows are cascade-deleted alongside their project/agent (see deleteProject/deleteAgent) — permanent rows
+-- would otherwise be an unbounded orphan class the transient shape never had to worry about.
+-- NOT a brand-new-table-only additive migration: this table SHIPPED (card edc1ec12) before state/
+-- surfaced_pending/project_id existed, so an ALTER TABLE (migratePendingGateOps, mirroring
+-- migrateWakes/migrateCompanionMessages) is REQUIRED for every DB opened since then — CREATE TABLE IF NOT
+-- EXISTS alone would silently no-op the column-add on any such DB. Contrast poll_jobs below, which really
+-- is brand-new and needs no ALTER.
 CREATE TABLE IF NOT EXISTS pending_gate_ops (
   op_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,             -- "gate" | "merge"
@@ -546,7 +561,13 @@ CREATE TABLE IF NOT EXISTS pending_gate_ops (
   owner_session_id TEXT NOT NULL,  -- who gets the synthetic nudge: the worker for "gate", the manager for "merge"
   task_id TEXT,
   branch TEXT,
-  started_at TEXT NOT NULL
+  started_at TEXT NOT NULL,
+  project_id TEXT,                                 -- added by migratePendingGateOps on an upgraded DB
+  state TEXT NOT NULL DEFAULT 'pending',            -- added by migratePendingGateOps on an upgraded DB
+  surfaced_pending INTEGER NOT NULL DEFAULT 1       -- added by migratePendingGateOps; legacy rows backfill
+                                                     -- to 1 — under the OLD shape a row's mere EXISTENCE
+                                                     -- meant "surfaced pending", so a leftover legacy row
+                                                     -- must still be swept by reconcileOrphanedGateOps
 );
 -- Local poll-job triggers (agent-tooling epic P3): the daemon PollService periodically fetches 'path' on
 -- 'connection_id' (through the SAME server-side P2 authenticated_request path — never a second outbound-
@@ -1568,6 +1589,18 @@ const WAKE_ADDED_COLUMNS: Record<string, string> = {
   route: "TEXT",
 };
 
+/** Columns added to `pending_gate_ops` after its initial ship (card edc1ec12's "surfaced pending" marker
+ *  generalized into a queryable tombstone, card e3e40167); applied to existing DBs by
+ *  migratePendingGateOps() (fresh installs already have them via CREATE TABLE). `project_id` has no honest
+ *  default for a legacy row (its owning session may itself be long gone) — nullable, mirrors `wakes.route`.
+ *  `state`/`surfaced_pending` DO have honest backfills — see the schema doc's own note on why
+ *  `surfaced_pending` backfills to 1, not 0, for a pre-existing row. */
+const PENDING_GATE_OPS_ADDED_COLUMNS: Record<string, string> = {
+  project_id: "TEXT",
+  state: "TEXT NOT NULL DEFAULT 'pending'",
+  surfaced_pending: "INTEGER NOT NULL DEFAULT 1",
+};
+
 /** Columns added to `companion_messages` after its initial ship (unified cross-channel chat, card
  *  7d63e200); applied to existing DBs by migrateCompanionMessages() (fresh installs already have them via
  *  CREATE TABLE). NOT NULL + constant DEFAULT 0 backfills every legacy (in-app-only) row to via_voice=0 —
@@ -1694,25 +1727,46 @@ export interface ContextNudgeState {
   unanswered: number;
 }
 
-/** A durable "surfaced pending" marker for a gate/merge PendingOpRegistry op — see the `pending_gate_ops`
- *  schema doc and SessionService.reconcileOrphanedGateOps (card edc1ec12). */
+/** A gate/merge PendingOpRegistry op's terminal classification — see the `pending_gate_ops` schema doc
+ *  for what each value means and which call site writes it. Never re-mutated once terminal. */
+export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart";
+
+/** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and
+ *  SessionService.reconcileOrphanedGateOps (card edc1ec12, generalized by card e3e40167). */
 export interface PendingGateOp {
   opId: string;
   kind: "gate" | "merge";
   key: string;
   ownerSessionId: string;
+  /** The scope anchor gate_status's tombstone read filters on — null only for a legacy row written before
+   *  this column existed (see migratePendingGateOps). */
+  projectId: string | null;
   taskId: string | null;
   branch: string | null;
   startedAt: string;
+  state: PendingGateOpState;
+  /** True once some caller was actually told "pending" for this op (mirrors the old row-existence signal
+   *  under the pre-e3e40167 shape) — reconcileOrphanedGateOps' boot sweep selects ONLY rows that are both
+   *  this AND still `state:"pending"`. */
+  surfacedPending: boolean;
 }
 interface PendingGateOpRow {
   op_id: string;
   kind: "gate" | "merge";
   key: string;
   owner_session_id: string;
+  project_id: string | null;
   task_id: string | null;
   branch: string | null;
   started_at: string;
+  state: PendingGateOpState;
+  surfaced_pending: number;
+}
+function toPendingGateOp(r: PendingGateOpRow): PendingGateOp {
+  return {
+    opId: r.op_id, kind: r.kind, key: r.key, ownerSessionId: r.owner_session_id, projectId: r.project_id,
+    taskId: r.task_id, branch: r.branch, startedAt: r.started_at, state: r.state, surfacedPending: !!r.surfaced_pending,
+  };
 }
 
 export class Db {
@@ -1751,6 +1805,7 @@ export class Db {
     this.migrateCompanionHomeToPerSession();
     this.migrateCompanionBindings();
     this.migrateWakes();
+    this.migratePendingGateOps();
     this.migrateCompanionMessages();
     this.migrateCompanionConversations();
     this.migrateOrchestrationEvents();
@@ -2003,6 +2058,24 @@ export class Db {
     );
     for (const [name, type] of Object.entries(WAKE_ADDED_COLUMNS)) {
       if (!have.has(name)) this.db.exec(`ALTER TABLE wakes ADD COLUMN ${name} ${type}`);
+    }
+  }
+
+  /**
+   * Idempotent additive migration for `pending_gate_ops` (card e3e40167 — the "surfaced pending" marker
+   * generalized into a queryable tombstone) — ADD COLUMN any column added after the table's initial ship
+   * (card edc1ec12) missing from an existing DB (fresh installs already have them via CREATE TABLE). UNLIKE
+   * `wakes`/`companion_messages` at the time THEIR migrations were introduced, `pending_gate_ops` is NOT a
+   * brand-new table here — every DB opened since card edc1ec12 already has the 7-column shape, so skipping
+   * this (relying on `CREATE TABLE IF NOT EXISTS` alone) would silently leave `state`/`surfaced_pending`/
+   * `project_id` missing on any such DB. Mirrors migrateWakes/migrateCompanionMessages mechanically.
+   */
+  private migratePendingGateOps(): void {
+    const have = new Set(
+      (this.db.prepare("PRAGMA table_info(pending_gate_ops)").all() as { name: string }[]).map((c) => c.name),
+    );
+    for (const [name, type] of Object.entries(PENDING_GATE_OPS_ADDED_COLUMNS)) {
+      if (!have.has(name)) this.db.exec(`ALTER TABLE pending_gate_ops ADD COLUMN ${name} ${type}`);
     }
   }
 
@@ -2372,6 +2445,9 @@ export class Db {
       this.db.prepare("DELETE FROM runs WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM api_keys WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM tasks WHERE project_id = ?").run(id);
+      // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167) — cascade explicitly, or a
+      // deleted project's rows become an unbounded orphan class (see the schema doc).
+      this.db.prepare("DELETE FROM pending_gate_ops WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM sessions WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM agents WHERE project_id = ?").run(id);
       this.db.prepare("DELETE FROM projects WHERE id = ?").run(id);
@@ -3280,6 +3356,9 @@ export class Db {
         this.db.prepare("DELETE FROM companion_capability_grants WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM questions WHERE session_id = ?").run(sid);
         this.db.prepare("DELETE FROM orchestration_events WHERE manager_session_id = ? OR worker_session_id = ?").run(sid, sid);
+        // pending_gate_ops is now a PERMANENT tombstone table (card e3e40167), keyed by owner_session_id
+        // with no direct agent_id — cascade per session, mirroring deleteProject's own project_id cascade.
+        this.db.prepare("DELETE FROM pending_gate_ops WHERE owner_session_id = ?").run(sid);
       }
       // run_events is project/run-keyed (not agent-keyed) — drop only the rows for THIS agent's runs.
       for (const rid of runIds) this.db.prepare("DELETE FROM run_events WHERE run_id = ?").run(rid);
@@ -5518,29 +5597,85 @@ export class Db {
     return (this.db.prepare("SELECT COUNT(*) AS c FROM wakes WHERE session_id = ?").get(sessionId) as { c: number }).c;
   }
 
-  // --- pending gate/merge ops (durable "surfaced pending" marker — card edc1ec12, see the schema doc) ---
-  /** Upsert: a re-attach() to a still-running op re-writes the SAME row (same op_id) harmlessly. */
-  recordPendingGateOp(op: PendingGateOp): void {
+  // --- pending gate/merge ops (durable TOMBSTONE — card edc1ec12, generalized by e3e40167; see the schema
+  // doc for the state machine: pending -> settled | evicted-dead-owner | orphaned-by-restart, never deleted
+  // except by the project/agent cascade below) ---
+  /** Insert a fresh row at OP-MINT time (PendingOpRegistry's `onOpMinted` hook). Callers always pass
+   *  `state:"pending"`, `surfacedPending:false` (a freshly-minted op has neither settled nor been surfaced
+   *  yet) — bound explicitly here (not hardcoded into the SQL literal) so the written row honestly reflects
+   *  what was passed. Upserts on a re-mint of the SAME op_id (defensive; a genuinely fresh mint never
+   *  collides in practice, since `onOpMinted` fires exactly once per fresh entry). */
+  insertPendingGateOp(op: PendingGateOp): void {
     this.db.prepare(
-      `INSERT INTO pending_gate_ops (op_id,kind,key,owner_session_id,task_id,branch,started_at)
-       VALUES (@opId,@kind,@key,@ownerSessionId,@taskId,@branch,@startedAt)
+      `INSERT INTO pending_gate_ops (op_id,kind,key,owner_session_id,project_id,task_id,branch,started_at,state,surfaced_pending)
+       VALUES (@opId,@kind,@key,@ownerSessionId,@projectId,@taskId,@branch,@startedAt,@state,@surfacedPending)
        ON CONFLICT(op_id) DO UPDATE SET kind=excluded.kind, key=excluded.key,
-         owner_session_id=excluded.owner_session_id, task_id=excluded.task_id,
+         owner_session_id=excluded.owner_session_id, project_id=excluded.project_id, task_id=excluded.task_id,
          branch=excluded.branch, started_at=excluded.started_at`,
-    ).run(op);
+    ).run({ ...op, surfacedPending: op.surfacedPending ? 1 : 0 });
   }
-  /** Called from the op's own settle callback (normal completion) — a row only survives this if the
-   *  process died before that callback ever ran. */
-  clearPendingGateOp(opId: string): void {
-    this.db.prepare("DELETE FROM pending_gate_ops WHERE op_id = ?").run(opId);
+  /** Flip `surfaced_pending` to 1 — called from `onSurfacedPending` (the row already exists, minted at
+   *  op-creation; this only marks that a caller was actually told "pending"). A no-op UPDATE if the row is
+   *  somehow already gone (defensive; never expected). */
+  markPendingGateOpSurfaced(opId: string): void {
+    this.db.prepare("UPDATE pending_gate_ops SET surfaced_pending = 1 WHERE op_id = ?").run(opId);
   }
-  /** Boot-time read of every surviving row — see SessionService.reconcileOrphanedGateOps. */
+  /** Mark a genuinely-settled op — called from PendingOpRegistry's `onSettle` (fires for EVERY settle, fast
+   *  or surfaced-pending; see its own doc for why this must be unconditional, not gated on surfacedPending
+   *  the way the completion-nudge push is). NEVER fires for an op an `evictDeadOwner()` call force-removed
+   *  (that op's late settle, if it ever happens, fails the identity guard and never reaches here). */
+  settlePendingGateOp(opId: string): void {
+    this.db.prepare("UPDATE pending_gate_ops SET state = 'settled' WHERE op_id = ?").run(opId);
+  }
+  /** Mark an op whose owning manager was confirmed dead and force-evicted (`evictDeadOwner`) — the op's
+   *  own `run()` may STILL be executing, unreachable but uncancellable; this is explicitly NOT a verdict,
+   *  just "nobody will ever be told the real outcome of this one" (see the schema doc). Two call sites:
+   *  confirmWorkerMergeTracked's per-call defensive check, and reconcileDeadOwnerMergeOps' boot sweep. */
+  evictPendingGateOpDeadOwner(opId: string): void {
+    this.db.prepare("UPDATE pending_gate_ops SET state = 'evicted-dead-owner' WHERE op_id = ?").run(opId);
+  }
+  /** Mark an op reconcileOrphanedGateOps found still `surfaced_pending`+`pending` at boot after a real
+   *  daemon-process death — the synthetic terminal nudge has already been pushed by the caller; this is the
+   *  row-side half of that same reconciliation. */
+  markPendingGateOpOrphaned(opId: string): void {
+    this.db.prepare("UPDATE pending_gate_ops SET state = 'orphaned-by-restart' WHERE op_id = ?").run(opId);
+  }
+  /** Full, unfiltered listing — test/diagnostic use. Production code wants {@link listSurfacedPendingGateOps}
+   *  (the boot-sweep's actual work set) or {@link findPendingGateOpByOpId} (gate_status's scoped read). */
   listPendingGateOps(): PendingGateOp[] {
-    return (this.db.prepare("SELECT * FROM pending_gate_ops").all() as PendingGateOpRow[]).map((r) => ({
-      opId: r.op_id, kind: r.kind, key: r.key, ownerSessionId: r.owner_session_id,
-      taskId: r.task_id, branch: r.branch, startedAt: r.started_at,
-    }));
+    return (this.db.prepare("SELECT * FROM pending_gate_ops").all() as PendingGateOpRow[]).map(toPendingGateOp);
   }
+  /** Boot-time read of every row still owed a reconciliation pass — see SessionService.reconcileOrphanedGateOps
+   *  and the schema doc for why this is `surfaced_pending=1 AND state='pending'`, NOT every surviving row:
+   *  a fast op that settled cleanly before a crash is `state:'settled'` and must never resurface a synthetic
+   *  failure nudge (that would invert the signal this table exists to give). */
+  listSurfacedPendingGateOps(): PendingGateOp[] {
+    return (this.db.prepare("SELECT * FROM pending_gate_ops WHERE surfaced_pending = 1 AND state = 'pending'").all() as PendingGateOpRow[]).map(toPendingGateOp);
+  }
+  /**
+   * Scoped id-or-prefix lookup for `gate_status`'s tombstone fallback (once a live GateSemaphore lookup
+   * comes back `kind:"none"`) — mirrors `GateSemaphore.findByOpId`'s OWN candidate-set discipline exactly:
+   * `scopeSessionId`/`scopeProjectId`, when given, restrict the SQL candidate set itself BEFORE prefix
+   * resolution ever runs (a WHERE clause, not a post-hoc filter on the resolved record) — so a stranger
+   * session/project can never learn that a same-prefix op exists under someone else's scope (no count, no
+   * ids leak), exactly like the live lookup it falls back from. Omitting both scopes (every manager call
+   * site) is byte-identical to an unscoped table scan.
+   */
+  findPendingGateOpByOpId(opId: string, scopeSessionId?: string, scopeProjectId?: string): IdPrefixResult<PendingGateOp> {
+    const clauses: string[] = [];
+    const params: string[] = [];
+    if (scopeSessionId != null) { clauses.push("owner_session_id = ?"); params.push(scopeSessionId); }
+    if (scopeProjectId != null) { clauses.push("project_id = ?"); params.push(scopeProjectId); }
+    const sql = `SELECT * FROM pending_gate_ops${clauses.length ? ` WHERE ${clauses.join(" AND ")}` : ""}`;
+    const rows = (this.db.prepare(sql).all(...params) as PendingGateOpRow[]).map(toPendingGateOp);
+    const r = resolveIdPrefix(rows.map((row) => ({ id: row.opId, row })), opId);
+    if (r.kind === "found") return { kind: "found", record: r.record.row };
+    if (r.kind === "ambiguous") return { kind: "ambiguous", ids: r.ids };
+    return { kind: "none" };
+  }
+  // Cascade-delete on project/agent removal lives inline in deleteProject/deleteAgent below (matching
+  // every other per-session/per-project table cascade in this file — wakes, questions, etc.), not as a
+  // separate method here.
 
   // --- poll jobs (local poll-job triggers, agent-tooling epic P3) ---
   insertPollJob(p: PollJob): void {

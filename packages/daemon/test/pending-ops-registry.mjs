@@ -478,7 +478,111 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(single-flight under rejection) BOTH callers observe the SAME fresh result — the second attached rather than minting its own", r1.settled && r1.ok && r2.settled && r2.ok && r1.value.opId === "fresh" && r2.value.opId === "fresh");
 }
 
+// --- onOpMinted (card e3e40167 — the mint-time durable-tombstone hook): fires SYNCHRONOUSLY, exactly once
+// per genuinely fresh entry, BEFORE run() is ever invoked — unlike onSurfacedPending, this fires on the
+// FAST path too (a caller needing to durably record "this op exists" can't rely on onSurfacedPending
+// alone, since a fast op never surfaces pending at all). ---
+{
+  const reg = new PendingOpRegistry();
+  const order = [];
+  const r = await reg.attach(
+    "mint1", "gate", "mgr1", 200, async () => { order.push("run"); return { ok: true }; },
+    undefined, { onOpMinted: (opId) => order.push(`minted:${typeof opId}`) },
+  );
+  check("(onOpMinted fast) fires exactly once, BEFORE run() ever executes", order.length === 2 && order[0] === "minted:string" && order[1] === "run");
+  check("(onOpMinted fast) still settles normally — the hook doesn't change the outcome", r.settled === true && r.ok === true);
+}
+
+// onOpMinted fires on the SLOW path too (the case onSurfacedPending alone can't cover for a durable mint).
+{
+  const reg = new PendingOpRegistry();
+  let minted = false;
+  const slow = async () => { await sleep(60); return { ok: true }; };
+  const pending = await reg.attach("mint2", "gate", "mgr1", 5, slow, undefined, { onOpMinted: () => { minted = true; } });
+  check("(onOpMinted slow) fires even though this op degrades to pending", minted === true && pending.settled === false);
+}
+
+// onOpMinted does NOT fire on a retry that merely attaches to an already-running entry, nor on a retained-
+// cache hit — only a genuinely fresh mint gets one.
+{
+  const reg = new PendingOpRegistry();
+  let mintCount = 0;
+  const slow = async () => { await sleep(80); return { ok: true }; };
+  const p1 = reg.attach("mint3", "gate", "mgr1", 10, slow, undefined, { onOpMinted: () => mintCount++ });
+  await sleep(20);
+  const p2 = reg.attach("mint3", "gate", "mgr1", 10, slow, undefined, { onOpMinted: () => mintCount++ }); // retry, attaches
+  await Promise.all([p1, p2]);
+  check("(onOpMinted retry) fires exactly once for the entry-creating call, never for a retry that attaches", mintCount === 1);
+}
+{
+  const reg = new PendingOpRegistry();
+  let mintCount = 0;
+  await reg.attach("mint4", "gate", "mgr1", 200, async () => ({ ok: true }), undefined, { retainMs: 200, onOpMinted: () => mintCount++ });
+  const r2 = await reg.attach("mint4", "gate", "mgr1", 200, async () => ({ ok: true }), undefined, { retainMs: 200, onOpMinted: () => mintCount++ }); // retained-cache hit
+  check("(onOpMinted retained hit) fires exactly once (the original mint) — a re-call served from the retained cache mints nothing new", mintCount === 1 && r2.settled === true);
+}
+
+// --- onSettle (card e3e40167): fires for EVERY genuine settle — fast OR surfaced-pending — unlike
+// onSettledAfterPending, which is gated to ONLY the surfaced-pending case. Fires from inside the SAME
+// identity-guarded branch (so an evicted-dead-owner op's late settle never reaches it either), and BEFORE
+// onSettledAfterPending in the same synchronous callback. ---
+{
+  const reg = new PendingOpRegistry();
+  const order = [];
+  const r = await reg.attach(
+    "settle1", "gate", "mgr1", 200, async () => ({ ok: true }),
+    () => order.push("afterPending"), // never fires here — this settles on the fast path
+    { onSettle: (outcome) => order.push(`settle:${outcome.ok}`) },
+  );
+  check("(onSettle fast) fires on the FAST path — unlike onSettledAfterPending, which does NOT", r.settled === true && order.length === 1 && order[0] === "settle:true");
+}
+
+// onSettle fires on the surfaced-pending path too, and strictly BEFORE onSettledAfterPending.
+{
+  const reg = new PendingOpRegistry();
+  const order = [];
+  let resolveOp;
+  const deferred = () => new Promise((resolve) => { resolveOp = resolve; });
+  const pending = await reg.attach(
+    "settle2", "gate", "mgr1", 5, deferred,
+    () => order.push("afterPending"),
+    { onSettle: () => order.push("settle") },
+  );
+  check("(onSettle surfaced) nothing has fired yet while still pending", pending.settled === false && order.length === 0);
+  resolveOp({ ok: true });
+  await sleep(20);
+  check("(onSettle surfaced) onSettle fires BEFORE onSettledAfterPending, in the same settle callback", order.length === 2 && order[0] === "settle" && order[1] === "afterPending");
+}
+
+// onSettle carries the FAILED outcome shape too (ok:false, the raw error).
+{
+  const reg = new PendingOpRegistry();
+  let captured;
+  const r = await reg.attach("settle3", "gate", "mgr1", 200, async () => { throw new Error("nope"); }, undefined, { onSettle: (outcome) => { captured = outcome; } });
+  check("(onSettle failure) fires with ok:false and the raw thrown error", r.settled === true && r.ok === false && captured.ok === false && captured.error instanceof Error && captured.error.message === "nope");
+}
+
+// CLOBBER GUARD parity (mirrors the identical evictDeadOwner test above, but for onSettle): an orphaned
+// op's eventual late settle must NOT fire onSettle against its successor's key — the identity guard that
+// protects onSettledAfterPending/the retained-view write must protect this hook too.
+{
+  const reg = new PendingOpRegistry();
+  let resolveOrphan;
+  const runOrphan = () => new Promise((resolve) => { resolveOrphan = resolve; });
+  const settleCalls = [];
+  void reg.attach("mint-evict", "merge", "mgr1", 10, runOrphan, undefined, { onSettle: (o) => settleCalls.push(o) });
+  await sleep(30); // let it degrade to pending
+  check("(onSettle clobber-guard precondition) evictDeadOwner removes the running entry", reg.evictDeadOwner("mint-evict") === true);
+  // A fresh op starts under the SAME key — its own onSettle must fire normally.
+  const fresh = await reg.attach("mint-evict", "merge", "mgr1", 200, async () => ({ ok: true, id: "fresh" }), undefined, { onSettle: (o) => settleCalls.push(o) });
+  check("(onSettle clobber-guard) the SUCCESSOR's own settle fires normally", fresh.settled === true && settleCalls.length === 1);
+  // NOW let the orphaned run() finally settle — its onSettle must be silently swallowed (identity guard).
+  resolveOrphan({ ok: true, id: "orphan" });
+  await sleep(20);
+  check("(onSettle clobber-guard) the ORPHAN's late settle never fires onSettle against the successor's key — still exactly 1 call", settleCalls.length === 1);
+}
+
 console.log(failures === 0
-  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, and (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation, and never lets two concurrent rejecting callers mint two concurrent real ops for the same key."
+  ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

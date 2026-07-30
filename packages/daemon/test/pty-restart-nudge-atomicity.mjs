@@ -33,10 +33,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           An EARLIER version of this guard DROPPED here instead — a Code Reviewer catch found that's a
 //           real stall hazard: the async run_gate FAILURE nudge (kind:"warning") embeds a raw code-unit
 //           slice of captured gate stderr, which CAN legitimately contain a lone surrogate (an emoji split
-//           at the slice boundary) — and `clearPendingGateOp` runs immediately before that enqueue, so a
-//           dropped nudge there would leave no durable pending-op to recover from, stranding a worker
-//           parked on its gate-completion nudge indefinitely. Sanitizing removes the hazard while still
-//           fixing the byte-level corruption.
+//           at the slice boundary) — and this nudge is the ONLY remaining path to the result by the time it
+//           fires (the durable `pending_gate_ops` tombstone is already marked settled by then — see card
+//           e3e40167), so a dropped nudge here would strand a worker parked on its gate-completion nudge
+//           indefinitely. Sanitizing removes the hazard while still fixing the byte-level corruption.
 //         - `isUntaggedSystemNudge` (LOG-ONLY, still delivered unmodified): missing the `[loom:` prefix.
 //           This was ALSO briefly a drop condition, but that assumed "warning"-kind ⇒ always
 //           `[loom:`-tagged is an invariant the codebase holds everywhere — it does NOT (the companion

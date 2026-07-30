@@ -2428,25 +2428,50 @@ export class SessionService {
    * PREFIX SUPPORT (card 225bc7bd — fixes a real false-negative bug): `opId` accepts EITHER the full id OR
    * an unambiguous 8-char id-prefix, mirroring every sibling tool (`tasks_get`, `worker_spawn`'s `taskId`,
    * `escalation_status`, `agent_get`) — `gate_status` used to be the one outlier doing an EXACT-match-only
-   * lookup, so pasting the short id Loom displays everywhere else silently missed a genuinely live op and
-   * reported `state:"not_found"`, a value documented to mean "settled or never existed" — the OPPOSITE of
-   * the truth. `state:"not_found"` now means ONLY its two documented senses (already settled — rely on the
-   * `[loom:gate-*]`/`[loom:merge-*]` nudge for the actual outcome — or never existed; this lookup genuinely
-   * cannot tell those two apart, see `GateSemaphore.findByOpId`'s doc for why splitting them isn't
-   * available here, card fc243a43 tracks it). An AMBIGUOUS prefix (matches more than one live op) is a
-   * THIRD, distinguishable outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must
-   * never collapse into `"not_found"`, which is exactly the bug being fixed: a miss that can't resolve is a
-   * different answer than a miss that means "gone", and neither may impersonate the other.
+   * lookup, so pasting the short id Loom displays everywhere else silently missed a genuinely live op.
    *
-   * `scopeSessionId` (card fc243a43 — the worker-facing `gate_status`) is threaded straight to
-   * `GateSemaphore.findByOpId`'s own scoping: when set, the lookup only ever considers ops OWNED by that
-   * session (see its doc for why this is a candidate-set filter, not a post-hoc check — an op belonging to
-   * another session is indistinguishable from `not_found`/`ambiguous`-among-only-your-own-ops, never a
-   * distinct "forbidden" outcome that would itself leak that a foreign op exists). Omitted (the manager
-   * call site), behavior is unchanged.
+   * TOMBSTONE FALLBACK (card e3e40167, superseding the original edc1ec12/fc243a43 `"not_found"` shape): a
+   * live-registry miss (`GateSemaphore.findByOpId` → `kind:"none"`) is no longer reported as `"not_found"`
+   * — it falls through to `Db.findPendingGateOpByOpId`, the SAME scoped id-or-prefix resolution over the
+   * PERMANENT `pending_gate_ops` tombstone table (never pruned — see its schema doc), and returns that
+   * row's OWN terminal state: `"settled"` (a normal completion, fast or surfaced-pending — rely on the
+   * `[loom:gate-*]`/`[loom:merge-*]` nudge for the actual pass/fail outcome, this tool still never reports
+   * that itself), `"evicted-dead-owner"`, or `"orphaned-by-restart"` (see the schema doc for what each
+   * means). `"pending"` covers the narrow, genuinely-real window where a row was minted but is not yet
+   * visible in the live GateSemaphore (either about to register, or — after a real daemon restart —
+   * awaiting the next boot's `reconcileOrphanedGateOps` sweep): the op demonstrably EXISTS, so this must
+   * never collapse to `never_existed`. An AMBIGUOUS prefix at EITHER layer is a DISTINCT outcome,
+   * `state:"ambiguous"` with an `error` naming the matching opIds — it must never collapse into
+   * `never_existed`/`unknown` either: a miss that can't resolve is a different answer than a miss that
+   * means "gone" or "not visible to you", and none of the three may impersonate another.
+   *
+   * FOUR TERMINAL "not live, not found" outcomes now, not three — `never_existed` alone is not enough
+   * once a scoped caller exists (see below): `"never_existed"` is a POSITIVE assertion the id was NEVER
+   * MINTED, provable ONLY over an UNSCOPED full-table/full-registry view (every manager call site — no
+   * candidate was ever filtered out, so a miss really does mean gone); `"unknown"` is the honest-ambiguity
+   * sink for a SCOPED caller's miss — it covers BOTH "this id genuinely never existed" AND "this id exists
+   * but isn't yours", and a scoped caller can never tell those apart (nor should it be able to).
+   *
+   * `scopeSessionId`/`scopeProjectId` (card fc243a43 — the worker-facing `gate_status`, widened by
+   * e3e40167 to also cover the tombstone fallback) are threaded straight to BOTH
+   * `GateSemaphore.findByOpId`'s AND `Db.findPendingGateOpByOpId`'s own scoping: when set, EITHER lookup
+   * only ever considers ops OWNED by that session/project (see their docs for why this is a candidate-set
+   * filter, not a post-hoc check). CORRECTNESS NOTE (caught in review — an earlier version of this method
+   * collapsed a scoped caller's miss into `never_existed`, which is EXACTLY the conflation this card exists
+   * to remove, reintroduced one layer down: the op WAS minted, the row DOES exist, the scope filter merely
+   * hid it from THIS caller — `never_existed` would be a confident, specific, FALSE claim standing in for
+   * an honest "can't tell", the identical shape as the original `not_found` defect. A scoped miss returns
+   * `"unknown"` instead — nothing leaks (a stranger and a genuinely-bogus id are STILL indistinguishable,
+   * preserving `fc243a43`'s guarantee — the sink just isn't a false positive-nonexistence claim anymore).
+   * Omitted (every manager call site), behavior is an unscoped table scan that CAN honestly return
+   * `never_existed`, unchanged from before this card.
    */
-  gateStatus(opId: string, scopeSessionId?: string): { state: "queued" | "running" | "not_found" | "ambiguous"; gateType: GateType | null; elapsedMs: number | null; error?: string } {
-    const r = this.gateSemaphore.findByOpId(opId, scopeSessionId);
+  gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string): {
+    state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
+    gateType: GateType | null; elapsedMs: number | null; error?: string;
+  } {
+    const scoped = scopeSessionId != null || scopeProjectId != null;
+    const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
     if (r.kind === "found") {
       const entry = r.record;
       return { state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since };
@@ -2457,7 +2482,26 @@ export class SessionService {
         error: `ambiguous opId prefix '${opId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id`,
       };
     }
-    return { state: "not_found", gateType: null, elapsedMs: null };
+    // Not live — fall back to the durable tombstone, scoped the identical way.
+    const t = this.db.findPendingGateOpByOpId(opId, scopeSessionId, scopeProjectId);
+    if (t.kind === "found") {
+      const gateType: GateType = t.record.kind === "merge" ? "merge" : "worker";
+      return { state: t.record.state, gateType, elapsedMs: null };
+    }
+    if (t.kind === "ambiguous") {
+      return {
+        state: "ambiguous", gateType: null, elapsedMs: null,
+        error: `ambiguous opId prefix '${opId}' — it matches ${t.ids.join(", ")}; pass more characters or the full id`,
+      };
+    }
+    // Neither layer has anything at all. UNSCOPED (manager): a genuine full-view miss — safe to POSITIVELY
+    // assert the id was never minted. SCOPED (worker): a miss here could mean "never existed" OR "exists,
+    // but isn't yours" — the candidate-set filter above deliberately can't tell those apart, so neither can
+    // this return; claiming `never_existed` for a scoped miss would be exactly this card's own defect one
+    // layer down (see the doc above).
+    return scoped
+      ? { state: "unknown", gateType: null, elapsedMs: null }
+      : { state: "never_existed", gateType: null, elapsedMs: null };
   }
 
   /**
@@ -4576,11 +4620,12 @@ export class SessionService {
       if (this.pendingOps.evictDeadOwner(op.key)) {
         cleared++;
         console.warn(`[orchestration] merge op ${op.opId} (${op.key}) had a dead owner (manager ${op.managerSessionId.slice(0, 8)}) — evicted so a fresh worker_merge_confirm can proceed`);
-        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12) — see the identical note at
-        // confirmWorkerMergeTracked's own eviction call site: an evicted entry's eventual settle never
-        // reaches onSettledAfterPending, so its durable pending_gate_ops row would otherwise survive until
-        // the NEXT boot and fire a FALSE [loom:merge-failed] at the (possibly-resumed-live) manager.
-        this.db.clearPendingGateOp(op.opId);
+        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12, restated by e3e40167) — see the identical
+        // note at confirmWorkerMergeTracked's own eviction call site: mark `evicted-dead-owner` (never
+        // `settled` — this op's own run() may still be executing — and never deleted, this table is a
+        // permanent tombstone) so a later boot's reconcileOrphanedGateOps sweep never mistakes this row for
+        // one still owed a synthetic [loom:merge-failed].
+        this.db.evictPendingGateOpDeadOwner(op.opId);
       }
     }
     return cleared;
@@ -4592,20 +4637,27 @@ export class SessionService {
    * IN-MEMORY PendingOpRegistry against a dead manager while the daemon PROCESS itself stays up; it is a
    * no-op the instant an actual process restart/crash happens, because that wipes the registry entirely
    * with NOTHING left to reconcile. This sweep instead reads the DURABLE `pending_gate_ops` table (see its
-   * schema doc in db.ts) — a row survives there ONLY when a "gate"/"merge" op was surfaced pending to a
-   * caller (runWorkerGate/confirmWorkerMergeTracked's `onSurfacedPending`) and the process died before that
-   * op's own settle callback ever got a chance to clear it. For each surviving row, push a synthetic
-   * terminal nudge to its owning session (the worker for "gate", the manager for "merge") — the exact
-   * `[loom:gate-failed]`/`[loom:merge-failed]` vocabulary those callbacks use on an ordinary failure, so a
-   * waiting session reacts to this exactly like any other terminal signal instead of needing special-case
-   * handling — then clear the row. Best-effort per row (one push failure must never block the rest) +
-   * never throws; returns the count reconciled for a boot-log line. Runs AFTER the fleet-resume passes
-   * (mirrors reconcileDeadOwnerMergeOps's own placement) so a resumed owning session is live to receive the
-   * push rather than queuing into a session that isn't there yet.
+   * schema doc in db.ts).
+   *
+   * SELECTS ONLY `surfaced_pending=1 AND state='pending'` rows (card e3e40167 — NOT every surviving row,
+   * the way the original edc1ec12 shape did): since `pending_gate_ops` became a permanent tombstone that
+   * mints a row for EVERY op at creation (fast or slow, never just the surfaced-pending ones), "every
+   * surviving row" would now also include every FAST op that settled cleanly seconds before the crash —
+   * pushing a FALSE `[loom:gate-failed]`/`[loom:merge-failed]` for a run that actually passed. Only a row
+   * that was BOTH told "pending" to some caller AND never reached a real settle (still `state:'pending'`)
+   * is a genuine restart orphan. For each such row, push a synthetic terminal nudge to its owning session
+   * (the worker for "gate", the manager for "merge") — the exact `[loom:gate-failed]`/`[loom:merge-failed]`
+   * vocabulary those callbacks use on an ordinary failure, so a waiting session reacts to this exactly like
+   * any other terminal signal instead of needing special-case handling — then mark the row
+   * `orphaned-by-restart` (never deleted — this table is a permanent tombstone, see the schema doc).
+   * Best-effort per row (one push failure must never block the rest) + never throws; returns the count
+   * reconciled for a boot-log line. Runs AFTER the fleet-resume passes (mirrors reconcileDeadOwnerMergeOps's
+   * own placement) so a resumed owning session is live to receive the push rather than queuing into a
+   * session that isn't there yet.
    */
   reconcileOrphanedGateOps(): number {
     let cleared = 0;
-    for (const row of this.db.listPendingGateOps()) {
+    for (const row of this.db.listSurfacedPendingGateOps()) {
       const isMerge = row.kind === "merge";
       const tag = isMerge ? "[loom:merge-failed]" : "[loom:gate-failed]";
       const verb = isMerge ? "re-run `worker_merge_confirm`" : "re-run `run_gate`";
@@ -4630,7 +4682,7 @@ export class SessionService {
       } catch {
         /* owning session not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */
       }
-      this.db.clearPendingGateOp(row.opId);
+      this.db.markPendingGateOpOrphaned(row.opId);
       cleared++;
       console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was orphaned by a daemon restart — resurfaced ${tag} to session ${target.slice(0, 8)}${target !== row.ownerSessionId ? ` (lineage-resolved from ${row.ownerSessionId.slice(0, 8)})` : ""}`);
     }
@@ -9467,17 +9519,24 @@ export class SessionService {
       // dedupe-hits the cache instead — a correct outcome, but a misleading operator-facing log line.
       if (this.pendingOps.evictDeadOwner(key)) {
         console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
-        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12): an evicted entry's eventual settle skips
-        // onSettledAfterPending entirely (its identity guard fails — see pending-ops.ts's class doc), so
-        // the durable row `onSurfacedPending` wrote for it would otherwise survive until the NEXT boot,
-        // where reconcileOrphanedGateOps would push a FALSE `[loom:merge-failed]` to this now-evicted op's
-        // (original, possibly-resumed-live) manager — the exact inverse of the signal this card exists to
-        // get right. Clear it here instead, at the moment the entry itself is force-removed, so the
-        // marker's lifecycle matches the entry's.
-        this.db.clearPendingGateOp(existing.opId);
+        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12, restated by e3e40167): an evicted entry's
+        // eventual settle skips `onSettle`/`onSettledAfterPending` entirely (its identity guard fails — see
+        // pending-ops.ts's class doc), so the durable row would otherwise sit forever at `state:"pending"`
+        // and, if it was ALSO surfaced pending before the eviction, get swept by reconcileOrphanedGateOps at
+        // the NEXT boot and push a FALSE `[loom:merge-failed]` to this now-evicted op's (original,
+        // possibly-resumed-live) manager — the exact inverse of the signal this card exists to get right.
+        // Mark it `evicted-dead-owner` here instead, at the moment the entry itself is force-removed — NOT
+        // `settled` (this op's own `run()` may still be executing, unreachable but uncancellable; there is
+        // no real verdict to report — see the schema doc), and NEVER deleted (this table is a permanent
+        // tombstone — a deleted row here would make this SAME opId look `never_existed` to gate_status,
+        // reintroducing this card's own defect one layer down for the eviction path).
+        this.db.evictPendingGateOpDeadOwner(existing.opId);
       }
     }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
+    // Same derivation `supersedeQueuedSelfCheck` above already uses — the scope anchor for this op's
+    // durable tombstone row (see onOpMinted below / the pending_gate_ops schema doc).
+    const projectId = this.db.getSession(managerSessionId)?.projectId ?? null;
     const who = (opId: string) => `worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${opId}]`;
     // OP-START CAPTURE (card 9d521792 CR follow-up): captured HERE, synchronously right before attach(),
     // rather than re-derived via `pendingOps.peek()` inside the settle callback below — a settle-time
@@ -9494,11 +9553,9 @@ export class SessionService {
       key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
       (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt),
       (outcome, opId) => {
-        // DURABLE-MARKER CLEANUP (card edc1ec12): this op settled normally (the daemon process is still
-        // alive to run this callback at all) — clear the durable "surfaced pending" row `onSurfacedPending`
-        // below wrote, so ONLY a genuine process death (which skips this callback entirely) ever leaves a
-        // row for reconcileOrphanedGateOps to find at the next boot.
-        this.db.clearPendingGateOp(opId);
+        // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
+        // EVERY settle — not just a surfaced-pending one, unlike this callback) has already flipped the
+        // durable row to `state:"settled"` by the time this runs — nothing to do here for the row itself.
         // DOUBLE-NOTIFY FIX (card 9eea3901, widened by 187f5b76 to cover the ALREADY_MERGED success path
         // too): a branch that already sent its own rich/direct push (`outcome.value.notified` — the
         // `[loom:merge-rejected]` rejection path OR the `[loom:already-merged]` success path) needs no
@@ -9558,16 +9615,28 @@ export class SessionService {
         // that the flag was silently ignored. `forceRemoveWorktree` is an explicit one-shot escalation from
         // the caller — it must never be served from a cache built by an earlier, non-forced call.
         bypassRetained: forceRemoveWorktree === true,
-        // DURABLE MARKER (card edc1ec12): fires synchronously, strictly before any possible settle for
-        // this op (see PendingOpRegistry.attach's onSurfacedPending doc) — records that managerSessionId is
-        // now owed an async [loom:merge-*] nudge, so a real process death before this op settles can still
-        // be reconciled at the next boot (SessionService.reconcileOrphanedGateOps) instead of leaving the
-        // manager waiting on a nudge that can now never come.
-        onSurfacedPending: (op, opId) => {
-          this.db.recordPendingGateOp({
-            opId, kind: "merge", key, ownerSessionId: managerSessionId, taskId,
-            branch: this.db.getSession(workerSessionId)?.branch ?? null, startedAt: op.startedAt,
+        // DURABLE TOMBSTONE (card edc1ec12, generalized by e3e40167): mints the row the MOMENT this op is
+        // created — see runWorkerGate's identical `onOpMinted` doc for why this must cover the fast path
+        // too, not just the surfaced-pending one.
+        onOpMinted: (opId) => {
+          this.db.insertPendingGateOp({
+            opId, kind: "merge", key, ownerSessionId: managerSessionId, projectId, taskId,
+            branch: this.db.getSession(workerSessionId)?.branch ?? null, startedAt: opStartedAt,
+            state: "pending", surfacedPending: false,
           });
+        },
+        // Fires synchronously, strictly before any possible settle for this op (see
+        // PendingOpRegistry.attach's onSurfacedPending doc) — flips the row's surfaced_pending flag so a
+        // real process death before this op settles can still be reconciled at the next boot
+        // (SessionService.reconcileOrphanedGateOps) instead of leaving the manager waiting on a nudge that
+        // can now never come.
+        onSurfacedPending: (_op, opId) => {
+          this.db.markPendingGateOpSurfaced(opId);
+        },
+        // Fires for EVERY genuine settle (fast or surfaced-pending) — see PendingOpRegistry.attach's
+        // `onSettle` doc for why this must be unconditional, unlike the completion-nudge push above.
+        onSettle: (_outcome, opId) => {
+          this.db.settlePendingGateOp(opId);
         },
       },
     );
@@ -9932,11 +10001,9 @@ export class SessionService {
         }
       },
       (outcome, opId) => {
-        // DURABLE-MARKER CLEANUP (card edc1ec12): this op settled normally (the daemon process is still
-        // alive to run this callback at all) — clear the durable "surfaced pending" row `onSurfacedPending`
-        // below wrote, so ONLY a genuine process death (which skips this callback entirely) ever leaves a
-        // row for reconcileOrphanedGateOps to find at the next boot.
-        this.db.clearPendingGateOp(opId);
+        // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
+        // EVERY settle — not just a surfaced-pending one, unlike this callback) has already flipped the
+        // durable row to `state:"settled"` by the time this runs — nothing to do here for the row itself.
         // CANCELLED (card 8d585277): a distinct "no verdict" settle — never fall through to the pass/fail
         // nudge below, which would otherwise read as a real gate result. `[loom:gate-superseded]` (the
         // manager's own merge decision made this self-check moot) vs `[loom:gate-cancelled]` (an explicit
@@ -10046,16 +10113,30 @@ export class SessionService {
         // value by `describeGateHeadCurrency` at settle, so this is a plain field read.
         isRetainedResultUsable: (value) => !(value.ran && value.headCurrent === false),
         classifyOutcome: (outcome) => (!outcome.ok ? "errored" : outcome.value.passed ? "passed" : "failed"),
-        // DURABLE MARKER (card edc1ec12): fires synchronously, strictly before any possible settle for
-        // this op (see PendingOpRegistry.attach's onSurfacedPending doc) — records that workerSessionId is
-        // now owed an async [loom:gate-*] nudge, so a real process death before this op settles can still
-        // be reconciled at the next boot (SessionService.reconcileOrphanedGateOps) instead of leaving the
-        // worker waiting on a nudge that can now never come.
-        onSurfacedPending: (op, opId) => {
-          this.db.recordPendingGateOp({
-            opId, kind: "gate", key, ownerSessionId: workerSessionId,
-            taskId: worker.taskId ?? null, branch: worker.branch ?? null, startedAt: op.startedAt,
+        // DURABLE TOMBSTONE (card edc1ec12, generalized by e3e40167): mints the row the MOMENT this op is
+        // created — fast or slow — so a settled fast-path opId is still POSITIVELY distinguishable from one
+        // that never existed (the original edc1ec12 shape only ever wrote a row once an op was surfaced
+        // pending, which made a fast op's opId indistinguishable from "never minted" once it settled — the
+        // defect e3e40167 fixes). `gate_status`'s tombstone fallback reads this row once the live
+        // GateSemaphore lookup comes back empty.
+        onOpMinted: (opId) => {
+          this.db.insertPendingGateOp({
+            opId, kind: "gate", key, ownerSessionId: workerSessionId, projectId: worker.projectId,
+            taskId: worker.taskId ?? null, branch: worker.branch ?? null, startedAt: opStartedAt,
+            state: "pending", surfacedPending: false,
           });
+        },
+        // Fires strictly before any possible settle for this op (see PendingOpRegistry.attach's
+        // onSurfacedPending doc) — flips the row's surfaced_pending flag so a real process death before
+        // this op settles can still be reconciled at the next boot (SessionService.reconcileOrphanedGateOps)
+        // instead of leaving the worker waiting on a nudge that can now never come.
+        onSurfacedPending: (_op, opId) => {
+          this.db.markPendingGateOpSurfaced(opId);
+        },
+        // Fires for EVERY genuine settle (fast or surfaced-pending) — see PendingOpRegistry.attach's
+        // `onSettle` doc for why this must be unconditional, unlike the completion-nudge push below.
+        onSettle: (_outcome, opId) => {
+          this.db.settlePendingGateOp(opId);
         },
       },
     );

@@ -89,11 +89,12 @@ try {
   check("(precondition) pendingMerge shows the zombie op as still 'running'", pre?.state === "running");
   check("(precondition) pendingMerge's managerSessionId is the DEAD predecessor manager", pre?.managerSessionId === deadMgrId);
 
-  // DURABLE-MARKER LEAK GUARD (CR follow-up, card edc1ec12): mirror what a REAL confirmWorkerMergeTracked
-  // call's onSurfacedPending would have written for this zombie BEFORE its owning manager died — a
-  // pending_gate_ops row keyed by this op's opId. If the dead-owner eviction below doesn't ALSO clear this
-  // row, it would leak until the next boot and fire a FALSE [loom:merge-failed] at the (now-live) manager.
-  db.recordPendingGateOp({ opId: pre.opId, kind: "merge", key, ownerSessionId: deadMgrId, taskId, branch: null, startedAt: now });
+  // DURABLE-MARKER LEAK GUARD (CR follow-up, card edc1ec12, restated by e3e40167): mirror what a REAL
+  // confirmWorkerMergeTracked call's onOpMinted+onSurfacedPending would have written for this zombie
+  // BEFORE its owning manager died — a pending_gate_ops row keyed by this op's opId, surfaced pending. If
+  // the dead-owner eviction below doesn't ALSO mark this row terminal, it would leak until the next boot
+  // and fire a FALSE [loom:merge-failed] at the (now-live) manager.
+  db.insertPendingGateOp({ opId: pre.opId, kind: "merge", key, ownerSessionId: deadMgrId, projectId: projId, taskId, branch: null, startedAt: now, state: "pending", surfacedPending: true });
   check("(precondition) the durable pending_gate_ops row for the zombie exists", db.listPendingGateOps().some((r) => r.opId === pre.opId));
 
   // ── (2) a LIVE manager's confirm evicts the dead-owner zombie and completes a REAL merge ────────────
@@ -110,7 +111,12 @@ try {
   // matters (not stuck "running" forever on the zombie) still holds; assert the terminal shape directly.
   const afterRecovery = sessions.peekPendingMerge(workerId);
   check("(recovery) pendingMerge is a RETAINED terminal 'merged' view post-settle — not stuck 'running'", afterRecovery?.state === "done" && afterRecovery?.outcome === "merged");
-  check("(recovery) the ZOMBIE's durable row was cleared on eviction — no leaked marker for a later boot to misfire on", !db.listPendingGateOps().some((r) => r.opId === pre.opId));
+  // Card e3e40167: pending_gate_ops is now a PERMANENT tombstone — eviction marks the row terminal
+  // ('evicted-dead-owner') rather than deleting it, so a later boot's reconcileOrphanedGateOps (which
+  // selects only surfaced_pending+state='pending' rows) correctly skips it — no false [loom:merge-failed],
+  // without needing the row to vanish.
+  const zombieRowAfter = db.listPendingGateOps().find((r) => r.opId === pre.opId);
+  check("(recovery) the ZOMBIE's durable row still exists but is marked 'evicted-dead-owner' — never deleted, never left leakable as 'pending'", zombieRowAfter !== undefined && zombieRowAfter.state === "evicted-dead-owner");
 
   // ── (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op directly ─────
   const key2 = `merge:${workerId}-b`;
@@ -118,12 +124,13 @@ try {
   await sleep(30);
   const zombie2 = sessions.pendingOps.peek(key2);
   check("(boot-sweep precondition) a second zombie op is tracked as running", zombie2?.state === "running");
-  db.recordPendingGateOp({ opId: zombie2.opId, kind: "merge", key: key2, ownerSessionId: deadMgrId, taskId, branch: null, startedAt: now });
+  db.insertPendingGateOp({ opId: zombie2.opId, kind: "merge", key: key2, ownerSessionId: deadMgrId, projectId: projId, taskId, branch: null, startedAt: now, state: "pending", surfacedPending: true });
   check("(boot-sweep precondition) its durable pending_gate_ops row exists too", db.listPendingGateOps().some((r) => r.opId === zombie2.opId));
   const cleared = sessions.reconcileDeadOwnerMergeOps();
   check("(boot-sweep) reports exactly the one dead-owner op it cleared", cleared === 1);
   check("(boot-sweep) the zombie is gone from the registry", sessions.pendingOps.peek(key2) === undefined);
-  check("(boot-sweep) its durable row was ALSO cleared — no leak until the next boot", !db.listPendingGateOps().some((r) => r.opId === zombie2.opId));
+  const zombie2RowAfter = db.listPendingGateOps().find((r) => r.opId === zombie2.opId);
+  check("(boot-sweep) its durable row still exists but is marked 'evicted-dead-owner' — never deleted", zombie2RowAfter !== undefined && zombie2RowAfter.state === "evicted-dead-owner");
 
   // ── (4) SURGICAL: a running op owned by a LIVE manager is untouched by either recovery path ────────
   const key3 = `merge:${workerId}-c`;
@@ -140,6 +147,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, and (card edc1ec12 CR follow-up) an evicted dead-owner op's durable pending_gate_ops row is cleared right along with its registry entry — never left to leak until the next boot and fire a false [loom:merge-failed] at the now-live manager."
+  ? "\n✅ ALL PASS — a merge op orphaned by a dead owning manager (the daemon-restart-mid-merge shape) is evicted rather than dedup-attached-to forever: confirmWorkerMergeTracked recovers it inline on the next confirm, reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears it directly, a live-owner op is left completely untouched by both paths, and (card edc1ec12 CR follow-up, restated by e3e40167) an evicted dead-owner op's durable pending_gate_ops row is marked 'evicted-dead-owner' right along with its registry eviction — NEVER deleted (the table is a permanent tombstone), but correctly excluded from reconcileOrphanedGateOps' boot sweep, so it never leaks a false [loom:merge-failed] at the now-live manager."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -486,6 +486,15 @@ mid-report — before sending anything.
      time on a still-QUEUED entry means it has been waiting a long time, not running a long time; only a
      RUNNING entry's elapsed time is evidence about how long the actual gate command has been executing.
      Read the phase before drawing a conclusion from the number.
+   - **A decision you just made can turn a worker's OWN in-flight self-check into dead weight — cancel it
+     rather than let it burn a shared gate slot for an answer nobody needs anymore.** If a worker is
+     parked on its own `run_gate` and you separately decide the branch is getting merged anyway (or
+     rejected outright, or the worker is being recycled), that self-check's eventual pass/fail no longer
+     changes anything you'll do. If your platform exposes a cancel tool scoped to a gate op (e.g.
+     `gate_cancel`), use it on the worker's `opId` — it settles as a distinct cancelled/superseded outcome,
+     never a false pass or fail, and frees the slot for real work instead of quietly finishing a check
+     whose answer you've already made moot. This is a MANAGER-side lever, not something to delegate to the
+     worker itself.
    - **Can't tell healthy contention from a leaked slot? Read the whole queue, don't guess.** `gate_status`
      only ever answers "what is MY op doing" — it has no view of the daemon-wide picture. If your platform
      exposes a `gate_queue` read tool, call it: ONE read returns the resolved concurrency cap plus every
