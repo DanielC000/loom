@@ -4790,8 +4790,13 @@ export class PtyHost {
     // Anchor for the give-up branch's liveness check below — captured for THIS attempt's own Enter write,
     // never an earlier one (each attempt gets its own closure). See the give-up branch's comment for why.
     const enterWrittenAt = Date.now();
+    // Card 04de8bbf's investigation: this line previously carried no generation/message id, so no
+    // analysis (or future live reconciliation fix on 4a0af485) could join a submit to its true confirming
+    // hook — only an approximate time-order pairing, which breaks down across a give-up cascade (several
+    // attempt-1 writes can precede the one real hook that eventually confirms a re-minted message).
+    // `gen` is already in scope here (this function's own parameter) — log-only, no behavior change.
     // eslint-disable-next-line no-console
-    console.log(`[submit] ${sessionId} Enter attempt ${attempt}/${SUBMIT_MAX_ATTEMPTS} written — awaiting confirmation`);
+    console.log(`[submit] ${sessionId} Enter attempt ${attempt}/${SUBMIT_MAX_ATTEMPTS} written gen=${gen} — awaiting confirmation`);
     setTimeout(() => {
       const l = this.live.get(sessionId);
       if (!l?.alive || l.enterConfirmed || l.submitGeneration !== gen) return; // confirmed / stale generation / dead — nothing more to do
