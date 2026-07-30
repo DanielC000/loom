@@ -3,18 +3,39 @@
 // duplicated copy — the census harness already learned that lesson the hard way, see its own lib.mjs
 // comment) and exercised against a synthetic temp directory, never the real test/ tree.
 //
-// Fully hermetic — no daemon, no claude, just fs + the real discovery function.
+// Card e7bcb0df extends this with `auditDiscoveryAgainstGit` coverage: the walk-vs-git cross-check, its
+// anchoring/validation/raw-layer constraints, and the path-wide underscore-exclusion fix (GAP 2). These
+// scenarios build a REAL throwaway git repo per `mkGitRepo` below (via `git init` + `git add`, no commit
+// needed — `git ls-files` reads the INDEX, so a bare `add` is enough) so the cross-check is exercised
+// against a genuinely independent git process, not a mocked stand-in for one.
+//
+// Fully hermetic — no daemon, no claude; fs + a scratch `git` repo + the real discovery functions.
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const { discoverHermeticTests } = await import(
+const { discoverHermeticTests, auditDiscoveryAgainstGit } = await import(
   pathToFileURL(path.join(import.meta.dirname, "..", "scripts", "test-daemon.mjs")).href
 );
+
+// Initializes a scratch git repo at `dir` and returns a `run(args)` helper scoped to it (throws on a
+// non-zero git exit, surfacing stderr — so a setup mistake in a test below fails loudly, not silently).
+function mkGitRepo(dir) {
+  const run = (args) => {
+    const result = spawnSync("git", args, { cwd: dir, encoding: "utf8" });
+    if (result.status !== 0) {
+      throw new Error(`git ${args.join(" ")} (cwd ${dir}) exited ${result.status}: ${result.stderr}`);
+    }
+    return result.stdout;
+  };
+  run(["init", "-q"]);
+  return run;
+}
 
 const dir = mkdtempManaged("loom-test-daemon-discovery-");
 {
@@ -57,6 +78,169 @@ const dir = mkdtempManaged("loom-test-daemon-discovery-");
 }
 // dir's own manual finally-block rmSync removed here: mkdtempManaged already registered it for
 // guaranteed cleanup at process exit (card 995be21f).
+
+// --- Card e7bcb0df GAP 2: the underscore-exclusion rule must be PATH-WIDE, not basename-only ---------
+{
+  const dir2 = mkdtempManaged("loom-test-daemon-discovery-gap2-");
+  // RED-first scenario (DoD 3): a marker-LESS .mjs nested under an underscore-prefixed DIRECTORY whose
+  // own basename carries no underscore. The OLD (basename-only) rule would have let this through as a
+  // candidate — no assertion marker ⇒ a VIOLATION ⇒ the whole gate refuses to run. The FIXED rule must
+  // treat the underscore on the containing directory as excluding it, silently, same as any other helper.
+  fs.mkdirSync(path.join(dir2, "_scratch"));
+  fs.writeFileSync(path.join(dir2, "_scratch", "x.mjs"), 'console.log("no marker, no underscore basename");\n');
+  // Also cover a MARKER-shaped file under the same underscore directory — must ALSO be silently
+  // excluded (the directory-level exclusion wins regardless of what the file itself looks like), never
+  // accidentally picked up as hermetic just because it happens to look test-shaped.
+  fs.writeFileSync(path.join(dir2, "_scratch", "y.mjs"), 'if (1 !== 1) throw new Error("unreachable");\n');
+
+  const { hermetic, violations } = discoverHermeticTests(dir2, new Set());
+  check(
+    "[GAP 2] a marker-less file under an underscore-prefixed DIRECTORY is silently excluded, not a violation",
+    !violations.includes("_scratch/x.mjs") && !hermetic.includes("_scratch/x"),
+  );
+  check(
+    "[GAP 2] a marker-shaped file under an underscore-prefixed DIRECTORY is also silently excluded, not hermetic",
+    !hermetic.includes("_scratch/y") && !violations.includes("_scratch/y.mjs"),
+  );
+  check("[GAP 2] nothing under the underscore directory is reported at all", hermetic.length === 0 && violations.length === 0);
+}
+
+// --- Card e7bcb0df FIX 1: auditDiscoveryAgainstGit, the independent walk-vs-git cross-check -----------
+{
+  // Positive control: a clean tree — including the intentionally-excluded fixtures/census subtrees,
+  // which the RAW walk (unlike the production walk) does traverse — must show ZERO diff in either
+  // direction once everything is tracked. Proves the raw-layer comparison (FIX 1 (iii)) doesn't
+  // false-positive on the architecture's own deliberate directory exclusions.
+  {
+    const clean = mkdtempManaged("loom-test-daemon-discovery-git-clean-");
+    const run = mkGitRepo(clean);
+    fs.writeFileSync(path.join(clean, "real-test.mjs"), 'if (1 !== 1) throw new Error("x");\n');
+    fs.writeFileSync(path.join(clean, "_helper.mjs"), 'export const thing = 1;\n');
+    fs.mkdirSync(path.join(clean, "fixtures"));
+    fs.writeFileSync(path.join(clean, "fixtures", "child.mjs"), 'if (false) throw new Error("x");\n');
+    fs.mkdirSync(path.join(clean, "census"));
+    fs.writeFileSync(path.join(clean, "census", "probe.mjs"), 'process.exit(1);\n');
+    run(["add", "-A"]);
+
+    const audit = auditDiscoveryAgainstGit(clean);
+    check(
+      "[positive control] a clean, fully-tracked tree (incl. fixtures/census) reports zero diff in both directions",
+      audit.inGitNotWalked.length === 0 && audit.walkedNotInGit.length === 0,
+    );
+  }
+
+  // RED-first, GAP 1 (DoD 1): a REAL under-discovery. `other-test.mjs` is `git add`-ed (tracked, present
+  // in the index) and then deleted from disk — the walk (whatever it is, raw or production) can never see
+  // it again, but git still lists it. This is exactly "the walk cannot check itself": `discoverHermeticTests`
+  // (which derives HERMETIC from the very same walk) reports a clean, GREEN result with the file simply
+  // absent — no violation, no error, nothing to notice. `auditDiscoveryAgainstGit` is the only thing that
+  // can catch this, and must name the file.
+  {
+    const underDiscover = mkdtempManaged("loom-test-daemon-discovery-git-gap1-");
+    const run = mkGitRepo(underDiscover);
+    fs.writeFileSync(path.join(underDiscover, "real-test.mjs"), 'if (1 !== 1) throw new Error("x");\n');
+    fs.writeFileSync(path.join(underDiscover, "other-test.mjs"), 'if (1 !== 1) throw new Error("x");\n');
+    run(["add", "-A"]);
+    fs.unlinkSync(path.join(underDiscover, "other-test.mjs"));
+
+    const { hermetic } = discoverHermeticTests(underDiscover, new Set());
+    check(
+      "[GAP 1 red-first] the walk-derived discovery reports GREEN — it simply never sees the missing file",
+      hermetic.includes("real-test") && !hermetic.includes("other-test"),
+    );
+    const audit = auditDiscoveryAgainstGit(underDiscover);
+    check(
+      "[GAP 1 red-first] the independent git cross-check reports RED, naming exactly the missing file",
+      audit.inGitNotWalked.length === 1 && audit.inGitNotWalked[0] === "other-test.mjs",
+    );
+    check("[GAP 1] the reverse direction is clean (nothing walked-but-untracked here)", audit.walkedNotInGit.length === 0);
+  }
+
+  // walked-but-untracked (the other direction): an on-disk file never `git add`-ed. Must be reported as
+  // an untracked stray (`walkedNotInGit`), never as `inGitNotWalked` — this is a warning-worthy but
+  // non-fatal state (a worker's own new, not-yet-staged test file), not the GAP-1 failure mode.
+  {
+    const untracked = mkdtempManaged("loom-test-daemon-discovery-git-stray-");
+    const run = mkGitRepo(untracked);
+    fs.writeFileSync(path.join(untracked, "real-test.mjs"), 'if (1 !== 1) throw new Error("x");\n');
+    run(["add", "-A"]);
+    fs.writeFileSync(path.join(untracked, "stray.mjs"), 'if (1 !== 1) throw new Error("x");\n'); // never git add-ed
+
+    const audit = auditDiscoveryAgainstGit(untracked);
+    check("[untracked stray] reported as walkedNotInGit, exactly one, named", audit.walkedNotInGit.length === 1 && audit.walkedNotInGit[0] === "stray.mjs");
+    check("[untracked stray] never reported as inGitNotWalked (it's not a discovery failure)", audit.inGitNotWalked.length === 0);
+  }
+
+  // RED-first, the CWD hole (DoD 2, FIX 1 (i)): call the audit while process.cwd() points somewhere
+  // totally unrelated to the repo under test. An UNANCHORED implementation (one that ran `git` with the
+  // inherited cwd instead of an explicit one) would silently answer from the WRONG repo — this proves the
+  // anchored version still returns the correct reference set regardless of ambient cwd. `path.dirname
+  // (anchored)` is `mkdtempManaged`'s own OS temp root (it mkdtemps directly under it) — an ancestor of
+  // `anchored` but NOT itself a git repo, without this file needing its own `node:os` import.
+  {
+    const anchored = mkdtempManaged("loom-test-daemon-discovery-git-anchor-");
+    const originalCwd = process.cwd();
+    try {
+      const run = mkGitRepo(anchored);
+      fs.writeFileSync(path.join(anchored, "real-test.mjs"), 'if (1 !== 1) throw new Error("x");\n');
+      run(["add", "-A"]);
+
+      process.chdir(path.dirname(anchored)); // an ancestor of `anchored`, but NOT itself a git repo — a wrong cwd
+      const audit = auditDiscoveryAgainstGit(anchored);
+      check(
+        "[CWD hole] the anchored audit still returns the correct reference set from an unrelated cwd",
+        audit.inGitNotWalked.length === 0 && audit.walkedNotInGit.length === 0,
+      );
+    } finally {
+      process.chdir(originalCwd);
+    }
+  }
+
+  // RED-first, empty/invalid reference (DoD 2, FIX 1 (ii)): a directory with no git repo at all must
+  // ERROR, never silently return an empty (vacuously-passing) comparison.
+  {
+    const notARepo = mkdtempManaged("loom-test-daemon-discovery-git-norepo-");
+    fs.writeFileSync(path.join(notARepo, "real-test.mjs"), 'if (1 !== 1) throw new Error("x");\n');
+    let threw = false;
+    try { auditDiscoveryAgainstGit(notARepo); } catch { threw = true; }
+    check("[empty reference] a directory with no git repo at all throws, rather than passing vacuously", threw);
+  }
+
+  // RED-first, empty/invalid reference, second shape: a REAL repo, but the test dir itself has nothing
+  // tracked under it at all — `git ls-files` succeeds (exit 0) but returns an empty reference set. Must
+  // still ERROR (a zero-size reference is a hard error per FIX 1 (ii)), not be treated as "zero diff".
+  {
+    const emptyTracked = mkdtempManaged("loom-test-daemon-discovery-git-emptyref-");
+    const run = mkGitRepo(emptyTracked);
+    fs.writeFileSync(path.join(emptyTracked, "README.md"), "tracked elsewhere in the repo\n");
+    fs.mkdirSync(path.join(emptyTracked, "emptysub"));
+    run(["add", "README.md"]); // something IS tracked in the repo — just nothing under emptysub/
+    let threw = false;
+    try { auditDiscoveryAgainstGit(path.join(emptyTracked, "emptysub")); } catch { threw = true; }
+    check("[empty reference] a real repo with zero tracked files under testDir throws, rather than passing vacuously", threw);
+  }
+
+  // RED-first, empty/invalid reference, THIRD shape (manager's negative control, mgr review of e7bcb0df):
+  // a real repo, and testDir has tracked files under it — but NONE of them are .mjs. `tracked.length`
+  // above is > 0 (something IS tracked), so that guard alone is not enough; the guard has to be on the
+  // set the comparison actually uses (`gitMjs`), or this is a clean pass on an empty-vs-empty comparison —
+  // the exact vacuous shape constraint (ii) exists to prevent, one layer in (measured live: pointing the
+  // pre-fix audit at this repo's own packages/daemon/src, which is all tracked .ts and zero .mjs, returned
+  // a clean {inGitNotWalked:0, walkedNotInGit:0} instead of throwing).
+  {
+    const nonMjsTracked = mkdtempManaged("loom-test-daemon-discovery-git-nonmjsref-");
+    const run = mkGitRepo(nonMjsTracked);
+    fs.writeFileSync(path.join(nonMjsTracked, "notes.ts"), "export const x = 1;\n");
+    fs.writeFileSync(path.join(nonMjsTracked, "README.md"), "no .mjs here\n");
+    run(["add", "-A"]);
+    let threw = false;
+    try { auditDiscoveryAgainstGit(nonMjsTracked); } catch { threw = true; }
+    check(
+      "[empty reference, non-.mjs shape] a real repo with tracked files but ZERO .mjs among them throws, rather than passing vacuously",
+      threw,
+    );
+  }
+}
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-discovery: ${failures} check(s) failed.`);
 await finishAndExit(failures === 0 ? 0 : 1);

@@ -10,16 +10,26 @@
 // Tests are DISCOVERED by an explicit ALLOWLIST (card b122c7d4), not by "everything not positively
 // excluded": a recursive walk of test/ (skipping the established non-test containers `fixtures/` and
 // `census/` — child-process fixtures and the out-of-band census harness, neither ever hermetic tests)
-// collects every `.mjs` file, then splits it two ways. A leading `_` (e.g. _guard.mjs, _tmp-fixture.mjs)
-// marks an intentional helper and is silently excluded, same as before. Everything else MUST look like a
-// real test — carry an assertion marker (`check(`/`assert`/`throw new Error`/`process.exit(1)`) — or
-// discovery REFUSES LOUDLY, naming the file, instead of silently spawning it and recording a pass: a
-// non-test `.mjs` that merely imports cleanly and exits 0 is indistinguishable from a real pass by exit
-// code alone (measured on `node:test` too — a zero-test file reports `# tests 1, # pass 1`), so
-// "unexpected but ran anyway" is not a safe default here. This is on top of, and does not replace, the
-// small NOT_HERMETIC denylist below for genuine tests that need a human-started isolated daemon and/or a
-// real `claude` login — run those manually per the header comment in each file. Adding a new ordinary
-// hermetic test file still needs no edit here: the allowlist is a derivation rule, not a static list.
+// collects every `.mjs` file, then splits it two ways. A leading `_` on ANY path segment — the file's own
+// name, or any containing directory (e.g. _guard.mjs, _tmp-fixture.mjs, or a whole _scratch/ directory) —
+// marks an intentional helper and is silently excluded, same as before (card e7bcb0df: this used to check
+// only the file's basename, which let a file inside an underscore-prefixed DIRECTORY through as a
+// candidate — see GAP 2 in that card). Everything else MUST look like a real test — carry an assertion
+// marker (`check(`/`assert`/`throw new Error`/`process.exit(1)`) — or discovery REFUSES LOUDLY, naming
+// the file, instead of silently spawning it and recording a pass: a non-test `.mjs` that merely imports
+// cleanly and exits 0 is indistinguishable from a real pass by exit code alone (measured on `node:test`
+// too — a zero-test file reports `# tests 1, # pass 1`), so "unexpected but ran anyway" is not a safe
+// default here. This is on top of, and does not replace, the small NOT_HERMETIC denylist below for
+// genuine tests that need a human-started isolated daemon and/or a real `claude` login — run those
+// manually per the header comment in each file. Adding a new ordinary hermetic test file still needs no
+// edit here: the allowlist is a derivation rule, not a static list.
+//
+// Card e7bcb0df: the walk above cannot audit itself — `HERMETIC` and the executed-path-set assertion
+// below both derive from the SAME walk, so a file the walk fails to discover is silently absent from
+// both sides and never noticed. `auditDiscoveryAgainstGit` (below) cross-checks the walk's TRAVERSAL
+// against git's own tracked-file list — a genuinely independent second opinion — and runs in the real
+// gate path before any test spawns. See that function's own doc comment for the anchoring/validation/
+// raw-layer constraints and its tracked-files-only blind spot.
 //
 // Runs in a BOUNDED, port-safe worker pool (each test file is already hermetically isolated — own
 // temp LOOM_HOME, own port — so this is embarrassingly-parallel). Pool size, in order:
@@ -33,7 +43,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -62,24 +72,38 @@ export const NOT_HERMETIC = new Set([
 // — a sibling investigation, not part of this gate.
 const EXCLUDED_DIR_NAMES = new Set(["fixtures", "census"]);
 
-// A discovered file not underscore-prefixed must carry at least one of these to count as a real test —
-// the exact marker set the b122c7d4 census verified holds for every one of the 629 currently-hermetic
-// top-level files (the other 4 non-matches were all underscore-prefixed helpers).
+// A discovered file not underscore-prefixed must carry at least one of these to count as a real test.
+// Card b122c7d4's census verified the marker set against test/'s top-level .mjs files at that commit:
+// 629 top-level files MATCHED a marker. That is a DIFFERENT population from "hermetic" — 629 counts every
+// top-level .mjs that matched, before NOT_HERMETIC exclusion; the actually-hermetic count at that same
+// commit was 592 (card e7bcb0df: the original comment here conflated the two figures — don't reintroduce
+// that when re-verifying this marker set later).
 const ASSERTION_MARKERS = [/\bcheck\(/, /\bassert\b/, /throw new Error/, /process\.exit\(1\)/];
 
 function looksLikeTest(source) {
   return ASSERTION_MARKERS.some((re) => re.test(source));
 }
 
-// Recursively collect every `.mjs` file under `dir`, skipping EXCLUDED_DIR_NAMES subtrees entirely.
-// Returns paths relative to `dir`, POSIX-separated (stable/portable name shape regardless of nesting).
-function walkMjsFiles(dir, base = dir) {
+// True if ANY path segment — the file's own name, or any containing directory — starts with "_". Card
+// e7bcb0df GAP 2: checking only the file's basename let a file inside an underscore-prefixed DIRECTORY
+// (e.g. test/_fixtures/x.mjs — "_fixtures" != the exact-match EXCLUDED_DIR_NAMES entry "fixtures") through
+// as a discovery candidate; a marker-less file there refused the whole gate. This makes the enforced rule
+// match the convention as humans actually read it — underscore-prefix a whole helper directory, not just
+// individual files.
+function isUnderscoreExcluded(rel) {
+  return rel.split("/").some((segment) => segment.startsWith("_"));
+}
+
+// Shared recursive `.mjs` collector. `skipDir(name)` is checked at every level of the recursion (so it
+// applies at any depth, not just the top) and decides whether to descend into a given directory at all.
+// Returns paths relative to `base`, POSIX-separated (stable/portable name shape regardless of nesting).
+function walkMjsFilesImpl(dir, skipDir, base) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      if (EXCLUDED_DIR_NAMES.has(entry.name)) continue;
-      out.push(...walkMjsFiles(full, base));
+      if (skipDir(entry.name)) continue;
+      out.push(...walkMjsFilesImpl(full, skipDir, base));
       continue;
     }
     if (entry.isFile() && entry.name.endsWith(".mjs")) {
@@ -89,18 +113,35 @@ function walkMjsFiles(dir, base = dir) {
   return out;
 }
 
+// Recursively collect every `.mjs` file under `dir`, skipping EXCLUDED_DIR_NAMES subtrees entirely — the
+// production discovery walk, unchanged from before card e7bcb0df.
+function walkMjsFiles(dir, base = dir) {
+  return walkMjsFilesImpl(dir, (name) => EXCLUDED_DIR_NAMES.has(name), base);
+}
+
+// A FULLY RAW walk — no directory exclusions at all, not even EXCLUDED_DIR_NAMES. Used ONLY by
+// `auditDiscoveryAgainstGit` below (card e7bcb0df), which cross-checks the discovery walk's TRAVERSAL
+// against git's own tracked-file list at a layer with NO classification logic on either side. Applying
+// EXCLUDED_DIR_NAMES here would make the git reference inherit the production walk's own exclusion
+// decision, and a traversal bug in `walkMjsFiles` (as opposed to a bug in what it deliberately excludes)
+// would then no longer be catchable — the two sides would still compare equal.
+function walkAllMjsFiles(dir, base = dir) {
+  return walkMjsFilesImpl(dir, () => false, base);
+}
+
 // The allowlist derivation (card b122c7d4): walk `testDir`, split into silently-excluded helpers (a
-// leading `_`) and candidates. Every candidate must `looksLikeTest`; one that doesn't is a VIOLATION —
-// named and returned, never silently run and never silently dropped. `hermetic` is `candidates minus
-// notHermetic`, using the SAME bare-name shape existing callers (NOT_HERMETIC, TEST_TIMEOUT_OVERRIDES)
-// already key on — for every file that lives at test/ top level (all of them, today) the name is
-// unchanged from before this card. Exported so a test can positive/negative-control this logic directly,
-// against a synthetic directory, instead of a duplicated copy silently drifting from the real thing.
+// leading `_` on any path segment — card e7bcb0df) and candidates. Every candidate must `looksLikeTest`;
+// one that doesn't is a VIOLATION — named and returned, never silently run and never silently dropped.
+// `hermetic` is `candidates minus notHermetic`, using the SAME bare-name shape existing callers
+// (NOT_HERMETIC, TEST_TIMEOUT_OVERRIDES) already key on — for every file that lives at test/ top level
+// (all of them, today) the name is unchanged from before this card. Exported so a test can
+// positive/negative-control this logic directly, against a synthetic directory, instead of a duplicated
+// copy silently drifting from the real thing.
 export function discoverHermeticTests(testDir, notHermetic = NOT_HERMETIC) {
   const violations = [];
   const hermetic = [];
   for (const rel of walkMjsFiles(testDir).sort()) {
-    if (path.basename(rel).startsWith("_")) continue;
+    if (isUnderscoreExcluded(rel)) continue;
     const name = rel.slice(0, -".mjs".length);
     if (notHermetic.has(name)) continue;
     const source = fs.readFileSync(path.join(testDir, rel), "utf8");
@@ -108,6 +149,94 @@ export function discoverHermeticTests(testDir, notHermetic = NOT_HERMETIC) {
     hermetic.push(name);
   }
   return { hermetic, violations };
+}
+
+// Runs a read-only, local git command with an EXPLICIT cwd (never `process.cwd()`) and returns its
+// stdout, or throws with a clear message. Used only by `auditDiscoveryAgainstGit` below; never mutates
+// the repo. GIT_TERMINAL_PROMPT=0 + a short timeout are cheap insurance against ever hanging the gate on
+// what should always be an instant local read.
+function runGitReadOnly(args, cwd) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 10_000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  if (result.error) {
+    throw new Error(`git ${args.join(" ")} (cwd ${cwd}) failed to run: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`git ${args.join(" ")} (cwd ${cwd}) exited ${result.status}: ${(result.stderr || "").trim()}`);
+  }
+  return result.stdout;
+}
+
+// Card e7bcb0df — an INDEPENDENT cross-check of the discovery walk's TRAVERSAL against git's own
+// tracked-file list. GAP 1: `HERMETIC` and the executed-path-set assertion further below both derive from
+// the SAME `walkMjsFiles` call, so a file the walk never discovers is missing from both sides and compares
+// equal — an under-discovering walk runs fewer tests and reports GREEN. `git ls-files` is a genuinely
+// independent second opinion on which files exist under test/, so this is the only thing that can catch
+// that class of bug.
+//
+// Three deliberate constraints, each closing a real hole found while designing this check:
+// (i) ANCHORED, not cwd-dependent. `git rev-parse --show-toplevel` and `git ls-files` both run with an
+//     EXPLICIT `cwd` (never relying on `process.cwd()`), so calling this from the wrong working directory
+//     can never silently change the answer. (`git ls-files` itself IS cwd-dependent — from the wrong cwd
+//     it can return nothing at all, and an empty reference set would otherwise pass VACUOUSLY: `∅ ⊆
+//     executedNames` is trivially true, both sides "fail" together and the check reports success. See (ii).)
+// (ii) VALIDATED reference. A zero-size reference set (git reported no tracked files at all under
+//      testDir) is a HARD ERROR — thrown, never silently treated as "nothing to compare". This is a floor
+//      on the instrument's INPUT (does the yardstick exist at all), not on the measurement itself.
+// (iii) RAW-LAYER comparison. `walkAllMjsFiles` applies NO exclusions (not even EXCLUDED_DIR_NAMES), and
+//       the git reference is filtered to `.mjs` files only — nothing about underscore-prefixing,
+//       NOT_HERMETIC, or assertion markers. Filtering the git list by those same classification rules
+//       would make the reference inherit the walk's own classification logic, and a classification bug
+//       would then sit on both sides and compare equal — independence lost again, one layer down. Only
+//       TRAVERSAL is cross-checked here: does the walk see the same FILES git sees, full stop.
+//
+// BLIND SPOT: `git ls-files` sees TRACKED files only. A brand-new, never-`git add`-ed test file is
+// invisible to this check — it protects the MERGE criterion (nothing tracked is silently dropped by the
+// walk), NOT a worker's own local run with a genuinely new, not-yet-staged file. Never read a clean
+// result here as total coverage.
+//
+// Reports both directions, named: `inGitNotWalked` (git-tracked, walk never saw it — the real GAP-1 class
+// of bug; the caller treats this as fatal) and `walkedNotInGit` (walk saw it, git doesn't track it — an
+// untracked stray; the caller treats this as a warning, not a failure — an untracked file is a normal
+// local-development state, not evidence of a broken walk).
+export function auditDiscoveryAgainstGit(testDir) {
+  const realTestDir = fs.realpathSync.native(testDir);
+  const repoRootRaw = runGitReadOnly(["rev-parse", "--show-toplevel"], realTestDir).trim();
+  if (!repoRootRaw) {
+    throw new Error(`git rev-parse --show-toplevel returned nothing for ${realTestDir} — cannot anchor the discovery audit`);
+  }
+  const repoRoot = fs.realpathSync.native(repoRootRaw);
+  const relTestDir = path.relative(repoRoot, realTestDir).split(path.sep).join("/");
+  // `git ls-files -- ""` is a git error ("empty string is not a valid pathspec"), not an empty result —
+  // the edge case where testDir IS the repo root itself (relTestDir === "") needs "." instead.
+  const lsOutput = runGitReadOnly(["ls-files", "--", relTestDir === "" ? "." : relTestDir], repoRoot);
+  const tracked = lsOutput.split("\n").map((line) => line.trim()).filter(Boolean);
+  if (tracked.length === 0) {
+    throw new Error(`git ls-files reported ZERO tracked files under "${relTestDir || "."}" (repo root ${repoRoot}) — refusing to treat an empty reference set as a valid comparison`);
+  }
+  const prefix = relTestDir === "" ? "" : `${relTestDir}/`;
+  const gitMjs = new Set(
+    tracked.filter((rel) => rel.startsWith(prefix) && rel.endsWith(".mjs")).map((rel) => rel.slice(prefix.length)),
+  );
+  // The `tracked.length === 0` check above only guards that git tracks SOMETHING under testDir — it does
+  // NOT guard that any of it is `.mjs`. `gitMjs` is the reference the comparison below actually consumes,
+  // so THAT is the set that must not be silently empty: a directory git tracks non-.mjs files under (e.g.
+  // a `src/` full of `.ts`) would otherwise pass `tracked.length === 0` and then compare two empty sets as
+  // a clean pass — the same vacuous-pass shape this whole check exists to prevent, one level in. A
+  // distinct message from the "zero tracked files at all" case above: that one means the pathspec/anchor
+  // itself is broken; this one means the anchor is fine but nothing here is even candidate material.
+  if (gitMjs.size === 0) {
+    throw new Error(`git tracks ${tracked.length} file(s) under "${relTestDir || "."}" (repo root ${repoRoot}) but NONE are .mjs — refusing to treat an empty .mjs reference set as a valid comparison`);
+  }
+  const walked = new Set(walkAllMjsFiles(realTestDir));
+
+  const inGitNotWalked = [...gitMjs].filter((rel) => !walked.has(rel)).sort();
+  const walkedNotInGit = [...walked].filter((rel) => !gitMjs.has(rel)).sort();
+  return { inGitNotWalked, walkedNotInGit };
 }
 
 const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS } = discoverHermeticTests(TEST_DIR);
@@ -276,6 +405,26 @@ if (isMain) {
     console.error("❌ test-daemon.mjs: discovered ZERO hermetic tests — refusing to report a green suite that ran nothing.");
     process.exit(1);
   }
+
+  // Card e7bcb0df DoD 6: the cross-check must actually run in the real gate path, not just exist as an
+  // importable function — so it runs here, unconditionally, before a single test spawns.
+  let gitAudit;
+  try {
+    gitAudit = auditDiscoveryAgainstGit(TEST_DIR);
+  } catch (err) {
+    console.error(`❌ test-daemon.mjs: could not verify the discovery walk against git — refusing to trust an unverified allowlist: ${err.message}`);
+    process.exit(1);
+  }
+  if (gitAudit.inGitNotWalked.length) {
+    console.error(`❌ test-daemon.mjs: ${gitAudit.inGitNotWalked.length} git-tracked .mjs file(s) under test/ were never seen by the discovery walk — naming them:`);
+    for (const rel of gitAudit.inGitNotWalked) console.error(`   - ${rel}`);
+    console.error("   The walk under-discovers relative to git — refusing to report a green gate that may have silently skipped real tests.");
+    process.exit(1);
+  }
+  if (gitAudit.walkedNotInGit.length) {
+    console.warn(`⚠ test-daemon.mjs: ${gitAudit.walkedNotInGit.length} .mjs file(s) seen by the discovery walk are untracked by git (fine for a local run; invisible to the merge gate's own tracked-files-only check): ${gitAudit.walkedNotInGit.join(", ")}`);
+  }
+
   const results = new Array(HERMETIC.length);
   const nextIndex = makeCursor(HERMETIC.length);
   await Promise.all(
