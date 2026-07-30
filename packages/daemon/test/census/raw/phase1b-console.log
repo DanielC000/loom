@@ -1,0 +1,45 @@
+=== Phase 1b: force codescape-health-probe + codescape-supervisor (both exercise real pickLoopbackPort()) ===
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 1/10: clean (50919ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 2/10: clean (49678ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 3/10: clean (30028ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 4/10: clean (29104ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 5/10: clean (28651ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 6/10: clean (28789ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 7/10: clean (28587ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 8/10: clean (28608ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 9/10: clean (28555ms)
+PASS  codescape-supervisor
+PASS  codescape-health-probe
+  [toctou:forced-concurrent-2] rep 10/10: clean (28760ms)
+PASS  codescape-health-probe
+  [toctou:solo-health-probe] rep 1/3: clean (31377ms)
+PASS  codescape-health-probe
+  [toctou:solo-health-probe] rep 2/3: clean (51243ms)
+PASS  codescape-health-probe
+  [toctou:solo-health-probe] rep 3/3: clean (46817ms)
+PASS  codescape-supervisor
+  [toctou:solo-supervisor] rep 1/3: clean (6160ms)
+PASS  codescape-supervisor
+  [toctou:solo-supervisor] rep 2/3: clean (6333ms)
+PASS  codescape-supervisor
+  [toctou:solo-supervisor] rep 3/3: clean (6101ms)
+
+forced-concurrent fails: 0/10 runs | solo fails: 0/6 runs

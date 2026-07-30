@@ -1,0 +1,152 @@
+=== Phase 1 Step A: positive-control the probe itself ===
+FAIL  collide-a  (exit 1)
+PASS  collide-b
+  [probe-control:known-colliding-together] rep 1/5: FAIL [{"name":"collide-a","status":1}] (604ms)
+PASS  collide-b
+FAIL  collide-a  (exit 1)
+  [probe-control:known-colliding-together] rep 2/5: FAIL [{"name":"collide-a","status":1}] (678ms)
+FAIL  collide-a  (exit 1)
+PASS  collide-b
+  [probe-control:known-colliding-together] rep 3/5: FAIL [{"name":"collide-a","status":1}] (527ms)
+FAIL  collide-a  (exit 1)
+PASS  collide-b
+  [probe-control:known-colliding-together] rep 4/5: FAIL [{"name":"collide-a","status":1}] (687ms)
+PASS  collide-b
+FAIL  collide-a  (exit 1)
+  [probe-control:known-colliding-together] rep 5/5: FAIL [{"name":"collide-a","status":1}] (688ms)
+PASS  collide-a
+  [probe-control:collide-a-solo] rep 1/3: clean (454ms)
+PASS  collide-a
+  [probe-control:collide-a-solo] rep 2/3: clean (468ms)
+PASS  collide-a
+  [probe-control:collide-a-solo] rep 3/3: clean (580ms)
+PASS  collide-b
+  [probe-control:collide-b-solo] rep 1/3: clean (593ms)
+PASS  collide-b
+  [probe-control:collide-b-solo] rep 2/3: clean (591ms)
+PASS  collide-b
+  [probe-control:collide-b-solo] rep 3/3: clean (447ms)
+PASS  pc-pass-1
+PASS  pc-pass-2
+  [probe-control:known-non-colliding-together] rep 1/5: clean (90ms)
+PASS  pc-pass-1
+PASS  pc-pass-2
+  [probe-control:known-non-colliding-together] rep 2/5: clean (81ms)
+PASS  pc-pass-1
+PASS  pc-pass-2
+  [probe-control:known-non-colliding-together] rep 3/5: clean (110ms)
+PASS  pc-pass-1
+PASS  pc-pass-2
+  [probe-control:known-non-colliding-together] rep 4/5: clean (97ms)
+PASS  pc-pass-1
+PASS  pc-pass-2
+  [probe-control:known-non-colliding-together] rep 5/5: clean (91ms)
+
+Probe self-check: known-colliding-together fail rate 100%, solo fail rate 0%, known-non-colliding fail rate 0%
+✅ Probe self-check passed — trusted to judge real candidate pairs below.
+
+=== Phase 1 Step B: force real candidate pairs ===
+
+--- pair: merge-gate-reuse+gate-timeout-circuit-breaker ---
+PASS  gate-timeout-circuit-breaker
+PASS  merge-gate-reuse
+  [merge-gate-reuse+gate-timeout-circuit-breaker:forced-concurrent-2] rep 1/2: clean (59228ms)
+PASS  gate-timeout-circuit-breaker
+PASS  merge-gate-reuse
+  [merge-gate-reuse+gate-timeout-circuit-breaker:forced-concurrent-2] rep 2/2: clean (52240ms)
+PASS  merge-gate-reuse
+PASS  gate-timeout-circuit-breaker
+  [merge-gate-reuse+gate-timeout-circuit-breaker:sequential-concurrency-1] rep 1/1: clean (107053ms)
+PASS  merge-gate-reuse
+  [merge-gate-reuse+gate-timeout-circuit-breaker:solo-merge-gate-reuse] rep 1/1: clean (57981ms)
+PASS  gate-timeout-circuit-breaker
+  [merge-gate-reuse+gate-timeout-circuit-breaker:solo-gate-timeout-circuit-breaker] rep 1/1: clean (44533ms)
+  => forced-concurrent fails: [] | sequential(c=1) fails: [] | solo fails: []
+
+--- pair: merge-gate-reuse+merge-repo-mutex ---
+PASS  merge-repo-mutex
+PASS  merge-gate-reuse
+  [merge-gate-reuse+merge-repo-mutex:forced-concurrent-2] rep 1/2: clean (59354ms)
+PASS  merge-repo-mutex
+PASS  merge-gate-reuse
+  [merge-gate-reuse+merge-repo-mutex:forced-concurrent-2] rep 2/2: clean (57860ms)
+PASS  merge-gate-reuse
+PASS  merge-repo-mutex
+  [merge-gate-reuse+merge-repo-mutex:sequential-concurrency-1] rep 1/1: clean (95256ms)
+PASS  merge-gate-reuse
+  [merge-gate-reuse+merge-repo-mutex:solo-merge-gate-reuse] rep 1/1: clean (52273ms)
+PASS  merge-repo-mutex
+  [merge-gate-reuse+merge-repo-mutex:solo-merge-repo-mutex] rep 1/1: clean (97922ms)
+  => forced-concurrent fails: [] | sequential(c=1) fails: [] | solo fails: []
+
+--- pair: merge-gate-reuse+filler(wake) ---
+PASS  wake
+PASS  merge-gate-reuse
+  [merge-gate-reuse+filler(wake):forced-concurrent-2] rep 1/2: clean (97441ms)
+PASS  wake
+PASS  merge-gate-reuse
+  [merge-gate-reuse+filler(wake):forced-concurrent-2] rep 2/2: clean (54498ms)
+PASS  merge-gate-reuse
+PASS  wake
+  [merge-gate-reuse+filler(wake):sequential-concurrency-1] rep 1/1: clean (53259ms)
+PASS  merge-gate-reuse
+  [merge-gate-reuse+filler(wake):solo-merge-gate-reuse] rep 1/1: clean (52370ms)
+PASS  wake
+  [merge-gate-reuse+filler(wake):solo-wake] rep 1/1: clean (577ms)
+  => forced-concurrent fails: [] | sequential(c=1) fails: [] | solo fails: []
+
+--- pair: codescape-lifecycle-hooks+merge-gate-reuse ---
+PASS  codescape-lifecycle-hooks
+PASS  merge-gate-reuse
+  [codescape-lifecycle-hooks+merge-gate-reuse:forced-concurrent-2] rep 1/2: clean (53413ms)
+PASS  codescape-lifecycle-hooks
+PASS  merge-gate-reuse
+  [codescape-lifecycle-hooks+merge-gate-reuse:forced-concurrent-2] rep 2/2: clean (55723ms)
+PASS  codescape-lifecycle-hooks
+PASS  merge-gate-reuse
+  [codescape-lifecycle-hooks+merge-gate-reuse:sequential-concurrency-1] rep 1/1: clean (68470ms)
+PASS  codescape-lifecycle-hooks
+  [codescape-lifecycle-hooks+merge-gate-reuse:solo-codescape-lifecycle-hooks] rep 1/1: clean (14152ms)
+PASS  merge-gate-reuse
+  [codescape-lifecycle-hooks+merge-gate-reuse:solo-merge-gate-reuse] rep 1/1: clean (50481ms)
+  => forced-concurrent fails: [] | sequential(c=1) fails: [] | solo fails: []
+
+--- pair: codescape-lifecycle-hooks+filler(wake) ---
+PASS  wake
+PASS  codescape-lifecycle-hooks
+  [codescape-lifecycle-hooks+filler(wake):forced-concurrent-2] rep 1/2: clean (14127ms)
+PASS  wake
+PASS  codescape-lifecycle-hooks
+  [codescape-lifecycle-hooks+filler(wake):forced-concurrent-2] rep 2/2: clean (13532ms)
+PASS  codescape-lifecycle-hooks
+PASS  wake
+  [codescape-lifecycle-hooks+filler(wake):sequential-concurrency-1] rep 1/1: clean (13513ms)
+PASS  codescape-lifecycle-hooks
+  [codescape-lifecycle-hooks+filler(wake):solo-codescape-lifecycle-hooks] rep 1/1: clean (13671ms)
+PASS  wake
+  [codescape-lifecycle-hooks+filler(wake):solo-wake] rep 1/1: clean (566ms)
+  => forced-concurrent fails: [] | sequential(c=1) fails: [] | solo fails: []
+
+--- pair: worker-spawn-cap-toctou-race+merge-gate-reuse ---
+PASS  worker-spawn-cap-toctou-race
+PASS  merge-gate-reuse
+  [worker-spawn-cap-toctou-race+merge-gate-reuse:forced-concurrent-2] rep 1/2: clean (51423ms)
+PASS  worker-spawn-cap-toctou-race
+PASS  merge-gate-reuse
+  [worker-spawn-cap-toctou-race+merge-gate-reuse:forced-concurrent-2] rep 2/2: clean (49526ms)
+PASS  worker-spawn-cap-toctou-race
+PASS  merge-gate-reuse
+  [worker-spawn-cap-toctou-race+merge-gate-reuse:sequential-concurrency-1] rep 1/1: clean (52386ms)
+PASS  worker-spawn-cap-toctou-race
+  [worker-spawn-cap-toctou-race+merge-gate-reuse:solo-worker-spawn-cap-toctou-race] rep 1/1: clean (2725ms)
+PASS  merge-gate-reuse
+  [worker-spawn-cap-toctou-race+merge-gate-reuse:solo-merge-gate-reuse] rep 1/1: clean (49728ms)
+  => forced-concurrent fails: [] | sequential(c=1) fails: [] | solo fails: []
+
+=== Phase 1 summary ===
+merge-gate-reuse+gate-timeout-circuit-breaker: clean
+merge-gate-reuse+merge-repo-mutex: clean
+merge-gate-reuse+filler(wake): clean
+codescape-lifecycle-hooks+merge-gate-reuse: clean
+codescape-lifecycle-hooks+filler(wake): clean
+worker-spawn-cap-toctou-race+merge-gate-reuse: clean

@@ -31,7 +31,10 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "test");
 
-const NOT_HERMETIC = new Set([
+// Exported so an out-of-band census/probe harness (test/census/*) can import the REAL exclusion list
+// instead of keeping its own copy — a duplicated copy is exactly the shared-unit-divergence anti-pattern
+// this codebase keeps paying for (see card ec7983c6's 116-copy SeamHost fixture).
+export const NOT_HERMETIC = new Set([
   "integration-e2e", "orchestration-e2e", "manager-live", "messaging", "mgmt-surface", "orch-scope",
   "orch-spawn", "mcp-scope", "platform-scope", "recycle", "scheduler", "scheduler-drain",
   "scheduler-disabled", "usage-limit-detect", "usage-limit-resume", "worker-report", "autonomy-rails",
@@ -108,7 +111,13 @@ function runOne(name, lane) {
 
     const home = fs.mkdtempSync(path.join(os.tmpdir(), `loom-td-${name}-`));
     tmpRoots.push(home);
-    const port = 4400 + lane; // fixed per-lane port — safe under concurrency (POOL_SIZE lanes, POOL_SIZE ports)
+    // Card fa52f555: this is safe WITHIN one invocation of this script (POOL_SIZE lanes, POOL_SIZE
+    // distinct ports) but NOT across two CONCURRENT invocations — e.g. two merge gates admitted at once
+    // under `maxConcurrentGates` >= 2 — since each independently computes the same `4400 + lane` values.
+    // Checked (census card d39db2db): not currently reachable, because no hermetic test binds a real
+    // listener on this assigned port (all either use in-memory `.inject()` or an unrelated ephemeral
+    // `:0` bind) — but that is a property of today's test files, not a guarantee this scheme provides.
+    const port = 4400 + lane;
 
     let stdout = "";
     let stderr = "";
@@ -156,37 +165,84 @@ async function runLane(lane, names, nextIndex, results) {
   }
 }
 
-const results = new Array(HERMETIC.length);
-const nextIndex = makeCursor(HERMETIC.length);
-await Promise.all(
-  Array.from({ length: Math.min(POOL_SIZE, HERMETIC.length) }, (_, lane) => runLane(lane, HERMETIC, nextIndex, results)),
-);
-
-// Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
-for (const root of tmpRoots) {
-  for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
+// Guard the actual run behind a main-module check: an out-of-band harness (test/census/*) needs to
+// import this file's NOT_HERMETIC export without ALSO triggering a full 585-test run as a side effect
+// of that import — importing a bare top-level script otherwise runs unconditionally. `node
+// scripts/test-daemon.mjs` (the real gate entry point) is unaffected by this — argv[1] resolves to this
+// same file there, so the guard is true and behavior is unchanged.
+//
+// This guard is the single highest-blast-radius line in the repo: if it is EVER false on the real gate
+// invocation, the merge gate runs ZERO tests and exits 0 — a silent green indistinguishable from a real
+// pass. Neither a correct guard nor a totally broken one can be told apart by the gate itself (both look
+// like a green gate) — verified instead by directly running the real invocation and watching test output
+// appear (see card d39db2db's report). Two defences against a future regression:
+//   1. Compare RESOLVED REAL paths (`fs.realpathSync.native`), not raw URL strings — normalises drive-
+//      letter case, 8.3 short-name components, and symlinks/junctions in one step (all three are
+//      concrete, non-exotic ways a raw string compare can silently diverge on Windows).
+//   2. If argv[1] LOOKS like a direct invocation of this exact file (same basename) but the resolved
+//      paths still differ, that is precisely the dangerous mismatch — fail loudly and non-zero instead
+//      of silently falling through. A genuinely different importer (a different basename entirely, e.g.
+//      the census harness importing NOT_HERMETIC) stays silent — that path is intentional, not a guard
+//      failure, and must not be treated as one.
+function resolveReal(p) {
+  try { return fs.realpathSync.native(p); } catch { return null; }
 }
+const selfPath = resolveReal(fileURLToPath(import.meta.url));
+const argvPath = process.argv[1] ? resolveReal(process.argv[1]) : null;
+const isMain = selfPath !== null && argvPath !== null && selfPath === argvPath;
 
-const pass = results.filter((r) => r.ok).length;
-const failed = results.filter((r) => !r.ok);
-
-console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed. (pool size ${POOL_SIZE})`);
-// Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
-// is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
-// (pass or fail) means the exclusion itself can never again go unnoticed, without paying the cost of
-// actually booting a live daemon here. Run one manually: `node dist/index.js` (some need extra env —
-// see the file's own header), then `node test/<name>.mjs` from packages/daemon.
-console.log(`ℹ NOT_HERMETIC (excluded from this gate — needs a live daemon and/or real claude; run manually, see each file's header): ${[...NOT_HERMETIC].sort().join(", ")}`);
-if (failed.length) {
-  console.log("FAILURES:");
-  // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
-  // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
-  // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
-  for (const f of failed) {
-    console.log(`  - ${f.name} (exit ${f.status}): ${f.tail ?? ""}`);
-    if (f.stdout?.trim()) console.log(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
-    if (f.stderr?.trim()) console.log(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+if (isMain) {
+  if (HERMETIC.length === 0) {
+    // A second, independent silent-green trap: even with isMain correctly true, an empty discovered set
+    // (a TEST_DIR/glob bug) would otherwise fall through to "0/0 passed" — indistinguishable from a real
+    // green. "Ran nothing" and "everything passed" must never share an exit code.
+    console.error("❌ test-daemon.mjs: discovered ZERO hermetic tests — refusing to report a green suite that ran nothing.");
+    process.exit(1);
   }
+  const results = new Array(HERMETIC.length);
+  const nextIndex = makeCursor(HERMETIC.length);
+  await Promise.all(
+    Array.from({ length: Math.min(POOL_SIZE, HERMETIC.length) }, (_, lane) => runLane(lane, HERMETIC, nextIndex, results)),
+  );
+
+  // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
+  for (const root of tmpRoots) {
+    for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
+  }
+
+  const pass = results.filter((r) => r.ok).length;
+  const failed = results.filter((r) => !r.ok);
+
+  console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed. (pool size ${POOL_SIZE})`);
+  // Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
+  // is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
+  // (pass or fail) means the exclusion itself can never again go unnoticed, without paying the cost of
+  // actually booting a live daemon here. Run one manually: `node dist/index.js` (some need extra env —
+  // see the file's own header), then `node test/<name>.mjs` from packages/daemon.
+  console.log(`ℹ NOT_HERMETIC (excluded from this gate — needs a live daemon and/or real claude; run manually, see each file's header): ${[...NOT_HERMETIC].sort().join(", ")}`);
+  if (failed.length) {
+    console.log("FAILURES:");
+    // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
+    // check() failures inside a test file were otherwise invisible in the CI log, which is exactly why a
+    // Linux-only failure (card 45a23c27) shipped undiagnosable from CI output alone.
+    for (const f of failed) {
+      console.log(`  - ${f.name} (exit ${f.status}): ${f.tail ?? ""}`);
+      if (f.stdout?.trim()) console.log(f.stdout.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+      if (f.stderr?.trim()) console.log(f.stderr.trimEnd().split("\n").map((l) => `      ${l}`).join("\n"));
+    }
+    process.exit(1);
+  }
+  console.log("✅ hermetic daemon suite green — never touched prod.");
+} else if (argvPath && selfPath && path.basename(argvPath).toLowerCase() === path.basename(selfPath).toLowerCase()) {
+  // argv[1] has the SAME FILENAME as this script but resolved to a different real path — this is not a
+  // legitimate import-for-export (that would have a different basename entirely), it is the guard
+  // mismatch itself: a direct invocation whose path didn't compare equal. Fail loudly and non-zero
+  // instead of silently exiting 0 with no test output — see the guard's own comment above.
+  console.error("❌ test-daemon.mjs: main-module guard MISMATCH — this looks like a direct invocation, but the resolved real paths differ:");
+  console.error(`   import.meta.url resolved to: ${selfPath}`);
+  console.error(`   process.argv[1] resolved to: ${argvPath}`);
+  console.error("   Refusing to silently report a green gate having run zero tests.");
   process.exit(1);
 }
-console.log("✅ hermetic daemon suite green — never touched prod.");
+// else: genuinely imported as a module by a different script (e.g. the census harness importing
+// NOT_HERMETIC) — silent and expected, no run, no exit.
