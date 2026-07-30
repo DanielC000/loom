@@ -769,9 +769,7 @@ export class CodescapeSupervisor {
    * malformed/unparseable stdout at exit 0 — see {@link readInstalledBuild}'s own doc). The running side
    * keeps its existing two-case fail-safe (absent from the response, or `build: null`). ALL FOUR of these
    * non-comparable states mean "do nothing" — a restart only fires when BOTH sides resolve to non-empty,
-   * DIFFERING strings. `healthJson`'s `version` field is NEVER read here — it is the static
-   * `CODESCAPE_VERSION` semver and reads identically across commits; wiring drift to it would produce a
-   * detector that reports "no drift" forever.
+   * DIFFERING strings.
    *
    * On a genuine mismatch this does NOT call `scheduleRestart`/`spawnServe` directly — exactly like the
    * wedge-kill above, it kills the live child ONCE and lets the EXISTING `child.on("exit")` -> `onDeath`
@@ -783,7 +781,10 @@ export class CodescapeSupervisor {
    * installed build we already kicked a restart for, so a serve that keeps reporting a stale/failing
    * `build` after that restart (the installed side hasn't moved) is never kicked again on every
    * subsequent probe tick — that guard is what stops an endless restart cycle when the new build can't
-   * come up. A restart fires again only once the installed build itself changes to something new.
+   * come up. A restart fires again once the installed build itself changes to something new — or once
+   * the daemon restarts: the guard is a private instance field reset in {@link start}/{@link stop} (see
+   * {@link lastDriftRestartInstalledBuild}'s own doc), so a fresh daemon process reopens the same
+   * one-restart allowance for the SAME installed build too.
    *
    * Card 9e6f984d — STABILITY WINDOW, a precondition layered ON TOP of the guard above (does not
    * replace it): a genuine mismatch does not restart immediately. The installed build must first sit
@@ -818,12 +819,15 @@ export class CodescapeSupervisor {
     if (this.stopped) return;
     if (installed.failed) {
       // A genuine read FAILURE (non-zero exit, or malformed/unparseable stdout at exit 0) — fail-safe
-      // behavior is UNCHANGED (still never restart), only the reporting changes. Latched so a sustained
-      // failure (the expected steady state until Codescape ships its version-command surface, or any
-      // other persistent misconfiguration) logs ONCE, not on every ~30s probe tick forever; a NEW reason
-      // (or the read recovering, which resets the latch below) is always reported again.
+      // behavior is UNCHANGED (still never restart), only the reporting changes. The dominant observed
+      // cause is a version-probe TIMEOUT under boot/host contention, not a broken install — see card
+      // f0718488. Latched so a sustained failure logs ONCE, not on every ~30s probe tick forever; a NEW
+      // reason (or the read recovering, which resets the latch below) is always reported again. The latch
+      // is a per-instance field reset in start()/stop() — verified called at most once each per daemon
+      // process (constructed + started once at boot in index.ts, never stopped in normal operation) — so
+      // in practice this also means "not again this daemon's lifetime".
       if (installed.reason !== this.lastInstalledBuildFailureReason) {
-        console.warn(`[codescape] cannot read the INSTALLED build id — drift detection is inert until this resolves (${installed.reason}). Will not repeat this warning unless the reason changes.`);
+        console.warn(`[codescape] cannot read the INSTALLED build id — drift detection is inert until this resolves (${installed.reason}). Won't repeat this warning again this daemon lifetime unless the reason changes.`);
         this.lastInstalledBuildFailureReason = installed.reason ?? null;
       }
       return;
@@ -859,7 +863,7 @@ export class CodescapeSupervisor {
       const pairKey = `${installedBuild}|${runningBuild}`;
       if (this.lastExhaustedDriftAnnounced !== pairKey) {
         this.lastExhaustedDriftAnnounced = pairKey;
-        console.warn(`[codescape] serve build drift UNRESOLVED (running "${runningBuild}" != installed "${installedBuild}") — its one restart is already spent and will not fire again for this installed build. Will not repeat this diagnostic until the installed build changes.`);
+        console.warn(`[codescape] serve build drift UNRESOLVED (running "${runningBuild}" != installed "${installedBuild}") — its one restart is already spent for this daemon's lifetime; a fresh allowance opens only if the installed build changes or the daemon restarts. Won't repeat this diagnostic until one of those happens.`);
       }
       return; // already gave THIS installed build its one restart
     }
@@ -887,14 +891,14 @@ export class CodescapeSupervisor {
    * (NOT the shared `runBounded` `ingest()` uses — see that function's own doc for why stdout/stderr must
    * stay separate here), never on any hot path (this only ever runs off the periodic {@link probeHealth}
    * tick, itself off any request path). The ONLY place that knows how to ask the installed binary for its
-   * build — deliberately isolated here so wiring to the real command, once it ships, is a one-function
-   * change with no ripple elsewhere.
+   * build — deliberately isolated here so a future change to the CLI's version-command surface is a
+   * one-function change with no ripple elsewhere.
    *
    * AGREED CONTRACT (with the Codescape manager, superseding an earlier wrong read of the CLI's failure
    * shape): both `codescape version` and `codescape --version` will work, resolving THREE distinguishable
    * outcomes, not two:
-   *   - exit 0, stdout `{"version":"0.1.0","build":"<sha>"}` — normal; comparable for drift.
-   *   - exit 0, stdout `{"version":"0.1.0","build":null}` — an HONEST answer (e.g. a dist built outside a
+   *   - exit 0, stdout `{"version":"<semver>","build":"<sha>"}` — normal; comparable for drift.
+   *   - exit 0, stdout `{"version":"<semver>","build":null}` — an HONEST answer (e.g. a dist built outside a
    *     git checkout), never a failure.
    *   - non-zero exit — reserved for a genuine failure to answer.
    * Two guarantees this relies on: stdout is clean JSON ONLY (no banners/prefixes mixed in) when exit is
@@ -905,15 +909,13 @@ export class CodescapeSupervisor {
    * not get silently rescued by a forgiving parser (that would hide exactly the class of bug this feature
    * already cost a round of review to find).
    *
-   * AS OF THIS WRITING the real CLI does not implement this yet — it exits 1 with EMPTY stdout and a usage
-   * banner on stderr for any unrecognized flag/subcommand — so this resolves the classified
-   * `{build:null, failed:true, reason:"... failed (exit 1) ..."}` case every time against today's binary.
-   * That is the CORRECT, SAFE outcome (never restart when the installed side can't be read), not a bug to
-   * route around: do NOT read Codescape's internal `dist/buildInfo.generated.js` (or any other
-   * undocumented internal file) to make this "work" today — that is an unversioned cross-project coupling
-   * that breaks silently the moment Codescape reshapes its build output, exactly the class of stale
-   * cross-project belief this project has already been burned by. Once their version-command surface
-   * ships, only this function needs to change.
+   * The real CLI implements this surface as of 2026-07-28: `codescape version`/`--version` returns
+   * `{"version":"<semver>","build":"<sha>"}` on stdout at exit 0 — confirmed live by `90550a97`, which
+   * validated the detector end-to-end against a genuine drift condition (installed != running,
+   * correctly classified). Do NOT read Codescape's internal `dist/buildInfo.generated.js` (or any other
+   * undocumented internal file) to make this "work" instead — that is an unversioned cross-project
+   * coupling that breaks silently the moment Codescape reshapes its build output, exactly the class of
+   * stale cross-project belief this project has already been burned by.
    *
    * Never throws; never fabricates a value. `failed` is true ONLY for a genuine read failure (spawn/exec
    * failure or timeout — `runBoundedSplit`'s own `!ok` — or malformed/unparseable stdout at exit 0); it is
