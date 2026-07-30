@@ -215,6 +215,24 @@ function fetchVersion(port) {
   });
 }
 
+// One-shot probe of the loopback port that tells apart "nothing is listening here at all" from
+// "something is listening but isn't answering" — the distinction `stop()` needs before it trusts a bare
+// pid enough to signal it (task a242c747). Returns "answered" (got an HTTP response, any status — the
+// port is held by an HTTP server, presumably Loom), "refused" (ECONNREFUSED/ECONNRESET — the OS actively
+// rejected the connection because no process is bound to this port at all), or "timeout"/"other-error"
+// (a connection went through — or errored some other way — but no response arrived; consistent with a
+// still-listening process that just isn't responding, e.g. a genuinely wedged daemon).
+function probePort(port, timeoutMs = 1500) {
+  return new Promise((resolve) => {
+    const req = http.get({ host: "127.0.0.1", port, path: "/api/version", timeout: timeoutMs }, (res) => {
+      res.resume();
+      resolve("answered");
+    });
+    req.on("error", (e) => resolve(e && (e.code === "ECONNREFUSED" || e.code === "ECONNRESET") ? "refused" : "other-error"));
+    req.on("timeout", () => { req.destroy(); resolve("timeout"); });
+  });
+}
+
 // POST /internal/shutdown (the daemon's graceful control hook) → { status } or { error }.
 function postShutdown(port) {
   return new Promise((resolve) => {
@@ -325,6 +343,16 @@ It may still be starting — check 'loom status'${logPath ? ` or the log at ${lo
 // SIGTERM (the daemon's own graceful handler); (3) LAST resort a hard kill — and we print a clear
 // warning that the stop was NOT graceful (Windows has no SIGTERM, so an older daemon there can only be
 // hard-killed). Stale/absent PID files are handled as "not running".
+//
+// IDENTITY, not just liveness (task a242c747): `isAlive(rec.pid)` below only proves *some* process holds
+// this pid — OS pids get reused, so after an unclean exit the pid file can point at a totally unrelated
+// process, and signalling it blind (steps 2/3 use a bare pid — SIGTERM, SIGKILL, and on Windows
+// `taskkill /T /F`, which kills that process's WHOLE tree) can hit an innocent bystander. The (1) hook
+// above already confirms identity whenever it gets ANY HTTP response — even a 404 means an HTTP server
+// answered on this port. Only when the hook gets NO response at all (a connection error) is identity
+// still undecided — resolved just below, before either signal step runs, into one of THREE outcomes: a
+// stale-record cleanup, a fall-through to the signal ladder, or an outright refusal (see that block's own
+// comment for which is which).
 async function stop() {
   const rec = readPidFile();
   if (!rec) { console.log("loom: no daemon is running (no PID file)."); return 0; }
@@ -339,6 +367,40 @@ async function stop() {
     if (await waitForDown(port, 12000)) graceful = true;
   } else if (hook.status === 404) {
     console.error("loom: this daemon predates the graceful-shutdown hook — falling back to a signal.");
+  }
+
+  // Identity check before EITHER signal step below. The hook already confirms identity when it got any
+  // HTTP response (hook.status defined, incl. 404). Otherwise, probe the port directly — THREE possible
+  // outcomes, each handled differently:
+  //   - REFUSED (nothing is listening on the port at all): an INFERENCE, not a certainty — a running Loom
+  //     daemon normally holds its port for its whole life, so a pid that's alive without holding the
+  //     expected port is almost certainly a reused one belonging to another process. The residual case
+  //     (the daemon's HTTP listener died while the process itself stayed alive) would also show refused
+  //     and make this inference wrong — but we deliberately prefer a false "stale" here over signalling a
+  //     possible bystander, so: treat it like any other stale PID file (clean it), never signal.
+  //   - TIMEOUT (the port IS held but not responding): consistent with a genuinely wedged real daemon —
+  //     this is exactly the case that must stay killable, so it falls through to the normal signal ladder
+  //     below unchanged. This is also why the check does NOT gate on a successful `fetchVersion`-style
+  //     probe to decide whether to hard-kill at all: a naive "only kill if it answers" would make a truly
+  //     wedged daemon (which by definition ISN'T answering) permanently unkillable — trading a rare
+  //     wrong-kill for a routine can't-stop.
+  //   - anything else (an unclassified connection error) is genuinely UNDECIDABLE from either signal above
+  //     — refuse to guess (never a blind kill, never a silent no-op) and hand the human the exact pid and
+  //     command so they can finish the job themselves if it really is stuck.
+  if (!graceful && hook.status === undefined) {
+    const probe = await probePort(port);
+    if (probe === "refused") {
+      console.error(`loom: PID ${rec.pid} is alive, but nothing is listening on ${urlFor(port)}. Treating the PID file as stale — a running Loom daemon always holds its port, so this PID is almost certainly a reused one belonging to another process.`);
+      removePidFile();
+      console.log(`loom: not running (stale PID ${rec.pid} cleaned). The process still holding that PID was NOT signalled.`);
+      return 0;
+    }
+    if (probe === "other-error") {
+      console.error(`loom: could not confirm whether PID ${rec.pid} is still the Loom daemon (no answer on ${urlFor(port)}).`);
+      console.error(`loom: refusing to signal an unidentified process. If you're sure PID ${rec.pid} is the stuck daemon, stop it yourself: ${process.platform === "win32" ? `taskkill /PID ${rec.pid} /T /F` : `kill -9 ${rec.pid}`}`);
+      return 1;
+    }
+    // probe === "timeout": the port IS held but unresponsive — fall through to the signal ladder below.
   }
 
   // (2) POSIX SIGTERM fallback (the daemon's signal handler runs the SAME graceful path). On Windows
