@@ -1570,6 +1570,11 @@ const TASK_ADDED_COLUMNS: Record<string, string> = {
   // Nullable, no DEFAULT (mirrors merged_sha/merged_repo_key/merged_date): every legacy row backfills to
   // NULL ("unknown mode"), read identically to a merge that landed before this column existed.
   merged_verification: "TEXT",
+  // Card 793ac76d — "deferred until THIS task merges" companion to `deferred`. Nullable, no DEFAULT
+  // (mirrors held_by/repo_key): every legacy row backfills to NULL, meaning "no named blocker" — the
+  // byte-identical-to-today case (see Task.deferredUntilTaskId's own doc for the read-time auto-clear
+  // this drives). No base-schema index or constraint references this column.
+  deferred_until_task_id: "TEXT",
 };
 
 /** Columns added to `project_memory` after its card-2fd9abf9 launch; applied to existing DBs by
@@ -5260,9 +5265,9 @@ export class Db {
   }
   insertTask(t: Task): void {
     this.db.prepare(
-      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key)
-       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey)`,
-    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null }); // defaults when an (untyped) caller omits them
+      `INSERT INTO tasks (id,project_id,title,body,column_key,position,priority,held,deferred,held_by,created_at,updated_at,repo_key,deferred_until_task_id)
+       VALUES (@id,@projectId,@title,@body,@columnKey,@position,@priority,@held,@deferred,@heldBy,@createdAt,@updatedAt,@repoKey,@deferredUntilTaskId)`,
+    ).run({ ...t, priority: t.priority ?? "p2", held: t.held ? 1 : 0, deferred: t.deferred ? 1 : 0, heldBy: t.heldBy ?? null, repoKey: t.repoKey ?? null, deferredUntilTaskId: t.deferredUntilTaskId ?? null }); // defaults when an (untyped) caller omits them
   }
   // `heldBy` is a plain persist here, same as every other field — no set-vs-clear POLICY belongs in the DB
   // layer. That lives in the ONE agent-facing choke point both agent MCP surfaces share
@@ -5276,14 +5281,14 @@ export class Db {
   // NOT go through this method — see {@link backfillTaskMergedInfo} below, which writes the same three
   // columns WITHOUT touching `updatedAt`, so opening an old done card's drawer can never reorder the
   // owner's `byRecentlyDone`-sorted done lane (Code Review finding, card 1eebc46a).
-  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification">>): void {
+  updateTask(id: string, patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "heldBy" | "repoKey" | "mergedSha" | "mergedRepoKey" | "mergedDate" | "mergedVerification" | "deferredUntilTaskId">>): void {
     const cur = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as Row | undefined;
     if (!cur) return;
     const t = toTask(cur);
     const next = { ...t, ...patch, updatedAt: new Date().toISOString() };
     this.db.prepare(
-      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification WHERE id=@id",
-    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null });
+      "UPDATE tasks SET title=@title, body=@body, column_key=@columnKey, position=@position, priority=@priority, held=@held, deferred=@deferred, held_by=@heldBy, updated_at=@updatedAt, repo_key=@repoKey, merged_sha=@mergedSha, merged_repo_key=@mergedRepoKey, merged_date=@mergedDate, merged_verification=@mergedVerification, deferred_until_task_id=@deferredUntilTaskId WHERE id=@id",
+    ).run({ ...next, held: next.held ? 1 : 0, deferred: next.deferred ? 1 : 0, heldBy: next.heldBy ?? null, repoKey: next.repoKey ?? null, mergedSha: next.mergedSha ?? null, mergedRepoKey: next.mergedRepoKey ?? null, mergedDate: next.mergedDate ?? null, mergedVerification: next.mergedVerification ?? null, deferredUntilTaskId: next.deferredUntilTaskId ?? null });
   }
   /**
    * Write-through cache-fill for a task's ship-state (card 1eebc46a) — used ONLY by the drawer's lazy
@@ -6979,6 +6984,7 @@ function toTask(r0: unknown): Task {
     priority: (r.priority as Task["priority"]) ?? "p2",
     held: (r.held as number) === 1,
     deferred: (r.deferred as number) === 1,
+    deferredUntilTaskId: (r.deferred_until_task_id as string | null) ?? null,
     heldBy: (r.held_by as Task["heldBy"]) ?? null,
     repoKey: (r.repo_key as string | null) ?? null,
     mergedSha: (r.merged_sha as string | null) ?? null,

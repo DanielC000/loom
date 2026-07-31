@@ -25,8 +25,11 @@ export type TaskWithMerged = Task & { merged: MergedCommitInfo | null };
  *  `repoKey` (multi-repo epic 49136451) so a manager triaging the board can see which cards target a
  *  non-primary repo WITHOUT a per-card tasks_get — the same "summary hides a dispatch-relevant flag"
  *  gotcha already burned an orchestrator on `held`/`deferred`, and matters more here once repoKey drives
- *  worktree creation (phase 2). */
-export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey">;
+ *  worktree creation (phase 2). Also carries `deferred`/`deferredUntilTaskId` (card 793ac76d) so a
+ *  manager triaging the board sees WHY a card is deferred without a per-card tasks_get — `deferred` was
+ *  not previously in this summary at all; adding it here is scoped to what this card needs (`held` stays
+ *  out, a separate pre-existing gap, not this card's concern). */
+export type TaskSummary = Pick<TaskWithMerged, "id" | "title" | "columnKey" | "position" | "priority" | "updatedAt" | "merged" | "repoKey" | "deferred" | "deferredUntilTaskId">;
 
 /**
  * {@link resolveMergedInfo}'s return: the git-derived ship state PLUS which repoKey was actually scanned
@@ -81,6 +84,67 @@ export async function resolveMergedInfo(db: Db, projectId: string, task: Pick<Ta
 }
 
 /**
+ * {@link resolveDeferredEffective}'s return: the EFFECTIVE `deferred` value a read should present, plus
+ * whether that differs from the raw stored row (`autoCleared`) — a caller uses `autoCleared` to decide
+ * whether a write-through persist is warranted (see that function's own doc for why this must be a
+ * true→false TRANSITION guard, not an unconditional write on every read).
+ */
+export interface ResolvedDeferredState {
+  deferred: boolean;
+  autoCleared: boolean;
+}
+
+/**
+ * Card 793ac76d — derive a task's EFFECTIVE `deferred` state at read time from its optional
+ * `deferredUntilTaskId` companion, WITHOUT persisting any new cached flag: when the row is `deferred:true`
+ * and names a blocker task, the blocker's git-derived `merged` state is resolved the SAME way
+ * {@link resolveMergedInfo} already resolves it for every row on this read (the SAME cached, bounded
+ * per-repo git-log scan — this is one more O(1) map lookup against it, not a new git call) — a non-null
+ * `merged` means the blocker has landed, so `deferred` reads `false` here.
+ *
+ * Returns `autoCleared:true` ONLY on a genuine `true → false` transition (the row's raw `deferred` was
+ * true and this call resolved it to false) — never on a row that was already `deferred:false`, never on
+ * a row with no `deferredUntilTaskId`, never on a still-blocked row. Callers use this to gate a
+ * write-through persist (`db.updateTask(id, {deferred:false})`) to fire EXACTLY ONCE per real transition,
+ * not on every subsequent read of an already-cleared row — an unconditional write-on-every-read would
+ * write-storm every deferred card on every `tasks_list` poll and needlessly bump `updatedAt` repeatedly.
+ *
+ * `includeMerged:false` (the companion board's latency-sensitive skip) and a missing/cross-project/
+ * dangling blocker (deleted since being validly set, or somehow not on this project — the set-time guard
+ * in {@link updateProjectTask} prevents the latter going forward, but a read must still degrade safely
+ * for data written before that guard, or a blocker deleted afterward) both fall through to "stays
+ * deferred, no clear" — never throws, never silently drops the card's deferred state.
+ */
+export async function resolveDeferredEffective(
+  db: Db, projectId: string, task: Pick<Task, "id" | "deferred" | "deferredUntilTaskId">, includeMerged: boolean,
+): Promise<ResolvedDeferredState> {
+  const raw = task.deferred === true;
+  if (!raw || !task.deferredUntilTaskId || !includeMerged) return { deferred: raw, autoCleared: false };
+  const blocker = db.getTask(task.deferredUntilTaskId);
+  if (!blocker || blocker.projectId !== projectId) return { deferred: true, autoCleared: false };
+  const { merged } = await resolveMergedInfo(db, projectId, blocker, true);
+  if (!merged) return { deferred: true, autoCleared: false };
+  return { deferred: false, autoCleared: true };
+}
+
+/**
+ * Write-through persist for {@link resolveDeferredEffective}'s `autoCleared` transition — updates the
+ * EXISTING `deferred` column to the derived truth (never a new column), so downstream consumers that
+ * read `deferred` straight off the DB (the idle watchdog, `db.listTasks`) self-heal on the next read
+ * that happens to pass through this MCP layer, without needing any knowledge of `deferredUntilTaskId`
+ * themselves. Best-effort / NON-FATAL by design (card 793ac76d review): a board read must never fail or
+ * alter its OWN result because this persist failed — the caller already computed the correct in-memory
+ * value from `resolveDeferredEffective` and returns that regardless of whether this write lands.
+ */
+function persistDeferredAutoClearBestEffort(db: Db, taskId: string): void {
+  try {
+    db.updateTask(taskId, { deferred: false });
+  } catch (e) {
+    console.warn(`[mcp/tasks] best-effort deferred auto-clear write failed for task ${taskId} (read result is unaffected):`, e);
+  }
+}
+
+/**
  * Backstop cap on a DEFAULT board read so a big board can't overflow the tool-result token cap with no
  * explicit limit — the EXACT sibling of DEFAULT_AGENT_SUMMARY_CAP (agentView) / DEFAULT_SESSION_SUMMARY_CAP
  * (sessionView). The CALLER applies it as the default `limit` (see server.ts tasks_list + platform
@@ -126,6 +190,7 @@ export interface ListTasksOptions {
 /** Project ONE (already merged-enriched) Task row down to its summary (drops the unbounded body). Mirrors toAgentSummary. */
 export const toTaskSummary = (t: TaskWithMerged): TaskSummary => ({
   id: t.id, title: t.title, columnKey: t.columnKey, position: t.position, priority: t.priority, updatedAt: t.updatedAt, merged: t.merged, repoKey: t.repoKey ?? null,
+  deferred: t.deferred === true, deferredUntilTaskId: t.deferredUntilTaskId ?? null,
 });
 
 /**
@@ -196,8 +261,15 @@ export async function listProjectTasks(
   // Merged-state enrichment (card 9983eed6): one cached, bounded git-log scan per repo backs every
   // task's O(1) map lookup here — see getTaskMergedInfo — so this stays cheap regardless of board size.
   // Skipped entirely when includeMerged is false (card f6753002).
+  // Deferred auto-clear (card 793ac76d): rides the SAME per-row pass — see resolveDeferredEffective's
+  // own doc for why the write-through only fires on a genuine transition.
   const withMerged: TaskWithMerged[] = await Promise.all(
-    tasks.map(async (t) => ({ ...t, merged: (await resolveMergedInfo(db, projectId, t, includeMerged)).merged })),
+    tasks.map(async (t) => {
+      const merged = (await resolveMergedInfo(db, projectId, t, includeMerged)).merged;
+      const { deferred, autoCleared } = await resolveDeferredEffective(db, projectId, t, includeMerged);
+      if (autoCleared) persistDeferredAutoClearBestEffort(db, t.id);
+      return { ...t, deferred, merged };
+    }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
 }
@@ -286,8 +358,12 @@ export async function getProjectTask(
 ): Promise<TaskWithRequests | { error: string }> {
   const found = resolveProjectTaskId(db, projectId, taskId);
   if ("error" in found) return found;
-  const merged = (await resolveMergedInfo(db, projectId, found, opts.includeMerged ?? true)).merged;
-  return { ...found, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
+  const includeMerged = opts.includeMerged ?? true;
+  const merged = (await resolveMergedInfo(db, projectId, found, includeMerged)).merged;
+  // Deferred auto-clear (card 793ac76d) — see resolveDeferredEffective's own doc.
+  const { deferred, autoCleared } = await resolveDeferredEffective(db, projectId, found, includeMerged);
+  if (autoCleared) persistDeferredAutoClearBestEffort(db, found.id);
+  return { ...found, deferred, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
 }
 
 /** The lightweight row {@link listProjectTaskRequests} returns per connected request — title-altitude, not
@@ -492,7 +568,7 @@ export function createProjectTaskChecked(
  * never asked to see. Still a valid task-ish object (id + the small fields), just without the
  * heavy field — plus `changed`, the patch keys the caller actually passed.
  */
-export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey"> & {
+export type TaskUpdateAck = Pick<Task, "id" | "title" | "columnKey" | "priority" | "position" | "updatedAt" | "held" | "deferred" | "heldBy" | "repoKey" | "deferredUntilTaskId"> & {
   changed: string[];
 };
 
@@ -516,7 +592,7 @@ export interface TaskUpdateActor {
 
 export async function updateProjectTask(
   db: Db, projectId: string, taskId: string,
-  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey">>,
+  patch: Partial<Pick<Task, "title" | "body" | "columnKey" | "position" | "priority" | "held" | "deferred" | "repoKey" | "deferredUntilTaskId">>,
   actor?: TaskUpdateActor,
 ): Promise<Task | TaskUpdateAck | { error: string }> {
   // Guard: the task must belong to this project — and taskId may be a full id OR an unambiguous
@@ -567,6 +643,20 @@ export async function updateProjectTask(
     }
     patch = { ...patch, repoKey: check.value };
   }
+  // deferredUntilTaskId guard (card 793ac76d) — set-time validation, whole-patch-reject (same convention
+  // as the column/repoKey guards above): a non-null value must resolve to a REAL task on THIS board (full
+  // id or an unambiguous prefix — resolveProjectTaskId), and a self-reference is rejected (a card can't
+  // un-defer itself). Normalized to the FULL id before it's written: resolveDeferredEffective's read-time
+  // lookup does an exact-id db.getTask, so a stored prefix would silently fail to resolve later. `null`
+  // (explicit clear) or `undefined` (omit) need no validation — omit is byte-identical to today.
+  if (patch.deferredUntilTaskId !== undefined && patch.deferredUntilTaskId !== null) {
+    if (patch.deferredUntilTaskId === owned.id) {
+      return { error: "deferredUntilTaskId cannot reference the task itself" };
+    }
+    const blocker = resolveProjectTaskId(db, projectId, patch.deferredUntilTaskId);
+    if ("error" in blocker) return { error: `deferredUntilTaskId ${blocker.error}` };
+    patch = { ...patch, deferredUntilTaskId: blocker.id };
+  }
   // held-clear guard (card 9b0373c0, Platform-Audit bb23d15a): this function is the ONE choke point both
   // agent-facing task-update surfaces share — the in-project `tasks_update` AND the Lead's cross-project
   // `project_task_update` (mcp/platform.ts) — reachable ONLY from an agent MCP session; the human-only
@@ -610,8 +700,8 @@ export async function updateProjectTask(
   // that DOES pass `body` returns the full task (the caller is intentionally editing it and wants to
   // see the result).
   if (patch.body === undefined) {
-    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, updatedAt } = updated;
-    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, updatedAt, changed: Object.keys(patch) };
+    const { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt } = updated;
+    return { id, title, columnKey, priority, position, held, deferred, heldBy, repoKey, deferredUntilTaskId, updatedAt, changed: Object.keys(patch) };
   }
   return updated;
 }
