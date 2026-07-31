@@ -92,7 +92,14 @@ class SeamHost extends PtyHost {
   constructor(events) { super(events); this.spawned = []; this.stopped = []; this.enqueued = []; }
   createPty(opts) { this.spawned.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
   stop(id, mode) { this.stopped.push({ id, mode }); }
-  enqueueStdin(id, text, source, _onDeliver, _opts, kind) { this.enqueued.push({ id, text, source, kind }); return { delivered: true }; }
+  // Card 417cea0a: also capture `onGiveUpExhausted` (real enqueueStdin's 12th positional arg) — every
+  // existing assertion reads only id/text/source/kind off `enqueued` entries, so this is purely additive.
+  // The park-coverage scenario below invokes it directly (mirrors give-up-exhausted-durable.mjs's own
+  // `giveUpOn` primitive) to simulate a give-up without modelling the real host's pty/hook lifecycle.
+  enqueueStdin(id, text, source, _onDeliver, _opts, kind, _questionId, _ownerText, _proactive, _senderId, _giveUpHeldUntil, onGiveUpExhausted) {
+    this.enqueued.push({ id, text, source, kind, onGiveUpExhausted });
+    return { delivered: true };
+  }
 }
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
@@ -220,6 +227,30 @@ try {
   const allMcpToolNames = [...mgrTools, ...platformTools];
   check("(9) NO tool on the manager OR platform MCP surface can create/delete a project link",
     !allMcpToolNames.some((n) => /project.?link/i.test(n)));
+
+  // ===================== (10) Card 417cea0a — PARK COVERAGE: this file had ZERO park coverage before this =====
+  // ===== (negative grep for "park", case-insensitive: 0 hits). A peer_message sender (MGR_A) is NEVER the ===
+  // ===== target's parentSessionId, so this is exactly the case the [loom:redelivery-parked] notice's =========
+  // ===== prescribed-action fix (card 417cea0a, DoD item 1) targets: the honest "no cross-session read" ======
+  // ===== clause, never the impossible worker_list/worker_status instruction. =================================
+  const parkClient = await connect(orch.buildServer("MGR_A", "manager"));
+  const parkCall = async (args) => parse(await parkClient.callTool({ name: "peer_message", arguments: args }));
+  const enqBeforePark = host.enqueued.length;
+  await parkCall({ targetProjectId: "pB", text: "PEER_PARK_TEST" });
+  const firstDispatch = host.enqueued.slice(enqBeforePark).find((e) => e.id === "MGR_B");
+  check("(10) setup: the peer dispatch to MGR_B carried a give-up hook", typeof firstDispatch?.onGiveUpExhausted === "function");
+  firstDispatch.onGiveUpExhausted(); // chainDepth 0 exhausted, below GIVE_UP_REMINT_LIMIT (default 1) → RE-MINT
+  const remint = host.enqueued.slice(enqBeforePark).find((e) => e.id === "MGR_B" && e !== firstDispatch);
+  check("(10) setup: the give-up RE-MINTED a fresh dispatch to MGR_B", typeof remint?.onGiveUpExhausted === "function");
+  remint.onGiveUpExhausted(); // chainDepth 1 not < GIVE_UP_REMINT_LIMIT(1) → terminal PARK → notice to MGR_A
+
+  const parkedNote = host.enqueued.slice(enqBeforePark).reverse().find((e) => e.id === "MGR_A" && e.text.includes("[loom:redelivery-parked]"));
+  check("(10) PARK COVERAGE: the peer sender (MGR_A) got a [loom:redelivery-parked] notice", !!parkedNote);
+  check("(10) PARK COVERAGE: a genuine peer sender (not the recipient's manager) gets the honest 'no cross-session read' clause",
+    !!parkedNote && parkedNote.text.includes("no cross-session") && parkedNote.text.includes("transcript/state read available"));
+  check("(10) PARK COVERAGE: the impossible worker_list/worker_status instruction is NEVER offered to a peer sender",
+    !!parkedNote && !parkedNote.text.includes("worker_list"));
+  await parkClient.close();
 
   // Defense in depth: the service method itself rejects a non-manager caller.
   let svcRejected = false;

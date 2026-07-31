@@ -65,9 +65,21 @@ const REMINT_LIMIT = 2;
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+// Card 417cea0a: the [loom:redelivery-parked] notice's "how much effort did Loom spend" figure is DERIVED
+// from these constants (sessions/service.ts), never hand-typed — so this test derives its OWN expectation
+// from the SAME constants (rather than a hardcoded number) and asserts the rendered notice matches. This
+// is deliberately NOT redundant with production's default config: this file pins REMINT_LIMIT=2 (below),
+// not production's default of 1, so a naive "4 submission attempts" expectation would itself be WRONG here
+// — proving the derivation, not a coincidence, is what must be tested.
+const { SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, GIVE_UP_HOLD_MS } = await import("../dist/pty/host.js");
 
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+const PARK_MESSAGE_OBJECTS = REMINT_LIMIT + 1;
+const PARK_SUBMIT_CYCLES = (GIVE_UP_REQUEUE_LIMIT + 1) * PARK_MESSAGE_OBJECTS;
+const PARK_ENTER_WRITES = PARK_SUBMIT_CYCLES * SUBMIT_MAX_ATTEMPTS;
+const PARK_HOLDS = GIVE_UP_REQUEUE_LIMIT * PARK_MESSAGE_OBJECTS;
+const PARK_MIN_HOLD_SECONDS = Math.round((PARK_HOLDS * GIVE_UP_HOLD_MS) / 1000);
 
 // Contract-faithful PtyStub (mirrors queued-message-durability.mjs's own), extended with `giveUpOn`: pops
 // the FIFO head and fires BOTH callbacks in the SAME order the real host does — `onDeliver` first (the
@@ -211,6 +223,27 @@ try {
     check("(3) SURFACED: the live sender got a [loom:redelivery-parked] notice", mgrSent.some((t) => t.includes("[loom:redelivery-parked]")));
     check("(3) SURFACED: the notice names the recipient", mgrSent.some((t) => t.includes("[loom:redelivery-parked]") && t.includes(wkr.slice(0, 8))));
     check("(3) SURFACED: the notice carries the message's own head (content, not just length)", mgrSent.some((t) => t.includes("[loom:redelivery-parked]") && t.includes("NEVER_LANDS_STAYS_WEDGED")));
+    const parkedNote = mgrSent.find((t) => t.includes("[loom:redelivery-parked]"));
+
+    // ===== Card 417cea0a — the notice's CORRECTED claims, for a sender who genuinely DOES manage this =====
+    // ===== recipient (mgr is wkr's own parentSessionId — the ONE case where a real read exists) ===========
+    check("(417cea0a #4) the notice's effort figure is DERIVED from the live constants, not a stale hand-typed number — this test's own REMINT_LIMIT=2 config makes '4 submission attempts' (the production default) the WRONG number, so this only passes if the notice genuinely computed its own",
+      !!parkedNote && parkedNote.includes(`${PARK_SUBMIT_CYCLES} submission attempts`) && parkedNote.includes(`~${PARK_ENTER_WRITES} Enter-key writes`)
+      && parkedNote.includes(`across ${PARK_MESSAGE_OBJECTS} independent retry levels`) && parkedNote.includes(`at least ${PARK_MIN_HOLD_SECONDS}s`));
+    check("(417cea0a #4) the OLD broken '${GIVE_UP_REMINT_LIMIT} redelivery attempt(s)' phrasing is GONE",
+      !!parkedNote && !/PARKED after \d+ redelivery attempt/i.test(parkedNote));
+    check("(417cea0a #1) a sender who genuinely manages this recipient (mgr is wkr's own parent) IS pointed at a real read",
+      !!parkedNote && parkedNote.includes("worker_list/worker_status"));
+    check("(417cea0a #1) the impossible-for-everyone-else 'no cross-session read' clause is NOT shown to a sender who actually has one",
+      !!parkedNote && !parkedNote.includes("no cross-session"));
+    check("(417cea0a #5a) resend caveat (a) present: framed text embeds the sender's OWN session id, so a recycle breaks the auto-join",
+      !!parkedNote && /framed text/i.test(parkedNote) && /session id/i.test(parkedNote) && /recycled/i.test(parkedNote));
+    check("(417cea0a #5b) resend caveat (b) present: the join window closes the instant Loom confirms the original landed",
+      !!parkedNote && /join window closes/i.test(parkedNote));
+    check("(417cea0a #2) the confirmed-after-park follow-up is HEDGED ('MAY follow up'), never promised",
+      !!parkedNote && /MAY follow up/.test(parkedNote) && !/Loom will (tell you|follow up)/i.test(parkedNote));
+    check("(417cea0a #2) the corollary is stated: no follow-up is NOT evidence the message failed to land",
+      !!parkedNote && /not evidence the message failed/i.test(parkedNote));
   }
 
   // ===== (5) POPULATION B: a settle-nudge-shaped dispatch (kind:"warning", sentinel "system" sender — the =====
@@ -318,6 +351,89 @@ try {
     const resB = runNoticeRecursionScenario(sessionsB, ptyB, "broken");
     check("(7) RED-FIRST PROOF: with the sentinel guard disabled (getSession(\"system\") faked live), the IDENTICAL code path DOES attempt a follow-on dispatch to \"system\" — proving 7a's zero-attempts result is a real, load-bearing guard, not a vacuous one",
       resB.systemAttempts >= 1);
+  }
+
+  // ===== (8) Card 417cea0a — THE PEER-SENDER CASE: a sender that does NOT manage the recipient (mirrors a =====
+  // ===== peer project's manager via peer_message, or any manager messaging a session it didn't spawn) gets ===
+  // ===== the HONEST "no read exists" clause — never the worker_list/worker_status instruction that only ======
+  // ===== applies to a sender who actually manages this recipient as ITS OWN worker ============================
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const realMgr = `gue-f-realmgr-${sfx}`, peerMgr = `gue-f-peermgr-${sfx}`, wkr = `gue-f-wkr-${sfx}`;
+    mkSession({ id: realMgr, role: "manager" });
+    mkSession({ id: peerMgr, role: "manager" }); // NOT wkr's parent — the sender has no legitimate read into wkr
+    mkSession({ id: wkr, role: "worker", parentSessionId: realMgr });
+    pty.setLive(peerMgr); pty.setLive(wkr);
+    pty.setBusy(wkr); pty.setBusy(peerMgr, false); // sender idle+live → the parked notice delivers as a live turn
+
+    // Dispatch AS peerMgr, not realMgr — enqueueDurableMessage directly (mirrors how a cross-project
+    // peer_message ultimately dispatches: sender = the ORIGINATING manager, recipient = the target session).
+    sessions.enqueueDurableMessage(wkr, "PEER_SENDER_NEVER_LANDS", { sender: peerMgr, taskId: null, kind: "agent" });
+    for (let i = 0; i <= REMINT_LIMIT; i++) pty.giveUpOn(wkr);
+
+    const peerSent = pty.sent.filter((s) => s.id === peerMgr).map((s) => s.text);
+    const parkedNote = peerSent.find((t) => t.includes("[loom:redelivery-parked]"));
+    check("(8) PEER SENDER: got the parked notice", !!parkedNote);
+    check("(8) PEER SENDER: the honest 'no cross-session read' clause is present (this sender does not manage the recipient)",
+      !!parkedNote && parkedNote.includes("no cross-session") && parkedNote.includes("transcript/state read available"));
+    check("(8) PEER SENDER: the impossible worker_list/worker_status instruction is NEVER offered to a sender who can't act on it",
+      !!parkedNote && !parkedNote.includes("worker_list"));
+  }
+
+  // ===== (9) Card 417cea0a — CONFIRMED-AFTER-PARK: sessions.handleGiveUpConfirmed (wired to PtyHost's new =====
+  // ===== onGiveUpConfirmed hook — see pty-giveup-content-match-attribution.mjs for proof THAT hook actually ===
+  // ===== fires) retracts a PARKED notice once a later confirmation proves the turn ran, and is a SILENT =====
+  // ===== NO-OP for an ordinary (never-parked, still mid-chain) confirmation — NOT every confirmed give-up ===
+  // ===== is news, and this method is what has to tell the two apart (PtyHost itself can't — it's DB-agnostic)
+  {
+    const pty = new PtyStub();
+    const sessions = new SessionService(db, pty, new OrchestrationControl());
+    const mgr = `gue-g-mgr-${sfx}`, wkr = `gue-g-wkr-${sfx}`;
+    mkSession({ id: mgr, role: "manager" });
+    mkSession({ id: wkr, role: "worker", parentSessionId: mgr });
+    pty.setLive(mgr); pty.setLive(wkr); pty.setBusy(wkr);
+    pty.setBusy(mgr, false);
+
+    sessions.messageWorker(mgr, wkr, "PARKED_THEN_LATER_CONFIRMED");
+    for (let i = 0; i <= REMINT_LIMIT; i++) pty.giveUpOn(wkr); // exhaust all the way to a genuine PARK
+    const parkedEvt = gaveUpEventsFor(wkr).find((e) => e.detail?.outcome === "parked");
+    check("(9) setup: the chain reached a genuine PARK", !!parkedEvt);
+    const rootMsgId = parkedEvt.detail.rootMsgId;
+
+    const eventsBeforeConfirm = db.listEventsForWorker(wkr).length;
+    const mgrSentBeforeConfirm = pty.sent.filter((s) => s.id === mgr).length;
+    sessions.handleGiveUpConfirmed(wkr, rootMsgId, 45678);
+
+    check("(9) CONFIRMED-AFTER-PARK: a new session_message_gave_up event was recorded, outcome confirmed-after-park, carrying the real latencyMs",
+      gaveUpEventsFor(wkr, rootMsgId).some((e) => e.detail?.outcome === "confirmed-after-park" && e.detail?.latencyMs === 45678));
+    const confirmedNote = pty.sent.filter((s) => s.id === mgr).map((s) => s.text).find((t) => t.includes("[loom:redelivery-confirmed]"));
+    check("(9) CONFIRMED-AFTER-PARK: the ORIGINAL sender got a [loom:redelivery-confirmed] retraction notice naming the recipient + root",
+      !!confirmedNote && confirmedNote.includes(wkr.slice(0, 8)) && confirmedNote.includes(rootMsgId.slice(0, 8)));
+    check("(9) CONFIRMED-AFTER-PARK: exactly one new event + one new notice (not a flood)",
+      db.listEventsForWorker(wkr).length === eventsBeforeConfirm + 1 &&
+      pty.sent.filter((s) => s.id === mgr).length === mgrSentBeforeConfirm + 1);
+
+    // ===== NEGATIVE CONTROL: a confirmation for a chain that was only RE-MINTED, never PARKED, must be a =====
+    // ===== SILENT NO-OP — proves this method actually discriminates rather than notifying on every confirm ===
+    const mgr2 = `gue-g-mgr2-${sfx}`, wkr2 = `gue-g-wkr2-${sfx}`;
+    mkSession({ id: mgr2, role: "manager" });
+    mkSession({ id: wkr2, role: "worker", parentSessionId: mgr2 });
+    pty.setLive(mgr2); pty.setLive(wkr2); pty.setBusy(wkr2); pty.setBusy(mgr2, false);
+    sessions.messageWorker(mgr2, wkr2, "REMINTED_ONLY_NEVER_PARKED");
+    pty.giveUpOn(wkr2); // ONE give-up only: chainDepth 0 < REMINT_LIMIT(2) → reminted, never reaches park
+    const remintedEvt = gaveUpEventsFor(wkr2).find((e) => e.detail?.outcome === "reminted");
+    check("(9) negative-control setup: this chain was RE-MINTED, never PARKED",
+      !!remintedEvt && !gaveUpEventsFor(wkr2).some((e) => e.detail?.outcome === "parked"));
+    const rootMsgId2 = remintedEvt.detail.rootMsgId;
+
+    const eventsBefore2 = db.listEventsForWorker(wkr2).length;
+    const mgr2SentBefore = pty.sent.filter((s) => s.id === mgr2).length;
+    sessions.handleGiveUpConfirmed(wkr2, rootMsgId2, 999);
+    check("(9) NEGATIVE CONTROL: no confirmed-after-park event for a chain that was never parked (silent, correct no-op)",
+      db.listEventsForWorker(wkr2).length === eventsBefore2);
+    check("(9) NEGATIVE CONTROL: no notice sent either — an ordinary mid-chain confirmation is not news",
+      pty.sent.filter((s) => s.id === mgr2).length === mgr2SentBefore);
   }
 
   db.close();

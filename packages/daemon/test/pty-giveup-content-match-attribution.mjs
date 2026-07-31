@@ -77,7 +77,15 @@ function makeSilentFakePty() {
   return fake;
 }
 const busyLog = {};
-const events = { onEngineSessionId() {}, onBusy(id, busy) { (busyLog[id] ??= []).push(busy); }, onContextStats() {}, onRateLimited() {}, onExit() {} };
+// Card 417cea0a: capture `onGiveUpConfirmed` (new optional PtyHostEvents hook, fired from
+// `purgeConfirmedGiveUpRequeue`'s content-match CONFIRMED branch — the exact branch this file's gen-1
+// scenario already exercises) so this suite can prove the NEW hook actually fires, carrying the SAME
+// sessionId/latencyMs the pre-existing "CONFIRMED logicalId=…" log line reports.
+const giveUpConfirmedLog = [];
+const events = {
+  onEngineSessionId() {}, onBusy(id, busy) { (busyLog[id] ??= []).push(busy); }, onContextStats() {}, onRateLimited() {}, onExit() {},
+  onGiveUpConfirmed(sessionId, logicalId, latencyMs) { giveUpConfirmedLog.push({ sessionId, logicalId, latencyMs }); },
+};
 class SilentTestPtyHost extends PtyHost { createPty() { return makeSilentFakePty(); } }
 const host = new SilentTestPtyHost(events);
 
@@ -139,6 +147,14 @@ try {
   const confirmedLine = submitLog.find((l) => l.includes("CONFIRMED logicalId=") && l.includes("content-matched"));
   const latencyMatch = confirmedLine?.match(/latencyMs=(\d+)/);
   check("(3) the CONFIRMED log carries a real, positive latencyMs (not 0, not \"unknown\")", !!latencyMatch && Number(latencyMatch[1]) > 0);
+
+  // ===== Card 417cea0a: the NEW onGiveUpConfirmed hook fired exactly once for THIS session, carrying the =====
+  // ===== SAME latencyMs the pre-existing CONFIRMED log line already reports — proves the hook is wired at ===
+  // ===== the right call site (not a separate, possibly-drifted computation) and fires exactly once (not ====
+  // ===== once per matched logicalId when there's only one, not zero) =========================================
+  check("(417cea0a) onGiveUpConfirmed fired exactly once, for this session, with the SAME latencyMs the CONFIRMED log reported",
+    giveUpConfirmedLog.length === 1 && giveUpConfirmedLog[0].sessionId === SID &&
+    !!latencyMatch && String(giveUpConfirmedLog[0].latencyMs) === latencyMatch[1]);
 
   // ===== sanity: gen 6 (the CURRENT, unrelated generation) was never touched by any of this =====
   host.deliverHook(SID, { hook_event_name: "Stop" });

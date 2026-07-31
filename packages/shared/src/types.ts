@@ -975,19 +975,28 @@ export type OrchestrationEventKind =
   // later gives up can already carry a (premature) delivered marker under the SAME msgId. This event is the
   // correction a reader must consult alongside it, not a replacement for it — don't infer "never dropped"
   // from `session_message_delivered`'s presence alone. `detail` carries { msgId, rootMsgId, chainDepth,
-  // outcome: "reminted" | "parked", remintedAs? }: `rootMsgId` is the FIRST msgId in this logical message's
-  // chain (self-referential on the first give-up), so every re-mint traces back to one auditable origin
-  // instead of a chain of unrelated ids. "reminted" means a FRESH `session_message_queued` record (msgId =
-  // detail.remintedAs) was dispatched in its place, budget reset, chainDepth+1 — never the SAME retry loop
-  // the ⛔ "don't raise the budget" constraint forbids widening. CR follow-up (card ccb407eb, BLOCKING
-  // finding [1]): a turn-boundary dispatch, not an immediate re-hammer, is ENFORCED — not just intended —
-  // by the re-mint stamping its own `giveUpHeldUntil` (sessions/service.ts `handleGiveUpExhausted`), which
-  // forces `enqueueStdin`'s HELD branch even though `live.busy` is already false at that instant (the give-
-  // up detector clears it BEFORE this fires). Omitting that stamp was a real, shipped bug — see git history
-  // for card ccb407eb's Code Review — not a hypothetical this note is merely warning against. "parked" means
-  // `chainDepth` reached `GIVE_UP_REMINT_LIMIT`: Loom stops writing to this recipient's pty for this message
-  // and surfaces it to the sender (a `[loom:redelivery-parked]` notice, durable itself) — NEVER a silent
-  // discard, per this project's "fail toward a duplicate, never a loss" principle (88f11385).
+  // outcome: "reminted" | "parked" | "confirmed-after-park", remintedAs? }: `rootMsgId` is the FIRST msgId
+  // in this logical message's chain (self-referential on the first give-up), so every re-mint traces back
+  // to one auditable origin instead of a chain of unrelated ids. "reminted" means a FRESH
+  // `session_message_queued` record (msgId = detail.remintedAs) was dispatched in its place, budget reset,
+  // chainDepth+1 — never the SAME retry loop the ⛔ "don't raise the budget" constraint forbids widening.
+  // CR follow-up (card ccb407eb, BLOCKING finding [1]): a turn-boundary dispatch, not an immediate
+  // re-hammer, is ENFORCED — not just intended — by the re-mint stamping its own `giveUpHeldUntil`
+  // (sessions/service.ts `handleGiveUpExhausted`), which forces `enqueueStdin`'s HELD branch even though
+  // `live.busy` is already false at that instant (the give-up detector clears it BEFORE this fires).
+  // Omitting that stamp was a real, shipped bug — see git history for card ccb407eb's Code Review — not a
+  // hypothetical this note is merely warning against. "parked" means `chainDepth` reached
+  // `GIVE_UP_REMINT_LIMIT`: Loom stops writing to this recipient's pty for this message and surfaces it to
+  // the sender (a `[loom:redelivery-parked]` notice, durable itself) — NEVER a silent discard, per this
+  // project's "fail toward a duplicate, never a loss" principle (88f11385). Card 417cea0a:
+  // "confirmed-after-park" is a LATER, separate event (same rootMsgId) filed if a confirming hook later
+  // content-matches a message whose chain DID reach "parked" — `sessions/service.ts`'s
+  // `handleGiveUpConfirmed` files it and best-effort notifies the original sender
+  // (`[loom:redelivery-confirmed]`). ⛔ NOT filed for every confirmed give-up — only when the chain's own
+  // history actually reached "parked" first (an ordinary mid-chain reminted-then-confirmed resolution is
+  // ubiquitous and NOT news) — and NEVER filed at all when the confirming content match spans more than
+  // one give-up batch (card bc0774c4's batch-provenance guard leaves those entirely unresolved) — so a
+  // "parked" event with no later "confirmed-after-park" is NOT evidence the message never landed.
   | "session_message_gave_up"
   // ── Companion proactive heartbeat (CompanionHeartbeatWatcher, card 9488951e) ───────────────────────
   // A daemon-driven proactive turn was injected into the long-lived companion session: the watcher's

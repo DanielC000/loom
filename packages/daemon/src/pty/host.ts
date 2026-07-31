@@ -103,8 +103,13 @@ function textSignature(text: string): { len: number; hash: string } {
  */
 const SUBMIT_VERIFY_TIMEOUT_MS = Number(process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS) || 900;
 
-/** Total Enter attempts (the first write + retries) before giving up and recovering busy. */
-const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
+/**
+ * Total Enter attempts (the first write + retries) before giving up and recovering busy. Card 417cea0a:
+ * exported (was module-private) so sessions/service.ts's `[loom:redelivery-parked]` notice can DERIVE its
+ * "how much effort did Loom actually spend" figure from this constant instead of hand-typing a number that
+ * silently rots the moment this changes — see that notice's own doc for the full derivation.
+ */
+export const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
 
 /**
  * Card 441499ee: how many times a single message may be put back on `live.pending` after a GIVE-UP
@@ -113,8 +118,9 @@ const SUBMIT_MAX_ATTEMPTS = Number(process.env.LOOM_SUBMIT_MAX_ATTEMPTS) || 4;
  * structurally-broken session (not just a transient contention burst) loop forever — worse than the
  * original drop. One requeue is enough to ride out a contention-driven burst (give-ups cluster where the
  * daemon is already busy, per the measurement on this same card) without risking an infinite retry loop.
+ * Card 417cea0a: exported alongside `SUBMIT_MAX_ATTEMPTS` for the same reason — see that constant's doc.
  */
-const GIVE_UP_REQUEUE_LIMIT = Number(process.env.LOOM_GIVE_UP_REQUEUE_LIMIT) || 1;
+export const GIVE_UP_REQUEUE_LIMIT = Number(process.env.LOOM_GIVE_UP_REQUEUE_LIMIT) || 1;
 
 /**
  * Card b64b3726: bounded poll for the GIVE-UP attempt's own paste-reassert (`BRACKET_PASTE_START +
@@ -1985,6 +1991,24 @@ export interface PtyHostEvents {
    * uses `?.`. Production (index.ts) always wires a real implementation.
    */
   onTurnCompleted?(sessionId: string): void;
+  /**
+   * Card 417cea0a: a confirming hook proved, BY CONTENT MATCH, that a give-up-tracked message actually
+   * landed — fired from `purgeConfirmedGiveUpRequeue`'s single-`batchId` CONFIRMED branch, right where
+   * the "CONFIRMED logicalId=… latencyMs=…" log line already fires (this is that same signal, exposed to
+   * a caller instead of only ever reaching stdout). `logicalId` is the chain's `rootMsgId` (see
+   * `QueuedMessage.logicalId`'s own doc — stable across every re-mint). PtyHost itself cannot tell whether
+   * `logicalId` was ever terminally PARKED (`session_message_gave_up` outcome:"parked") vs. still
+   * mid-chain when this confirmation arrived — that needs the DB, which this class deliberately does not
+   * hold (mirrors `getCapabilityCatalog`/`getIntegrationPaths` above) — so the implementer (sessions/
+   * service.ts) is the one that decides whether this is news (a previously-parked message, worth a
+   * `[loom:redelivery-confirmed]` sender notice) or a no-op (an ordinary mid-chain confirmation).
+   * ⛔ NEVER fired from the `batchIds.size > 1` branch just above (see that branch's own doc, card
+   * bc0774c4) — a content match spanning more than one give-up batch is left completely unresolved by
+   * design, so a message parked under a colliding signature will NOT produce a confirmed-after-park
+   * notice; there is nothing here to attribute the confirmation to. OPTIONAL, same rationale as
+   * `onTurnCompleted` above — every existing `PtyHostEvents` test double is unaffected until it opts in.
+   */
+  onGiveUpConfirmed?(sessionId: string, logicalId: string, latencyMs: number): void;
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
@@ -3971,12 +3995,16 @@ export class PtyHost {
    * Also self-heals a STUCK-busy session first, so a report can't strand behind a phantom 'busy'.
    * Returns whether it went out now, or its 1-based queue position. A `delivered:false` result also
    * carries `reason` (see EnqueueDeliveryReason) so a caller can tell a dead-drop (`"session-dead"` —
-   * no live pty, nothing will ever deliver this) apart from a hold (`"held"` — queued FIFO, will
-   * deliver at the next turn boundary); both used to read as the same bare `{delivered:false}`.
+   * no live pty, nothing will ever deliver this) apart from a hold (`"held"` — queued FIFO, delivered
+   * at the next turn boundary UNLESS redelivery is ultimately exhausted, in which case it is PARKED and
+   * the sender is notified instead — see `handleGiveUpExhausted` in sessions/service.ts, card 417cea0a);
+   * both used to read as the same bare `{delivered:false}`.
    * On the `"held"` path this ALSO carries `queued:true`, `landsAt:"next-turn-boundary"`, and
    * `busyForMs` (see {@link EnqueueResult}) — a held enqueue is a SUCCESS (the text is durably queued
-   * and WILL be delivered), and these fields report that honestly instead of leaving a reader to infer
-   * it from `delivered:false` alone. `delivered` itself is UNCHANGED — additive fields only.
+   * and WILL be delivered at that boundary unless its own give-up budget is later exhausted, in which
+   * case it is PARKED instead — a real, sender-notified exception, never a silent one; card 417cea0a),
+   * and these fields report that honestly instead of leaving a reader to infer it from `delivered:false`
+   * alone. `delivered` itself is UNCHANGED — additive fields only.
    *
    * `source` defaults to 'system' so EVERY existing programmatic caller (worker reports, idle/context/
    * busy nudges, resume notes, escalations) stays 'system' unchanged; only the REST composer passes
@@ -4101,9 +4129,12 @@ export class PtyHost {
       live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) });
     }
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
-    // WILL be delivered at the next turn boundary), instead of leaving a `delivered:false` reader to
-    // wonder whether it's a drop. `busyForMs` is only meaningful while the hold is actually busy-caused
-    // (not-ready/composer-dirty/rate-limited holds have no busy-since edge to measure from).
+    // WILL be delivered at the next turn boundary UNLESS redelivery is ultimately exhausted, in which
+    // case it is PARKED and the sender is notified instead of silently dropped — see
+    // `handleGiveUpExhausted` in sessions/service.ts, card 417cea0a), instead of leaving a
+    // `delivered:false` reader to wonder whether it's a drop. `busyForMs` is only meaningful while the
+    // hold is actually busy-caused (not-ready/composer-dirty/rate-limited holds have no busy-since edge
+    // to measure from).
     const busyForMs = live.busySince != null ? Date.now() - live.busySince : undefined;
     return { delivered: false, position: live.pending.length, reason: "held", queued: true, landsAt: "next-turn-boundary", busyForMs, deliveryState: "queued" };
   }
@@ -5623,6 +5654,9 @@ export class PtyHost {
           // eslint-disable-next-line no-console
           console.log(`[submit] ${sessionId} CONFIRMED logicalId=${logicalId} latencyMs=${latencyMs} (content-matched — resolving any still-queued duplicate copies)`);
           live.ambiguousDispatches.delete(logicalId); // Major 2: resolved — never lingers to wrongly auto-join a LATER, unrelated same-text directive
+          // Card 417cea0a: hand this same CONFIRMED signal to whoever's listening (sessions/service.ts) —
+          // see `onGiveUpConfirmed`'s own doc for why PtyHost can't decide here whether it's news.
+          this.events.onGiveUpConfirmed?.(sessionId, logicalId, latencyMs);
         }
         const matchedSet = new Set(matchedLogicalIds);
         for (let i = live.pending.length - 1; i >= 0; i--) {

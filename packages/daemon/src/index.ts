@@ -286,6 +286,10 @@ async function main(): Promise<void> {
     onContextStats: (sessionId, s) => db.setContextCounters(sessionId, { ctxInputTokens: s.inputTokens, ctxTurns: s.turns, model: s.model }),
     // Card 343441bd: persist the completed-turn counter — see PtyHostEvents.onTurnCompleted's doc for scope.
     onTurnCompleted: (sessionId) => db.incrementTurnSeq(sessionId),
+    // Card 417cea0a: a give-up-tracked message was confirmed by content match — `sessions` (forward
+    // reference, same pattern as onBusy/onExit above) decides whether it was ever actually PARKED and, if
+    // so, retracts that notice to the original sender. See PtyHostEvents.onGiveUpConfirmed's own doc.
+    onGiveUpConfirmed: (sessionId, logicalId, latencyMs) => sessions.handleGiveUpConfirmed(sessionId, logicalId, latencyMs),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

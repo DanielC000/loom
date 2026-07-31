@@ -11,7 +11,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
@@ -617,6 +617,25 @@ const AUTO_RETIRE_IDLE_WAIT_MS = Number(process.env.LOOM_AUTO_RETIRE_IDLE_WAIT_M
  * first exhaustion) needs a code change to the fallback expression, not an env override.
  */
 const GIVE_UP_REMINT_LIMIT = Number(process.env.LOOM_GIVE_UP_REMINT_LIMIT) || 1;
+
+/**
+ * Card 417cea0a: how much real effort a PARK actually costs, DERIVED from the live constants (never
+ * hand-typed prose) so the `[loom:redelivery-parked]` notice below can't silently rot the way the old
+ * "PARKED after ${GIVE_UP_REMINT_LIMIT} redelivery attempts" line did — that line rendered as "PARKED
+ * after 1 redelivery attempts" and, read literally, seeded v1 of this very card's (refuted) hypothesis
+ * that the retry budget was tiny. One "message object" (the original, or each re-mint) gets
+ * `GIVE_UP_REQUEUE_LIMIT + 1` submit cycles (the first attempt + that many in-session requeues) before
+ * handing off; there are `GIVE_UP_REMINT_LIMIT + 1` message objects in the chain (the original + that many
+ * re-mints) before the terminal PARK. A hold (`GIVE_UP_HOLD_MS`) separates the two cycles WITHIN each
+ * message object that gets requeued — `GIVE_UP_REQUEUE_LIMIT` holds per object, across
+ * `GIVE_UP_REMINT_LIMIT + 1` objects. `give-up-exhausted-durable.mjs` asserts these figures against the
+ * SAME imported constants, so a future change to any of them is a RED test, not a silently-stale sentence.
+ */
+const PARK_MESSAGE_OBJECTS = GIVE_UP_REMINT_LIMIT + 1;
+const PARK_SUBMIT_CYCLES = (GIVE_UP_REQUEUE_LIMIT + 1) * PARK_MESSAGE_OBJECTS;
+const PARK_ENTER_WRITES = PARK_SUBMIT_CYCLES * SUBMIT_MAX_ATTEMPTS;
+const PARK_HOLDS = GIVE_UP_REQUEUE_LIMIT * PARK_MESSAGE_OBJECTS;
+const PARK_MIN_HOLD_SECONDS = Math.round((PARK_HOLDS * GIVE_UP_HOLD_MS) / 1000);
 
 /** Card 4a0af485: one-time process-wide latch for `enqueueDurableMessage`'s degraded-branch warn — see
  *  that call site's own comment for why this should be statically unreachable in production. */
@@ -5357,16 +5376,51 @@ export class SessionService {
       // known ceiling) — the original write may still be sitting validly queued, about to land. State the
       // real three-way uncertainty (confirmed / unconfirmed-pending / dropped) honestly instead of
       // asserting the middle case as if it were the last: PARKED ⇒ Loom stopped its OWN automatic retries,
-      // NOT proof of non-delivery. A resend of the IDENTICAL content is now safe by construction — see
-      // `hasAmbiguousMatch`/`enqueueDurableMessage`'s auto-join (card 4a0af485) — so this notice can
-      // recommend it without recommending a duplicate.
+      // NOT proof of non-delivery.
+      //
+      // Card 417cea0a — THREE further corrections to this notice, each a "comment/notice is a claim" fix
+      // (read-only Code Reviewer audit `4474ffb7`, refuting this card's own v1 hypothesis first):
+      // (1) THE PRESCRIBED ACTION WAS IMPOSSIBLE FOR MOST SENDERS. The old text unconditionally said
+      //     "check <recipient>'s transcript/state" — but a manager has NO cross-project transcript read
+      //     (a `cross_project_message` audit event exists; nothing reads it — negative grep, 6 hits, all
+      //     non-readers) and, more generally, NO read at all into a session it doesn't manage. The ONE case
+      //     where a real read exists: the sender is a manager and `recipientId` is ITS OWN worker — then
+      //     `worker_list`/`worker_status` genuinely answers this. `canCheckRecipient` below is that exact,
+      //     narrow condition; every other sender (a peer project's manager via `peer_message` foremost
+      //     among them) gets the honest "no read exists" instead of an instruction that dead-ends.
+      // (2) THE "SAFE BY CONSTRUCTION" RESEND CLAIM WAS FALSE IN THE CASE IT ADDRESSED. The old text said a
+      //     same-content resend joins "automatically — no duplicate turn", full stop. Two ways that's
+      //     false: (a) the auto-join match is on the FRAMED text, which embeds the SENDER's own sessionId
+      //     (see `hasAmbiguousMatch`/`enqueueDurableMessage`'s framing) — a sender that has since been
+      //     recycled produces different framed text even for byte-identical content, so it does NOT join.
+      //     (b) the join window is `Live.ambiguousDispatches` — `purgeConfirmedGiveUpRequeue` DELETES that
+      //     entry the instant a confirming hook proves the original actually landed (see that method's own
+      //     doc). So in EXACTLY the case where the resend advice matters least — the original genuinely did
+      //     land late — a resend sent after that confirmation is no longer recognized as a duplicate and
+      //     becomes a second, real turn. The old text asserted the opposite of both.
+      // (3) "PARKED after ${GIVE_UP_REMINT_LIMIT} redelivery attempts" rendered as "PARKED after 1
+      //     redelivery attempts" — read literally, that seeds exactly the "the budget is tiny" inference
+      //     this card's own (refuted) v1 hypothesis made. Replaced with the real, constant-DERIVED effort
+      //     (see `PARK_SUBMIT_CYCLES`'s own doc above this method).
+      const recipient = this.db.getSession(recipientId);
+      const canCheckRecipient = recipient?.role === "worker" && recipient.parentSessionId === sender;
+      const recipientCheckClause = canCheckRecipient
+        ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status before assuming it's gone.`
+        : `Loom has no read you can use to check on ${recipientId.slice(0, 8)} from here — there is no cross-session ` +
+          `transcript/state read available to a sender in your position.`;
       const note =
-        `[loom:redelivery-parked] a message you sent to ${recipientId.slice(0, 8)} (head: ${JSON.stringify(text.slice(0, 60))}) ` +
-        `has been PARKED after ${GIVE_UP_REMINT_LIMIT} redelivery attempts — Loom has STOPPED retrying it automatically. This is ` +
-        `NOT proof it was never received: the engine can confirm a write minutes late under load, so the original may still land ` +
-        `on its own. Check ${recipientId.slice(0, 8)}'s transcript/state before assuming it's gone. If you do resend the SAME ` +
-        `content, Loom recognizes and joins it to this original automatically — no duplicate turn; a reworded resend is treated ` +
-        `as genuinely new.`;
+        `[loom:redelivery-parked] a message you sent to ${recipientId.slice(0, 8)} (root ${rootMsgId.slice(0, 8)}, head: ` +
+        `${JSON.stringify(text.slice(0, 60))}) has been PARKED — Loom exhausted its own redelivery budget (${PARK_SUBMIT_CYCLES} ` +
+        `submission attempts, ~${PARK_ENTER_WRITES} Enter-key writes, across ${PARK_MESSAGE_OBJECTS} independent retry levels, ` +
+        `spanning ${PARK_HOLDS} ${GIVE_UP_HOLD_MS / 1000}s hold(s) — at least ${PARK_MIN_HOLD_SECONDS}s) and has STOPPED ` +
+        `retrying it automatically. This is NOT proof it was never received: the engine can confirm a write minutes late under ` +
+        `load, so the original may still land on its own — Loom MAY follow up with a [loom:redelivery-confirmed] notice if it ` +
+        `can later prove that turn ran, but that follow-up is NOT guaranteed even when the message did land, so its absence is ` +
+        `NOT evidence the message failed. ${recipientCheckClause} If you resend the SAME content, Loom usually recognizes and ` +
+        `joins it to this original instead of creating a duplicate turn — but that join is NOT guaranteed: (a) it matches on ` +
+        `the exact framed text, which embeds YOUR OWN session id, so it breaks if you've been recycled since sending; (b) the ` +
+        `join window closes the instant Loom itself confirms the original landed — so if that happens before you resend, your ` +
+        `resend becomes a genuine second turn instead of joining. A reworded resend is always treated as new.`;
       // CR follow-up (card ccb407eb): this notice is ITSELF a one-shot terminal signal — by the exact
       // criterion this card applied to the six settle-nudge sites above, it must not be a bare enqueueStdin
       // a give-up could silently swallow one level up. Routed through enqueueDurableMessage exactly like
@@ -5382,6 +5436,50 @@ export class SessionService {
       // live and confirming a follow-on dispatch WOULD then occur. If that guard ever breaks, (7a) goes red.
       try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId, kind: "warning" }); } catch { /* best-effort — the durable session_message_gave_up record for the ORIGINAL message still stands regardless */ }
     }
+  }
+
+  /**
+   * Card 417cea0a — the post-hoc retraction half of the give-up notice: `purgeConfirmedGiveUpRequeue`
+   * (pty/host.ts) already learns, by content match, that a given-up message's turn actually ran — this
+   * consumes that signal (wired via `PtyHostEvents.onGiveUpConfirmed`). `sessionId` is the RECIPIENT whose
+   * confirming hook fired; `logicalId` is the chain's `rootMsgId` (stable across every re-mint — see
+   * `QueuedMessage.logicalId`'s own doc).
+   *
+   * PtyHost is deliberately DB-agnostic (see `onGiveUpConfirmed`'s own doc), so THIS is where "was this
+   * actually parked, or just a normal mid-chain confirmation?" gets answered: walk `sessionId`'s own event
+   * history for a `session_message_gave_up` event rooted at `logicalId` with `outcome: "parked"`. None
+   * found ⇒ this confirmation resolved an ordinary still-in-budget requeue/re-mint, not a terminal park —
+   * nothing to retract, no notice (a silent, correct no-op; NOT every CONFIRMED log line is news). Found ⇒
+   * the sender was told this message was gone-until-proven-otherwise; tell them it landed. Records a
+   * durable `session_message_gave_up` event (SAME kind, NEW `outcome: "confirmed-after-park"` — extends
+   * the existing outcome vocabulary rather than minting a new event kind) so the audit trail carries the
+   * correction alongside the original park, then best-effort notifies the ORIGINAL sender
+   * (`gaveUp.managerSessionId` — the same session `handleGiveUpExhausted` looked up as `sender` when this
+   * chain parked).
+   *
+   * ⛔ SCOPE (Correction 1, card 417cea0a): only ever called from `purgeConfirmedGiveUpRequeue`'s
+   * single-`batchId` branch (see `onGiveUpConfirmed`'s call site in pty/host.ts) — a parked message whose
+   * signature collides with another live give-up batch never reaches this method, so it will NOT produce a
+   * `[loom:redelivery-confirmed]` notice. That gap is stated in the parked notice itself (hedged as "MAY
+   * follow up", never "will") precisely so its absence is never misread as proof of non-delivery.
+   */
+  handleGiveUpConfirmed(sessionId: string, logicalId: string, latencyMs: number): void {
+    const events = this.db.listEventsForWorker(sessionId);
+    const gaveUp = events.find((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === logicalId && e.detail?.outcome === "parked");
+    if (!gaveUp) return; // never parked (still mid-chain, or no give-up history here for this chain) — nothing to retract
+    const sender = gaveUp.managerSessionId;
+    const gaveUpTaskId = gaveUp.taskId ?? null;
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sender, workerSessionId: sessionId, taskId: gaveUpTaskId,
+      kind: "session_message_gave_up", detail: { msgId: gaveUp.detail?.msgId, rootMsgId: logicalId, outcome: "confirmed-after-park", latencyMs },
+    });
+    const senderSession = this.db.getSession(sender);
+    if (!senderSession) return;
+    const note =
+      `[loom:redelivery-confirmed] good news — the message you sent to ${sessionId.slice(0, 8)} (root ${logicalId.slice(0, 8)}), ` +
+      `which was PARKED earlier, has now been CONFIRMED delivered: the engine proved the turn actually ran, ~${Math.round(latencyMs / 1000)}s ` +
+      `after Loom wrote it. Loom's own retry budget gave up before the engine did — no action needed on your end.`;
+    try { this.enqueueDurableMessage(sender, note, { sender: "system", taskId: gaveUpTaskId, kind: "warning" }); } catch { /* best-effort — the confirmed-after-park audit event above still stands regardless */ }
   }
 
   /**
