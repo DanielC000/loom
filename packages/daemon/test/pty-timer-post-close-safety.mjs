@@ -2,13 +2,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card c54d1ea0 — codescape-lifecycle-hooks.mjs's use-after-close race, generalized into a deterministic
 // regression guard (RED first, no waiting on gate contention/timing luck to reproduce).
 //
-// THE BUG: pty/host.ts's readiness-fallback (READY_FALLBACK_MS, default 20s) and kickoff-guarantee
-// (STARTUP_PROMPT_GRACE_MS, default 10s) timers exist to force a session to `ready`/submit its kickoff
-// when a real claude process never sends the expected hooks — both guard purely on `live.alive`/
-// `live.stopping`, exactly like every other stray timer in this file (escalateGracefulStop's timers use
-// the identical pattern, deliberately: "each timer is an inert no-op" once alive flips false). That's
-// SOUND in production: a real daemon's Db shares the whole process lifetime with PtyHost, and a real
-// `pty.kill()` always fires the real node-pty exit event.
+// THE BUG: pty/host.ts's readiness-fallback (READY_FALLBACK_MS, default 20s) timer, plus the
+// kickoff-delivery timer it can chain into (scheduleKickoffGuarantee — card 0050a17e collapsed this from
+// a ~10s grace window to "next tick after markReady", since there's no more vendor-CLI auto-submit to
+// race), exist to force a session to `ready`/submit its kickoff when a real claude process never sends
+// the expected hooks — both guard purely on `live.alive`/`live.stopping`, exactly like every other stray
+// timer in this file (escalateGracefulStop's timers use the identical pattern, deliberately: "each timer
+// is an inert no-op" once alive flips false). That's SOUND in production: a real daemon's Db shares the
+// whole process lifetime with PtyHost, and a real `pty.kill()` always fires the real node-pty exit event.
 //
 // It broke a TEST that (a) creates its OWN Db, (b) spawns a fake-pty session and never stops it before
 // closing that Db, and (c) uses a fake pty whose `kill()` is a no-op. Under load (the reported failure
@@ -34,8 +35,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   check that can't fail isn't a check.
 // (GREEN / the fix) a session that IS `stop()`-ped before its Db closes never reaches it, deterministically.
 //
-// Grace/fallback windows are read at import time — set tiny here so both timers are FORCED to fire well
-// within this test's own bounded wait; no gate contention or timing luck needed to reproduce.
+// The fallback window is read at import time — set tiny here so both timers are FORCED to fire well
+// within this test's own bounded wait; no gate contention or timing luck needed to reproduce. The
+// kickoff-delivery timer no longer has a configurable grace (card 0050a17e) — it fires on the next tick
+// after markReady's own delivery gate settles, which READY_FALLBACK_MS's own markReady call still chains
+// into. A Code Review catch on that SAME card found delivery now gated on logLandedMode's footer-read
+// poll (MODE_LOG_POLL_MS, default 500ms × up to 8 attempts) settling first — shrunk here too, or this
+// test's bounded wait would need to be several seconds longer than the fallback window alone implies.
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -44,7 +50,7 @@ const tmpHome = path.join(os.tmpdir(), `loom-pty-timer-close-${Date.now()}-${pro
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 process.env.LOOM_READY_FALLBACK_MS = "20";
-process.env.LOOM_STARTUP_PROMPT_GRACE_MS = "20";
+process.env.LOOM_MODE_LOG_POLL_MS = "5";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 
@@ -93,15 +99,16 @@ async function runScenario(label, { stopBeforeClose }) {
     geometry: { cols: 120, rows: 40 }, sessionEnv: {},
   });
   // Never deliver SessionStart/UserPromptSubmit/Stop — the fake session never reaches a real turn, so
-  // BOTH the readiness fallback and the kickoff guarantee are forced onto their own timers, exactly the
-  // "CLI's own auto-submit never lands" shape scheduleKickoffGuarantee's own doc comment describes.
+  // the readiness fallback fires on its own timer (READY_FALLBACK_MS), which itself calls markReady →
+  // scheduleKickoffGuarantee, chaining straight into the kickoff-delivery timer (next tick, no grace to
+  // configure any more — card 0050a17e).
 
   if (stopBeforeClose) host.stop(sessionId, "hard");
   db.close();
 
-  // Bounded wait past BOTH windows (READY_FALLBACK_MS + STARTUP_PROMPT_GRACE_MS, ~40ms combined here)
-  // with generous slack — long enough for the full timer chain to fire if it's going to, without needing
-  // real gate contention.
+  // Bounded wait past the fallback window (READY_FALLBACK_MS, 20ms here) plus the kickoff-delivery
+  // timer's own next-tick fire, with generous slack — long enough for the full timer chain to fire if
+  // it's going to, without needing real gate contention.
   await sleep(500);
 
   try { host.stop(sessionId, "hard"); } catch { /* best-effort cleanup regardless of scenario outcome */ }

@@ -111,6 +111,10 @@ process.env.LOOM_GIVE_UP_REQUEUE_LIMIT = "1";
 const HOLD_MS = 10;
 process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 const HOLD_WAIT = HOLD_MS + 20;
+// Card 0050a17e: a fresh startupPrompt spawn's kickoff delivery now gates on logLandedMode's footer-read
+// poll settling before it ever submits — shrink it so scenario (6) below doesn't wait ~4s (8 attempts ×
+// the 500ms default) for a ring that will never show a real footer (this suite's fake pty is silent).
+process.env.LOOM_MODE_LOG_POLL_MS = "5";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -417,14 +421,59 @@ try {
     check("(5) the turn finalizes cleanly", busyLog[SID].at(-1) === false && settleHost.getPendingEntries(SID).length === 0);
     try { settleHost.stop(SID, "hard"); } catch { /* ignore */ }
   }
+
+  // ===================== (6) card 0050a17e: the KICKOFF's own direct submit() now requeues on give-up ====
+  // too, instead of discarding it — scheduleKickoffGuarantee's direct submit() call USED TO pass no
+  // origin (Live.giveUpOrigin stayed null for it, by design, back when a give-up there was reachable only
+  // after the vendor CLI's own auto-submit had already failed once). Now that this direct submit() is the
+  // PRIMARY delivery path for EVERY fresh spawn, an unconfirmed give-up must not silently lose the kickoff
+  // — give-up is likeliest exactly for the large pastes this card exists to enable (pinned memory
+  // `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` records a real 232-second confirmation
+  // lag). This proves the fix: a fresh spawn's kickoff, never confirmed by this suite's silent fake pty,
+  // is requeued (not dropped) and genuinely re-delivered on the next drain — the SAME contract scenario
+  // (1) above already proves for an ordinary enqueueStdin-originated message.
+  {
+    const SID = "sess-requeue-kickoff";
+    const KICKOFF = "orchestrate the kickoff task — give-up must requeue this, not drop it";
+    host.spawn({
+      sessionId: SID, cwd: tmpHome, startupPrompt: KICKOFF,
+      permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+      geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+    });
+    host.deliverHook(SID, { hook_event_name: "SessionStart" });
+    const fake = fakes[fakes.length - 1];
+    const bodyCount = (text) => fake.writes.join("").split(text).length - 1;
+
+    // The kickoff delivers via scheduleKickoffGuarantee's direct submit() (nothing else is queued/busy for
+    // this fresh session, so it takes the "safe to write now" branch, not the enqueue-and-hold sibling).
+    await waitUntil(() => bodyCount(KICKOFF) >= 1);
+    check("(6) setup: the kickoff was actually written (direct submit(), not just queued)", bodyCount(KICKOFF) === 1);
+
+    // This suite's silent fake pty never confirms Enter — the kickoff's own submit() cycle gives up after
+    // MAX_ATTEMPTS, exactly like scenario (1)'s ordinary message.
+    await waitUntil(() => busyLog[SID].at(-1) === false);
+    check("(6) THE FIX: the kickoff was NOT silently dropped — it reappears in the pending queue",
+      host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === KICKOFF);
+
+    // Reconcile (the real daemon's periodic tick, simulated directly) drains the requeued kickoff — proving
+    // genuine recovery, not just presence in the queue.
+    await sleep(HOLD_WAIT);
+    host.reconcile();
+    check("(6) reconcile drained the requeued kickoff: busy re-armed", busyLog[SID].at(-1) === true);
+    await waitUntil(() => bodyCount(KICKOFF) === 2);
+    check("(6) the kickoff was actually RE-DELIVERED (written to the pty a second time), not just re-queued",
+      bodyCount(KICKOFF) === 2);
+
+    try { host.stop(SID, "hard"); } catch { /* ignore */ }
+  }
 } finally {
-  for (const sid of ["sess-requeue-basic", "sess-requeue-order"]) {
+  for (const sid of ["sess-requeue-basic", "sess-requeue-order", "sess-requeue-kickoff"]) {
     try { host.stop(sid, "hard"); } catch { /* ignore */ }
   }
   try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a genuinely-lost give-up is requeued (visible, identity-preserved) and actually re-delivered on the next drain, ordering is preserved against messages that arrive while stuck, the requeue budget bounds it from looping forever, a SUPPRESSED (false-negative) give-up never requeues or double-delivers anything, a confirming hook arriving DURING the settle window means no requeue ever happens, and a hook arriving AFTER RECOVERY already requeued still gets purged before it can double-deliver."
+  ? "\n✅ ALL PASS — a genuinely-lost give-up is requeued (visible, identity-preserved) and actually re-delivered on the next drain, ordering is preserved against messages that arrive while stuck, the requeue budget bounds it from looping forever, a SUPPRESSED (false-negative) give-up never requeues or double-delivers anything, a confirming hook arriving DURING the settle window means no requeue ever happens, a hook arriving AFTER RECOVERY already requeued still gets purged before it can double-deliver, and (card 0050a17e) a fresh spawn's KICKOFF — delivered via scheduleKickoffGuarantee's own direct submit() — gets the SAME give-up requeue/re-delivery protection, not silently dropped."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

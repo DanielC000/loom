@@ -53,14 +53,13 @@ for (const role of ["worker", "setup", "workspace-auditor", "run", "assistant", 
   const d = args.indexOf("--disallowedTools");
   const strict = args.indexOf("--strict-mcp-config");
   const cfg = args.indexOf("--mcp-config");
-  const sep = args.indexOf("--");
   check("manager: `--disallowedTools` is present", d !== -1);
   check("manager: the six tool names follow the flag, in order",
     ["TaskCreate", "TaskGet", "TaskList", "TaskOutput", "TaskStop", "TaskUpdate"]
       .every((name, i) => args[d + 1 + i] === name));
   check("manager: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by that flag)", d < strict && d + 7 === strict);
-  check("manager: `--mcp-config` value still sits right before the `--` separator", cfg !== -1 && sep > cfg + 1 && sep === args.length - 2);
-  check("manager: the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "lead it");
+  check("manager: `--mcp-config` value is the last real flag (no `--`/prompt trailing it — the prompt never rides argv)", cfg !== -1 && args.length - 1 === cfg + 1);
+  check("manager: no `--` separator (the prompt never rides argv)", !args.includes("--"));
 }
 
 // --- Byte-identical proof for the out-of-scope path ---------------------------------------------

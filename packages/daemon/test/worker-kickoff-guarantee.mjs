@@ -1,22 +1,33 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Fresh-spawn KICKOFF GUARANTEE + BROKEN-SPAWN SIGNAL (task c0a6e611).
+// Fresh-spawn KICKOFF DELIVERY + BROKEN-SPAWN SIGNAL (task c0a6e611, reworked by card 0050a17e).
 //
-// THE BUG: a `worker_spawn` kickoff rides the CLI as a positional arg (buildSpawnArgs) — the vendor
-// `claude` CLI is responsible for auto-typing + auto-submitting it as turn 1 once its TUI boots. That
-// internal auto-submit can lose the race against Loom's own boot machinery (mode-cycle keystrokes,
-// dialog dismissals) under load and never land as a real turn: the worker sits `live` with
-// `engineSessionId:null`, no transcript, no lastError — and the manager gets the BENIGN
-// `[loom:worker-idle]` nudge ("finished a turn and is idle but did NOT call worker_report"), which
-// masks a broken spawn as a normal park.
+// THE ORIGINAL BUG (c0a6e611): a `worker_spawn` kickoff used to ride the CLI as a positional arg — the
+// vendor `claude` CLI was responsible for auto-typing + auto-submitting it as turn 1 once its TUI booted.
+// That internal auto-submit could lose the race against Loom's own boot machinery (mode-cycle keystrokes,
+// dialog dismissals) under load and never land as a real turn: the worker sat `live` with
+// `engineSessionId:null`, no transcript, no lastError — and the manager got the BENIGN
+// `[loom:worker-idle]` nudge ("finished a turn and is idle but did NOT call worker_report"), which masks
+// a broken spawn as a normal park.
+//
+// CARD 0050a17e (Windows command-line ceiling removal) changed the VEHICLE: the startup prompt no longer
+// rides argv at ALL, for any role (buildSpawnArgs never emits it — see that function's own doc). So
+// there is no more vendor-CLI auto-submit to race — the delivery this file tests used to be a FALLBACK
+// racing that auto-submit after a `STARTUP_PROMPT_GRACE_MS` grace window; it is now the PRIMARY delivery
+// path, firing on the very next tick after `markReady` (no grace window — nothing left to wait out).
+// This file's H1b scenario ("the CLI's own auto-submit wins the race") is now STRUCTURALLY IMPOSSIBLE and
+// has been replaced with the still-real residual case: something ELSE starts a turn on the SAME
+// synchronous tick as `markReady`, before the deferred delivery check ever runs — proving the check's own
+// internal `firstTurnStarted` recheck (not a race against an external auto-submit) is what prevents a
+// double-submit.
 //
 // THE FIX, two parts, both in pty/host.ts + sessions/service.ts:
-//   (H1) scheduleKickoffGuarantee — once a positional-arg spawn reaches `ready` (markReady), if no turn
-//        has started within STARTUP_PROMPT_GRACE_MS, force-submit the SAME kickoff text via the exact
-//        reliable path (submit()) every later turn uses. Fires for EVERY positional-arg spawn — a fresh
-//        worker_spawn, a recycle handoff (recycleWorker/recycleManager/platform-lead recycle all pass a
-//        real startupPrompt through this same path), and a run's startup prompt. A no-op ONLY for resume
-//        and fork (neither ever passes a positional startupPrompt — lastPrompt stays null there) and a
-//        no-op once the CLI's own auto-submit lands in time.
+//   (H1) scheduleKickoffGuarantee — once a startup-prompt spawn reaches `ready` (markReady), deliver the
+//        kickoff via the exact reliable path (submit()) every later turn uses — UNLESS a turn already
+//        started (firstTurnStarted) by the time the deferred check runs. Fires for EVERY startup-prompt
+//        spawn — a fresh worker_spawn, a recycle handoff (recycleWorker/recycleManager/platform-lead
+//        recycle all pass a real startupPrompt through this same path), and a run's startup prompt. A
+//        no-op ONLY for resume and fork (neither ever passes a startupPrompt — lastPrompt stays null
+//        there) and a no-op once a turn already started before the deferred check runs.
 //   (H2) healIfStuck's SHORT pre-first-turn stale window (FIRST_TURN_STALE_MS) — a session that never
 //        started turn 1 can't legitimately be "mid a long tool call", so it self-heals busy:false on a
 //        much shorter window than the general busyStaleMs (5min), surfacing the broken spawn to the
@@ -38,22 +49,26 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { waitUntil } from "./_wait.mjs";
+import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-// Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn). Grace/stale
-// windows are read at MODULE IMPORT time — set them BEFORE importing host.js, short enough for a fast
-// test but with FIRST_TURN_STALE_MS comfortably > STARTUP_PROMPT_GRACE_MS (mirrors production's
-// grace(10s) < stale(30s) ordering) so the two mechanisms don't race each other inside this test.
+// Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn).
+// FIRST_TURN_STALE_MS is read at MODULE IMPORT time — set it BEFORE importing host.js, short enough for
+// a fast test. Delivery itself no longer has a grace window to configure (card 0050a17e collapsed it to
+// "next tick after markReady") — there's nothing left to set for that.
 const tmpHome = path.join(os.tmpdir(), `loom-kickoff-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
-process.env.LOOM_STARTUP_PROMPT_GRACE_MS = "150";
 process.env.LOOM_FIRST_TURN_STALE_MS = "450";
 process.env.LOOM_READY_FALLBACK_MS = "5000"; // long enough it never fires inside these tests' own windows
 process.env.LOOM_RESUME_MODE_POLL_MS = "20"; // fast footer polling for the mode-cycle scenario (H1e)
+// Pinned (not left at the 900ms default) so NEGATIVE_WINDOW_MS below has an EXPLICIT, measured margin
+// under it — sendEnterAndVerify's give-up/reassert-paste retry (host.ts) also writes a bracket-paste
+// marker, so a window that ever reached this timeout could misread an unrelated retry as a repeated
+// kickoff delivery. See NEGATIVE_WINDOW_MS's own comment below.
+process.env.LOOM_SUBMIT_VERIFY_TIMEOUT_MS = "5000";
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -87,9 +102,32 @@ const writtenOf = (fake) => fake.writes.join("");
 const countIn = (fake, marker) => writtenOf(fake).split(marker).length - 1;
 const lastFake = () => fakes[fakes.length - 1];
 
+// windowMs shared by every negative check below — derived from the pinned LOOM_SUBMIT_VERIFY_TIMEOUT_MS
+// (5000ms) above: comfortably (25x) under it, so sendEnterAndVerify's give-up/reassert-paste retry can
+// never fire inside the window and be mistaken for a repeated/unexpected kickoff delivery.
+const NEGATIVE_WINDOW_MS = 200;
+
+// Spawn a throwaway control session (SessionStart delivered, like kick-A) and wait for its own real
+// kickoff delivery — used by every positiveControl below to prove countIn(...)'s PASTE_START check can
+// actually catch a real delivery, via the identical write path scheduleKickoffGuarantee itself uses (not
+// a hand-written fake write).
+let controlSeq = 0;
+async function spawnControlDelivery(label) {
+  const id = `control-${controlSeq++}-${label.replace(/[^a-z0-9]+/gi, "-")}`;
+  host.spawn({
+    sessionId: id, cwd: tmpHome, startupPrompt: `control kickoff (${label})`,
+    permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
+    geometry: { cols: 120, rows: 40 }, sessionEnv: {},
+  });
+  const fake = lastFake();
+  host.deliverHook(id, { hook_event_name: "SessionStart" });
+  await waitUntil(() => countIn(fake, PASTE_START) === 1, { label: `${label}: control kickoff delivered once` });
+  return { id, fake };
+}
+
 try {
-  // ============ (H1a) LOST RACE: SessionStart fires, the CLI's own auto-submit NEVER lands ============
-  // → after STARTUP_PROMPT_GRACE_MS, the kickoff is force-submitted exactly once with the ORIGINAL text.
+  // ============ (H1a) NOTHING ELSE STARTS A TURN: SessionStart fires, nothing else ever submits =========
+  // → the kickoff is delivered exactly once, on the very next tick after ready (no grace window to wait out).
   {
     const A = "kick-A";
     const KICKOFF = "orchestrate task tk-A";
@@ -100,20 +138,44 @@ try {
     });
     const fa = lastFake();
     host.deliverHook(A, { hook_event_name: "SessionStart" }); // ready — no mode-cycles, no UserPromptSubmit ever
-    check("(H1a) NOT force-submitted immediately at ready — grace window not yet elapsed", countIn(fa, PASTE_START) === 0);
-    await waitUntil(() => countIn(fa, PASTE_START) === 1, { label: "(H1a) forced kickoff submit after the grace window" });
-    check("(H1a) the kickoff was force-submitted exactly once after the grace window", countIn(fa, PASTE_START) === 1);
-    check("(H1a) the force-submitted text is the ORIGINAL kickoff", writtenOf(fa).includes(KICKOFF));
-    check("(H1a) busy was (re)armed true by the forced submit", busyById[A]?.[busyById[A].length - 1] === true);
+    // Even at "next tick" (setTimeout(…,0)), JS's event-loop guarantees a macrotask never fires inside the
+    // SAME synchronous execution that scheduled it — so checking synchronously, right after the hook call
+    // returns, is still a valid "not yet" assertion, not a guess about timing.
+    check("(H1a) NOT delivered synchronously within the same tick as ready", countIn(fa, PASTE_START) === 0);
+    await waitUntil(() => countIn(fa, PASTE_START) === 1, { label: "(H1a) kickoff delivered on the next tick after ready" });
+    check("(H1a) the kickoff was delivered exactly once", countIn(fa, PASTE_START) === 1);
+    check("(H1a) the delivered text is the ORIGINAL kickoff", writtenOf(fa).includes(KICKOFF));
+    check("(H1a) busy was (re)armed true by the delivery", busyById[A]?.[busyById[A].length - 1] === true);
     // scheduleKickoffGuarantee is a ONE-SHOT setTimeout guarded by markReady's own live.ready latch — there
-    // is no further completion event to poll for here, only an absence to bound. 200ms is a fixed settle
-    // window measured from the ALREADY-OBSERVED force-submit above (not a guess about when it happens).
-    await sleep(200);
-    check("(H1a) still exactly ONE forced submit (no repeat firing)", countIn(fa, PASTE_START) === 1);
+    // is no further completion event to poll for here, only an absence to bound. Proven via
+    // assertNeverWithControl (not a bare sleep+look-once) — see NEGATIVE_WINDOW_MS's own comment for why
+    // the window stays well under the pinned SUBMIT_VERIFY_TIMEOUT_MS.
+    const noRepeatH1a = await assertNeverWithControl({
+      label: "(H1a) still exactly ONE delivery (no repeat firing)",
+      check: () => countIn(fa, PASTE_START) >= 2,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        // Arm a REAL second delivery on a throwaway control session — its own real delivery, then a
+        // legitimate end-of-turn (UserPromptSubmit+Stop, same shape as H1b below) + enqueueStdin to force
+        // a genuine second submit() — proving the >=2 check can actually catch a repeat via the SAME real
+        // write path scheduleKickoffGuarantee uses.
+        const { id, fake } = await spawnControlDelivery("H1a repeat-check positive control");
+        host.deliverHook(id, { hook_event_name: "UserPromptSubmit" });
+        host.deliverHook(id, { hook_event_name: "Stop" }); // end that turn — clears busy
+        host.enqueueStdin(id, "control forced second delivery", "system", undefined, undefined, "agent");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 2, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(H1a) still exactly ONE delivery (no repeat firing)", noRepeatH1a);
   }
 
-  // ============ (H1b) WON RACE: the CLI's own auto-submit lands BEFORE the grace elapses ============
-  // → simulated by a real UserPromptSubmit hook shortly after SessionStart. No forced duplicate ever.
+  // ============ (H1b) SAME-TICK RACE: something else starts a turn BEFORE the deferred check runs ========
+  // Card 0050a17e: there is no more vendor-CLI auto-submit to race (the prompt never rides argv, so the
+  // CLI has nothing to auto-type). The still-real residual case is a turn starting on the SAME
+  // synchronous tick as `ready` — before scheduleKickoffGuarantee's own deferred (next-tick) check ever
+  // runs — which its internal `firstTurnStarted` recheck (not a race window) is what catches.
   {
     const B = "kick-B";
     const KICKOFF = "orchestrate task tk-B";
@@ -123,24 +185,34 @@ try {
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     });
     const fb = lastFake();
-    host.deliverHook(B, { hook_event_name: "SessionStart" }); // ready — grace timer armed
-    await sleep(30); // well within the 150ms grace — the CLI's own turn starts on its own
-    host.deliverHook(B, { hook_event_name: "UserPromptSubmit" }); // the vendor CLI's auto-submit landed
-    host.deliverHook(B, { hook_event_name: "Stop" }); // the turn completes normally
+    host.deliverHook(B, { hook_event_name: "SessionStart" }); // ready — schedules the deferred delivery check
+    // Synchronously, on the SAME tick — before the scheduled check's setTimeout(0) can possibly fire —
+    // something else starts (and finishes) a turn.
+    host.deliverHook(B, { hook_event_name: "UserPromptSubmit" });
+    host.deliverHook(B, { hook_event_name: "Stop" });
     // No positive event to poll for — proving an ABSENCE needs a bounded wall-clock window, not a guess
-    // about when something completes. firstTurnStarted flipped true synchronously above, so the grace
-    // timer's own guard is already deterministic by the time it fires; this only bounds how long we give
-    // it to (not) misfire. Single hop, not chained onto any other guessed constant.
-    await sleep(250); // > grace(150) + slack — the fallback window fully elapses
-    check("(H1b) NO forced submit — nothing was ever written to the pty by Loom's own submit()", countIn(fb, PASTE_START) === 0);
+    // about when something completes. `firstTurnStarted` flipped true synchronously above, so the
+    // deferred check's own guard is already deterministic by the time it fires; this only bounds how
+    // long we give it to (not) misfire. Proven via assertNeverWithControl, not a bare sleep+look-once.
+    const neverDeliveredH1b = await assertNeverWithControl({
+      label: "(H1b) NO delivery — nothing was ever written to the pty by Loom's own submit()",
+      check: () => countIn(fb, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        // Prove the >=1 check can catch a real delivery — a normal control session really does get one.
+        const { id, fake } = await spawnControlDelivery("H1b positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(H1b) NO delivery — nothing was ever written to the pty by Loom's own submit()", neverDeliveredH1b);
   }
 
-  // ============ (H1c) ORDERING: the enqueue (real turn start) can race EITHER side of ready ============
-  // (c1) turn starts strictly AFTER ready is reached (the common shape, covered by H1a/H1b above).
-  // (c2) turn starts BEFORE ready is ever reached (UserPromptSubmit observed pre-SessionStart) — an
-  //      artificial ordering this test drives directly to prove scheduleKickoffGuarantee's guard
-  //      (`!live.firstTurnStarted`) is checked at SCHEDULE time, not just inside the timeout callback,
-  //      so a turn that started early is never redundantly replayed once ready is later reached.
+  // ============ (H1c) ORDERING: a turn can start BEFORE ready is ever reached =============================
+  // UserPromptSubmit observed pre-SessionStart — proves scheduleKickoffGuarantee's guard
+  // (`!live.firstTurnStarted`) is checked at SCHEDULE time, not just inside the deferred callback, so a
+  // turn that started early is never redundantly replayed once ready is later reached.
   {
     const C = "kick-C";
     const KICKOFF = "orchestrate task tk-C";
@@ -152,9 +224,19 @@ try {
     const fc = lastFake();
     host.deliverHook(C, { hook_event_name: "UserPromptSubmit" }); // "the enqueue" fires BEFORE ready
     host.deliverHook(C, { hook_event_name: "SessionStart" });     // ready reached AFTER the turn already started
-    // Pure absence check (nothing to poll for) — see H1b's comment. Single bounded hop.
-    await sleep(250); // > grace(150) + slack
-    check("(H1c) ready-after-enqueue: no forced submit — the turn had already started when ready landed", countIn(fc, PASTE_START) === 0);
+    // Pure absence check (nothing to poll for) — see H1b's comment.
+    const neverDeliveredH1c = await assertNeverWithControl({
+      label: "(H1c) ready-after-enqueue: no delivery — the turn had already started when ready landed",
+      check: () => countIn(fc, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("H1c positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(H1c) ready-after-enqueue: no delivery — the turn had already started when ready landed", neverDeliveredH1c);
   }
 
   // ============ (H1d) NO-OP for resume/fork ONLY (no startupPrompt → lastPrompt stays null) ============
@@ -167,16 +249,26 @@ try {
     });
     const fd = lastFake();
     host.deliverHook(D, { hook_event_name: "SessionStart" });
-    // Pure absence check (nothing to poll for) — see H1b's comment. Single bounded hop.
-    await sleep(250); // > grace(150) + slack
-    check("(H1d) resume path: NEVER force-submits (no kickoff was ever passed)", countIn(fd, PASTE_START) === 0);
+    // Pure absence check (nothing to poll for) — see H1b's comment.
+    const neverDeliveredH1d = await assertNeverWithControl({
+      label: "(H1d) resume path: NEVER delivers (no kickoff was ever passed)",
+      check: () => countIn(fd, PASTE_START) >= 1,
+      windowMs: NEGATIVE_WINDOW_MS,
+      positiveControl: async () => {
+        const { id, fake } = await spawnControlDelivery("H1d positive control");
+        const went = await observeOnce({ check: () => countIn(fake, PASTE_START) >= 1, windowMs: NEGATIVE_WINDOW_MS });
+        try { host.stop(id, "hard"); } catch { /* ignore */ }
+        return went;
+      },
+    });
+    check("(H1d) resume path: NEVER delivers (no kickoff was ever passed)", neverDeliveredH1d);
   }
 
-  // ============ (H1f) RECYCLE-SHAPED spawn: the guarantee DOES fire (a recycled session's handoff ======
-  // rides the SAME positional-arg path as a fresh worker_spawn — recycleWorker/recycleManager/the
-  // platform-lead recycle all call pty.spawn with a real startupPrompt (the handoff text), never
-  // `--resume` — so it is exposed to the identical lost-CLI-auto-submit race and must be guaranteed too.
-  // Same shape as H1a's lost-race case, just framed as a recycle handoff to prove the guarantee isn't
+  // ============ (H1f) RECYCLE-SHAPED spawn: delivery still fires ==========================================
+  // A recycled session's handoff rides the SAME startup-prompt path as a fresh worker_spawn —
+  // recycleWorker/recycleManager/the platform-lead recycle all call pty.spawn with a real startupPrompt
+  // (the handoff text), never `--resume` — so it must be delivered the same way. Same shape as H1a's
+  // "nothing else starts a turn" case, just framed as a recycle handoff to prove delivery isn't
   // fresh-spawn-only.
   {
     const G = "kick-G";
@@ -187,14 +279,14 @@ try {
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     });
     const fg = lastFake();
-    host.deliverHook(G, { hook_event_name: "SessionStart" }); // ready — the CLI's own auto-submit never lands
-    check("(H1f) recycle handoff: NOT force-submitted immediately at ready — grace window not yet elapsed", countIn(fg, PASTE_START) === 0);
-    await waitUntil(() => countIn(fg, PASTE_START) === 1, { label: "(H1f) recycle handoff forced submit after the grace window" });
-    check("(H1f) recycle handoff: force-submitted exactly once after the grace window (the guarantee is NOT fresh-spawn-only)", countIn(fg, PASTE_START) === 1);
-    check("(H1f) recycle handoff: the force-submitted text is the ORIGINAL handoff", writtenOf(fg).includes(HANDOFF));
+    host.deliverHook(G, { hook_event_name: "SessionStart" }); // ready — nothing else ever starts a turn
+    check("(H1f) recycle handoff: NOT delivered synchronously within the same tick as ready", countIn(fg, PASTE_START) === 0);
+    await waitUntil(() => countIn(fg, PASTE_START) === 1, { label: "(H1f) recycle handoff delivered on the next tick after ready" });
+    check("(H1f) recycle handoff: delivered exactly once (delivery is NOT fresh-spawn-only)", countIn(fg, PASTE_START) === 1);
+    check("(H1f) recycle handoff: the delivered text is the ORIGINAL handoff", writtenOf(fg).includes(HANDOFF));
   }
 
-  // ============ (H1e) mode-cycling still lands BEFORE the forced kickoff (ordering preserved) =========
+  // ============ (H1e) mode-cycling still lands BEFORE the delivered kickoff (ordering preserved) =========
   {
     const E = "kick-E";
     const KICKOFF = "orchestrate task tk-E";
@@ -208,31 +300,29 @@ try {
     host.deliverHook(E, { hook_event_name: "SessionStart" }); // starts the feedback mode-cycle
 
     // Each hop below waits for the ACTUAL write it's reacting to, instead of summing nominal constants
-    // (MODE_CYCLE_SETTLE_MS + poll ticks + grace) into one guessed deadline — that sum is exactly the
-    // accumulation shape that bit pty-reassert-settle (65e4e978): individually-comfortable per-hop margins
-    // are not comfortable once chained, and this block chained THREE of them at the thinnest margin in the
-    // file. Waiting on real observables removes the guess at every hop.
+    // into one guessed deadline — individually-comfortable per-hop margins are not comfortable once
+    // chained (card 65e4e978). Waiting on real observables removes the guess at every hop.
     await waitUntil(() => countIn(fe, SHIFT_TAB) === 1, { label: "(H1e) mode-cycle press #1" });
-    check("(H1e) press #1 landed before any forced submit", countIn(fe, PASTE_START) === 0);
+    check("(H1e) press #1 landed before any delivery", countIn(fe, PASTE_START) === 0);
     fe.feed("plan mode on (shift+tab to cycle)"); // press #1's footer response — not yet the target
 
     await waitUntil(() => countIn(fe, SHIFT_TAB) === 2, { label: "(H1e) mode-cycle press #2" });
-    check("(H1e) press #2 landed before any forced submit", countIn(fe, PASTE_START) === 0);
+    check("(H1e) press #2 landed before any delivery", countIn(fe, PASTE_START) === 0);
     fe.feed("auto mode on (shift+tab to cycle)"); // press #2 lands the target → markReady fires
 
-    await waitUntil(() => countIn(fe, PASTE_START) === 1, { label: "(H1e) the eventual forced kickoff submit" });
-    check("(H1e) the kickoff was eventually force-submitted", countIn(fe, PASTE_START) === 1);
+    await waitUntil(() => countIn(fe, PASTE_START) === 1, { label: "(H1e) the eventual kickoff delivery" });
+    check("(H1e) the kickoff was eventually delivered", countIn(fe, PASTE_START) === 1);
     check("(H1e) no THIRD Shift+Tab was pressed once the target landed (cycle stopped at exactly 2)", countIn(fe, SHIFT_TAB) === 2);
-    check("(H1e) ORDERING — the Shift+Tabs were written BEFORE the forced kickoff paste",
+    check("(H1e) ORDERING — the Shift+Tabs were written BEFORE the delivered kickoff paste",
       writtenOf(fe).lastIndexOf(SHIFT_TAB) >= 0 && writtenOf(fe).lastIndexOf(SHIFT_TAB) < writtenOf(fe).indexOf(PASTE_START));
   }
 
   // ============ (H2) healIfStuck: SHORT pre-first-turn stale window self-heals busy fast =================
-  // A worker that never starts turn 1 (its forced submit at H1a's grace also never "lands" here, since
-  // the fake pty never echoes engine output back) must self-heal busy:false via FIRST_TURN_STALE_MS
-  // (450ms) — WAY under the 5-minute default busyStaleMs a real turn would tolerate — proving the SHORT
-  // branch fired, not the general one. reconcile() is the real production trigger (index.ts's timer); the
-  // test drives it directly.
+  // A worker that never starts turn 1 (its delivery at H1a's shape also never "lands" here, since the
+  // fake pty never echoes engine output back) must self-heal busy:false via FIRST_TURN_STALE_MS (450ms) —
+  // WAY under the 5-minute default busyStaleMs a real turn would tolerate — proving the SHORT branch
+  // fired, not the general one. reconcile() is the real production trigger (index.ts's timer); the test
+  // drives it directly.
   {
     const F = "kick-F";
     host.spawn({
@@ -240,12 +330,11 @@ try {
       permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 },
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     });
-    host.deliverHook(F, { hook_event_name: "SessionStart" }); // ready; grace timer armed; never fires UserPromptSubmit
+    host.deliverHook(F, { hook_event_name: "SessionStart" }); // ready; delivery fires; never sees UserPromptSubmit
     check("(H2) busy immediately after spawn (optimistic set)", busyById[F]?.[0] === true);
-    // Was a single sleep(700) summing grace(150, force-submits and resets busySince) + stale(450) + slack —
-    // the exact accumulation shape this card exists to kill. Poll the real production trigger (reconcile())
-    // repeatedly instead: it only flips busy once ACTUAL elapsed time clears both windows, so this is
-    // correct regardless of host scheduling contention, not a guess about how long two hops take together.
+    // Poll the real production trigger (reconcile()) repeatedly instead of summing guessed windows: it
+    // only flips busy once ACTUAL elapsed time clears the stale window, so this is correct regardless of
+    // host scheduling contention, not a guess about how long the hops take together.
     await waitUntil(() => { host.reconcile(); return busyById[F]?.[busyById[F].length - 1] === false; },
       { intervalMs: 20, label: "(H2) busy self-heals via reconcile() on the short pre-first-turn window" });
     check("(H2) busy self-healed to false on the SHORT pre-first-turn window (well under the 5min default)",
@@ -370,6 +459,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — kickoff guarantee: a lost CLI auto-submit race is force-submitted exactly once after a short grace window (original text, busy re-armed); a won race never double-submits regardless of which side of `ready` the turn started on; resume/fork are byte-identical no-ops; a RECYCLE-shaped handoff (the same positional-arg path recycleWorker/recycleManager use) IS guaranteed too, not just a fresh worker_spawn; mode-cycle ordering is preserved. healIfStuck self-heals a never-started turn on a short window, well under the 5min default. notifyManagerOfIdleWorker branches on engineSessionId: null → a distinct [loom:worker-spawn-broken] signal (not the benign idle copy, not a duplicate of the existing worker-exited mechanism, still suppressed by the redirect-race pending guard); set → the existing benign nudge, unchanged."
+  ? "\n✅ ALL PASS — kickoff delivery (card 0050a17e: PRIMARY, not a grace-window fallback) delivers exactly once on the next tick after ready when nothing else starts a turn first; a turn starting on the SAME tick as ready (before the deferred check runs) is never redundantly replayed, via the check's own internal recheck (no more vendor-CLI auto-submit race to speak of); a turn starting BEFORE ready is reached is likewise never replayed; resume/fork are byte-identical no-ops; a RECYCLE-shaped handoff (the same startup-prompt path recycleWorker/recycleManager use) IS delivered too, not just a fresh worker_spawn; mode-cycle ordering is preserved. healIfStuck self-heals a never-started turn on a short window, well under the 5min default. notifyManagerOfIdleWorker branches on engineSessionId: null → a distinct [loom:worker-spawn-broken] signal (not the benign idle copy, not a duplicate of the existing worker-exited mechanism, still suppressed by the redirect-race pending guard); set → the existing benign nudge, unchanged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -218,9 +218,10 @@ const AMBIGUOUS_DISPATCH_CAP = 20;
  * worker reports and pastes arriving cut off in the receiving session. Split big writes into
  * paced chunks so the console host drains between them. Keystroke-sized writes take one chunk.
  */
-// Env-overridable (test-only seam, mirrors STARTUP_PROMPT_GRACE_MS et al. below): a hermetic test can
-// shrink the chunk size / widen the delay to make a multi-chunk writeChunked() chain span a wide,
-// deterministic window instead of relying on production-sized timing — see pty-restart-nudge-atomicity.mjs.
+// Env-overridable (test-only seam, mirrors other env-overridable timing constants in this file): a
+// hermetic test can shrink the chunk size / widen the delay to make a multi-chunk writeChunked() chain
+// span a wide, deterministic window instead of relying on production-sized timing — see
+// pty-restart-nudge-atomicity.mjs.
 const PTY_WRITE_CHUNK_BYTES = Number(process.env.LOOM_PTY_WRITE_CHUNK_BYTES) || 1024;
 const PTY_WRITE_CHUNK_DELAY_MS = Number(process.env.LOOM_PTY_WRITE_CHUNK_DELAY_MS) || 8;
 
@@ -537,8 +538,11 @@ const MODE_CYCLE_SETTLE_MS = 700;
 /**
  * OBSERVABILITY (card f05e4897): after a session settles (markReady), poll the footer a few times
  * (until a mode is read or this cap) and log the landed permission mode. Read-only — see logLandedMode.
+ * Card 0050a17e: kickoff delivery now GATES on this poll settling (see logLandedMode's `onSettled` doc),
+ * so this is no longer purely observational timing — env-overridable (like the other constants in this
+ * file) so a test can shrink it instead of eating a real ≥500ms wait per scenario.
  */
-const MODE_LOG_POLL_MS = 500;
+const MODE_LOG_POLL_MS = Number(process.env.LOOM_MODE_LOG_POLL_MS) || 500;
 const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then log whatever we have
 /**
  * Mode-convergence loop (cycleToMode, card f05e4897 / generalized in b99d3d67). Drives the footer to the
@@ -586,23 +590,15 @@ const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
  */
 const MCP_READY_TIMEOUT_MS = Number(process.env.LOOM_MCP_READY_TIMEOUT_MS) || 9_000;
 
-/**
- * KICKOFF GUARANTEE (the "start/ready-gating race" — board card guaranteeing worker_spawn drives turn
- * 1). A positional-arg startup/kickoff prompt (buildSpawnArgs) — a fresh worker_spawn, a recycle
- * handoff (recycleWorker/recycleManager/the platform-lead recycle), or a run's startup prompt — rides
- * the CLI as a positional arg; the vendor CLI is responsible for auto-typing + auto-submitting it as
- * turn 1 once its TUI boots. That internal auto-submit can lose the race against Loom's own boot
- * machinery (mode-cycle keystrokes, dialog dismissals) under load and never land as a real turn: the
- * session then sits `ready`+optimistically-`busy` with NO `UserPromptSubmit` ever observed (see
- * Live.firstTurnStarted) and no engine session id captured for context. Grace window AFTER markReady
- * (not after spawn — mode-cycling must finish first) before `scheduleKickoffGuarantee` force-submits the
- * SAME text via the exact reliable path (`submit()`) every later turn — and the §19c-b rate-limit
- * replay — already uses. NOT applicable to resume/fork (they never carry a positional startup prompt —
- * see scheduleKickoffGuarantee's own doc comment). Short relative to READY_FALLBACK_MS/BUSY_STALE_MS: it
- * only needs to outlast the CLI's own submit latency under load, not a missed SessionStart or a
- * genuinely long tool call. Env-overridable so tests don't wait for it.
- */
-const STARTUP_PROMPT_GRACE_MS = Number(process.env.LOOM_STARTUP_PROMPT_GRACE_MS) || 10_000;
+// Card 0050a17e removed `STARTUP_PROMPT_GRACE_MS` (formerly a ~10s window here, env-overridable via
+// LOOM_STARTUP_PROMPT_GRACE_MS): it existed ONLY to outlast the vendor CLI's own auto-type-and-submit of
+// a positional startup prompt, which no longer happens for ANY role (buildSpawnArgs never emits the
+// prompt into argv any more — see that function's own doc). With nothing left to race, the kickoff
+// guarantee (scheduleKickoffGuarantee, below) fires on the very next tick after `markReady` instead of
+// waiting out an arbitrary grace window — see that function's own doc for what "next tick" still needs
+// to wait for (it is not truly zero-cost) and why deleting the constant outright, rather than keeping it
+// "just in case", is the correct call: a timer with nothing left to guard is dead weight that would
+// eventually be mistaken for load-bearing by a future reader.
 
 /**
  * SHORT stale-busy threshold for a session that has NEVER started its first turn (Live.firstTurnStarted
@@ -1697,11 +1693,14 @@ interface Live {
   // Card 441499ee: the exact QueuedMessage entry/entries this IN-FLIGHT submit()'s text came from — set
   // in submit(), read ONLY by `fireEnterAndVerify`'s GIVE-UP RECOVERY branch so a give-up can put the
   // ORIGINAL message(s) back on `live.pending` (identity-preserved, never re-derived from text) instead of
-  // discarding them after the caller was already told `delivered:true`. null for the two direct submit()
-  // callers that don't originate from enqueueStdin (resumeAfterRateLimit's replay, scheduleKickoffGuarantee)
-  // — a give-up there has no origin to restore, same as before this card. Overwritten (not appended) by
-  // every submit() call; a stale reference from an already-confirmed/superseded turn is harmless because
-  // the give-up branch itself bails on `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
+  // discarding them after the caller was already told `delivered:true`. null ONLY for resumeAfterRateLimit's
+  // direct replay (a give-up there has no origin to restore — unchanged). `scheduleKickoffGuarantee`'s own
+  // direct submit() USED to be origin-less too — card 0050a17e (Code Review catch) gave it a synthetic
+  // single-element origin instead, once that call became the PRIMARY delivery path for every spawn rather
+  // than a rare fallback: an unconfirmed give-up there now correctly re-queues the kickoff instead of
+  // silently discarding it. Overwritten (not appended) by every submit() call; a stale reference from an
+  // already-confirmed/superseded turn is harmless because the give-up branch itself bails on
+  // `enterConfirmed`/a mismatched `submitGeneration` before ever reading it.
   giveUpOrigin: QueuedMessage[] | null;
   // Card 09e655d5: FIFO of generations that GIVE-UP RECOVERY requeued and which may still receive a late
   // confirming hook — pushed in `requeueGiveUpOrigin`, consulted (never `submitGeneration`) by
@@ -1955,15 +1954,6 @@ export interface SpawnOpts {
    * buildSpawnArgs, so an old claude's argv is byte-identical regardless of what the caller passed.
    */
   sessionName?: string;
-  /**
-   * Card abcf0eba part (a): OPTIONAL labeled breakdown of `startupPrompt`'s own contributors (e.g. a
-   * worker's agent base brief vs its kickoffPrompt), used ONLY to name "which knob to shorten" in the
-   * command-line-length preflight's refusal message (see {@link PromptSizePart} /
-   * {@link preflightWindowsCommandLine}) — never affects the actual argv. Omitted (every existing spawn
-   * path) ⇒ the preflight still refuses correctly on an oversized command line, just without the
-   * per-part split in the message.
-   */
-  startupPromptParts?: readonly PromptSizePart[];
 }
 
 export interface PtyHostEvents {
@@ -2218,11 +2208,19 @@ export function redactSecrets(text: string, secrets: string[]): string {
 }
 
 /**
- * Assemble the `claude` argv (extracted so the ordering is unit-testable). The startup/kickoff
- * prompt is positional and goes LAST, behind a `--` end-of-options separator (H2): a manager
- * controls kickoffPrompt, and a prompt beginning with `-`/`--` would otherwise be parsed as a flag.
- * `--` also terminates the variadic `--mcp-config`, so the prompt isn't swallowed as another config
- * value (the reason the prompt used to be placed before --mcp-config). All real flags precede `--`.
+ * Assemble the `claude` argv (extracted so the ordering is unit-testable).
+ *
+ * Card 0050a17e: the startup/kickoff prompt does NOT ride argv at all, for ANY role — it USED TO be
+ * positional, behind a `--` end-of-options separator (H2's dash-prompt fix), but that put its FULL
+ * TEXT on the Windows `CreateProcess` command line, which has a hard 32766-character ceiling
+ * (`WINDOWS_COMMAND_LINE_LIMIT`) — a large agent brief + kickoff (project memory, real CLAUDE.md/SKILL.md
+ * excerpts) could blow through it and refuse the spawn outright (the diagnosed occurrence this card
+ * fixes). `o.startupPrompt` is accepted here purely so callers don't need a separate code path, but it
+ * is NEVER emitted into `args` — the caller (createPty/spawn) instead boots claude with no trailing
+ * prompt (identical to how a resume/fork spawn already boots) and delivers the SAME text later via
+ * `submit()` once the session reaches `ready` (see `scheduleKickoffGuarantee`). All real flags precede
+ * the (now prompt-free) end of the argv; there is no `--` separator at all unless some other future
+ * option needs one.
  */
 export function buildSpawnArgs(o: {
   resumeId?: string;
@@ -2243,6 +2241,11 @@ export function buildSpawnArgs(o: {
    * existed (inline `o.mcpServers` JSON).
    */
   mcpConfigPath?: string;
+  /**
+   * Card 0050a17e: accepted for API convenience (callers pass the same opts they used to) but DELIBERATELY
+   * NEVER emitted into argv — see this function's own doc. Kept as a named field (not dropped from the
+   * signature) so `createPty`'s existing call site and the preflight measurement don't need a shape change.
+   */
   startupPrompt?: string;
   /** Profile-pinned model id → `--model <id>`. Undefined/empty ⇒ NO `--model` (byte-identical to today). */
   model?: string;
@@ -2291,7 +2294,7 @@ export function buildSpawnArgs(o: {
   // Agent-tooling P4: a secret-bearing spawn passes the FILE PATH (never the JSON, never the secret);
   // every other spawn stays the byte-identical inline JSON form (o.mcpConfigPath undefined).
   args.push("--strict-mcp-config", "--mcp-config", o.mcpConfigPath ?? JSON.stringify({ mcpServers: o.mcpServers }));
-  if (o.startupPrompt) args.push("--", o.startupPrompt);
+  // Card 0050a17e: `o.startupPrompt` is DELIBERATELY never emitted here — see this function's own doc.
   return args;
 }
 
@@ -2374,17 +2377,6 @@ export function windowsCommandLine(file: string, args: readonly string[]): strin
 }
 
 /**
- * A labeled chunk of a spawn's startupPrompt, purely for an ACTIONABLE refusal message — e.g. a
- * worker's "agent base brief" vs "this spawn's kickoffPrompt". Optional and additive: a caller that
- * omits it (every non-worker spawn path today) still gets a correct refusal, just without the
- * per-part breakdown (see {@link preflightWindowsCommandLine}'s doc).
- */
-export interface PromptSizePart {
-  label: string;
-  chars: number;
-}
-
-/**
  * Card abcf0eba part (a): preflight the EXACT, post-escaping, platform-aware command-line length a
  * spawn is about to produce, and fail ACTIONABLY instead of letting a bare Windows `CreateProcess`
  * `error code: 206` reach the caller with no indication of what's oversized (see WINDOWS_COMMAND_LINE_LIMIT's
@@ -2396,33 +2388,35 @@ export interface PromptSizePart {
  * (if it passes) the real spawn.
  *
  * Windows-only: POSIX `execve`'s argv/environ ceiling (`ARG_MAX`) is measured differently (combined
- * argv+environ bytes) and is typically several MB — multiple orders of magnitude above anything a
- * prompt-sized startupPrompt could reach — so this is deliberately NOT enforced on POSIX; the caller
- * gates this function on `process.platform === "win32"` (see `createPty`).
+ * argv+environ bytes) and is typically several MB — multiple orders of magnitude above the settings
+ * path / MCP config / disallowed-tools list this daemon actually puts on argv — so this is deliberately
+ * NOT enforced on POSIX; the caller gates this function on `process.platform === "win32"` (see
+ * `createPty`).
  *
- * `parts` (optional) is a breakdown of the startupPrompt's own contributors (e.g. agent brief vs
- * kickoffPrompt) for naming "which knob to shorten" in the message — omitted, the message still names
- * the total command-line length, the limit, and how far over it is, just without the per-part split.
+ * Card 0050a17e removed the per-part "which knob to shorten" breakdown this used to take (a labeled
+ * split of the startup prompt's own contributors, e.g. a worker's agent base brief vs its
+ * kickoffPrompt): the startup prompt no longer rides argv AT ALL (buildSpawnArgs never emits it — see
+ * that function's own doc), so a breakdown of ITS contributors would now describe text that isn't even
+ * part of `cmdLine` — actively misleading, not just stale. What CAN still contribute to `args` today —
+ * the settings path, the inline `--mcp-config` JSON, `--disallowedTools`, `-n <name>` — has no natural
+ * single "shorten this" knob the way the old prompt-only breakdown did, so the refusal message below
+ * just names the total length/limit/overage; there's no per-part split to reintroduce until a real
+ * incident shows which of those needs one.
  */
 export function preflightWindowsCommandLine(
   bin: string,
   args: readonly string[],
-  parts?: readonly PromptSizePart[],
 ): { ok: true } | { ok: false; message: string } {
   const cmdLine = windowsCommandLine(bin, args);
   if (cmdLine.length <= WINDOWS_COMMAND_LINE_LIMIT) return { ok: true };
   const over = cmdLine.length - WINDOWS_COMMAND_LINE_LIMIT;
-  const breakdown = parts && parts.length
-    ? " Breakdown: " + parts.map((p) => `${p.label} is ${p.chars} chars`).join(", ") + "."
-    : "";
-  const knob = parts && parts.length
-    ? ` Shorten the largest contributor above${parts.length > 1 ? ` (currently "${[...parts].sort((a, b) => b.chars - a.chars)[0]!.label}")` : ""} — the whole spawn is refused until the combined command line fits.`
-    : " Shorten the startup prompt (the agent's base brief and/or this spawn's kickoff/dynamic text) — the whole spawn is refused until the combined command line fits.";
   return {
     ok: false,
     message: `Spawn refused: the assembled command line is ${cmdLine.length} characters, ` +
       `${over} over the Windows CreateProcess limit of ${WINDOWS_COMMAND_LINE_LIMIT} ` +
-      `(this is what produces the raw, unhelpful "Cannot create process, error code: 206" OS failure).${breakdown}${knob}`,
+      `(this is what produces the raw, unhelpful "Cannot create process, error code: 206" OS failure). ` +
+      `Shorten the MCP config / settings path / disallowed-tools list for this spawn — the whole spawn ` +
+      `is refused until the combined command line fits.`,
   };
 }
 
@@ -3143,15 +3137,21 @@ export class PtyHost {
       rateLimited: false,
       transcriptMissingDiagnosedOnce: false,
       promptFieldAbsentDiagnosedOnce: false,
-      // The startup-prompt turn runs from a CLI arg (not submit()), so seed lastPrompt with it —
-      // a cap on the FIRST turn must still be re-submittable on resume (§19c-b). It carries NO companion
-      // route (a startup turn is never a companion inbound), so the route fields start null.
+      // Card 0050a17e: seed `lastPrompt` HERE, synchronously at spawn() — NOT left for the eventual
+      // post-ready `submit()` call (scheduleKickoffGuarantee) to set it. Reason: the fresh-spawn kickoff
+      // now waits for `ready` (SessionStart + mode-cycles) before `submit()` ever runs, and a crash in
+      // that window (before the FIRST submit()) must still leave something to re-submit on resume
+      // (§19c-b) — a genuinely no-op-looking simplification ("submit() already sets this unconditionally,
+      // so this seed is redundant") would silently reopen that exact window and lose the kickoff. Keep
+      // this line even though it duplicates what submit() will later (redundantly, harmlessly) write. It
+      // carries NO companion route (a startup turn is never a companion inbound), so the route fields
+      // start null.
       lastPrompt: opts.startupPrompt ?? null,
       lastRawSubmit: null,
       pendingRawOwnerSubmit: null,
       pendingRawOwnerSubmitAt: null,
       firstTurnStarted: false, // flips true on the first UserPromptSubmit — see scheduleKickoffGuarantee/healIfStuck
-      enterConfirmed: true, // no submit() outstanding yet (the startup turn is a CLI arg, not submit()) — see submit()'s reset
+      enterConfirmed: true, // no submit() outstanding yet — nothing has called submit() for this pty at spawn time — see submit()'s reset
       submitGeneration: 0,
       writeSeq: 0,
       giveUpOrigin: null,
@@ -3256,9 +3256,11 @@ export class PtyHost {
       this.events.onExit(opts.sessionId, exitCode, { intended: live.stopping });
     });
 
-    // A new session runs its startup-prompt turn immediately. Set busy optimistically so
-    // GET /api/sessions is correct within the ~250ms before the UserPromptSubmit hook lands;
-    // the hook then re-asserts the same value (idempotent). Resume injects no prompt, so no set.
+    // A new session's kickoff turn doesn't actually submit() until `ready` (SessionStart + mode-cycles —
+    // see scheduleKickoffGuarantee), which can take a real, variable amount of time. Set busy optimistically
+    // right away anyway, so GET /api/sessions reads "busy" for that whole window instead of a misleading
+    // "idle" — the UserPromptSubmit hook re-asserts the same value once the turn actually starts
+    // (idempotent). Resume injects no prompt, so no set.
     if (opts.startupPrompt) this.setBusy(opts.sessionId, true, "spawn-startup-prompt");
 
     // Readiness fallback: if SessionStart never arrives (a missed hook), don't strand a queued boot
@@ -3595,16 +3597,18 @@ export class PtyHost {
     const mcpConfigPath = capabilitySecrets.length ? writeSessionMcpConfig(opts.sessionId, mcpServers) : undefined;
     const args = buildSpawnArgs({ resumeId: opts.resumeId, fork: opts.fork, forkSessionId: opts.forkSessionId, settingsPath, mode: permission.mode, mcpServers, mcpConfigPath, startupPrompt: opts.startupPrompt, model: opts.model, disallowedTools, sessionName });
 
-    // Card abcf0eba part (a): preflight the EXACT command line this spawn is about to hand node-pty —
-    // Windows-only (see preflightWindowsCommandLine's doc: POSIX's ARG_MAX is orders of magnitude larger
-    // and not a realistic ceiling for a prompt-sized startupPrompt). Uses the SAME bin+args the real
-    // spawn below uses, so the check and the spawn can never disagree about "the command line". Thrown
+    // Card abcf0eba part (a) / 0050a17e: preflight the EXACT command line this spawn is about to hand
+    // node-pty — Windows-only (see preflightWindowsCommandLine's doc: POSIX's ARG_MAX is orders of
+    // magnitude larger). Uses the SAME bin+args the real spawn below uses, so the check and the spawn
+    // can never disagree about "the command line" — and since `args` never carries the startup prompt
+    // any more (buildSpawnArgs' own doc), this now guards only the settings/MCP-config/disallowed-tools
+    // argv, not the prompt (which used to be, and no longer is, this preflight's main concern). Thrown
     // SYNCHRONOUSLY, before any process is created — the caller's existing try/catch around
     // `this.pty.spawn(...)` (sessions/service.ts spawnWorker, card ae6c24e1) already reconciles a
     // synchronous createPty throw to processState:'exited' instead of leaving a live phantom, so this
     // refusal gets that same honest handling for free.
     if (process.platform === "win32") {
-      const preflight = preflightWindowsCommandLine(bin, args, opts.startupPromptParts);
+      const preflight = preflightWindowsCommandLine(bin, args);
       if (!preflight.ok) throw new Error(preflight.message);
     }
 
@@ -4696,8 +4700,8 @@ export class PtyHost {
    * Clear a phantom 'busy' (busy with no engine output for a stale window) so its queue can drain.
    * A session that has NEVER started its first turn (`!firstTurnStarted`) uses the much SHORTER
    * FIRST_TURN_STALE_MS instead of `busyStaleMs` — there's no such thing as a legitimately long tool
-   * call before turn 1 has even started, so stale output there already means broken (a lost kickoff
-   * race the STARTUP_PROMPT_GRACE_MS fallback didn't recover, or an engine that never got past boot),
+   * call before turn 1 has even started, so stale output there already means broken (the kickoff
+   * delivery in scheduleKickoffGuarantee didn't recover it, or an engine that never got past boot),
    * and it should surface via the onBusy→notifyManagerOfIdleWorker path fast rather than sit masked as
    * "busy" for the full 5-minute window. Once a real turn starts, the normal, more generous window applies.
    *
@@ -6087,37 +6091,63 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.ready) return;
     live.ready = true;
-    this.scheduleKickoffGuarantee(sessionId); // force the kickoff in if the CLI's own auto-submit never lands (no-op for resume/fork — see below)
-    this.drainPending(sessionId); // deliver the first queued injection now that the composer is live
-    this.logLandedMode(sessionId); // record the landed mode + the role-gated plan auto-heal backstop
+    this.drainPending(sessionId); // deliver the first queued injection now that the composer is live (synchronous; see its own doc — never races logLandedMode's read, which only starts polling MODE_LOG_POLL_MS from now)
+    // Card 0050a17e (Code Review catch #1): CAPTURE the kickoff SYNCHRONOUSLY, right now — a later
+    // unrelated drain (e.g. the queued nudge drainPending just delivered above starting its own submit())
+    // must never change what gets replayed. `submit()` unconditionally overwrites `live.lastPrompt` with
+    // whatever IT is currently submitting, so capturing this LATE — e.g. inside logLandedMode's own
+    // deferred `onSettled` callback below — would silently swap in that OTHER text instead of the real
+    // kickoff (a live-verified regression this exact restructuring introduced once, caught before landing:
+    // capturing inside the gated callback let a drained nudge's own text get requeued as "the kickoff").
+    // scheduleKickoffGuarantee's OWN doc already documents this "capture NOW" principle for its internal
+    // setTimeout; this generalizes the same principle across the newly-added logLandedMode gate too.
+    const kickoff = live.lastPrompt != null && !live.firstTurnStarted ? live.lastPrompt : null;
+    // Card 0050a17e (Code Review catch #2): logLandedMode's footer read + role-gated plan auto-heal (its
+    // own Shift+Tab writes) must SETTLE before the kickoff DELIVERY (the actual pty write) ever happens —
+    // both READ the same ring buffer / WRITE to the same pty, and now that delivery fires on the next tick
+    // (not after the old ~10s grace, which used to keep the two windows apart incidentally), running them
+    // concurrently would let the kickoff's paste pollute the footer read (→ mode:"unknown" → the heal
+    // silently never fires for a role stranded in `plan` with ExitPlanMode disallowed) or interleave the
+    // heal's own Shift+Tab writes with the kickoff's writeChunked/Enter-retry chain (the frame-splice class
+    // of cards 3ce3fa39/78a16dc5). Gating the DELIVERY (not the capture above) on logLandedMode's own
+    // completion callback makes that ordering STRUCTURAL rather than incidental.
+    this.logLandedMode(sessionId, () => { if (kickoff != null) this.scheduleKickoffGuarantee(sessionId, kickoff); });
   }
 
   /**
-   * KICKOFF GUARANTEE — see the STARTUP_PROMPT_GRACE_MS doc comment for the full race being closed.
-   * Called exactly once per session from markReady (which itself only proceeds once, guarded by
-   * `live.ready`), so this schedules at most one grace-window check per (re)spawn.
+   * KICKOFF DELIVERY (card 0050a17e — formerly a "guarantee" racing the vendor CLI's own auto-submit of a
+   * positional prompt; that race no longer exists, since no role's boot ever carries a positional prompt
+   * any more — see buildSpawnArgs' own doc). This is now the PRIMARY delivery path for a fresh session's
+   * first turn, not a fallback: `submit()` is the same reliable path every later turn (and the §19c-b
+   * rate-limit replay) already uses, so routing turn 1 through it too removes a whole class of CLI-side
+   * auto-type/auto-submit timing risk instead of racing it.
    *
-   * Fires for EVERY positional-arg spawn, not just a fresh worker_spawn: `live.lastPrompt` is seeded
+   * Called exactly once per session from markReady (which itself only proceeds once, guarded by
+   * `live.ready`) — `markReady` captures `kickoff` itself, synchronously, BEFORE calling this (see its own
+   * doc: a later unrelated drain must never change what gets replayed), and passes it in here as a plain
+   * parameter — this function no longer re-reads `live.lastPrompt` itself, precisely so its OWN call site
+   * (now reached asynchronously, after logLandedMode's gate settles) can never observe a value some other
+   * submit() has since overwritten. Deliberately still deferred by one further tick (`setTimeout(…, 0)`)
+   * past ITS OWN call site — by the time markReady's caller (logLandedMode's `onSettled`) invokes this,
+   * real asynchronous work has already happened (the mode-read poll, possibly a heal), so the extra tick
+   * here is defense-in-depth, not load-bearing the way capturing `kickoff` early is.
+   *
+   * Fires for EVERY startup-prompt spawn, not just a fresh worker_spawn: `live.lastPrompt` is seeded
    * from `opts.startupPrompt` at spawn (see spawn()), and recycleWorker/recycleManager/the platform-lead
-   * recycle ALL pass a real handoff prompt through that SAME positional-arg path (a fresh startup-prompt
-   * spawn, deliberately not `--resume`, so the recycled session doesn't drag the old context forward) —
-   * so a recycled session's handoff is just as exposed to the CLI's own lost-auto-submit race as a fresh
-   * spawn's kickoff, and the guarantee correctly covers it too. A run session's startup prompt
+   * recycle ALL pass a real handoff prompt through that SAME path (a fresh startup-prompt spawn,
+   * deliberately not `--resume`, so the recycled session doesn't drag the old context forward) — so a
+   * recycled session's handoff is delivered the same way. A run session's startup prompt
    * (composeRunStartupPrompt) rides the same path and is covered the same way.
    *
    * A no-op ONLY for resume and fork: neither ever passes `opts.startupPrompt` (a resume's continuation
-   * is injected via enqueueStdin post-boot, not a CLI-arg turn — and boot-reconcile's resume path is
-   * covered by the SAME resume mechanics, not this one), so `lastPrompt` stays null there and this
-   * returns immediately, leaving their behavior byte-identical. Also a no-op if the turn already started
-   * (firstTurnStarted) by the time markReady lands — the common, healthy case.
+   * is injected via enqueueStdin post-boot, not a startup turn — and boot-reconcile's resume path is
+   * covered by the SAME resume mechanics, not this one), so `lastPrompt` stays null there and markReady's
+   * own capture never calls this at all in that case, leaving their behavior byte-identical.
    */
-  private scheduleKickoffGuarantee(sessionId: string): void {
-    const live = this.live.get(sessionId);
-    if (!live?.alive || live.lastPrompt == null || live.firstTurnStarted) return;
-    const kickoff = live.lastPrompt; // capture NOW — a later unrelated drain must not change what we replay
+  private scheduleKickoffGuarantee(sessionId: string, kickoff: string): void {
     setTimeout(() => {
       const l = this.live.get(sessionId);
-      if (!l?.alive || l.firstTurnStarted) return; // the CLI's own auto-submit landed in time — no-op
+      if (!l?.alive || l.firstTurnStarted) return; // something else already started a turn on this SAME tick (see this function's own doc) — no-op
       // Card 78a16dc5 (mirrors resumeAfterRateLimit's card-81f9c887 fix): `firstTurnStarted` is set ONLY
       // by the UserPromptSubmit hook, which CAN be lost (see the Stop/StopFailure handler's own comment) —
       // so this can fire while a turn genuinely already ran and its Stop's own drainPending() just started
@@ -6126,8 +6156,8 @@ export class PtyHost {
       // together mid-word (the observed corruption).
       //
       // `busy` alone is NOT the right signal for "a write is genuinely in flight": it is ALSO true from
-      // spawn()'s own OPTIMISTIC set (the common, intended case this guarantee exists for — a spawn whose
-      // CLI-arg turn never even attempted to start) with NO submit() ever having run — deferring on bare
+      // spawn()'s own OPTIMISTIC set (the common, intended case this delivery exists for — a fresh spawn
+      // whose kickoff hasn't attempted to submit yet) with NO submit() ever having run — deferring on bare
       // `busy` would wrongly hold the kickoff in `pending` FOREVER in exactly that case, since nothing will
       // ever fire a Stop to drain it (worker-kickoff-guarantee.mjs's H1a/H1e/H1f pinned this regression).
       // The precise signal is `submitGeneration > 0 && !enterConfirmed`: `submitGeneration` only advances
@@ -6153,14 +6183,30 @@ export class PtyHost {
       const submitOutstanding = l.submitGeneration > 0 && !l.enterConfirmed;
       if (submitOutstanding || l.stopping || l.drainHeld || l.rateLimited) {
         // eslint-disable-next-line no-console
-        console.log(`[pty] ${sessionId} startup-prompt grace elapsed with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
+        console.log(`[pty] ${sessionId} ready with no turn started, but unsafe to write directly (submitOutstanding=${submitOutstanding} stopping=${l.stopping} drainHeld=${l.drainHeld} rateLimited=${l.rateLimited}) — queuing the kickoff for atomic delivery instead of racing an in-flight write`);
         this.enqueueStdin(sessionId, kickoff, "system", undefined, undefined, "agent");
         return;
       }
       // eslint-disable-next-line no-console
-      console.log(`[pty] ${sessionId} startup-prompt grace elapsed with no turn started — force-submitting the kickoff`);
-      this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee");
-    }, STARTUP_PROMPT_GRACE_MS);
+      console.log(`[pty] ${sessionId} ready with no turn started — submitting the kickoff`);
+      // Code Review Major finding (card 0050a17e): this is a DIRECT submit() (mirrors resumeAfterRateLimit's
+      // "rate-limit-replay", the OTHER direct caller `Live.giveUpOrigin`'s doc names) — historically its
+      // `origin` was left undefined, since a lost give-up here was reachable only after the vendor CLI's
+      // OWN auto-submit had already failed once. Now that this direct submit() is the PRIMARY delivery path
+      // for EVERY spawn, an unconfirmed give-up (Enter never confirms within SUBMIT_MAX_ATTEMPTS — a real,
+      // measured risk: pinned memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` records
+      // a 232-second confirmation lag) would otherwise DISCARD the kickoff with nothing to restore — give-up
+      // is likeliest exactly for the large pastes this card exists to enable. A synthetic single-element
+      // origin routes this write through the SAME requeueGiveUpOrigin recovery every enqueueStdin-originated
+      // turn already gets: on a give-up, the kickoff is re-queued at the front of `pending` (held pending a
+      // late confirming hook — see requeueGiveUpOrigin's own doc), not lost. `source:"system"`/`kind:"agent"`
+      // mirror the enqueueStdin call in the branch just above (the "unsafe to write directly" sibling path),
+      // which ALREADY gets a correct origin for free via drainPending's own `drained` array.
+      this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
+        [{ id: randomUUID(), text: kickoff, source: "system", kind: "agent", logicalId: randomUUID() }]);
+      // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
+      // depth, not load-bearing. Card 0050a17e.
+    }, 0);
   }
 
   /**
@@ -6207,10 +6253,20 @@ export class PtyHost {
    * session (modeLogged guard, claimed up front, so a repeat markReady never re-triggers the heal even
    * mid-cycle). Shells are excluded. `cycleToMode` is itself bounded (see its doc comment), so the whole
    * heal — this poll-for-a-read plus the cycle — stays comfortably under READY_FALLBACK_MS.
+   *
+   * `onSettled` (card 0050a17e, Code Review catch): fires EXACTLY ONCE, on every terminal path (an early
+   * return, the poll giving up at MODE_LOG_MAX_ATTEMPTS, a definite read with no heal needed, or a fired
+   * heal's own `cycleToMode` completion) — never on the "keep polling" continuation. `markReady` gates
+   * kickoff delivery on this callback so the kickoff's own pty write can never land WHILE this read (or
+   * the heal it can trigger) is still in flight — both touch the same ring/pty, and interleaving them
+   * either pollutes the footer read (→ a stranded-in-plan role's auto-heal silently never fires) or
+   * splices the heal's Shift+Tab writes into the kickoff's own writeChunked/Enter-retry chain (the
+   * frame-splice class of cards 3ce3fa39/78a16dc5). Every early-return path below still calls `onSettled`
+   * — there is nothing left to gate on once this function has decided there's no read/heal to run.
    */
-  private logLandedMode(sessionId: string): void {
+  private logLandedMode(sessionId: string, onSettled: () => void): void {
     const live = this.live.get(sessionId);
-    if (!live || live.kind !== "claude" || live.modeLogged) return;
+    if (!live || live.kind !== "claude" || live.modeLogged) { onSettled(); return; }
     live.modeLogged = true; // claim it once, up front — a repeat markReady won't re-schedule this
     const isResume = live.isResume;
     const role = live.role;
@@ -6226,7 +6282,7 @@ export class PtyHost {
     let attempts = 0;
     const tryRead = (): void => {
       const l = this.live.get(sessionId);
-      if (!l) return;
+      if (!l) { onSettled(); return; }
       attempts++;
       const recent = Buffer.concat(l.ring.chunks).toString("utf8").slice(-8192);
       const { mode, matchedToken } = detectPermissionMode(recent);
@@ -6242,8 +6298,10 @@ export class PtyHost {
       if (!noCyclingConfigured && healTarget != null && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
         console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to ${healTarget}`);
-        this.cycleToMode(sessionId, healTarget, () => {});
+        this.cycleToMode(sessionId, healTarget, onSettled);
+        return;
       }
+      onSettled();
     };
     setTimeout(tryRead, MODE_LOG_POLL_MS);
   }

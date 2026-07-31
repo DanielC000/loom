@@ -59,15 +59,14 @@ for (const role of [null, undefined]) {
   const d = args.indexOf("--disallowedTools");
   const strict = args.indexOf("--strict-mcp-config");
   const cfg = args.indexOf("--mcp-config");
-  const sep = args.indexOf("--");
   check("worker: `--disallowedTools` is present", d !== -1);
   check("worker: the three tool names follow the flag, in order",
     args[d + 1] === "AskUserQuestion" && args[d + 2] === "ExitPlanMode" && args[d + 3] === "EnterPlanMode");
   check("worker: `--disallowedTools` precedes `--strict-mcp-config` (its variadic is terminated by that flag)", d < strict && d + 4 === strict);
   check("worker: `--disallowedTools` follows `--permission-mode` (a real flag, mid-argv)", d > args.indexOf("--permission-mode"));
-  check("worker: `--mcp-config` value still sits right before the `--` separator", cfg !== -1 && sep > cfg + 1 && sep === args.length - 2);
-  check("worker: the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "build it");
-  check("worker: every disallowed tool name precedes `--`", tools.every((t) => { const i = args.indexOf(t); return i !== -1 && i < sep; }));
+  check("worker: `--mcp-config` value is the last real flag (no `--`/prompt trailing it — the prompt never rides argv)", cfg !== -1 && args.length - 1 === cfg + 1);
+  check("worker: no `--` separator (the prompt never rides argv)", !args.includes("--"));
+  check("worker: every disallowed tool name precedes `--mcp-config`", tools.every((t) => { const i = args.indexOf(t); return i !== -1 && i < cfg; }));
 }
 
 // With a model pinned too, the flag slots between --model and --strict-mcp-config (both real flags, in order).

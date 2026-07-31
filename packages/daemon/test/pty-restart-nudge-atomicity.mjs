@@ -11,11 +11,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // `!live.busy`; `resumeAfterRateLimit`, fixed once already for this exact class of bug — card 81f9c887 —
 // guards `busy`/`stopping`/`drainHeld` and falls back to `enqueueStdin`). `firstTurnStarted` is set ONLY
 // by the `UserPromptSubmit` hook, which CAN be lost (Stop/StopFailure still fires and clears busy
-// regardless — see the handler's own comment) — so the grace-timer force-submit can fire WHILE a
-// `drainPending`-triggered submit for a genuinely queued nudge is still mid `writeChunked` (which splits
-// a large write into paced chunks across MULTIPLE ticks — see PTY_WRITE_CHUNK_BYTES/_DELAY_MS). Two
-// concurrent `writeChunked` chains on the SAME pty interleave their staggered `pty.write()` calls,
-// splicing two different messages together mid-word.
+// regardless — see the handler's own comment) — so the delivery timer's own fire (card 0050a17e:
+// deferred one tick past markReady, no longer a multi-ms grace window — there's no more vendor-CLI
+// auto-submit to wait out) can still land WHILE a `drainPending`-triggered submit for a genuinely queued
+// nudge is mid `writeChunked` (which splits a large write into paced chunks across MULTIPLE ticks — see
+// PTY_WRITE_CHUNK_BYTES/_DELAY_MS). Two concurrent `writeChunked` chains on the SAME pty interleave their
+// staggered `pty.write()` calls, splicing two different messages together mid-word.
 //
 // THE FIX (host.ts):
 //   (1) scheduleKickoffGuarantee now defers to `enqueueStdin(..., kind:"agent")` instead of a raw
@@ -71,16 +72,21 @@ const waitUntil = async (cond, ceilingMs = 8000, intervalMs = 20) => {
 // Hermetic LOOM_HOME + tight, test-only timing windows — all read at MODULE IMPORT time (host.ts), so
 // they must be set BEFORE importing host.js. PTY_WRITE_CHUNK_BYTES/_DELAY_MS are shrunk/widened (env
 // seam added by card 78a16dc5 specifically for this test) so a single writeChunked() chain spans a wide,
-// deterministic real-time window instead of relying on production-sized (1024B/8ms) timing.
+// deterministic real-time window instead of relying on production-sized (1024B/8ms) timing. The kickoff
+// delivery timer itself no longer has a configurable grace (card 0050a17e collapsed it to "next tick
+// after markReady") — but a Code Review catch on that SAME card found delivery now GATES on
+// logLandedMode's own footer-read poll (MODE_LOG_POLL_MS) settling first, so THAT is the timing this
+// test needs shrunk instead — left at production scale, this test's "mid-race" checks below would sample
+// state before the gate even schedules the kickoff-guarantee's check.
 const tmpHome = path.join(os.tmpdir(), `loom-restart-atomic-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
-process.env.LOOM_STARTUP_PROMPT_GRACE_MS = "60";
 process.env.LOOM_PTY_WRITE_CHUNK_BYTES = "10";
 process.env.LOOM_PTY_WRITE_CHUNK_DELAY_MS = "15";
 process.env.LOOM_SUBMIT_ENTER_DELAY_MS = "120000"; // never fires within this test's window — no Enter/retry noise
 process.env.LOOM_READY_FALLBACK_MS = "120000";
 process.env.LOOM_FIRST_TURN_STALE_MS = "120000";
+process.env.LOOM_MODE_LOG_POLL_MS = "5"; // shrink the logLandedMode gate the kickoff now waits on (see above)
 
 const { PtyHost } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
@@ -123,19 +129,24 @@ try {
       geometry: { cols: 120, rows: 40 }, sessionEnv: {},
     });
     const fa = fakes[fakes.length - 1];
-    host.deliverHook(SID, { hook_event_name: "SessionStart" }); // ready — arms the grace timer; NEVER fires UserPromptSubmit (simulates the lost hook)
+    host.deliverHook(SID, { hook_event_name: "SessionStart" }); // ready — arms the delivery timer (next tick); NEVER fires UserPromptSubmit (simulates the lost hook)
 
     // Queue the restart-resume nudge while busy (the optimistic startupPrompt busy set) — held FIFO.
+    // Enqueued in the SAME synchronous tick as SessionStart above, so it's in place before the delivery
+    // timer's deferred check ever runs.
     const enq = host.enqueueStdin(SID, NUDGE, "system", undefined, undefined, "warning");
     check("(A) the well-formed [loom:*] nudge is accepted (held, not dropped)", enq.delivered === false && enq.reason === "held");
 
     // Stop fires WITHOUT a preceding UserPromptSubmit (the lost-hook case) — busy clears, drainPending()
     // finds the queued NUDGE and starts its OWN writeChunked chain (many ticks at the shrunk chunk size).
+    // Still the SAME synchronous tick as SessionStart/enqueueStdin above.
     host.deliverHook(SID, { hook_event_name: "Stop" });
     check("(A) the nudge drain started immediately (one bracketed paste already written)", countIn(fa, PASTE_START) === 1);
 
-    // The grace timer (60ms) elapses WHILE the nudge's writeChunked chain is still mid-flight (33 chunks
-    // × 15ms ≈ 480ms) and firstTurnStarted is STILL false (that hook was never fired) — exactly the race.
+    // By the time the delivery timer's deferred (next-tick) check actually runs, the nudge's writeChunked
+    // chain (33 chunks × 15ms ≈ 480ms) is still mid-flight and firstTurnStarted is STILL false (that hook
+    // was never fired) — exactly the race scheduleKickoffGuarantee's own submitOutstanding check exists
+    // for, now hit on the very next tick instead of after a multi-ms grace window.
     await sleep(200);
     check("(A) mid-race: NOT yet a second bracketed paste (kickoff held, not racing the in-flight write)",
       countIn(fa, PASTE_START) === 1);

@@ -4584,13 +4584,6 @@ export class SessionService {
             composeWorkerStartupPrompt(workerAgent.startupPrompt, opts.kickoffPrompt, worktreePath, project.referenceRepos, reusedDirtyWorktree, staleBase, buildWorkerRepoContext(project, targetRepo), reviewForkFrom ? { branch: reviewForkFrom.branch, headSha: reviewForkFrom.headSha } : undefined),
             workerProjectMemoryFramed,
           ),
-          // Card abcf0eba part (a): name the two knobs a manager can actually shorten (the agent's own
-          // base brief, vs THIS spawn's kickoffPrompt) in the command-line-length preflight's refusal
-          // message, if it fires — purely for that message; never affects the composed prompt above.
-          startupPromptParts: [
-            { label: "agent base brief (workerAgent.startupPrompt — shorten via agent_update)", chars: (workerAgent.startupPrompt ?? "").length },
-            { label: "this spawn's kickoffPrompt (worker_spawn's own kickoffPrompt argument)", chars: opts.kickoffPrompt.length },
-          ],
           role: "worker", // gives the worker the orchestration surface (worker_report only)
           browserTesting, // inject the per-session Playwright MCP iff this worker's profile opted in
           documentConversion, // inject the per-session markitdown MCP iff this worker's profile opted in

@@ -100,18 +100,17 @@ check("(P) ON manager: union = manager's task-tracking base tools + restricted n
   const d = args.indexOf("--disallowedTools");
   const strict = args.indexOf("--strict-mcp-config");
   const cfg = args.indexOf("--mcp-config");
-  const sep = args.indexOf("--");
   check("(A) companion(restricted): --disallowedTools is present", d !== -1);
   check("(A) companion(restricted): the merged names follow the flag, in union order",
     eq(args.slice(d + 1, d + 1 + tools.length), tools));
-  check("(A) companion(restricted): every restricted native tool is in argv before `--`",
-    RESTRICTED.every((t) => { const i = args.indexOf(t); return i !== -1 && i < sep; }));
+  check("(A) companion(restricted): every restricted native tool is in argv before `--mcp-config`",
+    RESTRICTED.every((t) => { const i = args.indexOf(t); return i !== -1 && i < cfg; }));
   check("(A) companion(restricted): the human-prompt tools are ALSO in argv (union)",
-    HUMAN_PROMPT_TOOLS.every((t) => args.indexOf(t) !== -1 && args.indexOf(t) < sep));
+    HUMAN_PROMPT_TOOLS.every((t) => args.indexOf(t) !== -1 && args.indexOf(t) < cfg));
   check("(A) companion(restricted): --disallowedTools precedes --strict-mcp-config (variadic terminated by it)",
     d < strict && d + 1 + tools.length === strict);
-  check("(A) companion(restricted): --mcp-config value still sits right before `--`", cfg !== -1 && sep === args.length - 2 && sep > cfg + 1);
-  check("(A) companion(restricted): the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "chat back");
+  check("(A) companion(restricted): --mcp-config value is the last real flag (no `--`/prompt trailing it — the prompt never rides argv)", cfg !== -1 && args.length - 1 === cfg + 1);
+  check("(A) companion(restricted): no `--` separator (the prompt never rides argv)", !args.includes("--"));
 }
 // Flag OFF ⇒ argv BYTE-IDENTICAL to today. A worker spawned WITHOUT the restriction is the role's
 // human-prompt-only disallow — byte-identical to feeding disallowedToolsForRole("worker") directly.

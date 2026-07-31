@@ -2,6 +2,16 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // Card abcf0eba part (a) — the Windows CreateProcess command-line ceiling (raw, unactionable
 // "error code: 206" / ERROR_FILENAME_EXCED_RANGE) preflighted at the REAL createPty spawn chokepoint.
 //
+// Card 0050a17e REWROTE this file: the startup/kickoff prompt no longer rides argv AT ALL (see
+// buildSpawnArgs' own doc in pty/host.ts) — it's delivered post-`ready` via submit() instead. That
+// removes the Windows ceiling from the ONE thing that used to blow through it (a large agent brief +
+// kickoff). The preflight itself (`preflightWindowsCommandLine`) still exists as a real, exact,
+// real-spawn-time guard for whatever ELSE rides argv (the settings path, the inline `--mcp-config`
+// JSON, `--disallowedTools`) — this file now proves BOTH halves: (1) a startupPrompt of ANY size,
+// including the exact real content that used to trip this preflight, contributes NOTHING to the
+// composed command line any more, and (2) the boundary math itself is still correct for whatever DOES
+// still ride argv (proven here by inflating a non-prompt contributor instead).
+//
 // WINDOWS_COMMAND_LINE_LIMIT and windowsCommandLine (a behaviourally-equivalent ADAPTATION of node-pty's
 // argv->command-line quoting for ARRAY args — NOT a byte-for-byte port; see windowsCommandLine's own doc
 // in pty/host.ts and test/node-pty-quoting-parity.mjs for the measured comparison, card 9fea4196) are NOT
@@ -11,35 +21,32 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // error code: 206" — confirming BOTH the constant AND that windowsCommandLine matches node-pty's own
 // quoting at the real OS boundary, for the array-args inputs this daemon actually passes (this is the RED
 // repro this card's verification demands; not re-run here as a hermetic assertion — it needs a real OS
-// spawn and was performed manually against this exact dependency version). This test proves the GREEN
-// half: wired correctly, the preflight refuses BEFORE any process is created, with an actionable message.
+// spawn and was performed manually against this exact dependency version).
 //
 // UNITS (stated explicitly, per manager review): the preflight measures a JS string's `.length` —
 // i.e. UTF-16 CODE UNITS — of the FULL composed command line: the binary path + EVERY flag/value
 // (--settings <path>, --permission-mode, --model if any, --disallowedTools if any, -n if any,
-// --strict-mcp-config --mcp-config <json>) + the startupPrompt, ALL joined and Windows-quoted/escaped
-// the same way node-pty's own argsToCommandLine would for array args (windowsCommandLine is a
-// behaviourally-equivalent ADAPTATION of it, not a byte-for-byte port — see that function's own doc)
-// — i.e. POST-escaping, not a raw pre-escaped argv sum. This is deliberately the SAME unit
-// `CreateProcessW`'s documented "32,767 characters, including the terminating null" ceiling uses: a
-// JS string is natively UTF-16, so `.length` counts UTF-16 code units with no re-encoding step — the
-// exact unit Windows itself counts (NOT bytes, NOT UTF-8 code units, NOT grapheme clusters). My
-// empirical binary search (this file's header) landed on an EXACT integer boundary (32766 OK / 32767
-// FAIL, zero slack) using ASCII padding, which is consistent with — though doesn't by itself prove for
-// non-ASCII — this unit match; the theoretical argument (JS length ≡ UTF-16 code units ≡ what
-// CreateProcessW counts) holds regardless of ASCII/non-ASCII content. I did not separately
-// re-validate the exact boundary with astral (surrogate-pair) characters against a real spawn; I'm
-// stating that rather than presenting it as confirmed.
+// --strict-mcp-config --mcp-config <json>), ALL joined and Windows-quoted/escaped the same way
+// node-pty's own argsToCommandLine would for array args (windowsCommandLine is a behaviourally-equivalent
+// ADAPTATION of it, not a byte-for-byte port — see that function's own doc) — i.e. POST-escaping, not a
+// raw pre-escaped argv sum. This is deliberately the SAME unit `CreateProcessW`'s documented "32,767
+// characters, including the terminating null" ceiling uses: a JS string is natively UTF-16, so `.length`
+// counts UTF-16 code units with no re-encoding step — the exact unit Windows itself counts (NOT bytes,
+// NOT UTF-8 code units, NOT grapheme clusters). My empirical binary search (this file's header) landed on
+// an EXACT integer boundary (32766 OK / 32767 FAIL, zero slack) using ASCII padding, which is consistent
+// with — though doesn't by itself prove for non-ASCII — this unit match; the theoretical argument (JS
+// length ≡ UTF-16 code units ≡ what CreateProcessW counts) holds regardless of ASCII/non-ASCII content. I
+// did not separately re-validate the exact boundary with astral (surrogate-pair) characters against a
+// real spawn; I'm stating that rather than presenting it as confirmed.
 //
 // Part A (pure, cross-platform): windowsCommandLine's quoting + preflightWindowsCommandLine's
-// ok/refuse boundary and message content — deterministic, no real spawn.
+// ok/refuse boundary and message content — deterministic, no real spawn. Includes the direct
+// prompt-never-contributes regression proof.
 // Part B (Windows-only): the REAL (unsubclassed) PtyHost.createPty(), via a real node.exe substituted
-// for `claude` (LOOM_CLAUDE_BIN), actually refuses an oversized-but-REAL prompt (this project's own
-// full CLAUDE.md + /worker SKILL.md, not synthetic padding) with the actionable message (never a raw
-// OS error) and leaves NO Live entry — while a REALISTIC-scale brief+kickoff (real CLAUDE.md/SKILL.md
-// excerpts sized to the incident's own ~11KB/~7KB, NOT a toy string) still spawns for real. Both
-// directions are exercised against real, non-synthetic content, with the measured composed
-// command-line length reported for each.
+// for `claude` (LOOM_CLAUDE_BIN) — proves a REALISTICALLY HUGE real startupPrompt (this project's own
+// full CLAUDE.md + full /worker SKILL.md, uncut — the exact content this preflight used to refuse) now
+// spawns for real with no throw, while an oversized NON-prompt argv contributor still gets refused
+// actionably.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/spawn-command-line-preflight.mjs
 import fs from "node:fs";
@@ -62,11 +69,8 @@ fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
-const { PtyHost, windowsCommandLine, preflightWindowsCommandLine, WINDOWS_COMMAND_LINE_LIMIT, buildSpawnArgs, disallowedToolsForSpawn } =
+const { PtyHost, windowsCommandLine, preflightWindowsCommandLine, WINDOWS_COMMAND_LINE_LIMIT, buildSpawnArgs } =
   await import("../dist/pty/host.js");
-const { resolveExecutable } = await import("../dist/pty/resolve-bin.js");
-const { SETTINGS_DIR, PORT } = await import("../dist/paths.js");
-const { spawnBudgetWarning, spawnFixedOverheadChars } = await import("../dist/agents/promptLint.js");
 
 // ===================== Part A: pure quoting + preflight (cross-platform) =====================
 
@@ -88,19 +92,35 @@ check("WINDOWS_COMMAND_LINE_LIMIT is the empirically-confirmed 32766 (not a roun
   check("empty-string arg: quoted as \"\"", windowsCommandLine("bin", [""]) === 'bin ""');
 }
 
-// --- The exact empirical boundary, reproduced deterministically via buildSpawnArgs + windowsCommandLine
-//     (no real spawn needed here — the real-OS cross-check was performed manually; see this file's header) ---
+// --- CARD 0050a17e's core regression proof: startupPrompt contributes NOTHING to argv, at any size ---
+{
+  const mcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
+  const base = { settingsPath: "S", mode: "acceptEdits", mcpServers };
+  const noPromptArgs = buildSpawnArgs(base);
+  const hugePromptArgs = buildSpawnArgs({ ...base, startupPrompt: "X".repeat(200_000) });
+  const dashedPromptArgs = buildSpawnArgs({ ...base, startupPrompt: "--dangerously-do-a-thing" });
+  check("no-prompt vs 200KB-prompt: byte-identical argv (the prompt contributes NOTHING)",
+    JSON.stringify(noPromptArgs) === JSON.stringify(hugePromptArgs));
+  check("no-prompt vs dash-prefixed-prompt: byte-identical argv", JSON.stringify(noPromptArgs) === JSON.stringify(dashedPromptArgs));
+  check("preflight: a 200KB startupPrompt alone never trips it (nothing else in this argv is oversized)",
+    preflightWindowsCommandLine("C:\\claude\\claude.cmd", hugePromptArgs).ok === true);
+}
+
+// --- The exact empirical boundary, reproduced deterministically — now probed via the SETTINGS PATH
+//     (a real argv contributor that survives this card) instead of startupPrompt (which no longer
+//     contributes at all). Proves the boundary math itself is still exactly correct for whatever DOES
+//     still ride argv; the real-OS cross-check was performed manually — see this file's header. ---
 {
   const mcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
   const bin = "C:\\claude\\claude.cmd";
-  // A single "X" startupPrompt has no space/tab, so windowsCommandLine's quoting rule never wraps it in
+  // A settingsPath made of "X" has no space/tab, so windowsCommandLine's quoting rule never wraps it in
   // quotes — it contributes EXACTLY its own char count to the command line. That makes `base` (the
   // command-line length contributed by everything ELSE) exact, so padding to any target total is exact.
-  const probeArgs = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "X" });
+  const probeArgs = buildSpawnArgs({ settingsPath: "X", mode: "acceptEdits", mcpServers });
   const base = windowsCommandLine(bin, probeArgs).length - 1;
   const padTo = (total) => "X".repeat(Math.max(1, total - base));
-  const atLimitArgs = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: padTo(WINDOWS_COMMAND_LINE_LIMIT) });
-  const overLimitArgs = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: padTo(WINDOWS_COMMAND_LINE_LIMIT + 1) });
+  const atLimitArgs = buildSpawnArgs({ settingsPath: padTo(WINDOWS_COMMAND_LINE_LIMIT), mode: "acceptEdits", mcpServers });
+  const overLimitArgs = buildSpawnArgs({ settingsPath: padTo(WINDOWS_COMMAND_LINE_LIMIT + 1), mode: "acceptEdits", mcpServers });
   const atLimitLen = windowsCommandLine(bin, atLimitArgs).length;
   const overLimitLen = windowsCommandLine(bin, overLimitArgs).length;
   check(`a command line of exactly the limit (${WINDOWS_COMMAND_LINE_LIMIT}) computed len matches`, atLimitLen === WINDOWS_COMMAND_LINE_LIMIT);
@@ -109,154 +129,21 @@ check("WINDOWS_COMMAND_LINE_LIMIT is the empirically-confirmed 32766 (not a roun
   check("preflight: ONE char over the limit is refused", preflightWindowsCommandLine(bin, overLimitArgs).ok === false);
 }
 
-// --- Actionable message content: names the size, the limit, how far over, and (with parts) the
-//     specific knobs + which one to shorten. This is the whole point of the card — never a bare
-//     "error code: 206". ---
+// --- Actionable message content: names the size, the limit, and how far over — never a bare
+//     "error code: 206". No more per-part breakdown (card 0050a17e removed it along with
+//     startupPromptParts/PromptSizePart — a breakdown of the prompt's own contributors would now
+//     describe text that isn't even part of the measured command line). ---
 {
   const mcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
-  const hugePrompt = "X".repeat(40_000);
-  const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: hugePrompt });
-  const result = preflightWindowsCommandLine("C:\\claude\\claude.cmd", args, [
-    { label: "agent base brief", chars: 11_000 },
-    { label: "this spawn's kickoffPrompt", chars: 29_000 },
-  ]);
+  const args = buildSpawnArgs({ settingsPath: "X".repeat(40_000), mode: "acceptEdits", mcpServers });
+  const result = preflightWindowsCommandLine("C:\\claude\\claude.cmd", args);
   check("oversized spawn: preflight reports not-ok", result.ok === false);
   check("message names the assembled command-line length", /is \d+ characters/.test(result.message));
   check("message names the Windows CreateProcess limit (32766)", result.message.includes("32766"));
   check("message names the raw OS symptom it replaces (error code: 206)", result.message.includes("error code: 206"));
-  check("message includes the breakdown: agent base brief size", result.message.includes("agent base brief is 11000 chars"));
-  check("message includes the breakdown: kickoffPrompt size", result.message.includes("this spawn's kickoffPrompt is 29000 chars"));
-  check("message names the LARGER contributor as the knob to shorten", result.message.includes('currently "this spawn\'s kickoffPrompt"'));
-}
-// Without a breakdown, the message still stands alone (actionable, just less granular) — every
-// non-worker spawn path (manager/platform/resume/fork) omits startupPromptParts.
-{
-  const mcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" } };
-  const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "X".repeat(40_000) });
-  const result = preflightWindowsCommandLine("C:\\claude\\claude.cmd", args);
-  check("no breakdown: still refused, with a generic 'shorten the startup prompt' knob", result.ok === false && result.message.includes("Shorten the startup prompt"));
-}
-
-// ===================== Part (b): agent_create/agent_update spawn-budget warning =====================
-// Card 08723d94: this warning used to compute its OWN hand-rolled overhead constant
-// (SPAWN_PROMPT_BUDGET_ESTIMATE_CHARS = 24_000, implying a fixed spawn overhead of exactly
-// WINDOWS_COMMAND_LINE_LIMIT-24_000 = 8766 chars) — a SECOND, independent computation of the same
-// budget `preflightWindowsCommandLine` already computes exactly from the real argv. That second
-// computation silently drifted ~8KB into the UNSAFE direction (a live agent's measured real overhead:
-// ~16.5KB) while still labelling itself "conservative". Fixed: `spawnFixedOverheadChars` DERIVES the
-// fixed overhead from the SAME buildMcpServers/buildSpawnArgs/windowsCommandLine arithmetic
-// `preflightWindowsCommandLine` calls, for a representative argv built from the agent's own resolved
-// role + browserTesting flag — one source of truth instead of two.
-{
-  const workerProfile = { role: "worker" };
-  check("a short brief: no budget warning", spawnBudgetWarning("a short worker brief", workerProfile) === null);
-  check("empty/absent brief: no budget warning", spawnBudgetWarning(undefined, workerProfile) === null && spawnBudgetWarning("", workerProfile) === null);
-
-  const fixedOverhead = spawnFixedOverheadChars(workerProfile);
-  const budget = WINDOWS_COMMAND_LINE_LIMIT - fixedOverhead;
-  console.log(`\n[measured] spawnFixedOverheadChars({role:"worker"}) = ${fixedOverhead} chars → derived budget = ${budget} chars (vs the OLD hand-rolled advisory's assumed overhead of ${WINDOWS_COMMAND_LINE_LIMIT - 24_000} chars)`);
-
-  const bigBrief = "X".repeat(Math.round(budget * 0.6)); // over the 50% warn threshold
-  const warning = spawnBudgetWarning(bigBrief, workerProfile);
-  check("a brief over the warn threshold: returns a warning", typeof warning === "string");
-  check("warning names the brief's own size", warning.includes(String(bigBrief.length)));
-  check("warning is framed as an ESTIMATE (never presented as the exact limit)", /estimate/i.test(warning));
-  check("warning points at the real, exact check (pty/host.ts preflightWindowsCommandLine)", warning.includes("preflightWindowsCommandLine"));
-  check("warning no longer calls itself 'conservative' (card 08723d94: it wasn't)", !/\bconservative\b/i.test(warning));
-  check("warning names the derived fixed-overhead figure it's using", warning.includes(String(fixedOverhead)));
-
-  // A profile carrying owner-added capabilities gets an explicit "not modeled, real headroom is
-  // smaller" caveat rather than a false confident number for the dimension this can't safely compute
-  // (resolving a real capability could kick a background provisioning install — see spawnFixedOverheadChars's
-  // own doc for why that's never done from this lint path).
-  const capProfile = { role: "worker", capabilities: [{ slug: "cap-a" }, { slug: "cap-b" }] };
-  const capWarning = spawnBudgetWarning(bigBrief, capProfile);
-  check("a profile with owner-added capabilities: warning names the gap and says headroom is smaller, never larger",
-    typeof capWarning === "string" && capWarning.includes("2 owner-added capabilities") && /smaller than reported/i.test(capWarning));
-
-  // --- DoD 1: reproduce the exact divergence shape the card reported. Simulate a heavily-provisioned
-  // worker (many owner-added stdio capabilities mounted, each a realistic node subprocess entry) via a
-  // literal mcpServers map — NOT via the real capability-catalog resolver (which could kick a real
-  // provisioning install; see above) — fed through the SAME buildSpawnArgs/windowsCommandLine the real
-  // spawn uses. This reproduces, side-effect-free, what a real heavily-provisioned agent's fixed
-  // overhead looks like. ---
-  const longCapabilityPath = ["C:", "Users", "example", "AppData", "Local", "pnpm", "global", "v9",
-    "node_modules", ".pnpm", "some-capability-package@1.2.3", "node_modules", "some-capability-package",
-    "dist", "cli.js"].join("\\");
-  const heavyMcpServers = {
-    "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/s1" },
-    "loom-orchestration": { type: "http", url: "http://127.0.0.1:4317/mcp-orch/s1" },
-  };
-  const CAPABILITY_COUNT = 50; // sized to land near the peer's own reported ~16.5KB real overhead
-  for (let i = 0; i < CAPABILITY_COUNT; i++) {
-    heavyMcpServers[`owner-cap-${i}`] = {
-      type: "stdio",
-      command: "C:\\Program Files\\nodejs\\node.exe",
-      args: [longCapabilityPath, "--flag-one", "--flag-two", "value"],
-    };
-  }
-  const heavyDisallowed = disallowedToolsForSpawn("worker", false, false, false);
-  const heavyBin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
-  const heavySettingsPath = path.join(SETTINGS_DIR, "s1.json");
-  const heavyArgsNoPrompt = buildSpawnArgs({ settingsPath: heavySettingsPath, mode: "acceptEdits", mcpServers: heavyMcpServers, disallowedTools: heavyDisallowed });
-  const heavyFixedOverhead = windowsCommandLine(heavyBin, heavyArgsNoPrompt).length;
-  const OLD_ASSUMED_OVERHEAD = WINDOWS_COMMAND_LINE_LIMIT - 24_000; // the card's own arithmetic: 8766
-  console.log(`[measured] synthetic heavily-provisioned worker (${CAPABILITY_COUNT} owner capabilities): REAL fixed overhead = ${heavyFixedOverhead} chars, vs the OLD hand-rolled advisory's assumed overhead = ${OLD_ASSUMED_OVERHEAD} chars`);
-  check("DoD1 repro: a realistically-provisioned agent's REAL fixed overhead exceeds the OLD advisory's assumed overhead (the exact unsafe divergence the card reported)",
-    heavyFixedOverhead > OLD_ASSUMED_OVERHEAD);
-
-  // The OLD code would have reported (24_000 - briefChars) chars of headroom for an agent like this —
-  // headroom a same-sized real spawn cannot actually fit, because the real fixed overhead is bigger
-  // than the old code ever accounted for. Prove it: size a brief+kickoff pair the OLD formula would
-  // have called comfortably safe, then show the REAL preflight — fed this agent's REAL argv — refuses it.
-  const oldSafeBriefChars = 20_000; // OLD formula: reported headroom = 24_000-20_000 = 4_000 chars
-  const oldSafeKickoffChars = 3_500; // comfortably UNDER that old ~4_000-char reported headroom
-  const combinedPrompt = "X".repeat(oldSafeBriefChars + oldSafeKickoffChars);
-  const heavyArgsWithPrompt = buildSpawnArgs({ settingsPath: heavySettingsPath, mode: "acceptEdits", mcpServers: heavyMcpServers, disallowedTools: heavyDisallowed, startupPrompt: combinedPrompt });
-  const heavyTotalLen = windowsCommandLine(heavyBin, heavyArgsWithPrompt).length;
-  const heavyPreflight = preflightWindowsCommandLine(heavyBin, heavyArgsWithPrompt);
-  console.log(`[measured] a brief+kickoff pair (${oldSafeBriefChars}+${oldSafeKickoffChars}=${oldSafeBriefChars + oldSafeKickoffChars} chars) the OLD advisory's arithmetic would have called "~4KB of headroom left, safe": REAL composed command line = ${heavyTotalLen} chars vs limit ${WINDOWS_COMMAND_LINE_LIMIT} → preflight ${heavyPreflight.ok ? "ACCEPTS" : "REFUSES"} it`);
-  check("DoD1 repro: the REAL preflight refuses a spawn the OLD advisory's arithmetic would have called safe",
-    heavyPreflight.ok === false);
-}
-
-// --- DoD 3: the advisory and the preflight can never diverge again for what the advisory DOES model —
-// they are now literally the SAME buildMcpServers/buildSpawnArgs/windowsCommandLine computation. Prove
-// it structurally: the exact headroom spawnFixedOverheadChars derives is the exact real pass/fail
-// boundary preflightWindowsCommandLine enforces for that SAME representative argv (mirrors this file's
-// own atLimitArgs/overLimitArgs technique in Part A, now applied to the advisory's own derived budget
-// rather than a hand-picked one). If a future change reintroduces a second, independent overhead
-// computation for either side, this boundary equality is what breaks. ---
-{
-  const workerProfile = { role: "worker" };
-  const fixedOverhead = spawnFixedOverheadChars(workerProfile);
-  const budget = WINDOWS_COMMAND_LINE_LIMIT - fixedOverhead;
-
-  // Reconstruct the exact representative argv spawnFixedOverheadChars builds internally (same session
-  // id, same role, same browserTesting:false, and the REAL PORT it reads — NOT a hardcoded literal:
-  // the gate runs every test on its own non-4317 LOOM_PORT (scripts/test-daemon.mjs assigns 4400+lane),
-  // and a hardcoded port here would silently desync from spawnFixedOverheadChars' own computation
-  // whenever the real port's digit count differs from the literal's), so a real startupPrompt can be
-  // preflighted against it.
-  const sessionId = "00000000-0000-0000-0000-000000000000";
-  const bin = resolveExecutable(process.env.LOOM_CLAUDE_BIN || "claude");
-  const mcpServers = {
-    "loom-tasks": { type: "http", url: `http://127.0.0.1:${PORT}/mcp/${sessionId}` },
-    "loom-orchestration": { type: "http", url: `http://127.0.0.1:${PORT}/mcp-orch/${sessionId}` },
-  };
-  const disallowedTools = disallowedToolsForSpawn("worker", false, false, false);
-  const settingsPath = path.join(SETTINGS_DIR, `${sessionId}.json`);
-
-  const atBudgetPrompt = "X".repeat(budget); // no space/tab → contributes exactly its own char count
-  const overBudgetPrompt = "X".repeat(budget + 1);
-  const atBudgetArgs = buildSpawnArgs({ settingsPath, mode: "acceptEdits", mcpServers, disallowedTools, startupPrompt: atBudgetPrompt });
-  const overBudgetArgs = buildSpawnArgs({ settingsPath, mode: "acceptEdits", mcpServers, disallowedTools, startupPrompt: overBudgetPrompt });
-  const atBudgetPreflight = preflightWindowsCommandLine(bin, atBudgetArgs);
-  const overBudgetPreflight = preflightWindowsCommandLine(bin, overBudgetArgs);
-  check("DoD3: a prompt sized EXACTLY at the advisory's derived budget is accepted by the REAL preflight",
-    atBudgetPreflight.ok === true);
-  check("DoD3: one char OVER the advisory's derived budget is refused by the REAL preflight",
-    overBudgetPreflight.ok === false);
+  check("message no longer names the startup prompt as the knob to shorten (it can't be — it's not on argv)",
+    !/startup prompt/i.test(result.message));
+  check("message names the argv contributors that DO still ride argv", /MCP config|settings path|disallowed-tools/i.test(result.message));
 }
 
 // ===================== Part B: real createPty wiring (Windows-only — the preflight is win32-gated) =====================
@@ -284,58 +171,53 @@ if (process.platform !== "win32") {
     startupPrompt,
   });
 
-  // --- NEGATIVE CONTROL (manager-required): a REALISTIC brief+kickoff, near the incident's own
-  // reported scale, must still spawn for REAL. Not a toy string — this project's OWN real CLAUDE.md
-  // (real prose: markdown, backticks, em-dashes, and literal embedded double-quotes in its JSON
-  // examples) and its own real /worker skill doctrine, sliced to ~11KB / ~7KB (matching the incident's
-  // reported "~11 KB brief + ~7 KB kickoff") and joined the SAME way composeWorkerStartupPrompt joins
-  // a real worker's brief + dynamic part ("\n\n---\n\n"). A preflight with an inverted comparison, a
-  // wrong unit, or an order-of-magnitude-off constant would refuse THIS — it would not look like a
-  // clean pass on a trivially-small string, because this one is realistically large and realistically
-  // textured (real quotes, real escaping-relevant characters).
+  // --- THE CARD'S OWN REGRESSION PROOF, at real-spawn scale: the EXACT content that used to trip this
+  // preflight (the full real CLAUDE.md + full real /worker SKILL.md, uncut, not synthetic padding) must
+  // now spawn for REAL with no throw — because it no longer contributes to argv at all. ---
   const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
   const workerSkill = fs.readFileSync(path.join(REPO_ROOT, ".claude", "skills", "worker", "SKILL.md"), "utf8");
-  const realisticBrief = claudeMd.slice(0, 11_000);
-  const realisticKickoff = workerSkill.slice(0, 7_000);
-  const realisticPrompt = `${realisticBrief}\n\n---\n\n${realisticKickoff}`;
-  check("realistic fixture actually contains real quote/escape-relevant characters (not synthetic)",
-    realisticPrompt.includes("\"") || realisticPrompt.includes("\\") || realisticPrompt.includes("`"));
-
-  // Reproduce (independently of the real spawn) the SAME composed command line this spawn will
-  // produce, purely so we can REPORT the measured length vs the limit — createPty doesn't hand its
-  // internal computation back to the caller.
-  const reportMcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/realistic-1" } };
-  const reportArgs = buildSpawnArgs({ settingsPath: path.join(tmpHome, "tmp", "settings", "realistic-1.json"), mode: "acceptEdits", mcpServers: reportMcpServers, startupPrompt: realisticPrompt });
-  const reportCmdLine = windowsCommandLine(process.execPath, reportArgs);
-  console.log(`\n[measured] realistic negative control: raw brief=${realisticBrief.length} chars, raw kickoff=${realisticKickoff.length} chars, raw combined=${realisticPrompt.length} chars`);
-  console.log(`[measured] FULL composed command line (bin + every flag, POST-escaping) = ${reportCmdLine.length} chars, vs WINDOWS_COMMAND_LINE_LIMIT=${WINDOWS_COMMAND_LINE_LIMIT} (margin = ${WINDOWS_COMMAND_LINE_LIMIT - reportCmdLine.length} chars headroom)`);
-  console.log(`[measured] escaping/overhead inflation vs raw combined prompt alone: ${(reportCmdLine.length / realisticPrompt.length).toFixed(4)}x`);
-
-  const realisticId = "realistic-1";
-  let realisticThrew = null;
-  try { host.spawn(baseOpts(realisticId, realisticPrompt)); } catch (e) { realisticThrew = e; }
-  check("REALISTIC brief+kickoff (~18KB raw, real project text): real createPty does NOT throw", realisticThrew === null);
-  check("REALISTIC brief+kickoff: a real Live entry was registered (a real process actually spawned)", host.isAlive(realisticId) === true);
-  if (realisticThrew) console.log("   (unexpected throw:", realisticThrew.message.slice(0, 300), ")");
-  try { host.stop(realisticId, "hard"); } catch { /* best-effort cleanup */ }
-
-  // --- POSITIVE CONTROL (oversized, but STILL real content — not synthetic padding): the full real
-  // CLAUDE.md + the full real /worker SKILL.md, uncut, joined the same way. Proves the refusal isn't
-  // an artifact of "X" padding specifically — genuine markdown/prose at this scale trips it too. ---
   const oversizedRealisticPrompt = `${claudeMd}\n\n---\n\n${workerSkill}`;
-  const oversizedCmdLine = windowsCommandLine(process.execPath, buildSpawnArgs({ settingsPath: path.join(tmpHome, "tmp", "settings", "realistic-huge.json"), mode: "acceptEdits", mcpServers: reportMcpServers, startupPrompt: oversizedRealisticPrompt }));
-  console.log(`[measured] oversized-but-real fixture (full CLAUDE.md + full worker SKILL.md): raw combined=${oversizedRealisticPrompt.length} chars, FULL composed command line=${oversizedCmdLine.length} chars, vs limit=${WINDOWS_COMMAND_LINE_LIMIT} (over by ${oversizedCmdLine.length - WINDOWS_COMMAND_LINE_LIMIT} chars)`);
+  check("fixture prompt is genuinely oversized relative to the old ceiling (not a toy string)",
+    oversizedRealisticPrompt.length > WINDOWS_COMMAND_LINE_LIMIT);
+  check("fixture prompt actually contains real quote/escape-relevant characters (not synthetic)",
+    oversizedRealisticPrompt.includes("\"") || oversizedRealisticPrompt.includes("\\") || oversizedRealisticPrompt.includes("`"));
+
+  // Reproduce (independently of the real spawn) the command line this spawn actually produces, to
+  // REPORT the measured length (logged below — the FULL real CLAUDE.md + SKILL.md, tens of KB, not a
+  // fixed figure worth restating here since it drifts as those files grow) — proving it's now driven
+  // purely by the fixed/non-prompt argv, not by the real prose above.
+  const reportMcpServers = { "loom-tasks": { type: "http", url: "http://127.0.0.1:4317/mcp/huge-1" } };
+  const settingsPathForReport = path.join(tmpHome, "tmp", "settings", "huge-1.json");
+  const reportArgsWithPrompt = buildSpawnArgs({ settingsPath: settingsPathForReport, mode: "acceptEdits", mcpServers: reportMcpServers, startupPrompt: oversizedRealisticPrompt });
+  const reportArgsNoPrompt = buildSpawnArgs({ settingsPath: settingsPathForReport, mode: "acceptEdits", mcpServers: reportMcpServers });
+  const reportCmdLine = windowsCommandLine(process.execPath, reportArgsWithPrompt);
+  console.log(`\n[measured] oversized-but-real fixture (full CLAUDE.md + full worker SKILL.md): raw combined=${oversizedRealisticPrompt.length} chars, but FULL composed command line (WITH the prompt passed) = ${reportCmdLine.length} chars, vs WINDOWS_COMMAND_LINE_LIMIT=${WINDOWS_COMMAND_LINE_LIMIT} (headroom = ${WINDOWS_COMMAND_LINE_LIMIT - reportCmdLine.length} chars)`);
+  check("the real (tens-of-KB) prompt contributes ZERO of that composed length (identical with/without it)",
+    JSON.stringify(reportArgsWithPrompt) === JSON.stringify(reportArgsNoPrompt));
 
   const hugeId = "huge-1";
   let hugeThrew = null;
   try { host.spawn(baseOpts(hugeId, oversizedRealisticPrompt)); } catch (e) { hugeThrew = e; }
-  check("oversized-but-REAL prompt: real createPty THROWS (refused before any process creation)", hugeThrew !== null);
-  check("oversized-but-REAL prompt: the thrown message is the ACTIONABLE one, not a raw OS error",
-    hugeThrew && hugeThrew.message.includes("Spawn refused") && hugeThrew.message.includes(String(WINDOWS_COMMAND_LINE_LIMIT)));
-  check("oversized-but-REAL prompt: NO Live entry was ever registered for it", host.isAlive(hugeId) === false);
+  check("oversized-but-REAL prompt (the old positive control): real createPty does NOT throw any more", hugeThrew === null);
+  check("oversized-but-REAL prompt: a real Live entry WAS registered (a real process actually spawned)", host.isAlive(hugeId) === true);
+  if (hugeThrew) console.log("   (unexpected throw:", hugeThrew.message.slice(0, 300), ")");
+  try { host.stop(hugeId, "hard"); } catch { /* best-effort cleanup */ }
+
+  // --- The preflight mechanism ITSELF still works for what remains on argv (a control that the fix
+  // didn't just delete the whole check) — inflate the settings path instead of the prompt.
+  // createPty derives settingsPath internally (writeSessionSettings) rather than accepting one as a
+  // SpawnOpts field, so there's no real spawn-level lever to inflate JUST the settings path without
+  // reaching into private machinery; prove the control at the buildSpawnArgs+preflight layer instead —
+  // still the REAL functions the real spawn uses, just not routed through a full createPty this time
+  // (Part A already covers this same shape deterministically — this is the same check, restated here
+  // as the control paired with Part B's real-spawn positive case above, for the reader who skips A). ---
+  const inflatedSettingsArgs = buildSpawnArgs({ settingsPath: "X".repeat(40_000), mode: "acceptEdits", mcpServers: reportMcpServers });
+  const inflatedPreflight = preflightWindowsCommandLine(process.execPath, inflatedSettingsArgs);
+  check("control: an oversized NON-prompt argv contributor (settings path) is STILL refused — the whole check wasn't deleted, only the prompt's contribution to it",
+    inflatedPreflight.ok === false);
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — the Windows command-line preflight (grounded against a real node-pty binary search: 32766 chars OK, 32767 FAIL) refuses an oversized spawn ACTIONABLY (size, limit, over-amount, which knob to shorten) before any process is created, the agent_create/agent_update spawn-budget warning flags an oversized base brief as an estimate, and a real (unsubclassed) createPty spawn proves the wiring end-to-end on Windows."
+  ? "\n✅ ALL PASS — the startup prompt (any size, any content, dash-prefixed or not) contributes NOTHING to the composed Windows command line any more — the exact real content that used to trip this preflight (full CLAUDE.md + worker SKILL.md) now spawns for real with no throw. The Windows command-line preflight itself (grounded against a real node-pty binary search: 32766 chars OK, 32767 FAIL) still refuses actionably for whatever DOES remain on argv (settings path / MCP config / disallowed-tools)."
   : `\n❌ ${failures} FAILURE(S).`);
 await finishAndExit(failures === 0 ? 0 : 1); // awaits real cleanup, then exits deterministically — no hang-on-drain risk from the real node.exe children spawned above

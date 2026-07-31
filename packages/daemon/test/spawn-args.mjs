@@ -1,6 +1,9 @@
-// buildSpawnArgs / argv-ordering test (PR H2). Deterministic, no daemon, no claude — asserts the
-// startup/kickoff prompt is always positional behind a `--` end-of-options separator, so a prompt
-// beginning with - / -- can't be parsed as a flag. Run: node test/spawn-args.mjs
+// buildSpawnArgs / argv-ordering test. Deterministic, no daemon, no claude — asserts flag ordering AND
+// (card 0050a17e) that `startupPrompt` is accepted for API convenience but is NEVER emitted into argv,
+// for ANY input (dash-prefixed, huge, empty, or omitted) — closing the Windows command-line ceiling this
+// used to create (a large agent brief + kickoff could blow through CreateProcess's 32766-char limit and
+// refuse the spawn outright). The prompt now rides to the engine post-ready via submit() instead (see
+// pty/host.ts's scheduleKickoffGuarantee). Run: node test/spawn-args.mjs
 import { buildSpawnArgs } from "../dist/pty/host.js";
 
 let failures = 0;
@@ -8,25 +11,35 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${process.env.LOOM_PORT || 4317}/mcp/s1` } };
 
-// A kickoff prompt that STARTS WITH A DASH (the H2 footgun) must survive as positional text.
+// A startupPrompt that STARTS WITH A DASH (the old H2 footgun, back when it rode positionally) must have
+// NO effect on argv at all now — no `--` separator, no trace of its text anywhere in args.
 {
   const prompt = "--dangerously-do-a-thing then build the feature";
   const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: prompt });
-  const sep = args.indexOf("--");
-  check("dashed prompt: a `--` separator is present", sep !== -1);
-  check("dashed prompt: the prompt is the LAST arg", args[args.length - 1] === prompt);
-  check("dashed prompt: `--` immediately precedes the prompt", args[sep + 1] === prompt && sep === args.length - 2);
-  check("dashed prompt: every real flag precedes `--`", args.slice(0, sep).includes("--mcp-config") && args.slice(0, sep).includes("--settings"));
-  check("dashed prompt: only ONE `--` (the prompt isn't itself counted as a separator)", args.filter((a) => a === "--").length === 1);
+  check("dashed prompt: no `--` separator emitted", !args.includes("--"));
+  check("dashed prompt: the prompt text does not appear anywhere in argv", !args.includes(prompt));
+  check("dashed prompt: every real flag is still present", args.includes("--mcp-config") && args.includes("--settings"));
 }
 
-// A normal prompt is positional too (consistent path).
+// A normal prompt: same — never rides argv.
 {
   const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it" });
-  check("normal prompt: behind `--`, last arg", args[args.length - 2] === "--" && args[args.length - 1] === "build it");
+  check("normal prompt: not present anywhere in argv", !args.includes("build it"));
+  check("normal prompt: no `--` separator", !args.includes("--"));
 }
 
-// No startup prompt (resume path) → no trailing `--`/positional, and --resume leads.
+// A HUGE prompt (the actual incident shape — a large agent brief + kickoff) must have ZERO effect on the
+// composed argv length: with vs without it, argv is byte-identical.
+{
+  const huge = "K".repeat(100_000);
+  const withHuge = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: huge });
+  const without = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers });
+  check("huge prompt: argv is byte-identical to no-prompt argv (the prompt contributes NOTHING to argv)",
+    JSON.stringify(withHuge) === JSON.stringify(without));
+}
+
+// No startup prompt (resume path) → no trailing `--`/positional, and --resume leads. Byte-identical
+// behavior to a fresh spawn WITH a prompt, now that the prompt never touches argv either way.
 {
   const args = buildSpawnArgs({ resumeId: "engine-123", settingsPath: "S", mode: "acceptEdits", mcpServers });
   check("resume (no prompt): no `--` separator emitted", !args.includes("--"));
@@ -34,24 +47,22 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
   check("resume (no prompt): --mcp-config still present", args.includes("--mcp-config"));
 }
 
-// --mcp-config's value sits right before `--` (so the variadic is terminated by it, not by the prompt).
+// --mcp-config's value is the LAST thing on argv now that there's no positional prompt/`--` behind it.
 {
   const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "-x" });
   const cfg = args.indexOf("--mcp-config");
-  check("--mcp-config value precedes the `--` separator", cfg !== -1 && args.indexOf("--") > cfg + 1);
+  check("--mcp-config value is the last real flag (no `--`/prompt trailing it)", cfg !== -1 && args.length - 1 === cfg + 1);
 }
 
 // --- Profile-pinned model (Phase-3) -------------------------------------------------------------
-// A model set → `--model <id>` is emitted as a real flag (precedes `--`), right after --permission-mode.
+// A model set → `--model <id>` is emitted as a real flag, right after --permission-mode.
 {
   const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", model: "claude-opus-4-8" });
   const m = args.indexOf("--model");
-  const sep = args.indexOf("--");
   check("model set: `--model` is present", m !== -1);
   check("model set: `--model` is immediately followed by the id", args[m + 1] === "claude-opus-4-8");
-  check("model set: `--model` precedes the `--` separator (it's a real flag)", m < sep);
   check("model set: `--model` follows `--permission-mode`", m > args.indexOf("--permission-mode"));
-  check("model set: the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "build it");
+  check("model set: no `--` separator (prompt still doesn't ride argv)", !args.includes("--"));
 }
 // Model NULL / OMITTED → byte-identical to today: NO `--model` anywhere. Asserted against the existing
 // no-model argv so a regression that always-emits `--model` is caught.
@@ -91,13 +102,11 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
 {
   const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", sessionName: "loom-loom-dev-fix-thing" });
   const n = args.indexOf("-n");
-  const sep = args.indexOf("--");
   const cfg = args.indexOf("--mcp-config");
   check("sessionName set: `-n` is present", n !== -1);
   check("sessionName set: `-n` is immediately followed by the name", args[n + 1] === "loom-loom-dev-fix-thing");
-  check("sessionName set: `-n` precedes the `--` separator (it's a real flag)", n < sep);
   check("sessionName set: `-n` precedes `--strict-mcp-config`/`--mcp-config` (H2 ordering)", n < cfg);
-  check("sessionName set: the prompt is still the LAST arg behind `--`", args[args.length - 2] === "--" && args[args.length - 1] === "build it");
+  check("sessionName set: no `--` separator (prompt still doesn't ride argv)", !args.includes("--"));
 }
 // Omitted/undefined/empty ⇒ byte-identical to before this option existed: NO `-n` anywhere.
 {
@@ -108,8 +117,7 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
   check("sessionName undefined: argv is byte-identical to the no-name argv", JSON.stringify(withUndef) === JSON.stringify(base));
   check("sessionName empty-string: treated as absent — byte-identical, no `-n`", JSON.stringify(withEmpty) === JSON.stringify(base));
 }
-// Both `--model` and `-n` set together: both present, in the documented relative order (model, then the
-// role disallow list if any, then sessionName, then --strict-mcp-config).
+// Both `--model` and `-n` set together: both present, in the documented relative order.
 {
   const args = buildSpawnArgs({ settingsPath: "S", mode: "acceptEdits", mcpServers, startupPrompt: "build it", model: "claude-opus-4-8", sessionName: "loom-loom-mgr" });
   check("model + sessionName: --model precedes -n", args.indexOf("--model") < args.indexOf("-n"));
@@ -125,6 +133,6 @@ const mcpServers = { "loom-tasks": { type: "http", url: `http://127.0.0.1:${proc
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — buildSpawnArgs puts the prompt last behind a `--` separator (dashed prompts stay positional), flags lead, resume omits the separator, --fork-session follows --resume, --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model), and -n <name> emits/omits the same way (byte-identical when absent, always ahead of --mcp-config)."
+  ? "\n✅ ALL PASS — buildSpawnArgs NEVER emits startupPrompt into argv (dash-prefixed, huge, or plain — byte-identical argv with or without it), flags lead, resume/fork thread correctly, --model is emitted iff a profile pins one (null/empty ⇒ byte-identical, no --model), and -n <name> emits/omits the same way (byte-identical when absent, always ahead of --mcp-config)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
