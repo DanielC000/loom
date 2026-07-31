@@ -14,7 +14,8 @@ import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, Enqueue
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
-import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
+import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
@@ -107,6 +108,50 @@ export interface GateQueueSnapshot {
   queuedCount: number;
   running: GateQueueEntry[];
   queued: GateQueueEntry[];
+}
+
+/** The near-free identity {@link SessionService.reconcileOrchestrationOnBoot}'s Pass B already has in
+ *  hand for a worktree `worktreeHasWork` decided to KEEP — recorded at boot with NO extra git calls
+ *  (Pass B already paid for the keep decision itself). `reason`/`commitsAhead` are deliberately NOT
+ *  stored here — they're derived LAZILY at read time by {@link SessionService.getRetainedWorktrees},
+ *  matching the codebase's existing read-time-derivation convention (`Task.merged`, `Task.deferred`)
+ *  rather than re-running `git status`/`git rev-list` a second time for every retained worktree on
+ *  every boot (card 31df7e2f review, mgr #83) — cost that scales with exactly the backlog this surface
+ *  exists to observe. */
+interface RetainedWorktreeRecord {
+  worktreePath: string;
+  branch: string | null;
+  sessionId: string;
+  taskId: string | null;
+  /** The owning session's `lastActivity` at the moment Pass B recorded it — see {@link RetainedWorktreeEntry.lastActivityAt}. */
+  lastActivityAt: string;
+  repoPath: string;
+}
+
+/** One entry in {@link SessionService.getRetainedWorktrees}'s result — a worktree Pass B of
+ *  {@link SessionService.reconcileOrchestrationOnBoot} found still holding work (`worktreeHasWork`
+ *  returned true) and therefore did NOT reclaim. Purely observational: nothing here feeds back into any
+ *  GC decision. `worktreeHasWork` stays the sole authority over what gets kept vs. removed. */
+export interface RetainedWorktreeEntry {
+  worktreePath: string;
+  branch: string | null;
+  sessionId: string;
+  taskId: string | null;
+  /** Best-available proxy for "when did the owning session exit" — {@link Session} has no dedicated
+   *  `exitedAt` field. `lastActivity` is the session's last DB write, which for an exited worker IS its
+   *  exit in practice — but it's still a proxy, so this field is named for what it actually measures,
+   *  not for what it approximates. */
+  lastActivityAt: string;
+  /** floor((now - lastActivityAt) / 1 day) — the AGE signal that turns "kept, correctly" into "worth a
+   *  human's attention" (card 31df7e2f). */
+  ageDays: number;
+  /** Which of `worktreeHasWork`'s two checks currently holds: a dirty working tree, unmerged commits
+   *  ahead of the repo's HEAD, or both. Derived at READ time (see {@link RetainedWorktreeRecord}'s doc),
+   *  so this reflects the worktree's CURRENT state, not a stale snapshot from whichever boot recorded it. */
+  reason: "dirty-tree" | "unmerged-commits" | "both";
+  /** `git rev-list --count HEAD..<branch>`, read live. `null` only when that probe itself failed/timed
+   *  out (best-effort, observability-only — never blocks or excludes the entry). */
+  commitsAhead: number | null;
 }
 
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
@@ -776,6 +821,13 @@ export class SessionService {
    */
   private readonly gitOpMs: number | undefined;
   private readonly provisionMs: number | undefined;
+  /**
+   * The retained-worktree backlog (card 31df7e2f) — REBUILT, never appended, at the start of every
+   * {@link reconcileOrchestrationOnBoot} call, so a worktree GC'd (or newly kept) by THIS boot's Pass B
+   * is exactly what this reflects; a stale entry from a prior boot can never linger. See
+   * {@link getRetainedWorktrees} for the read-time derivation of the fuller {@link RetainedWorktreeEntry} shape.
+   */
+  private retainedWorktreeRecords: RetainedWorktreeRecord[] = [];
   /**
    * Test-only seam for {@link removeWorktree}'s killable-removal backstop (task dea6728e). `undefined` in
    * production ⇒ removeWorktree falls back to its own real {@link killableRemoveDir}. Lets a test drive
@@ -10968,6 +11020,9 @@ export class SessionService {
     // Include archived sessions: an archived worker whose worktree still lingers must still be GC'd.
     const all = this.db.listAllSessionsIncludingArchived();
     const handledWorktrees = new Set<string>();
+    // REBUILT here, not appended — this boot's Pass B is about to recompute the full retained set from
+    // scratch, and a stale entry from a prior boot (e.g. a worktree since GC'd by hand) must not linger.
+    this.retainedWorktreeRecords = [];
     let mergesFinished = 0;
     let mergesFailed = 0;
     let staleMergesResolved = 0;
@@ -11176,6 +11231,12 @@ export class SessionService {
         // eslint-disable-next-line no-console
         console.warn(`[reconcile] kept worktree ${worktreePath} — holds unmerged/uncommitted work (Pass B)`);
         worktreesKept++;
+        // Record ONLY the near-free identity Pass B already has in hand (card 31df7e2f) — NO extra git
+        // calls here. `reason`/`commitsAhead` are derived lazily, at read time, by getRetainedWorktrees.
+        this.retainedWorktreeRecords.push({
+          worktreePath, branch: s.branch ?? null, sessionId: s.id, taskId: s.taskId ?? null,
+          lastActivityAt: s.lastActivity, repoPath,
+        });
         continue;
       }
       // Same nested-repo guard, same "never override on an automatic path" rule as above — this is the
@@ -11340,5 +11401,73 @@ export class SessionService {
       console.log(`[reconcile] reclaimed ${branchesReclaimed} merged loom/* branch ref(s)`);
     }
     return { mergesFinished, mergesFailed, staleMergesResolved, worktreesPruned, worktreesKept, worktreesNeedsHuman, worktreesStillWedged: stillWedged.length, worktreesStaleRepoKey, branchesReclaimed, branchSweepSkippedRepos, branchSweepNoOrigin, branchSweepFoundZero };
+  }
+
+  /**
+   * The retained-worktree backlog surface (card 31df7e2f): every worktree the LAST
+   * {@link reconcileOrchestrationOnBoot} Pass B decided to KEEP (worktreeHasWork returned true), with a
+   * live `reason`/`commitsAhead`/`ageDays` — read-only, observational, and derived at READ time (not
+   * cached from boot), so this always reflects CURRENT truth:
+   *  - a worktree removed since boot (by a human, or a later reconcile) is silently excluded, never
+   *    reported stale.
+   *  - a worktree that no longer holds work (cleaned up by hand since boot) is EXCLUDED too — this
+   *    surface only ever lists what's genuinely retained RIGHT NOW, not a frozen boot-time snapshot.
+   * Changes NO GC policy and calls no destructive git op — `worktreeHasWork` remains the sole authority
+   * over what actually gets kept vs. removed; this only re-reads the same two signals it already checks
+   * (dirty tree, commits ahead) to LABEL an outcome, never to decide one.
+   */
+  async getRetainedWorktrees(): Promise<{ count: number; entries: RetainedWorktreeEntry[] }> {
+    const entries: RetainedWorktreeEntry[] = [];
+    const now = Date.now();
+    for (const rec of this.retainedWorktreeRecords) {
+      if (!fs.existsSync(rec.worktreePath)) continue; // gone since boot — current truth, not a stale report
+      const classified = await this.classifyRetainedWorktree(rec.repoPath, rec.worktreePath, rec.branch);
+      if (!classified) continue; // no longer holds work (e.g. merged/cleaned by hand since boot)
+      const ageDays = Math.max(0, Math.floor((now - new Date(rec.lastActivityAt).getTime()) / 86_400_000));
+      entries.push({
+        worktreePath: rec.worktreePath, branch: rec.branch, sessionId: rec.sessionId, taskId: rec.taskId,
+        lastActivityAt: rec.lastActivityAt, ageDays, reason: classified.reason, commitsAhead: classified.commitsAhead,
+      });
+    }
+    return { count: entries.length, entries };
+  }
+
+  /**
+   * Best-effort, read-time classification of ONE already-retained worktree into `worktreeHasWork`'s two
+   * constituent signals (dirty tree / commits ahead) for display. Never called from Pass B itself — only
+   * from {@link getRetainedWorktrees}, lazily, so a normal boot pays NO extra git cost for this (card
+   * 31df7e2f review, mgr #83): re-deriving at read time instead of caching a classification at boot also
+   * means this always reflects the worktree's CURRENT state, not whichever boot first recorded it.
+   * Fails safe on either probe: an error/timeout on the dirty-tree check is read as "dirty" (never
+   * silently drops a genuinely-retained worktree off the surface), and an error/timeout on the
+   * ahead-count check is read as `commitsAhead: null` (unknown — still counted as "has work", same
+   * fail-safe spirit as {@link worktreeHasWork} itself) rather than as zero. Returns null only when BOTH
+   * probes cleanly agree the worktree no longer holds work.
+   */
+  private async classifyRetainedWorktree(
+    repoPath: string, worktreePath: string, branch: string | null,
+  ): Promise<{ reason: RetainedWorktreeEntry["reason"]; commitsAhead: number | null } | null> {
+    const timeoutMs = this.gitOpMs ?? 15_000; // mirrors git/worktrees.ts's own GIT_OP_TIMEOUT_MS default
+    let dirty: boolean;
+    try {
+      const porcelain = await simpleGit(worktreePath, { timeout: { block: timeoutMs } }).raw(["status", "--porcelain"]);
+      dirty = worktreeStatusHasWork(porcelain);
+    } catch {
+      dirty = true; // fail safe — an error means "don't know", not "clean"
+    }
+    let commitsAhead: number | null = null;
+    if (branch) {
+      try {
+        const raw = await simpleGit(repoPath, { timeout: { block: timeoutMs } }).raw(["rev-list", "--count", `HEAD..${branch}`]);
+        const parsed = parseInt(raw.trim(), 10);
+        commitsAhead = Number.isFinite(parsed) ? parsed : null;
+      } catch {
+        commitsAhead = null; // probe failed — unknown, not zero
+      }
+    }
+    const aheadOrUnknown = commitsAhead === null || commitsAhead > 0;
+    if (!dirty && !aheadOrUnknown) return null; // both probes cleanly agree: no longer holds work
+    const reason: RetainedWorktreeEntry["reason"] = dirty && aheadOrUnknown ? "both" : dirty ? "dirty-tree" : "unmerged-commits";
+    return { reason, commitsAhead };
   }
 }

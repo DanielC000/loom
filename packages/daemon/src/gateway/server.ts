@@ -783,6 +783,16 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     return getCapabilityProvisionStatus("github") ?? { state: "idle" };
   });
 
+  // --- Retained-worktree backlog (card 31df7e2f). HUMAN/REST-ONLY (loopback), NOT an MCP tool — same
+  // trust posture as the two provisioning pairs above (a human-only loopback read of daemon-internal
+  // state, mirroring GET /api/python/provisioning). Worktree paths and branch names are project-scoped
+  // data, but a human-only loopback read needs no `callerProjectId` filtering the way an agent-facing
+  // tool would (see sessions/service.ts's `gateQueueForManager` for that pattern) — this route is never
+  // exposed as an MCP tool and reads across all projects, same as the boot-log line it replaces. GC
+  // policy is untouched: this only LABELS what reconcileOrchestrationOnBoot's Pass B already decided to
+  // keep; it never reclaims or deletes anything.
+  app.get("/api/worktrees/retained", async () => deps.sessions.getRetainedWorktrees());
+
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {
     const { managerId } = req.query as { managerId?: string };
