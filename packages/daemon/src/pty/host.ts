@@ -542,8 +542,11 @@ const MODE_CYCLE_SETTLE_MS = 700;
  * so this is no longer purely observational timing — env-overridable (like the other constants in this
  * file) so a test can shrink it instead of eating a real ≥500ms wait per scenario.
  */
-const MODE_LOG_POLL_MS = Number(process.env.LOOM_MODE_LOG_POLL_MS) || 500;
-const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then log whatever we have
+// Exported (card 27c36293): kickoff-real-spawn.mjs derives its post-SessionStart delivery budget from
+// these two production constants instead of hardcoding a second copy that could silently drift out of
+// sync with this file.
+export const MODE_LOG_POLL_MS = Number(process.env.LOOM_MODE_LOG_POLL_MS) || 500;
+export const MODE_LOG_MAX_ATTEMPTS = 8; // ≤ ~4s of best-effort polling, then log whatever we have
 /**
  * Mode-convergence loop (cycleToMode, card f05e4897 / generalized in b99d3d67). Drives the footer to the
  * target ABSOLUTELY for BOTH a fresh spawn and a resume: press one Shift+Tab, then poll the footer until
@@ -577,7 +580,9 @@ const MODE_OVERRIDE_MAX_ATTEMPTS = Number(process.env.LOOM_MODE_OVERRIDE_MAX_ATT
  * mode-cycles land). If that hook never arrives, don't strand a queued boot injection forever —
  * mark ready after this grace so the message still drains. Env-overridable so tests don't wait 20s.
  */
-const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
+// Exported (card 27c36293) for the same reason as MODE_LOG_POLL_MS/MODE_LOG_MAX_ATTEMPTS above —
+// kickoff-real-spawn.mjs's real-child-boot budget derives from this production constant too.
+export const READY_FALLBACK_MS = Number(process.env.LOOM_READY_FALLBACK_MS) || 20_000;
 
 /**
  * Card df5e37e7: bound on waitForMcpSeen — how long a deferred resume-continuation nudge (see

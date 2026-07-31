@@ -70,10 +70,37 @@ fs.writeFileSync(wrapperPath, `@"${process.execPath}" "${FIXTURE_PATH}" %*\r\n`)
 process.env.LOOM_CLAUDE_BIN = wrapperPath;
 process.env.FIXTURE_DEBOUNCE_MS = "250"; // generous quiet-period so a paced writeChunked chain fully lands first
 
-const { PtyHost, buildSpawnArgs } = await import("../dist/pty/host.js");
+const { PtyHost, buildSpawnArgs, MODE_LOG_POLL_MS, MODE_LOG_MAX_ATTEMPTS, READY_FALLBACK_MS } = await import("../dist/pty/host.js");
 const { ensureDirs, WORKTREES_DIR } = await import("../dist/paths.js");
 ensureDirs();
 registerForCleanup(WORKTREES_DIR);
+
+// ============ Timeout budgets (card 27c36293) ============
+// Card 0050a17e made kickoff delivery GATE on logLandedMode's footer-read poll settling first (see that
+// function's own doc in pty/host.ts): up to MODE_LOG_MAX_ATTEMPTS polls of MODE_LOG_POLL_MS each, since
+// THIS fixture never presents a real mode-cycle footer (no HEALABLE_MODES read is ever possible), so the
+// poll always exhausts its full budget before onSettled fires — this is a DETERMINISTIC worst case, not a
+// guess. kickoff-real-spawn's original 15s post-SessionStart delivery budget was calibrated BEFORE
+// 0050a17e existed (delivery used to fire on the very next tick after markReady), so it never accounted
+// for this floor. Deriving it from the SAME exported production constants host.ts itself computes (rather
+// than hardcoding a second copy of "8" and "500") means this budget can never silently drift out of sync
+// with a future change to either constant — and honors env overrides transparently: LOOM_MODE_LOG_POLL_MS
+// inflates BOTH the real floor kickoff delivery waits on AND this derived budget together, which is what
+// let this fix be positive-controlled (a scratch run that inflated LOOM_MODE_LOG_POLL_MS to 3000 proved
+// the OLD fixed-15000ms formula times out at exactly that inflated floor while this derived formula
+// survives it — see this card's worker_report for the numbers; not embedded here as a test since it
+// depends on env mutation this file doesn't otherwise perform).
+const KICKOFF_PRE_DELIVERY_FLOOR_MS = MODE_LOG_MAX_ATTEMPTS * MODE_LOG_POLL_MS;
+// The FIXTURE_READY wait (real child process boot, BEFORE SessionStart/markReady ever runs) is NOT
+// touched by 0050a17e's floor at all — nothing about logLandedMode runs before the child has even booted.
+// It has no analogous code-level floor to derive from, so widening it "because it might be more
+// load-exposed" would be exactly the reflexive-widening move memory `engine-confirmation-can-lag...`
+// forbids. Instead: production ITSELF already budgets a real `claude` process up to READY_FALLBACK_MS to
+// reach SessionStart from a cold spawn before giving up and marking ready anyway (see that constant's own
+// doc) — this fixture's readiness line is a far cheaper signal than a real engine's full boot, so giving
+// it at least as much room as production's own readiness fallback is a documented, derived floor, not an
+// arbitrary pick.
+const FIXTURE_READY_TIMEOUT_MS = Math.max(15000, READY_FALLBACK_MS);
 
 const claudeMd = fs.readFileSync(path.join(REPO_ROOT, "CLAUDE.md"), "utf8");
 const workerSkill = fs.readFileSync(path.join(REPO_ROOT, ".claude", "skills", "worker", "SKILL.md"), "utf8");
@@ -156,7 +183,14 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
     host.live.get(sessionId)?.lastPrompt === kickoff);
 
   // Wait for the REAL child process to boot and announce readiness over the REAL pty's data stream.
-  await waitUntil(() => /FIXTURE_READY/.test(harness.text(sessionId)), { label: `${label} real fixture process signals FIXTURE_READY`, timeoutMs: 15000 });
+  // Elapsed time is printed on EVERY run (pass or fail — the `finally` runs even if waitUntil throws on
+  // timeout) so a gate rejection carries a real measured number instead of just a bare timeout message.
+  const readyWaitStartedAt = performance.now();
+  try {
+    await waitUntil(() => /FIXTURE_READY/.test(harness.text(sessionId)), { label: `${label} real fixture process signals FIXTURE_READY`, timeoutMs: FIXTURE_READY_TIMEOUT_MS });
+  } finally {
+    console.log(`   [measured ${label}] spawn()→FIXTURE_READY: ${Math.round(performance.now() - readyWaitStartedAt)}ms (budget ${FIXTURE_READY_TIMEOUT_MS}ms)`);
+  }
   check(`${label} the real child process never reported an extra positional argv entry`, !/FIXTURE_FAIL/.test(harness.text(sessionId)));
 
   // Simulate SessionStart (this fixture has no real mode-cycle footer to converge on) — this is what
@@ -164,10 +198,17 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
   host.deliverHook(sessionId, { hook_event_name: "SessionStart" });
 
   // Wait for the REAL child's short summary line (stable size regardless of kickoff size — see header),
-  // scaling the timeout with payload size since writeChunked paces large payloads over more real ticks.
-  const deliveryTimeoutMs = Math.max(15000, kickoff.length * 2);
-  await waitUntil(() => /FIXTURE_RECEIVED/.test(harness.text(sessionId)), { label: `${label} real fixture reports FIXTURE_RECEIVED`, timeoutMs: deliveryTimeoutMs });
-  console.log(`   [measured ${label}] spawn()→kickoff-landed: ${Math.round(performance.now() - spawnStartedAt)}ms (kickoff ${kickoff.length} chars)`);
+  // scaling the timeout with payload size since writeChunked paces large payloads over more real ticks,
+  // PLUS the documented pre-delivery floor (see KICKOFF_PRE_DELIVERY_FLOOR_MS above) that 0050a17e added
+  // between SessionStart and the kickoff's actual pty write.
+  const deliveryTimeoutMs = KICKOFF_PRE_DELIVERY_FLOOR_MS + Math.max(15000, kickoff.length * 2);
+  const deliveryWaitStartedAt = performance.now();
+  try {
+    await waitUntil(() => /FIXTURE_RECEIVED/.test(harness.text(sessionId)), { label: `${label} real fixture reports FIXTURE_RECEIVED`, timeoutMs: deliveryTimeoutMs });
+  } finally {
+    console.log(`   [measured ${label}] SessionStart→FIXTURE_RECEIVED: ${Math.round(performance.now() - deliveryWaitStartedAt)}ms (budget ${deliveryTimeoutMs}ms = ${KICKOFF_PRE_DELIVERY_FLOOR_MS}ms floor + ${Math.max(15000, kickoff.length * 2)}ms pacing, kickoff ${kickoff.length} chars)`);
+  }
+  console.log(`   [measured ${label}] spawn()→kickoff-landed (total): ${Math.round(performance.now() - spawnStartedAt)}ms (kickoff ${kickoff.length} chars)`);
 
   const receivedCount = (harness.text(sessionId).match(/FIXTURE_RECEIVED/g) || []).length;
   check(`${label} the kickoff was received exactly once (no duplicate delivery)`, receivedCount === 1);
