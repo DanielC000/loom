@@ -1641,6 +1641,14 @@ interface Live {
   // detector silently comparing `undefined` and never firing again for every subsequent turn.
   promptFieldAbsentDiagnosedOnce: boolean;
   lastPrompt: string | null; // the most-recent submitted turn — re-sendable if the cap kills it (§19c-b)
+  // Card 25813ecc: the ORIGINAL fresh-spawn kickoff intent, seeded ONCE at spawn() from
+  // `opts.startupPrompt ?? null` and never written again by anything else — unlike `lastPrompt`, which
+  // every submit() (including a resume's drainPending-triggered delivery of a QUEUED message) unconditionally
+  // overwrites. `markReady` reads THIS field, not `lastPrompt`, to decide what "the kickoff" is — so the
+  // answer is correct by construction (it names the one thing that can never be another turn's text),
+  // not by capturing `lastPrompt` before some other write gets a chance to clobber it. A resume/fork never
+  // passes `opts.startupPrompt`, so this is null there — no kickoff to guarantee, exactly as intended.
+  startupPrompt: string | null;
   // Card 0f9268cc: the raw-terminal-channel counterpart of `lastPrompt`, so the paste-tripwire can see a
   // paste/long text typed or pasted directly into the terminal panel (/ws/term -> writeStdin), NOT just a
   // structured submit() turn. `lastPrompt` is set ONLY by submit(); writeStdin never touched it, so a
@@ -3147,6 +3155,7 @@ export class PtyHost {
       // carries NO companion route (a startup turn is never a companion inbound), so the route fields
       // start null.
       lastPrompt: opts.startupPrompt ?? null,
+      startupPrompt: opts.startupPrompt ?? null, // immutable kickoff intent — see field's own doc
       lastRawSubmit: null,
       pendingRawOwnerSubmit: null,
       pendingRawOwnerSubmitAt: null,
@@ -3308,7 +3317,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -3386,7 +3395,7 @@ export class PtyHost {
       busy: false, ready: true, busySince: null,
       mcpSeen: true, mcpSeenWaiters: [], // a shell/canned entry never mounts loom-orchestration — inert/unreachable, seeded true like ready
       lastOutputAt: Date.now(), composerLen: 0, composerDirtyLen: 0, composerDirtyLenClearedByGen: null, composerDirtyMarkedForGen: null, rawDraftText: "",
-      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, lastRawSubmit: null,
+      pending: [], stopping: false, drainHeld: false, rateLimited: false, transcriptMissingDiagnosedOnce: false, promptFieldAbsentDiagnosedOnce: false, lastPrompt: null, startupPrompt: null, lastRawSubmit: null,
       pendingRawOwnerSubmit: null, pendingRawOwnerSubmitAt: null,
       firstTurnStarted: true, // not applicable (no kickoff to guarantee) — seeded true so the fresh-spawn checks are trivially satisfied
       enterConfirmed: true, // not applicable (deliverHook/submit's verify-retry never runs for a shell/canned kind)
@@ -4979,9 +4988,14 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive) return;
     // Card 441499ee: remember the ORIGINAL queued message(s) this turn's text came from — see
-    // `Live.giveUpOrigin`'s doc. `origin` is undefined for the two direct submit() callers that don't
-    // originate from enqueueStdin (rate-limit replay, kickoff guarantee), so this stays byte-identical
-    // (null) for them, exactly like every other per-turn field this change didn't touch.
+    // `Live.giveUpOrigin`'s doc. Of the two direct submit() callers that don't originate from
+    // enqueueStdin, only resumeAfterRateLimit's "rate-limit-replay" still calls with `origin` undefined
+    // (a give-up there has no origin to restore — unchanged), so this stays byte-identical (null) for
+    // it. `scheduleKickoffGuarantee`'s "kickoff-guarantee" caller is NO LONGER one of these — card
+    // 0050a17e gave it a synthetic single-element origin (see that call site) once it became the PRIMARY
+    // delivery path for every spawn, so an unconfirmed give-up there now correctly re-queues instead of
+    // discarding. (Card 25813ecc: this comment previously listed both callers as origin-less — stale
+    // since 0050a17e; see `Live.giveUpOrigin`'s own doc, which was updated correctly at the time.)
     live.giveUpOrigin = origin ?? null;
     // DIAGNOSTIC ONLY (card 1f74080a instrumentation, no control-flow change): `reason` names WHICH of the
     // four call sites is writing this turn — the two queue-mediated ones ("immediate"/"drain", both already
@@ -6091,17 +6105,19 @@ export class PtyHost {
     const live = this.live.get(sessionId);
     if (!live?.alive || live.ready) return;
     live.ready = true;
+    // Card 25813ecc (fixes a live regression 0050a17e/b4fa85a4 introduced): capture the kickoff from
+    // `live.startupPrompt` — the IMMUTABLE field seeded once at spawn() — BEFORE `drainPending` runs
+    // below. `live.lastPrompt` is NOT safe to read here: `drainPending` calls `submit()` for any queued
+    // message (a resume's queue is normally non-empty — companion/project-memory recall, redriven
+    // undelivered messages, all enqueued before ready), and `submit()` unconditionally overwrites
+    // `live.lastPrompt` with whatever IT is currently submitting. Reading `lastPrompt` AFTER that drain —
+    // as this code used to — captured the DRAINED message instead of the real kickoff on a resume, and
+    // scheduleKickoffGuarantee then redelivered it a second time. `startupPrompt` never receives such a
+    // write (only submit() touches lastPrompt; nothing ever touches startupPrompt past spawn()), so
+    // reading it is correct by construction, not by statement order — no future reordering of the lines
+    // below can reintroduce this bug.
+    const kickoff = live.startupPrompt != null && !live.firstTurnStarted ? live.startupPrompt : null;
     this.drainPending(sessionId); // deliver the first queued injection now that the composer is live (synchronous; see its own doc — never races logLandedMode's read, which only starts polling MODE_LOG_POLL_MS from now)
-    // Card 0050a17e (Code Review catch #1): CAPTURE the kickoff SYNCHRONOUSLY, right now — a later
-    // unrelated drain (e.g. the queued nudge drainPending just delivered above starting its own submit())
-    // must never change what gets replayed. `submit()` unconditionally overwrites `live.lastPrompt` with
-    // whatever IT is currently submitting, so capturing this LATE — e.g. inside logLandedMode's own
-    // deferred `onSettled` callback below — would silently swap in that OTHER text instead of the real
-    // kickoff (a live-verified regression this exact restructuring introduced once, caught before landing:
-    // capturing inside the gated callback let a drained nudge's own text get requeued as "the kickoff").
-    // scheduleKickoffGuarantee's OWN doc already documents this "capture NOW" principle for its internal
-    // setTimeout; this generalizes the same principle across the newly-added logLandedMode gate too.
-    const kickoff = live.lastPrompt != null && !live.firstTurnStarted ? live.lastPrompt : null;
     // Card 0050a17e (Code Review catch #2): logLandedMode's footer read + role-gated plan auto-heal (its
     // own Shift+Tab writes) must SETTLE before the kickoff DELIVERY (the actual pty write) ever happens —
     // both READ the same ring buffer / WRITE to the same pty, and now that delivery fires on the next tick
@@ -6123,16 +6139,17 @@ export class PtyHost {
    * auto-type/auto-submit timing risk instead of racing it.
    *
    * Called exactly once per session from markReady (which itself only proceeds once, guarded by
-   * `live.ready`) — `markReady` captures `kickoff` itself, synchronously, BEFORE calling this (see its own
-   * doc: a later unrelated drain must never change what gets replayed), and passes it in here as a plain
-   * parameter — this function no longer re-reads `live.lastPrompt` itself, precisely so its OWN call site
-   * (now reached asynchronously, after logLandedMode's gate settles) can never observe a value some other
-   * submit() has since overwritten. Deliberately still deferred by one further tick (`setTimeout(…, 0)`)
-   * past ITS OWN call site — by the time markReady's caller (logLandedMode's `onSettled`) invokes this,
-   * real asynchronous work has already happened (the mode-read poll, possibly a heal), so the extra tick
-   * here is defense-in-depth, not load-bearing the way capturing `kickoff` early is.
+   * `live.ready`) — `markReady` captures `kickoff` itself, synchronously, from the IMMUTABLE
+   * `live.startupPrompt` field (see that field's own doc and card 25813ecc), and passes it in here as a
+   * plain parameter — this function never reads `live.lastPrompt` itself, and `startupPrompt` is written
+   * exactly once (at spawn()) and never again, so there is no "some other submit() has since overwritten
+   * it" window to worry about here AT ALL — correct by construction, not by capture timing. Deliberately
+   * still deferred by one further tick (`setTimeout(…, 0)`) past ITS OWN call site — by the time
+   * markReady's caller (logLandedMode's `onSettled`) invokes this, real asynchronous work has already
+   * happened (the mode-read poll, possibly a heal), so the extra tick here is defense-in-depth, not
+   * load-bearing the way capturing `kickoff` from an immutable field is.
    *
-   * Fires for EVERY startup-prompt spawn, not just a fresh worker_spawn: `live.lastPrompt` is seeded
+   * Fires for EVERY startup-prompt spawn, not just a fresh worker_spawn: `live.startupPrompt` is seeded
    * from `opts.startupPrompt` at spawn (see spawn()), and recycleWorker/recycleManager/the platform-lead
    * recycle ALL pass a real handoff prompt through that SAME path (a fresh startup-prompt spawn,
    * deliberately not `--resume`, so the recycled session doesn't drag the old context forward) — so a
@@ -6141,8 +6158,9 @@ export class PtyHost {
    *
    * A no-op ONLY for resume and fork: neither ever passes `opts.startupPrompt` (a resume's continuation
    * is injected via enqueueStdin post-boot, not a startup turn — and boot-reconcile's resume path is
-   * covered by the SAME resume mechanics, not this one), so `lastPrompt` stays null there and markReady's
-   * own capture never calls this at all in that case, leaving their behavior byte-identical.
+   * covered by the SAME resume mechanics, not this one), so `startupPrompt` stays null there and
+   * markReady's own capture never calls this at all in that case — genuinely byte-identical now, since
+   * `startupPrompt`, unlike `lastPrompt`, is never written by a resume's own pre-ready drain.
    */
   private scheduleKickoffGuarantee(sessionId: string, kickoff: string): void {
     setTimeout(() => {
