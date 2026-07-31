@@ -155,3 +155,72 @@ export function appendNdjson(filePath, record) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.appendFileSync(filePath, JSON.stringify(record) + "\n");
 }
+
+// Reads an NDJSON file into an array of parsed row objects. A missing file reads as `[]` (a fresh
+// census file legitimately doesn't exist yet), not an error.
+export function readNdjson(filePath) {
+  if (!fs.existsSync(filePath)) return [];
+  return fs.readFileSync(filePath, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
+}
+
+// Card f106f28e: refuses LOUDLY (throws, naming the colliding index) if `runIndex` already appears among
+// `existingRows` for `phase`. This is the read-back that was previously entirely absent —
+// phase2-baseline.mjs used to derive `runIndex` from `--start`/`--count` argv alone, so a replacement
+// invocation racing an original that was still running (a `worker_redirect` that interrupted the worker's
+// turn but not its detached background task) silently appended a second row at the same index
+// (raw/baseline.ndjson rows 4 & 5, both runIndex:4). Per `ambiguity-fail-toward-duplicate-never-loss`:
+// refusing the write is the safe direction — the run itself is reproducible, a silently-duplicated
+// dataset is not.
+export function assertRunIndexAvailable(existingRows, runIndex, phase) {
+  const collision = existingRows.find((r) => r.phase === phase && r.runIndex === runIndex);
+  if (collision) {
+    throw new Error(
+      `runIndex ${runIndex} already exists for phase "${phase}" (recorded at ${collision.ts}) — refusing to append a duplicate row. Pass a different --start, or omit --start to derive the next free index from the file.`,
+    );
+  }
+}
+
+// The next free `runIndex` for `phase`, derived from the file itself (max existing + 1, or 1 if none) —
+// so two concurrent invocations that both omit `--start` don't independently mint the same label.
+// `--start` still lets a deliberate re-run override this default; `assertRunIndexAvailable` above gates
+// the result either way, so an explicit override that collides is still refused, never silently accepted.
+export function nextRunIndex(existingRows, phase) {
+  const indices = existingRows.filter((r) => r.phase === phase).map((r) => r.runIndex);
+  return indices.length ? Math.max(...indices) + 1 : 1;
+}
+
+// A row's wall-clock window. Prefers hostBefore.ts/hostAfter.ts — sampled right around the actual test
+// run — over the row's own top-level `ts`, which is sampled at record-construction time, after the run
+// has already finished (so it approximates the window's END, not a useful START).
+function rowWindow(row) {
+  return { start: row.hostBefore?.ts ?? row.ts, end: row.hostAfter?.ts ?? row.ts };
+}
+
+// Card f106f28e DoD #4/#5: which of `existingRows`' wall-clock windows overlap `newRow`'s, for `phase` —
+// COMPUTED from hostBefore/hostAfter timestamps only, never self-reported (the prior `knownConcurrentActivity`
+// free-text annotation was FALSE for row 1 — it missed an entire merge gate overlap — which is exactly why
+// classification must key on a measured covariate, not an annotation). Returns the colliding runIndex
+// values, sorted ascending. Does not refuse anything — an overlapping run is still real data (e.g. the
+// accidental load-stress arm behind card 28279371), just flagged so a reader doesn't have to re-derive
+// the overlap by hand the way the f106f28e audit did.
+export function computeOverlappingRunIndices(existingRows, newRow, phase) {
+  const { start: newStart, end: newEnd } = rowWindow(newRow);
+  const overlapping = [];
+  for (const row of existingRows) {
+    if (row.phase !== phase) continue;
+    const { start, end } = rowWindow(row);
+    if (newStart < end && start < newEnd) overlapping.push(row.runIndex);
+  }
+  return overlapping.sort((a, b) => a - b);
+}
+
+// Card f106f28e DoD #3: summarizes which of a `runCensusBatch()` `results` array actually EXECUTED (a
+// result is `skipped:true` only when `runOneTimed` couldn't resolve the test's file — see its own
+// `fs.existsSync` check). Without this, a persisted row's `testCount` is a PRE-COMPUTED CONSTANT set
+// before any test runs, and `failed` is a pure blacklist of non-ok results — so `failedCount: 0` cannot
+// distinguish "ran and passed" from "silently never ran". Bounded: one name per test (~585), never full
+// output.
+export function summarizeExecuted(results) {
+  const executed = results.filter((r) => !r.skipped);
+  return { executedCount: executed.length, executedNames: executed.map((r) => r.name).sort() };
+}
