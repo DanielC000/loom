@@ -355,9 +355,12 @@ export class PendingOpRegistry {
    * is treated as a miss — falls through to the same fresh-mint path as a genuine cache miss below — while
    * the cache is still WRITTEN on every settle exactly as always (this predicate only gates the READ,
    * mirroring `bypassRetained`'s own read/write split). Never consulted for an `ok:false` (thrown error)
-   * retained hit — an error carries no analogous staleness signal, so those are unaffected. Omit it (every
-   * call site except `runWorkerGate`, today) and behavior is byte-identical to before this existed — a
-   * retained hit is always usable.
+   * retained hit — an error carries no analogous staleness signal, so those are unaffected. Re-serving one
+   * is also the SAFER choice, not merely the default: for merge, a throw can strike after the squash
+   * already landed, so re-running risks compounding an unknown mid-mutation state; for gate, this window
+   * answers whether an already-kicked-off run finished, not whether to retry. Omit it (every call site
+   * except `runWorkerGate`, today) and behavior is byte-identical to before this existed — a retained hit
+   * is always usable.
    *
    * SINGLE-FLIGHT UNDER REPEATED REJECTION: this predicate only changes which VALUES pass the retained-hit
    * check above — it never touches the RUNNING-entry branch at the top of this method. So even a caller
@@ -430,8 +433,12 @@ export class PendingOpRegistry {
       if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt) {
         // USABILITY GATE (card 79b0ee52): an `ok:false` hit, or an `ok:true` hit with no
         // `isRetainedResultUsable` opt, is unconditionally usable — byte-identical to before this opt
-        // existed. An `ok:true` hit whose value the predicate rejects is treated as a MISS: falls through
-        // to the fresh-mint path below instead of returning here, exactly like a genuine cache miss.
+        // existed. The `ok:false` half is a DELIBERATE, pre-existing contract from card 33172f01 (predates
+        // this opt) — locked by test/pending-ops-registry.mjs's "(retain dedupe/failed)" cases, not a gap
+        // for this opt to also close; see this method's own `isRetainedResultUsable` doc for why re-serving
+        // an error is correct. An `ok:true` hit whose value the predicate rejects is treated as a MISS:
+        // falls through to the fresh-mint path below instead of returning here, exactly like a genuine
+        // cache miss.
         const usable = !retainedHit.rawOutcome.ok || !opts?.isRetainedResultUsable || opts.isRetainedResultUsable(retainedHit.rawOutcome.value as T);
         if (usable) {
           return retainedHit.rawOutcome.ok
