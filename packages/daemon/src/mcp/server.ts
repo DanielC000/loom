@@ -270,7 +270,12 @@ export class TaskMcpRouter {
           "`text` is the note body. `pinned:true` marks it especially important — pinned notes are " +
           "injected IN FULL on EVERY kickoff and are never auto-evicted; leave it false/omitted for a note " +
           "that should surface only when it's RELEVANT (matched by full-text search against the kickoff/" +
-          "task text). Optional `title` (short label, max 200 chars) and `tags` (string[]). Write " +
+          "task text). Pinned notes are delivered newest-updated first when the digest budget can't fit " +
+          "them all, so an old, untouched-but-critical pinned note can still be dropped — tag it " +
+          "`\"never-drop\"` (via `tags`) to pack it ahead of every other pinned note; a dropped never-drop " +
+          "note is reported as a distinct ALARM (not routine overflow) so a broken guarantee is never " +
+          "silent, but it can still fail to fit if it alone exceeds the whole budget. Optional `title` " +
+          "(short label, max 200 chars) and `tags` (string[]). Write " +
           "declarative facts/decisions worth remembering across sessions, not throwaway task chatter — " +
           "`text` is capped at 4000 bytes (a short, curated note, not a dumping ground); a too-long write " +
           "is rejected with `bytesOver` + the current note (if any) so you can trim without re-fetching. " +

@@ -59,7 +59,10 @@ try {
   {
     const pinned = [mk({ id: "p1", key: "b-key", text: "pinned B text" }), mk({ id: "p2", key: "a-key", text: "pinned A text" })];
     const { digest, includedIds } = composeProjectMemoryDigest(pinned, [], 4000);
-    check("(compose) pinned notes ride in full, key-sorted", digest.indexOf("a-key") < digest.indexOf("b-key"));
+    // card 15503722: pinned order is recency (updatedAt) then key-ascending tiebreak — these two fixtures
+    // share one `now` timestamp, so the tiebreak alone decides here; the full recency behavior is covered
+    // in project-memory-pinned-order.mjs against a real, timestamp-varied corpus.
+    check("(compose) pinned notes ride in full, tiebreak-sorted by key under equal timestamps", digest.indexOf("a-key") < digest.indexOf("b-key"));
     check("(compose) pinned notes' text is included verbatim", digest.includes("pinned A text") && digest.includes("pinned B text"));
     check("(compose) includedIds carries both pinned ids", includedIds.length === 2 && includedIds.includes("p1") && includedIds.includes("p2"));
   }

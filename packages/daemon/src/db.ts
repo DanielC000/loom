@@ -5508,8 +5508,14 @@ export class Db {
   deleteProjectMemory(projectId: string, key: string): boolean {
     return this.db.prepare("DELETE FROM project_memory WHERE project_id = ? AND key = ?").run(projectId, key).changes > 0;
   }
-  /** Always-injected tier (kickoff injection §3) — every pinned note, newest-updated first. Pinned rows are
-   *  never evicted and never counted against `maxNotes` (owner decision #2). */
+  /** Always-injected tier (kickoff injection §3) — every pinned note, newest-updated first as fetched.
+   *  Pinned rows are never evicted and never counted against `maxNotes` (owner decision #2). Card
+   *  15503722: this SQL order is a reasonable default fetch order, NOT the authoritative delivery order —
+   *  `composeProjectMemoryDigest` re-derives its own order over these rows (recency + a `never-drop` floor
+   *  sub-tier) rather than trusting caller order, precisely because trusting it once already let this
+   *  comment's claim go silently false (the compose function discarded this order for a key-alphabetical
+   *  sort). Don't let this comment go stale the same way again — if the delivery order ever changes, it
+   *  changes in `composeProjectMemoryDigest`, not by relying on this query's order. */
   listPinnedProjectMemory(projectId: string): ProjectMemoryEntry[] {
     return (this.db.prepare("SELECT * FROM project_memory WHERE project_id = ? AND pinned = 1 ORDER BY updated_at DESC")
       .all(projectId) as Row[]).map(toProjectMemoryEntry);

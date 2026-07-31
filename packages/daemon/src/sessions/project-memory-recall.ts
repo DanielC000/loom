@@ -43,6 +43,24 @@ import { annotateRequestLinks } from "./project-memory-request-links.js";
 
 export const PROJECT_MEMORY_TAG = "[loom:project-memory]";
 
+/** Card 15503722 — a note carrying this tag in its (existing, free-form) `tags` field is packed FIRST
+ *  within the pinned tier, ahead of every other pinned note, regardless of recency. No DB/API change:
+ *  reuses `ProjectMemoryEntry.tags`, already writable via `memory_write`. Not a hard guarantee — a
+ *  never-drop note can still fail to fit if it (or the sum of several never-drop notes) alone exceeds the
+ *  whole budget; that case is reported as a distinct, louder ALARM rather than silently, see
+ *  `composeProjectMemoryDigest`. */
+export const NEVER_DROP_TAG = "never-drop";
+
+/** How many dropped keys `composeProjectMemoryDigest`'s overflow/alarm lines list by name before folding
+ *  the rest into a "+N more" — keeps those lines bounded even against a pathological corpus (pinned notes
+ *  are never evicted/capped, so the dropped-count itself has no upper bound). */
+const MAX_LISTED_DROPPED_KEYS = 8;
+
+function summarizeDroppedKeys(keys: string[]): string {
+  if (keys.length <= MAX_LISTED_DROPPED_KEYS) return keys.join(", ");
+  return `${keys.slice(0, MAX_LISTED_DROPPED_KEYS).join(", ")}, +${keys.length - MAX_LISTED_DROPPED_KEYS} more`;
+}
+
 const SECTION_SEP = "\n\n";
 
 /** Cheap token estimate — no tokenizer, no API call (the v1 "zero metered tokens" constraint applies to
@@ -69,19 +87,48 @@ function noteBlock(m: ProjectMemoryEntry, annotations: string[] = []): string {
   return lines.join("\n");
 }
 
+function isNeverDrop(m: ProjectMemoryEntry): boolean {
+  return m.tags?.includes(NEVER_DROP_TAG) ?? false;
+}
+
+/** Card 15503722 — the pinned tier's delivery-order signal: newest `updatedAt` first, `key` ascending as
+ *  a deterministic tiebreak (fixtures — and real notes bulk-written in the same instant — often share one
+ *  timestamp). Chosen over `retrievalCount` (self-reinforcing: a note the OLD key-alphabetical bug was
+ *  already dropping has `retrievalCount:0` and would stay 0 forever, so ranking by it would permanently
+ *  entrench exactly the notes the bug already favoured) and over raw key order (arbitrary — spelling and
+ *  note size, not importance, decided who survived). Known, NOT solved, limitations: an old-but-important
+ *  note nobody has touched recently still ranks low (see NEVER_DROP_TAG for the escape hatch), and editing
+ *  ANY note's text bumps `updatedAt` and can leapfrog it ahead of an untouched, more important note — a
+ *  trivial wording fix can outrank real value. This is a heuristic with known edges, not a settled policy. */
+function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[] {
+  return [...entries].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt) || a.key.localeCompare(b.key));
+}
+
 /**
  * Compose the two-tier digest body (no framing tag) — deterministic, side-effect-free, hermetically
  * testable with fixture entries (no DB). Mirrors companion/memory-recall.ts's composeMemoryRecallDigest
- * shape: PINNED first (key-sorted, against the full budget), then RELATED (caller-ranked — FTS5 `rank`
- * order — against whatever budget remains), each built incrementally so the byte/token check is always
- * against the ACTUAL joined candidate string. Returns the digest plus the ids of notes actually INCLUDED
- * (the caller bumps `lastRetrievedAt`/`retrievalCount` only for those — a note dropped for budget was
- * never really "retrieved" into context). `null` digest ⇒ nothing to inject (both tiers empty, or nothing
- * fit at all).
+ * shape: PINNED first, then RELATED (caller-ranked — FTS5 `rank` order — against whatever budget
+ * remains), each built incrementally so the byte/token check is always against the ACTUAL joined
+ * candidate string. Returns the digest plus the ids of notes actually INCLUDED (the caller bumps
+ * `lastRetrievedAt`/`retrievalCount` only for those — a note dropped for budget was never really
+ * "retrieved" into context), plus `droppedFloorKeys`/`droppedRestKeys` for the caller to log. `null`
+ * digest ⇒ nothing to inject (both tiers empty, or nothing fit at all).
  *
- * PINNED tier packs MAXIMALLY: an oversized pinned note that alone would overflow the budget is SKIPPED
- * (`continue`), never `break` — "pinned ALWAYS injected" is the feature's headline promise, so one bloated,
- * key-early pinned note must never suppress every other (possibly small, critical) pinned note behind it.
+ * PINNED delivery order (card 15503722 — replaces the original key-alphabetical sort, which delivered
+ * notes by spelling and size, not importance: `db.ts`'s `listPinnedProjectMemory` doc comment already
+ * stated the intended order was "newest-updated first," but this function silently discarded that order
+ * and re-sorted by key instead — a specimen of this project's own `a-comment-is-a-claim` rule: the DB
+ * layer's comment asserted an order its own consumer threw away). Two sub-tiers, each internally ordered
+ * by {@link sortPinnedByRecency}:
+ *   1. FLOOR — any note tagged {@link NEVER_DROP_TAG}. Packed FIRST, so it can only fail to survive if it
+ *      (or the sum of several floor notes) alone exceeds the WHOLE budget — reported as a distinct, louder
+ *      ALARM (`droppedFloorKeys`), never folded into the routine overflow signal (an alarm that reads like
+ *      routine overflow is an alarm nobody notices).
+ *   2. REST — every other pinned note, recency-ordered, reported via the routine `droppedRestKeys` signal.
+ * Both sub-tiers still pack MAXIMALLY within their own pass: an oversized note is SKIPPED (`continue`),
+ * never `break` — "pinned ALWAYS injected" is the feature's headline promise, so one bloated note must
+ * never suppress every other (possibly small, critical) note behind it in the SAME sub-tier.
+ *
  * RELATED tier still `break`s at the first overflow — a rank-ordered PREFIX is the correct truncation there
  * (the top-ranked matches are the ones worth keeping; skipping past a big one to pack a worse-ranked one
  * would invert the ranking).
@@ -95,21 +142,54 @@ export function composeProjectMemoryDigest(
    *  entries with no DB) stays byte-identical. The real caller ({@link retrieveProjectMemoryForKickoff})
    *  passes a callback backed by {@link annotateRequestLinks}. */
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
-): { digest: string | null; includedIds: string[] } {
-  if (pinned.length === 0 && related.length === 0) return { digest: null, includedIds: [] };
+): { digest: string | null; includedIds: string[]; droppedFloorKeys: string[]; droppedRestKeys: string[] } {
+  if (pinned.length === 0 && related.length === 0) {
+    return { digest: null, includedIds: [], droppedFloorKeys: [], droppedRestKeys: [] };
+  }
   const includedIds: string[] = [];
 
-  const pinnedSorted = [...pinned].sort((a, b) => a.key.localeCompare(b.key));
+  const floorSorted = sortPinnedByRecency(pinned.filter(isNeverDrop));
+  const restSorted = sortPinnedByRecency(pinned.filter((m) => !isNeverDrop(m)));
+  const pinnedOrdered = [...floorSorted, ...restSorted];
+
   let pinnedSection: string | null = null;
+  const droppedFloorKeys: string[] = [];
+  const droppedRestKeys: string[] = [];
   {
     const blocks: string[] = [];
-    for (const m of pinnedSorted) {
+    for (const m of pinnedOrdered) {
       const block = noteBlock(m, annotate(m));
       const candidate = ["## Pinned project memory (always included)", ...blocks, block].join(SECTION_SEP);
-      if (estimateTokens(candidate) > budgetTokens) continue; // pack maximally: skip an oversized note, keep trying the rest
+      if (estimateTokens(candidate) > budgetTokens) {
+        // pack maximally: skip an oversized note, keep trying the rest of THIS note's own sub-tier
+        (isNeverDrop(m) ? droppedFloorKeys : droppedRestKeys).push(m.key);
+        continue;
+      }
       blocks.push(block);
       pinnedSection = candidate;
       includedIds.push(m.id);
+    }
+    // Loud overflow (card 15503722) — added UNCONDITIONALLY once known, never itself skipped for being
+    // over budget: gating it behind the same budget check it exists to report on would let a tight budget
+    // suppress the very warning that flags the tight budget. It still counts toward `usedTokens` below
+    // (computed from the FINAL pinnedSection), so the related tier doesn't over-pack on top of it — the
+    // overall digest stays close to budgetTokens even though these lines aren't budget-gated themselves.
+    // Bounded in size regardless of corpus (see MAX_LISTED_DROPPED_KEYS), so this can't itself balloon the
+    // digest. The floor alarm is a DIFFERENT signal from the routine line on purpose — "a note declared
+    // undroppable was dropped" is an alarm about a broken guarantee, "the budget overflowed" is routine;
+    // collapsing them would let the alarm arrive wearing the routine case's costume.
+    if (droppedFloorKeys.length > 0) {
+      const alarmLine = `🚨 ALARM: ${droppedFloorKeys.length} note(s) tagged "${NEVER_DROP_TAG}" were STILL DROPPED ` +
+        `(their own size exceeds the budget) — this is a BROKEN GUARANTEE, not routine overflow: ${summarizeDroppedKeys(droppedFloorKeys)}`;
+      pinnedSection = pinnedSection
+        ? [pinnedSection, alarmLine].join(SECTION_SEP)
+        : ["## Pinned project memory (always included)", alarmLine].join(SECTION_SEP);
+    }
+    if (droppedRestKeys.length > 0) {
+      const overflowLine = `⚠️ ${droppedRestKeys.length} pinned note(s) dropped for budget: ${summarizeDroppedKeys(droppedRestKeys)}`;
+      pinnedSection = pinnedSection
+        ? [pinnedSection, overflowLine].join(SECTION_SEP)
+        : ["## Pinned project memory (always included)", overflowLine].join(SECTION_SEP);
     }
   }
   const usedTokens = pinnedSection ? estimateTokens(pinnedSection) : 0;
@@ -131,7 +211,7 @@ export function composeProjectMemoryDigest(
   }
 
   const sections = [pinnedSection, relatedSection].filter((s): s is string => s != null);
-  return { digest: sections.length > 0 ? sections.join(SECTION_SEP) : null, includedIds };
+  return { digest: sections.length > 0 ? sections.join(SECTION_SEP) : null, includedIds, droppedFloorKeys, droppedRestKeys };
 }
 
 /** Frame a digest as SILENT, untrusted-adjacent DATA/CONTEXT — never a new instruction, never able to
@@ -154,9 +234,9 @@ export function buildFramedProjectMemory(
   related: ProjectMemoryEntry[],
   budgetTokens: number,
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
-): { framed: string | null; includedIds: string[] } {
-  const { digest, includedIds } = composeProjectMemoryDigest(pinned, related, budgetTokens, annotate);
-  return { framed: digest == null ? null : framedProjectMemory(digest), includedIds };
+): { framed: string | null; includedIds: string[]; droppedFloorKeys: string[]; droppedRestKeys: string[] } {
+  const { digest, includedIds, droppedFloorKeys, droppedRestKeys } = composeProjectMemoryDigest(pinned, related, budgetTokens, annotate);
+  return { framed: digest == null ? null : framedProjectMemory(digest), includedIds, droppedFloorKeys, droppedRestKeys };
 }
 
 /**
@@ -166,6 +246,11 @@ export function buildFramedProjectMemory(
  * byte-identical to before this feature) when the project has zero memory notes — the additive guarantee.
  * `kickoffText` empty/whitespace ⇒ pinned-only (no FTS query is issued — `searchProjectMemory` would
  * reject an empty MATCH anyway; skipping it here avoids the round-trip).
+ *
+ * Card 15503722 — the SECOND overflow-visibility surface (the first is the in-digest line itself, seen by
+ * the spawned agent): a daemon log line for a human/dev scanning logs. `console.error` for a
+ * `NEVER_DROP_TAG` drop (a broken guarantee — an operational alarm), `console.warn` for a routine budget
+ * drop — kept as two distinct calls so the alarm doesn't read as routine in the logs either.
  */
 export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kickoffText: string): string | null {
   const project = db.getProject(projectId);
@@ -175,7 +260,20 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const related = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
   if (pinned.length === 0 && related.length === 0) return null;
   const annotate = (m: ProjectMemoryEntry) => annotateRequestLinks(db, projectId, m.requestIds);
-  const { framed, includedIds } = buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate);
+  const { framed, includedIds, droppedFloorKeys, droppedRestKeys } =
+    buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate);
+  if (droppedFloorKeys.length > 0) {
+    console.error(
+      `[project-memory] ALARM project ${projectId}: ${droppedFloorKeys.length} "${NEVER_DROP_TAG}"-tagged ` +
+      `pinned note(s) dropped for budget (broken guarantee): ${summarizeDroppedKeys(droppedFloorKeys)}`,
+    );
+  }
+  if (droppedRestKeys.length > 0) {
+    console.warn(
+      `[project-memory] project ${projectId}: ${droppedRestKeys.length} pinned note(s) dropped for budget: ` +
+      summarizeDroppedKeys(droppedRestKeys),
+    );
+  }
   if (framed) db.touchProjectMemoryRetrieved(includedIds);
   return framed;
 }
