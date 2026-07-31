@@ -42,6 +42,15 @@
 //     `"__NULL__"` is a non-failure; `"__FAIL__"` and `"__NONJSON__"` must both resolve `failed:true`
 //     (never a fabricated build), and they are INDEPENDENT failure paths (a non-zero exit vs. malformed
 //     stdout at exit 0), not one case wearing two names.
+//     Card f0718488 (version-probe retry-on-timeout): env `FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS=N` makes
+//     the first N `--version` invocations (counted PER CWD, via a `fake-codescape-version-hangs.count`
+//     file written alongside the calls log — so parallel scenarios using distinct homeDirs never share a
+//     counter) HANG — never write stdout, never exit — genuinely exercising the daemon's own bounded
+//     subprocess timeout (`runBoundedSplit`'s timer kills it), the same shape a real host-contention stall
+//     produces. Invocation N+1 onward responds normally per `FAKE_CODESCAPE_INSTALLED_BUILD` as above. Lets
+//     a test drive "timeout once, then succeed on retry" (N=1) or "always times out" (N >= max attempts)
+//     without any wall-clock assertion on the RETRY LOGIC itself — only the fixture's own hang duration is
+//     wall-clock (bounded by the caller's `versionProbeTimeoutMs`), same as every other timeout in this file.
 //   - `mcp --graph <path>` — records the call, prints a "server ready on stdio" line (mirrors the real
 //     CLI's own startup line), then stays alive reading stdin (a real stdio MCP server would too) until
 //     killed — never actually speaks JSON-RPC (no test here exercises the protocol, only the spawn shape).
@@ -70,15 +79,33 @@ if (args[0] === "ingest") {
   }
   process.exit(0);
 } else if (args[0] === "--version") {
-  const raw = process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
-  if (raw === "__FAIL__") {
-    // The real CLI's actual shape today: non-zero exit, EMPTY stdout, usage banner on STDERR ONLY.
-    process.stderr.write("usage: codescape ingest <path-to-loom> ...\n       codescape diff ... / mcp ... / mcp-usage ... / serve ...\n");
-    process.exit(1);
-  }
-  if (raw === "__NONJSON__") { console.log("not json"); process.exit(0); } // exit 0 but malformed stdout (hypothetical defect)
-  console.log(JSON.stringify({ version: "fake", build: raw === "__NULL__" ? null : (raw === undefined ? "fake" : raw) }));
-  process.exit(0);
+  // Wrapped in a function so the hang branch can `return` early — `setInterval` does NOT block, so
+  // without an early return the code below it would still run synchronously and defeat the hang.
+  (function runVersion() {
+    const hangAttempts = Number(process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS || "0");
+    if (hangAttempts > 0) {
+      const counterFile = path.join(cwd, "fake-codescape-version-hangs.count");
+      let prior = 0;
+      try { prior = Number(fs.readFileSync(counterFile, "utf8")) || 0; } catch { /* first invocation — starts at 0 */ }
+      const invocationNumber = prior + 1;
+      fs.writeFileSync(counterFile, String(invocationNumber));
+      if (invocationNumber <= hangAttempts) {
+        // Never write stdout, never exit — the caller's own bounded timeout (runBoundedSplit) is what
+        // ends this, exactly like a real subprocess stalled by host contention.
+        setInterval(() => {}, 1 << 30);
+        return;
+      }
+    }
+    const raw = process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+    if (raw === "__FAIL__") {
+      // The real CLI's actual shape today: non-zero exit, EMPTY stdout, usage banner on STDERR ONLY.
+      process.stderr.write("usage: codescape ingest <path-to-loom> ...\n       codescape diff ... / mcp ... / mcp-usage ... / serve ...\n");
+      process.exit(1);
+    }
+    if (raw === "__NONJSON__") { console.log("not json"); process.exit(0); } // exit 0 but malformed stdout (hypothetical defect)
+    console.log(JSON.stringify({ version: "fake", build: raw === "__NULL__" ? null : (raw === undefined ? "fake" : raw) }));
+    process.exit(0);
+  })();
 } else if (args[0] === "mcp") {
   const graphIdx = args.indexOf("--graph");
   record({ cmd: "mcp", graph: graphIdx === -1 ? null : args[graphIdx + 1] });

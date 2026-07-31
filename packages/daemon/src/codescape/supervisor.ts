@@ -74,6 +74,23 @@ const DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD = 3;
  */
 const DEFAULT_VERSION_PROBE_TIMEOUT_MS = 5_000;
 /**
+ * Card f0718488: max attempts for {@link CodescapeSupervisor.readInstalledBuild}'s version probe when
+ * consecutive attempts TIME OUT specifically — a genuinely broken binary (non-zero exit / malformed
+ * stdout) never reaches a 2nd attempt, see that method's own retry loop. 3 sits at the top of the
+ * originally-suggested "2-3 attempts" range: the observed failure is steady-state host contention (a
+ * live fleet of workers + gates), exactly the shape more chances helps with, while the timedOut-only
+ * retry gate already filters out genuine breakage after just one try. See the retry loop itself for the
+ * full worst-case budget arithmetic against the health-probe tick interval.
+ */
+const DEFAULT_VERSION_PROBE_MAX_ATTEMPTS = 3;
+/**
+ * Card f0718488: flat (non-escalating) delay between retried version-probe attempts — deliberately NOT
+ * {@link DEFAULT_RESTART_BACKOFF_MS}'s escalating shape (that nurses a possibly-broken PROCESS back up
+ * over minutes); this is only bridging a brief host-scheduling blip on a cheap subprocess spawn, so a
+ * short fixed pause is the right fit.
+ */
+const DEFAULT_VERSION_PROBE_RETRY_DELAY_MS = 250;
+/**
  * Card 9e6f984d: how long the INSTALLED build id must sit UNCHANGED before a detected drift is allowed
  * to fire a restart. Without this, a burst of N distinct rebuilds on the codescape side (their own
  * legitimate rebuild cadence) becomes N legitimately-distinct drift events, each restarting `serve` and
@@ -121,6 +138,10 @@ export interface CodescapeSupervisorOpts {
   healthProbeFailureThreshold?: number;
   /** Test seam: shrink/lengthen {@link DEFAULT_VERSION_PROBE_TIMEOUT_MS}. */
   versionProbeTimeoutMs?: number;
+  /** Test seam: override {@link DEFAULT_VERSION_PROBE_MAX_ATTEMPTS}. */
+  versionProbeMaxAttempts?: number;
+  /** Test seam: shrink/lengthen {@link DEFAULT_VERSION_PROBE_RETRY_DELAY_MS}. */
+  versionProbeRetryDelayMs?: number;
   /** Test seam: shrink/lengthen {@link DEFAULT_DRIFT_STABILITY_MS} so a stability-window test doesn't wait real minutes. */
   driftStabilityMs?: number;
 }
@@ -248,6 +269,11 @@ function runBoundedSplit(command: string, args: string[], cwd: string, timeoutMs
   });
 }
 
+/** Promise-based delay — used only by {@link CodescapeSupervisor.readInstalledBuild}'s retry backoff. */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 /**
  * Nitpick fix (card 088afc94): normalize a repo path for use as a `projectIds`/`unresolvedProjectIds` map
  * key. Resolved + lowercased — mirrors `codescape/manifest.ts`'s `samePath` (itself mirroring codescape's
@@ -307,6 +333,8 @@ export class CodescapeSupervisor {
   private readonly healthProbeTimeoutMs: number;
   private readonly healthProbeFailureThreshold: number;
   private readonly versionProbeTimeoutMs: number;
+  private readonly versionProbeMaxAttempts: number;
+  private readonly versionProbeRetryDelayMs: number;
   private readonly driftStabilityMs: number;
 
   /**
@@ -421,6 +449,14 @@ export class CodescapeSupervisor {
    */
   private spawnCount = 0;
   /**
+   * Card f0718488: count of {@link readInstalledBuild} attempts (real subprocess spawns of `--version`)
+   * that were actually made, incremented once per loop iteration regardless of outcome. Cumulative across
+   * this instance's lifetime — never reset on {@link stop}/{@link start}, matching {@link spawnCount}/
+   * {@link completedProbeTicks}'s own scope — so a test asserting "retried exactly N times" (or "gave up
+   * after exactly the max") reads this rather than timing the wall-clock, per this card's own DoD.
+   */
+  private versionProbeAttempts = 0;
+  /**
    * Card 088afc94 P4 follow-up: codescape's OWN authoritative project id, cached per NORMALIZED (resolved
    * + lowercased — see {@link repoKey}) repoRoot once {@link registerProject} succeeds OR a manifest read
    * inside {@link resolveProjectId} hits — the fast path resolveProjectId checks before ever falling back
@@ -448,6 +484,8 @@ export class CodescapeSupervisor {
     this.healthProbeTimeoutMs = opts?.healthProbeTimeoutMs ?? DEFAULT_HEALTH_PROBE_TIMEOUT_MS;
     this.healthProbeFailureThreshold = opts?.healthProbeFailureThreshold ?? DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD;
     this.versionProbeTimeoutMs = opts?.versionProbeTimeoutMs ?? DEFAULT_VERSION_PROBE_TIMEOUT_MS;
+    this.versionProbeMaxAttempts = opts?.versionProbeMaxAttempts ?? DEFAULT_VERSION_PROBE_MAX_ATTEMPTS;
+    this.versionProbeRetryDelayMs = opts?.versionProbeRetryDelayMs ?? DEFAULT_VERSION_PROBE_RETRY_DELAY_MS;
     this.driftStabilityMs = opts?.driftStabilityMs ?? DEFAULT_DRIFT_STABILITY_MS;
     if (opts?.port != null) {
       // Test-only: exercise the control-plane client against a fake HTTP server with no real spawn.
@@ -481,6 +519,11 @@ export class CodescapeSupervisor {
   /** Test seam — see {@link spawnCount}. */
   getSpawnCount(): number {
     return this.spawnCount;
+  }
+
+  /** Test seam — see {@link versionProbeAttempts}. */
+  getVersionProbeAttemptCount(): number {
+    return this.versionProbeAttempts;
   }
 
   /**
@@ -925,9 +968,41 @@ export class CodescapeSupervisor {
    */
   private async readInstalledBuild(): Promise<{ build: string | null; failed: boolean; reason?: string }> {
     const { command, args } = resolveCodescapeBin(this.codescapePath);
-    const r = await runBoundedSplit(command, [...args, "--version"], this.homeDir, this.versionProbeTimeoutMs);
+    let r: SplitRunResult = { ok: false, code: null, timedOut: false, stdout: "", stderr: "" };
+    let attempt = 0;
+    // Card f0718488: retry ONLY a TIMED-OUT attempt (r.timedOut) — a non-zero exit or malformed stdout at
+    // exit 0 is a genuine failure of the installed binary, not host contention, so it breaks below on
+    // attempt 1 and is never retried (stays fast + latched, exactly as before this card). The dominant
+    // observed cause of a timeout is steady-state contention from a live fleet of workers + gates, not a
+    // boot-window blip — see the card for the measurement that overturned the original "boot only" theory.
+    //
+    // WORST-CASE BUDGET (every attempt hits the full timeout — do not "helpfully" retune any of these
+    // constants without redoing this arithmetic):
+    //   versionProbeMaxAttempts(3) * versionProbeTimeoutMs(5,000ms)
+    //   + (versionProbeMaxAttempts - 1)(2) * versionProbeRetryDelayMs(250ms)
+    //   = 15,500ms for this method alone.
+    // This only ever runs after a successful `/graph/health` fetch inside the SAME probeHealth() tick
+    // (sequential awaits — see checkBuildDrift's caller), so the full worst-case single-tick wall time also
+    // carries that fetch's own bound: +healthProbeTimeoutMs(5,000ms) = 20,500ms, ~68% of the default
+    // 30,000ms healthProbeIntervalMs tick interval — a real ~9.5s margin, on top of the `probeInFlight`
+    // guard (see that field's doc) which already makes a literal tick-overlap structurally impossible
+    // regardless. Under sustained contention this does mean ~20.5s of every 30s tick is spent spawning
+    // `--version` subprocesses — judged negligible next to the load actually causing the contention (live
+    // workers + gates), and the timedOut-only gate above means a genuinely broken binary never enters this
+    // path at all. Deliberately no adaptive/stateful backoff here — not warranted at this priority.
+    // A `for` loop's own post-body increment would still fire after a final, exhausted iteration breaks
+    // out below — leaving `attempt` one higher than the real count. Track it explicitly instead so the
+    // "(N attempts)" reason string below, and every test asserting on {@link getVersionProbeAttemptCount},
+    // see the true number actually made.
+    while (true) {
+      attempt++;
+      this.versionProbeAttempts++;
+      r = await runBoundedSplit(command, [...args, "--version"], this.homeDir, this.versionProbeTimeoutMs);
+      if (!r.timedOut || attempt >= this.versionProbeMaxAttempts) break; // success, a genuine non-timeout failure, or attempts exhausted
+      await sleep(this.versionProbeRetryDelayMs);
+    }
     if (!r.ok) {
-      return { build: null, failed: true, reason: `"${command} --version" ${r.timedOut ? "timed out" : `failed (exit ${r.code ?? "null"})`}${r.stderr ? ` — ${r.stderr}` : ""}` };
+      return { build: null, failed: true, reason: `"${command} --version" ${r.timedOut ? `timed out (${attempt} attempt${attempt === 1 ? "" : "s"})` : `failed (exit ${r.code ?? "null"})`}${r.stderr ? ` — ${r.stderr}` : ""}` };
     }
     let parsed: unknown;
     try {

@@ -802,6 +802,112 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
 }
 
+// ===================== (13) card f0718488: a TIMED-OUT version probe is retried — a transient timeout rescued by a retry never even reaches the loud diagnostic ====
+{
+  const homeDir = path.join(tmpHome, "version-retry-success-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-running";
+  process.env.FAKE_CODESCAPE_INSTALLED_BUILD = "build-installed"; // resolvable once the hang clears
+  process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS = "1"; // the FIRST `--version` invocation hangs; the 2nd succeeds
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    // Same margin rule as every other scenario in this file (see (1)/(8) etc.) — kept consistent even
+    // though this scenario's own subprocess timing (below) now dominates the tick's wall time.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 300, // short — the fixture hang only needs to exceed this to genuinely time out
+    versionProbeRetryDelayMs: 50, // this card's new retry-backoff test seam
+  });
+  const warnings = captureWarnings();
+  await sup.start(["/fake/repo/version-retry-success"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+
+  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
+  check("(13) the first probe tick completed", sup.getCompletedProbeTickCount() >= 1);
+
+  // ⭐ Observed ATTEMPT COUNT, never wall-clock (card f0718488's own DoD) — getVersionProbeAttemptCount()
+  // is incremented once per real subprocess spawn inside readInstalledBuild's retry loop.
+  check("(13) exactly 2 version-probe attempts were made (1 timeout + 1 retry that succeeded)",
+    sup.getVersionProbeAttemptCount() === 2);
+  const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
+  check("(13) a transient timeout rescued by a retry never reaches the loud 'cannot read' diagnostic at all",
+    diagnosticLines.length === 0);
+  check("(13) the tick that retried into success did not restart serve",
+    readServeCalls(callsFile).length === 1);
+
+  warnings.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_INSTALLED_BUILD;
+  delete process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS;
+}
+
+// ===================== (14) card f0718488: a version probe that ALWAYS times out exhausts the bounded retry budget, still fails the tick loudly (once), and NEVER restarts ====
+{
+  const homeDir = path.join(tmpHome, "version-retry-exhausted-home");
+  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
+  process.env.FAKE_CODESCAPE_HEALTH_BUILD = "build-running";
+  process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS = "999"; // every `--version` invocation hangs — persistent, never resolves
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: [50, 100, 150],
+    healthyRunMs: 60_000,
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
+    versionProbeTimeoutMs: 300,
+    versionProbeMaxAttempts: 3,
+    versionProbeRetryDelayMs: 50,
+  });
+  const warnings = captureWarnings();
+  await sup.start(["/fake/repo/version-retry-exhausted"]);
+  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  const pidBefore = sup.getPid();
+
+  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
+  check("(14) the first probe tick completed", sup.getCompletedProbeTickCount() >= 1);
+  // ⭐ Observed ATTEMPT COUNT, never wall-clock — EXACTLY the configured max, not fewer (budget genuinely
+  // exhausted) and not more (bounded, no runaway retry).
+  check("(14) EXACTLY the max (3) version-probe attempts were made for the first tick",
+    sup.getVersionProbeAttemptCount() === 3);
+
+  const diagnosticLines = () => warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
+  check("(14) a persistent timeout IS reported loudly, exactly once (latched, same discipline as scenario (8))",
+    diagnosticLines().length === 1);
+  check("(14) the timeout diagnostic names the actual attempt count made (3 attempts)",
+    diagnosticLines().some((l) => l.includes("3 attempts")));
+
+  // ⭐ Assert BOTH halves of the fail-safe (the property most likely to be quietly broken by a refactor of
+  // this retry loop): the tick classifies failed (asserted above via the diagnostic) AND this never
+  // restarts — a probe that ultimately fails must only ever decline to act, never trigger a restart.
+  check("(14) a persistently-timing-out version probe NEVER triggers a restart (fail-safe half 1: no spawn)",
+    readServeCalls(callsFile).length === 1);
+  check("(14) serve's pid is unchanged (fail-safe half 2: nothing was killed)",
+    sup.getPid() === pidBefore);
+
+  // Drive a second completed tick — the retry budget re-exhausts EVERY tick (never cached: checkBuildDrift
+  // calls readInstalledBuild fresh on every probe), but the loud diagnostic must stay latched at exactly
+  // one (same reason, unchanged) rather than re-firing per tick, and the fail-safe must hold across ticks.
+  const ticksAtCheckpoint = sup.getCompletedProbeTickCount();
+  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= ticksAtCheckpoint + 1, () => sup.getCompletedProbeTickCount());
+  check("(14) a second completed tick re-spends the full attempt budget too (cumulative: 6 across 2 ticks) — the retry budget is per-tick, never cached",
+    sup.getVersionProbeAttemptCount() === 6);
+  check("(14) the diagnostic still did not re-fire on the second tick (still exactly ONE, same reason)",
+    diagnosticLines().length === 1);
+  check("(14) still no restart after a second exhausted tick (fail-safe holds across ticks too)",
+    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+
+  warnings.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_BUILD;
+  delete process.env.FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS;
+}
+
 // ===================== cleanup =====================
 delete process.env.LOOM_CODESCAPE_BIN;
 delete process.env.LOOM_CODESCAPE_ENABLED;
@@ -813,6 +919,6 @@ delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, and (card ebd755ab, Gap 2) a successful read after a latched failure now ALSO announces the recovery transition exactly once (inert -> recovered is no longer indistinguishable from still-inert); and (card ebd755ab, Gap 1) a drift that persists after its ONE allowed restart is already spent is now LOUD exactly once (never silent forever, never once per tick), with its own resolution — the installed side matching the running build again — likewise announced exactly once, and the restart guard itself unchanged throughout — claude-free, network-free beyond loopback."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, and (card ebd755ab, Gap 2) a successful read after a latched failure now ALSO announces the recovery transition exactly once (inert -> recovered is no longer indistinguishable from still-inert); and (card ebd755ab, Gap 1) a drift that persists after its ONE allowed restart is already spent is now LOUD exactly once (never silent forever, never once per tick), with its own resolution — the installed side matching the running build again — likewise announced exactly once, and the restart guard itself unchanged throughout; and (card f0718488) a version probe that TIMES OUT specifically is retried (a genuine timeout rescued by a retry never even reaches the loud diagnostic, asserted on the observed attempt COUNT, never wall-clock), while a persistently-timing-out probe still exhausts EXACTLY its bounded attempt budget, still fails the tick loudly (latched, once, same discipline as (8)), and — the property most likely to break under a refactor of this retry loop — STILL never triggers a restart, across repeated ticks — claude-free, network-free beyond loopback."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
