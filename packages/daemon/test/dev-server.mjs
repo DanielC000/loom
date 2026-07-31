@@ -24,6 +24,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
 
 requireHermeticEnv();
 
@@ -89,9 +90,23 @@ try {
 
   const trackedGone = trackedPid != null && await waitUntil(() => !isAlive(trackedPid), 5000);
   check("(b) tracked pid is gone after stop()", trackedGone);
-  const heartbeatMtimeAfterKill = fs.existsSync(heartbeatOut) ? fs.statSync(heartbeatOut).mtimeMs : 0;
-  await new Promise((r) => setTimeout(r, 400));
-  const heartbeatStillFrozen = !fs.existsSync(heartbeatOut) || fs.statSync(heartbeatOut).mtimeMs === heartbeatMtimeAfterKill;
+  const HEARTBEAT_INTERVAL_MS = 100; // the fixture's own write cadence (heartbeatSrc's setInterval, above)
+  const mtimeOf = (f) => (fs.existsSync(f) ? fs.statSync(f).mtimeMs : 0);
+  const heartbeatMtimeAfterKill = mtimeOf(heartbeatOut);
+  const heartbeatStillFrozen = await assertNeverWithControl({
+    label: "(b) fixture's heartbeat file stops advancing after stop()",
+    check: () => mtimeOf(heartbeatOut) !== heartbeatMtimeAfterKill,
+    windowMs: HEARTBEAT_INTERVAL_MS * 5, // several write intervals' worth — derived, not guessed
+    positiveControl: async () => {
+      // Prove the SAME sampling mechanism CAN observe advancement: the control process (never stopped)
+      // is still writing its own heartbeat on the identical cadence — sample IT and confirm "advanced".
+      const controlBaseline = mtimeOf(controlOut);
+      return observeOnce({
+        check: () => mtimeOf(controlOut) !== controlBaseline,
+        windowMs: HEARTBEAT_INTERVAL_MS * 5,
+      });
+    },
+  });
   check("(b) fixture's heartbeat file stops advancing after stop()", heartbeatStillFrozen);
 
   // (c) the unrelated control process is UNAFFECTED — this is the "never a bare/wrong pid" proof: if

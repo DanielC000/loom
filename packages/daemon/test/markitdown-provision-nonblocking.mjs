@@ -20,6 +20,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { performance } from "node:perf_hooks";
+import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -33,7 +34,7 @@ process.env.LOOM_HOME = tmpHome;
 delete process.env.LOOM_MARKITDOWN_BIN;        // exercise the venv path, not the fast override seam
 process.env.LOOM_PYTHON_NO_PROVISION = "1";    // never build a real venv / run pip / hit the network in CI
 
-const { buildMcpServers, markitdownMcpServer, __markitdownProvisionKicks } = await import("../dist/pty/host.js");
+const { buildMcpServers, markitdownMcpServer, __markitdownProvisionKicks, __markitdownProvisionSettle, __setMarkitdownProvisionerForTest } = await import("../dist/pty/host.js");
 const { loomVenvDir, loomVenvBin } = await import("../dist/python/venv.js");
 
 // Precondition: the shared venv binary really is absent (so we're on the cold path).
@@ -66,10 +67,30 @@ const elapsed5 = performance.now() - t1;
 check(`(3b) five more cold resolves stay fast (<500ms total; measured ${elapsed5.toFixed(1)}ms)`, elapsed5 < 500);
 check("(3b) the kick is deduped/one-shot (still exactly 1, no parallel installs)", __markitdownProvisionKicks() === 1);
 
-// (4) Let the async provision job settle, then confirm NO real venv was created in CI (the disable seam
-//     held — the background job did not build a venv or run pip).
-await new Promise((r) => setTimeout(r, 100));
-check("(4) NO real venv was created in CI (LOOM_PYTHON_NO_PROVISION honored — no venv/pip/network)", !fs.existsSync(loomVenvDir()));
+// (4) Deterministically settle the REAL in-flight provision job from (2) above (await the actual
+//     promise, not a guessed sleep), then confirm NO real venv was created in CI (the disable seam held).
+const noRealVenvCreated = await assertNeverWithControl({
+  label: "(4) NO real venv was created in CI (LOOM_PYTHON_NO_PROVISION honored — no venv/pip/network)",
+  check: () => fs.existsSync(loomVenvDir()),
+  settle: () => __markitdownProvisionSettle(),
+  positiveControl: async () => {
+    // Prove the SAME check+settle CAN observe a violation: swap in a fake provisioner simulating what a
+    // LEAKED disable-seam would actually do (build a real venv dir), kick a fresh provision, settle,
+    // confirm the check goes true — then restore the real provisioner and re-kick the real (disabled)
+    // scenario for the assertion below.
+    __setMarkitdownProvisionerForTest(async () => {
+      fs.mkdirSync(loomVenvDir(), { recursive: true }); // simulate a leaked-seam venv-create
+      return { binary: null, outcome: "disabled" };
+    });
+    markitdownMcpServer();
+    const observed = await observeOnce({ check: () => fs.existsSync(loomVenvDir()), settle: () => __markitdownProvisionSettle() });
+    fs.rmSync(loomVenvDir(), { recursive: true, force: true }); // clean the simulated dir before the real run
+    __setMarkitdownProvisionerForTest(); // restore the REAL ensurePythonPackageAsync (also resets in-flight/kicks)
+    markitdownMcpServer(); // re-kick the REAL (disabled) scenario for the assertion below
+    return observed;
+  },
+});
+check("(4) NO real venv was created in CI (LOOM_PYTHON_NO_PROVISION honored — no venv/pip/network)", noRealVenvCreated);
 
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 

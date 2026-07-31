@@ -1,0 +1,401 @@
+import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no daemon/Db used below, pure fs
+// STANDING GUARD (card 1addef27) — catches NEW or REGRESSED instances of the "fixed wait guarding a
+// NEGATIVE assertion" defect class BY DEFAULT (no opt-in — a guard you must opt into reproduces `eb29e410`
+// exactly), without re-auditing the whole suite first. The defect: a fixed-duration sleep asserting "X did
+// NOT happen" passes silently if X arrives after the window — see memory
+// `fixed-wait-polarity-negative-assertions-fail-silently` and the population screen at 975956b2.
+//
+// WHAT THIS IS: a static TEXT scan over packages/daemon/test/*.mjs (source, not dist — no build needed) —
+// same shape as codescape-privacy-guard.mjs (walk + regex + a baseline), NOT a control-flow analyzer, and
+// NOT the runtime-unit-test-of-a-lint-function shape of agent-prompt-lint.mjs (the card's own citation for
+// this precedent was loose — codescape-privacy-guard.mjs is the one that actually applies here).
+//
+// WHAT IT CATCHES: a fixed-duration wait — `sleep(<expr>)` or `new Promise((r) => setTimeout(r, <expr>))`
+// — idiom SHAPE only, regardless of whether the duration is an integer literal or a derived/named-constant
+// expression (so adopting THIS CARD'S OWN "derive the window from a measured quantity" advice does not
+// make a site invisible to this guard — measured empirically: broadening from literal-only to idiom-shape
+// only grew the flagged set from 115 to 131 sites out of 645 total wait sites, not an explosion) —
+// immediately followed (within 5 lines) by a check()/assert() whose label reads as a NEGATIVE-polarity
+// claim (never/not/no/zero/unchanged/frozen/refuse/omit/etc.).
+//
+// WHAT IT CANNOT SEE (stated plainly — a guard silently blind to an idiom is the same failure one level
+// up, DoD-6): a locally-reimplemented waitUntil/poll-loop misused with a bad predicate (975956b2 found
+// these are USUALLY safe — this guard does not verify that; it simply never flags the shape at all); a
+// differently-named delay()/wait() helper; a raw non-awaited `setTimeout(fn, N)` (fire-and-forget, never
+// `await`ed); or a check()/assert() whose label doesn't textually read as negative even though its polarity
+// is (a mislabeled assertion escapes both a human reviewer and this heuristic alike).
+//
+// EXEMPTIONS: a flagged site clears ONLY by (a) a `// TIMING-GUARD-SAFE: <reason>` comment anywhere in the
+// contiguous `//`-comment block immediately above the wait line (or on the wait line itself), where
+// <reason> is one of the THREE sanctioned clearing patterns below — the enum is CLOSED on purpose, because
+// an exemption comment is itself a claim, and an open enum would let that claim mean anything — or (b)
+// being listed in KNOWN_UNAUDITED_WAITS.
+//
+// ⭐ BASELINE KEY = (file, assertion label text) — NOT (file, line number). A worker was mid-flight
+// migrating 49 test files onto a shared fixture (~10-line class body → 1-2 line import) the SAME day this
+// guard shipped; 17 of those files overlapped this baseline, covering ~35 entries. A line-numbered key
+// turns every one of those into a spurious NEW violation the instant lines shift — and "just regenerate
+// the baseline" is the dangerous fix, because a blind regen silently absorbs any GENUINE new violation
+// introduced by the same edit. The label text is what actually identifies the site semantically (it's
+// already extracted below as `checkMatch[2]`) and survives any edit that doesn't touch the assertion's own
+// wording — including line-shifting refactors, reordering, or a preceding wait construct being swapped for
+// another. WHAT STILL INVALIDATES A BASELINE ENTRY: editing that check()'s own label text — which is
+// exactly the moment a human is already looking at the assertion and should re-audit it anyway, so
+// invalidation and the correct re-audit trigger coincide by construction.
+//
+// ⚠ COLLISION NOTE: when regenerating, 7 (file, label) pairs collapsed from 2 raw hits to 1 — NOT a bug.
+// Each is ONE check() fed by TWO nearby wait constructs (e.g. a bounded `for(...) await sleep(N)` poll
+// loop immediately followed by a longer settle sleep) — manually verified by grepping each label back to
+// source: every one resolves to exactly ONE check() call. One baseline entry correctly covers both feeding
+// wait lines, because the audit unit is the ASSERTION, not each individual timer call upstream of it. This
+// is why the entry count below (113, +2 hand-added — see next paragraph) is LOWER than the prior
+// line-keyed count (122): re-verify this delta before trusting a future regeneration — a genuine (not
+// artifact) merge or split is the one case DoD-5's "investigate before accepting" rule is for.
+//
+// KNOWN_UNAUDITED_WAITS is a PERMANENT BASELINE, not a countdown to zero — same posture as
+// codescape-privacy-guard.mjs's KNOWN_LEAKING_FILES. Every one of its 115 entries (113 auto-derived +
+// 2 hand-added for companion-voice-tts-provision.mjs — see the comment at that entry) is UNEXAMINED under
+// this card — 975956b2's own language — NOT cleared. Do not read this baseline as a completed census
+// (DoD-7), and do not remove an entry to "clean up" without actually auditing that site's polarity/timing
+// risk first. The property that matters: a NEW (file, label) pair — or one of the four retrofitted files
+// regressing back to a raw fixed-wait-then-negative-check shape — fails the gate by default, so the
+// footprint cannot grow silently even though this card does not close it.
+//
+// Run: node packages/daemon/test/fixed-wait-negative-guard.mjs (no build needed — pure source-text scan)
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const TEST_DIR = __dirname;
+
+let failures = 0;
+const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+
+// CLOSED enum — see the EXEMPTIONS note above. Each corresponds to one of the three clearing patterns
+// source-verified on card 1addef27 (§ CLEARING in the memory note, and companion-voice-*.mjs's own
+// annotations below).
+const SANCTIONED_REASONS = new Set(["sync-early-return", "sync-probe-no-macrotask", "fully-awaited-completion"]);
+
+const IDIOM_A = /\bsleep\(\s*[^)]+\)/;
+const IDIOM_B = /new Promise\(\s*\(?\s*[a-zA-Z_$][\w$]*\s*\)?\s*=>\s*setTimeout\(\s*[a-zA-Z_$][\w$]*\s*,\s*[^)]+\)/;
+const NEG_KEYWORDS = /\b(never|not\b|no\s|zero|absent|unaffected|unchanged|stops advancing|stayed|stays|frozen|didn.?t|doesn.?t|hasn.?t|won.?t|refuse|omit)/i;
+const EXEMPT_RE = /TIMING-GUARD-SAFE:\s*([a-z-]+)/;
+
+// file -> Set(assertion label text). EXCLUDING the 4 retrofitted files (no longer match the raw idiom at
+// all — a regression there is a NEW flag, not a baseline hit) and the 2 files exempted via inline comment
+// (companion-voice-enable-gate.mjs, companion-voice-tts-provision.mjs's line-37 site). Regenerate with the
+// same walk+regex+NEG_KEYWORDS logic above if this ever needs re-deriving; do not hand-edit an entry
+// without auditing the site (that's exactly the "read as a completed census" trap this guard exists to
+// avoid reproducing) — and re-verify the total count per the COLLISION NOTE above before accepting it.
+const KNOWN_UNAUDITED_WAITS = new Map([
+  ["_probe-composer-dirty.mjs", [
+    "2) the report text NEVER reached the TUI while the draft was open (no concatenation)",
+  ]],
+  ["_probe-resume-mode.mjs", [
+    "BEFORE: a resume with no convergence lands at acceptEdits (one short of auto — the bug)",
+    "AFTER: the fix drives the resumed session to AUTO with NO probe keystrokes (host feedback-cycled)",
+  ]],
+  ["_smoke-mode-fix-9c03f5a6.mjs", [
+    "the [resume-mode] landed-mode log line appeared within 25s (no boot hang)",
+    "a REAL turn completed (Stop hook fired) within 60s — no hang on any prompt/dialog",
+  ]],
+  ["agent-runs-primitive.mjs", [
+    "6 BUG2: the completed run never flips to timed_out (timer was cleared, no late fire)",
+  ]],
+  ["agent-runs-rest.mjs", [
+    "B2 a run with NO webhookUrl fires no webhook",
+    "B3 a refused webhook does NOT throw into the teardown path",
+  ]],
+  ["claude-version-prewarm.mjs", [
+    "a nonexistent LOOM_CLAUDE_BIN leaves the cache null (graceful degrade, not a hang/throw)",
+  ]],
+  ["codescape-health-probe.mjs", [
+    "(2) give-up STAYS terminal — no further restart / serve spawn, even with the health-probe timer still ticking",
+    "(5) a persisting mismatch against the SAME installed build does NOT loop (still exactly 2 spawns on record)",
+    "(6) `build` ABSENT from the health response never triggers a restart",
+    "(7) `build: null` never triggers a restart",
+    "(8) an unresolvable installed build (${installedFailureMode}) never triggers a restart",
+    "(8c) an HONEST installed build:null never triggers a restart",
+    "(9) `build` matching never restarts even when `version` differs — `version` is not the drift signal",
+    "(10) give-up STAYS terminal under drift — no further restart / serve spawn, even with a fresh drift event and the health-probe timer still ticking",
+    "(11) mid-burst: no restart has fired yet (each distinct build reset the still-open stability window)",
+    "(11) after the single settled restart, no further restart follows (still exactly 2 spawns on record)",
+    "(12) drift persisting after its one restart is spent logs the UNRESOLVED diagnostic exactly ONCE (not once per tick, and not silently forever)",
+  ]],
+  ["codescape-lifecycle-hooks.mjs", [
+    "(1b) a taskless spawn never fires register-worktree (no stable worktreeId)",
+    "(4) recycleWorker triggers no drop call (worktree not removed)",
+    "(5) LOOM_DEV off: no supervisor call ever fired (spawn+merge+gc lifecycle)",
+    "(6) project not enabled: no supervisor call ever fired (spawn+merge+gc lifecycle)",
+  ]],
+  ["codescape-supervisor.mjs", [
+    "(dbPath) start(repoPaths, dbPath) with ONLY a dbPath (no env var) actually ingests+spawns serve",
+    "(c) no further serve call is recorded after stop() (restart-on-death is disarmed)",
+    "(bad-bin) after exhausting the bounded restart schedule, getPort() is null (gave up, NOT phantom-alive)",
+    "(bad-bin) stays down (no stray restart revives it after giving up)",
+  ]],
+  ["companion-mirror.mjs", [
+    "B: NOTHING mirrored — B has no telegram binding (no broadcast to A's telegram or anywhere else)",
+    "failed-mirror: handleInAppInbound never throws even though the mirror send does",
+  ]],
+  // NOT part of the card's cleared citation (only companion-voice-tts-provision.mjs's line-37 site is) —
+  // this section's __setTtsProvisionerForTest fake resolves fast today, but that's a test-scaffolding
+  // timing argument this card never source-verified (the sanctioned "sync-probe-no-macrotask" reasoning is
+  // specifically about venv.ts's REAL ensurePythonPackageAsync/probeOk path, not a fake). Genuinely
+  // unaudited debt, not a manufactured clearance — hand-added since the whole file is excluded from the
+  // auto-derivation above (it already carries one inline TIMING-GUARD-SAFE exemption).
+  ["companion-voice-tts-provision.mjs", [
+    "3: still not ready right after the failure (this call ALSO kicks a fresh attempt)",
+    "3: a THIRD call is now ready — retried after a terminal failure, never a permanent dead-end",
+  ]],
+  ["end-me.mjs", [
+    "(queued) the pty is NOT stopped — no Ctrl-C written",
+    "(workers) the pty is NOT stopped — no Ctrl-C written",
+  ]],
+  ["gate-cancel.mjs", [
+    "(guard) cap 2 but SAME worktree — B has not run yet while A holds it",
+    "(auto-supersede) the self-check is QUEUED, not yet admitted (nothing spawned)",
+    "(primitive gateType guard) the synthetic merge entry is queued, not yet admitted",
+  ]],
+  ["gate-idle-liveness.mjs", [
+    "(1) THE RED-FIRST PROOF: onOutput advances lastOutputAt strictly forward — a static/broken wiring would leave this UNCHANGED",
+  ]],
+  ["gate-queue.mjs", [
+    "(unit, handoff) after release, exactly 1 running (the FORMER queued entry) + 0 queued — never a moment with 2 running",
+    "(unit) registry empty once both settle (no leaked entries)",
+  ]],
+  ["gate-semaphore-concurrency.mjs", [
+    "(priority) an omitted-priority call defaults to high and jumps an already-queued low waiter",
+  ]],
+  ["gate-timeout-tree-kill.mjs", [
+    "(no-fratricide) the WORKER-LOOKALIKE (excluded via pty.getPid) SURVIVES the exact same sweep — no fratricide",
+  ]],
+  ["graceful-stop.mjs", [
+    "idle: still no hard kill after the escalation window",
+    "busy-retry: hard-kill backstop stayed a no-op after a clean Stage-2 exit",
+  ]],
+  ["mcp-ready-gate.mjs", [
+    "7: nudge NOT delivered/queued yet — MCP not seen",
+    "9: a session that died before markMcpSeen never receives the deferred nudge",
+    "no unhandled promise rejections were produced across all scenarios",
+  ]],
+  ["orch-abort-warn.mjs", [
+    "(1) a NORMALLY completed request logs NO diagnostic warning",
+    "(2) the client-aborted call never resolves normally on the client side",
+  ]],
+  ["pending-ops-registry.mjs", [
+    "(nudge slow-ok) callback fired EXACTLY ONCE once the op actually terminates, with no re-poll",
+    "(onSurfacedPending) the settled callback fires AFTER surfaced, never before — order holds even under the tightest possible race",
+    "(clobber guard) run_C's entry SURVIVES run_A's late settle — NOT clobbered",
+    "(onOpMinted retry) fires exactly once for the entry-creating call, never for a retry that attaches",
+    "(onSettle clobber-guard) the ORPHAN's late settle never fires onSettle against the successor's key — still exactly 1 call",
+  ]],
+  ["pty-coalesce-drain.mjs", [
+    "COALESCE: exactly ONE Enter (`\\\\r`) written for the whole drain (one turn, not three)",
+  ]],
+  ["pty-giveup-clear.mjs", [
+    "(3) NO clear byte was ever written on a normally-confirmed turn (give-up path never triggers)",
+    "(4) the redrain itself also gave up (harness never confirms) — busy fell back to false again",
+  ]],
+  ["pty-giveup-hold-until-confirmed.mjs", [
+    "(3) THE BACKSTOP: the hold expired with no confirmation — busy re-armed (genuinely re-delivered)",
+    "(3) sanity: still exactly 2 delivery attempts after another reconcile tick — no runaway loop",
+  ]],
+  ["pty-giveup-requeue.mjs", [
+    "(1) sanity: still exactly 2 rounds' worth of attempts after another reconcile tick — no runaway loop",
+    "(2) ORDERING: draining resubmits TEXT1 (not TEXT2) — its body appears a SECOND time",
+    "(5) NO DUPLICATE, NO CLEAR: the message body was written exactly once, no backspace clear either",
+  ]],
+  ["pty-healifstuck-clear.mjs", [
+    "(3) NO heal-time clear ever fired for a session that legitimately went on to submit",
+  ]],
+  ["pty-interrupt-redirect.mjs", [
+    "after settle: busy was self-cleared (a busy=false edge appears, with no Stop hook)",
+    "no double-submit: redirect still written exactly once",
+    "stopping: still no crash, queue stays clear",
+  ]],
+  ["pty-log-stream-error.mjs", [
+    "writeLog stays a no-op after logBroken (no new uncaughtException from further writes)",
+  ]],
+  ["pty-mode-convergence.mjs", [
+    "1: NO auto-heal press fires when the session actually reached auto (not stuck in plan)",
+    "2: the RAW cycler gave up WITHOUT a 3rd blind press (bounded, never infinite/overshooting)",
+    "2: AUTO-HEAL fired a 3rd Shift+Tab — a worker is NEVER left stranded in plan",
+    "2: the auto-heal fires AT MOST ONCE per session (modeLogged guard — no repeat correction)",
+    "3: NO auto-heal press for a manager stranded in plan (role-gated — never fights a legitimate plan)",
+    "4: heal converged the worker to auto (2 corrective presses) — never left stranded at acceptEdits",
+    "5: the RAW cycler cleanly reached ITS OWN target `default` in exactly 3 presses (no give-up)",
+    "5: NO further heal press — the heal's target IS `default` (this session's own config), ",
+    "6: the raw main cycle issued ZERO presses (never had a definite footer to decide from)",
+    "7: main convergence issued ZERO presses (resume already at its own configured target, acceptEdits)",
+    "7: FIXED — no auto-heal press on resume for a startupModeCycles:0 config (stays at acceptEdits, ",
+    "8: resume converged to auto via the heal (1 corrective press) — the common case is not regressed",
+  ]],
+  ["pty-mode-heal-retry.mjs", [
+    "no further Shift+Tab after the heal converged (modeLogged guard — no repeat correction)",
+  ]],
+  ["pty-mode-race.mjs", [
+    "still exactly 1 press — no concurrent press from the queued manual call",
+    "still exactly 2 presses — the manual call has NOT started pressing during boot's cycle",
+  ]],
+  ["pty-owner-attestation.mjs", [
+    "5: held while busy — no attestation yet (still the PRIMER turn)",
+  ]],
+  ["pty-proactive-turn.mjs", [
+    "5: held while busy — no proactive attestation yet (still the PRIMER turn)",
+  ]],
+  ["pty-restart-nudge-atomicity.mjs", [
+    "(A) mid-race: NOT yet a second bracketed paste (kickoff held, not racing the in-flight write)",
+  ]],
+  ["pty-resume-readiness.mjs", [
+    "3: readiness fallback drained the nudge despite no SessionStart",
+    "4: gate handled exactly once per session (no double-select)",
+    "8: NO Enter was ever sent (would durably persist \\",
+  ]],
+  ["pty-submit-paste-end-retry.mjs", [
+    "(a) no further re-assert/Enter writes after confirmation",
+  ]],
+  ["pty-submit-verify-retry.mjs", [
+    "(4) no further Enter attempts after giving up (the retry loop actually stopped)",
+    "(5) NO extra Enter from B's stale chain (only B's 1 + C's 1 attempt — no spurious 3rd write)",
+    "(5) no further Enter writes after C ended (both chains are fully retired)",
+  ]],
+  ["pty-writechunked-done-on-death.mjs", [
+    "sanity: the burst genuinely never completed (proves this exercised the not-alive bail, not a race that just finished naturally)",
+  ]],
+  ["run-gate-cancelled-retention.mjs", [
+    "(D) THE FIX: the re-call after a cancel triggers a genuinely FRESH gate invocation (not a cache hit)",
+  ]],
+  ["scheduler-disabled.mjs", [
+    "disabled: NO manager session booted in the agent",
+  ]],
+  ["scheduler.mjs", [
+    "Transition-only: a second same-reason tick leaves lastDeferredAt UNCHANGED",
+  ]],
+  ["shutdown-endpoint.mjs", [
+    "(b) requestShutdown NOT invoked by the rejected caller (still 1)",
+  ]],
+  ["update-endpoint.mjs", [
+    "(b) beginSelfUpdate NOT invoked by the rejected caller (still 1)",
+    "(c) beginSelfUpdate NOT invoked on a source daemon (still 1)",
+  ]],
+  ["worker-kickoff-guarantee.mjs", [
+    "(H1a) still exactly ONE forced submit (no repeat firing)",
+    "(H1b) NO forced submit — nothing was ever written to the pty by Loom's own submit()",
+    "(H1c) ready-after-enqueue: no forced submit — the turn had already started when ready landed",
+    "(H1d) resume path: NEVER force-submits (no kickoff was ever passed)",
+  ]],
+  ["worker-liveness-signal.mjs", [
+    "(1) getLastOutputAt ADVANCES AGAIN on a second chunk — WITHIN the same turn (no Stop/hook in between)",
+    "(3) with no further engine output, lastEngineOutputAt FREEZES (does not advance) — the wedge signal",
+  ]],
+  ["worker-run-gate.mjs", [
+    "(G) a SUBSEQUENT gate run (past the retention window) still acquires the semaphore slot (no permanent leak)",
+  ]],
+  ["worker-session-reap.mjs", [
+    "(C) the UNRELATED sibling worker's process is NEVER touched — the load-bearing scoping invariant",
+  ]],
+  ["worker-stop-reap.mjs", [
+    "(B) killAllWorkers reports the correct live-worker count (2, not the live manager too)",
+  ]],
+  ["worktree-process-reap.mjs", [
+    "(real) child B (a DIFFERENT worktree) is NEVER touched by a reap scoped to worktree A",
+  ]],
+  ["worktrees.mjs", [
+    "(l2) all ${spawnedChildren.length} hanging children were ACTUALLY terminated (no orphans left running)",
+  ]],
+  ["ws-fleet.mjs", [
+    "(4) an unknown message type is ignored (no throw, no resurrected subscription)",
+    "(4b) a raw ${label} frame does not crash the handler (socket stays open, hub unchanged)",
+    "(4c) sub:events with a non-string managerId or non-finite sinceSeq is ignored (hub subscription state unchanged)",
+  ]],
+  ["ws-json-hardening.mjs", [
+    "(term) a raw ${label} frame does not crash the handler (socket stays open)",
+    "(companion) a raw ${label} frame does not crash the handler (socket stays open)",
+  ]],
+]);
+
+function baselineHas(file, label) {
+  return KNOWN_UNAUDITED_WAITS.get(file)?.includes(label) ?? false;
+}
+
+// The 4 files card 1addef27 retrofitted to assertNeverWithControl — a raw fixed-wait-then-negative-check
+// hit in ANY of these is a REGRESSION (the guard rejects it as a fresh flag, never silently re-baselines
+// it), not new/unrelated debt.
+const RETROFITTED_FILES = new Set([
+  "ws-fleet-session-feed.mjs", "markitdown-prewarm.mjs", "markitdown-provision-nonblocking.mjs", "dev-server.mjs",
+]);
+
+function walkTestFiles() {
+  return fs.readdirSync(TEST_DIR).filter((f) => f.endsWith(".mjs"));
+}
+
+/** Scan backward from `waitLineIdx` through the contiguous `//`-comment block directly above it (plus the
+ *  wait line itself, which may carry a trailing `//` comment) for a TIMING-GUARD-SAFE marker. Multi-line
+ *  annotation comments are the norm in this codebase, so a single-line lookback would miss them. */
+function exemptionReasonFor(lines, waitLineIdx) {
+  const onWaitLine = EXEMPT_RE.exec(lines[waitLineIdx]);
+  if (onWaitLine) return onWaitLine[1];
+  for (let i = waitLineIdx - 1; i >= 0 && /^\s*\/\//.test(lines[i]); i--) {
+    const m = EXEMPT_RE.exec(lines[i]);
+    if (m) return m[1];
+  }
+  return null;
+}
+
+function scanFile(file) {
+  const text = fs.readFileSync(path.join(TEST_DIR, file), "utf8");
+  const lines = text.split("\n");
+  const hits = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (!IDIOM_A.test(line) && !IDIOM_B.test(line)) continue;
+    const window = lines.slice(i, i + 5).join("\n");
+    const checkMatch = window.match(/check\(\s*(["'`])((?:(?!\1).)*)\1/) || window.match(/assert\(\s*(["'`])((?:(?!\1).)*)\1/);
+    if (!checkMatch || !NEG_KEYWORDS.test(checkMatch[2])) continue;
+    hits.push({ file, lineNo: i + 1, label: checkMatch[2], exempt: exemptionReasonFor(lines, i) });
+  }
+  return hits;
+}
+
+const files = walkTestFiles();
+const newViolations = [];
+const badExemptions = [];
+const regressions = [];
+
+for (const file of files) {
+  for (const hit of scanFile(file)) {
+    const key = `${file}:${hit.lineNo}`; // display-only — membership below is keyed by (file, label)
+    if (hit.exempt) {
+      if (!SANCTIONED_REASONS.has(hit.exempt)) badExemptions.push({ ...hit, key });
+      continue; // validly exempted — cleared, not baselined
+    }
+    if (RETROFITTED_FILES.has(file)) { regressions.push({ ...hit, key }); continue; }
+    if (baselineHas(file, hit.label)) continue; // baselined debt, not clearance — see header
+    newViolations.push({ ...hit, key });
+  }
+}
+
+check(`no NEW fixed-wait-guarding-a-negative-assertion sites outside the baseline (found ${newViolations.length})`, newViolations.length === 0);
+for (const v of newViolations) console.log(`  NEW  ${v.key}  "${v.label}"`);
+
+check(`no REGRESSION in the 4 retrofitted files back to a raw fixed-wait-then-negative-check (found ${regressions.length})`, regressions.length === 0);
+for (const r of regressions) console.log(`  REGRESSION  ${r.key}  "${r.label}"`);
+
+check(`every TIMING-GUARD-SAFE exemption cites one of the ${SANCTIONED_REASONS.size} sanctioned reasons (found ${badExemptions.length} invalid)`, badExemptions.length === 0);
+for (const b of badExemptions) console.log(`  BAD-EXEMPTION  ${b.key}  reason="${b.exempt}"`);
+
+// The 4 confirmed instances from card 1addef27 must actually be gone from the raw idiom shape (not merely
+// exempted or baselined) — proves the retrofit landed, not just that this guard would have accepted a
+// no-op. A fresh scan of each of these 4 files finding ZERO idiom-shape matches (retrofitted files use
+// assertNeverWithControl, which does not contain the raw idiom text at the call site) confirms this.
+for (const retrofitted of RETROFITTED_FILES) {
+  const stillRaw = scanFile(retrofitted).some((h) => !h.exempt);
+  check(`${retrofitted}: the retrofit actually removed the raw fixed-wait-then-negative-check shape`, !stillRaw);
+}
+
+console.log(failures === 0
+  ? "\n✅ ALL PASS — no new/regressed fixed-wait-guarding-a-negative-assertion sites. This is NOT a completed census: the baseline above (115 entries, keyed by file+label — see the header's BASELINE KEY note) is UNAUDITED debt, not cleared code."
+  : `\n❌ ${failures} FAILURE(S).`);
+process.exit(failures === 0 ? 0 : 1);

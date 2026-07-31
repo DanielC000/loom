@@ -22,6 +22,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
+import { observeOnce, assertNeverWithControl } from "./_timing-guard.mjs";
 
 const TMP = mkdtempManaged("loom-ws-fleet-sf-");
 process.env.LOOM_HOME = TMP;
@@ -34,7 +35,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
-const { FleetHub } = await import("../dist/gateway/fleet-hub.js");
+const { FleetHub, DIRTY_FLUSH_MS } = await import("../dist/gateway/fleet-hub.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -82,9 +83,13 @@ try {
   await app.ready();
 
   // --- (1) no fleet socket connected: markSessionDirty is a pure no-op (zero point-reads) -------------
-  let pointReads = 0;
+  // Tracked PER SESSION ID (not a bare shared counter): the positive control below deliberately arms a
+  // real violation on a DIFFERENT id ("CONTROL") concurrently with the real ("S1") scenario it's proving
+  // alongside — a shared counter would let either phase's reads bleed into the other depending on exact
+  // timing; per-id tracking makes that impossible by construction, no reset/ordering care needed.
+  const pointReadCounts = new Map();
   const originalGet = db.getSessionListItemById.bind(db);
-  db.getSessionListItemById = (id) => { pointReads++; return originalGet(id); };
+  db.getSessionListItemById = (id) => { pointReadCounts.set(id, (pointReadCounts.get(id) ?? 0) + 1); return originalGet(id); };
   db.insertSession({
     id: "S1", projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: TMP,
     processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
@@ -92,8 +97,28 @@ try {
   });
   db.setBusy("S1", true);
   db.setBusy("S1", false);
-  await new Promise((r) => setTimeout(r, 300)); // past the debounce window, if one had (wrongly) armed
-  check("(1) no socket connected: session mutations trigger zero point-reads", pointReads === 0);
+  const noPointReadsWithoutSocket = await assertNeverWithControl({
+    label: "(1) no socket connected: session mutations trigger zero point-reads",
+    check: () => (pointReadCounts.get("S1") ?? 0) > 0,
+    windowMs: DIRTY_FLUSH_MS + 100, // derived from FleetHub's own debounce constant, not a guessed value
+    positiveControl: async () => {
+      // Prove the SAME check+window CAN observe a violation: a throwaway hub WITH a socket connected,
+      // marking a DIFFERENT session ("CONTROL") dirty, DOES trigger a point-read within this window.
+      // Fully isolated from the real fleetHub under test below — its own hub instance, never touches
+      // fleetHub's sockets/dirty state, and its reads land under a DIFFERENT map key than "S1"'s.
+      const controlHub = new FleetHub();
+      controlHub.attach(db, sessions);
+      controlHub.add({}); // fake socket stand-in: readyState never === OPEN, so broadcast() safely no-ops send
+      db.insertSession({
+        id: "CONTROL", projectId: "p1", agentId: "a1", engineSessionId: null, title: null, cwd: TMP,
+        processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now,
+        lastError: null, role: "worker", parentSessionId: null,
+      });
+      controlHub.markSessionDirty("CONTROL");
+      return observeOnce({ check: () => (pointReadCounts.get("CONTROL") ?? 0) > 0, windowMs: DIRTY_FLUSH_MS + 100 });
+    },
+  });
+  check("(1) no socket connected: session mutations trigger zero point-reads", noPointReadsWithoutSocket);
 
   // --- connect a fleet socket ----------------------------------------------------------------------
   const inbox = makeInbox();
@@ -110,7 +135,7 @@ try {
     upsert1?.session?.projectName === "Proj" && upsert1?.session?.agentName === "Agent");
   check("(2) delta shape carries pendingMerge, null when nothing is merging",
     "pendingMerge" in (upsert1?.session ?? {}) && upsert1.session.pendingMerge === null);
-  check("(1b) the point-read happened exactly once for this one delta", pointReads === 1);
+  check("(1b) the point-read happened exactly once for this one delta", pointReadCounts.get("S1") === 1);
 
   // --- (3) N rapid mutations of the SAME id coalesce into ONE delta reflecting the LATEST state -------
   db.setBusy("S1", false);

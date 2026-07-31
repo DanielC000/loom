@@ -43,6 +43,9 @@ try {
     check("1: isReady() is false when disabled", tr.isReady() === false);
     const result = await tr.transcribe({ filePath: "/tmp/x.ogg", langHint: null });
     check("1: transcribe() resolves null when disabled", result === null);
+    // TIMING-GUARD-SAFE: sync-early-return — stt.ts's disable check (`if (!enabled) return false;`) is
+    // the literal first line, synchronous, zero `await`, before the provisioner is reachable at all
+    // (source-verified, card 1addef27/975956b2). Structurally unreachable, not a timer race.
     await new Promise((r) => setTimeout(r, 20));
     check("1: the provisioner was NEVER called (no venv provisioning kicked)", calls === 0);
   }
@@ -56,6 +59,9 @@ try {
     check("2: isReady() is false when disabled", synth.isReady() === false);
     const result = await synth.synthesize({ text: "hello there", lang: null, voice: null });
     check("2: synthesize() resolves null when disabled", result === null);
+    // TIMING-GUARD-SAFE: sync-early-return — tts.ts's disable check (`if (!enabled) return false;`) is
+    // the literal first line, synchronous, zero `await`, before the provisioner is reachable at all
+    // (source-verified, card 1addef27/975956b2). Structurally unreachable, not a timer race.
     await new Promise((r) => setTimeout(r, 20));
     check("2: the provisioner was NEVER called (no venv provisioning kicked)", calls === 0);
   }

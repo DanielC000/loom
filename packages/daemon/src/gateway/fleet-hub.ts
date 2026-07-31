@@ -4,8 +4,10 @@ import type { Db } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
 
 /** Debounce window between a session becoming dirty and its coalesced delta going out — long enough to
- *  fold a burst of rapid mutations on one id into a single broadcast (see `markSessionDirty`). */
-const DIRTY_FLUSH_MS = 200;
+ *  fold a burst of rapid mutations on one id into a single broadcast (see `markSessionDirty`). Exported
+ *  so a hermetic test can DERIVE a wait window from this real constant instead of guessing one (card
+ *  1addef27 — see test/ws-fleet-session-feed.mjs). */
+export const DIRTY_FLUSH_MS = 200;
 
 /**
  * C2/C3 of the WS delta-push umbrella (1efde4ba) — the registry backing `/ws/fleet`. Holds every connected

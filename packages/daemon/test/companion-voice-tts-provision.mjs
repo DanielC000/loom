@@ -34,6 +34,10 @@ try {
     const synth = createKokoroSynthesizer();
     const ready1 = synth.isReady();
     check("1: isReady() is false on a cold venv with provisioning disabled", ready1 === false);
+    // TIMING-GUARD-SAFE: sync-probe-no-macrotask — the disable check sits behind `await probeOk(...)`
+    // (venv.ts:240-256), but probeOk's first line is `if (!fs.existsSync(bin)) return false;` and in a
+    // fresh temp LOOM_HOME the binary never exists, so it resolves by that sync check alone: pure
+    // microtask chaining, no subprocess, no I/O, no real macrotask to starve (card 1addef27/975956b2).
     await new Promise((r) => setTimeout(r, 100)); // let the (disabled, near-instant) kick settle
     const ready2 = synth.isReady();
     check("1: isReady() stays false after the disabled kick settles", ready2 === false);

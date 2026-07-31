@@ -910,6 +910,17 @@ export function __markitdownProvisionKicks(): number {
 }
 
 /**
+ * TEST-ONLY: deterministically await the CURRENT in-flight markitdown provision kick's real completion
+ * (or resolve immediately if nothing is in flight) — DETERMINISTIC SETTLEMENT for a hermetic test to use
+ * instead of guessing a sleep length (card 1addef27). Never throws: `markitdownProvisionInFlight` itself
+ * never rejects (see its own `.catch` above), so this is belt-and-suspenders for an injected test
+ * provisioner that might.
+ */
+export async function __markitdownProvisionSettle(): Promise<void> {
+  if (markitdownProvisionInFlight) { try { await markitdownProvisionInFlight; } catch { /* best-effort */ } }
+}
+
+/**
  * TEST-ONLY: swap the provisioner the kick calls (pass nothing/undefined to restore the real
  * `ensurePythonPackageAsync`) and reset provisioning module state back to idle (status, the success memo, the
  * kick counter, any in-flight handle). Lets a hermetic test drive every classified outcome + the retry/dedupe
