@@ -1,7 +1,7 @@
 // loom:gate-exempt: card fa52f555 — a real manual probe/test, deliberately run out of band as part of the
 // census investigation harness, never by the daemon's own hermetic gate.
 // Phase 2 (per manager directive #5's renumbering) — baseline census: N=20 full-suite runs at the real
-// gate profile (LOOM_TEST_CONCURRENCY=2, unmodified composition C0). Invoked in SMALL BATCHES (--start/
+// gate profile (LOOM_GATE_TEST_CONCURRENCY=2, unmodified composition C0). Invoked in SMALL BATCHES (--start/
 // --count) rather than one long-lived process, so a recycled successor can resume from the NDJSON alone
 // without needing to reconnect to a background task. Run from packages/daemon:
 //   node test/census/phase2-baseline.mjs --start 1 --count 5
@@ -28,7 +28,7 @@ const { names } = await discoverHermetic();
 // --start is still honored as a deliberate override — assertRunIndexAvailable below gates it too, so an
 // override that collides is refused, not silently accepted.
 const start = explicitStart ?? nextRunIndex(readNdjson(OUT), PHASE);
-console.log(`Baseline census: ${names.length} hermetic tests, LOOM_TEST_CONCURRENCY=2, runs ${start}..${start + count - 1}` + (explicitStart === null ? " (--start derived from file)" : " (--start explicit override)"));
+console.log(`Baseline census: ${names.length} hermetic tests, LOOM_GATE_TEST_CONCURRENCY=2, runs ${start}..${start + count - 1}` + (explicitStart === null ? " (--start derived from file)" : " (--start explicit override)"));
 
 for (let i = 0; i < count; i++) {
   const runIndex = start + i;

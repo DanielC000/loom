@@ -5,7 +5,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // with the existing PendingOpRegistry sync/async pattern.
 //
 // THE HOLE THIS GUARDS: before this, a worker's own DoD self-check ran the gate command via raw Bash,
-// completely bypassing the daemon's GateSemaphore. Only the LOOM_TEST_CONCURRENCY=1 convention (fix A)
+// completely bypassing the daemon's GateSemaphore. Only the LOOM_GATE_TEST_CONCURRENCY=1 convention (fix A)
 // kept N parallel workers from spiking total test-lanes. This test proves the STRUCTURAL bound: even a
 // worker that runs its gate through `run_gate` alongside an in-flight MERGE gate never exceeds the
 // configured `maxConcurrentGates` cap.
@@ -264,10 +264,17 @@ try {
     check("(D) reports ran:true, passed:true", r.value.ran === true && r.value.passed === true);
   }
 
-  // ── (D2) run_gate's spawned child is pinned to LOOM_TEST_CONCURRENCY=2 (card 68920f5b: matches the
-  //         merge gate's own default lane count — was "=1" pre-68920f5b, half the merge gate's
+  // ── (D2) run_gate's spawned child is pinned to LOOM_GATE_TEST_CONCURRENCY=2 (card 68920f5b: matches
+  //         the merge gate's own default lane count — was "=1" pre-68920f5b, half the merge gate's
   //         parallelism against the same gateCommandTimeoutMs, which made run_gate structurally more
   //         timeout-prone than the merge gate it feeds) ─────────────────────────────────────────────
+  // Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY`, which this project's own gate child
+  // (as any OTHER project's would too — nothing here branches on project identity, so this "WG-GATE" test
+  // project stands in for a non-Loom project just as well) received unconditionally regardless of whether
+  // anything in ITS harness was ever meant to read that generic a name. The second check below proves the
+  // old name is now GONE from the injected env, not merely that the new one is present — verified failing
+  // against pre-rename code (git-stashed) before this fix, passing after: this is the DoD's required
+  // positive control on the "non-Loom project does not receive the Loom-private variable" property.
   {
     const sfx = `d2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-d2-${sfx}`);
@@ -281,7 +288,8 @@ try {
     const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: capturingGate });
 
     await sessions.runWorkerGate(gateWorkerId);
-    check("(D2) run_gate pins LOOM_TEST_CONCURRENCY=2 on its spawned child", capturedEnvOverride?.LOOM_TEST_CONCURRENCY === "2");
+    check("(D2) run_gate pins LOOM_GATE_TEST_CONCURRENCY=2 on its spawned child", capturedEnvOverride?.LOOM_GATE_TEST_CONCURRENCY === "2");
+    check("(D2) run_gate does NOT inject the old generic LOOM_TEST_CONCURRENCY name (closes the cross-project collision hazard)", capturedEnvOverride?.LOOM_TEST_CONCURRENCY === undefined);
   }
 
   // ── (E) slow path degrades to {opId,status:pending} and later delivers a [loom:gate-*] nudge ──────
@@ -593,6 +601,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — run_gate is admitted through the SAME GateSemaphore merge/deploy gates share (structural bound, not just LOOM_TEST_CONCURRENCY=1 convention), composes with PendingOpRegistry's sync/async degrade, and fails closed/role-gated correctly."
+  ? "\n✅ ALL PASS — run_gate is admitted through the SAME GateSemaphore merge/deploy gates share (structural bound, not just LOOM_GATE_TEST_CONCURRENCY=1 convention), composes with PendingOpRegistry's sync/async degrade, and fails closed/role-gated correctly."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

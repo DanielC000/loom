@@ -263,7 +263,7 @@ const MERGE_OP_RETAIN_MS = 5_000;
 
 /** {@link SessionService.runWorkerGate}'s result (card 7f96aa09 — structural fix B for d5c5ccdf: route the
  *  worker DoD self-gate through the daemon GateSemaphore). `ran:false` means no gate command is configured
- *  for this project at all (the caller should fall back to a raw self-check, pinning `LOOM_TEST_CONCURRENCY=1`
+ *  for this project at all (the caller should fall back to a raw self-check, pinning `LOOM_GATE_TEST_CONCURRENCY=1`
  *  itself); `ran:true` always means the SAME `orchestration.gateCommand` the merge gate itself runs was
  *  actually executed, in the worker's own worktree. Reuses `GateRejectionDetail`'s shape on a failure — the
  *  same diagnostic enrichment (phase/failedStep/failingTest/stderrTail/exitCode/signal/timedOut) the merge
@@ -389,17 +389,22 @@ const GATE_OP_RETAIN_MS = 5_000;
  *  Still safe: `orchestration.maxConcurrentGates` (default 1) admits gate RUNS — merge, deploy, AND
  *  run_gate — through the SAME `gateSemaphore`, so at the default config at most one gate runs at a time
  *  and a 2-lane `run_gate` peaks at the SAME 2 lanes a merge gate already reaches today. The 2026-07-15
- *  8-lane incident was ONE gate's pool defaulting to full core count (no `LOOM_TEST_CONCURRENCY` pin at
+ *  8-lane incident was ONE gate's pool defaulting to full core count (no `LOOM_GATE_TEST_CONCURRENCY` pin at
  *  all), not concurrent gates — this override still pins a bound, just 2 instead of 1. The real
  *  host-load budget is `maxConcurrentGates × 2` (same formula the merge gate already implies); that only
  *  changes if someone raises `maxConcurrentGates` above 1, which carries the identical exposure for the
  *  merge gate too — no new risk class.
  *
- *  This is DELIBERATELY DIFFERENT from the raw-Bash fallback pin (still `LOOM_TEST_CONCURRENCY=1`,
+ *  This is DELIBERATELY DIFFERENT from the raw-Bash fallback pin (still `LOOM_GATE_TEST_CONCURRENCY=1`,
  *  documented below and in CLAUDE.md): a raw self-check run via Bash is OUTSIDE the semaphore entirely —
  *  N concurrent raw gates is N × lanes with no structural bound, so its pin stays conservative at 1. This
- *  override is admitted through the semaphore, so it can safely match the merge gate's 2. */
-const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_TEST_CONCURRENCY: "2" };
+ *  override is admitted through the semaphore, so it can safely match the merge gate's 2.
+ *
+ *  Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY` — that name was indistinguishable from
+ *  a name any OTHER project's own test harness might independently choose, so it was unconditionally
+ *  injected into every project's gate child regardless of whether anything there was meant to read it.
+ *  `LOOM_GATE_TEST_CONCURRENCY` is unambiguously Loom's own gate-runner convention. */
+const WORKER_GATE_ENV_OVERRIDE: NodeJS.ProcessEnv = { LOOM_GATE_TEST_CONCURRENCY: "2" };
 
 /** {@link SessionService.gcWorktreeDir}'s result. `nestedRepoPaths`/`scanTruncated` are only ever set
  *  alongside `outcome: "nested-repo-blocked"` — see that outcome's doc on gcWorktreeDir. */
@@ -4799,7 +4804,7 @@ export class SessionService {
    * `pendingOps.peek(key)` AT SETTLE TIME — plausible-looking (the retained view IS written moments
    * earlier, in the same synchronous settle callback), but it raced the registry's retain-then-notify
    * ordering under CPU-contended concurrent test load (merge-gate op 473b8596: this test's own
-   * "fallback wake reaped" assertions failed under `LOOM_TEST_CONCURRENCY=2` while passing standalone)
+   * "fallback wake reaped" assertions failed under `LOOM_GATE_TEST_CONCURRENCY=2` while passing standalone)
    * — closure capture removes that race entirely instead of chasing a more reliable read.
    *
    * FAIL-SAFE ON UNKNOWN START TIME (kept even though closure capture makes it effectively unreachable
@@ -10019,7 +10024,7 @@ export class SessionService {
    * project's OWN configured `gateCommand` in the CALLING worker's own worktree, daemon-mediated and bound
    * by the SAME `gateSemaphore`/`maxConcurrentGates` cap the merge/deploy gates already share — so N
    * parallel workers self-gating can no longer structurally exceed the total-lane budget, regardless of
-   * whether each worker remembers the `LOOM_TEST_CONCURRENCY=1` convention (fix A, d5c5ccdf — which stays
+   * whether each worker remembers the `LOOM_GATE_TEST_CONCURRENCY=1` convention (fix A, d5c5ccdf — which stays
    * documented as the fallback for a project with no `gateCommand` configured at all, or an ad-hoc local
    * run outside `run_gate`).
    *
@@ -10167,8 +10172,8 @@ export class SessionService {
         value: {
           ran: false,
           reason: worker.repoKey
-            ? `no gateCommand configured for repo "${worker.repoKey}" — ask the owner to set it on that registry entry, or fall back to a raw self-check (pin LOOM_TEST_CONCURRENCY=1 yourself)`
-            : "no gateCommand configured for this project — ask the owner to set orchestration.gateCommand, or fall back to a raw self-check (pin LOOM_TEST_CONCURRENCY=1 yourself)",
+            ? `no gateCommand configured for repo "${worker.repoKey}" — ask the owner to set it on that registry entry, or fall back to a raw self-check (pin LOOM_GATE_TEST_CONCURRENCY=1 yourself)`
+            : "no gateCommand configured for this project — ask the owner to set orchestration.gateCommand, or fall back to a raw self-check (pin LOOM_GATE_TEST_CONCURRENCY=1 yourself)",
         },
       };
     }

@@ -991,13 +991,13 @@ export class OrchestrationMcpRouter {
             "GateSemaphore/`maxConcurrentGates` budget the merge/deploy gates already share, instead of an " +
             "unbounded raw-Bash self-check. Prefer this over running the gate yourself via Bash: it structurally " +
             "bounds total concurrent test-lanes across every worker + merge/deploy gate on the daemon (it also " +
-            "pins LOOM_TEST_CONCURRENCY=2 on the spawned child itself (matching the merge gate's own default " +
+            "pins LOOM_GATE_TEST_CONCURRENCY=2 on the spawned child itself (matching the merge gate's own default " +
             "parallelism — semaphore-admitted, so this is structurally safe), so you don't need to set that " +
             "env var). " +
             "Because it shares one budget with merge/deploy gates, a busy fleet MAY mean this call queues behind " +
             "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
-            "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
+            "build/test command directly (still pin LOOM_GATE_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
             "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, steps?, " +
             "outputTail?, gateDetail?} — " +
             "`validatedHead` is stamped when this run was ISSUED, before it's even admitted past the queue — " +

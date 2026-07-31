@@ -1,7 +1,10 @@
 // Runs every hermetic web unit test in this directory. Each file is a self-contained node script
 // (no shared daemon/db/fs state), so this is embarrassingly-parallel — a fixed pool of lanes pulls the
 // next unclaimed file off a shared cursor. Pool size defaults to os.availableParallelism() capped at
-// MAX_CONCURRENCY; override with LOOM_TEST_CONCURRENCY=<n> (e.g. =1 to force serial). Every file still
+// MAX_CONCURRENCY; override with LOOM_GATE_TEST_CONCURRENCY=<n> (e.g. =1 to force serial). Card ba3c9580:
+// this reader shares the name with packages/daemon's gate-runner pin deliberately — `pnpm build` (which
+// runs this file) is itself part of THIS project's own gateCommand, so this is a first-party consumer of
+// the SAME gate-run env override, not a foreign project coincidentally reading a generic name. Every file still
 // runs to completion regardless of an earlier failure — output is buffered per file and printed as
 // PASS/FAIL on completion (with the failing file's captured output) so concurrent runs stay legible.
 import { readdirSync } from 'node:fs';
@@ -24,7 +27,7 @@ console.log(`Running ${files.length} test file(s) in ${testDir}`);
 const MAX_CONCURRENCY = 8;
 const POOL_SIZE = Math.max(
   1,
-  Math.min(Number(process.env.LOOM_TEST_CONCURRENCY) || os.availableParallelism(), MAX_CONCURRENCY),
+  Math.min(Number(process.env.LOOM_GATE_TEST_CONCURRENCY) || os.availableParallelism(), MAX_CONCURRENCY),
 );
 
 function runOne(file) {

@@ -33,7 +33,7 @@
 //
 // Runs in a BOUNDED, port-safe worker pool (each test file is already hermetically isolated — own
 // temp LOOM_HOME, own port — so this is embarrassingly-parallel). Pool size, in order:
-// LOOM_TEST_CONCURRENCY env (explicit dial-up/down on a host you know can take it) ?? a bounded
+// LOOM_GATE_TEST_CONCURRENCY env (explicit dial-up/down on a host you know can take it) ?? a bounded
 // DEFAULT_CONCURRENCY (safe when unset — see its own doc below) — either way clamped to the
 // MAX_CONCURRENCY ceiling (concurrent temp-SQLite DBs + in-process daemon boots thrash host
 // resources past a point; incident: this exact command, run with no env override, starved a live
@@ -303,19 +303,21 @@ export function auditDiscoveryAgainstGit(testDir) {
 
 const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS, notHermeticNames: NOT_HERMETIC_NAMES } = discoverHermeticTests(TEST_DIR);
 
-// Ceiling — unchanged. `LOOM_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
+// Ceiling — unchanged. `LOOM_GATE_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
 const MAX_CONCURRENCY = 8;
-// Safe DEFAULT when LOOM_TEST_CONCURRENCY is unset (card 301d8c01 — a bare `pnpm --filter @loom/daemon
+// Safe DEFAULT when LOOM_GATE_TEST_CONCURRENCY is unset (card 301d8c01 — a bare `pnpm --filter @loom/daemon
 // test:daemon`, no env override, is exactly the command a worker or the daemon-run merge gate runs
 // unattended). Previously this fell back to `os.availableParallelism()`, which on a many-core
 // self-hosting box let this command spike to `MAX_CONCURRENCY` lanes of concurrent temp-SQLite/
 // in-process-daemon boots with nothing bounding it — that's what starved the live Codescape service.
 // 2 is a conservative default; a beefier/known-safe host can still override upward via the env.
+// Card ba3c9580: renamed from the generic `LOOM_TEST_CONCURRENCY`, which every project's gate child
+// received regardless of whether its own harness happened to read that same generic name.
 const DEFAULT_CONCURRENCY = 2;
 const POOL_SIZE = Math.max(
   1,
   Math.min(
-    Number(process.env.LOOM_TEST_CONCURRENCY) || DEFAULT_CONCURRENCY,
+    Number(process.env.LOOM_GATE_TEST_CONCURRENCY) || DEFAULT_CONCURRENCY,
     MAX_CONCURRENCY,
   ),
 );
