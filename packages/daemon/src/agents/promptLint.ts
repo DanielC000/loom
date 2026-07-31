@@ -89,9 +89,10 @@ export const ORCH_MANAGER_TOOLS: readonly string[] = [
   "worker_merge_confirm", "worker_message", "worker_reap", "worker_recycle", "worker_redirect",
   "worker_relink", "worker_set_mode", "worker_spawn", "worker_status", "worker_stop", "worker_transcript",
 ];
-// The worker's tested depth-1 surface (orchestration.ts's own comment: "EXACTLY { gate_status,
-// my_context, run_gate, worker_report }" — pinned by 5 existing hermetic tests there).
-export const ORCH_WORKER_TOOLS: readonly string[] = ["gate_status", "my_context", "run_gate", "worker_report"];
+// The worker's tested depth-1 surface (orchestration.ts's own comment: "EXACTLY { gate_queue, gate_status,
+// my_context, run_gate, worker_report }" — pinned by 5 existing hermetic tests there. `gate_queue`, card
+// d04f9c76, is read-only and project-scoped the SAME way gate_status is — see registerGateQueue's doc).
+export const ORCH_WORKER_TOOLS: readonly string[] = ["gate_queue", "gate_status", "my_context", "run_gate", "worker_report"];
 export const ORCH_ASSISTANT_TOOLS: readonly string[] = ["my_context", "notify_lead"];
 
 // loom-tasks: universal across every role except assistant (which loses the two write tools).

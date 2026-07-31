@@ -17,6 +17,13 @@
 //   (D) allowExtend:false (the flag the merge gate's own retry-after-timeout call passes, so the two
 //       "one more chance" mechanisms don't compound) disables the extension even with live output —
 //       killed at the first deadline, identical to (B).
+// Card d04f9c76: (B)/(C)/(D) also assert the TIMEOUT MESSAGE states WHY no extend was granted — idle ≥
+//       GATE_EXTEND_IDLE_MS (STALLED, (B)'s case) vs. extend never available at all (allowExtend:false or
+//       GATE_TIMEOUT_EXTEND_ENABLED=0, says nothing about stalling — (D)'s case, deliberately fixtured with
+//       LIVE output so a wrong "idle/stalled" message would be actively misleading, not just imprecise) —
+//       these are two different remedies a reader used to need a source read to tell apart. (C)'s SECOND
+//       (granted-extend) kill still reports "(after one auto-extend)", unchanged. Each check pairs a
+//       positive assertion with a negative control (the OTHER fork's wording must be absent).
 // Run: 1) build daemon (pnpm build), 2) node test/gate-timeout-extend.mjs
 //
 // Card 9f3164b8 (2026-07-22): under heavy host CPU oversubscription this file produced FAILs unrelated to
@@ -157,6 +164,13 @@ try {
     const elapsed = result.decidedAt - testStart;
     check("(B) a silent/idle step is still killed at the FIRST deadline — timedOut:true", result.timedOut === true);
     check("(B) no extension was granted (elapsed stays near the FIRST deadline, not the second)", elapsed < TIMEOUT_MS * 1.7);
+    // Card d04f9c76: the message must state WHY no extend was granted — here, idle ≥ threshold (STALLED),
+    // the fork with the OPPOSITE remedy from (D) below. Both the positive assertion (says "stalled") and
+    // the negative control (does NOT claim the other two reasons) are checked — a message that vaguely
+    // says both would pass a positive-only check while still being useless to a reader.
+    check("(B) message states the STALLED reason (idle ≥ threshold)", /idle .*≥.*stalled/i.test(result.error?.message ?? ""));
+    check("(B) message does NOT claim extend-unavailable or after-one-auto-extend (negative control)",
+      !/extend unavailable/i.test(result.error?.message ?? "") && !/after one auto-extend/i.test(result.error?.message ?? ""));
   }
 
   // ── (C) ACTIVE forever (never exits): EXACTLY ONE extension, then killed at the second deadline ────
@@ -169,6 +183,12 @@ try {
     check("(C) it ran past the first deadline (got the one extension)", elapsed > TIMEOUT_MS * 1.15);
     check("(C) it was killed at (not far past) the SECOND deadline — proves the cap: never extends a second time",
       elapsed < TIMEOUT_MS * 2.6);
+    // Card d04f9c76: the FINAL kill followed a granted extend — `extended` wins over the idle/unavailable
+    // fork regardless of how idle the child looks at the second deadline (it's actively streaming here, so
+    // idleMs is small anyway, but the ordering is what this asserts, not just the idle value).
+    check("(C) message states '(after one auto-extend)', not the idle/unavailable fork", /after one auto-extend/i.test(result.error?.message ?? ""));
+    check("(C) message does NOT ALSO claim idle-stalled or extend-unavailable (negative control)",
+      !/idle .*stalled/i.test(result.error?.message ?? "") && !/extend unavailable/i.test(result.error?.message ?? ""));
   }
 
   // ── (D) allowExtend:false disables the extension even with live output — same as (B) ────────────────
@@ -179,12 +199,20 @@ try {
     const elapsed = result.decidedAt - testStart; // decision instant, not promise-resolution — see (B)'s comment
     check("(D) allowExtend:false kills at the FIRST deadline despite live output — timedOut:true", result.timedOut === true);
     check("(D) no extension was granted (elapsed stays near the FIRST deadline)", elapsed < TIMEOUT_MS * 1.7);
+    // Card d04f9c76: `allowExtend:false` is the "never available" fork (the merge gate's own
+    // retry-after-timeout shape) — this is a genuinely LIVE-output step (same fixture as (C)), so if the
+    // message said "idle ... stalled" instead it would be actively misleading, not just imprecise: a
+    // reader would go hunt for a hang that was never there.
+    check("(D) message states extend-unavailable, NOT the idle/stalled fork (this step has LIVE output)",
+      /extend unavailable/i.test(result.error?.message ?? "") && !/idle .*stalled/i.test(result.error?.message ?? ""));
+    check("(D) message does NOT claim after-one-auto-extend (negative control — none was ever granted)",
+      !/after one auto-extend/i.test(result.error?.message ?? ""));
   }
 } finally {
   try { fs.rmSync(scratchDir, { recursive: true, force: true }); } catch { /* best-effort cleanup */ }
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a healthy-but-slow gate step (still producing output, zero failures) survives past its timeout via ONE bounded auto-extend and resolves to its own true exit code instead of a false timeout-fail; a genuinely idle/wedged step, or an extension-disabled call, is still killed exactly as before."
+  ? "\n✅ ALL PASS — a healthy-but-slow gate step (still producing output, zero failures) survives past its timeout via ONE bounded auto-extend and resolves to its own true exit code instead of a false timeout-fail; a genuinely idle/wedged step, or an extension-disabled call, is still killed exactly as before — and the timeout message now states WHICH of those two it was (idle-stalled vs. extend-unavailable), not just that it was killed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

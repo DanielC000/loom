@@ -11,7 +11,7 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        - the unmeasured-context branch (ctxInputTokens null) ALSO carries gateCommand
 //   (S) SURFACE — my_context stays READ-ONLY: NO set/propose/confirm gate tool is registered on the
 //       manager or worker surface (the trust boundary is untouched), and the worker surface is still
-//       exactly { my_context, run_gate, worker_report }.
+//       exactly { gate_queue, gate_status, my_context, run_gate, worker_report }.
 //   (W) Pre-first-turn contextWindow/model reflect the session's CONFIGURED profile model (not the
 //       misleading DEFAULT_CONTEXT_WINDOW/null), with an explicit measured:false marker either way.
 import fs from "node:fs";
@@ -207,7 +207,8 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
   // `run_gate` (card 7f96aa09), `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
-  // the worker's own call is scoped to its own ops), `gate_queue` (card fa359824, MANAGER-ONLY), and
+  // the worker's own call is scoped to its own ops), `gate_queue` (card fa359824, now on BOTH surfaces
+  // per card d04f9c76 — same project-scoped redaction either way, see registerGateQueue's doc), and
   // `gate_cancel` (card 8d585277, MANAGER-ONLY) are DELIBERATE, reviewed exceptions to the /gate/i sweep
   // below: `run_gate` only EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the
   // GateSemaphore), `gate_status` only READS the live GateSemaphore registry by opId, `gate_queue` only
@@ -220,11 +221,12 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",
     gateSetTool(workerTools) === undefined);
-  // The worker surface is exactly { gate_status, my_context, run_gate, worker_report } — run_gate (card
-  // 7f96aa09) and gate_status (card fc243a43, read-only + own-op-scoped) are the deliberate additions
-  // since this assertion was written; anything else would be a surface leak.
-  check("(S) worker surface is STILL exactly { gate_status, my_context, run_gate, worker_report }",
-    workerTools.slice().sort().join(",") === "gate_status,my_context,run_gate,worker_report");
+  // The worker surface is exactly { gate_queue, gate_status, my_context, run_gate, worker_report } —
+  // run_gate (card 7f96aa09), gate_status (card fc243a43, read-only + own-op-scoped), and gate_queue
+  // (card d04f9c76, read-only + project-scoped) are the deliberate additions since this assertion was
+  // first written; anything else would be a surface leak.
+  check("(S) worker surface is STILL exactly { gate_queue, gate_status, my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "gate_queue,gate_status,my_context,run_gate,worker_report");
   // my_context is present on BOTH role branches (it's the tool the gate is folded into).
   check("(S) my_context registered on both manager + worker surfaces",
     managerTools.includes("my_context") && workerTools.includes("my_context"));

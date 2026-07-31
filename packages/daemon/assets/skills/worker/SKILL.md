@@ -162,8 +162,8 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      shape you're looking at — don't guess from the sha alone. Same family as the step-1-diffstat merge
      rule: verify the artifact, not the signal.
    - **The gate is a shared, capped, daemon-global resource, not just yours.** Every project sharing it
-     queues on the SAME cap, so what you do with it affects work that has nothing to do with you. Two
-     things follow, and they pull in opposite directions — read both:
+     queues on the SAME cap, so what you do with it affects work that has nothing to do with you. A few
+     things follow from that, and the first two pull in opposite directions — read all of them:
      - **A hand-run FULL suite is an opt-out from the cap, even when someone above you asks for one** —
        e.g. to get a trustworthy timing number. It doesn't queue, so it just competes for the host with
        whatever IS properly admitted, and it contaminates the very measurement it was run to get. If the
@@ -177,6 +177,10 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
        scarce, queued slot on feedback a narrower run would have given you for free, at the cost of
        whoever else is waiting behind it. (If your tests run against a build output rather than source,
        rebuild first — a check against a stale build is meaningless either way.)
+     - **If a read-only `gate_queue` tool is on your list, check it before firing `run_gate` when a
+       manager asks you to confirm a lane is free first** — it's a project-scoped snapshot of who
+       currently holds or is waiting on the shared cap, so you can answer that instruction from a read
+       instead of firing blind and finding out the hard way.
 
    **If you do run a build/test command yourself** (that no-gate-command fallback, or another check your
    task names): **run it in the FOREGROUND, commit, then report — in ONE flow.** A blocking command

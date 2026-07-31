@@ -191,6 +191,75 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
   );
 }
 
+// gate_queue (card fa359824 — Codescape manager escalation 530e59a0; exposed to the WORKER surface too by
+// card d04f9c76 — Codescape platform relay: a worker told "confirm a lane is free before firing" had no
+// daemon-wide view of its own and could only ever fire `run_gate` blind into a saturated cap). gate_status
+// only ever answers "what is MY op doing", so a caller with no op of its own to poll (or one whose op has
+// been queued a long time) had no way to tell healthy contention apart from a leaked slot short of
+// cross-project DB access no worker/manager surface grants. This is the ONE-read answer: cap + every
+// running/queued gate run. READ-ONLY — it cannot mutate the cap, cancel, or reorder anything; it only
+// reads the live GateSemaphore registry (see SessionService.gateQueueForManager's doc for the
+// cross-project scoping: a row from a DIFFERENT project is named by project + kind + age only, never its
+// task title/branch). Privacy is keyed off the CALLER'S PROJECT (derived server-side from `sessionId`,
+// same as every other tool here), never the caller's ROLE — `gateQueueForManager` takes only a
+// `callerProjectId` and redacts by comparing each entry's OWN projectId against it, so a worker sees
+// EXACTLY the same cross-project redaction a manager on the same project would (verified: gate-queue.mjs's
+// redaction checks now run against BOTH a manager AND a worker session on the same project, see (unit-worker)
+// below). `recentTimeoutStreak` (escalation 4f151331, filed while the manager card was in flight — a REAL
+// incident: two concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while
+// its op still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own
+// belief — see SessionService.gateQueueForManager's doc for why the two are surfaced side by side, never
+// merged.
+function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, sessionId: string): void {
+  server.registerTool(
+    "gate_queue",
+    {
+      description:
+        "Read-only snapshot of the WHOLE daemon-global gate queue — the resolved concurrency cap plus " +
+        "every gate run currently `running` or `queued` (merge/deploy/worker-self-check alike), so you can " +
+        "answer 'why is my gate queued, who holds the slot, how deep am I' from ONE read instead of " +
+        "guessing or polling gate_status per-opId, or firing `run_gate` blind to find out. Returns {cap, " +
+        "activeCount, queuedCount, running: " +
+        "GateQueueEntry[], queued: GateQueueEntry[]} — `queued` is already in real admission order (all " +
+        "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
+        "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
+        "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, queuePosition} — " +
+        "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
+        "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
+        "SAME entry RE-BASES to admission time and they measure time RUNNING instead. Don't read a `queued` " +
+        "entry's `elapsedMs` as run time — a deeply-queued op can show a large `elapsedMs` while it has done " +
+        "zero seconds of actual work, and mistaking that for a hung run is exactly backwards: it lands " +
+        "hardest on the op that's MOST expensive to wrongly cancel. A large `elapsedMs` on a `queued` entry " +
+        "is evidence of queue depth/contention, not of a wedged run; only a `running` entry's `elapsedMs` " +
+        "is evidence about run duration. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
+        "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
+        "belonging to YOUR OWN project ALSO " +
+        "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
+        "DIFFERENT project omits those three fields entirely (never redacted-to-null) — named only by " +
+        "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +
+        "apart from 'this looks leaked' without exposing another project's task/branch identity. " +
+        "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
+        "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
+        "dying, leaving an orphan the registry no longer tracks. So an OWN-project entry with a `branch` " +
+        "ALSO carries `recentTimeoutStreak` (an integer ≥0) — how many consecutive timeouts that branch " +
+        "has recorded, from an INDEPENDENT tracker that survives exactly the eviction the live registry " +
+        "doesn't. A nonzero streak on a 'queued' or 'running' entry is a reason to verify no orphaned " +
+        "process survives from an earlier attempt before treating this worktree as otherwise idle — treat " +
+        "it as a second data point, not a verdict this tool merges into `phase` itself. This tool is cheap " +
+        "(an in-memory read bounded by cap + queue depth, never a real scan) — safe to call BEFORE firing " +
+        "`run_gate`/`worker_merge_confirm` to confirm a lane is actually free instead of firing blind into " +
+        "a saturated cap, and again right after either comes back `pending` to see the full picture instead " +
+        "of only your own op's state.",
+      inputSchema: strictShape({}),
+    },
+    async () => {
+      const projectId = db.getSession(sessionId)?.projectId;
+      if (!projectId) return ok({ error: "no project for this session" });
+      return ok(sessions.gateQueueForManager(projectId));
+    },
+  );
+}
+
 // ColumnRole (shared) mirror for the board_column_* tools below — kept in lockstep with the ColumnRole
 // union in shared/src/config.ts, same as mcp/platform.ts's own `columnRole` mirror.
 const columnRole = z.enum([
@@ -961,11 +1030,18 @@ export class OrchestrationMcpRouter {
       // read-only complement: SCOPED to this session's own ops (registerGateStatus's `scopeSessionId` AND,
       // since card e3e40167 added the durable-tombstone fallback, `scopeProjectId` too), so a worker can
       // check queued/running/settled/elapsed without starting anything and cannot probe another session's
-      // run at EITHER the live-registry or tombstone layer. The worker's tested depth-1 surface is now
-      // EXACTLY { gate_status, my_context, run_gate, worker_report } — my-context-gate.mjs, idle-report.mjs,
-      // inbox-pull.mjs, orch-scope.mjs, and mgmt-surface.mjs all pin this sorted list; update ALL of them
-      // if this surface ever changes again.
+      // run at EITHER the live-registry or tombstone layer.
       registerGateStatus(server, sessions, sessionId, () => db.getSession(sessionId)?.projectId);
+      // gate_queue (card d04f9c76 — Codescape platform relay: a manager told a worker "confirm a lane is
+      // free before firing", but the worker had no daemon-wide view of the shared gate cap and could only
+      // ever fire `run_gate` blind). Same tool, same privacy shape as the manager's own — see
+      // registerGateQueue's doc: redaction is keyed off the CALLER'S PROJECT (derived server-side from
+      // `sessionId`), never the caller's role, so a worker sees exactly the same cross-project redaction a
+      // manager on this project would, nothing more.
+      registerGateQueue(server, sessions, db, sessionId);
+      // The worker's tested depth-1 surface is now EXACTLY { gate_queue, gate_status, my_context, run_gate,
+      // worker_report } — my-context-gate.mjs, idle-report.mjs, inbox-pull.mjs, orch-scope.mjs, and
+      // mgmt-surface.mjs all pin this sorted list; update ALL of them if this surface ever changes again.
       return server;
     }
 
@@ -2093,63 +2169,7 @@ export class OrchestrationMcpRouter {
       },
     );
     registerGateStatus(server, sessions);
-
-    // gate_queue (card fa359824 — Codescape manager escalation 530e59a0): gate_status only ever answers
-    // "what is MY op doing", so a manager with no op of its own to poll (or one whose op has been queued a
-    // long time) had no way to tell healthy contention apart from a leaked slot short of cross-project DB
-    // access no manager surface grants. This is the ONE-read answer: cap + every running/queued gate run.
-    // READ-ONLY — it cannot mutate the cap, cancel, or reorder anything; it only reads the live
-    // GateSemaphore registry (see SessionService.gateQueueForManager's doc for the cross-project scoping:
-    // a row from a DIFFERENT project is named by project + kind + age only, never its task title/branch).
-    // `recentTimeoutStreak` (escalation 4f151331, filed while this card was in flight — a REAL incident: two
-    // concurrent daemon-executed gates under cap 1, one worktree's fixtures already running while its op
-    // still read "queued") is a SECOND, independently-tracked signal alongside the semaphore's own belief —
-    // see SessionService.gateQueueForManager's doc for why the two are surfaced side by side, never merged.
-    server.registerTool(
-      "gate_queue",
-      {
-        description:
-          "Read-only snapshot of the WHOLE daemon-global gate queue — the resolved concurrency cap plus " +
-          "every gate run currently `running` or `queued` (merge/deploy/worker-self-check alike), so you can " +
-          "answer 'why is my gate queued, who holds the slot, how deep am I' from ONE read instead of " +
-          "guessing or polling gate_status per-opId. Returns {cap, activeCount, queuedCount, running: " +
-          "GateQueueEntry[], queued: GateQueueEntry[]} — `queued` is already in real admission order (all " +
-          "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
-          "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
-          "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, queuePosition} — " +
-          "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
-          "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
-          "SAME entry RE-BASES to admission time and they measure time RUNNING instead. Don't read a `queued` " +
-          "entry's `elapsedMs` as run time — a deeply-queued op can show a large `elapsedMs` while it has done " +
-          "zero seconds of actual work, and mistaking that for a hung run is exactly backwards: it lands " +
-          "hardest on the op that's MOST expensive to wrongly cancel. A large `elapsedMs` on a `queued` entry " +
-          "is evidence of queue depth/contention, not of a wedged run; only a `running` entry's `elapsedMs` " +
-          "is evidence about run duration. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
-          "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
-          "belonging to YOUR OWN project ALSO " +
-          "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
-          "DIFFERENT project omits those three fields entirely (never redacted-to-null) — named only by " +
-          "project + gate kind + age, which is enough to tell 'someone else legitimately holds the slot' " +
-          "apart from 'this looks leaked' without exposing another project's task/branch identity. " +
-          "IMPORTANT — `phase`/`queuePosition` reflect only what the semaphore BELIEVES, which can diverge " +
-          "from reality: a gate timeout can settle (freeing the slot) without its process tree actually " +
-          "dying, leaving an orphan the registry no longer tracks. So an OWN-project entry with a `branch` " +
-          "ALSO carries `recentTimeoutStreak` (an integer ≥0) — how many consecutive timeouts that branch " +
-          "has recorded, from an INDEPENDENT tracker that survives exactly the eviction the live registry " +
-          "doesn't. A nonzero streak on a 'queued' or 'running' entry is a reason to verify no orphaned " +
-          "process survives from an earlier attempt before treating this worktree as otherwise idle — treat " +
-          "it as a second data point, not a verdict this tool merges into `phase` itself. This tool is cheap " +
-          "(an in-memory read bounded by cap + queue depth, never a real scan) — safe to call on every loop " +
-          "iteration, e.g. right after a run_gate/worker_merge_confirm call comes back `pending` to see the " +
-          "full picture instead of only your own op's state.",
-        inputSchema: strictShape({}),
-      },
-      async () => {
-        const projectId = db.getSession(managerSessionId)?.projectId;
-        if (!projectId) return ok({ error: "no project for this session" });
-        return ok(sessions.gateQueueForManager(projectId));
-      },
-    );
+    registerGateQueue(server, sessions, db, managerSessionId);
 
     // gate_cancel (card 8d585277): the manual cancel/supersede escalation for a case auto-supersede-on-
     // merge does NOT cover — no merge decision exists yet (a known-failing base, a stale/UNVERIFIED

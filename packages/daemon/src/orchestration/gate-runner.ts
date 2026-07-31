@@ -298,17 +298,29 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     // `timedOut:false`. Every later close/error is a no-op once `settled` is true.
     if (settled) return;
     const idleMs = performance.now() - lastOutputAt;
-    if (allowExtend && GATE_TIMEOUT_EXTEND_ENABLED && !extended && idleMs < GATE_EXTEND_IDLE_MS) {
+    const canExtend = allowExtend && GATE_TIMEOUT_EXTEND_ENABLED;
+    if (canExtend && !extended && idleMs < GATE_EXTEND_IDLE_MS) {
       extended = true;
       timer = setTimeout(onTimeout, timeoutMs);
       return;
     }
     settled = true;
     const decidedAt = performance.now(); // captured BEFORE the async tree-kill below — see GateStepResult.decidedAt
+    // Card d04f9c76: a BARE "exceeded ...ms" message is ambiguous between two cases with OPPOSITE
+    // remedies — extend refused because the child was idle ≥ GATE_EXTEND_IDLE_MS (something STALLED) vs.
+    // extend never available at all (`allowExtend:false`, e.g. the merge gate's own retry-after-timeout
+    // call, or GATE_TIMEOUT_EXTEND_ENABLED=0 — says nothing about stalling either way). State WHICH one
+    // fired so a reader doesn't need a source read to make that fork. `extended` (one was already granted;
+    // this is the second/final deadline) still wins first, unchanged from before this card.
+    const extendNote = extended
+      ? " (after one auto-extend)"
+      : canExtend
+        ? ` (no extend: idle ${Math.round(idleMs)}ms ≥ ${GATE_EXTEND_IDLE_MS}ms threshold — stalled)`
+        : " (no extend: extend unavailable for this run)";
     void killGateProcessTree(child).finally(() => {
       resolve({
         status: null,
-        error: new Error(`gate step exceeded ${timeoutMs}ms${extended ? " (after one auto-extend)" : ""}`),
+        error: new Error(`gate step exceeded ${timeoutMs}ms${extendNote}`),
         signal: "SIGKILL", timedOut: true,
         // Card 8d585277: if a cancel was ALSO requested and never verified before this timeout backstop
         // finally fired, tag it cancelled too — a caller checking `cancelled` must see it even when the

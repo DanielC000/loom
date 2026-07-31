@@ -6,10 +6,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //           entry (never redacted-to-null — the fields are OMITTED), while a CALLER-OWN-project entry
 //           carries full detail; running/queued split with correct queuePosition; cap/activeCount/
 //           queuedCount reflect the live GateSemaphore registry.
-//   (e2e)   the REAL MCP tool `gate_queue`, registered on the manager surface only (never the worker's
-//           pinned depth-1 surface), driven against two REAL runWorkerGate ops in TWO DIFFERENT projects —
-//           the exact shape of the manager's escalation (a foreign project's gate legitimately holding the
-//           daemon-global slot).
+//   (e2e)   the REAL MCP tool `gate_queue`, registered on BOTH the manager AND worker surfaces (card
+//           d04f9c76 added the worker exposure), driven against two REAL runWorkerGate ops in TWO
+//           DIFFERENT projects — the exact shape of the manager's escalation (a foreign project's gate
+//           legitimately holding the daemon-global slot) — AND, for the worker surface, a live proof that
+//           a WORKER caller gets the SAME project-scoped redaction a manager on that project would, never
+//           more (redaction is keyed off caller PROJECT, never caller ROLE).
 //   (4f151331 — the sibling question this card also asks: does the semaphore actually cap concurrency at
 //           maxConcurrentGates?) A live snapshot taken WHILE one op holds the only cap-1 slot and a second,
 //           different-project op is queued behind it: gate_queue() reports EXACTLY 1 running + 1 queued —
@@ -238,6 +240,21 @@ function makeRepo(repo) {
     check("(e2e, MCP) gate_queue: the queued entry is P2's FOREIGN op, redacted (project named, task/branch omitted)",
       snap.queued[0].projectId === P2 && snap.queued[0].projectName === "MCP Foreign" && !("taskId" in snap.queued[0]) && !("workerLabel" in snap.queued[0]));
 
+    // Card d04f9c76: gate_queue is now ALSO registered on the WORKER surface (same tool, same
+    // project-scoped redaction — see registerGateQueue's doc) so a worker can check lane availability
+    // itself instead of firing run_gate blind. Prove a WORKER caller (w1, on P1) gets EXACTLY the same
+    // shape the manager just saw above: its OWN project's running entry in full detail, the FOREIGN
+    // project's queued entry redacted — captured while the ops are still genuinely live, not after they've
+    // settled (a redaction bug that only showed up on a settled/empty snapshot would be invisible here).
+    const wkrLive = await connect(w1, "worker");
+    check("(e2e, MCP) gate_queue IS registered on the worker's own MCP surface", Object.keys(wkrLive.server._registeredTools).includes("gate_queue"));
+    const wSnap = await wkrLive.call("gate_queue");
+    check("(e2e, MCP worker) gate_queue: cap/activeCount/queuedCount match the manager's own read", wSnap.cap === 1 && wSnap.activeCount === 1 && wSnap.queuedCount === 1);
+    check("(e2e, MCP worker) gate_queue: the running entry is w1's OWN project (P1), full detail", wSnap.running[0].projectId === P1 && wSnap.running[0].taskId === t1 && wSnap.running[0].workerLabel === "dev-1 · MCP own task");
+    check("(e2e, MCP worker) gate_queue: the queued entry is the FOREIGN project (P2), redacted — taskId/branch/workerLabel OMITTED for a WORKER caller too (redaction is keyed off CALLER PROJECT, never caller ROLE)",
+      wSnap.queued[0].projectId === P2 && !("taskId" in wSnap.queued[0]) && !("branch" in wSnap.queued[0]) && !("workerLabel" in wSnap.queued[0]));
+    await wkrLive.client.close();
+
     await waitUntilInvoked(() => release1, "(e2e, MCP) w1's fakeGate");
     release1({ passed: true });
     await sleep(200); // handoff settle only — see the admission-vs-invocation note above
@@ -252,13 +269,15 @@ function makeRepo(repo) {
     await Promise.all([p1, p2]);
     await mgr.client.close();
 
-    // Role gate: gate_queue must NEVER appear on the worker's pinned depth-1 surface (mgmt-surface.mjs /
-    // my-context-gate.mjs / etc. pin the EXACT list {gate_status, my_context, run_gate, worker_report}).
+    // Role gate: gate_queue IS on the worker's pinned depth-1 surface as of card d04f9c76 (mgmt-surface.mjs
+    // / my-context-gate.mjs / idle-report.mjs / inbox-pull.mjs / orch-scope.mjs pin the EXACT list
+    // {gate_queue, gate_status, my_context, run_gate, worker_report}) — read-only + project-scoped, so it
+    // adds no writable/manager-only surface (see the live redaction proof above).
     const wkr = await connect(w1, "worker");
     const wTools = Object.keys(wkr.server._registeredTools);
-    check("(e2e, MCP) gate_queue is NOT on the worker surface (manager-only tool)", !wTools.includes("gate_queue"));
-    check("(e2e, MCP) worker surface is still EXACTLY the pinned 4-tool set (gate_queue didn't leak in)",
-      wTools.slice().sort().join(",") === "gate_status,my_context,run_gate,worker_report");
+    check("(e2e, MCP) gate_queue IS on the worker surface (read-only, project-scoped)", wTools.includes("gate_queue"));
+    check("(e2e, MCP) worker surface is EXACTLY the pinned 5-tool set",
+      wTools.slice().sort().join(",") === "gate_queue,gate_status,my_context,run_gate,worker_report");
     await wkr.client.close();
   } finally {
     for (const db of dbs) try { db.close(); } catch { /* ignore */ }
@@ -339,6 +358,6 @@ function makeRepo(repo) {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — gate_queue() answers cap/activeCount/queuedCount + running/queued detail from ONE read, redacts taskId/branch/workerLabel for a cross-project entry (never redacted-to-null — omitted), is registered on the manager surface only (the worker's pinned 4-tool depth-1 surface is untouched), never reports 2 entries as \"running\" at cap 1 across a real hold/queue/handoff/settle sequence (corroborating gate-semaphore-concurrency.mjs's structural proof that the cap genuinely bounds concurrency), and — answering escalation 4f151331's design ask — surfaces the independent gate-timeout-streak signal so a fresh op on a recently-timed-out branch carries a visible anomaly flag instead of looking indistinguishable from a clean one."
+  ? "\n✅ ALL PASS — gate_queue() answers cap/activeCount/queuedCount + running/queued detail from ONE read, redacts taskId/branch/workerLabel for a cross-project entry (never redacted-to-null — omitted), is registered on BOTH the manager AND worker surfaces with the SAME project-scoped redaction either way (the worker's pinned 5-tool depth-1 surface holds), never reports 2 entries as \"running\" at cap 1 across a real hold/queue/handoff/settle sequence (corroborating gate-semaphore-concurrency.mjs's structural proof that the cap genuinely bounds concurrency), and — answering escalation 4f151331's design ask — surfaces the independent gate-timeout-streak signal so a fresh op on a recently-timed-out branch carries a visible anomaly flag instead of looking indistinguishable from a clean one."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
