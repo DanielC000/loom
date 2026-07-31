@@ -48,7 +48,7 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
 - **Caveat (supervisor code is NOT `daemon_restart`-deployable):** `daemon_restart` only rebuilds +
   relaunches the daemon *process*; the **supervisor** (`scripts/daemon-supervisor.mjs`) and anything it loads are NOT re-read across exit `75` (the same running supervisor execs the new `dist/`). A merge that edits the supervisor needs a **human Ctrl-C + re-run of `pnpm daemon:stable`** to go live — a manager must flag that human action in its done-report (mirrors the unsupervised `restarting:false` refusal).
 
-**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these three footguns:
+**Isolated-daemon testing on Windows (a throwaway daemon for UI/API review):** spinning up a second, disposable daemon (own `LOOM_HOME`, non-default port) to eyeball a change has burned cycles across worker sessions on these four footguns:
 - A bash `run_in_background` PID is the **shell's** PID, not the daemon's — `taskkill //PID <that-pid>`
   fails. Find the real node listener with `netstat -ano | grep :<port>`, then `taskkill //F //T //PID <that-pid>`, and confirm the port actually freed.
 - A helper `.mjs` must **LIVE under `packages/daemon`** for its deps (e.g. `ws`, `better-sqlite3`) to
@@ -58,6 +58,12 @@ End users install globally — `npm i -g loomctl` (command stays `loom`) — and
   `createRequire(path.join(daemonPkgDir, 'package.json'))`.)
 - Pass node / dynamic-`import()` paths as `file://` URLs (or `pathToFileURL`), never a bare drive-letter
   absolute path — a bare path throws `ERR_UNSUPPORTED_ESM_URL_SCHEME` on Windows.
+- `pnpm web`'s dev proxy (`packages/web/vite.config.ts`) targets `127.0.0.1:LOOM_PORT` (default `4317`)
+  — **if you run `pnpm web` without also setting `LOOM_PORT` to the throwaway daemon's port, it silently
+  proxies to your ORIGINAL daemon instead**, and the page renders perfectly either way: you'd be
+  reviewing the wrong daemon's sessions/board/settings with no visible sign. Set `LOOM_PORT` before
+  starting `pnpm web`, and check the `[web] proxying → http://127.0.0.1:NNNN` line it logs on startup to
+  confirm the target.
 
 ## Load-bearing invariants (validated in the spike — do not regress)
 - **Drive the REAL interactive `claude` via node-pty.** Never `claude -p`/headless.
