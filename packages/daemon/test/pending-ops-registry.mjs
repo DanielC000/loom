@@ -414,16 +414,34 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
 // freeing a key while an orphaned RUNNING op is still executing in the background — is a distinct scenario
 // and is unaffected by this change.)
 {
+  // Card ca87fc6a: this block used to prove "not refreshed by a dedupe hit" with two blind sleeps summing
+  // to 45ms against a 40ms window — only 5ms slack, which flaked under host contention (a delayed sleep
+  // could land the dedupe re-confirm itself past expiry, or leave the "gone" check racing the real timer).
+  // Fix: widen the base window for headroom, and prove eviction by MEASURING when it actually happens
+  // (waitUntil + Date.now(), not a guessed sleep duration) — the discriminating assertion below then
+  // depends only on the REAL elapsed gap between the dedupe-hit and eviction, never on how long any sleep
+  // actually took, so it can't flake the way the fixed-sleep version did.
   const reg = new PendingOpRegistry();
-  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: 40, classifyOutcome: classify });
+  const RETAIN_MS = 200;
+  const tSettle = Date.now();
+  await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: true, opId: "op-1" }), undefined, { retainMs: RETAIN_MS, classifyOutcome: classify });
   check("(retain ttl) retained view present after the first settle", reg.peek("m6")?.outcome === "merged");
-  await sleep(20); // still within the original 40ms window
-  const r2 = await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: false, reason: "y", opId: "op-2" }), undefined, { retainMs: 40, classifyOutcome: classify });
-  check("(retain ttl) the re-confirm at t=20ms dedupe-hits the cached op-1 result", r2.value.opId === "op-1");
-  await sleep(25); // t=45ms total — past the ORIGINAL 40ms window (would still be live if the dedupe hit had refreshed the TTL)
-  check("(retain ttl) the retained view is gone — its lifetime was anchored to the ORIGINAL settle, not extended by the re-confirm", reg.peek("m6") === undefined);
+  await sleep(50); // partway through the window — comfortable headroom (4x) before it closes
+  const tDedupe = Date.now();
+  const r2 = await reg.attach("m6", "merge", "mgr1", 200, async () => ({ merged: false, reason: "y", opId: "op-2" }), undefined, { retainMs: RETAIN_MS, classifyOutcome: classify });
+  check("(retain ttl) the re-confirm partway through the window dedupe-hits the cached op-1 result", r2.value.opId === "op-1");
+  await waitUntil(() => reg.peek("m6") === undefined, { timeoutMs: RETAIN_MS * 10, label: "m6 retained view evicted after its original window" });
+  const elapsedSinceDedupe = Date.now() - tDedupe;
+  // If the dedupe-hit HAD refreshed the TTL, eviction would land at tDedupe + RETAIN_MS (elapsed-since-
+  // dedupe >= RETAIN_MS). Anchored-to-original behavior evicts at tSettle + RETAIN_MS instead — strictly
+  // earlier than tDedupe + RETAIN_MS by the (tDedupe - tSettle) gap actually observed above — so a correct
+  // implementation always lands comfortably under RETAIN_MS here, regardless of real sleep/poll timing.
+  check(
+    `(retain ttl) the retained view is gone — its lifetime was anchored to the ORIGINAL settle (evicted ${elapsedSinceDedupe}ms after the dedupe-hit, under the ${RETAIN_MS}ms window), not extended by the re-confirm`,
+    elapsedSinceDedupe < RETAIN_MS
+  );
   let calls = 0;
-  const r3 = await reg.attach("m6", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-3" }; }, undefined, { retainMs: 40, classifyOutcome: classify });
+  const r3 = await reg.attach("m6", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-3" }; }, undefined, { retainMs: RETAIN_MS, classifyOutcome: classify });
   check("(retain ttl) a call after expiry runs a genuinely FRESH op, unaffected by the earlier dedupe hits", calls === 1 && r3.value.opId === "op-3");
 }
 
