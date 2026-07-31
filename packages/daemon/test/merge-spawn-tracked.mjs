@@ -79,6 +79,27 @@ function makeRepo() {
   execSync(`git init -q && git config user.email mst@loom && git config user.name mst && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
   return repo;
 }
+// Card 5783dffc: the SPAWN scenarios below spawn a REAL live PtyHost session (via SeamHost) with a real
+// `kickoffPrompt` — but SeamHost's `write()` is an inert no-op (see its own file header) and never emits
+// any data, so the engine-side confirmation submit() waits for (`enterConfirmed`, set by a `SessionStart`/
+// `UserPromptSubmit` hook) can NEVER arrive. Left alone, EVERY one of these spawns runs, in the background,
+// the SAME production submit/retry/give-up machinery a real stuck spawn would: a ~20s READY_FALLBACK_MS
+// wait, then up to SUBMIT_MAX_ATTEMPTS (4) real `setTimeout`-paced Enter-write/verify cycles at
+// SUBMIT_VERIFY_TIMEOUT_MS (900ms) each, then GIVE-UP RECOVERY — all landing, by coincidence of this
+// file's own runtime, right on top of the MERGE scenarios further down (measured: the ~20s readiness
+// fallback for every SPAWN-block worker fires while the MERGE (7)/(8) blocks are running). That is
+// self-inflicted background CPU/timer load with zero test value (these scenarios test the Tracked
+// wrapper's dedupe/attach mechanics, not kickoff delivery) — exactly the kind of noise that turns a
+// borderline-loaded host into a spurious failure elsewhere in the SAME process (see this card's own
+// worker_report for the measured before/after). `host.stop(id, "hard")` bumps `submitGeneration` and kills
+// the fake pty SYNCHRONOUSLY (SeamHost's `kill()` invokes the tracked onExit callback inline), so every
+// still-pending timer for that session's generation becomes a no-op on its very next check — the same
+// cleanup kickoff-real-spawn.mjs already does for its own real spawns. Best-effort: a scenario whose
+// worker was never actually left live (none, today) must not fail the file over a redundant stop.
+function stopSeamPty(sessionId) {
+  try { host.stop(sessionId, "hard"); } catch { /* best-effort cleanup — see this function's own doc */ }
+}
+
 function seedProject(projId, repo, gateCommand) {
   db.insertProject({ id: projId, name: "MST", repoPath: repo, vaultPath: repo, config: gateCommand ? { orchestration: { gateCommand } } : {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: `${projId}-mgr`, projectId: projId, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
@@ -100,6 +121,7 @@ try {
     check("(spawn fast) value shape matches spawnWorker's Session (role/taskId/live)", r.value.role === "worker" && r.value.taskId === taskId && db.getSession(r.value.id).processState === "live");
     check("(spawn fast) NO lingering pendingSpawn placeholder once settled (evict-on-settle)", !svc.listPendingSpawns(`${P}-mgr1`).some((op) => op.taskId === taskId));
     worktrees.push([repo, r.value.worktreePath]);
+    stopSeamPty(r.value.id);
   }
 
   // ============================ SPAWN (2): TWO concurrent Tracked calls → ONE real spawn ============================
@@ -129,7 +151,7 @@ try {
     const liveForTask = db.listLiveWorkers().filter((w) => w.taskId === taskId);
     check("(spawn race) exactly ONE live worker holds the task", liveForTask.length === 1);
     check("(spawn race) NO pendingSpawn placeholder lingers alongside the now-real worker row (no dup/over-count)", !svc.listPendingSpawns(`${P}-mgr1`).some((op) => op.taskId === taskId));
-    if (bothOk) worktrees.push([repo, r1.value.worktreePath]);
+    if (bothOk) { worktrees.push([repo, r1.value.worktreePath]); stopSeamPty(r1.value.id); }
   }
 
   // ============================ SPAWN (3): post-eviction stale retry → falls through to live-guard ============================
@@ -151,6 +173,7 @@ try {
     check("(spawn stale) falls through to the live-worker guard, NOT a silent double-spawn", stale.ok === false && /already has a live worker/.test(stale.error?.message ?? ""));
     const rowsForTask = db.listAllSessions().filter((s) => s.taskId === taskId);
     check("(spawn stale) still exactly ONE session row for the task", rowsForTask.length === 1);
+    stopSeamPty(first.value.id); // stopped only NOW — the stale re-spawn above needs it to still read as live
   }
 
   // ============================ MERGE (4): fast path — SAME shape as untracked confirmWorkerMerge ============================
