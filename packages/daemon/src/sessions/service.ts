@@ -126,6 +126,12 @@ interface RetainedWorktreeRecord {
   /** The owning session's `lastActivity` at the moment Pass B recorded it — see {@link RetainedWorktreeEntry.lastActivityAt}. */
   lastActivityAt: string;
   repoPath: string;
+  /** The owning session's project — captured here (Pass B already has `project` in hand for this
+   *  session, see the resolveRepoByKey call above its push site) so {@link getRetainedWorktrees} needs
+   *  NO extra DB lookup to attribute an entry to its project (card fixing 90fffe03's first production
+   *  read: 2 of 40 entries silently belonged to a different project with no field to tell them apart). */
+  projectId: string;
+  projectName: string;
 }
 
 /** One entry in {@link SessionService.getRetainedWorktrees}'s result — a worktree Pass B of
@@ -137,6 +143,11 @@ export interface RetainedWorktreeEntry {
   branch: string | null;
   sessionId: string;
   taskId: string | null;
+  /** The owning session's project — lets a consumer of this daemon-wide surface attribute each entry to
+   *  the project it actually belongs to instead of string-matching worktree paths (the gap that let a
+   *  bulk-reclaim consumer nearly delete another project's worktrees — see {@link RetainedWorktreeRecord}). */
+  projectId: string;
+  projectName: string;
   /** Best-available proxy for "when did the owning session exit" — {@link Session} has no dedicated
    *  `exitedAt` field. `lastActivity` is the session's last DB write, which for an exited worker IS its
    *  exit in practice — but it's still a proxy, so this field is named for what it actually measures,
@@ -11236,6 +11247,7 @@ export class SessionService {
         this.retainedWorktreeRecords.push({
           worktreePath, branch: s.branch ?? null, sessionId: s.id, taskId: s.taskId ?? null,
           lastActivityAt: s.lastActivity, repoPath,
+          projectId: project.id, projectName: project.name,
         });
         continue;
       }
@@ -11426,6 +11438,7 @@ export class SessionService {
       const ageDays = Math.max(0, Math.floor((now - new Date(rec.lastActivityAt).getTime()) / 86_400_000));
       entries.push({
         worktreePath: rec.worktreePath, branch: rec.branch, sessionId: rec.sessionId, taskId: rec.taskId,
+        projectId: rec.projectId, projectName: rec.projectName,
         lastActivityAt: rec.lastActivityAt, ageDays, reason: classified.reason, commitsAhead: classified.commitsAhead,
       });
     }
@@ -11470,4 +11483,21 @@ export class SessionService {
     const reason: RetainedWorktreeEntry["reason"] = dirty && aheadOrUnknown ? "both" : dirty ? "dirty-tree" : "unmerged-commits";
     return { reason, commitsAhead };
   }
+}
+
+/**
+ * Pure predicate backing `GET /api/worktrees/retained`'s optional `?projectId=` narrowing filter
+ * (card fixing 90fffe03 review) — extracted to a standalone function so it's unit-testable without
+ * standing up the Fastify route/HTTP scaffolding just to exercise a one-line filter. `projectId`
+ * omitted/undefined returns `result` UNCHANGED (same reference) — the daemon-wide view stays the
+ * default, never narrowed unless explicitly asked for. A real filter always recomputes `count` to
+ * match `entries.length`, including the empty-set case (no silent mismatch between the two).
+ */
+export function filterRetainedWorktreesByProject(
+  result: { count: number; entries: RetainedWorktreeEntry[] },
+  projectId: string | undefined,
+): { count: number; entries: RetainedWorktreeEntry[] } {
+  if (!projectId) return result;
+  const entries = result.entries.filter((e) => e.projectId === projectId);
+  return { count: entries.length, entries };
 }

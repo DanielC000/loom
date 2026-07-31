@@ -21,6 +21,7 @@ import { inTestMode } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { detectDefaultShell } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
+import { filterRetainedWorktreesByProject } from "../sessions/service.js";
 import { deleteAgentCore } from "../sessions/delete-agent-core.js";
 import type { TaskMcpRouter } from "../mcp/server.js";
 import { toBoardTasks, resolveMergedInfo } from "../mcp/tasks.js";
@@ -791,7 +792,14 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // exposed as an MCP tool and reads across all projects, same as the boot-log line it replaces. GC
   // policy is untouched: this only LABELS what reconcileOrchestrationOnBoot's Pass B already decided to
   // keep; it never reclaims or deletes anything.
-  app.get("/api/worktrees/retained", async () => deps.sessions.getRetainedWorktrees());
+  // `?projectId=` is an OPTIONAL narrowing filter for a caller that already knows which project it wants
+  // (each entry now carries its own `projectId`/`projectName` — card fixing 90fffe03's first production
+  // read, where a consumer had to string-match paths to tell projects apart). Omitted ⇒ the full
+  // daemon-wide view, unchanged — this is a convenience filter, never access control, and never the default.
+  app.get("/api/worktrees/retained", async (req) => {
+    const { projectId } = req.query as { projectId?: string };
+    return filterRetainedWorktreesByProject(await deps.sessions.getRetainedWorktrees(), projectId);
+  });
 
   // A manager's orchestration_events timeline (chronological). READ-ONLY — emits no event.
   app.get("/api/orchestration/events", async (req) => {

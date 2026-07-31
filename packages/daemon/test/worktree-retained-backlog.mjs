@@ -23,7 +23,7 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wrb-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");
-const { SessionService } = await import("../dist/sessions/service.js");
+const { SessionService, filterRetainedWorktreesByProject } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
 
@@ -38,7 +38,7 @@ const db = new Db();
 const sessions = new SessionService(db, {}, new OrchestrationControl());
 
 function seed(p, { lastActivity, protect }) {
-  db.insertProject({ id: p.projId, name: "WRB", repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
+  db.insertProject({ id: p.projId, name: p.projName, repoPath: p.repo, vaultPath: p.repo, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: p.agentId, projectId: p.projId, name: "t", startupPrompt: "", position: 0 });
   db.insertTask({ id: p.taskId, projectId: p.projId, title: "WRB-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
   db.insertSession({ id: p.mgrId, projectId: p.projId, agentId: p.agentId, engineSessionId: null, title: null, cwd: p.repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
@@ -93,10 +93,13 @@ async function setupProtectedLive(p) {
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const mk = (tag, file) => ({
-  projId: `wrb-${tag}-proj-${sfx}`, agentId: `wrb-${tag}-top-${sfx}`, taskId: `wrb-${tag}-task-${sfx}`,
+  projId: `wrb-${tag}-proj-${sfx}`, projName: `WRB-${tag.toUpperCase()}-${sfx}`, agentId: `wrb-${tag}-top-${sfx}`, taskId: `wrb-${tag}-task-${sfx}`,
   mgrId: `wrb-${tag}-mgr-${sfx}`, workerId: `wrb-${tag}-wkr-${sfx}`,
   repo: path.join(os.tmpdir(), `loom-wrb-${tag}-${sfx}`), file, protectedSessionIds: null,
 });
+// A and B belong to TWO DIFFERENT PROJECTS (distinct projId + projName) — this is what lets this test
+// observe the projectId/projectName attribution bug (card fixing 90fffe03): a single-project fixture
+// can't tell "attributed to the right project" apart from "attributed to A project".
 const A = mk("a", "feat.txt");   // unmerged commit, 5 days stale
 const B = mk("b", "work.txt");   // dirty/uncommitted, 2 days stale
 const C = mk("c", "done.txt");   // clean merged — negative control
@@ -134,6 +137,11 @@ try {
     check("(a) taskId matches", a.taskId === A.taskId);
     // AGE SIGNAL (card 31df7e2f item 2) — derived from the owning session's (backdated) lastActivity.
     check(`(a) ageDays reflects the 5-day-backdated lastActivity (got ${a.ageDays})`, a.ageDays >= 4 && a.ageDays <= 6);
+    // PROJECT ATTRIBUTION (card fixing 90fffe03) — A and B are DIFFERENT projects; this asserts a is
+    // attributed to ITS OWN project, not merely to A project (the bug: 40 entries, 2 misattributed).
+    check("(a) projectId matches A's OWN project", a.projectId === A.projId);
+    check("(a) projectName matches A's OWN project", a.projectName === A.projName);
+    check("(a) projectId is NOT B's project", a.projectId !== B.projId);
   }
 
   // (b) dirty/uncommitted worktree.
@@ -142,6 +150,10 @@ try {
   if (b) {
     check("(b) reason=dirty-tree", b.reason === "dirty-tree");
     check(`(b) ageDays reflects the 2-day-backdated lastActivity (got ${b.ageDays})`, b.ageDays >= 1 && b.ageDays <= 3);
+    // PROJECT ATTRIBUTION — b must carry ITS OWN (different) project, never A's.
+    check("(b) projectId matches B's OWN project", b.projectId === B.projId);
+    check("(b) projectName matches B's OWN project", b.projectName === B.projName);
+    check("(b) projectId is NOT A's project", b.projectId !== A.projId);
   }
 
   // (c) NEGATIVE CONTROL: clean merged worktree — never appears (already reclaimed, and even if it
@@ -152,6 +164,34 @@ try {
   // because its session is PROTECTED (live) — proves the surface is Pass B's retained set, not a blanket
   // "any worktree with unmerged commits" scan.
   check("(d) EXCLUSION CONTROL — protected live worker's worktree ABSENT despite real unmerged commits", !byPath.has(D.worktreePath));
+
+  // --- `?projectId=` filter (mgr review on card fixing 90fffe03: the filter ITSELF needs coverage, not
+  // just per-entry attribution — an untested filter that silently returns an empty/wrong set to a human
+  // doing a destructive reclaim is a second instance of the exact bug this card fixes). Exercised via the
+  // pure predicate that backs the route (`filterRetainedWorktreesByProject`), not real HTTP scaffolding —
+  // the route itself is a one-line pass-through to this function.
+  const full = { count, entries };
+
+  // (1) filtering by A's project returns A's entry and EXCLUDES B's — BOTH directions asserted. A
+  // one-sided check ("A is present") alone would also pass a filter that returns everything unfiltered;
+  // a one-sided "B is absent" alone would also pass a filter that always returns nothing.
+  const byA = filterRetainedWorktreesByProject(full, A.projId);
+  check("(filter) byA count matches entries.length", byA.count === byA.entries.length);
+  check("(filter) byA INCLUDES A's entry", byA.entries.some((e) => e.worktreePath === A.worktreePath));
+  check("(filter) byA EXCLUDES B's entry", !byA.entries.some((e) => e.worktreePath === B.worktreePath));
+
+  // (2) a projectId matching NOTHING returns a real, well-formed empty set — distinguishable from a
+  // silent error or an accidental fall-through to the unfiltered set.
+  const byNobody = filterRetainedWorktreesByProject(full, "wrb-no-such-project-at-all");
+  check("(filter) unknown projectId returns count 0", byNobody.count === 0);
+  check("(filter) unknown projectId returns entries:[] (not an error, not the full unfiltered set)", Array.isArray(byNobody.entries) && byNobody.entries.length === 0);
+
+  // (3) THE INVARIANT THE CARD CARES ABOUT MOST: omitting the param returns the full daemon-wide set,
+  // byte-identical to the unfiltered call — narrowing must never be the default or mandatory.
+  const omitted = filterRetainedWorktreesByProject(full, undefined);
+  check("(filter) omitted projectId returns the SAME count as the unfiltered read", omitted.count === full.count);
+  check("(filter) omitted projectId returns entries byte-identical to the unfiltered read", JSON.stringify(omitted.entries) === JSON.stringify(full.entries));
+  check("(filter) omitted projectId returns the SAME object reference (no narrowing copy at all)", omitted === full);
 
   // --- idempotent second read: re-deriving at read time gives the same answer without another boot ---
   const second = await sessions.getRetainedWorktrees();
