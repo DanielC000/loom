@@ -10048,12 +10048,14 @@ export class SessionService {
    *      `opId`) straight out of `PendingOpRegistry`'s retention cache — `run()` below is NOT invoked again
    *      — instead of silently starting a brand-new ~gate-timeout-long run (the origin incident: a re-call
    *      meant to "fetch the passed result" instead ran a whole fresh gate that then failed on unrelated
-   *      flakes). "Served" here means served WHEN USABLE — `isRetainedResultUsable` below (card 79b0ee52)
-   *      rejects a cache hit whose OWN settled value already declared itself contaminated, in which case
-   *      this call falls through to a genuinely fresh run instead, same as a real cache miss.
-   *      RESIDUAL BOUNDARY (Code Review, card 50c1e0d0 hardening — narrowed, not closed, by card 79b0ee52):
-   *      a USABLE cached path (headCurrent `true`/`undefined`, or `ran:false`) is still served straight out
-   *      of `PendingOpRegistry` without re-deriving `staleAgainstWorktree` — it carries only what was
+   *      flakes). "Served" here means served WHEN USABLE — `isRetainedResultUsable` below (card 79b0ee52,
+   *      polarity-inverted by card ec994992) states what IS usable rather than enumerating what isn't: only
+   *      a value that actually ran, reached a real pass/fail verdict, and settled with a current HEAD is
+   *      served from cache. A cancelled, never-ran, or tree-contaminated cache hit falls through to a
+   *      genuinely fresh run instead, same as a real cache miss.
+   *      RESIDUAL BOUNDARY (Code Review, card 50c1e0d0 hardening — narrowed by card 79b0ee52, narrowed
+   *      again by card ec994992): a USABLE cached path (`ran:true`, a real `passed` verdict, `headCurrent`
+   *      exactly `true`) is still served straight out of `PendingOpRegistry` without re-deriving
    *      computed ONCE at the original settle (`validatedHead`, plus `headCurrent`/`headWarning` — card
    *      39196378, a caller CAN detect a HEAD change by comparing `validatedHead` to their own HEAD even
    *      without re-deriving it), not a fresh dirty-state comparison taken NOW. A caller who makes an
@@ -10069,9 +10071,10 @@ export class SessionService {
    *      `computeWorktreeGateStamp` on every cache hit just to potentially discard it, adding a git round-trip
    *      to the fast path this retention window exists to keep fast, for a case (a fast-gate project + an
    *      edit inside a 5s window, striking AFTER an already-clean settle) the origin incidents never actually
-   *      hit. `isRetainedResultUsable` already closes the higher-value case — a settled result that KNOWS
-   *      it's contaminated — for free, since `headCurrent` is computed once at settle regardless of whether
-   *      anyone ever re-calls; it's the free half of this tradeoff, not a substitute for the rest of it. If
+   *      hit. `isRetainedResultUsable` already closes the higher-value cases — a settled result that KNOWS
+   *      it's contaminated, or never reached a real verdict at all (cancelled) — for free, since `ran`,
+   *      `passed`, and `headCurrent` are all computed once at settle regardless of whether anyone ever
+   *      re-calls; it's the free half of this tradeoff, not a substitute for the rest of it. If
    *      the residual above becomes a real footgun in practice, the fix is comparing `validatedHead`/a fresh
    *      dirty stamp on every cache-hit path too — not today's fix.
    *  (2) MID-FLIGHT STALENESS: `attachedToInFlight` (computed via a `peek()` BEFORE this call's own
@@ -10495,27 +10498,52 @@ export class SessionService {
         // WHEN IT'S USABLE (see `isRetainedResultUsable` just below), never reaching this closure again.
         // `this.gateOpRetainMs` defaults to GATE_OP_RETAIN_MS in production; see its doc for the test-only
         // override.
-        // RESIDUAL BOUNDARY (Code Review hardening, narrowed by card 79b0ee52): a USABLE cached outcome is
-        // still NOT re-checked against the worktree's CURRENT state — it carries `validatedHead` only (a
-        // caller can compare that to their own HEAD), never a fresh `staleAgainstWorktree`. An uncommitted
-        // edit made AFTER an already-clean settle, before a re-call lands inside the window, is invisible
-        // here — see the doc above for why this residual is accepted (mirrors the merge-op retention
-        // precedent, which doesn't re-check its cache either). What's NO LONGER accepted is re-serving a
-        // result that was already contaminated AT SETTLE — `isRetainedResultUsable` below rejects that
-        // case outright, so this closure DOES run again for it (a fresh gate, against the current tree).
+        // RESIDUAL BOUNDARY (Code Review hardening, narrowed by card 79b0ee52, narrowed again by card
+        // ec994992): a USABLE cached outcome is still NOT re-checked against the worktree's CURRENT state —
+        // it carries `validatedHead` only (a caller can compare that to their own HEAD), never a fresh
+        // `staleAgainstWorktree`. An uncommitted edit made AFTER an already-clean settle, before a re-call
+        // lands inside the window, is invisible here — see the doc above for why this residual is accepted
+        // (mirrors the merge-op retention precedent, which doesn't re-check its cache either). What's NO
+        // LONGER accepted is re-serving a result that was already contaminated AT SETTLE, OR one that never
+        // reached a real verdict at all (cancelled) — `isRetainedResultUsable` below rejects both outright,
+        // so this closure DOES run again for either case (a fresh gate, against the current tree).
         retainMs: this.gateOpRetainMs,
-        // KNOWN-CONTAMINATED GUARD (card 79b0ee52 — `run_gate` re-serving a `headCurrent:false` result out
-        // of the retention cache cost a live merge wave a usable gate slot): a `ran:true` result whose
-        // OWN settle already found `headCurrent:false` (the worktree moved WHILE the gate was running) is
-        // never handed back from the retained cache — the caller was already told, via the settle nudge,
-        // that this exact result is unusable; re-serving it wastes a round-trip on an answer already known
-        // to be discarded. Every OTHER shape (`ran:false` — no gateCommand / circuit-broken; `headCurrent`
-        // `true` or `undefined`) stays usable exactly as before this existed, which is what preserves card
-        // 50c1e0d0's own guarantee (a genuinely usable settled result is served from cache, never re-run):
-        // this predicate only ever NARROWS what's servable, never widens or removes the base case. No new
+        // USABLE-BY-CONSTRUCTION (card ec994992 — polarity-inverted from the original card 79b0ee52 guard,
+        // which enumerated ONE unusable shape (`ran:true` + `headCurrent:false`) and so silently kept
+        // serving every OTHER unusable shape it never named, including a CANCELLED result: cancel always
+        // settles `ran:false` — see `WorkerGateResult`'s cancelled branch above — which the old
+        // `!(value.ran && …)` form vacuously passed as "usable" since `value.ran` was already false).
+        // States what IS usable instead: a retained value is worth re-serving only if it's a run that
+        // genuinely executed, reached a real pass/fail verdict, and settled against a current tree.
+        // Everything else — cancelled, never-ran, errored-out-of-shape, or contaminated — is unusable BY
+        // DEFAULT, so a NEW kind of unusable outcome added later (one this comment's author never
+        // anticipated) fails closed automatically instead of silently falling through: it would have to
+        // affirmatively satisfy all three conjuncts below to be served from cache.
+        //   - `value.ran === true`               — excludes every `ran:false` shape, cancelled included.
+        //     (The other two `ran:false` shapes in this file — "no gateCommand configured" and the
+        //     circuit-breaker short-circuit — never reach this predicate at all: both return directly from
+        //     `runWorkerGate` BEFORE `pendingOps.attach` is ever called, so in practice this conjunct's
+        //     `ran:false` exclusion only ever touches the cancelled shape. Verified by reading every
+        //     `ran:`-returning site in this function — see card ec994992's worker_report for the full
+        //     enumeration.)
+        //   - `typeof value.passed === "boolean"` — excludes any `ran:true` shape that lacks a real
+        //     pass/fail verdict. Deliberately a type check, not `!== undefined`: the latter is the same
+        //     enumerate-the-bad-value mistake this card exists to fix one level down (a future `passed:
+        //     null` would slip through `!== undefined` but not `typeof … === "boolean"`).
+        //   - `value.headCurrent === true`        — excludes tree-contaminated AND unknown-currency results
+        //     (`false` or `undefined`), not just `false`. Safe to be this strict: `describeGateHeadCurrency`
+        //     (the ONLY place that computes `headCurrent` for a value that reaches this predicate) always
+        //     returns a `headCurrent: boolean` — never omits it — for both settle paths that flow through
+        //     `pendingOps.attach` (pass and fail, both spread `...headCurrency`). The one `ran:true` shape
+        //     in this file that omits `headCurrent` (the circuit-breaker short-circuit) never reaches this
+        //     predicate either, for the same reason as the `ran:false` shapes above. So `=== true` narrows
+        //     nothing reachable today, and is strictly more fail-closed than `!== false` would be if that
+        //     ever changes.
+        // Preserves card 50c1e0d0's own guarantee (a genuinely usable settled result is served from cache,
+        // never re-run) — see DoD-3 in card ec994992's worker_report for the positive-control proof. No new
         // git round-trip on the fast path — `headCurrent` is already computed and stored on the cached
-        // value by `describeGateHeadCurrency` at settle, so this is a plain field read.
-        isRetainedResultUsable: (value) => !(value.ran && value.headCurrent === false),
+        // value by `describeGateHeadCurrency` at settle, so this is a plain field read, same as before.
+        isRetainedResultUsable: (value) => value.ran === true && typeof value.passed === "boolean" && value.headCurrent === true,
         classifyOutcome: (outcome) => (!outcome.ok ? "errored" : outcome.value.passed ? "passed" : "failed"),
         // DURABLE TOMBSTONE (card edc1ec12, generalized by e3e40167): mints the row the MOMENT this op is
         // created — fast or slow — so a settled fast-path opId is still POSITIVELY distinguishable from one
