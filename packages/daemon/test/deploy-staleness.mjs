@@ -1,10 +1,16 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
-// Card 5e30c4bd — computeDeployStaleness(): compares this daemon's own built entry (dist/index.js mtime)
-// against mainline HEAD, scoped to ONLY packages/daemon/src + packages/shared/src commits, so an
-// assets/docs/vault-only merge never reports stale (the 637558ca cry-wolf precedent). HERMETIC:
-// a real throwaway git repo (execSync git, real commits with controlled GIT_COMMITTER_DATE) + a real
-// throwaway "dist/index.js" fixture file, driven entirely through the exported test-seam overrides
-// (distEntryOverride/repoRootOverride) — no dependency on this checkout's own real dist/git state.
+// Card 5e30c4bd — computeDeployStaleness(): compares this daemon's own build clock against mainline
+// HEAD, scoped to ONLY packages/daemon/src + packages/shared/src commits, so an assets/docs/vault-only
+// merge never reports stale (the 637558ca cry-wolf precedent). HERMETIC: a real throwaway git repo
+// (execSync git, real commits with controlled GIT_COMMITTER_DATE) + real throwaway dist-output fixture
+// files, driven entirely through the exported test-seam overrides
+// (distEntryOverride/repoRootOverride/sharedDistOverride) — no dependency on this checkout's own real
+// dist/git state (EXCEPT section (8), which deliberately probes the real tree — see its own comment).
+//
+// Card c1072385 — the build is INCREMENTAL (`tsc` only rewrites files whose input changed), so
+// dist/index.js's OWN mtime means "when index.ts last changed", not "when this daemon was last built".
+// The build clock is now the NEWEST mtime across every file recursively under the dist directory (PLUS
+// packages/shared/dist) rather than one file's mtime — sections (6)-(8) below prove this directly.
 //
 // Proves the DoD:
 //   (1) STALE positive control: a dist built BEFORE a packages/daemon/src commit ⇒ stale:true,
@@ -20,12 +26,29 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (4) unavailable, gracefully, never throws: no .git at repoRootOverride; dist entry missing.
 //   (5) two independent calls after the SAME mutation return the SAME fresh answer — proves it's derived
 //       at call time, not cached/memoized across calls (DoD #4).
+//   (6) c1072385's actual bug class, reproduced deterministically: dist/index.js frozen at an OLD mtime
+//       while a DIFFERENT, NESTED file in the same dist tree was rewritten LATER by an incremental build
+//       — a commit landing between those two mtimes must read clean, where a single-file (index.js-only)
+//       check would have wrongly read it as stale. This is the "always exercisable" version of the real-
+//       tree control in (8) — it doesn't depend on this checkout's own current dist state to demonstrate
+//       the class of bug.
+//   (7) packages/shared/dist is genuinely IN SCOPE (c1072385 DoD 1): a shared/src commit reads stale
+//       against a stale shared/dist even though the daemon dist is unchanged, then reads clean once ONLY
+//       shared/dist is rebuilt — daemon dist never touched — proving shared/dist is actually scanned,
+//       not merely accepted as a parameter.
+//   (8) REAL-TREE positive control (c1072385 DoD 2): on THIS checkout's actual built dist/index.js vs.
+//       the actual newest mtime under packages/daemon/dist, the two must genuinely differ — a test that
+//       only ever compares a fixture to itself cannot detect this bug class (that was the exact blindness
+//       that let c1072385 ship). Guarded: loudly SKIPS rather than passing vacuously if this checkout's
+//       dist happens to have a uniform mtime (e.g. a from-scratch build where every file lands in one
+//       tsc pass) instead of asserting a fixed, possibly-flaky gap.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/deploy-staleness.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -116,6 +139,112 @@ try {
   const rSecond = computeDeployStaleness(distEntry, repo);
   check("(5) a call before a rebuild reads stale", rFirst.stale === true);
   check("(5) the VERY NEXT call after the rebuild reads clean — proves no stale in-process cache", rSecond.stale === false && rSecond.commitsBehind === 0);
+
+  // ===================== (6) c1072385's actual bug class — reproduced deterministically =====================
+  // Own throwaway repo + dist so this doesn't perturb the sequential history/state the sections above rely on.
+  const incRepo = path.join(os.tmpdir(), `loom-dpstl-increpo-${Date.now()}`);
+  fs.mkdirSync(path.join(incRepo, "packages", "daemon", "src"), { recursive: true });
+  const gitInc = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: incRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitInc("init -q");
+  gitInc('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-07-01T00:00:00Z");
+
+  const incDistDir = path.join(os.tmpdir(), `loom-dpstl-incdist-${Date.now()}`);
+  fs.mkdirSync(incDistDir, { recursive: true });
+  const incDistEntry = path.join(incDistDir, "index.js");
+  fs.writeFileSync(incDistEntry, "// fixture: dist/index.js — NOT rewritten by the incremental build below\n");
+  fs.utimesSync(incDistEntry, new Date("2026-07-01T00:00:00Z"), new Date("2026-07-01T00:00:00Z")); // frozen — "the previous deploy"
+
+  fs.writeFileSync(path.join(incRepo, "packages", "daemon", "src", "incremental.ts"), "export const inc = 1;\n");
+  gitInc("add packages/daemon/src/incremental.ts");
+  gitInc('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add incremental"', "2026-07-02T00:00:00Z"); // AFTER index.js's frozen mtime
+
+  const nestedDir = path.join(incDistDir, "sessions"); // mirrors the real dist/sessions/*.js the incident actually measured
+  fs.mkdirSync(nestedDir, { recursive: true });
+  const nestedFile = path.join(nestedDir, "manager-prompt.js");
+  fs.writeFileSync(nestedFile, "// fixture: a DIFFERENT, NESTED file the incremental build DID rewrite\n");
+  fs.utimesSync(nestedFile, new Date("2026-07-03T00:00:00Z"), new Date("2026-07-03T00:00:00Z")); // AFTER the commit — "this deploy"
+
+  const rIncremental = computeDeployStaleness(incDistEntry, incRepo);
+  check("(6) a commit landing BETWEEN index.js's stale mtime and a nested dist file's real rebuild mtime ⇒ stale:false — a single-file (index.js-only) check would have wrongly read stale:true here", rIncremental.available === true && rIncremental.stale === false && rIncremental.commitsBehind === 0);
+  check("(6) distBuiltAt reflects the NEWEST file in the tree (the nested file, July 3), not index.js's own frozen July 1 mtime", (rIncremental.distBuiltAt ?? "").startsWith("2026-07-03"));
+
+  try { fs.rmSync(incRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(incDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (7) packages/shared/dist is genuinely IN SCOPE (c1072385 DoD 1) =====================
+  const shRepo = path.join(os.tmpdir(), `loom-dpstl-shrepo-${Date.now()}`);
+  fs.mkdirSync(path.join(shRepo, "packages", "shared", "src"), { recursive: true });
+  const gitSh = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: shRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitSh("init -q");
+  gitSh('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-08-01T00:00:00Z");
+
+  const shDaemonDistDir = path.join(os.tmpdir(), `loom-dpstl-shdaemondist-${Date.now()}`);
+  fs.mkdirSync(shDaemonDistDir, { recursive: true });
+  const shDaemonDistEntry = path.join(shDaemonDistDir, "index.js");
+  const buildShDaemonDistAt = (iso) => {
+    fs.writeFileSync(shDaemonDistEntry, "// fixture daemon dist\n");
+    fs.utimesSync(shDaemonDistEntry, new Date(iso), new Date(iso));
+  };
+  const shSharedDistDir = path.join(os.tmpdir(), `loom-dpstl-shshareddist-${Date.now()}`);
+  fs.mkdirSync(shSharedDistDir, { recursive: true });
+  const shSharedDistEntry = path.join(shSharedDistDir, "types.js");
+  const buildShSharedDistAt = (iso) => {
+    fs.writeFileSync(shSharedDistEntry, "// fixture shared dist\n");
+    fs.utimesSync(shSharedDistEntry, new Date(iso), new Date(iso));
+  };
+
+  buildShDaemonDistAt("2026-08-01T12:00:00Z"); // daemon dist built once, NEVER rebuilt again in this section
+  buildShSharedDistAt("2026-08-01T12:00:00Z"); // shared dist starts level with it
+
+  fs.writeFileSync(path.join(shRepo, "packages", "shared", "src", "quux.ts"), "export const quux = 1;\n");
+  gitSh("add packages/shared/src/quux.ts");
+  gitSh('-c user.email=t@loom -c user.name=t commit -q -m "feat(shared): add quux"', "2026-08-02T00:00:00Z"); // AFTER both dists
+
+  const rBeforeSharedRebuild = computeDeployStaleness(shDaemonDistEntry, shRepo, shSharedDistDir);
+  check("(7-setup) a shared/src commit after BOTH dists were built ⇒ stale:true (sanity check before proving shared/dist is what clears it)", rBeforeSharedRebuild.available === true && rBeforeSharedRebuild.stale === true && rBeforeSharedRebuild.commitsBehind === 1);
+
+  buildShSharedDistAt("2026-08-03T00:00:00Z"); // ONLY shared/dist rebuilt after the commit — daemon dist left untouched at 08-01T12:00
+  const rAfterSharedRebuild = computeDeployStaleness(shDaemonDistEntry, shRepo, shSharedDistDir);
+  check("(7) shared/dist alone rebuilt AFTER the shared/src commit ⇒ stale:false, even though daemon dist/index.js is UNCHANGED — proves packages/shared/dist is genuinely scanned, not just accepted as an unused parameter", rAfterSharedRebuild.available === true && rAfterSharedRebuild.stale === false && rAfterSharedRebuild.commitsBehind === 0);
+  check("(7) distBuiltAt reflects the newer shared/dist mtime (Aug 3), not the older, untouched daemon dist/index.js (Aug 1)", (rAfterSharedRebuild.distBuiltAt ?? "").startsWith("2026-08-03"));
+
+  try { fs.rmSync(shRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(shDaemonDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(shSharedDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (8) REAL-TREE positive control (c1072385 DoD 2) =====================
+  // Sections (6)/(7) prove the algorithm on a controlled fixture; this proves the BUG CLASS is real on
+  // THIS checkout's own actual built output, not merely constructible in a fixture. A fixture whose mtime
+  // the test itself sets can never demonstrate "the real build didn't rewrite this file" — that was
+  // exactly test/deploy-staleness.mjs's original blind spot (per the module doc + this card).
+  const __dirname = path.dirname(fileURLToPath(import.meta.url));
+  const realDistDir = path.join(__dirname, "..", "dist");
+  const realIndexJs = path.join(realDistDir, "index.js");
+  const realIndexJsMtimeMs = fs.statSync(realIndexJs).mtime.getTime();
+  let realNewestMtimeMs = realIndexJsMtimeMs;
+  const stack = [realDistDir];
+  while (stack.length > 0) {
+    const dir = stack.pop();
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) stack.push(full);
+      else if (entry.isFile()) {
+        const mt = fs.statSync(full).mtimeMs;
+        if (mt > realNewestMtimeMs) realNewestMtimeMs = mt;
+      }
+    }
+  }
+  if (realNewestMtimeMs === realIndexJsMtimeMs) {
+    console.log("SKIP  (8) this checkout's dist/index.js mtime coincides with the newest mtime across the whole dist tree (e.g. a from-scratch build in one tsc pass) — the real-tree positive control for the incremental-build bug class is inconclusive on this run, not exercised. Section (6) above exercises the same class deterministically regardless.");
+  } else {
+    check("(8) on THIS checkout, dist/index.js's own mtime genuinely DIFFERS from the newest mtime across packages/daemon/dist — proves the incremental-build bug class is real here, not just fixture-constructible", true);
+  }
 } finally {
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(distDir, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -123,6 +252,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, and is derived fresh on every call with no cross-call caching."
+  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), and that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

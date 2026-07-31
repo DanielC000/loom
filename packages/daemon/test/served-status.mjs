@@ -11,10 +11,12 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       LIVE session in a FOREIGN project still counts, an EXITED one does not;
 //   (3) with no web dist built/found (LOOM_WEB_DIST pointed at an empty dir), `webBundle` is null (never
 //       throws) — the tool degrades gracefully instead of erroring.
-//   (4) card 5e30c4bd: served_status ALSO returns `deployStaleness`, wired end-to-end through the REAL
-//       MCP tool (not just the unit-level computeDeployStaleness — see test/deploy-staleness.mjs for
-//       that), against a LOOM_REPO_ROOT-pointed fixture repo: a packages/daemon/src commit committed
-//       AFTER this checkout's REAL built dist/index.js mtime ⇒ stale:true; rewound to BEFORE it ⇒
+//   (4) card 5e30c4bd (build clock fixed by c1072385): served_status ALSO returns `deployStaleness`,
+//       wired end-to-end through the REAL MCP tool (not just the unit-level computeDeployStaleness —
+//       see test/deploy-staleness.mjs for that), against a LOOM_REPO_ROOT-pointed fixture repo: a
+//       packages/daemon/src commit committed AFTER this checkout's REAL build clock (the newest mtime
+//       across packages/daemon/dist, read via a live computeDeployStaleness() probe — NOT dist/index.js
+//       alone, which an incremental build can leave stale) ⇒ stale:true; rewound to BEFORE it ⇒
 //       stale:false — both directions, over the actual tool response, proving the wiring (not just the
 //       underlying helper) works.
 //
@@ -52,6 +54,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
+const { computeDeployStaleness } = await import("../dist/deploy-staleness.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
@@ -94,11 +97,25 @@ const call = async (name, args) => JSON.parse((await client.callTool({ name, arg
 
 // ===================== (4) fixture: LOOM_REPO_ROOT-pointed repo for the deployStaleness end-to-end check.
 // computeDeployStaleness() (called with NO overrides from served_status) always reads THIS checkout's
-// REAL built dist/index.js mtime — so rather than faking that, anchor fixture commit dates relative to
-// it (read once, real, whatever it happens to be) so the STALE/CLEAN split is deterministic either way.
+// REAL build clock — since card c1072385, that's the NEWEST mtime across every file recursively under
+// packages/daemon/dist (an incremental `tsc` build means dist/index.js's OWN mtime is NOT this clock —
+// see deploy-staleness.ts's module doc). Probe the REAL clock by calling computeDeployStaleness() with NO
+// overrides at all (before LOOM_REPO_ROOT is pointed at the fixture repo below, so this reads the actual
+// checkout) and anchor fixture commit dates relative to its real distBuiltAt, so the STALE/CLEAN split is
+// deterministic either way without hardcoding an assumption about which single file is newest.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const realDistEntry = path.join(__dirname, "..", "dist", "index.js");
-const realDistMtimeMs = fs.statSync(realDistEntry).mtime.getTime();
+const realBuildProbe = computeDeployStaleness();
+check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout", realBuildProbe.available === true);
+const realDistMtimeMs = new Date(realBuildProbe.distBuiltAt).getTime();
+// Positive control (DoD 2): dist/index.js's own mtime must NOT equal the directory-wide build clock on
+// a real incremental build — if they coincide, this checkout's dist doesn't exhibit the class of bug this
+// card fixes, and comparing a fixture to a fixture (the old test's blind spot) would be all we could prove.
+const realIndexJsMtimeMs = fs.statSync(path.join(__dirname, "..", "dist", "index.js")).mtime.getTime();
+if (realIndexJsMtimeMs === realDistMtimeMs) {
+  console.log("SKIP  (4-setup) dist/index.js mtime coincides with the directory-wide build clock on this checkout (e.g. a fresh full build) — the real-tree positive control for the incremental-build class of bug is inconclusive here, not exercised. See test/deploy-staleness.mjs's own (rebuild-then-touch) real-tree assertion for the always-exercisable version of this control.");
+} else {
+  check("(4-setup) real-tree positive control: dist/index.js mtime genuinely DIFFERS from max(dist/**) on this checkout (proves the bug class is real, not just a fixture artifact)", true);
+}
 const beforeBuild = new Date(realDistMtimeMs - 60_000).toISOString();
 const afterBuild = new Date(realDistMtimeMs + 60_000).toISOString();
 const stalenessRepo = path.join(os.tmpdir(), `loom-svst-stalenessrepo-${Date.now()}`);
