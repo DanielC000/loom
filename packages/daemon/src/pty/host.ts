@@ -78,17 +78,19 @@ function fnv1a32(s: string): string {
  *
  * ⚠️ CODE REVIEW CORRECTION (an earlier draft of this comment claimed a collision is "never a false-
  * positive purge" — WRONG, and the real vector needs no collision at all): a 32-bit hash collision between
- * two genuinely DIFFERENT texts is ~2⁻³² and not worth carding on its own. But `purgeConfirmedGiveUpRequeue`
- * purges EVERY entry whose signature matches, by design (a coalesced drain seeds several logicalIds with
- * the identical joined signature on purpose — see `requeueGiveUpOrigin`'s doc) — so two GENUINELY DISTINCT
- * messages that happen to carry byte-IDENTICAL text (P=1 if they coexist, no collision needed) are
- * indistinguishable from a coalesced batch by signature alone, and one confirming hook would purge BOTH,
- * including a still-undelivered one that never should have been touched. `Live.ambiguousDispatches`'
- * aggressive cleanup-on-every-resolution-path (see this map's own doc, and `purgeConfirmedGiveUpRequeue`'s)
- * is what keeps the window for two such entries to coexist as narrow as the underlying give-up rate allows
- * — it does not make the case structurally impossible. A non-byte-identical engine echo, separately, is
- * still only ever a false-negative MISS (a real duplicate this map could have purged is left for the
- * FIFO-position fallback instead) — that half of the original claim holds.
+ * two genuinely DIFFERENT texts is ~2⁻³² and not worth carding on its own. But two GENUINELY DISTINCT
+ * messages that happen to carry byte-IDENTICAL text (P=1 if they coexist, no collision needed) land on the
+ * exact same signature too — indistinguishable from a coalesced batch's members by signature alone.
+ * FIXED (card bc0774c4): `purgeConfirmedGiveUpRequeue` no longer purges every signature match
+ * unconditionally — every `Live.ambiguousDispatches` entry also carries a `batchId` (the `gen` every member
+ * of ONE `requeueGiveUpOrigin` call is seeded under; see that map's own doc), and a content match purges
+ * ONLY when every matched entry shares ONE `batchId`. A match spanning more than one `batchId` — the
+ * genuinely-distinct-same-text case — is left entirely untouched rather than guessed at (an age-based
+ * tie-break was considered and rejected: a batch that has already redrained under a fresh
+ * `submitGeneration` breaks the "oldest batch confirmed first" assumption — see
+ * `purgeConfirmedGiveUpRequeue`'s own doc for the concrete trace). A non-byte-identical engine echo,
+ * separately, is still only ever a false-negative MISS (a real duplicate this map could have purged is
+ * left for the FIFO-position fallback instead) — that half of the original claim holds.
  */
 function textSignature(text: string): { len: number; hash: string } {
   return { len: text.length, hash: fnv1a32(text) };
@@ -1713,16 +1715,26 @@ interface Live {
   // matched against every entry here BEFORE falling back to the old FIFO-position logic) and by
   // `hasAmbiguousMatch` (sessions/service.ts's `enqueueDurableMessage` auto-join check for a manual resend
   // with no explicit `resendOf`). MEMORY-SAFETY: bounded by COUNT (`AMBIGUOUS_DISPATCH_CAP`), never by
-  // elapsed time — a real ambiguity is rare, so this is expected to almost never approach the cap; see
-  // `capAmbiguousDispatches`. Stores `{len, hash}` (an `fnv1a32` signature, the SAME cheap hash `ptyWrite`'s
-  // own log line already uses), never the message's full text — the text itself is ALREADY retained for
-  // free wherever it still needs to be (live.pending, or the DB's `session_message_queued` row), so this
-  // map adds no new full-text retention on the most load-bearing path. A signature collision (or an
-  // engine-echo that isn't byte-identical to what Loom wrote — untested as of this card; see the pre-
-  // registered prediction at the prompt-mismatch site) is a FALSE-NEGATIVE MISS for this map, never a
-  // false-positive purge: a miss just falls through to the existing FIFO-position fallback, no worse than
-  // before this card existed.
-  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number }>;
+  // elapsed time — see that constant's own doc for why this map is NOT expected to stay near-empty as an
+  // independent claim (it grows monotonically with every give-up unless promptly cleaned up on resolution);
+  // see `capAmbiguousDispatches`. Stores `{len, hash, batchId}` (an `fnv1a32` signature — the SAME cheap
+  // hash `ptyWrite`'s own log line already uses — plus the `gen` every member of ONE `requeueGiveUpOrigin`
+  // call is seeded under, i.e. that call's batch identity; see that method's own doc), never the message's
+  // full text — the text itself is ALREADY retained for free wherever it still needs to be (live.pending,
+  // or the DB's `session_message_queued` row), so this map adds no new full-text retention on the most
+  // load-bearing path. A signature collision (or an engine-echo that isn't byte-identical to what Loom
+  // wrote — untested as of card 4a0af485; see the pre-registered prediction at the prompt-mismatch site) is
+  // a FALSE-NEGATIVE MISS for this map, never a false-positive purge: a miss just falls through to the
+  // existing FIFO-position fallback, no worse than before that card existed. ⚠️ CORRECTION (card
+  // bc0774c4): that "never a false-positive purge" claim was ALSO wrong on a separate axis — two GENUINELY
+  // DISTINCT dispatches that happen to carry byte-identical text produce two entries here with the SAME
+  // `{len,hash}` but DIFFERENT `batchId`s, and were, before that card, indistinguishable from one coalesced
+  // batch's members: one confirming hook purged BOTH. `batchId` is what closes it —
+  // `purgeConfirmedGiveUpRequeue` now purges a content match only when every matched entry shares ONE
+  // `batchId`; a match spanning more than one is left untouched entirely rather than guessed at, restoring
+  // the "never a false-positive purge" property for real — see that method's own doc for why guessing
+  // (even an age-based tie-break) was rejected in favor of resolving nothing.
+  ambiguousDispatches: Map<string, { len: number; hash: string; writtenAt: number; batchId: number }>;
   // Card 1bd1f045: monotonic per-session sequence number for the `[pty-write]` byte/call-sequence log —
   // bumped by `ptyWrite()` on every REAL `live.pty.write()` call (see that method's doc). THE load-bearing
   // field: it is what makes a duplicated or replayed emission visible AS SUCH (two records sharing a
@@ -5309,10 +5321,16 @@ export class PtyHost {
       // since nothing survives in `live.pending` for it past that point. `writtenAt` uses
       // `currentGenFirstWrittenAt` (this generation's own original Enter-write time, still valid here —
       // nothing has re-submitted between the give-up firing and this call) so `latencyMs` logging is exact.
-      // EVERY member of a coalesced origin is seeded with the SAME joined signature (not its own) — see
-      // `purgeConfirmedGiveUpRequeue`'s "collect every match" handling for why that's the correct pairing,
-      // not a bug: one confirming hook legitimately confirms the whole coalesced batch at once.
-      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now() });
+      // EVERY member of a coalesced origin is seeded with the SAME joined signature (not its own) AND the
+      // SAME `batchId: gen` (card bc0774c4) — see `purgeConfirmedGiveUpRequeue`'s "collect every match"
+      // handling for why sharing the signature is the correct pairing, not a bug: one confirming hook
+      // legitimately confirms the whole coalesced batch at once. `batchId` is the discriminator that lets
+      // that purge tell "coalesced together" (one call to THIS method, one shared `gen`) apart from
+      // "coincidentally identical" (two SEPARATE calls to this method — i.e. two genuinely distinct give-up
+      // events — that happen to land on the same text): `gen` only ever increases and is captured once per
+      // call, so it's a free, already-threaded batch identity — the SAME value already stamped onto each
+      // kept `QueuedMessage.giveUpGen` below — no new counter needed.
+      live.ambiguousDispatches.set(m.logicalId, { ...submittedSig, writtenAt: live.currentGenFirstWrittenAt ?? Date.now(), batchId: gen });
       this.capAmbiguousDispatches(live);
       const requeues = (m.giveUpRequeues ?? 0) + 1;
       if (requeues > GIVE_UP_REQUEUE_LIMIT) {
@@ -5506,9 +5524,10 @@ export class PtyHost {
    * no such field, so that call site is untouched and always takes the fallback below, exactly per
    * Requirement C — "no worse than today's behaviour" when a prompt is absent), THIS method first checks
    * `reportedPrompt`'s `{len, hash}` signature against EVERY entry in `Live.ambiguousDispatches` (keyed by
-   * `logicalId`, not `submitGeneration` — see that map's own doc) and resolves ALL that match, not just the
-   * first — a coalesced drain (see `requeueGiveUpOrigin`'s own doc) seeds several member logicalIds with
-   * the IDENTICAL joined signature, and a single confirming hook legitimately confirms all of them at once.
+   * `logicalId`, not `submitGeneration` — see that map's own doc) and resolves ALL that match AND share ONE
+   * `batchId` (see the card bc0774c4 paragraph below), not just the first — a coalesced drain (see
+   * `requeueGiveUpOrigin`'s own doc) seeds several member logicalIds with the IDENTICAL joined signature
+   * AND the same `batchId`, and a single confirming hook legitimately confirms all of them at once.
    * A match resolves the CORRECT generation(s) DIRECTLY, by CONTENT, instead of guessing from queue
    * position — this is what closes residual (4): a cross-remint re-mint (or an auto-joined manual resend,
    * see `hasAmbiguousMatch`) is now enrolled by `logicalId` regardless of whether
@@ -5522,6 +5541,33 @@ export class PtyHost {
    * map is empty, or the engine's echo isn't byte-identical to what Loom wrote; see `textSignature`'s doc)
    * falls straight through to the untouched fallback below — a false-negative MISS here is by construction
    * never worse than the pre-card behaviour, only ever a no-op improvement missed.
+   *
+   * CARD bc0774c4 — BATCH-PROVENANCE DISCRIMINATION (closes the residual THIS card's own body originally
+   * documented as accepted, in the paragraph that used to sit where this one now does — "genuinely-
+   * distinct-but-same-text is indistinguishable from coalesced-together by signature alone"): a signature
+   * match can span MORE than one `batchId` whenever two GENUINELY DISTINCT give-up events happen to share
+   * byte-identical text — no hash collision needed, P=1 once two such entries coexist (see `textSignature`'s
+   * own doc). An age-based tie-break (purge whichever matched `batchId` is numerically smallest, i.e. the
+   * OLDEST give-up) was tried and REJECTED: it is refutable by a concrete trace, not merely "usually right".
+   * Consider batch A (older) and batch B (younger), both genuinely ambiguous and held, sharing a signature.
+   * If B's OWN held entry redrains on its normal hold-expiry path — an ordinary, unremarkable event this
+   * class already handles (see `isGiveUpHeld`/`GIVE_UP_HOLD_MS`) — it resubmits under a BRAND-NEW
+   * `submitGeneration`, and when THAT resubmission's own hook confirms normally, the confirming hook's
+   * content still matches BOTH A's and B's stored signatures (B's stale `ambiguousDispatches` entry is not
+   * itself cleared by a plain successful resubmission — only an explicit purge clears it). An age-based
+   * tie-break would purge A here — a message that was NEVER actually confirmed — while leaving B's own
+   * (truly resolved) entry to linger unpurged. That is loss through a narrower door than the one this card
+   * was originally carded for, not a fix. So: when a content match spans MORE than one `batchId`, this
+   * method purges NONE of them — every matched entry is left exactly as it was, still genuinely ambiguous,
+   * to be resolved later once the competing batch has separately resolved (making a future same-content
+   * hook a single-`batchId` match again) or via its own bounded give-up hold. It still returns `true` (see
+   * the method body) rather than falling through to the FIFO-position fallback below: that fallback is
+   * CONTENT-BLIND (it purges by queue position alone) and running it here could purge a `live.pending` entry
+   * whose text doesn't even match `reportedPrompt` — strictly worse than resolving nothing. Per this
+   * project's own "fail toward a duplicate, never a loss" principle (88f11385): this is the unconditional-
+   * safe choice over a heuristic that is right most of the time — worst case, both batches eventually
+   * redrain on their own bounded holds and one becomes a genuine duplicate delivery; never a silently
+   * resolved-and-dropped row.
    *
    * ⚠️ SCOPE — WHAT THIS DOES NOT CLOSE (Requirement D; state this precisely, per this project's own
    * "a comment is a claim" rule — a claim of "duplicates prevented" here would be exactly the false-
@@ -5553,18 +5599,24 @@ export class PtyHost {
       // Code Reviewer follow-up (card 4a0af485, Major 4): a COALESCED drain seeds MULTIPLE member
       // logicalIds with the SAME joined signature (see `requeueGiveUpOrigin`'s own doc) — a single hook can
       // therefore legitimately confirm more than one logicalId at once. Collect every match instead of
-      // stopping at the first, or the other coalesced members' duplicates would survive unpurged. RESIDUAL
-      // (accepted, narrowed by Major 2's cleanup discipline below): two INDEPENDENTLY-ambiguous, never-
-      // coalesced messages that happen to carry byte-identical text would ALSO both match here and both
-      // get purged — genuinely-distinct-but-same-text is indistinguishable from coalesced-together by
-      // signature alone. Major 2's aggressive cleanup (deleting an entry the MOMENT its own ambiguity
-      // resolves, on every resolution path) keeps the window for two such entries to coexist as narrow as
-      // the underlying give-up rate allows; it does not make the collision structurally impossible.
+      // stopping at the first, or the other coalesced members' duplicates would survive unpurged.
       const matchedLogicalIds: string[] = [];
       for (const [logicalId, entry] of live.ambiguousDispatches) {
         if (entry.len === sig.len && entry.hash === sig.hash) matchedLogicalIds.push(logicalId);
       }
       if (matchedLogicalIds.length > 0) {
+        // Card bc0774c4 (see this method's own big doc block, "CARD bc0774c4 — BATCH-PROVENANCE
+        // DISCRIMINATION", for the full reasoning and the rejected age-based tie-break): a content match can
+        // span more than one give-up `batchId` whenever two GENUINELY DISTINCT give-up events happen to
+        // share byte-identical text — resolve ONLY when every match belongs to ONE batch (the coalesced
+        // case, including every single-member batch); a match spanning more than one batch is left
+        // COMPLETELY untouched rather than guessed at.
+        const batchIds = new Set(matchedLogicalIds.map((id) => live.ambiguousDispatches.get(id)!.batchId));
+        if (batchIds.size > 1) {
+          // eslint-disable-next-line no-console
+          console.log(`[submit] ${sessionId} AMBIGUOUS content match: ${matchedLogicalIds.length} logicalId(s) span ${batchIds.size} distinct give-up batches sharing this signature — cannot attribute by content alone, leaving ALL untouched rather than guess (fails toward a duplicate, never a loss)`);
+          return true; // still "handled" by content — do NOT fall through to the content-BLIND FIFO-position fallback, which could purge an entry whose text doesn't even match reportedPrompt
+        }
         for (const logicalId of matchedLogicalIds) {
           const entry = live.ambiguousDispatches.get(logicalId)!;
           const latencyMs = Date.now() - entry.writtenAt;
