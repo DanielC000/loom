@@ -45,6 +45,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
@@ -93,8 +94,7 @@ const seedSession = (id, role, extra) => db.insertSession({
 seedSession("PL", "platform", { projectId: "pProj" });
 
 // Fake pty (no real claude). Same SeamHost shape as project-rebind.mjs.
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
   stop() {}
 }
 const events = {

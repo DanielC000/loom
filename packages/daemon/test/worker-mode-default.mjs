@@ -47,6 +47,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveConfig } = await import("@loom/shared");
 const { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- pure helper contract: reverse of modeAfterCyclesFromAcceptEdits ---
 check("(setup) cyclesToReachFromAcceptEdits('auto') round-trips through modeAfterCyclesFromAcceptEdits",
@@ -82,16 +83,11 @@ const tW = "11111111-1111-4111-8111-111111111111";
 db.insertTask({ id: tW, projectId: "pP", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
 // Fake pty seam: capture every SpawnOpts; kill() fires onExit so recycle's wait-for-dead loop resolves.
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242, write() {}, onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); }, resize() {},
-    };
+    return super.createPty(opts);
   }
   isAlive() { return false; } // no real OS pty here — respawn/recycle paths treat the source as not-live
 }

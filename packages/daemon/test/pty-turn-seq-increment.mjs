@@ -37,22 +37,15 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
-// Mirrors resume-after-rate-limit-stop-gate.mjs's SeamHost: captures every SpawnOpts and wires kill() to
-// fire the REAL onExit callback the base PtyHost.spawn() registers — alive/dead tracking is real.
-class SeamHost extends PtyHost {
+// Shared _seam-host-fixture.mjs base: captures every SpawnOpts; kill() fires the REAL onExit callback the
+// base PtyHost.spawn() registers — alive/dead tracking is real. Distinct pids kept for parity via a spread.
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242 + this.capture.length,
-      write() {},
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); },
-      resize() {},
-    };
+    return { ...super.createPty(opts), pid: 4242 + this.capture.length };
   }
 }
 

@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { Db } from "../dist/db.js";
 import { PtyHost } from "../dist/pty/host.js";
+import { createSeamHost } from "./_seam-host-fixture.mjs";
 import { SessionService } from "../dist/sessions/service.js";
 import { OrchestrationControl } from "../dist/orchestration/control.js";
 import { WakeService } from "../dist/orchestration/wake.js";
@@ -50,9 +51,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   db.insertProject({ id: "pS", name: "TimeEchoProj", repoPath: repo, vaultPath: vault, config: {}, createdAt: now, archivedAt: null });
   db.insertAgent({ id: "agentMgr", projectId: "pS", name: "Mgr", startupPrompt: "AGENT_MGR_DOCTRINE", position: 0, profileId: null });
 
-  class SeamHost extends PtyHost {
-    createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-  }
+  class SeamHost extends createSeamHost(PtyHost) {}
   const events = {
     onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
     onBusy(id, busy) { db.setBusy(id, busy); },

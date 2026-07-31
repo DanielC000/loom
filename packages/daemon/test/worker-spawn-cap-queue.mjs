@@ -109,6 +109,8 @@ function initRepo(repo) {
 const now = new Date().toISOString();
 const db = new Db();
 
+// LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): kill() fires onExit
+// asynchronously (setTimeout(0), see below), which the shared fixture's synchronous kill() doesn't do.
 class SeamHost extends PtyHost {
   spawnedPrompts = new Map(); // sessionId -> the FULL startupPrompt handed to spawn() — for the full-kickoff assertion (8)
   enqueueLog = []; // {sessionId, text} for every enqueueStdin call — for the autofire-failure notification assertion

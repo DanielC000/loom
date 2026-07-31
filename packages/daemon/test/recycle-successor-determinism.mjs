@@ -62,6 +62,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
@@ -73,10 +74,10 @@ const now = new Date().toISOString();
 // Fake pty: no real claude/signals. isAlive() reflects stop() immediately (SeamHost's fake pty never
 // fires a real onExit), so recycleWorker's synchronous "wait until the old pty is actually gone" poll
 // (packages/daemon/src/sessions/service.ts) returns on its first check instead of spinning its ~5s budget.
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   spawned = [];
   stoppedIds = new Set();
-  createPty(opts) { this.spawned.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.spawned.push(opts); return super.createPty(opts); }
   stop(id, mode) { this.stoppedIds.add(id); }
   isAlive(id) { return !this.stoppedIds.has(id); }
 }

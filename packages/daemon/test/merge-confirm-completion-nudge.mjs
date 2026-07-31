@@ -89,6 +89,7 @@ process.env.HOME = sandboxHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree, mergeBranch } = await import("../dist/git/worktrees.js");
@@ -96,9 +97,7 @@ const { createWorktree, removeWorktree, mergeBranch } = await import("../dist/gi
 const GIT_ID = "-c user.email=mcn@loom -c user.name=mcn";
 const now = new Date().toISOString();
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 // SPY: records every enqueueStdin() call (incl. `kind`, the 6th arg — not observable via any public
 // getPending*/worker_list surface) then delegates to the real implementation so queueing/delivery
 // behavior is otherwise completely unaffected.

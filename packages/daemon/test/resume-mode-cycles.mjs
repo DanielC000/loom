@@ -39,6 +39,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -67,9 +68,9 @@ db.insertProject({ id: "pP", name: "P", repoPath: repo, vaultPath: repo, config:
 db.insertAgent({ id: "agentMgr", projectId: "pP", name: "Mgr", startupPrompt: "MGR_PROMPT", position: 0, profileId: null });
 
 // Capture every SpawnOpts via the createPty() seam (mirrors profile-spawn.mjs / browser-testing-spawn.mjs).
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty,
   // so report not-live — the test resumes a (notionally stopped) session to inspect its resume spawn args.
   isAlive() { return false; }

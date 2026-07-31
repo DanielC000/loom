@@ -45,6 +45,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PlatformMcpRouter, mergeConfigOverride } = await import("../dist/mcp/platform.js");
@@ -57,8 +58,8 @@ const db = new Db();
 db.insertProject({ id: "pCfg", name: "Cfg", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null, reserved: false });
 
 // Fake pty (the routers' constructors need a SessionService; no tool here spawns).
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
+  createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
   stop() {}
 }
 const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

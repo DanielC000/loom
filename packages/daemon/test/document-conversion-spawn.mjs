@@ -48,6 +48,7 @@ process.env.LOOM_MARKITDOWN_BIN = MARKITDOWN_BIN;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, markitdownMcpServer } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { loomVenvBin, loomVenvDir } = await import("../dist/python/venv.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -134,9 +135,9 @@ for (const id of [tW1, tW2])
 check("(roundtrip) Doc profile persists documentConversion=true", db.getProfile("profDoc").documentConversion === true);
 check("(roundtrip) Dev profile defaults documentConversion=false", db.getProfile("profDev").documentConversion === false);
 
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty,
   // so report not-live — the test resumes a (notionally stopped) session to inspect its resume spawn args.
   isAlive() { return false; }

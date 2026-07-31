@@ -28,6 +28,7 @@ const path = (await import("node:path")).default;
 const { randomUUID } = await import("node:crypto");
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { nextFireAt } = await import("../dist/orchestration/cron.js");
@@ -47,9 +48,7 @@ const db = new Db(path.join(tmpHome, "sched.db"));
 db.insertProject({ id: "pS", name: "SchedRecomputeProj", repoPath: repo, vaultPath: vault, config: {}, createdAt: now, archivedAt: null });
 db.insertAgent({ id: "agentMgr", projectId: "pS", name: "Mgr", startupPrompt: "AGENT_MGR_DOCTRINE", position: 0, profileId: null });
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
   onBusy(id, busy) { db.setBusy(id, busy); },

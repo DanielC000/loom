@@ -36,6 +36,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
@@ -85,8 +86,8 @@ db.insertSession({ id: "WEXIT", projectId: "pOrd", agentId: "agentWork", engineS
   processState: "exited", resumability: "resumable", busy: false, createdAt: now, lastActivity: new Date(Date.now() - 10_000).toISOString(), lastError: null, role: "worker", parentSessionId: null });
 
 // Fake pty seam (no real claude).
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
+  createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
   stop() {}
 }
 const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

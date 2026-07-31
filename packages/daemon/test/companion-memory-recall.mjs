@@ -36,6 +36,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { composeAssistantStartupPrompt, appendMemoryRecallToStartupPrompt } = await import("../dist/sessions/assistant-prompt.js");
@@ -204,11 +205,11 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
   db.insertAgent({ id: "agentAsst", projectId: "pR", name: "Companion", startupPrompt: "AGENT_OWN_PROMPT", position: 0, profileId: "profAsst" });
   db.insertAgent({ id: "agentMgr", projectId: "pR", name: "Manager", startupPrompt: "MGR_PROMPT", position: 1, profileId: "profMgr" });
 
-  class SeamHost extends PtyHost {
+  class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
     createPty(opts) {
       this.capture.push(opts);
-      return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+      return super.createPty(opts);
     }
   }
   const events = {

@@ -96,6 +96,9 @@ db.insertTask({ id: taskW, projectId: "pP", title: "WORK", body: "", columnKey: 
 
 // --- the fake pty + a PtyHost subclass that captures every SpawnOpts via the createPty() seam.
 // `failFast` makes the NEXT spawn's pty fire onExit SYNCHRONOUSLY (during spawn()) — the M5 race. ---
+// LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): onExit fires
+// conditionally and synchronously at registration time (not on kill()) to model the M5 race — a
+// genuinely different mechanism, not the discard bug the shared fixture fixes.
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; this.failFast = false; }
   createPty(opts) {

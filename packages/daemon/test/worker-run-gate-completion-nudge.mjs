@@ -77,6 +77,7 @@ process.env.HOME = sandboxHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
@@ -84,9 +85,7 @@ const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.j
 const GIT_ID = "-c user.email=wgn@loom -c user.name=wgn";
 const now = new Date().toISOString();
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 // SPY: records every enqueueStdin() call (incl. `kind`, the 6th arg) then delegates to the real
 // implementation — mirrors merge-confirm-completion-nudge.mjs's SpyHost exactly.
 class SpyHost extends SeamHost {

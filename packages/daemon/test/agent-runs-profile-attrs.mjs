@@ -34,6 +34,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { runSnapshotDir } = await import("../dist/runs/snapshot.js");
@@ -55,9 +56,9 @@ db.insertAgent({ id: "agentPinned", projectId: PROJECT_ID, name: "Pinned", start
 db.insertAgent({ id: "agentPlain", projectId: PROJECT_ID, name: "Plain", startupPrompt: "PLAIN_DOCTRINE", position: 1, profileId: null, endpoint: true, ioSchema: null });
 
 // --- fake pty + a PtyHost subclass capturing every SpawnOpts via createPty() ---
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
 }
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },

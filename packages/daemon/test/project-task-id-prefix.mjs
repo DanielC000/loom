@@ -38,6 +38,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
@@ -65,8 +66,7 @@ db.insertAgent({ id: "agentPL", projectId: P_SOLO, name: "Platform Lead", startu
 db.insertSession({ id: "PL", projectId: P_SOLO, agentId: "agentPL", engineSessionId: null, title: null, cwd: repo,
   processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform" });
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
   stop() {}
 }
 const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

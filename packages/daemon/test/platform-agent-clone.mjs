@@ -69,6 +69,8 @@ db.insertAgent({ id: "agentPlatform", projectId: "pSrc", name: "Lead-ish", start
 db.insertAgent({ id: "agentAuditor", projectId: "pSrc", name: "Audit-ish", startupPrompt: "elevated", position: 3, profileId: "profAuditor" });
 
 // A no-op SessionService/PtyHost — these tools never touch sessions, but the router constructor needs one.
+// LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): createPty() throws by
+// design ("agent_clone tools must never spawn a pty") — there is no onExit/kill to share.
 class SeamHost extends PtyHost {
   createPty() { throw new Error("agent_clone tools must never spawn a pty"); }
   stop() {}

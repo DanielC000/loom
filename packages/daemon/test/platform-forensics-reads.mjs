@@ -43,6 +43,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 
 const { Db, MAX_EVENTS_SEARCH_PAGE } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PlatformMcpRouter, DEFAULT_EVENTS_SEARCH_CAP } = await import("../dist/mcp/platform.js");
@@ -76,8 +77,7 @@ seedSession("PL", "pHome", "platform", null);
 seedSession("M", "pTarget", "manager", null);
 seedSession("W", "pTarget", "worker", "M");
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
   stop() {}
 }
 const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

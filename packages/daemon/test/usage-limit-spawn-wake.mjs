@@ -41,6 +41,7 @@ const LATCH = path.join(tmpHome, "tmp", "claude-usage.json"); // the global awar
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { buildServer } = await import("../dist/gateway/server.js");
@@ -64,9 +65,7 @@ const taskGood = randomUUID();
 db.insertTask({ id: taskGood, projectId: "pP", title: "real", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
 // FAKE pty (createPty seam) — spawnWorker never drives a real claude.
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
   onBusy(id, busy) { db.setBusy(id, busy); },

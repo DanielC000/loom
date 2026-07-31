@@ -41,6 +41,7 @@ fs.mkdirSync(repo, { recursive: true });
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { parseApiKey } = await import("../dist/keys/hash.js");
@@ -180,9 +181,9 @@ try {
   check("(G1) a non-boolean endpoint is rejected (400)", (await app.inject({ method: "POST", url: "/api/agents/aPlain", payload: { endpoint: "yes" } })).statusCode === 400);
 
   // (G2) the MCP-reachable agent-write path CANNOT flip endpoint, even if a caller smuggles it in the patch.
-  class SeamHost extends PtyHost {
+  class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
-    createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+    createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   }
   const events = {
     onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, b) { db.setBusy(id, b); },

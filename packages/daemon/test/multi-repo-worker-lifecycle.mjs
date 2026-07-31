@@ -45,6 +45,7 @@ process.env.HOME = sandboxHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { WORKTREES_DIR } = await import("../dist/paths.js");
@@ -61,8 +62,7 @@ function initRepo(repo, readme) {
   execSync(`git init -q && git config user.email mrwl@loom && git config user.name mrwl && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 }
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
   isAlive() { return false; }
 }
 function makeHost(db) {

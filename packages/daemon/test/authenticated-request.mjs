@@ -37,6 +37,7 @@ const { createConnection } = await import("../dist/connections/store.js");
 const { performAuthenticatedRequest, __resetConnectionsRateLimitState } = await import("../dist/connections/request.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -213,9 +214,9 @@ try {
     db.insertAgent({ id: "agentNoConn", projectId: PROJECT_ID, name: "NoConn", startupPrompt: "", position: 0, profileId: "profNoConn" });
     db.insertAgent({ id: "agentWithConn", projectId: PROJECT_ID, name: "WithConn", startupPrompt: "", position: 1, profileId: "profWithConn" });
 
-    class SeamHost extends PtyHost {
+    class SeamHost extends createSeamHost(PtyHost) {
       constructor(events) { super(events); this.capture = []; }
-      createPty(opts) { this.capture.push(opts); return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+      createPty(opts) { this.capture.push(opts); return { ...super.createPty(opts), pid: 1 }; }
     }
     const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
     const host = new SeamHost(events);

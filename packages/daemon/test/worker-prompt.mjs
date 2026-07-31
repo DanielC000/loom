@@ -36,6 +36,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { composeWorkerStartupPrompt } = await import("../dist/sessions/worker-prompt.js");
@@ -63,19 +64,11 @@ const taskB = "22222222-2222-2222-8222-222222222222";
 db.insertTask({ id: taskA, projectId: "pW", title: "A", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
 db.insertTask({ id: taskB, projectId: "pW", title: "B", body: "", columnKey: "todo", position: 2, createdAt: now, updatedAt: now });
 
-// --- fake pty: captures every SpawnOpts, and fires onExit on kill() so recycleWorker's hard-stop wait resolves fast ---
-class SeamHost extends PtyHost {
+// --- fake pty (shared _seam-host-fixture.mjs base): captures every SpawnOpts; kill() fires onExit so
+// recycleWorker's hard-stop wait resolves fast ---
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) {
-    this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242, write() {}, resize() {},
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); },
-    };
-  }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
 }
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },

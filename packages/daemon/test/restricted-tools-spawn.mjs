@@ -43,6 +43,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildSpawnArgs, disallowedToolsForRole, disallowedToolsForSpawn, RESTRICTED_NATIVE_TOOLS, HUMAN_PROMPT_TOOLS } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -176,13 +177,9 @@ for (const id of [tRW, tDev])
 check("(roundtrip) Companion profile persists restrictedTools=true", db.getProfile("profComp").restrictedTools === true);
 check("(roundtrip) Dev profile defaults restrictedTools=false", db.getProfile("profDev").restrictedTools === false);
 
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) {
-    this.capture.push(opts);
-    let exitCb = null;
-    return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit(cb) { exitCb = cb; return { dispose() {} }; }, kill() { if (exitCb) exitCb({ exitCode: 0 }); }, resize() {} };
-  }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   isAlive() { return false; } // capture seam drives no live pty — resume/recycle inspect the respawn args
 }
 const events = {

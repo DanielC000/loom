@@ -59,6 +59,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
@@ -75,9 +76,7 @@ function initRepo(repo) {
 const now = new Date().toISOString();
 const db = new Db();
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 const events = {
   onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
   onBusy(id, busy) { db.setBusy(id, busy); },

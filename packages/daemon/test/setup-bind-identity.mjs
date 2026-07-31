@@ -47,6 +47,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
@@ -91,9 +92,9 @@ db.insertSession({
   createdAt: now, lastActivity: now, lastError: null, role: "setup", parentSessionId: null,
 });
 
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.spawned = []; }
-  createPty(opts) { this.spawned.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.spawned.push(opts); return super.createPty(opts); }
   stop() {}
 }
 const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

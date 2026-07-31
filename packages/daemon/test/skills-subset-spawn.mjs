@@ -45,6 +45,7 @@ for (const n of STORE_SKILLS) {
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { injectSkills } = await import("../dist/skills/inject.js");
@@ -148,9 +149,9 @@ db.insertTask({ id: tW1, projectId: "pP", title: "t", body: "", columnKey: "back
 check("(roundtrip) profile persists its skills subset", sameSet(db.getProfile("profSub").skills, ["alpha", "beta"]));
 check("(roundtrip) a plain profile reads skills:null", db.getProfile("profWorkerSub") && db.getProfile("profSub") && db.getProfile("profSub").skills !== null);
 
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty,
   // so report not-live — the test resumes a (notionally stopped) session to inspect its resume spawn args.
   isAlive() { return false; }

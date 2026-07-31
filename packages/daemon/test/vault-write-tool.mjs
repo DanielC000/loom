@@ -34,6 +34,7 @@ const { TaskMcpRouter } = await import("../dist/mcp/server.js");
 const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { agentProfileKeyError } = await import("../dist/profiles/validate.js");
@@ -61,9 +62,9 @@ try {
   db.insertAgent({ id: "agentNoVault", projectId: PROJECT_ID, name: "NoVault", startupPrompt: "", position: 0, profileId: "profNoVault" });
   db.insertAgent({ id: "agentWithVault", projectId: PROJECT_ID, name: "WithVault", startupPrompt: "", position: 1, profileId: "profWithVault" });
 
-  class SeamHost extends PtyHost {
+  class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
-    createPty(opts) { this.capture.push(opts); return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+    createPty(opts) { this.capture.push(opts); return { ...super.createPty(opts), pid: 1 }; }
   }
   const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
   const host = new SeamHost(events);

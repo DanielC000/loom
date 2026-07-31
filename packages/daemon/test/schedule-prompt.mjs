@@ -131,6 +131,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
   const { Db } = await import("../dist/db.js");
   const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   const { SessionService } = await import("../dist/sessions/service.js");
   const { OrchestrationControl } = await import("../dist/orchestration/control.js");
   const { appendScheduledPrompt } = await import("../dist/sessions/manager-prompt.js");
@@ -160,11 +161,11 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   db.insertAgent({ id: "agentAud", projectId: "pS", name: "Aud", startupPrompt: "AGENT_AUD_DOCTRINE", position: 1, profileId: null });
   db.insertAgent({ id: "agentWsa", projectId: "pS", name: "Wsa", startupPrompt: "AGENT_WSA_DOCTRINE", position: 2, profileId: null });
 
-  class SeamHost extends PtyHost {
+  class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
     createPty(opts) {
       this.capture.push(opts);
-      return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+      return super.createPty(opts);
     }
   }
   const events = {

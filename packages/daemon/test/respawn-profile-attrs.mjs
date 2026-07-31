@@ -45,6 +45,7 @@ for (const n of STORE_SKILLS) {
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { injectSkills } = await import("../dist/skills/inject.js");
@@ -117,21 +118,14 @@ db.insertSession({ id: "mgrRig", projectId: "pP", agentId: "agentMgr", engineSes
 const tW = "11111111-1111-4111-8111-111111111111";
 db.insertTask({ id: tW, projectId: "pP", title: "t", body: "", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
-// Fake pty seam: capture every SpawnOpts; `kill()` fires onExit so recycle's wait-for-dead loop resolves
-// immediately (recycleWorker hard-stops the old pty then waits on isAlive before reusing the worktree).
-class SeamHost extends PtyHost {
+// Fake pty seam (shared _seam-host-fixture.mjs base): captures every SpawnOpts; `kill()` fires onExit so
+// recycle's wait-for-dead loop resolves immediately (recycleWorker hard-stops the old pty then waits on
+// isAlive before reusing the worktree).
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242,
-      write() {},
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); },
-      resize() {},
-    };
+    return super.createPty(opts);
   }
   // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty, so
   // report not-live — the test resumes/recycles a (notionally stopped) worker to inspect its respawn args.

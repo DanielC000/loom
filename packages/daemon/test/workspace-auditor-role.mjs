@@ -39,6 +39,7 @@ delete process.env.LOOM_DEV; // GUARD 3(b) is about the NON-dev (ungated) seed g
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { validateProfile } = await import("../dist/profiles/validate.js");
@@ -77,11 +78,11 @@ try {
   // role-omitted startNew (the "+New" / POST /api/agents/:id/sessions default branch) resolves the
   // profile role; PROFILE_SPAWNABLE_ROLES = {manager,worker} clamps anything else to a plain (role-null)
   // session, so an agent carrying a workspace-auditor profile can never silently elevate.
-  class SeamHost extends PtyHost {
+  class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
     createPty(opts) {
       this.capture.push(opts);
-      return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+      return super.createPty(opts);
     }
   }
   const db = new Db();

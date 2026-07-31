@@ -1986,9 +1986,9 @@ export interface PtyHostEvents {
    * designed to avoid. A wedged/stuck worker is a DIFFERENT signal, owned by the busy-stuck watchdog.
    *
    * OPTIONAL (unlike its siblings above) so the many existing test doubles that construct a `PtyHostEvents`
-   * object (often `class SeamHost extends PtyHost`, the real class, across ~150 daemon tests) don't all
-   * need updating just to add a no-op for a callback their scenario never exercises — the call site below
-   * uses `?.`. Production (index.ts) always wires a real implementation.
+   * object (the shared `SeamHost` fake-pty double in test/_seam-host-fixture.mjs, used across 115 daemon
+   * tests) don't all need updating just to add a no-op for a callback their scenario never exercises —
+   * the call site below uses `?.`. Production (index.ts) always wires a real implementation.
    */
   onTurnCompleted?(sessionId: string): void;
   /**

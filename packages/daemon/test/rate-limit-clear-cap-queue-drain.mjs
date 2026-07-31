@@ -83,6 +83,10 @@ function initRepo(repo) {
 const now = new Date().toISOString();
 const db = new Db();
 
+// LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): kill() fires the tracked
+// onExit callback on setTimeout(0), not synchronously — this test needs a genuinely ASYNCHRONOUS exit
+// (mirroring a real node-pty) to exercise the cap-queue drain's own wait/poll behavior, which the shared
+// fixture's synchronous kill() would short-circuit.
 class SeamHost extends PtyHost {
   createPty() {
     let exitCb = null;

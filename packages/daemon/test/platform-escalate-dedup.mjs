@@ -46,13 +46,13 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 // No live Lead in this test at all — the exact "no live handler" scenario from the evidence. A fake pty
 // host is enough; enqueueStdin is never reached because no session has role "platform"/processState "live".
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
   enqueueStdin() { throw new Error("no live Lead in this test — enqueueStdin should never be reached"); }
 }
 const events = {

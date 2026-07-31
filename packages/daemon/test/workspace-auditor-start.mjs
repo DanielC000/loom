@@ -44,6 +44,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { WorkspaceAuditMcpRouter } = await import("../dist/mcp/user-audit.js");
@@ -78,9 +79,9 @@ db.insertAgent({ id: "agentSetup", projectId: "pSetup", name: "Platform", startu
 db.insertAgent({ id: "agentMgr", projectId: "pOrd", name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
 
 // Fake pty: capture createPty (spawn) calls; no real claude.
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.spawned = []; }
-  createPty(opts) { this.spawned.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.spawned.push(opts); return super.createPty(opts); }
   stop() {}
 }
 const events = {

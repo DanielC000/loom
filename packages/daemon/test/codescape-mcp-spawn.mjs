@@ -81,6 +81,7 @@ process.env.LOOM_CODESCAPE_BIN = fixtureCli;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildMcpServers, buildSpawnArgs, disallowedToolsForSpawn, codescapeHttpMcpServer, CODESCAPE_TOOL_ALLOW, CODESCAPE_WRITE_TOOLS } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { isLoomDev, isCodescapeSupervisorEnabled, isCodescapeEnabled, resolveCodescapeBin, codescapeBinCandidate, hostToolBinExists, resolveHostToolBin } = await import("../dist/paths.js");
@@ -359,22 +360,13 @@ db.insertProject({ id: "pA", name: "A", repoPath: repo, vaultPath: repo, config:
 db.insertAgent({ id: "agentMgrA", projectId: "pA", name: "Mgr", startupPrompt: "MGR_PROMPT", position: 0, profileId: null });
 db.insertAgent({ id: "agentWorkerA", projectId: "pA", name: "Worker", startupPrompt: "WORKER_PROMPT", position: 1, profileId: null });
 
-// Card c54d1ea0: `onExit`/`kill` must actually simulate a real node-pty process dying (mirrors
-// codescape-lifecycle-hooks.mjs's identical fixture + fix) — a discarded onExit callback means
-// PtyHost.stop() can never flip this fake session's `live.alive` to false, so its pending
-// readiness-fallback/kickoff-guarantee timers (pty/host.ts) stay armed past this file's own db.close().
-class SeamHost extends PtyHost {
+// Card c54d1ea0: `onExit`/`kill` must actually simulate a real node-pty process dying — see
+// _seam-host-fixture.mjs (card ec7983c6) for why that wiring is now shared rather than local.
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242, write() {},
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { exitCb?.({ exitCode: 0 }); },
-      resize() {},
-    };
+    return super.createPty(opts);
   }
   isAlive() { return false; }
 }

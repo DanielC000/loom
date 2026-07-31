@@ -36,6 +36,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { AuditMcpRouter } = await import("../dist/mcp/audit.js");
@@ -120,8 +121,8 @@ for (let i = 0; i < N_LIVE_SESSIONS; i++) {
 const N_TOTAL_LIVE = N_LIVE_SESSIONS + 1;
 
 // Fake pty seam (no real claude) — the routers need a SessionService, but list tools only hit the Db.
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
+  createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
   stop() {}
 }
 const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

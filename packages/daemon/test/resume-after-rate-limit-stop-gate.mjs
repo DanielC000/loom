@@ -39,22 +39,16 @@ process.env.USERPROFILE = sandboxHome;
 process.env.HOME = sandboxHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
-// Mirrors companion-live-upgrade.mjs's SeamHost: captures every SpawnOpts and wires kill() to fire the
-// REAL onExit callback the base PtyHost.spawn() registers, so alive/dead tracking is real, not stubbed.
-class SeamHost extends PtyHost {
+// Shared _seam-host-fixture.mjs base: captures every SpawnOpts; kill() fires the REAL onExit callback the
+// base PtyHost.spawn() registers, so alive/dead tracking is real, not stubbed. Distinct pids kept via a
+// spread (not asserted on, just parity with the original per-file fixture).
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242 + this.capture.length,
-      write() {}, // graceful stop's Ctrl-C write is a no-op here — nothing auto-exits the fake pty
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); },
-      resize() {},
-    };
+    return { ...super.createPty(opts), pid: 4242 + this.capture.length };
   }
 }
 const events = {

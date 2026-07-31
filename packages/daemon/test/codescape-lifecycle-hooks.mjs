@@ -69,6 +69,7 @@ const fixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli.mjs");
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -142,25 +143,14 @@ function seedProject(db, p) {
 // "spawn" to it at the exact moment `PtyHost.spawn()` calls it — that call is `createPty`'s FIRST
 // synchronous action (host.ts), so this tags the true moment claude's own process would be launched.
 //
-// Card c54d1ea0: `onExit`/`kill` must actually simulate a real node-pty process dying — a discarded
-// onExit callback means `PtyHost.stop()` can NEVER flip this fake session's `live.alive` to false, so
-// its pending readiness-fallback/kickoff-guarantee timers (pty/host.ts) stay armed forever regardless of
-// how many times `stop()` is called on it. `kill()` now invokes the SAME callback host.ts registered via
-// `pty.onExit(cb)`, exactly like a real process exiting synchronously on kill — this is what lets every
-// existing `pty.stop(id, "hard")` call in spawnWorker/confirmWorkerMerge/recycleWorker genuinely retire
-// the fake session instead of leaving it "live" with unkillable timers.
-class SeamHost extends PtyHost {
+// Card c54d1ea0: `onExit`/`kill` must actually simulate a real node-pty process dying — see
+// _seam-host-fixture.mjs (card ec7983c6) for why that wiring is now shared rather than local. This
+// subclass only adds the orderLog tap; onExit/kill/pid/etc. come from the shared base.
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events, orderLog) { super(events); this.orderLog = orderLog; }
   createPty(opts) {
     this.orderLog?.push("spawn");
-    let exitCb = null;
-    return {
-      pid: 4242, write() {},
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { exitCb?.({ exitCode: 0 }); },
-      resize() {},
-    };
+    return super.createPty(opts);
   }
   isAlive() { return false; }
 }

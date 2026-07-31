@@ -39,6 +39,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { CompanionController } = await import("../dist/companion/controller.js");
@@ -90,11 +91,11 @@ function makeHeartbeatBuilder() {
 }
 
 // The fake-pty PtyHost that captures every SpawnOpts via the createPty() seam (mirrors assistant-role.mjs).
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+    return super.createPty(opts);
   }
 }
 

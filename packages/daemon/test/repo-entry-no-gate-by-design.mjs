@@ -200,6 +200,7 @@ async function partB() {
   process.env.HOME = sandboxHome;
 
   const { PtyHost } = await import("../dist/pty/host.js");
+  const { createSeamHost } = await import("./_seam-host-fixture.mjs");
   const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
   const { SetupMcpRouter } = await import("../dist/mcp/setup.js");
   const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -214,8 +215,7 @@ async function partB() {
   db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 0, profileId: null });
   db.insertAgent({ id: "agentSetup", projectId: "pHome", name: "Setup", startupPrompt: "SETUP", position: 0, profileId: null });
 
-  class SeamHost extends PtyHost {
-    createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  class SeamHost extends createSeamHost(PtyHost) {
     stop() {}
   }
   const events = { onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); }, onBusy(id, busy) { db.setBusy(id, busy); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };

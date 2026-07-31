@@ -51,6 +51,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the temp dir (no port — this tes
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
@@ -71,8 +72,8 @@ db.insertSession({
   processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager", parentSessionId: null,
 });
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+class SeamHost extends createSeamHost(PtyHost) {
+  createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
   stop() {}
 }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };

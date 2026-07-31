@@ -68,6 +68,7 @@ process.env.LOOM_UPGRADE_BUSY_WAIT_MS = "300";
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, capabilityToolAllowlist } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -94,23 +95,16 @@ const listToolsFor = async (sessionId) => {
   return tools.map((t) => t.name);
 };
 
-// Fake pty seam (mirrors respawn-profile-attrs.mjs's SeamHost): captures every SpawnOpts and wires kill()
-// to fire the REAL onExit callback the base PtyHost.spawn() registers — so the base class's OWN `live` map
-// (and therefore its REAL isAlive()) tracks alive/dead exactly like a real pty would, letting this test
-// exercise the actual graceful-stop-then-wait loop rather than bypassing it.
-class SeamHost extends PtyHost {
+// Fake pty seam (shared _seam-host-fixture.mjs base): captures every SpawnOpts; kill() fires the REAL
+// onExit callback the base PtyHost.spawn() registers — so the base class's OWN `live` map (and therefore
+// its REAL isAlive()) tracks alive/dead exactly like a real pty would, letting this test exercise the
+// actual graceful-stop-then-wait loop rather than bypassing it. Distinct pids (not asserted on, just kept
+// for parity with the original per-file fixture) via a spread override.
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242 + this.capture.length,
-      write() {}, // graceful stop's Ctrl-C writes are no-ops here — the escalation timers drive the exit
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); },
-      resize() {},
-    };
+    return { ...super.createPty(opts), pid: 4242 + this.capture.length };
   }
 }
 const events = {

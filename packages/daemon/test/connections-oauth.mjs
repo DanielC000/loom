@@ -45,6 +45,7 @@ const { performAuthenticatedRequest, __resetConnectionsRateLimitState } = await 
 const { __resetOAuthRefreshState } = await import("../dist/connections/oauth.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
@@ -192,8 +193,8 @@ try {
     // --- 1k. HUMAN-ONLY: no MCP tool (setup / orchestration manager+worker+assistant / platform) exposes
     // any oauth-related surface — mirrors connections-store.mjs Part 4's pattern, extended to "oauth". ---
     {
-      class SeamHost extends PtyHost {
-        createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+      class SeamHost extends createSeamHost(PtyHost) {
+        createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
         stop() {}
       }
       const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

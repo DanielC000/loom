@@ -31,6 +31,7 @@ process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
@@ -62,9 +63,9 @@ const tB = "22222222-2222-4222-8222-222222222222";
 db.insertTask({ id: tA, projectId: projA, title: "Fix the flaky vite dev-server port bug", body: "the dev server sometimes binds a random port when 5317 is taken", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 db.insertTask({ id: tB, projectId: projB, title: "Unrelated task", body: "nothing to do with any note", columnKey: "backlog", position: 1, priority: "p2", createdAt: now, updatedAt: now });
 
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; this.enqueued = []; }
-  createPty(opts) { this.capture.push(opts); return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   // resume()'s already-live short-circuit consults pty.isAlive: this capture seam drives NO live OS pty,
   // so report not-live — the test resumes a (notionally stopped) session to inspect its resume behavior.
   isAlive() { return false; }

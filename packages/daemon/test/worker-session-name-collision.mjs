@@ -44,6 +44,7 @@ const { PtyHost } = await import("../dist/pty/host.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { composeWorkerSessionName } = await import("../dist/pty/session-name.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
 const repo = path.join(os.tmpdir(), `loom-wsnc-repo-${Date.now()}`);
@@ -67,22 +68,12 @@ const tCollideA = randomUUID(), tCollideB = randomUUID();
 db.insertTask({ id: tCollideA, projectId: "pP", title: "Polish the dashboard", body: "", columnKey: "backlog", position: 2, priority: "p2", createdAt: now, updatedAt: now });
 db.insertTask({ id: tCollideB, projectId: "pP", title: "Polish the dashboard!!", body: "", columnKey: "backlog", position: 3, priority: "p2", createdAt: now, updatedAt: now });
 
-// Fake pty seam: capture every SpawnOpts; `kill()` fires onExit so recycle's wait-for-dead loop resolves
-// immediately (recycleWorker hard-stops the old pty then waits on isAlive before reusing the worktree).
-class SeamHost extends PtyHost {
+// Fake pty seam (shared _seam-host-fixture.mjs base): captures every SpawnOpts; `kill()` fires onExit so
+// recycle's wait-for-dead loop resolves immediately (recycleWorker hard-stops the old pty then waits on
+// isAlive before reusing the worktree).
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
-  createPty(opts) {
-    this.capture.push(opts);
-    let exitCb = null;
-    return {
-      pid: 4242,
-      write() {},
-      onData() { return { dispose() {} }; },
-      onExit(cb) { exitCb = cb; return { dispose() {} }; },
-      kill() { if (exitCb) exitCb({ exitCode: 0 }); },
-      resize() {},
-    };
-  }
+  createPty(opts) { this.capture.push(opts); return super.createPty(opts); }
   isAlive() { return false; } // this seam drives no real OS pty — recycle's wait-for-dead resolves instantly
 }
 const events = {

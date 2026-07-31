@@ -60,6 +60,10 @@ try {
 
   // A real SessionService against a fake pty (the createPty seam) — startRun's endpoint check runs BEFORE
   // any snapshot/spawn, so the refuse cases never touch the repo or pty.
+  // LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): tracks exit callbacks
+  // in a per-sessionId Map rather than the shared fixture's per-call closure, because this scenario runs
+  // several concurrent ptys and needs to address one by sessionId — the shared base's design is already
+  // correct (kill() invokes the tracked callback) but doesn't expose that per-session addressing.
   class SeamHost extends PtyHost {
     constructor(events) { super(events); this.exitCbs = new Map(); }
     createPty(opts) {

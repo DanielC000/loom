@@ -45,6 +45,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { composeManagerStartupPrompt } = await import("../dist/sessions/manager-prompt.js");
@@ -78,11 +79,11 @@ const taskW = "44444444-4444-4444-8444-444444444444";
 db.insertTask({ id: taskW, projectId: "pM", title: "WORK", body: "", columnKey: "todo", position: 1, createdAt: now, updatedAt: now });
 
 // --- the fake pty + a PtyHost subclass that captures every SpawnOpts via the createPty() seam ---
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+    return super.createPty(opts);
   }
 }
 const events = {

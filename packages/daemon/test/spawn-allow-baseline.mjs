@@ -26,6 +26,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { resolveConfig } = await import("@loom/shared");
@@ -58,11 +59,11 @@ db.insertTask({ id: taskW, projectId: "pCustom", title: "WORK", body: "", column
 check("setup: the custom project's resolved config.permission.allow UNIONS the baseline and keeps the custom entry",
   resolveConfig(customConfig).permission.allow.includes(BASELINE) && resolveConfig(customConfig).permission.allow.includes(CUSTOM_EXTRA));
 
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+    return { ...super.createPty(opts), pid: 1 };
   }
 }
 const events = { onEngineSessionId(id, e) { db.setEngineSessionId(id, e); }, onBusy(id, b) { db.setBusy(id, b); }, onContextStats() {}, onRateLimited() {}, onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); } };

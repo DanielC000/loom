@@ -80,6 +80,7 @@ process.env.HOME = sandboxHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
@@ -88,9 +89,7 @@ const { liveLineageSuccessor } = await import("../dist/sessions/platform-lead-pr
 const GIT_ID = "-c user.email=posl@loom -c user.name=posl";
 const now = new Date().toISOString();
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 // SPY: records every enqueueStdin() call (sessionId + text) so the exact TARGET a completion nudge landed
 // on can be asserted directly. Also tracks stop()-ed ids so isAlive() reflects them immediately — SeamHost's
 // fake pty never fires a real exit event, so without this recycleWorker's synchronous "wait until the old

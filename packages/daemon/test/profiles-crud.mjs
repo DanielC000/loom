@@ -29,6 +29,7 @@ fs.mkdirSync(repo, { recursive: true });
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { seedDefaultProfiles, resetProfileToBundled, BUNDLED_PROFILES } = await import("../dist/profiles/seed.js");
@@ -98,11 +99,11 @@ try {
   db.insertAgent({ id: "tMgrOwn", projectId: "pP", name: "ManagedOwn", startupPrompt: "AGENT_OWN", position: 2, profileId: "profMgr" });
   db.insertAgent({ id: "tMgrBlank", projectId: "pP", name: "ManagedBlank", startupPrompt: "", position: 3, profileId: "profMgr" });
 
-  class SeamHost extends PtyHost {
+  class SeamHost extends createSeamHost(PtyHost) {
     constructor(events) { super(events); this.capture = []; }
     createPty(opts) {
       this.capture.push(opts);
-      return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+      return super.createPty(opts);
     }
   }
   const events = {

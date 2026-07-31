@@ -56,6 +56,10 @@ db.insertAgent({ id: "agentPlain", projectId: PROJECT_ID, name: "Plain", startup
 
 // --- fake pty + a PtyHost subclass capturing every SpawnOpts via createPty(); fireExit triggers the
 //     captured onExit so teardown (events.onExit → onRunSessionExit) runs deterministically ---
+// LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): tracks exit callbacks in
+// a per-sessionId Map, exposed externally via fireExit(sessionId) — the shared base's design is already
+// correct (kill() invokes the tracked callback) but has no way to address one pty by sessionId from
+// outside, which this test needs since it doesn't hold a direct reference to the spawned pty object.
 class SeamHost extends PtyHost {
   constructor(events) { super(events); this.capture = []; this.exitCbs = new Map(); }
   createPty(opts) {

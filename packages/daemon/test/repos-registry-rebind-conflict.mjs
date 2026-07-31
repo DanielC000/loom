@@ -44,6 +44,7 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
@@ -124,8 +125,8 @@ try {
     db.insertAgent({ id: "agentLead", projectId: "pHome", name: "Lead", startupPrompt: "LEAD", position: 0, profileId: null });
     db.insertSession({ id: "PL", projectId: "pHome", agentId: "agentLead", engineSessionId: null, title: null, cwd: primary, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform", parentSessionId: null });
 
-    class SeamHost extends PtyHost {
-      createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+    class SeamHost extends createSeamHost(PtyHost) {
+      createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
       stop() {}
     }
     const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });

@@ -28,6 +28,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost, buildSpawnArgs, buildMcpServers, disallowedToolsForRole, HUMAN_PROMPT_TOOLS } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
@@ -56,11 +57,11 @@ db.insertAgent({ id: "agentAsst", projectId: "pC", name: "Companion", startupPro
 db.insertAgent({ id: "agentMgr", projectId: "pC", name: "Manager", startupPrompt: "MGR_PROMPT", position: 1, profileId: "profMgr" });
 
 // The fake-pty PtyHost that captures every SpawnOpts via the createPty() seam (mirrors profile-spawn.mjs).
-class SeamHost extends PtyHost {
+class SeamHost extends createSeamHost(PtyHost) {
   constructor(events) { super(events); this.capture = []; }
   createPty(opts) {
     this.capture.push(opts);
-    return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
+    return super.createPty(opts);
   }
 }
 const events = {

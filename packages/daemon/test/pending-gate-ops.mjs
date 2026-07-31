@@ -76,6 +76,7 @@ requireHermeticEnv();
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.js");
@@ -83,9 +84,7 @@ const { createWorktree, removeWorktree } = await import("../dist/git/worktrees.j
 const GIT_ID = "-c user.email=pgo@loom -c user.name=pgo";
 const now = new Date().toISOString();
 
-class SeamHost extends PtyHost {
-  createPty() { return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
-}
+class SeamHost extends createSeamHost(PtyHost) {}
 class SpyHost extends SeamHost {
   enqueueCalls = [];
   enqueueStdin(sessionId, text, source, onDeliver, route, kind, questionId) {

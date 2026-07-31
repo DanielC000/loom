@@ -186,6 +186,10 @@ try {
   dbB.insertAgent({ id: "agentEndpoint", projectId: "pRun", name: "Analyst", startupPrompt: "DOCTRINE", position: 0, profileId: null, endpoint: true, ioSchema: null });
 
   // fake pty (createPty seam) — capture spawn opts, record graceful stops, deliver exits on demand.
+  // LOCAL OVERRIDE (not _seam-host-fixture.mjs's shared SeamHost, card ec7983c6): tracks exit callbacks
+  // in a per-sessionId Map, exposed externally via fireExit(sessionId) — the shared base's design is
+  // already correct (kill() invokes the tracked callback) but has no way to address one pty by sessionId
+  // from outside, which this test needs since it doesn't hold a direct reference to the spawned pty.
   class SeamHost extends PtyHost {
     constructor(events) { super(events); this.capture = []; this.exitCbs = new Map(); this.stops = []; }
     createPty(opts) {

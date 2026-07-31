@@ -52,6 +52,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { TaskMcpRouter } = await import("../dist/mcp/server.js");
@@ -398,8 +399,8 @@ try {
   // Seed an existing card on the TARGET board carrying the same rare identifiers as the peer_message below —
   // if the check somehow reached this path, this is exactly what it would try to refuse against.
   createProjectTask(db, "pTargetPeer", { title: SPEC.p1b.title, body: SPEC.p1b.body });
-  class SeamHost extends PtyHost {
-    createPty() { return { pid: 1, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} }; }
+  class SeamHost extends createSeamHost(PtyHost) {
+    createPty(opts) { return { ...super.createPty(opts), pid: 1 }; }
     enqueueStdin() { throw new Error("no live target manager in this test — enqueueStdin should never be reached"); }
   }
   const host = new SeamHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
