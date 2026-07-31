@@ -5635,6 +5635,43 @@ export class SessionService {
   }
 
   /**
+   * Card a8f8a8f2 — consumes `PtyHostEvents.onKickoffGiveUpExhausted`: `scheduleKickoffGuarantee`'s
+   * synthetic turn-1 origin (pty/host.ts) exhausted its ONE give-up requeue with no confirming hook ever
+   * arriving. PtyHost cannot decide anything DB-aware from there (same layering boundary as
+   * `onGiveUpConfirmed`), so this is where "who spawned this, and how do they recover" gets answered.
+   *
+   * Scoped exactly like `notifyManagerOfIdleWorker` (role worker/null + a real `parentSessionId`): a
+   * top-level session (a manager/platform-lead spawned with no parent) has no single natural recipient for
+   * this notice, so it's a no-op there — the generic idle-watchdog + the console.error below stay its only
+   * signals, unchanged by this card.
+   *
+   * Routed through `enqueueSystemNudge` (the SAME durable dispatch every settle-nudge — merge-done,
+   * gate-failed, etc. — already uses) rather than a bare `pty.enqueueStdin`: a fire-and-forget push is lost
+   * outright if the manager isn't live at this exact instant, and this is EXACTLY the "item lost" failure
+   * mode this card exists to close — a bare drop one layer up is not a fix. The durable path persists a
+   * `session_message_queued` row (redriven on the manager's next resume/boot) and gets its OWN
+   * `onGiveUpExhausted` wiring recursively (re-mint, then park to nobody — sender is the `"system"`
+   * sentinel) if IT also can't get through.
+   *
+   * Names the ONE recovery known to work for a session that never started a turn (worker_stop + fresh
+   * worker_spawn) and explicitly rules out the two actions that look plausible but are wrong: worker_message
+   * (returns a false `delivered:true` against a session running no turn) and worker_merge (would review an
+   * empty branch) — see this card's own DEFINITION OF DONE.
+   */
+  handleKickoffGiveUpExhausted(sessionId: string): void {
+    const w = this.db.getSession(sessionId);
+    if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) {
+      // eslint-disable-next-line no-console
+      console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget with no parent session to notify (role=${w?.role ?? "none"}) — the dispatch was DROPPED; only the generic idle-watchdog can still catch this`);
+      return;
+    }
+    // eslint-disable-next-line no-console
+    console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget — the engine never confirmed receiving it; PARKING and notifying manager ${w.parentSessionId} instead of a bare drop`);
+    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff was DROPPED — Loom exhausted its own give-up requeue budget without the engine ever confirming it received the kickoff, so NO turn ever started (this is not a stall mid-task; nothing began at all). Loom will not retry this automatically. Recovery: worker_stop this worker, then worker_spawn it fresh with the same task direction — do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch is empty).`;
+    this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
+  }
+
+  /**
    * Card 417cea0a — the post-hoc retraction half of the give-up notice: `purgeConfirmedGiveUpRequeue`
    * (pty/host.ts) already learns, by content match, that a given-up message's turn actually ran — this
    * consumes that signal (wired via `PtyHostEvents.onGiveUpConfirmed`). `sessionId` is the RECIPIENT whose

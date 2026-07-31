@@ -2024,6 +2024,16 @@ export interface PtyHostEvents {
    */
   onGiveUpConfirmed?(sessionId: string, logicalId: string, latencyMs: number): void;
   /**
+   * Card a8f8a8f2: `scheduleKickoffGuarantee`'s synthetic turn-1 origin (the DIRECT `submit()` that
+   * delivers a fresh session's startup prompt) exhausted `GIVE_UP_REQUEUE_LIMIT` on that ONE message —
+   * the entire task dispatch (the session's brief/kickoff) is about to be dropped with nothing further
+   * PtyHost itself can do about it (no DB, no manager/task lookup — same layering boundary as
+   * `onGiveUpConfirmed` above). OPTIONAL, same rationale as `onGiveUpConfirmed`/`onTurnCompleted`: every
+   * existing `PtyHostEvents` test double is unaffected until it opts in. The implementer (sessions/
+   * service.ts, via index.ts) decides how to park + notify — see `handleKickoffGiveUpExhausted`'s own doc.
+   */
+  onKickoffGiveUpExhausted?(sessionId: string): void;
+  /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
    * `detail.detector` (card 33d5aef1) names which of the two park sites below fired — `"stop_failure"`
@@ -6225,8 +6235,19 @@ export class PtyHost {
       // late confirming hook — see requeueGiveUpOrigin's own doc), not lost. `source:"system"`/`kind:"agent"`
       // mirror the enqueueStdin call in the branch just above (the "unsafe to write directly" sibling path),
       // which ALREADY gets a correct origin for free via drainPending's own `drained` array.
+      //
+      // Card a8f8a8f2: `onGiveUpExhausted` (card ccb407eb's hook — see `QueuedMessage.onGiveUpExhausted`'s
+      // own doc) was left UNWIRED here — `GIVE_UP_REQUEUE_LIMIT` is 1, so a SECOND unconfirmed give-up on
+      // this same kickoff took the residual bare-drop path `requeueGiveUpOrigin` documents (console.error
+      // only), losing the entire task dispatch with nothing durable or visible surfacing it except the
+      // generic idle-watchdog eventually noticing the idle, never-started session — slow and indirect,
+      // not a signal at the exact seam that failed. Wired to `events.onKickoffGiveUpExhausted` (DB-agnostic,
+      // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can park + notify.
       this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
-        [{ id: randomUUID(), text: kickoff, source: "system", kind: "agent", logicalId: randomUUID() }]);
+        [{
+          id: randomUUID(), text: kickoff, source: "system", kind: "agent", logicalId: randomUUID(),
+          onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId),
+        }]);
       // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
       // depth, not load-bearing. Card 0050a17e.
     }, 0);

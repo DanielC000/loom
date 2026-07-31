@@ -290,6 +290,11 @@ async function main(): Promise<void> {
     // reference, same pattern as onBusy/onExit above) decides whether it was ever actually PARKED and, if
     // so, retracts that notice to the original sender. See PtyHostEvents.onGiveUpConfirmed's own doc.
     onGiveUpConfirmed: (sessionId, logicalId, latencyMs) => sessions.handleGiveUpConfirmed(sessionId, logicalId, latencyMs),
+    // Card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin exhausted its requeue budget — `sessions`
+    // (forward reference, same pattern as onBusy/onGiveUpConfirmed above) decides who spawned this and
+    // parks + notifies them instead of the bare drop that used to happen here. See
+    // PtyHostEvents.onKickoffGiveUpExhausted's own doc / SessionService.handleKickoffGiveUpExhausted's doc.
+    onKickoffGiveUpExhausted: (sessionId) => sessions.handleKickoffGiveUpExhausted(sessionId),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).
