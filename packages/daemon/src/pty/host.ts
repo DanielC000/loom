@@ -2577,7 +2577,9 @@ export interface WorktreeProcess {
  *  abandoned by an outer wrapper — see {@link enumerateProcessesWin32}. Must REJECT (never resolve `[]`)
  *  on a genuine enumeration failure — {@link reapProcessesRootedInWorktree}'s catch is what turns a
  *  rejection into a loud, classified log line plus `enumerationFailed: true`, instead of a result that
- *  looks identical to "no matching process exists". */
+ *  looks identical to "no matching process exists". A rejection MAY carry `timedOut: true` (see
+ *  {@link enumerateProcessesWin32}'s timeout branch) — {@link enumerateWithRetry} retries ONLY that
+ *  specific shape, never a spawn error / empty-output / parse-error rejection (card ed9c448d). */
 export type ProcessEnumerator = (timeoutMs: number) => Promise<WorktreeProcess[]>;
 /** Injectable process killer for {@link reapProcessesRootedInWorktree} (defaults to a real OS kill). */
 export type ProcessKiller = (pid: number) => void;
@@ -2782,7 +2784,12 @@ function enumerateProcessesWin32(timeoutMs: number): Promise<WorktreeProcess[]> 
       settled = true;
       clearTimeout(timer);
       const tail = stderrTail();
-      reject(new Error(`win32 process enumeration failed (${kind}): ${detail}${tail ? ` — stderr: ${tail}` : ""}`));
+      const error: Error & { timedOut?: boolean } = new Error(`win32 process enumeration failed (${kind}): ${detail}${tail ? ` — stderr: ${tail}` : ""}`);
+      // Stamped ONLY for the self-timeout branch (never spawn-error) — enumerateWithRetry's retry
+      // decision keys off this flag, not the message text, so it can never be fooled by a coincidental
+      // substring match in a genuine spawn-error's detail.
+      if (kind === "timeout") error.timedOut = true;
+      reject(error);
     };
     const timer = setTimeout(() => {
       // Force-kill the query helper itself so a wedged CIM call never leaks an orphaned powershell.exe —
@@ -2821,13 +2828,74 @@ function killProcessById(pid: number): void {
   try { process.kill(pid, "SIGKILL"); } catch { /* already gone / no permission */ }
 }
 
-/** Reject after `ms` — bounds {@link reapProcessesRootedInWorktree}'s enumerate step so a wedged/slow
- *  helper (a hung `powershell.exe`, an unreadable `/proc`) can never block worktree teardown indefinitely. */
+/** Reject after `ms` — bounds {@link reapProcessesRootedInWorktree}'s (possibly-retried, see
+ *  {@link enumerateWithRetry}) enumerate step so a wedged/slow helper (a hung `powershell.exe`, an
+ *  unreadable `/proc`) can never block worktree teardown indefinitely, even one that ignores the
+ *  `timeoutMs` it was called with entirely (an injected/broken seam). */
 function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`process enumeration exceeded ${ms}ms`)), ms);
     p.then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
   });
+}
+
+function sleepMs(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Max attempts + flat retry delay for {@link enumerateWithRetry} — exported so a test can assert against
+ *  the real constants (e.g. an observed attempt count) instead of a hardcoded duplicate that would silently
+ *  drift from a future retune. See {@link enumerateWithRetry}'s doc for the worst-case budget arithmetic
+ *  these feed in {@link reapProcessesRootedInWorktree}. */
+export const REAP_ENUMERATE_MAX_ATTEMPTS = 2;
+export const REAP_ENUMERATE_RETRY_DELAY_MS = 500;
+
+/**
+ * Card ed9c448d — ROOT CAUSE (established, not assumed): the observed failure (`test/merge-spawn-
+ * tracked.mjs`'s "(merge retain)" scenario, gate tail "CIM query produced no output within 10000ms", at
+ * `cap=2 concurrent=2` — genuine host contention) is NEITHER "10s is a permanently broken bound" NOR "the
+ * query is unconditionally too expensive to ever finish" — {@link reapProcessesRootedInWorktree}'s catch
+ * already treats a failed enumeration as fully non-fatal (fail-closed, logged, `enumerationFailed: true`,
+ * never thrown past that function at any of its seven call sites in sessions/service.ts, every one of
+ * which ALSO wraps the call in its own best-effort try/catch) — so "failure handled too harshly" is
+ * likewise ruled out; the failure was already survivable, just not RECOVERABLE. What actually happens is
+ * the SAME shape card f0718488 established for the codescape version probe (`readInstalledBuild`, this
+ * file's sibling in `codescape/supervisor.ts`): `Get-CimInstance Win32_Process` enumerates EVERY live
+ * process, so under a loaded host (two concurrent merge gates competing for CPU/WMI) a single attempt can
+ * transiently miss its own timeout window even though the query would have completed given a little more
+ * patience or a slightly quieter moment — contention on this host is bursty, not constant, so a SECOND
+ * attempt has a real chance of landing where the first one didn't. Widening the 10s bound would not fix a
+ * query that's still contended at 15s or 20s (and this project has a standing rule that widening a
+ * constant is not a structural fix — the `7b634e58` family); retrying the SAME bound on a fresh attempt
+ * does, for exactly the reason the codescape precedent already proved. Retried ONLY when the rejection is
+ * flagged `timedOut: true` (see {@link enumerateProcessesWin32}'s `fail` helper) — a genuine spawn error,
+ * empty-output, or parse-error is a real defect, not contention, and retrying one of those would just
+ * repeat a guaranteed failure at the cost of extra teardown latency for nothing.
+ *
+ * Returns the successful attempt's process list plus the number of attempts actually made — read by
+ * `test/worktree-process-reap.mjs`'s enumeration-timeout-then-success case, and by a persistent-failure
+ * case that counts invocations of its own fake enumerator — so both are asserted on observed attempt
+ * counts / observable outcome, NEVER wall-clock (card ca87fc6a is the sibling this deliberately does not
+ * repeat). Rethrows the LAST error once attempts are exhausted, or immediately for a non-timeout error.
+ */
+async function enumerateWithRetry(enumerate: ProcessEnumerator, timeoutMs: number): Promise<{ procs: WorktreeProcess[]; attempts: number }> {
+  let attempt = 0;
+  let lastErr: unknown;
+  while (attempt < REAP_ENUMERATE_MAX_ATTEMPTS) {
+    attempt++;
+    try {
+      const procs = await enumerate(timeoutMs);
+      return { procs, attempts: attempt };
+    } catch (err) {
+      lastErr = err;
+      const timedOut = (err as { timedOut?: boolean } | null)?.timedOut === true;
+      if (!timedOut || attempt >= REAP_ENUMERATE_MAX_ATTEMPTS) throw err;
+      await sleepMs(REAP_ENUMERATE_RETRY_DELAY_MS);
+    }
+  }
+  // Unreachable in practice (the loop above always returns or throws), kept only so TS sees every path
+  // settle without needing a non-null assertion on `lastErr`.
+  throw lastErr;
 }
 
 /**
@@ -2892,13 +2960,23 @@ function withReapTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
 export async function reapProcessesRootedInWorktree(
   worktreePath: string,
   deps: { enumerate?: ProcessEnumerator; kill?: ProcessKiller; timeoutMs?: number; excludePids?: number[] } = {},
-): Promise<{ killedPids: number[]; enumerationFailed?: boolean }> {
+): Promise<{ killedPids: number[]; enumerationFailed?: boolean; enumerationAttempts?: number }> {
   const enumerate = deps.enumerate ?? (process.platform === "win32" ? enumerateProcessesWin32 : enumerateProcessesPosix);
   const kill = deps.kill ?? killProcessById;
   const timeoutMs = deps.timeoutMs ?? 10_000;
   const excluded = new Set(deps.excludePids ?? []);
+  // WORST-CASE BUDGET (every attempt hits the full per-attempt timeout — do not retune REAP_ENUMERATE_
+  // MAX_ATTEMPTS/REAP_ENUMERATE_RETRY_DELAY_MS without redoing this arithmetic): REAP_ENUMERATE_MAX_
+  // ATTEMPTS(2) * timeoutMs(10,000ms default) + (REAP_ENUMERATE_MAX_ATTEMPTS - 1)(1) *
+  // REAP_ENUMERATE_RETRY_DELAY_MS(500ms) = 20,500ms for the default timeoutMs. This is the OUTER
+  // withReapTimeout bound too — it must cover the retry loop's own genuine worst case, not just one
+  // attempt, or it would fire mid-retry and manufacture a fresh timeout out of a legitimate second attempt
+  // still in flight. Spent only on the best-effort worktree-teardown path (every call site wraps this
+  // function in its own try/catch — see this function's own catch below), so the added worst-case delay
+  // costs nothing beyond a slower teardown under exactly the contention that caused the original timeout.
+  const totalBudgetMs = REAP_ENUMERATE_MAX_ATTEMPTS * timeoutMs + (REAP_ENUMERATE_MAX_ATTEMPTS - 1) * REAP_ENUMERATE_RETRY_DELAY_MS;
   try {
-    const procs = await withReapTimeout(enumerate(timeoutMs), timeoutMs);
+    const { procs, attempts } = await withReapTimeout(enumerateWithRetry(enumerate, timeoutMs), totalBudgetMs);
     const killedPids: number[] = [];
     for (const proc of procs) {
       if (proc.pid === process.pid) continue; // NEVER the daemon's own process — see SELF-EXCLUSION above
@@ -2906,13 +2984,16 @@ export async function reapProcessesRootedInWorktree(
       if (!processRootedInWorktree(proc, worktreePath)) continue;
       try { kill(proc.pid); killedPids.push(proc.pid); } catch { /* best effort */ }
     }
-    return { killedPids };
+    return { killedPids, enumerationAttempts: attempts };
   } catch (err) {
     // LOUD ON FAILURE: still fail-CLOSED (never widen the kill set on a failure — return nothing to kill,
     // exactly like before) but no longer SILENT — a total enumeration collapse used to be indistinguishable
     // from "no matching process exists" (finish([]) on every failure path), which is what let worktree
     // process cleanup silently no-op host-wide, undetected, for as long as the underlying trigger
     // persisted. Never rethrown past this caller — best-effort by construction, teardown must never block.
+    // A rejection reaching here already survived {@link enumerateWithRetry}'s own timeout-only retry (or
+    // was never eligible for one — a genuine spawn/parse/empty-output error), so this remains the terminal,
+    // fully-exhausted outcome.
     console.error(`[reap] ${worktreePath}: process enumeration FAILED this cycle — found/killed NOTHING (fail-closed, not proof nothing needed killing): ${(err as Error).message}`);
     return { killedPids: [], enumerationFailed: true };
   }

@@ -34,7 +34,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree, killableRemoveDir } = await import("../dist/git/worktrees.js");
-const { processRootedInWorktree, reapProcessesRootedInWorktree, parseWin32CimStdout, classifyWin32EnumerationClose } = await import("../dist/pty/host.js");
+const { processRootedInWorktree, reapProcessesRootedInWorktree, parseWin32CimStdout, classifyWin32EnumerationClose, REAP_ENUMERATE_MAX_ATTEMPTS, REAP_ENUMERATE_RETRY_DELAY_MS } = await import("../dist/pty/host.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -150,10 +150,11 @@ if (process.platform === "win32") {
   const errors = [];
   const origConsoleError = console.error;
   console.error = (msg) => { errors.push(String(msg)); };
+  let calls = 0;
   let result;
   try {
     result = await reapProcessesRootedInWorktree(WT2, {
-      enumerate: async () => { throw new Error("simulated enumeration failure (malformed CIM payload)"); },
+      enumerate: async () => { calls++; throw new Error("simulated enumeration failure (malformed CIM payload)"); },
     });
   } finally {
     console.error = origConsoleError;
@@ -165,6 +166,85 @@ if (process.platform === "win32") {
     result.enumerationFailed === true);
   check("(unit) THE FIX: the failure is LOUD — a classified [reap] error naming the worktree + cause was logged, not swallowed silently",
     errors.some((e) => e.includes("[reap]") && e.includes(WT2) && e.includes("simulated enumeration failure")));
+  check("(unit) card ed9c448d: a NON-timeout enumeration error is NEVER retried — exactly ONE attempt was made " +
+    "(a genuine spawn/parse/empty-output failure is a real defect, not contention; retrying it would just repeat it)",
+    calls === 1);
+}
+
+// ============================== (unit) card ed9c448d: enumeration-timeout retry, asserted on ATTEMPT COUNTS ==============================
+// The observed production failure (test/merge-spawn-tracked.mjs's "(merge retain)" scenario, gate tail
+// "CIM query produced no output within 10000ms", at cap=2 concurrent=2 — genuine host contention): a
+// single Get-CimInstance attempt can transiently miss its own timeout window under load even though the
+// query would complete given a little more patience — the SAME shape card f0718488's codescape version-
+// probe retry was built for. Both cases below assert on the fake enumerator's OWN observed call count /
+// the result's reported attempt count — NEVER wall-clock (card ca87fc6a's sibling exists precisely because
+// a wall-clock assertion flakes under the contention this card is about; a real REAP_ENUMERATE_RETRY_
+// DELAY_MS sleep still elapses between attempts here, but nothing below asserts on its duration).
+{
+  const WT3 = "/home/x/.loom/worktrees/proj1/deadbeef7777";
+  const survivorPid = 777001;
+
+  // Asserted FIRST, before anything below relies on it: a broken/undefined REAP_ENUMERATE_MAX_ATTEMPTS
+  // export would otherwise let a downstream `calls < REAP_ENUMERATE_MAX_ATTEMPTS` comparison silently
+  // evaluate to `false` for every `calls` (any number compared to `undefined` is `false`) and an
+  // `enumerationAttempts === REAP_ENUMERATE_MAX_ATTEMPTS` check pass VACUOUSLY via `undefined === undefined`
+  // — both would look green while proving nothing. Failing loudly here first rules that out.
+  check("(unit) REAP_ENUMERATE_MAX_ATTEMPTS is a real retry budget (> 1 — otherwise there is no retry at all)",
+    typeof REAP_ENUMERATE_MAX_ATTEMPTS === "number" && REAP_ENUMERATE_MAX_ATTEMPTS > 1);
+  check("(unit) REAP_ENUMERATE_RETRY_DELAY_MS is a bounded, non-negative flat delay",
+    typeof REAP_ENUMERATE_RETRY_DELAY_MS === "number" && REAP_ENUMERATE_RETRY_DELAY_MS >= 0);
+
+  // --- timeout-then-success: the FIRST attempt(s) time out, the LAST allowed attempt succeeds ---
+  {
+    let calls = 0;
+    const result = await reapProcessesRootedInWorktree(WT3, {
+      enumerate: async () => {
+        calls++;
+        if (calls < REAP_ENUMERATE_MAX_ATTEMPTS) {
+          const err = new Error(`win32 process enumeration failed (timeout): CIM query produced no output within 10000ms (attempt ${calls})`);
+          err.timedOut = true;
+          throw err;
+        }
+        return [{ pid: survivorPid, exePath: `${WT3}/node_modules/.bin/vite`, cwd: null, commandLine: null }];
+      },
+      kill: () => {},
+    });
+    check("(unit) card ed9c448d: enumeration-timeout-then-success retried exactly up to REAP_ENUMERATE_MAX_ATTEMPTS " +
+      "(observed call count, never wall-clock)", calls === REAP_ENUMERATE_MAX_ATTEMPTS);
+    check("(unit) card ed9c448d: a successful retry is NOT reported as an enumeration failure",
+      result.enumerationFailed !== true);
+    check("(unit) card ed9c448d: the successful attempt's process list is used (the survivor rooted in the worktree was found)",
+      result.killedPids.includes(survivorPid));
+    check("(unit) card ed9c448d: the result reports the real number of attempts it took to succeed",
+      result.enumerationAttempts === REAP_ENUMERATE_MAX_ATTEMPTS);
+  }
+
+  // --- persistent-enumeration-failure: EVERY attempt times out — retries are bounded, not indefinite ---
+  {
+    let calls = 0;
+    const errors = [];
+    const origConsoleError = console.error;
+    console.error = (msg) => { errors.push(String(msg)); };
+    let result;
+    try {
+      result = await reapProcessesRootedInWorktree(WT3, {
+        enumerate: async () => {
+          calls++;
+          const err = new Error(`win32 process enumeration failed (timeout): CIM query produced no output within 10000ms (attempt ${calls})`);
+          err.timedOut = true;
+          throw err;
+        },
+      });
+    } finally {
+      console.error = origConsoleError;
+    }
+    check("(unit) card ed9c448d: a PERSISTENT timeout retries exactly REAP_ENUMERATE_MAX_ATTEMPTS times, then gives up " +
+      "(bounded, not indefinite — observed call count, never wall-clock)", calls === REAP_ENUMERATE_MAX_ATTEMPTS);
+    check("(unit) card ed9c448d: a persistent timeout still fails CLOSED (killedPids: [], enumerationFailed: true) " +
+      "exactly like any other exhausted enumeration failure", result.killedPids.length === 0 && result.enumerationFailed === true);
+    check("(unit) card ed9c448d: the exhausted-retry failure is still LOUD (a classified [reap] error was logged)",
+      errors.some((e) => e.includes("[reap]") && e.includes(WT3)));
+  }
 }
 
 // ============================== (unit) win32 CIM close classification — empty-stdout regression guard ==============================
