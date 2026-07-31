@@ -28,6 +28,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { PtyHost, nextComposerLen } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // ===================== PART A — nextComposerLen pure classification =====================
 // The byte classifier the dirty signal is built on. Pure: no pty, no state.
@@ -62,13 +63,15 @@ check("nextComposerLen: 'abc\\r' is freeing → 0", nextComposerLen(0, "abc\r") 
 
 // ===================== PART B — the live state machine =====================
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  const fake = { pid: 4242, write: (d) => { writes.push(d); }, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 
 const busyLog = [];
 const events = { onEngineSessionId() {}, onBusy(_id, b) { busyLog.push(b); }, onContextStats() {}, onRateLimited() {}, onExit() {} };

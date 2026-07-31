@@ -39,6 +39,7 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { Db } = await import("../dist/db.js");
 const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
@@ -47,25 +48,22 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 // --- A fake IPty whose onData callback is CAPTURED so the test can feed simulated engine-output
 // chunks on demand (unlike pty-busy-drain.mjs's inert onData, we need to actually invoke it here). ---
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = () => {};
-  const fake = {
-    pid: 5150,
-    write: (d) => { writes.push(d); },
-    onData: (cb) => { dataCb = cb; return { dispose() { dataCb = () => {}; } }; },
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-    emit: (chunk) => dataCb(chunk),
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = () => {};
+    const fake = {
+      ...base,
+      pid: 5150,
+      write: (d) => { writes.push(d); },
+      onData: (cb) => { dataCb = cb; return { dispose() { dataCb = () => {}; } }; },
+      writes,
+      emit: (chunk) => dataCb(chunk),
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 const events = {

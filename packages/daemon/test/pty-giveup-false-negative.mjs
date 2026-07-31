@@ -125,35 +125,32 @@ const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEM
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const BACKSPACE = "\x7f";
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  // Card b64b3726: the exact Date.now() of each bare-Enter ("\r") write, in order — lets a scenario spin
-  // past the REAL millisecond a specific attempt's Enter landed (see awaitClockPast) instead of racing it.
-  const enterWriteTimes = [];
-  let onDataCb = null;
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); if (d === "\r") enterWriteTimes.push(Date.now()); },
-    // UNLIKE this suite's other fakes: actually stores the callback, so a scenario can fire it on demand
-    // to simulate real engine output (bumps live.lastOutputAt inside host.ts's own pty.onData handler).
-    onData: (cb) => { onDataCb = cb; return { dispose() { onDataCb = null; } }; },
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-    enterWriteTimes,
-    emitOutput: (s = ".") => { if (onDataCb) onDataCb(Buffer.from(s, "utf-8")); },
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    // Card b64b3726: the exact Date.now() of each bare-Enter ("\r") write, in order — lets a scenario spin
+    // past the REAL millisecond a specific attempt's Enter landed (see awaitClockPast) instead of racing it.
+    const enterWriteTimes = [];
+    let onDataCb = null;
+    const fake = {
+      ...base,
+      write: (d) => { writes.push(d); if (d === "\r") enterWriteTimes.push(Date.now()); },
+      // UNLIKE this suite's other fakes: actually stores the callback, so a scenario can fire it on demand
+      // to simulate real engine output (bumps live.lastOutputAt inside host.ts's own pty.onData handler).
+      onData: (cb) => { onDataCb = cb; return { dispose() { onDataCb = null; } }; },
+      writes,
+      enterWriteTimes,
+      emitOutput: (s = ".") => { if (onDataCb) onDataCb(Buffer.from(s, "utf-8")); },
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 const busyLog = {};

@@ -92,32 +92,29 @@ const writeAt = (k) => ENTER_DELAY + (k - 1) * VERIFY_TIMEOUT + (k === MAX_ATTEM
 const giveUpAt = () => writeAt(MAX_ATTEMPTS) + VERIFY_TIMEOUT;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const BACKSPACE = "\x7f";
 const BUSY_STALE_MS = 500; // small override for the post-first-turn (busySince) heal path — see scenario (2)
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let onDataCb = null;
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); },
-    onData: (cb) => { onDataCb = cb; return { dispose() {} }; },
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-    // Test-only: synthetically fire an output chunk, exactly like a real engine's onData would — this is
-    // how we force `live.lastOutputAt` to advance without ever confirming a turn (the false-suppress).
-    emitData: (d) => { if (onDataCb) onDataCb(d); },
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let onDataCb = null;
+    const fake = {
+      ...base,
+      write: (d) => { writes.push(d); },
+      onData: (cb) => { onDataCb = cb; return { dispose() {} }; },
+      writes,
+      // Test-only: synthetically fire an output chunk, exactly like a real engine's onData would — this is
+      // how we force `live.lastOutputAt` to advance without ever confirming a turn (the false-suppress).
+      emitData: (d) => { if (onDataCb) onDataCb(d); },
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 const busyLog = {};

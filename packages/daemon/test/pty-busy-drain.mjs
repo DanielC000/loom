@@ -31,28 +31,18 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
-// --- A fake IPty: records every write; onData/onExit are inert. host.ts only uses pid/write/
-// onData/onExit/kill, and never depends on onData/onExit firing for the busy/drain machine. ---
+// --- Records every write on top of the shared fixture's pid/onData/onExit/kill wiring. ---
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-// Subclass overrides the ONE seam (createPty) → no real spawn, no FS/trust side effects.
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 // Recording events sink: capture the busy transition log (mirrors the daemon's onBusy persistence).

@@ -53,6 +53,7 @@ const { ChatGateway } = await import("../dist/companion/chat-gateway.js");
 const { createDbCompanionAuth } = await import("../dist/companion/auth.js");
 const { IN_APP_CHANNEL } = await import("../dist/companion/in-app.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const TELEGRAM = "telegram";
 const dbFile = (name) => path.join(tmpHome, name);
@@ -62,12 +63,13 @@ const fakeAdapter = (name) => { const sent = []; return { name, maxMessageLength
 // A fake IPty + a PtyHost subclass injecting it (mirrors pty-route-coalesce.mjs) — the REAL turn machinery
 // (enqueueStdin route pinning + drainPending route-keyed coalescing + getActiveTurnOrigin), no real claude.
 const fakes = [];
-function makeFakePty() {
-  const fake = { pid: 4242, write() {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill() {}, resize() {} };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const fake = super.createPty(opts);
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 const ptyEvents = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 
 try {

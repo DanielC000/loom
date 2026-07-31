@@ -52,6 +52,7 @@ process.env.LOOM_MODE_OVERRIDE_MAX_ATTEMPTS = "1"; // isolate queueing from the 
 process.env.LOOM_READY_FALLBACK_MS = "9000";
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const SHIFT_TAB = "\x1b[Z";
 const ACCEPT_EDITS_FOOTER = "accept edits on (shift+tab to cycle)";
@@ -66,19 +67,21 @@ const DEFAULT_FOOTER = "(shift+tab to cycle)"; // no mode label — the unlabele
 const RING_WINDOW_PAD = "x".repeat(8300);
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = null;
-  const fake = {
-    pid: 4242, write: (d) => writes.push(d),
-    onData: (cb) => { dataCb = cb; return { dispose() {} }; },
-    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes,
-    feed: (s) => { if (dataCb) dataCb(s); },
-  };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; },
+      writes,
+      feed: (s) => { if (dataCb) dataCb(s); },
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
 const countShiftTabs = (fake) => fake.writes.filter((w) => w === SHIFT_TAB).length;

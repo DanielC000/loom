@@ -24,21 +24,9 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
-function makeFakePty() {
-  return {
-    pid: 4242,
-    write: () => {},
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-  };
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
-}
+const TestPtyHost = createSeamHost(PtyHost);
 
 const events = {
   onEngineSessionId() {},

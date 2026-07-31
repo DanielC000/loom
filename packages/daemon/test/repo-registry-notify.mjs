@@ -52,6 +52,7 @@ requireHermeticEnv();
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- Real temp git repos: valid registry targets. ---
 const mkRepo = (tag) => {
@@ -67,21 +68,16 @@ const primary2 = mkRepo("primary2"); // a distinct repo for the repoPath-rebind 
 
 const now = new Date().toISOString();
 
-function makeFakePty() {
-  return { pid: 4242, write() {}, onData() { return { dispose() {} }; }, onExit() { return { dispose() {} }; }, kill() {}, resize() {} };
-}
-
 // Records every enqueueStdin call (sessionId + text) BEFORE delegating to the real implementation, so
 // assertions can inspect exactly what was sent to which session without depending on live/busy/ready
 // timing — while still exercising the REAL host.enqueueStdin (queueing, sanitization, etc.) underneath.
 // `throwFor` lets ONE test (T6) simulate the "pty mid-teardown" race the route's own comment describes.
-class RecordingHost extends PtyHost {
+class RecordingHost extends createSeamHost(PtyHost) {
   constructor(events) {
     super(events);
     this.calls = [];
     this.throwFor = null;
   }
-  createPty() { return makeFakePty(); }
   enqueueStdin(sessionId, text, ...rest) {
     this.calls.push({ sessionId, text });
     if (this.throwFor && sessionId === this.throwFor) throw new Error("simulated pty mid-teardown race");

@@ -68,14 +68,9 @@ process.env.LOOM_GIVE_UP_REQUEUE_LIMIT = "1";
 process.env.LOOM_GIVE_UP_HOLD_MS = "5000"; // generous — this test resolves the ambiguity itself, never relies on the hold expiring
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakes = [];
-function makeSilentFakePty() {
-  const writes = [];
-  const fake = { pid: 4242, write: (d) => { writes.push(d); }, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes };
-  fakes.push(fake);
-  return fake;
-}
 const busyLog = {};
 // Card 417cea0a: capture `onGiveUpConfirmed` (new optional PtyHostEvents hook, fired from
 // `purgeConfirmedGiveUpRequeue`'s content-match CONFIRMED branch — the exact branch this file's gen-1
@@ -86,7 +81,15 @@ const events = {
   onEngineSessionId() {}, onBusy(id, busy) { (busyLog[id] ??= []).push(busy); }, onContextStats() {}, onRateLimited() {}, onExit() {},
   onGiveUpConfirmed(sessionId, logicalId, latencyMs) { giveUpConfirmedLog.push({ sessionId, logicalId, latencyMs }); },
 };
-class SilentTestPtyHost extends PtyHost { createPty() { return makeSilentFakePty(); } }
+class SilentTestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
+}
 const host = new SilentTestPtyHost(events);
 
 function spawnReady(sessionId) {

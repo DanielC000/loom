@@ -43,6 +43,7 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { readContextStats } = await import("../dist/sessions/context.js");
 const { isWeeklyUsageLimitSentinel } = await import("../dist/orchestration/usage-limit.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // Every fixture line below needs a `usage` block: readContextStats (whose single pass now also derives
 // lastAssistantText) returns null with none, same as its own no-usage case (context-stats.mjs's (d)).
@@ -134,23 +135,14 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
 // ===================== PART 2 — PtyHost (fake pty, no real claude, no daemon) =====================
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  const fake = {
-    pid: 4243,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, pid: 4243, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 const busyLog = [];

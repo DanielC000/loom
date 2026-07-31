@@ -35,24 +35,27 @@ fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { Db } = await import("../dist/db.js");
 const { ContextWatcher } = await import("../dist/orchestration/context-watcher.js");
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = null;
-  const fake = {
-    pid: 4242, write: (d) => writes.push(d),
-    onData: (cb) => { dataCb = cb; return { dispose() {} }; },
-    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes,
-    feed: (s) => { if (dataCb) dataCb(s); },
-  };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; },
+      writes,
+      feed: (s) => { if (dataCb) dataCb(s); },
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 
 // --- Db wiring: mirrors index.ts's real onEngineSessionId/onContextStats event → db.* wiring.
 const dbFile = path.join(tmpHome, "test.db");

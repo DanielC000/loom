@@ -82,6 +82,7 @@ process.env.LOOM_SUBMIT_MAX_ATTEMPTS = String(MAX_ATTEMPTS);
 process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -90,15 +91,11 @@ const restart = await import("../dist/orchestration/restart.js");
 const now = new Date().toISOString();
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
-/** A fake pty that never emits output — every give-up this drives is a genuine drop, never the
- *  false-negative/SUPPRESSED case (that's pty-giveup-false-negative.mjs's job). */
-function makeSilentFakePty(fakes) {
+/** Decorates the shared fixture's base pty with write-capture — every give-up this drives is a genuine
+ *  drop, never the false-negative/SUPPRESSED case (that's pty-giveup-false-negative.mjs's job). */
+function decorateSilentFakePty(base, fakes) {
   const writes = [];
-  const fake = {
-    pid: 4242, write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }),
-    kill: () => {}, resize: () => {}, writes,
-  };
+  const fake = { ...base, write: (d) => { writes.push(d); }, writes };
   fakes.push(fake);
   return fake;
 }
@@ -106,7 +103,7 @@ function makeSilentFakePty(fakes) {
 try {
   // ===================== SETUP: drive a genuine give-up on a REAL "pre-restart" PtyHost ===================
   const fakesPre = [];
-  class PreHost extends PtyHost { createPty() { return makeSilentFakePty(fakesPre); } }
+  class PreHost extends createSeamHost(PtyHost) { createPty(opts) { return decorateSilentFakePty(super.createPty(opts), fakesPre); } }
   const busyLogPre = {};
   const hostPre = new PreHost({
     onEngineSessionId() {}, onBusy(id, busy) { (busyLogPre[id] ??= []).push(busy); },
@@ -163,7 +160,7 @@ try {
   // ===================== reading this SAME round-tripped intent must never crash or corrupt the text ========
   {
     const fakesOld = [];
-    class OldReplayHost extends PtyHost { createPty() { return makeSilentFakePty(fakesOld); } }
+    class OldReplayHost extends createSeamHost(PtyHost) { createPty(opts) { return decorateSilentFakePty(super.createPty(opts), fakesOld); } }
     const busyLogOld = {};
     const hostOld = new OldReplayHost({
       onEngineSessionId() {}, onBusy(id, busy) { (busyLogOld[id] ??= []).push(busy); },
@@ -189,7 +186,7 @@ try {
 
   // ===================== (3)+(4) THE FIX: through the REAL resumeFleetOnBoot replay path ===================
   const fakesPost = [];
-  class PostHost extends PtyHost { createPty() { return makeSilentFakePty(fakesPost); } }
+  class PostHost extends createSeamHost(PtyHost) { createPty(opts) { return decorateSilentFakePty(super.createPty(opts), fakesPost); } }
   const busyLogPost = {};
   const hostPost = new PostHost({
     onEngineSessionId() {}, onBusy(id, busy) { (busyLogPost[id] ??= []).push(busy); },
@@ -272,7 +269,7 @@ try {
   // already gone. This must degrade to "skip the one bad entry, keep going", never "abort the fleet".)
   {
     const fakesBad = [];
-    class BadHost extends PtyHost { createPty() { return makeSilentFakePty(fakesBad); } }
+    class BadHost extends createSeamHost(PtyHost) { createPty(opts) { return decorateSilentFakePty(super.createPty(opts), fakesBad); } }
     const hostBad = new BadHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
     const dbBad = new Db();
     const projBad = `rgh-bad-proj-${sfx}`, agentBad = `rgh-bad-ag-${sfx}`;

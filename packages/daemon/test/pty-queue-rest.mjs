@@ -33,6 +33,7 @@ const LOOM = process.env.LOOM_HOME;
 const { Db } = await import("../dist/db.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -47,11 +48,7 @@ db.insertSession({ id: SID, projectId: "p", agentId: "t", engineSessionId: null,
   processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null });
 
 // ---- REAL PtyHost over a FAKE pty (no claude) ----
-function makeFakePty() {
-  return { pid: 4242, write: () => {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {} };
-}
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
-const host = new TestPtyHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+const host = new (createSeamHost(PtyHost))({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
 host.spawn({ sessionId: SID, cwd: LOOM, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
 host.deliverHook(SID, { hook_event_name: "SessionStart" }); // mark ready
 host.enqueueStdin(SID, "PRIMER"); // idle → delivers now + arms busy, so everything after this QUEUES

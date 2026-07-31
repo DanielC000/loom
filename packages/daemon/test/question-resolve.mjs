@@ -66,6 +66,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { PlatformMcpRouter } = await import("../dist/mcp/platform.js");
 const { buildServer } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const dbFile = path.join(tmpHome, "qr.db");
 const db = new Db(dbFile);
@@ -233,11 +234,7 @@ try {
   db.insertSession({ id: "mgrLive", projectId: "pA", agentId: "agentA", engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
   insertQ("p1", { sessionId: "mgrLive", projectId: "pA", title: "Live composer reply" });
 
-  function makeFakePty() {
-    return { pid: 4242, write: () => {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {} };
-  }
-  class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
-  const realHost = new TestPtyHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+  const realHost = new (createSeamHost(PtyHost))({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
   realHost.spawn({ sessionId: "mgrLive", cwd: tmpHome, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
   realHost.deliverHook("mgrLive", { hook_event_name: "SessionStart" }); // mark ready — session is IDLE, no primer
 

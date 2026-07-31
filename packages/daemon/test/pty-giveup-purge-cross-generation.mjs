@@ -83,25 +83,9 @@ process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = String(CONFIRM_SETTLE_MAX_PO
 process.env.LOOM_GIVE_UP_REQUEUE_LIMIT = "1";
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakes = [];
-/** A fake pty that never emits output — every give-up this drives is a genuine drop (GIVE-UP RECOVERY),
- *  never the false-negative/SUPPRESSED case. */
-function makeSilentFakePty() {
-  const writes = [];
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.push(fake);
-  return fake;
-}
-
 const busyLog = {};
 const events = {
   onEngineSessionId() {},
@@ -111,8 +95,16 @@ const events = {
   onExit() {},
 };
 
-class SilentTestPtyHost extends PtyHost {
-  createPty() { return makeSilentFakePty(); }
+/** A fake pty that never emits output — every give-up this drives is a genuine drop (GIVE-UP RECOVERY),
+ *  never the false-negative/SUPPRESSED case. */
+class SilentTestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
 const host = new SilentTestPtyHost(events);
 

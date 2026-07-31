@@ -68,6 +68,7 @@ process.env.LOOM_RESUME_MODE_MAX_POLLS = "3";  // change-wait cap ≈ 120ms (a "
 process.env.LOOM_READY_FALLBACK_MS = "9000";   // comfortably longer than any scenario below
 
 const { PtyHost, disallowedToolsForRole } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 check("(setup) worker has ExitPlanMode disallowed (the role the auto-heal protects)",
   disallowedToolsForRole("worker").includes("ExitPlanMode"));
@@ -87,19 +88,21 @@ const DEFAULT_FOOTER = "(shift+tab to cycle)"; // no mode label — the unlabele
 const RING_WINDOW_PAD = "x".repeat(8300);
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = null;
-  const fake = {
-    pid: 4242, write: (d) => writes.push(d),
-    onData: (cb) => { dataCb = cb; return { dispose() {} }; }, // capture so a test can feed footer bytes
-    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes,
-    feed: (s) => { if (dataCb) dataCb(s); }, // simulate engine output reaching host.onData (repaints the ring)
-  };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; }, // capture so a test can feed footer bytes
+      writes,
+      feed: (s) => { if (dataCb) dataCb(s); }, // simulate engine output reaching host.onData (repaints the ring)
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
 

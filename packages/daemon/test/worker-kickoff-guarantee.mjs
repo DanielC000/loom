@@ -56,24 +56,26 @@ process.env.LOOM_READY_FALLBACK_MS = "5000"; // long enough it never fires insid
 process.env.LOOM_RESUME_MODE_POLL_MS = "20"; // fast footer polling for the mode-cycle scenario (H1e)
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const PASTE_START = "\x1b[200~";
 const SHIFT_TAB = "\x1b[Z";
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = null;
-  const fake = {
-    pid: 4242, write: (d) => writes.push(d),
-    onData: (cb) => { dataCb = cb; return { dispose() {} }; },
-    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {},
-    writes, feed: (s) => { if (dataCb) dataCb(s); },
-  };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; },
+      writes, feed: (s) => { if (dataCb) dataCb(s); },
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 const busyById = {};
 const events = {
   onEngineSessionId() {}, onContextStats() {}, onRateLimited() {}, onExit() {},

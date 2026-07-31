@@ -57,6 +57,7 @@ process.env.LOOM_RESUME_MODE_MAX_POLLS = "15"; // change-wait window ≈ 600ms
 process.env.LOOM_READY_FALLBACK_MS = "9000";
 
 const { PtyHost, disallowedToolsForRole } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 check("(setup) worker has ExitPlanMode disallowed (the role the auto-heal protects)",
   disallowedToolsForRole("worker").includes("ExitPlanMode"));
@@ -78,19 +79,21 @@ console.log = (...args) => {
 };
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = null;
-  const fake = {
-    pid: 4242, write: (d) => writes.push(d),
-    onData: (cb) => { dataCb = cb; return { dispose() {} }; },
-    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes,
-    feed: (s) => { if (dataCb) dataCb(s); },
-  };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; },
+      writes,
+      feed: (s) => { if (dataCb) dataCb(s); },
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
 

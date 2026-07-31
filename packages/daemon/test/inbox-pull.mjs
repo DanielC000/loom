@@ -30,17 +30,20 @@ process.env.LOOM_HOME = tmpHome;
 // ============================ (H) HOST: PtyHost.consumePending ============================
 {
   const { PtyHost } = await import("../dist/pty/host.js");
+  const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
-  // A fake IPty that records writes; onData/onExit are inert (host.ts never depends on them for the
-  // busy/drain machine). Mirrors pty-busy-drain.mjs.
+  // Records every write on top of the shared fixture's pid/onData/onExit/kill wiring. Mirrors
+  // pty-busy-drain.mjs.
   const fakes = [];
-  function makeFakePty() {
-    const writes = [];
-    const fake = { pid: 4242, write: (d) => { writes.push(d); }, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes };
-    fakes.push(fake);
-    return fake;
+  class TestPtyHost extends createSeamHost(PtyHost) {
+    createPty(opts) {
+      const base = super.createPty(opts);
+      const writes = [];
+      const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+      fakes.push(fake);
+      return fake;
+    }
   }
-  class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
   const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 
   const host = new TestPtyHost(events);

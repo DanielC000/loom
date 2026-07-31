@@ -94,29 +94,21 @@ async function waitForBusyFalse(sessionId, t0) {
 }
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const BACKSPACE = "\x7f";
 const BRACKET_PASTE_START = "\x1b[200~";
 const BRACKET_PASTE_END = "\x1b[201~";
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 const busyLog = {};

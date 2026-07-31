@@ -113,26 +113,9 @@ process.env.LOOM_GIVE_UP_HOLD_MS = String(HOLD_MS);
 const HOLD_WAIT = HOLD_MS + 20;
 
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const fakes = [];
-/** A fake pty that never emits output (onData registered but never fired) — every give-up this drives is
- *  a genuine drop, never the false-negative/SUPPRESSED case (that's pty-giveup-false-negative.mjs's job).
- *  Scenario (3) below needs a fake that CAN emit on demand, so it builds its own variant inline. */
-function makeSilentFakePty() {
-  const writes = [];
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.push(fake);
-  return fake;
-}
-
 const busyLog = {};
 const events = {
   onEngineSessionId() {},
@@ -142,8 +125,17 @@ const events = {
   onExit() {},
 };
 
-class SilentTestPtyHost extends PtyHost {
-  createPty() { return makeSilentFakePty(); }
+/** A fake pty that never emits output (onData registered but never fired) — every give-up this drives is
+ *  a genuine drop, never the false-negative/SUPPRESSED case (that's pty-giveup-false-negative.mjs's job).
+ *  Scenario (3) below needs a fake that CAN emit on demand, so it builds its own variant inline. */
+class SilentTestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
 const host = new SilentTestPtyHost(events);
 
@@ -154,8 +146,14 @@ const host = new SilentTestPtyHost(events);
 // within this test file, rather than computing a guessed wall-clock offset from the Enter-write log and
 // hoping it lands inside the (narrow, chain-drift-prone) confirm-settle window.
 const confirmSettleEnteredAt = {};
-class SettleObservedTestPtyHost extends PtyHost {
-  createPty() { return makeSilentFakePty(); }
+class SettleObservedTestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
   awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled) {
     if (polls === 0) confirmSettleEnteredAt[sessionId] = Date.now();
     return super.awaitGiveUpConfirmSettle(sessionId, gen, polls, onSettled);
@@ -278,17 +276,21 @@ try {
     const SID2 = "sess-requeue-suppressed";
     let onDataCb = null;
     const writes2 = [];
-    const fake2 = {
-      pid: 4343,
-      write: (d) => { writes2.push(d); },
-      onData: (cb) => { onDataCb = cb; return { dispose() { onDataCb = null; } }; },
-      onExit: () => ({ dispose() {} }),
-      kill: () => {}, resize: () => {},
-      writes: writes2,
-      emitOutput: (s = ".") => { if (onDataCb) onDataCb(Buffer.from(s, "utf-8")); },
-    };
-    class SuppressTestPtyHost extends PtyHost {
-      createPty() { fakes.push(fake2); return fake2; }
+    let fake2;
+    class SuppressTestPtyHost extends createSeamHost(PtyHost) {
+      createPty(opts) {
+        const base = super.createPty(opts);
+        fake2 = {
+          ...base,
+          pid: 4343,
+          write: (d) => { writes2.push(d); },
+          onData: (cb) => { onDataCb = cb; return { dispose() { onDataCb = null; } }; },
+          writes: writes2,
+          emitOutput: (s = ".") => { if (onDataCb) onDataCb(Buffer.from(s, "utf-8")); },
+        };
+        fakes.push(fake2);
+        return fake2;
+      }
     }
     const host2 = new SuppressTestPtyHost(events);
     const TEXT = "REAL_TURN_JUST_SLOW_TO_CONFIRM";

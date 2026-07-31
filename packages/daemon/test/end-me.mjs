@@ -30,6 +30,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -44,26 +45,17 @@ const waitUntil = async (pred, timeoutMs, intervalMs = 20) => {
 };
 const now = new Date().toISOString();
 
-// A fake IPty: records every write; onExit/kill are inert (endMe's assertions only need the WRITE side —
-// whether/when the Ctrl-C interrupt landed — not a real process exit).
+// Records every write on top of the shared fixture's pid/onData/onExit/kill wiring — endMe's assertions
+// only need the WRITE side (whether/when the Ctrl-C interrupt landed), not a real process exit.
 const fakes = new Map();
-function makeFakePty(sessionId) {
-  const writes = [];
-  const fake = {
-    pid: 4242,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.set(sessionId, fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty(opts) { return makeFakePty(opts.sessionId); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, write: (d) => { writes.push(d); }, writes };
+    fakes.set(opts.sessionId, fake);
+    return fake;
+  }
 }
 
 const events = {

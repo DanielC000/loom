@@ -60,6 +60,7 @@ process.env.LOOM_RESUME_GATE_POLL_MS = "25"; // fast confirm-polling for scenari
 process.env.LOOM_RESUME_GATE_MAX_POLLS = "3";
 
 const { PtyHost, isResumeSummaryGate, resumeGateCursorOption } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- resume-from-summary gate DETECTION (pure fn). collapseBoot is internal; replicate it
 // (strip ANSI CSI + all whitespace) to feed realistic boot output. The exact gate text Loom hit:
@@ -92,19 +93,21 @@ const collapse = (s) => s.replace(/\x1B\[[0-9;?]*[ -/]*[@-~]/g, "").replace(/\s+
 }
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  let dataCb = null;
-  const fake = {
-    pid: 4242, write: (d) => writes.push(d),
-    onData: (cb) => { dataCb = cb; return { dispose() {} }; }, // capture so a test can feed boot bytes
-    onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {}, writes,
-    feed: (s) => { if (dataCb) dataCb(s); }, // simulate engine output reaching host.onData
-  };
-  fakes.push(fake);
-  return fake;
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    let dataCb = null;
+    const fake = {
+      ...base, write: (d) => writes.push(d),
+      onData: (cb) => { dataCb = cb; return { dispose() {} }; }, // capture so a test can feed boot bytes
+      writes,
+      feed: (s) => { if (dataCb) dataCb(s); }, // simulate engine output reaching host.onData
+    };
+    fakes.push(fake);
+    return fake;
+  }
 }
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
 const busyLog = [];
 const events = { onEngineSessionId() {}, onBusy(_i, b) { busyLog.push(b); }, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);

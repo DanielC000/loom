@@ -36,6 +36,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -47,10 +48,7 @@ const BRACKET_PASTE_END = "\x1b[201~";
 const BIG_PASTE = Array.from({ length: 200 }, (_, i) => `payload line ${i}`).join("\n");
 
 // ===================== PART A — PtyHost.isComposerDirty (real state, fake pty) =====================
-function makeFakePty() {
-  return { pid: 1234, write() {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill() {}, resize() {} };
-}
-class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
+const TestPtyHost = createSeamHost(PtyHost);
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
 

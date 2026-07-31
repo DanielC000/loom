@@ -25,6 +25,7 @@ const LOOM = process.env.LOOM_HOME;
 const { Db } = await import("../dist/db.js");
 const { buildServer, parseIdsParam } = await import("../dist/gateway/server.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -98,11 +99,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
   mkSession("a"); mkSession("b");
   db.insertWake({ id: "wa", sessionId: "a", wakeAt: now, note: "wake for a", createdAt: now });
 
-  function makeFakePty() {
-    return { pid: 4242, write: () => {}, onData: () => ({ dispose() {} }), onExit: () => ({ dispose() {} }), kill: () => {}, resize: () => {} };
-  }
-  class TestPtyHost extends PtyHost { createPty() { return makeFakePty(); } }
-  const host = new TestPtyHost({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
+  const host = new (createSeamHost(PtyHost))({ onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} });
   for (const id of ["a", "b"]) {
     host.spawn({ sessionId: id, cwd: LOOM, permission: { mode: "acceptEdits", allow: [], deny: [], startupModeCycles: 0 }, geometry: { cols: 120, rows: 40 }, sessionEnv: {} });
     host.deliverHook(id, { hook_event_name: "SessionStart" }); // mark ready

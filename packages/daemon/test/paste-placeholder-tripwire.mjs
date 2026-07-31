@@ -44,6 +44,7 @@ const {
   isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG,
 } = await import("../dist/orchestration/paste-tripwire.js");
 const { PtyHost } = await import("../dist/pty/host.js");
+const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const USAGE = { input_tokens: 100, output_tokens: 10 };
 
@@ -151,23 +152,14 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
 // ===================== PART 2 — PtyHost (fake pty, no real claude, no daemon) =====================
 
 const fakes = [];
-function makeFakePty() {
-  const writes = [];
-  const fake = {
-    pid: 4321,
-    write: (d) => { writes.push(d); },
-    onData: () => ({ dispose() {} }),
-    onExit: () => ({ dispose() {} }),
-    kill: () => {},
-    resize: () => {},
-    writes,
-  };
-  fakes.push(fake);
-  return fake;
-}
-
-class TestPtyHost extends PtyHost {
-  createPty() { return makeFakePty(); }
+class TestPtyHost extends createSeamHost(PtyHost) {
+  createPty(opts) {
+    const base = super.createPty(opts);
+    const writes = [];
+    const fake = { ...base, pid: 4321, write: (d) => { writes.push(d); }, writes };
+    fakes.push(fake);
+    return fake;
+  }
 }
 
 const events = {
