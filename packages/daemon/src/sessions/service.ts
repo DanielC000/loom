@@ -44,7 +44,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner, type GateLivenessHooks } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -83,6 +83,24 @@ export interface GateQueueEntry {
   /** ISO anchor for the run's admission (running) or enqueue (queued) time. */
   since: string;
   elapsedMs: number;
+  /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
+   *  stdout/stderr byte) — `Date.now() - lastOutputAt` from the SAME liveness clock `gate-runner.ts`'s own
+   *  auto-extend decision uses (see {@link GateSnapshotEntry.lastOutputAt}'s doc), never a second,
+   *  independently-derived value. Non-null once the step has genuinely started (stamped before it's even
+   *  produced a byte — a step with no output yet is legitimately "idle since it started"); null while
+   *  `queued`, AND — for `run_gate` specifically (`runWorkerGate`'s own pre-flight git-stamp read runs
+   *  AFTER admission but BEFORE its `runGateSequential` call; a merge/deploy gate has no such gap) — for a
+   *  brief real window immediately after admission too, before that call happens. UNLIKE
+   *  `elapsedMs`, a LARGE `idleMs` is never healthy — `elapsedMs` alone frequently IS (see
+   *  `GATE_EXTEND_IDLE_MS`'s doc: a gate still producing output gets its timeout extended rather than
+   *  killed), so `idleMs`, not `elapsedMs`, is the signal that actually separates "working hard" from
+   *  "hung". Present for EVERY entry regardless of project (unlike `taskId`/`branch`/`workerLabel` below)
+   *  — it carries no more than the redacted age already does, so cross-project redaction doesn't apply. */
+  idleMs: number | null;
+  /** Whether this run's CURRENT step has already used its one-time auto-extend (see
+   *  `GATE_EXTEND_IDLE_MS`'s doc — the extension is `!extended`-gated and fires at most once per step).
+   *  Always `false` while `queued`. Same cross-project visibility as `idleMs` above. */
+  extended: boolean;
   /** 1-based position among queued waiters; null for a running entry. */
   queuePosition: number | null;
   taskId?: string | null;
@@ -942,7 +960,7 @@ export class SessionService {
    * real spawn on every OS this daemon runs on).
    */
   private readonly runGate:
-    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal) => Promise<GateSequentialResult>)
+    | ((gate: string, cwd: string, timeoutMs: number, runStep?: GateStepRunner, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks) => Promise<GateSequentialResult>)
     | undefined;
   /**
    * SLOW-retry policy for a wedged worktree (task dea6728e — the owner-directed refinement: "quarantine"
@@ -2498,10 +2516,10 @@ export class SessionService {
     let deployConcurrentAtStart = 0;
     const result = await this.gateSemaphore.runExclusive(
       orchestration.maxConcurrentGates, deployDescriptor,
-      (startedAt) => {
+      (startedAt, _cancelSignal, hooks) => {
         deployStartedAt = startedAt;
         deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
-        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs);
+        return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, undefined, undefined, undefined, hooks);
       },
       "high",
     );
@@ -2627,7 +2645,20 @@ export class SessionService {
    */
   gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
-    gateType: GateType | null; elapsedMs: number | null; error?: string;
+    gateType: GateType | null; elapsedMs: number | null;
+    /** How long since the run's CURRENT step last showed a liveness event (started, or produced a
+     *  stdout/stderr byte) — see {@link GateQueueEntry.idleMs}'s doc for why this (not `elapsedMs`) is the
+     *  actual "is it wedged?" signal, and why it must be the SAME `lastOutputAt` clock `gate-runner.ts`
+     *  already tracks, never a second one. Non-null once the step has genuinely started (normally the same
+     *  instant `state` flips to `running`, though `run_gate` specifically has a brief real pre-flight gap
+     *  where it can still read `null` right after admission); `null` while `state` is `queued` (nothing has
+     *  started yet) or a non-live state. */
+    idleMs: number | null; error?: string;
+    /** Whether the run's CURRENT step has already used its one-time auto-extend (see
+     *  {@link GateQueueEntry.extended}'s doc). Present (always `true`/`false`, never omitted) only while
+     *  `state` is `queued`/`running` — omitted for every settled/tombstone state, where there is no
+     *  current step left to have extended. */
+    extended?: boolean;
     /** Card 4c5bf820 — see the method doc's "SETTLED VERDICT" section. Present ONLY for a settled "gate"
      *  row with a recorded verdict; every field below is independently optional and omitted (never a
      *  fabricated `null`/`false`) when there's nothing to report. */
@@ -2639,11 +2670,15 @@ export class SessionService {
     const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
     if (r.kind === "found") {
       const entry = r.record;
-      return { state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since };
+      return {
+        state: entry.phase, gateType: entry.gateType, elapsedMs: Date.now() - entry.since,
+        idleMs: entry.lastOutputAt != null ? Date.now() - entry.lastOutputAt : null,
+        extended: entry.extended,
+      };
     }
     if (r.kind === "ambiguous") {
       return {
-        state: "ambiguous", gateType: null, elapsedMs: null,
+        state: "ambiguous", gateType: null, elapsedMs: null, idleMs: null,
         error: `ambiguous opId prefix '${opId}' — it matches ${r.ids.join(", ")}; pass more characters or the full id`,
       };
     }
@@ -2673,11 +2708,11 @@ export class SessionService {
           : t.record.verdict === "error"
             ? { ...(payload?.reason !== undefined ? { reason: payload.reason } : {}) }
             : {};
-      return { state: t.record.state, gateType, elapsedMs: null, ...verdictFields };
+      return { state: t.record.state, gateType, elapsedMs: null, idleMs: null, ...verdictFields };
     }
     if (t.kind === "ambiguous") {
       return {
-        state: "ambiguous", gateType: null, elapsedMs: null,
+        state: "ambiguous", gateType: null, elapsedMs: null, idleMs: null,
         error: `ambiguous opId prefix '${opId}' — it matches ${t.ids.join(", ")}; pass more characters or the full id`,
       };
     }
@@ -2687,8 +2722,8 @@ export class SessionService {
     // this return; claiming `never_existed` for a scoped miss would be exactly this card's own defect one
     // layer down (see the doc above).
     return scoped
-      ? { state: "unknown", gateType: null, elapsedMs: null }
-      : { state: "never_existed", gateType: null, elapsedMs: null };
+      ? { state: "unknown", gateType: null, elapsedMs: null, idleMs: null }
+      : { state: "never_existed", gateType: null, elapsedMs: null, idleMs: null };
   }
 
   /**
@@ -2730,6 +2765,8 @@ export class SessionService {
         projectName: project?.name ?? e.projectId,
         since: new Date(e.since).toISOString(),
         elapsedMs: Date.now() - e.since,
+        idleMs: e.lastOutputAt != null ? Date.now() - e.lastOutputAt : null,
+        extended: e.extended,
         queuePosition: e.queuePosition,
       };
       if (e.projectId === callerProjectId) {
@@ -9360,10 +9397,10 @@ export class SessionService {
       // union-merge — not captured here at admission. The gap between the union-merge and this admission
       // is unbounded semaphore queue wait; capturing here instead would leave that whole gap unverified
       // (a real defect found on review of this card's first draft — see `gateBaseMainHead`'s own doc).
-      let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt) => {
+      let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks) => {
         gateStartedAt = startedAt;
         concurrentAtStart = this.gateSemaphore.snapshot().active;
-        return runGateSeq(gate, worktreePath, gateTimeoutMs);
+        return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, hooks);
       }, "high");
       evt("build_gate", {
         passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart,
@@ -9403,10 +9440,10 @@ export class SessionService {
         let retryStartedAt = 0;
         gateResult = await this.gateSemaphore.runExclusive(
           gateCap, gateDescriptor,
-          (startedAt) => {
+          (startedAt, _cancelSignal, hooks) => {
             retryStartedAt = startedAt;
             concurrentAtStart = this.gateSemaphore.snapshot().active;
-            return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false);
+            return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
           },
           "high",
         );
@@ -10215,11 +10252,11 @@ export class SessionService {
             // above, which this function deliberately does not share).
             gateResult = await this.gateSemaphore.runExclusive(
               gateCap, gateDescriptor,
-              async (startedAt, cancelSignal) => {
+              async (startedAt, cancelSignal, hooks) => {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
-                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE, undefined, cancelSignal);
+                return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE, undefined, cancelSignal, hooks);
               },
               "low",
             );

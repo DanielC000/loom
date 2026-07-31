@@ -140,6 +140,31 @@ export const GATE_EXTEND_IDLE_MS = Number(process.env.LOOM_GATE_EXTEND_IDLE_MS) 
  *  merge gate's own retry policy uses — see @loom/shared's GateRetryConfig/`resolveConfig`). */
 export const GATE_TIMEOUT_EXTEND_ENABLED = process.env.LOOM_GATE_TIMEOUT_EXTEND_ENABLED !== "0";
 
+/**
+ * Liveness hooks an external caller — {@link GateSemaphore}'s registry, so `gate_status`/`gate_queue` can
+ * expose `idleMs`/`extended` — can pass into {@link runGateStep}/{@link runGateSequential} to MIRROR this
+ * runner's own internal liveness tracking. Deliberately a mirror, never a second independently-computed
+ * clock: elapsed time alone cannot tell "working hard" from "hung" (see `GATE_EXTEND_IDLE_MS`'s own doc),
+ * so any external idle signal must be the SAME `lastOutputAt`/`extended` state this file already tracks
+ * for its own auto-extend decision, not a divergent second measurement. All optional/no-ops when omitted,
+ * so every existing `GateStepRunner` caller (a hermetic test double, or a production call site that
+ * hasn't been updated) is unaffected.
+ */
+export interface GateLivenessHooks {
+  /** Fired once at the very start of a step, before ITS OWN `lastOutputAt`/`extended` state initializes —
+   *  lets a caller reset its mirrored idle clock/extended flag to match this fresh step (the auto-extend
+   *  is scoped PER STEP, not per whole gate run — see `extended`'s own doc below). */
+  onStepStart?: () => void;
+  /** Fired on every stdout/stderr chunk this step captures — the exact same event that updates this
+   *  runner's own `lastOutputAt`, so a caller's mirrored idle clock advances in lockstep rather than
+   *  drifting from a separately-timed poll. */
+  onOutput?: () => void;
+  /** Fired the one time (per step) this runner auto-extends the step's timeout because the child was
+   *  still producing output — mirrors {@link GateStepResult}'s own `extended`-gated-once semantics (see
+   *  `runGateStep`'s `onTimeout`). */
+  onExtend?: () => void;
+}
+
 /** One gate step's outcome: exit code, spawn error (if any), the signal that killed it (if any — e.g. an
  *  OOM SIGKILL, or our own timeout-kill), whether OUR timeout bound was what killed it, and the bounded
  *  combined stdout+stderr tail. `signal`/`timedOut` are captured (not yet acted on) so a later change
@@ -179,7 +204,7 @@ export interface GateStepResult {
  *  bounded ring so a rejection can surface the REAL failure instead of an opaque "gate failed". Injectable
  *  so a hermetic test can prove step-by-step + short-circuit behavior without spawning real processes. */
 export interface GateStepRunner {
-  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal): Promise<GateStepResult>;
+  (command: string, cwd: string, timeoutMs: number, envOverride?: NodeJS.ProcessEnv, allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks): Promise<GateStepResult>;
 }
 
 /**
@@ -192,7 +217,7 @@ export interface GateStepRunner {
  * other work (and let the sync-wait budget's timer actually fire) while the OS process runs in the
  * background.
  */
-export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true, cancelSignal) => new Promise((resolve) => {
+export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride, allowExtend = true, cancelSignal, hooks) => new Promise((resolve) => {
   // Bounded capture ring: keep roughly the last OUTPUT_TAIL_BYTES, dropping whole chunks off the front
   // as newer ones arrive. The final tail() slices to exactly the cap. Same shape as python/venv.ts's
   // runAsync — captured (not ignored) so a rejection can surface the actual gate output.
@@ -204,6 +229,9 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
   // (setTimeout, also monotonic) — a backward wall-clock step (NTP) mid-gate can't flip the extend
   // decision (mirrors Loom's existing monotonic-clock preference for timing logic).
   let lastOutputAt = performance.now();
+  // `hooks.onStepStart` mirrors this fresh step's own initialization (lastOutputAt/extended, both reset
+  // right here) into an external caller's own idle clock — see GateLivenessHooks' doc.
+  hooks?.onStepStart?.();
   // Card 55cba5c5: scans the FULL stream for the failing-test marker, independent of the ring's own
   // OUTPUT_TAIL_BYTES eviction above — see createFailingTestTracker's doc for why the ring alone isn't
   // enough (a tail dominated by trailing warnings/a pnpm epilogue truncates the marker right out of it).
@@ -212,6 +240,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     chunks.push(b);
     bytes += b.length;
     lastOutputAt = performance.now();
+    hooks?.onOutput?.();
     while (bytes > OUTPUT_TAIL_BYTES && chunks.length > 1) bytes -= chunks.shift()!.length;
     failingTestTracker.feed(b);
   };
@@ -301,6 +330,7 @@ export const runGateStep: GateStepRunner = (command, cwd, timeoutMs, envOverride
     const canExtend = allowExtend && GATE_TIMEOUT_EXTEND_ENABLED;
     if (canExtend && !extended && idleMs < GATE_EXTEND_IDLE_MS) {
       extended = true;
+      hooks?.onExtend?.();
       timer = setTimeout(onTimeout, timeoutMs);
       return;
     }
@@ -457,10 +487,13 @@ export function formatGateStepsDiagnostic(steps: GateStepDuration[]): string | u
  * (card 24642c3d, default `true` when omitted — matches `runGateStep`'s own default) is forwarded the
  * same way, trailing again so existing 5-arg callers are unaffected; pass `false` to disable the
  * one-time auto-extend for this whole run (e.g. the merge gate's own retry-after-timeout call).
+ * `hooks` ({@link GateLivenessHooks}) is forwarded to EVERY step's own `runStep` call, unchanged — trailing
+ * again so existing 7-arg callers are unaffected; lets an external registry (GateSemaphore) mirror this
+ * run's live idle/extend state without this function needing to know anything about that registry.
  */
 export async function runGateSequential(
   gate: string, cwd: string, timeoutMs: number, runStep: GateStepRunner = runGateStep, envOverride?: NodeJS.ProcessEnv,
-  allowExtend?: boolean, cancelSignal?: AbortSignal,
+  allowExtend?: boolean, cancelSignal?: AbortSignal, hooks?: GateLivenessHooks,
 ): Promise<GateSequentialResult> {
   // Card a2873f7e: per-step {step, durationMs, status} accumulated as each step settles — forwarded
   // verbatim on EVERY return below (green or rejected), same shape either way.
@@ -475,7 +508,7 @@ export async function runGateSequential(
     // that was never going to be waited for.
     if (cancelSignal?.aborted) return { passed: false, cancelled: true, failedStep: step, steps };
     const startedAt = performance.now();
-    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal);
+    const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal, hooks);
     const durationMs = res.decidedAt != null ? res.decidedAt - startedAt : null;
     steps.push({ step, durationMs, status: res.status });
     lastOutputTail = res.outputTail;

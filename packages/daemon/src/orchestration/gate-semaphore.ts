@@ -49,6 +49,7 @@
 
 import type { GateType } from "@loom/shared";
 import { resolveIdPrefix, type IdPrefixResult } from "../id-prefix.js";
+import type { GateLivenessHooks } from "./gate-runner.js";
 
 /** Queue priority for {@link GateSemaphore.runExclusive} (card 24642c3d): `"high"` for a merge/deploy
  *  gate, `"low"` for a worker's own `run_gate` DoD self-check. Governs QUEUE ORDER only — there is no
@@ -111,6 +112,30 @@ export interface GateSnapshotEntry {
   queuePosition: number | null;
   /** Echoed from {@link GateDescriptor.opId} — see its doc; null when the run's descriptor didn't carry one. */
   opId: string | null;
+  /** Epoch-ms of the CURRENT step's last liveness event — the SAME `lastOutputAt` clock
+   *  {@link GateLivenessHooks} mirrors from `gate-runner.ts`'s own auto-extend decision, never a second,
+   *  independently-derived one (see that file's `GateLivenessHooks` doc for why). Stamped the instant a
+   *  step actually STARTS (`onStepStart`, mirroring `runGateStep`'s own `lastOutputAt = performance.now()`
+   *  at the top of its promise body — i.e. before the child even spawns), then advanced forward on every
+   *  `onOutput` — never null merely because no output has arrived yet once the step has genuinely begun (a
+   *  step that hasn't printed anything is legitimately "idle since it started", which is real information,
+   *  not an absence). Null while `queued` (no step has started at all) AND, for a caller with real async
+   *  work between admission and its OWN `runGateSequential` call (e.g. `run_gate`'s pre-flight git-stamp
+   *  read in `runWorkerGate` — `confirmWorkerMerge`/`deployOwnProject` have no such gap, they invoke the
+   *  runner synchronously on admission), for the brief window between admission and that call — this
+   *  entry is genuinely `phase:"running"` during that window with NOTHING yet to report, which is exactly
+   *  why `null` (not a fabricated `0`) is correct there too. A caller computes idle time as
+   *  `Date.now() - lastOutputAt` when non-null, matching how `since`/`elapsedMs` are derived elsewhere in
+   *  this codebase (raw epoch-ms here, `now - stamp` at the read site). A LARGE elapsed time (`since`) is
+   *  frequently HEALTHY (see `GATE_EXTEND_IDLE_MS`'s doc: a gate still producing output gets its timeout
+   *  extended rather than killed) — idle time, not elapsed time, is what actually distinguishes "working
+   *  hard" from "hung". */
+  lastOutputAt: number | null;
+  /** True once the CURRENT step's timeout has already been auto-extended once (see `GATE_EXTEND_IDLE_MS`'s
+   *  doc — the extension is `!extended`-gated and fires AT MOST ONCE per step). Resets to `false` at the
+   *  start of every new step in a multi-step `gateCommand`, mirroring `runGateStep`'s own per-step
+   *  `extended` flag exactly — this is per-STEP state, not a whole-run total. Always `false` while queued. */
+  extended: boolean;
 }
 
 /** The whole live picture: the counter/queue depth plus a detail entry per in-flight run. */
@@ -133,6 +158,11 @@ interface RegistryEntry {
   enqueuedAt: number;
   startedAt: number | null;
   controller: AbortController;
+  /** See {@link GateSnapshotEntry.lastOutputAt} — null until the running `fn`'s `GateLivenessHooks` first
+   *  reports a step start/output, updated in lockstep with `gate-runner.ts`'s own internal clock. */
+  lastOutputAt: number | null;
+  /** See {@link GateSnapshotEntry.extended} — mirrors the CURRENT step's `runGateStep` `extended` flag. */
+  extended: boolean;
 }
 
 /** One reason a queued/running gate op can be cancelled (card 8d585277): `"superseded-by-merge"` is the
@@ -290,9 +320,17 @@ export class GateSemaphore {
    * The registry entry is added up front and deleted in `finally` — which runs on admission-then-settle,
    * a throwing `fn`, and a timing-out `fn` alike — so no in-flight metadata ever leaks. `release()` is
    * gated on `acquired` so a slot is only ever released if one was actually taken.
+   *
+   * `fn` ALSO receives a third param, {@link GateLivenessHooks} — a caller whose `fn` forwards it into its
+   * own `runGateSequential`/`runGateStep` call lets THIS entry's `lastOutputAt`/`extended` mirror that
+   * run's real liveness (see {@link GateSnapshotEntry.lastOutputAt}'s doc for why this must be a mirror of
+   * the runner's own clock, never a second one computed here). A caller whose `fn` ignores it (ever pre-
+   * existing call site — TS permits a callback to omit trailing params) simply leaves `lastOutputAt` null
+   * and `extended` false forever, byte-identical to before this parameter existed.
    */
   async runExclusive<T>(
-    cap: number, descriptor: GateDescriptor, fn: (startedAt: number, cancelSignal: AbortSignal) => Promise<T>,
+    cap: number, descriptor: GateDescriptor,
+    fn: (startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks) => Promise<T>,
     priority: GatePriority = "high",
   ): Promise<T> {
     // TRANSITION LOG (card 424ed9a8): fires exactly when THIS semaphore observes `cap` change from what
@@ -306,15 +344,23 @@ export class GateSemaphore {
     this.lastKnownCap = cap;
     const entry: RegistryEntry = {
       id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null,
-      controller: new AbortController(),
+      controller: new AbortController(), lastOutputAt: null, extended: false,
     };
     this.registry.set(entry.id, entry);
+    // Mirrors gate-runner.ts's own per-step lastOutputAt/extended state into this entry — see
+    // GateLivenessHooks' doc. onStepStart resets BOTH (a fresh step's own state starts clean, matching
+    // runGateStep's local vars exactly), onOutput/onExtend update forward as the step actually runs.
+    const hooks: GateLivenessHooks = {
+      onStepStart: () => { entry.lastOutputAt = Date.now(); entry.extended = false; },
+      onOutput: () => { entry.lastOutputAt = Date.now(); },
+      onExtend: () => { entry.extended = true; },
+    };
     let acquired = false;
     try {
       const outcome = await this.acquire(cap, priority, entry);
       if (!outcome.admitted) throw new GateCancelledError(outcome.kind, outcome.detail);
       acquired = true;
-      return await fn(entry.startedAt!, entry.controller.signal);
+      return await fn(entry.startedAt!, entry.controller.signal, hooks);
     } finally {
       this.registry.delete(entry.id);
       if (acquired) this.release(entry);
@@ -407,6 +453,8 @@ export class GateSemaphore {
       since: phase === "running" ? e.startedAt! : e.enqueuedAt,
       queuePosition,
       opId: e.descriptor.opId ?? null,
+      lastOutputAt: e.lastOutputAt,
+      extended: e.extended,
     });
     const entries: GateSnapshotEntry[] = [
       ...running.map((e) => toEntry(e, "running", null)),

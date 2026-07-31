@@ -89,6 +89,15 @@ const STALE_DIRECTIVE_TURN_THRESHOLD = 3;
  * explicitly in their descriptions below; keep them in sync if either changes. `elapsedMs` is `null` for
  * every tombstone-fallback state (`settled`/`evicted-dead-owner`/`orphaned-by-restart`/`pending`) — there
  * is no live admission clock to read once the op is no longer in the live registry.
+ *
+ * `idleMs`/`extended`: `elapsedMs` (however large) is frequently HEALTHY BY DESIGN and cannot by itself
+ * answer "is this wedged?" — `gate-runner.ts`'s own `runGateStep` extends a step's timeout, rather than
+ * killing it, precisely WHEN it's still producing output (see `GATE_EXTEND_IDLE_MS`'s doc), so a long
+ * `elapsedMs` is routinely just "working hard", not "hung". `idleMs` (`Date.now() - lastOutputAt`, the
+ * SAME liveness clock that extension decision itself reads — never a second, independently-computed one)
+ * is the signal that actually tells the two apart; `extended` (whether the CURRENT step already used its
+ * one-time auto-extend) is the directly-relevant fact about how much runway is left before a stall would
+ * actually be killed. Both are documented on `gate_status`/`gate_queue` below; keep them in sync too.
  */
 function registerGateStatus(server: McpServer, sessions: SessionService, scopeSessionId?: string, getScopeProjectId?: () => string | undefined): void {
   const forWorker = scopeSessionId != null;
@@ -104,8 +113,8 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "cannot use this to probe another worker's run. `opId` accepts the FULL id OR an unambiguous " +
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
-      "\"ambiguous\", gateType, elapsedMs, error?, passed?, cancelled?, reason?, durationMs?, " +
-      "validatedHead?, headWarning?, steps?, outputTail?, gateDetail?}. `queued`/`running` mean it's still " +
+      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, passed?, cancelled?, reason?, " +
+      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?}. `queued`/`running` mean it's still " +
       "LIVE. `settled` means the op reached a normal terminal result (pass, fail, error, or cancelled). " +
       "The `[loom:gate-done]`/`[loom:gate-failed]` nudge is still the PRIMARY, unprompted way you learn the " +
       "outcome — but once `state` reads `settled`, this tool NOW ALSO reports it directly: `passed:true` " +
@@ -138,7 +147,23 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "measures time RUNNING instead), and `null` for every other state (nothing live left to time). So a " +
       "large `elapsedMs` alone doesn't mean you're stuck — check `state` first: a big number while still " +
       "`queued` is queue depth, not a hung run; compare it against how long this project's gate normally " +
-      "takes (in whichever phase `state` reports) before concluding it's wedged and re-firing. Still not a " +
+      "takes (in whichever phase `state` reports) before concluding it's wedged and re-firing. BUT EVEN A " +
+      "LARGE `elapsedMs` WHILE `running` IS NOT ITSELF EVIDENCE OF A WEDGE: your own gate auto-extends a " +
+      "step's timeout, rather than killing it, for as long as the step keeps producing output (see " +
+      "`GATE_EXTEND_IDLE_MS`'s doc in gate-runner.ts) — a long-running-but-healthy gate is routine, not a " +
+      "red flag. `idleMs` (`Date.now()` minus your step's last liveness event — started, or produced a " +
+      "stdout/stderr byte, the SAME clock your gate's own auto-extend decision reads, not a second, " +
+      "independently-computed number) is " +
+      "the signal that actually distinguishes \"working hard\" from \"hung\": non-null once your step has " +
+      "genuinely started (normally the same instant `state` flips to `running`, though a brief real gap " +
+      "right after admission — before your gate's own pre-flight check finishes — can still read `null` " +
+      "too), `null` while " +
+      "`queued` (nothing has started yet) or any other state. A SMALL `idleMs` on a `running` entry (recent " +
+      "output) means it's actively progressing no matter how large `elapsedMs` has grown; a `idleMs` " +
+      "approaching this project's gate-idle threshold is the real warning sign. `extended` (present, " +
+      "always `true`/`false`, only while `queued`/`running`) tells you whether the CURRENT step has already " +
+      "used its one-time auto-extend — `true` means a stall from here would be killed at the NEXT deadline, " +
+      "not given another reprieve. Still not a " +
       "replacement for the completion nudge — check this when you're unsure whether to keep waiting, don't " +
       "poll it on a timer."
     : "Read-only status for ONE merge-gate run, by the `opId` a `worker_merge_confirm` " +
@@ -148,7 +173,7 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"ambiguous\", gateType, elapsedMs, " +
-      "error?}. `queued`/`running` mean it's still LIVE. `settled` means the op reached a normal terminal " +
+      "idleMs, extended?, error?}. `queued`/`running` mean it's still LIVE. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
       "`[loom:merge-failed]` nudge for the actual outcome, this tool NEVER reports that itself. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
@@ -169,7 +194,20 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "other state. Use this when a merge has been pending for a long time and you want to confirm it's " +
       "genuinely still working (a large `elapsedMs` alone doesn't mean it's stuck — check `state` first, " +
       "then compare against how long the project's gate normally takes IN THAT PHASE) rather than " +
-      "concluding it's wedged.";
+      "concluding it's wedged. IMPORTANT — even a large `elapsedMs` while `running` is routinely HEALTHY: " +
+      "the gate auto-extends a step's timeout, rather than killing it, for as long as the step keeps " +
+      "producing output (`GATE_EXTEND_IDLE_MS` in gate-runner.ts), so elapsed time alone cannot tell " +
+      "\"working hard\" from \"hung\". `idleMs` (`Date.now()` minus the gate's last liveness event — " +
+      "started, or produced a stdout/stderr byte, the SAME clock the gate's own auto-extend decision " +
+      "reads, never a second, independently-computed number) is the signal that actually distinguishes " +
+      "the two: non-null once the step has genuinely started (normally the same instant `state` flips to " +
+      "`running`, though a brief real pre-flight gap right after admission can still read `null` too), " +
+      "`null` while `queued` or any other state. A small `idleMs` on a `running` entry means it's " +
+      "actively progressing no matter how large `elapsedMs` has grown; `idleMs` approaching this project's " +
+      "gate-idle threshold is the real warning sign, not `elapsedMs`. `extended` (present, always " +
+      "`true`/`false`, only while `queued`/`running`) tells you whether the CURRENT step has already used " +
+      "its one-time auto-extend — `true` means a stall from here would be killed at the next deadline, not " +
+      "given another reprieve.";
   server.registerTool(
     "gate_status",
     {
@@ -223,15 +261,30 @@ function registerGateQueue(server: McpServer, sessions: SessionService, db: Db, 
         "GateQueueEntry[], queued: GateQueueEntry[]} — `queued` is already in real admission order (all " +
         "high-priority merge/deploy waiters before low-priority worker self-checks, FIFO within each " +
         "tier), so its array index + 1 IS each entry's queue position (also echoed as `queuePosition`). " +
-        "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, queuePosition} — " +
+        "Each entry carries {opId, gateType, projectId, projectName, since, elapsedMs, idleMs, extended, " +
+        "queuePosition} — " +
         "`since`/`elapsedMs` are PHASE-SCOPED to whichever array the entry is in, not a fixed admission " +
         "clock: for a `queued` entry they measure time WAITING (since it was enqueued); once admitted, the " +
         "SAME entry RE-BASES to admission time and they measure time RUNNING instead. Don't read a `queued` " +
         "entry's `elapsedMs` as run time — a deeply-queued op can show a large `elapsedMs` while it has done " +
         "zero seconds of actual work, and mistaking that for a hung run is exactly backwards: it lands " +
-        "hardest on the op that's MOST expensive to wrongly cancel. A large `elapsedMs` on a `queued` entry " +
-        "is evidence of queue depth/contention, not of a wedged run; only a `running` entry's `elapsedMs` " +
-        "is evidence about run duration. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
+        "hardest on the op that's MOST expensive to wrongly cancel. ⚠️ AND EVEN A `running` ENTRY'S LARGE " +
+        "`elapsedMs` IS NOT EVIDENCE OF A WEDGE — it is routinely HEALTHY BY DESIGN: the gate auto-extends a " +
+        "step's timeout, rather than killing it, for as long as the step keeps producing output (see " +
+        "`GATE_EXTEND_IDLE_MS` in gate-runner.ts), so a long-running gate is frequently just working hard, " +
+        "not hung. `idleMs` (`Date.now()` minus that run's last liveness event — started, or produced a " +
+        "stdout/stderr byte — " +
+        "the SAME liveness clock the gate's own auto-extend decision reads, never a second, " +
+        "independently-computed number) is the signal that actually tells \"working hard\" apart from " +
+        "\"hung\": non-null once the run has genuinely started (normally the same instant it's admitted " +
+        "into `running`, though a brief real pre-flight gap can still read `null` too), `null` while " +
+        "`queued` or otherwise not live. A small `idleMs` means recent, active output regardless of how " +
+        "large `elapsedMs` has grown; `idleMs` approaching this project's gate-idle threshold is the real " +
+        "warning sign. `extended` (always `true`/`false`) tells you whether the CURRENT step already used " +
+        "its one-time auto-extend — `true` means the NEXT deadline is a real kill, not another reprieve. " +
+        "Both `idleMs`/`extended` are present on EVERY entry regardless of project — unlike `taskId`/" +
+        "`branch`/`workerLabel` below, they carry no more than the age a cross-project entry already " +
+        "exposes, so cross-project redaction doesn't apply to them. `opId` is the SAME id `gate_status(opId)` accepts (full or an " +
         "unambiguous 8-char prefix), so you can chain into a live per-op read if you want one. An entry " +
         "belonging to YOUR OWN project ALSO " +
         "carries {taskId, branch, workerLabel} (\"<agent> · <short task title>\"); an entry from a " +
