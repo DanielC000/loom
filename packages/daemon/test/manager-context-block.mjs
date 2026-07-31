@@ -110,6 +110,40 @@ try {
   const blankCase = composeManagerStartupPrompt("   ", { repoPath: "/r", vaultPath: "/v", name: "Demo" });
   check("(3) pure: blank/whitespace own-prompt → block-only (trimmed away)", blankCase.includes("## Where things live") && blankCase.trimEnd().endsWith("reconstruct it."));
 
+  // ===================== (3j) card 5e30c4bd: deploy-staleness surfaced in the "Where things live" block.
+  // Driven entirely via the stalenessOverride test seam (deterministic — no real git/dist dependency; see
+  // test/deploy-staleness.mjs for the underlying computeDeployStaleness() unit coverage). Proves DoD #3
+  // (surfaced where a manager will actually see it) and DoD #5 (STALE fires a visible warning; CLEAN and
+  // UNAVAILABLE both emit NOTHING — the manager-review ruling on the gate regression this card originally
+  // shipped with: a quiet "Deploy status: current" line on EVERY manager spawn, forever, IS the cry-wolf
+  // noise DoD #2 warns about, and it broke the multi-repo-prompt.mjs byte-identity pin for every project
+  // unaffected by this feature — see that file's own note). "Goes both ways" here means the ALARM
+  // reliably fires when true and reliably stays SILENT when false, not that there are two distinct texts.
+  const staleResult = { available: true, stale: true, commitsBehind: 2, distBuiltAt: "2026-06-01T00:00:00.000Z", mainlineHeadSha: "abc123def4567890abc123def4567890abc123d", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
+  const cleanResult = { available: true, stale: false, commitsBehind: 0, distBuiltAt: "2026-06-03T00:00:00.000Z", mainlineHeadSha: "1112223334445556667778889990001112223334", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
+  const unavailableResult = { available: false, reason: "not a Loom source checkout", distBuiltAt: null, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
+
+  const staleComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, staleResult);
+  check("(3j-stale) fires the [loom:deploy-stale] note", staleComposed.includes("[loom:deploy-stale]"));
+  check("(3j-stale) names the commitsBehind count", staleComposed.includes("2 `packages/daemon/src`"));
+  check("(3j-stale) names the short mainline HEAD sha", staleComposed.includes("abc123de"));
+  check("(3j-stale) names the dist build date", staleComposed.includes("2026-06-01T00:00:00.000Z"));
+  check("(3j-stale) tells the manager it applies to EVERY project this daemon serves", /EVERY project this shared daemon serves/.test(staleComposed));
+  check("(3j-stale) points at daemon_restart as the remedy", staleComposed.includes("daemon_restart"));
+  check("(3j-stale) the note precedes the 'Where things live' block (mirrors sizeNote/invalidNote ordering)", staleComposed.indexOf("[loom:deploy-stale]") < staleComposed.indexOf("Where things live"));
+  check("(3j-stale) the agent's own doctrine still rides along", staleComposed.includes("DOCTRINE_BODY"));
+
+  const cleanComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, cleanResult);
+  check("(3j-clean) does NOT fire the [loom:deploy-stale] note", !cleanComposed.includes("[loom:deploy-stale]"));
+  check("(3j-clean) emits NO 'Deploy status' line at all (dropped per manager review — see comment above)", !cleanComposed.includes("Deploy status"));
+  check("(3j-clean) does not even mention its own distBuiltAt/mainlineHeadSha fixture values anywhere (nothing rendered from a clean result)", !cleanComposed.includes("2026-06-03T00:00:00.000Z") && !cleanComposed.includes("111222333"));
+  check("(3j-clean) still carries the 'Where things live' header + the agent's own doctrine", cleanComposed.includes("## Where things live") && cleanComposed.includes("DOCTRINE_BODY"));
+
+  const unavailableComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, unavailableResult);
+  check("(3j-unavailable) neither the stale note nor any 'Deploy status' text renders", !unavailableComposed.includes("[loom:deploy-stale]") && !unavailableComposed.includes("Deploy status"));
+  check("(3j-unavailable) still carries the 'Where things live' header + the agent's own doctrine", unavailableComposed.includes("## Where things live") && unavailableComposed.includes("DOCTRINE_BODY"));
+  check("(3j) CLEAN and UNAVAILABLE render BYTE-IDENTICALLY (neither adds any text — this IS the additive guarantee multi-repo-prompt.mjs pins for real projects)", cleanComposed === unavailableComposed);
+
   // ===================== (3c) reference-repos epic Phase 3: referenceRepos block =====================
   const noRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" });
   const emptyRefs = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo", referenceRepos: [] });

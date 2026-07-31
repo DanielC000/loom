@@ -91,9 +91,16 @@ const REGISTRY = [
     " This project has no vault bound — there is no resume doc; keep any handoff/progress notes on the board task instead." +
     `\n\n${own}`;
 
-  const omitted = composeManagerStartupPrompt(own, loc);
-  const withEmptyRegistry = composeManagerStartupPrompt(own, { ...loc, repos: [] });
-  const withUndefinedRegistry = composeManagerStartupPrompt(own, { ...loc, repos: undefined });
+  // Card 5e30c4bd: composeManagerStartupPrompt now ALSO calls computeDeployStaleness() when no
+  // stalenessOverride is passed — deterministically absent from `expected` above (it emits nothing when
+  // clean/unavailable), but coupling this byte-identity pin to ambient dist-mtime-vs-git state would be a
+  // latent env-dependent flake (a gate worktree whose dist predates a daemon/src commit would emit the
+  // stale warning and break byte-identity for reasons unrelated to what this section actually tests —
+  // the same family the f5767961 fix addressed in gate-cancel.mjs). Pin it deterministically instead.
+  const stalenessUnavailable = { available: false, reason: "test fixture", distBuiltAt: null, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
+  const omitted = composeManagerStartupPrompt(own, loc, stalenessUnavailable);
+  const withEmptyRegistry = composeManagerStartupPrompt(own, { ...loc, repos: [] }, stalenessUnavailable);
+  const withUndefinedRegistry = composeManagerStartupPrompt(own, { ...loc, repos: undefined }, stalenessUnavailable);
 
   check("(2) manager · no registry · field OMITTED is byte-identical to the pre-multi-repo output", omitted === expected);
   check("(2) manager · no registry · repos:[] is byte-identical to the pre-multi-repo output", withEmptyRegistry === expected);

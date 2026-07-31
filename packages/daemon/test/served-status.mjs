@@ -11,11 +11,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       LIVE session in a FOREIGN project still counts, an EXITED one does not;
 //   (3) with no web dist built/found (LOOM_WEB_DIST pointed at an empty dir), `webBundle` is null (never
 //       throws) — the tool degrades gracefully instead of erroring.
+//   (4) card 5e30c4bd: served_status ALSO returns `deployStaleness`, wired end-to-end through the REAL
+//       MCP tool (not just the unit-level computeDeployStaleness — see test/deploy-staleness.mjs for
+//       that), against a LOOM_REPO_ROOT-pointed fixture repo: a packages/daemon/src commit committed
+//       AFTER this checkout's REAL built dist/index.js mtime ⇒ stale:true; rewound to BEFORE it ⇒
+//       stale:false — both directions, over the actual tool response, proving the wiring (not just the
+//       underlying helper) works.
 //
 // Run: 1) build (turbo builds shared first), 2) node test/served-status.mjs
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { execSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -84,6 +92,24 @@ const client = new Client({ name: "served-status-test", version: "0" });
 await client.connect(clientT);
 const call = async (name, args) => JSON.parse((await client.callTool({ name, arguments: args ?? {} })).content[0].text);
 
+// ===================== (4) fixture: LOOM_REPO_ROOT-pointed repo for the deployStaleness end-to-end check.
+// computeDeployStaleness() (called with NO overrides from served_status) always reads THIS checkout's
+// REAL built dist/index.js mtime — so rather than faking that, anchor fixture commit dates relative to
+// it (read once, real, whatever it happens to be) so the STALE/CLEAN split is deterministic either way.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const realDistEntry = path.join(__dirname, "..", "dist", "index.js");
+const realDistMtimeMs = fs.statSync(realDistEntry).mtime.getTime();
+const beforeBuild = new Date(realDistMtimeMs - 60_000).toISOString();
+const afterBuild = new Date(realDistMtimeMs + 60_000).toISOString();
+const stalenessRepo = path.join(os.tmpdir(), `loom-svst-stalenessrepo-${Date.now()}`);
+fs.mkdirSync(path.join(stalenessRepo, "packages", "daemon", "src"), { recursive: true });
+const gitStale = (args, dateIso) => execSync(`git ${args}`, {
+  cwd: stalenessRepo,
+  env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+});
+gitStale("init -q");
+gitStale('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', beforeBuild);
+
 try {
   // ===================== (1) + (2) staged dist + cross-project live count =====================
   const status = await call("served_status");
@@ -99,9 +125,29 @@ try {
   process.env.LOOM_WEB_DIST = emptyDist;
   const statusEmpty = await call("served_status");
   check("(3) an unbuilt/missing web dist → webBundle: null (no throw)", statusEmpty.webBundle === null);
+
+  // ===================== (4) deployStaleness, wired end-to-end through the real MCP tool =====================
+  process.env.LOOM_REPO_ROOT = stalenessRepo;
+  const statusClean = await call("served_status");
+  check("(4) no daemon/src commits after the real dist build ⇒ deployStaleness.available:true, stale:false", statusClean.deployStaleness?.available === true && statusClean.deployStaleness?.stale === false);
+  check("(4) clean: commitsBehind is 0", statusClean.deployStaleness?.commitsBehind === 0);
+  check("(4) served_status does NOT rely on version/webBundle for this — both stay whatever they already were (DoD #8's own proof point)", typeof statusClean.version === "string" && "webBundle" in statusClean);
+
+  fs.writeFileSync(path.join(stalenessRepo, "packages", "daemon", "src", "foo.ts"), "export const foo = 1;\n");
+  gitStale("add packages/daemon/src/foo.ts");
+  gitStale('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add foo"', afterBuild);
+  const statusStale = await call("served_status");
+  check("(4) a daemon/src commit AFTER the real dist build ⇒ deployStaleness.stale:true", statusStale.deployStaleness?.available === true && statusStale.deployStaleness?.stale === true);
+  check("(4) stale: commitsBehind counts the new commit", statusStale.deployStaleness?.commitsBehind === 1);
+  check("(4) stale: mainlineHeadSha is a real 40-char sha", /^[0-9a-f]{40}$/.test(statusStale.deployStaleness?.mainlineHeadSha ?? ""));
+
+  delete process.env.LOOM_REPO_ROOT;
+  const statusNoRepoRoot = await call("served_status");
+  check("(4) LOOM_REPO_ROOT unset ⇒ deployStaleness still present (falls back to the real monorepo root) and never throws", statusNoRepoRoot.deployStaleness !== undefined);
 } finally {
   db.close();
   for (let i = 0; i < 5; i++) { try { fs.rmSync(tmpHome, { recursive: true, force: true }); break; } catch { /* retry (WAL handle) */ } }
+  try { fs.rmSync(stalenessRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
 }
 
 console.log(failures === 0

@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { RepoRegistryEntry } from "@loom/shared";
 import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.js";
+import { computeDeployStaleness, type DeployStalenessResult } from "../deploy-staleness.js";
 
 /**
  * PL Auditor finding #8 — inject a small "Where things live" context block (the project's absolute
@@ -38,6 +39,10 @@ import { resumeDocSizeWarning, resolveResumeDocPath } from "./resume-doc-notes.j
 export function composeManagerStartupPrompt(
   startupPrompt: string | undefined,
   loc: { repoPath: string; vaultPath: string; name: string; referenceRepos?: string[]; repos?: RepoRegistryEntry[]; resumeDocFilename?: string },
+  // Test seam ONLY (card 5e30c4bd) — a real spawn always omits this and gets the live
+  // `computeDeployStaleness()` read; a hermetic test injects a fixed result so it can assert BOTH the
+  // STALE and CLEAN renderings deterministically, without needing a real git checkout + a rebuilt dist.
+  stalenessOverride?: DeployStalenessResult,
 ): string {
   // A project with no vault bound (`vaultPath === ""` — see shared/types.ts) has no resume doc to
   // resolve: omit both the vault-dir and resume-doc lines entirely rather than feed "" into
@@ -58,6 +63,36 @@ export function composeManagerStartupPrompt(
       `shown below. This needs a HUMAN to re-bind the project's vault path (project settings) to a real, ` +
       `absolute filesystem path; do not attempt to derive or guess the correct path yourself.`
     : "";
+  // Card 5e30c4bd: a daemon-`src`/`shared` commit can be MERGED on mainline for a long time before this
+  // daemon PROCESS is restarted to actually run it — and nothing surfaced that gap (the incident: ~1h50m,
+  // discovered only because a manager happened to call `served_status` by hand). DERIVED fresh on every
+  // manager spawn/resume/recycle (never cached/persisted — see computeDeployStaleness's own doc), scoped
+  // to ONLY daemon-src/shared commits so an assets/docs/vault-only merge (no restart needed) never cries
+  // wolf. `available:false` (a packaged loomctl install, or the check itself failing) emits nothing —
+  // byte-identical to before this card for every non-self-hosting deployment.
+  //
+  // SYNCHRONOUS by design, not an oversight: `computeDeployStaleness()` runs a bounded `execFileSync` git
+  // read directly on this call. That is NOT the `createPty`/`buildSpawnArgs` hot path CLAUDE.md's
+  // event-loop discipline protects (the incident that discipline exists for was an UNBOUNDED,
+  // minutes-long `spawnSync` — venv create + pip install — on a path EVERY session spawn hits). This
+  // function only runs for a MANAGER spawn/resume/recycle, a comparatively rare event, so a bounded git
+  // call (worst case 2×`GIT_TIMEOUT_MS` fully-blocked event loop, degrading gracefully on timeout — see
+  // that constant's own doc) was judged an acceptable, much simpler alternative to an async-cache-plus-
+  // prewarm layer (the `getCachedClaudeVersion` pattern) for this specific, infrequent call site.
+  const staleness = stalenessOverride ?? computeDeployStaleness();
+  const shortSha = (sha: string) => sha.slice(0, 8);
+  // Deliberately EMITS NOTHING when clean (or unavailable) — no "Deploy status: current" line. A quiet
+  // reassurance on EVERY manager spawn, forever, is exactly the cry-wolf noise DoD #2 (`637558ca`) warns
+  // about: a line that's nearly always present is a line nobody reads, and it breaks byte-identical
+  // output for every project unaffected by this feature. The startup block is for the ALARM; a manager
+  // wanting positive confirmation already has the full detail via `served_status.deployStaleness`.
+  const deployStaleNote = staleness.available && staleness.stale
+    ? `[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE CODE. Mainline HEAD \`${shortSha(staleness.mainlineHeadSha!)}\` ` +
+      `(committed ${staleness.mainlineHeadDate}) carries ${staleness.commitsBehind} \`packages/daemon/src\`/\`packages/shared/src\` ` +
+      `commit(s) this running process was NOT built with (its own build dates to ${staleness.distBuiltAt}). Those changes are ` +
+      `MERGED but NOT LIVE — for EVERY project this shared daemon serves, not just this one. Do not assume a recently-merged ` +
+      `daemon fix or feature is actually in effect; a manager holding it can bring it live via \`daemon_restart\`.`
+    : "";
   const block =
     "## Where things live (this project's absolute paths)\n" +
     `- **Repo root (your cwd):** \`${loc.repoPath}\`\n` +
@@ -71,7 +106,7 @@ export function composeManagerStartupPrompt(
       : vaultPathInvalid
       ? " This project's vault path is misconfigured (see the note above) — keep any handoff/progress notes on the board task instead until it's fixed."
       : " This project has no vault bound — there is no resume doc; keep any handoff/progress notes on the board task instead.");
-  const blockWithNote = [invalidNote, sizeNote, block].filter(Boolean).join("\n\n");
+  const blockWithNote = [invalidNote, sizeNote, deployStaleNote, block].filter(Boolean).join("\n\n");
   // Reference-repos epic Phase 3 ("Interpretation A"): additional repos this project's manager may
   // READ but never owns — no worktree/branch/gate exists for them, so they're never a cwd or a merge
   // target. Omitted entirely when the project sets none, so the additive guarantee holds.

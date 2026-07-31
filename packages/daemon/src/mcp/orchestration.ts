@@ -23,6 +23,7 @@ import type { CompanionReminder, CompanionRoute } from "../companion/types.js";
 import { resolveIdPrefix } from "../id-prefix.js";
 import { resolveWebDistDir } from "../paths.js";
 import { loomVersion } from "../version.js";
+import { computeDeployStaleness } from "../deploy-staleness.js";
 import { lineageRootId } from "../sessions/platform-lead-prompt.js";
 import {
   authorCompanionSkill,
@@ -2248,7 +2249,18 @@ export class OrchestrationMcpRouter {
           "webBundle (the served assets/index-<hash>.js filename, or null if the web dist isn't built/found " +
           "— a changed hash after a restart proves the new web build is live), uptimeSeconds (this process's), " +
           "liveSessionCount (ACROSS ALL projects — a coarse sanity signal; use worker_list for your own " +
-          "fleet)}.",
+          "fleet), deployStaleness}. ⚠️ Card 5e30c4bd, measured first-hand across a real deploy: `version` " +
+          "and `webBundle` are BOTH byte-identical before/after a daemon-`src`-only deploy (no package bump, " +
+          "no web rebuild) — do NOT use either as a staleness proxy. `deployStaleness` is the real signal: " +
+          "{available, stale, commitsBehind, distBuiltAt, mainlineHeadSha, mainlineHeadDate, reason?} — " +
+          "DERIVED fresh on every call (stat this daemon's own built entry + `git log` mainline, never " +
+          "cached/persisted), scoped to ONLY `packages/daemon/src`/`packages/shared/src` commits (an " +
+          "assets/docs/vault-only merge does NOT need a restart and never counts). `available:false` " +
+          "(with `reason`) means this daemon isn't running from a Loom source checkout (e.g. a packaged " +
+          "`loomctl` install) or the check failed — not a claim of freshness either way. `stale:true` means " +
+          "mainline HEAD carries `commitsBehind` daemon-src/shared commit(s) this running process was not " +
+          "built with — a `daemon_restart` (or a human `pnpm daemon:stable` relaunch) is needed before they " +
+          "take effect, for every project this daemon serves.",
         inputSchema: strictShape({}),
       },
       async () => {
@@ -2259,7 +2271,13 @@ export class OrchestrationMcpRouter {
           webBundle = fs.readdirSync(assetsDir).find((f) => /^index-.*\.js$/.test(f)) ?? null;
         } catch { /* dist not built / no assets dir — webBundle stays null */ }
         const liveSessionCount = db.listAllSessions().filter((s) => s.processState === "live").length;
-        return ok({ version: loomVersion(), webBundle, uptimeSeconds: Math.round(process.uptime()), liveSessionCount });
+        return ok({
+          version: loomVersion(),
+          webBundle,
+          uptimeSeconds: Math.round(process.uptime()),
+          liveSessionCount,
+          deployStaleness: computeDeployStaleness(),
+        });
       },
     );
 
