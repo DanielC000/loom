@@ -9223,7 +9223,7 @@ export class SessionService {
           // together with this run — the exact context a byte-identical-tree pass/fail pair (a real
           // incident: op f954fb86 failed where op 8c7f078e had just passed) needs to be attributable to
           // its concurrency neighbourhood instead of an unexplained code-defect hunt.
-          `cap=${gateCap} concurrent=${concurrentAtStart}`,
+          `cap=${gateCap} concurrentAtStart=${concurrentAtStart}`,
           failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
