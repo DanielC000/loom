@@ -292,7 +292,7 @@ class ControllableMcpPty {
   // ghost-resume guard), so a fake path like "/x" would silently drop this session from the resume set.
   db.insertSession({ id: "reqPlatWrite", projectId: "wp", agentId: "wa", engineSessionId: null, title: null, cwd: os.tmpdir(), processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "platform" });
 
-  const sessions = new SessionService(db, { getPersistablePending: () => [], getPersistablePendingHolds: () => ({}), isComposerDirty: () => false }, new OrchestrationControl());
+  const sessions = new SessionService(db, { getPersistablePendingSnapshot: () => ({ texts: [], holds: {} }), isComposerDirty: () => false }, new OrchestrationControl());
   const fakeRunStep = async () => ({ code: 0, out: "" }); // instant green "build" — no real spawn
   const exitCalls = [];
   const captureExit = (code) => exitCalls.push(code); // never actually exits this test process

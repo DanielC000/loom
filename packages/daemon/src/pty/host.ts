@@ -4117,7 +4117,7 @@ export class PtyHost {
    * `giveUpHeldUntil` (card 9e27f4d2) is an OPTIONAL trailing arg, appended last for the same byte-
    * identical-by-default reason — every existing caller omits it by default. `resumeFleetOnBoot`'s
    * restart-intent replay passes it, restoring a give-up-requeued entry's hold deadline (see
-   * `getPersistablePending`/`getPersistablePendingHolds`) onto the freshly re-enqueued entry so a restart
+   * `getPersistablePendingSnapshot`) onto the freshly re-enqueued entry so a restart
    * landing mid-hold-window doesn't skip the hold entirely. Card f25bf3bf's companion capability re-pin
    * respawn (`SessionService.upgradeCompanionCapabilities`) passes it too, for the same reason — it also
    * reconnects the SAME engine session via `--resume`. `SessionService.carryPendingToSuccessor` (the
@@ -4341,55 +4341,52 @@ export class PtyHost {
 
   /**
    * Like getPending, but EXCLUDES durable-tracked messages (those carrying an `onDeliver` callback —
-   * the down/cross-tree session_message/message_worker entries persisted as `session_message_queued`).
+   * the down/cross-tree session_message/message_worker entries persisted as `session_message_queued`),
+   * and ALSO returns each surviving entry's give-up-hold state alongside its text — in one pass, so the
+   * two halves can never drift out of index alignment (card refactoring 9e27f4d2's original two-method
+   * split, `getPersistablePending`/`getPersistablePendingHolds`: they were only valid together if a
+   * caller invoked both against the same live state with no `await` between them, a requirement that
+   * lived only in a doc comment and was never enforced — this method makes misalignment structurally
+   * impossible instead of a documented caution).
+   *
    * The daemon_restart intent snapshot uses THIS (card 2ca18433): the durable boot scan
-   * (recoverUndeliveredMessagesOnBoot) owns re-enqueueing those on boot, so snapshotting them into
-   * intent.pending too would deliver them TWICE on a normal restart. Non-durable held items (worker
-   * reports, idle/resume nudges) carry no callback and stay in the snapshot, replayed exactly as before.
+   * (recoverUndeliveredMessagesOnBoot) owns re-enqueueing durable messages on boot, so snapshotting them
+   * into intent.pending too would deliver them TWICE on a normal restart. Non-durable held items (worker
+   * reports, idle/resume nudges) carry no callback and stay in `texts`, replayed exactly as before.
    *
-   * FIXED (card 9e27f4d2, closing `purgeConfirmedGiveUpRequeue`'s residual (3)): a still-`isGiveUpHeld`
-   * entry (see that method) used to snapshot as its TEXT ONLY, so a restart landing mid-hold-window
-   * replayed it on boot as an ordinary fresh message — no hold, no purge correlation — and delivered the
-   * duplicate UNCONDITIONALLY, regardless of how much of the hold window was actually left. That bypassed
-   * the exact protection card 73d5c34a added. This method's OWN return shape is UNCHANGED (still bare
-   * `string[]`) — see `getPersistablePendingHolds` (its sibling) for where the hold deadline actually goes.
+   * `texts` is a bare `string[]` — DELIBERATELY, not `{text, giveUpHeldUntil}[]` (card 9e27f4d2 code
+   * review, first attempt at that card's fix did exactly that and was rejected): `RestartIntent.pending`
+   * is un-versioned JSON on disk (`readRestartIntent` is a bare `JSON.parse(...) as RestartIntent`, no
+   * schema check) that an OLDER daemon can read — a second stable daemon sharing `~/.loom` from a
+   * separate checkout (this project's own documented pattern), or a rollback landing between this
+   * daemon's exit-75 and the supervisor's relaunch. An older daemon's `replayPending` calls
+   * `enqueueStdin(id, m, ...)` expecting `m` to be a plain string; handed `{text, giveUpHeldUntil}`
+   * instead, `kind:"agent"` short-circuits BOTH shape guards (`sanitizeLoneSurrogates`/
+   * `isUntaggedSystemNudge`) before either inspects the value, and the object is silently string-coerced
+   * to `"[object Object]"` by the eventual `.map(m=>m.text).join()` — the actual message TEXT is gone,
+   * no throw, no log. That is the exact LOSS class card 9e27f4d2's own constraint forbids ("fail toward
+   * a duplicate, never a loss"), reintroduced by a fix for a duplicate. Keeping the persisted `pending`
+   * field a bare `string[]` and carrying holds on `RestartIntent.pendingHolds`, a wholly separate
+   * additive field, means an older daemon reading a newer intent sees only strings it already knows how
+   * to handle — an unheld duplicate (bad, but the ALREADY-ACCEPTED pre-9e27f4d2 behavior), never a
+   * garbled loss. This method's own in-process return shape carries no such on-disk constraint — `holds`
+   * sits alongside `texts` right here even though the caller must still write them to SEPARATE
+   * `RestartIntent` fields when persisting (see `requestDaemonRestart`).
    *
-   * ⚠️ WHY NOT WIDEN THIS METHOD'S ELEMENT TYPE (code review, first attempt at this fix did exactly that
-   * and was rejected): `RestartIntent.pending` is un-versioned JSON on disk (`readRestartIntent` is a bare
-   * `JSON.parse(...) as RestartIntent`, no schema check) that an OLDER daemon can read — a second stable
-   * daemon sharing `~/.loom` from a separate checkout (this project's own documented pattern), or a
-   * rollback landing between this daemon's exit-75 and the supervisor's relaunch. An older daemon's
-   * `replayPending` calls `enqueueStdin(id, m, ...)` expecting `m` to be a plain string; handed
-   * `{text, giveUpHeldUntil}` instead, `kind:"agent"` short-circuits BOTH shape guards
-   * (`sanitizeLoneSurrogates`/`isUntaggedSystemNudge`) before either inspects the value, and the object is
-   * silently string-coerced to `"[object Object]"` by the eventual `.map(m=>m.text).join()` — the actual
-   * message TEXT is gone, no throw, no log. That is the exact LOSS class this card's own constraint
-   * forbids ("fail toward a duplicate, never a loss"), reintroduced by the FIX for a duplicate. Keeping
-   * `pending` a bare `string[]` and adding the hold as a wholly separate, ADDITIVE sibling field means an
-   * older daemon reading a newer intent sees only strings it already knows how to handle — an unheld
-   * duplicate (bad, but the ALREADY-ACCEPTED pre-this-card behavior), never a garbled loss.
+   * `holds` is `{index: giveUpHeldUntil}` for every entry in `texts` that is currently `isGiveUpHeld`,
+   * keyed by that entry's position in `texts`. An ordinary entry has no key at all (byte-identical-by-
+   * omission for the common case). Returns `{ texts: [], holds: {} }` for a dead/unknown session or one
+   * with nothing queued/held.
    */
-  getPersistablePending(sessionId: string): string[] {
-    return (this.live.get(sessionId)?.pending ?? []).filter((m) => !m.onDeliver).map((m) => m.text);
-  }
-
-  /**
-   * Sibling of `getPersistablePending` (card 9e27f4d2) — the hold-state half of the same snapshot, kept
-   * in a SEPARATE, additive structure rather than widening `getPersistablePending`'s own element type (see
-   * that method's doc for why: an older daemon reading a newer on-disk intent must see nothing it doesn't
-   * already understand). Returns `{index: giveUpHeldUntil}` for every entry in the SAME filtered
-   * (`!onDeliver`), SAME-ORDER array `getPersistablePending` would return for this session, keyed by
-   * that entry's position in THAT array — a caller must call both against the same live state (no await
-   * between them) for the indices to line up, exactly as `requestDaemonRestart` does. Only entries
-   * currently `isGiveUpHeld` appear; an ordinary entry has no key at all (byte-identical-by-omission for
-   * the common case). Returns `{}` for a dead/unknown session or one with nothing held.
-   */
-  getPersistablePendingHolds(sessionId: string): Record<number, number> {
+  getPersistablePendingSnapshot(sessionId: string): { texts: string[]; holds: Record<number, number> } {
+    const texts: string[] = [];
     const holds: Record<number, number> = {};
-    (this.live.get(sessionId)?.pending ?? [])
-      .filter((m) => !m.onDeliver)
-      .forEach((m, i) => { if (this.isGiveUpHeld(m)) holds[i] = m.giveUpHeldUntil!; });
-    return holds;
+    for (const m of this.live.get(sessionId)?.pending ?? []) {
+      if (m.onDeliver) continue;
+      if (this.isGiveUpHeld(m)) holds[texts.length] = m.giveUpHeldUntil!;
+      texts.push(m.text);
+    }
+    return { texts, holds };
   }
 
   /**
@@ -5566,12 +5563,12 @@ export class PtyHost {
    * resolved), an `inbox_pull` caller has explicitly asked for its own inbox NOW — that is itself a
    * deliberate act by the very recipient the hold exists to protect, so treating the held entry as
    * delivered here is a reasonable, intentional choice, not an accidental bypass of the hold's purpose.
-   * (3) FIXED (card 9e27f4d2): `getPersistablePending` used to snapshot a held entry's TEXT ONLY, dropping
+   * (3) FIXED (card 9e27f4d2): the pending snapshot used to carry a held entry's TEXT ONLY, dropping
    * `giveUpHeldUntil`, so a daemon-restart landing mid-hold-window replayed it on boot as a plain fresh
    * message with no hold at all — an unconditional immediate duplicate, strictly worse than residual (1).
-   * The fix persists the deadline in a SEPARATE, additive sibling structure (`getPersistablePendingHolds`
-   * — kept out of `getPersistablePending`'s own return shape deliberately; see that method's doc for the
-   * backward-compat reason) and `resumeFleetOnBoot` restores it via `enqueueStdin`'s `giveUpHeldUntil`
+   * The fix persists the deadline in `getPersistablePendingSnapshot`'s SEPARATE, additive `holds` half
+   * — kept out of its `texts` return value deliberately; see that method's doc for the backward-compat
+   * reason — and `resumeFleetOnBoot` restores it via `enqueueStdin`'s `giveUpHeldUntil`
    * param, so a restart during the hold degrades to the SAME delayed-duplicate SHAPE as residual (1) —
    * but NOT identically: residual (1) is a race the hold can still WIN (a confirming hook merely arrives
    * late but before some other purge/expiry); post-restart nothing can ever win it (no hook can reach a

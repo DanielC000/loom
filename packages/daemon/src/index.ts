@@ -1168,7 +1168,7 @@ async function main(): Promise<void> {
   // or a daemon restart used to drop it silently (it lost a P1 cross-project dispatch twice). Runs on EVERY
   // boot, AFTER the fleet resume above (so resumed recipients are live to re-enqueue onto) and unconditional
   // of a restart intent (covers crash / OS-service restart too). The single re-enqueue owner — the intent
-  // snapshot now excludes these (getPersistablePending), so no double on a normal restart. Best-effort:
+  // snapshot now excludes these (getPersistablePendingSnapshot), so no double on a normal restart. Best-effort:
   // never gate boot.
   try {
     const m = sessions.recoverUndeliveredMessagesOnBoot();

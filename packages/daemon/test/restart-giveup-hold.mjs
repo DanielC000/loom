@@ -1,15 +1,15 @@
 // Regression test for card 9e27f4d2 — "a restart replays a held give-up requeue with neither hold nor
 // purge" (found by the Code Reviewer while reviewing 73d5c34a, which added the give-up hold this bypasses).
 //
-// ROOT CAUSE: `getPersistablePending` snapshotted a still-`isGiveUpHeld` entry as its TEXT ONLY, dropping
+// ROOT CAUSE: the pending snapshot carried a still-`isGiveUpHeld` entry as its TEXT ONLY, dropping
 // `giveUpHeldUntil`. `daemon_restart`'s intent is consumed at boot BEFORE any confirming hook can fire, so
 // a restart landing mid-hold-window replayed the entry on boot as an ordinary fresh message with NO hold —
 // delivering the duplicate UNCONDITIONALLY and IMMEDIATELY, regardless of how much of the hold window was
 // actually left. That reintroduces the exact double-delivery card 73d5c34a exists to prevent.
 //
 // THE FIX (round two, after code review rejected a widen-the-element-type first attempt as itself a LOSS
-// bug — see restart.ts's `RestartIntent.pendingHolds` doc and host.ts's `getPersistablePending`/
-// `getPersistablePendingHolds` docs for the full why): `RestartIntent.pending` stays a bare
+// bug — see restart.ts's `RestartIntent.pendingHolds` doc and host.ts's `getPersistablePendingSnapshot`
+// doc for the full why): `RestartIntent.pending` stays a bare
 // `Record<string, string[]>` — byte-identical on disk to the pre-this-card shape — and the give-up hold's
 // `giveUpHeldUntil` deadline is carried in a wholly separate, ADDITIVE sibling field, `pendingHolds:
 // Record<string, Record<number, number>>` (session → index into that session's `pending` array →
@@ -26,10 +26,11 @@
 // This suite proves, against a real (fake-pty-backed) PtyHost driving a genuine give-up, THEN a simulated
 // restart onto a SECOND, fresh PtyHost instance (mirroring "the process dies, a new one boots" — same
 // convention as queued-message-durability.mjs's Part B):
-//   (1) getPersistablePending's OWN return shape is unaffected (still bare strings, held or not) —
-//       getPersistablePendingHolds is the sibling that carries a still-held entry's deadline, keyed by
-//       that entry's index into the first array. Both round-trip through the REAL on-disk intent file
-//       (writeRestartIntent/readRestartIntent) exactly as `pending`/`pendingHolds`.
+//   (1) getPersistablePendingSnapshot's `texts` half is unaffected (still bare strings, held or not) —
+//       its `holds` half carries a still-held entry's deadline, keyed by that entry's index into `texts`,
+//       returned from the SAME single-pass call so the two can never fall out of index alignment. Both
+//       round-trip through the REAL on-disk intent file (writeRestartIntent/readRestartIntent) exactly
+//       as `pending`/`pendingHolds`.
 //   (2) OLD-DAEMON COMPATIBILITY (the direction the blocking review finding was about): replaying the
 //       round-tripped `pending` array through the OLD (pre-9e27f4d2) call shape — plain strings only,
 //       `pendingHolds` never even looked at — delivers the full, uncorrupted text with no crash and no
@@ -133,12 +134,11 @@ try {
   check("(setup) the give-up requeued TEXT to the front, held, with PLAIN_TEXT now behind it",
     hostPre.getPendingEntries(SID).length === 2 && hostPre.getPendingEntries(SID)[0].text === TEXT && hostPre.getPendingEntries(SID)[1].text === PLAIN_TEXT);
 
-  // ===================== (1) the persisted SHAPE: getPersistablePending unaffected, holds are additive ======
-  const rawTexts = hostPre.getPersistablePending(SID);
-  const rawHolds = hostPre.getPersistablePendingHolds(SID);
-  check("(1) getPersistablePending returns bare strings, unaffected by the fix — [TEXT, PLAIN_TEXT]",
+  // ===================== (1) the persisted SHAPE: getPersistablePendingSnapshot's texts are unaffected, holds are additive ======
+  const { texts: rawTexts, holds: rawHolds } = hostPre.getPersistablePendingSnapshot(SID);
+  check("(1) getPersistablePendingSnapshot's texts are bare strings, unaffected by the fix — [TEXT, PLAIN_TEXT]",
     JSON.stringify(rawTexts) === JSON.stringify([TEXT, PLAIN_TEXT]));
-  check("(1) getPersistablePendingHolds keys ONLY the still-held index (0) with a future deadline",
+  check("(1) getPersistablePendingSnapshot's holds key ONLY the still-held index (0) with a future deadline",
     typeof rawHolds[0] === "number" && rawHolds[0] > Date.now() && rawHolds[1] === undefined && Object.keys(rawHolds).length === 1);
 
   // Round-trip through the REAL on-disk intent file (not a hand-rolled JSON.stringify) — proves the
@@ -311,6 +311,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — getPersistablePending's own shape stays bare strings (an OLDER daemon reads `pending` exactly as it always has, no crash, no corrupted text — proven against a REAL round-tripped on-disk intent), the additive getPersistablePendingHolds sibling carries a still-held entry's deadline, a restart-during-hold no longer bypasses the hold through the real resumeFleetOnBoot path, an unrelated queued entry behind it is never stalled, and once the restored hold naturally expires the entry still delivers — a delayed, honest duplicate, never a silent loss."
+  ? "\n✅ ALL PASS — getPersistablePendingSnapshot's `texts` half stays bare strings (an OLDER daemon reads `pending` exactly as it always has, no crash, no corrupted text — proven against a REAL round-tripped on-disk intent), its additive `holds` half carries a still-held entry's deadline from the SAME single-pass call, a restart-during-hold no longer bypasses the hold through the real resumeFleetOnBoot path, an unrelated queued entry behind it is never stalled, and once the restored hold naturally expires the entry still delivers — a delayed, honest duplicate, never a silent loss."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

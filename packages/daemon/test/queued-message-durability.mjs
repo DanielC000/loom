@@ -10,13 +10,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       load-bearing M1/M2 immediate-submit window is untouched;
 //     • a HELD message fires onDeliver exactly when it is handed to the recipient — at the next Stop drain
 //       AND via inbox_pull (consumePending);
-//     • getPersistablePending EXCLUDES onDeliver-bearing (durable) messages but keeps plain ones (the
-//       daemon_restart snapshot dedup).
+//     • getPersistablePendingSnapshot EXCLUDES onDeliver-bearing (durable) messages but keeps plain ones
+//       (the daemon_restart snapshot dedup).
 //
 //   PART B — SessionService + Db + a contract-faithful PtyStub: the end-to-end durability.
 //     (a) SENDER DEATH before flush → the held message still delivers on the recipient's next turn boundary
 //         (sender liveness is irrelevant; the durable record + onDeliver carry it).
-//     (b) DAEMON RESTART → the held message is NOT in intent.pending (getPersistablePending excludes it) and
+//     (b) DAEMON RESTART → the held message is NOT in intent.pending (getPersistablePendingSnapshot excludes it) and
 //         the boot scan re-enqueues it EXACTLY ONCE onto the resumed recipient (no double), then it delivers
 //         + resolves on the recipient's next turn.
 //     (c) UNDELIVERED OUTBOUND → a held message whose recipient isn't live at boot is SURFACED to the resumed
@@ -83,9 +83,9 @@ try {
   check("(A2) durable message queued behind busy (position 1, not delivered)", rDur.delivered === false && rDur.position === 1);
   check("(A2) plain message queued (position 2)", rPlain.delivered === false && rPlain.position === 2);
 
-  // (A3) getPersistablePending EXCLUDES the durable (onDeliver) message, keeps the plain one — the snapshot dedup.
+  // (A3) getPersistablePendingSnapshot EXCLUDES the durable (onDeliver) message, keeps the plain one — the snapshot dedup.
   check("(A3) getPending holds BOTH [DURABLE_HELD, PLAIN_HELD]", JSON.stringify(host.getPending(SID)) === JSON.stringify(["DURABLE_HELD", "PLAIN_HELD"]));
-  check("(A3) getPersistablePending EXCLUDES the durable msg, keeps the plain one", JSON.stringify(host.getPersistablePending(SID)) === JSON.stringify(["PLAIN_HELD"]));
+  check("(A3) getPersistablePendingSnapshot EXCLUDES the durable msg, keeps the plain one", JSON.stringify(host.getPersistablePendingSnapshot(SID).texts) === JSON.stringify(["PLAIN_HELD"]));
 
   // (A4) ONE Stop COALESCE-drains the WHOLE held FIFO (DURABLE_HELD + PLAIN_HELD) as a single turn:
   // the durable entry's onDeliver fires exactly once, the plain (no-callback) entry fires nothing.
@@ -141,7 +141,7 @@ try {
       return m.text;
     }
     getPending(id) { return (this.q.get(id) ?? []).map((m) => m.text); }
-    getPersistablePending(id) { return (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text); }
+    getPersistablePendingSnapshot(id) { return { texts: (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text), holds: {} }; }
     waitForMcpSeen() { return Promise.resolve(true); } // card df5e37e7 — see mcp-ready-gate.mjs for the primitive's own timing
   }
   const flushB = () => new Promise((r) => setTimeout(r, 0));
@@ -195,8 +195,8 @@ try {
     ptyPre.enqueueStdin(wkr, "plain nudge");
     check("(B-b) pre-restart: 1 undelivered durable message recorded", db.listUndeliveredQueuedMessages().some((e) => e.detail.text.includes("RESTART DISPATCH")));
 
-    // Snapshot as requestDaemonRestart does: getPersistablePending EXCLUDES the durable message.
-    const snap = ptyPre.getPersistablePending(wkr);
+    // Snapshot as requestDaemonRestart does: getPersistablePendingSnapshot EXCLUDES the durable message.
+    const snap = ptyPre.getPersistablePendingSnapshot(wkr).texts;
     check("(B-b) intent.pending snapshot EXCLUDES the durable message (dedup at the source)", !snap.some((t) => t.includes("RESTART DISPATCH")));
     check("(B-b) intent.pending snapshot STILL carries the plain nudge", snap.includes("plain nudge"));
 

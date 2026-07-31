@@ -2181,7 +2181,7 @@ export class SessionService {
    * exits) instead of the full multi-second graceful/hard-stop wait. A durable recipient message (one
    * carrying `onDeliver` — e.g. a Platform Lead `session_message` mid-flight) is deliberately SKIPPED on
    * redelivery: `resume()`'s own `redriveUndeliveredMessagesForRecipient` already re-delivers it, so
-   * redelivering it here too would double it (mirrors `getPersistablePending`'s dedup reasoning). If the pty
+   * redelivering it here too would double it (mirrors `getPersistablePendingSnapshot`'s dedup reasoning). If the pty
    * never dies in time and this method aborts, `carried` is pushed BACK onto the still-alive old pty (every
    * entry, durable or not — resume() never ran, so nothing else will redeliver them) rather than dropped.
    *
@@ -2397,16 +2397,16 @@ export class SessionService {
     // process on exit). Only non-empty FIFOs are included. Defensive caps keep the intent JSON small:
     // a real FIFO holds a handful of short messages, so clip a pathologically long queue and skip a
     // single absurdly large message rather than bloat the persisted intent.
-    //   DEDUP (card 2ca18433): use getPersistablePending, NOT getPending — durable-tracked messages
-    //   (session_message / message_worker, persisted as `session_message_queued`) are EXCLUDED here
-    //   because the boot scan (recoverUndeliveredMessagesOnBoot) is their single re-enqueue owner. Were
-    //   they in BOTH stores, a normal daemon_restart would deliver them TWICE. Non-durable held items
-    //   (worker reports, idle/resume nudges) carry no callback → stay in the snapshot, replayed as before.
-    //   Card 9e27f4d2: an entry still within its post-give-up hold window carries a `giveUpHeldUntil`
-    //   deadline, recorded in the SEPARATE, additive `pendingHolds` field (see its doc on RestartIntent
-    //   for why `pending` itself must stay a bare `string[]`) rather than on the entry. `pendingHolds`
-    //   is keyed by each entry's INDEX into `pending[sessionId]` — the filter/truncate below has to keep
-    //   `rawHolds`' indices lined up against `rawTexts` before re-deriving them against the FINAL
+    //   DEDUP (card 2ca18433): use getPersistablePendingSnapshot, NOT getPending — durable-tracked
+    //   messages (session_message / message_worker, persisted as `session_message_queued`) are EXCLUDED
+    //   here because the boot scan (recoverUndeliveredMessagesOnBoot) is their single re-enqueue owner.
+    //   Were they in BOTH stores, a normal daemon_restart would deliver them TWICE. Non-durable held
+    //   items (worker reports, idle/resume nudges) carry no callback → stay in the snapshot, replayed as
+    //   before. Card 9e27f4d2: an entry still within its post-give-up hold window carries a
+    //   `giveUpHeldUntil` deadline, returned in the snapshot's SEPARATE, additive `holds` half (see its
+    //   doc on RestartIntent for why `pending` itself must stay a bare `string[]`) rather than on the
+    //   entry. `holds` is keyed by each entry's INDEX into `texts` — the filter/truncate below has to
+    //   keep `rawHolds`' indices lined up against `rawTexts` before re-deriving them against the FINAL
     //   (filtered + truncated) array, since a dropped-for-length or truncated-away entry must not leave a
     //   stale index pointing at the wrong (or a nonexistent) surviving entry.
     const PENDING_MAX_MSGS = 50;
@@ -2414,8 +2414,7 @@ export class SessionService {
     const pending: Record<string, string[]> = {};
     const pendingHolds: Record<string, Record<number, number>> = {};
     for (const { sessionId } of resume) {
-      const rawTexts = this.pty.getPersistablePending(sessionId);
-      const rawHolds = this.pty.getPersistablePendingHolds(sessionId);
+      const { texts: rawTexts, holds: rawHolds } = this.pty.getPersistablePendingSnapshot(sessionId);
       const kept = rawTexts
         .map((text, i) => ({ text, heldUntil: rawHolds[i] }))
         .filter((e) => e.text.length <= PENDING_MAX_MSG_LEN)
@@ -3051,7 +3050,7 @@ export class SessionService {
     // puts them ahead of the boot note. enqueueStdin is ready-gated (host.ts), so they queue until the
     // resumed TUI boots, then drain cleanly.
     //
-    // kind: "agent" — the snapshot (getPersistablePending) carries only TEXT, not each entry's original
+    // kind: "agent" — the snapshot (getPersistablePendingSnapshot) carries only TEXT, not each entry's original
     // warning/agent classification (it predates that discriminator), and this replayed set can be a mix
     // of worker reports / manager direction (agent) and idle/resume nudges (warning) that were pending at
     // restart. Ambiguous ⇒ bias to "agent" per the classification's own rule — a warning wrongly replayed
@@ -3447,7 +3446,7 @@ export class SessionService {
    * queued` so a SENDER DEATH (API 529) or a DAEMON RESTART before the recipient's next turn boundary can't
    * have silently dropped a dispatch (it lost a P1 cross-project dispatch twice). Runs ONCE at boot
    * (index.ts), AFTER the fleet is resumed, and is the SINGLE re-enqueue owner for these messages: the
-   * daemon_restart intent snapshot now EXCLUDES them (getPersistablePending), so there's no double on a
+   * daemon_restart intent snapshot now EXCLUDES them (getPersistablePendingSnapshot), so there's no double on a
    * normal restart, and this also covers the crash / OS-service-restart / non-live-recipient paths the
    * intent snapshot never reached. Per still-undelivered message:
    *   • recipient is LIVE → re-enqueue with the SAME msgId (no new queued event), so it drains on the

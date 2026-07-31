@@ -126,7 +126,7 @@ class PtyStub {
     return m.text;
   }
   getPending(id) { return (this.q.get(id) ?? []).map((m) => m.text); }
-  getPersistablePending(id) { return (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text); }
+  getPersistablePendingSnapshot(id) { return { texts: (this.q.get(id) ?? []).filter((m) => !m.onDeliver).map((m) => m.text), holds: {} }; }
   waitForMcpSeen() { return Promise.resolve(true); } // card df5e37e7
 }
 
