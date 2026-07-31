@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+// loom:not-a-test: card fa52f555 — a fixture CLI stub spawned BY sibling tests as a child process, not a
+// standalone test itself; only trips the looksLikeTest heuristic via its own error handling.
 // Fixture stand-in for the real `codescape` CLI, used by the real-spawn integration coverage in
 // test/codescape-supervisor.mjs (card 894b9b02) and test/codescape-mcp-spawn.mjs (card C2 rewrite,
 // e068a2ab). Mimics the subcommands the daemon drives:

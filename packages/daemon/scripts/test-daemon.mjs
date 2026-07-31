@@ -70,6 +70,16 @@ export const NOT_HERMETIC = new Set([
 // child — which would otherwise false-positive as a "missing helper" violation below). `census/` is the
 // out-of-band suite-flake census harness (its own `lib.mjs`, phase*.mjs probes, `fixtures/`, `raw/` logs)
 // — a sibling investigation, not part of this gate.
+//
+// ⚠ Card fa52f555: hand-deriving the discovered test count from `git ls-tree`/`grep -c` (or any other
+// tracked-file count) is UNSUPPORTED and WILL drift from the real number. Two exclusion layers already
+// broke a hand-rolled count in production: (1) this very set — a naive count included every file under
+// `fixtures/`/`census/`, which the walk never even descends into (668 vs. the real 646 at the time); (2)
+// the underscore-prefix rule below (`isUnderscoreExcluded`) — a further ~18 files invisible to a count
+// that only knows about (1) (646 vs. ~628, and even that corrected number wasn't certifiable, since it
+// still didn't account for `looksLikeTest` violations). The ONLY authoritative number is `HERMETIC.length`
+// (computed below) — read it from a real run's own "N/M hermetic daemon tests passed" line, or run this
+// script with `--count` for the same number without running the suite.
 const EXCLUDED_DIR_NAMES = new Set(["fixtures", "census"]);
 
 // A discovered file not underscore-prefixed must carry at least one of these to count as a real test.
@@ -137,18 +147,70 @@ function walkAllMjsFiles(dir, base = dir) {
 // (all of them, today) the name is unchanged from before this card. Exported so a test can
 // positive/negative-control this logic directly, against a synthetic directory, instead of a duplicated
 // copy silently drifting from the real thing.
+// Return shape is additive-only across changes (card fa52f555 added `notHermeticNames`) — existing
+// callers destructure `{ hermetic, violations }` by name, so a new key never breaks them.
 export function discoverHermeticTests(testDir, notHermetic = NOT_HERMETIC) {
   const violations = [];
   const hermetic = [];
+  const notHermeticNames = [];
   for (const rel of walkMjsFiles(testDir).sort()) {
     if (isUnderscoreExcluded(rel)) continue;
     const name = rel.slice(0, -".mjs".length);
-    if (notHermetic.has(name)) continue;
+    if (notHermetic.has(name)) { notHermeticNames.push(name); continue; }
     const source = fs.readFileSync(path.join(testDir, rel), "utf8");
     if (!looksLikeTest(source)) { violations.push(rel); continue; }
     hermetic.push(name);
   }
-  return { hermetic, violations };
+  return { hermetic, violations, notHermeticNames };
+}
+
+// Card fa52f555 Part 2: a test-shaped file placed inside an EXCLUDED_DIR_NAMES subtree is, BY
+// CONSTRUCTION, invisible to `walkMjsFiles`/`discoverHermeticTests`/the DISCOVERY_VIOLATIONS check above —
+// it runs NEVER and SILENTLY, and nothing tells its author so (false coverage, worse than a miscount: card
+// f106f28e is a real instance — test/census/lib-guards.test.mjs — that happens to be a legitimate,
+// deliberately-manual test; nothing previously distinguished it from an accident).
+//
+// A bare "this is deliberate" marker is an unchecked claim — the same shape as a comment asserting safety
+// with no argument attached. Every declaration must carry a non-empty REASON; a marker with an empty or
+// missing reason is treated as ABSENT (still a violation), never silently accepted.
+//
+// Two markers, never conflated, because they mean different things to a reader of the `declared` echo
+// (see the isMain block below):
+//   `loom:gate-exempt: <reason>`  — a REAL test, deliberately run manually / out of band.
+//   `loom:not-a-test: <reason>`   — NOT a test at all; it only trips the `looksLikeTest` heuristic (a
+//     shared lib that throws for input validation, a CLI stub, a child-process fixture that calls
+//     `process.exit(1)` to simulate an outcome). Folding this into `gate-exempt` would misrepresent it in
+//     the echoed count as a manual test that exists, when no such test exists at all.
+const EXCLUDED_DIR_MARKER_RE = /loom:(gate-exempt|not-a-test):[ \t]*(.*)/;
+
+function parseExcludedDirMarker(source) {
+  const match = EXCLUDED_DIR_MARKER_RE.exec(source);
+  if (!match) return null;
+  const reason = match[2].trim();
+  if (!reason) return null; // marker present but no reason — treated as undeclared, per the doc above.
+  return { type: match[1], reason };
+}
+
+// Walks the FULL tree (`walkAllMjsFiles` — the same raw layer `auditDiscoveryAgainstGit` uses), keeps
+// only paths inside an excluded-dir subtree, applies the SAME underscore-exclusion precedence as the main
+// walk (an underscore-prefixed helper already declares itself — no marker needed), then classifies every
+// remaining test-shaped file by its marker. Exported so the regression test can drive it against a
+// synthetic directory, same pattern as `discoverHermeticTests`/`auditDiscoveryAgainstGit`.
+export function findExcludedDirTestShapedFiles(testDir, excludedDirNames = EXCLUDED_DIR_NAMES) {
+  const violations = [];
+  const declared = { gateExempt: [], notATest: [] };
+  for (const rel of walkAllMjsFiles(testDir).sort()) {
+    const parentSegments = rel.split("/").slice(0, -1);
+    if (!parentSegments.some((seg) => excludedDirNames.has(seg))) continue;
+    if (isUnderscoreExcluded(rel)) continue;
+    const source = fs.readFileSync(path.join(testDir, rel), "utf8");
+    if (!looksLikeTest(source)) continue;
+    const marker = parseExcludedDirMarker(source);
+    if (marker?.type === "gate-exempt") { declared.gateExempt.push(rel); continue; }
+    if (marker?.type === "not-a-test") { declared.notATest.push(rel); continue; }
+    violations.push(rel);
+  }
+  return { violations, declared };
 }
 
 // Runs a read-only, local git command with an EXPLICIT cwd (never `process.cwd()`) and returns its
@@ -239,7 +301,7 @@ export function auditDiscoveryAgainstGit(testDir) {
   return { inGitNotWalked, walkedNotInGit };
 }
 
-const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS } = discoverHermeticTests(TEST_DIR);
+const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS, notHermeticNames: NOT_HERMETIC_NAMES } = discoverHermeticTests(TEST_DIR);
 
 // Ceiling — unchanged. `LOOM_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
 const MAX_CONCURRENCY = 8;
@@ -389,6 +451,12 @@ const isMain = selfPath !== null && argvPath !== null && selfPath === argvPath;
 const resolutionThrew = selfResolved.threw || argvResolved.threw;
 
 if (isMain) {
+  // Card fa52f555 Part 1: a `--count`/`--list` invocation does discovery ONLY — no test spawns — so a
+  // manager can read the authoritative number without paying for a full run. Read here, before any of the
+  // loud discovery-integrity refusals below, so those refusals also cover this mode (a count computed over
+  // a broken discovery state would itself be a lie).
+  const countOnly = process.argv.includes("--count") || process.argv.includes("--list");
+
   if (DISCOVERY_VIOLATIONS.length) {
     // Card b122c7d4's positive-control scenario: a file under test/ that is neither underscore-prefixed
     // nor test-shaped. Refuse loudly and name it, rather than silently spawning it (a false pass) or
@@ -404,6 +472,53 @@ if (isMain) {
     // green. "Ran nothing" and "everything passed" must never share an exit code.
     console.error("❌ test-daemon.mjs: discovered ZERO hermetic tests — refusing to report a green suite that ran nothing.");
     process.exit(1);
+  }
+
+  // Card fa52f555 Part 2: a test-shaped file inside fixtures/ or census/ is structurally invisible to the
+  // checks above (they both derive from `walkMjsFiles`, which never descends into an EXCLUDED_DIR_NAMES
+  // subtree) — so it runs never and silently. Refuse loudly, naming every undeclared one, before a single
+  // test spawns; a legitimately manual/out-of-band file must carry a reasoned marker (see
+  // `findExcludedDirTestShapedFiles`'s own doc comment) to be exempted.
+  const excludedDirCheck = findExcludedDirTestShapedFiles(TEST_DIR);
+  if (excludedDirCheck.violations.length) {
+    console.error(`❌ test-daemon.mjs: ${excludedDirCheck.violations.length} test-shaped file(s) under an EXCLUDED_DIR_NAMES subtree (fixtures/, census/) would NEVER run — the discovery walk never descends there, so these are silently dead, not covered by this gate:`);
+    for (const v of excludedDirCheck.violations) console.error(`   - ${v}`);
+    console.error("   Rename it with a leading underscore if it's a helper, add `// loom:not-a-test: <reason>` if it only trips the heuristic (a lib/stub/fixture, not a real test), or `// loom:gate-exempt: <reason>` if it's a real test deliberately run manually / out of band. A marker with no reason does not count.");
+    process.exit(1);
+  }
+  // Card 12bdea9e's reasoning applied one layer in: an exemption with no standing echo decays silently.
+  // Print the declared set on EVERY run (pass or fail, `--count` or not) so it stays auditable rather than
+  // implicitly trusted forever.
+  if (excludedDirCheck.declared.gateExempt.length || excludedDirCheck.declared.notATest.length) {
+    console.log(`ℹ excluded-dir test-shaped files, declared (gate-exempt: ${excludedDirCheck.declared.gateExempt.length}, not-a-test: ${excludedDirCheck.declared.notATest.length}):`);
+    for (const rel of excludedDirCheck.declared.gateExempt) console.log(`   - [gate-exempt] ${rel}`);
+    for (const rel of excludedDirCheck.declared.notATest) console.log(`   - [not-a-test] ${rel}`);
+  }
+
+  if (countOnly) {
+    const rawAll = walkAllMjsFiles(TEST_DIR).length;
+    const walked = walkMjsFiles(TEST_DIR);
+    const excludedDirFilesCount = rawAll - walked.length;
+    const underscoreExcludedCount = walked.filter(isUnderscoreExcluded).length;
+    console.log(`\nDiscovery breakdown for ${TEST_DIR}:`);
+    console.log(`  all .mjs under test/ (raw walk, no exclusions): ${rawAll}`);
+    console.log(`  excluded — under fixtures/ or census/ (never walked): ${excludedDirFilesCount}`);
+    console.log(`  excluded — underscore-prefixed path segment: ${underscoreExcludedCount}`);
+    console.log(`  excluded — NOT_HERMETIC (needs a live daemon/claude, run manually): ${NOT_HERMETIC_NAMES.length}`);
+    console.log(`  discovery violations (neither helper nor test-shaped): ${DISCOVERY_VIOLATIONS.length}`);
+    console.log(`  → hermetic tests this gate will run: ${HERMETIC.length}`);
+    // Card fa52f555: `--count` exists to REPLACE a hand-rolled tracked-file count, so it must not print a
+    // confident number while a known git-vs-walk drift condition sits undetected — but this mode is for a
+    // fast read, so a drift here is a WARNING, not the fatal refusal the real run enforces below.
+    try {
+      const gitAudit = auditDiscoveryAgainstGit(TEST_DIR);
+      if (gitAudit.inGitNotWalked.length || gitAudit.walkedNotInGit.length) {
+        console.warn(`⚠ git-vs-walk drift detected — this count may not reflect what the real gate run would see: ${gitAudit.inGitNotWalked.length} git-tracked file(s) unseen by the walk, ${gitAudit.walkedNotInGit.length} walked file(s) untracked by git.`);
+      }
+    } catch (err) {
+      console.warn(`⚠ could not run the git-vs-walk audit (non-fatal in --count mode): ${err.message}`);
+    }
+    process.exit(0);
   }
 
   // Card e7bcb0df DoD 6: the cross-check must actually run in the real gate path, not just exist as an

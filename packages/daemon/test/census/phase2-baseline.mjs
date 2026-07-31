@@ -1,3 +1,5 @@
+// loom:gate-exempt: card fa52f555 — a real manual probe/test, deliberately run out of band as part of the
+// census investigation harness, never by the daemon's own hermetic gate.
 // Phase 2 (per manager directive #5's renumbering) — baseline census: N=20 full-suite runs at the real
 // gate profile (LOOM_TEST_CONCURRENCY=2, unmodified composition C0). Invoked in SMALL BATCHES (--start/
 // --count) rather than one long-lived process, so a recycled successor can resume from the NDJSON alone

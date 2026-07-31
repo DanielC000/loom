@@ -19,7 +19,7 @@ import { mkdtempManaged, finishAndExit } from "./_tmp-fixture.mjs";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const { discoverHermeticTests, auditDiscoveryAgainstGit } = await import(
+const { discoverHermeticTests, auditDiscoveryAgainstGit, findExcludedDirTestShapedFiles } = await import(
   pathToFileURL(path.join(import.meta.dirname, "..", "scripts", "test-daemon.mjs")).href
 );
 
@@ -240,6 +240,87 @@ const dir = mkdtempManaged("loom-test-daemon-discovery-");
       threw,
     );
   }
+}
+
+// --- Card fa52f555 Part 2: findExcludedDirTestShapedFiles — the excluded-dir loud-refusal guard --------
+// Same synthetic-dir pattern as above — never the real test/ tree. Builds a tree with `fixtures/` and
+// `census/` subdirectories directly under the synthetic root (matching the real EXCLUDED_DIR_NAMES
+// shape) and exercises every classification outcome.
+{
+  const dir = mkdtempManaged("loom-test-daemon-excluded-dir-guard-");
+  fs.mkdirSync(path.join(dir, "fixtures"));
+  fs.mkdirSync(path.join(dir, "census"));
+
+  // [positive control] a marker-less, non-underscore, test-shaped file inside an excluded dir — must be
+  // reported as a violation, the exact false-coverage scenario this guard exists to catch.
+  fs.writeFileSync(
+    path.join(dir, "census", "forgotten.mjs"),
+    'if (1 !== 1) { throw new Error("unreachable"); }\n',
+  );
+  // A marker-shaped file, but the marker's reason is EMPTY — must be treated as undeclared (still a
+  // violation), per the explicit "a marker with no reason does not count" rule.
+  fs.writeFileSync(
+    path.join(dir, "fixtures", "empty-reason.mjs"),
+    '// loom:gate-exempt:\nif (1 !== 1) { throw new Error("unreachable"); }\n',
+  );
+  // [negative control] the SAME file, but WITH a real reason — must be exempted and bucketed as declared.
+  fs.writeFileSync(
+    path.join(dir, "census", "declared-test.mjs"),
+    '// loom:gate-exempt: a real manual test, run out of band\nif (1 !== 1) { throw new Error("unreachable"); }\n',
+  );
+  // A `not-a-test` marker with a real reason — must be exempted into the OTHER bucket, never conflated
+  // with `gate-exempt` (they mean different things in the echoed count).
+  fs.writeFileSync(
+    path.join(dir, "fixtures", "declared-fixture.mjs"),
+    '// loom:not-a-test: a shared lib that only throws for validation, not a real test\nif (1 !== 1) { throw new Error("unreachable"); }\n',
+  );
+  // A non-test-shaped file inside an excluded dir — nothing to flag either way; must be silently ignored.
+  fs.writeFileSync(path.join(dir, "census", "not-test-shaped.mjs"), 'console.log("just a script");\n');
+  // An underscore-prefixed helper inside an excluded dir — already self-declared by the naming convention;
+  // must be silently ignored even though it's test-shaped, same precedence as the main discovery walk.
+  fs.writeFileSync(
+    path.join(dir, "fixtures", "_helper.mjs"),
+    'if (1 !== 1) { throw new Error("unreachable"); }\n',
+  );
+  // A marker-less, non-underscore, test-shaped file OUTSIDE any excluded dir — this function must never
+  // flag it (that's DISCOVERY_VIOLATIONS's job, a different check); scoping must stay to excluded dirs only.
+  fs.writeFileSync(
+    path.join(dir, "real-test.mjs"),
+    'if (1 !== 1) { throw new Error("unreachable"); }\n',
+  );
+
+  const { violations, declared } = findExcludedDirTestShapedFiles(dir);
+
+  check(
+    "[positive control] a marker-less test-shaped file in an excluded dir is refused, named exactly",
+    violations.includes("census/forgotten.mjs"),
+  );
+  check(
+    "a marker with an EMPTY reason is treated as undeclared — reported as a violation, not exempted",
+    violations.includes("fixtures/empty-reason.mjs"),
+  );
+  check("exactly two violations reported (forgotten + empty-reason, nothing else)", violations.length === 2);
+  check(
+    "[negative control] the same test, WITH a reasoned gate-exempt marker, is NOT a violation and lands in the gate-exempt bucket",
+    !violations.includes("census/declared-test.mjs") && declared.gateExempt.includes("census/declared-test.mjs"),
+  );
+  check(
+    "a reasoned not-a-test marker is NOT a violation and lands in the SEPARATE not-a-test bucket",
+    !violations.includes("fixtures/declared-fixture.mjs") && declared.notATest.includes("fixtures/declared-fixture.mjs"),
+  );
+  check("gate-exempt and not-a-test buckets never cross-contaminate", declared.gateExempt.length === 1 && declared.notATest.length === 1);
+  check(
+    "a non-test-shaped file in an excluded dir is silently ignored (not a violation, not declared)",
+    !violations.includes("census/not-test-shaped.mjs") && !declared.gateExempt.includes("census/not-test-shaped.mjs") && !declared.notATest.includes("census/not-test-shaped.mjs"),
+  );
+  check(
+    "an underscore-prefixed helper in an excluded dir is silently ignored even though test-shaped",
+    !violations.includes("fixtures/_helper.mjs"),
+  );
+  check(
+    "a marker-less test-shaped file OUTSIDE any excluded dir is never flagged by this function (out of scope)",
+    !violations.includes("real-test.mjs") && !declared.gateExempt.includes("real-test.mjs") && !declared.notATest.includes("real-test.mjs"),
+  );
 }
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-discovery: ${failures} check(s) failed.`);

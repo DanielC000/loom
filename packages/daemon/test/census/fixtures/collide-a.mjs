@@ -1,3 +1,5 @@
+// loom:not-a-test: card fa52f555 — a child-process fixture spawned BY phase1-forced-probe.mjs, not a
+// standalone test; its node:test shape is deliberately reused to make the probe's harness realistic.
 // Phase 1 step 4 fixture: a KNOWN colliding pair (collide-a.mjs / collide-b.mjs) used to positive-control
 // the forced-pair probe itself. Both write their own identity to the SAME fixed (non-process-unique) path
 // — deliberately violating the per-process-isolation convention every real hermetic test follows — so

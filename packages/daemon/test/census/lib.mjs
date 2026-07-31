@@ -1,3 +1,6 @@
+// loom:not-a-test: card fa52f555 — a shared helper library imported by the census harness's own test-
+// shaped files, not a test itself; only trips the looksLikeTest heuristic via its own input-validation
+// `throw new Error(...)` calls.
 // Shared helpers for the d39db2db suite-flake census + forced-pair probe harness.
 // Reuses the REAL scripts/test-daemon.mjs discovery/exclusion logic (imports its NOT_HERMETIC export)
 // so this harness's file set can never silently drift from the real gate's.

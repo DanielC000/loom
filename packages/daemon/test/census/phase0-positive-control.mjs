@@ -1,3 +1,5 @@
+// loom:gate-exempt: card fa52f555 — a real manual probe/test, deliberately run out of band as part of the
+// census investigation harness, never by the daemon's own hermetic gate.
 // Phase 0 — positive-control the census/probe harness itself, in BOTH directions, before trusting any
 // "clean" result it reports later. Also: the manager's mandatory synthetic-dir-isolation safety check —
 // prove a file placed under test/census/synthetic/ can NEVER be picked up by the REAL gate's discovery

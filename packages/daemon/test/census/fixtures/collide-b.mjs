@@ -1,3 +1,5 @@
+// loom:not-a-test: card fa52f555 — a child-process fixture spawned BY phase1-forced-probe.mjs, see
+// collide-a.mjs's marker for the reasoning.
 // Phase 1 step 4 fixture: see collide-a.mjs's header — this is its deliberate colliding twin.
 import fs from "node:fs";
 import os from "node:os";

@@ -1,3 +1,5 @@
+// loom:gate-exempt: card fa52f555 — a real hermetic test, deliberately run manually / out of band; see
+// the "Not run by the real gate" note below for why it lives in the excluded census/ dir.
 // Card f106f28e — hermetic unit tests for the runIndex-dedup / overlap-flagging / executed-evidence
 // guards added to lib.mjs. Never touches test/*.mjs, src/**, or shared/**  — census-scoped, as directed.
 //

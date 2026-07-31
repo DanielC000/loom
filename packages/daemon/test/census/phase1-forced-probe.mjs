@@ -1,3 +1,5 @@
+// loom:gate-exempt: card fa52f555 — a real manual probe/test, deliberately run out of band as part of the
+// census investigation harness, never by the daemon's own hermetic gate.
 // Phase 1 — forced deterministic probe (re-sequenced ahead of the expensive census per manager directive
 // #3). Cheap: pairs of real files run together repeatedly, not the full 585-file suite.
 //
