@@ -9824,9 +9824,15 @@ export class SessionService {
     const gateKey = `gate:${workerSessionId}`;
     const pending = this.pendingOps.peek(gateKey);
     if (!pending || pending.state !== "running") return; // nothing outstanding to supersede
+    // WORDING: this fires BEFORE the confirm's own outcome is known (see the doc above), and a
+    // same-project peer manager can reach here for a worker it doesn't own (the ownership check runs
+    // LATER and can still refuse — e.g. "not your worker"). So this text must read correctly whether the
+    // confirm goes on to merge OR gets refused — state only what's true unconditionally: a manager in
+    // this project called worker_merge_confirm for this worker, which supersedes the queued self-check
+    // regardless of what that confirm call itself goes on to decide. Never assert a merge happened.
     this.gateSemaphore.cancelQueuedForSession(
       workerSessionId, "worker", callerProjectId, "superseded-by-merge",
-      "the manager decided to merge — this self-check's result would no longer be used",
+      "a manager in this project called worker_merge_confirm for this worker — any queued self-check is superseded regardless of that call's own outcome",
     );
   }
 

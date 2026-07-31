@@ -415,6 +415,98 @@ function makeRepo(repo) {
   await pSelfCheck.catch(() => {});
 }
 
+// ── The gate-superseded nudge's `reason` text must not assert a merge HAPPENED when the confirm that
+//    triggered the supersede is then REFUSED. Sibling of the B2-1 block above, but SAME-project this
+//    time: B2-1's mgrA is in a DIFFERENT project, so supersedeQueuedSelfCheck's own projectId check
+//    refuses it before anything is cancelled. Here mgrA is a PEER manager in the SAME project as
+//    workerB's real owner (mgrB) — that project-level (not ownership-level) scope is DELIBERATE (mirrors
+//    gate_cancel's own scope; see supersedeQueuedSelfCheck's doc) — so this confirm DOES supersede
+//    workerB's queued self-check, even though confirmWorkerMerge itself goes on to refuse the confirm
+//    ("not your worker", checked deeper in the call chain, well after the supersede already fired). The
+//    self-check's own settled `reason` — the exact text also threaded into the worker's
+//    `[loom:gate-superseded]` nudge and into `gate_status`'s cancelled payload — must therefore read
+//    truthfully for this exact case: it must NOT claim a merge happened or was decided, only that a
+//    manager in this project called worker_merge_confirm for this worker. RED-first: this fails against
+//    the pre-fix text ("the manager decided to merge — this self-check's result would no longer be
+//    used") and passes against the corrected text.
+{
+  const sfx = `wording-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-wording-${sfx}`);
+  const db = new Db();
+  dbs.push(db);
+  db.setPlatformConfig({ maxConcurrentGates: 1 });
+
+  const projId = `gc-wd-p-${sfx}`;
+  const mgrB = `gc-wd-mgrb-${sfx}`, mgrA = `gc-wd-mgra-${sfx}`; // PEERS in the SAME project
+  const workerB = `gc-wd-wkr-${sfx}`, taskB = `gc-wd-task-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "WD", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-wd-a-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrA, projectId: projId, agentId: `agent-wd-a-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertAgent({ id: `agent-wd-b-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrB, projectId: projId, agentId: `agent-wd-b-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertAgent({ id: `agent-wd-w-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskB, projectId: projId, title: "WD-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtB = await createWorktree(repo, projId, taskB);
+  worktrees.push(wtB.worktreePath);
+  fs.writeFileSync(path.join(wtB.worktreePath, "feature.txt"), "work\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: wtB.worktreePath });
+  db.insertSession({ id: workerB, projectId: projId, agentId: `agent-wd-w-${sfx}`, engineSessionId: null, title: null, cwd: wtB.worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrB, taskId: taskB, worktreePath: wtB.worktreePath, branch: wtB.branch });
+
+  // A second, unrelated worker (same project) to saturate cap 1, so workerB's own self-check genuinely
+  // queues instead of running immediately.
+  const workerHolder = `gc-wd-hwkr-${sfx}`, taskHolder = `gc-wd-htask-${sfx}`;
+  const repoHolder = path.join(reposDir, "holder");
+  makeRepo(repoHolder);
+  db.insertAgent({ id: `agent-wd-h-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskHolder, projectId: projId, title: "WD-HTASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const wtHolder = await createWorktree(repoHolder, projId, taskHolder);
+  worktrees.push(wtHolder.worktreePath);
+  db.insertSession({ id: workerHolder, projectId: projId, agentId: `agent-wd-h-${sfx}`, engineSessionId: null, title: null, cwd: wtHolder.worktreePath, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: null, taskId: taskHolder, worktreePath: wtHolder.worktreePath, branch: wtHolder.branch });
+
+  let releaseHolder;
+  const holderHold = new Promise((res) => { releaseHolder = res; });
+  const sharedGate = async (_gate, cwd) => {
+    if (cwd === wtHolder.worktreePath) { await holderHold; return { passed: true }; }
+    return { passed: true };
+  };
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+
+  const pHolderRun = sessions.runWorkerGate(workerHolder);
+  await waitUntil(() => sessions.gateQueueForManager(projId).activeCount === 1);
+
+  const pSelfCheck = sessions.runWorkerGate(workerB);
+  await waitUntil(() => sessions.gateQueueForManager(projId).queued.length === 1);
+  check("(wording) workerB's own self-check is queued (setup sanity)", sessions.gateQueueForManager(projId).queued.length === 1);
+
+  // mgrA is a PEER manager (same project) but does NOT own workerB — confirmWorkerMergeTracked must
+  // refuse ("not your worker"), same as B2-1's own assertion shape — but here, UNLIKE B2-1, the queued
+  // self-check DOES get superseded as a side effect, because supersedeQueuedSelfCheck's project-level
+  // scope matches (both mgrA and workerB are in projId). That's the existing, deliberate scope — this
+  // block is about the WORDING of what the worker is then told, not about whether the supersede itself
+  // should fire (it should, and must keep firing).
+  const mergeAttempt = await sessions.confirmWorkerMergeTracked(mgrA, workerB);
+  check("(wording) the same-project peer manager's merge attempt is genuinely refused (not your worker)",
+    mergeAttempt.settled === true && mergeAttempt.ok === false && /not your worker/i.test(String(mergeAttempt.error?.message ?? mergeAttempt.error)));
+
+  const selfCheckSettled = await pSelfCheck;
+  check("(wording) workerB's queued self-check WAS superseded despite the refused confirm (deliberate project-level scope, unchanged)",
+    selfCheckSettled.ok === true && selfCheckSettled.value?.cancelled === true && selfCheckSettled.value?.cancelKind === "superseded-by-merge");
+  const reasonText = String(selfCheckSettled.value?.reason ?? "");
+  check("(wording) the reason text is non-empty (setup sanity — everything downstream reads this string)", reasonText.length > 0);
+  // THE ACTUAL BUG: the pre-fix text asserted "the manager decided to merge" unconditionally — false on
+  // THIS path, where the confirm that triggered the supersede was refused, not decided.
+  check("(wording) the reason text does NOT assert a merge happened or was decided — this confirm was REFUSED",
+    !/decided to merge/i.test(reasonText) && !/\bmerged?\b/i.test(reasonText));
+  check("(wording) the reason text still names the real, unconditional trigger — the worker_merge_confirm call itself, true regardless of that call's own outcome",
+    /worker_merge_confirm/i.test(reasonText) && /regardless/i.test(reasonText));
+
+  releaseHolder("go");
+  await pHolderRun.catch(() => {});
+}
+
 // ── Code Review finding B2-2: gate_cancel's QUEUED branch has no gateType guard (unlike the RUNNING
 //    branch, which explicitly refuses non-worker gates) — so a manager can cancel their OWN worker's
 //    QUEUED merge gate, which throws an uncaught GateCancelledError inside confirmWorkerMerge (only
