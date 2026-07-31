@@ -318,12 +318,18 @@ function makeRepo(repo) {
   });
   check("(refuse) found project B's live gate op", !!liveEntry);
 
-  const cancelFromA = await sessions.cancelGateOp(mgrA, liveEntry.opId);
-  check("(refuse) a DIFFERENT project's manager is REFUSED", cancelFromA.outcome === "refused");
-  // Pin the REASON, not just the outcome (card 8f58c354) — a future refusal branch could produce the same
-  // "refused" outcome for a different reason (e.g. an auth check unrelated to project scope) and this
-  // assertion would read green while no longer proving cross-project scoping actually fired.
-  check("(refuse) the reason names project scope specifically", /different project/i.test(cancelFromA.reason ?? ""));
+  // Guard: a timed-out waitUntil yields undefined — dereferencing liveEntry.opId unguarded is the exact
+  // shape card f5767961 fixed (B2-2's crash). Skip the dependent assertions rather than crash the file.
+  if (liveEntry) {
+    const cancelFromA = await sessions.cancelGateOp(mgrA, liveEntry.opId);
+    check("(refuse) a DIFFERENT project's manager is REFUSED", cancelFromA.outcome === "refused");
+    // Pin the REASON, not just the outcome (card 8f58c354) — a future refusal branch could produce the same
+    // "refused" outcome for a different reason (e.g. an auth check unrelated to project scope) and this
+    // assertion would read green while no longer proving cross-project scoping actually fired.
+    check("(refuse) the reason names project scope specifically", /different project/i.test(cancelFromA.reason ?? ""));
+  } else {
+    console.log("SKIP  (refuse) cancel assertions — setup sanity check above already failed");
+  }
   // The actual same-project running-op cancel path (accept + verify) is covered by the never-settling
   // test below, which also exercises cancelGateOp's RUNNING branch end to end.
 
@@ -468,24 +474,33 @@ function makeRepo(repo) {
   const mergeEntry = await waitUntil(() => sessions.gateQueueForManager(projId).queued.find((e) => e.gateType === "merge"));
   check("(B2-2) the MERGE gate itself is queued (setup sanity)", !!mergeEntry);
 
-  const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
-  check("(B2-2) cancelling a QUEUED merge gate is refused, never silently succeeds", cancelResult.outcome === "not_cancelled");
-  // Pin the REASON (card 8f58c354): "not_cancelled" also fires from a genuinely DIFFERENT branch — a
-  // "no longer queued" admission/settle race (see the never-settling-kill block below for that reason's
-  // own text). Without pinning which branch produced it, a future race there would produce the SAME
-  // coarse outcome this assertion checks, and this test would keep reading green while no longer
-  // exercising the gateType guard it exists to cover — precisely the false-green shape card 8d585277 was
-  // fixed for, one level up in its own regression coverage.
-  check("(B2-2) the reason names the gateType-scope refusal, not a 'no longer queued' race",
-    /gate is not supported/i.test(cancelResult.reason ?? "") && !/no longer queued/i.test(cancelResult.reason ?? ""));
+  // Guard: this is the exact site that fired live (op 6e29e337, card f5767961) — a timed-out waitUntil
+  // yields undefined, and dereferencing mergeEntry.opId unguarded turned a soft, correctly-reported
+  // assertion failure into a TypeError that killed the whole suite. Skip the dependent assertions instead.
+  if (mergeEntry) {
+    const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
+    check("(B2-2) cancelling a QUEUED merge gate is refused, never silently succeeds", cancelResult.outcome === "not_cancelled");
+    // Pin the REASON (card 8f58c354): "not_cancelled" also fires from a genuinely DIFFERENT branch — a
+    // "no longer queued" admission/settle race (see the never-settling-kill block below for that reason's
+    // own text). Without pinning which branch produced it, a future race there would produce the SAME
+    // coarse outcome this assertion checks, and this test would keep reading green while no longer
+    // exercising the gateType guard it exists to cover — precisely the false-green shape card 8d585277 was
+    // fixed for, one level up in its own regression coverage.
+    check("(B2-2) the reason names the gateType-scope refusal, not a 'no longer queued' race",
+      /gate is not supported/i.test(cancelResult.reason ?? "") && !/no longer queued/i.test(cancelResult.reason ?? ""));
+  } else {
+    console.log("SKIP  (B2-2) cancel assertions — setup sanity check above already failed");
+  }
 
   releaseHolder("go");
   await pHolderRun.catch(() => {});
   const mergeResult = await pMergeConfirm;
-  check("(B2-2) the merge itself is NEVER misreported as 'gate cancelled' — it settles for real",
-    !(mergeResult.ok === false && /gate cancelled/i.test(String(mergeResult.error?.message ?? mergeResult.error))));
-  check("(B2-2) the merge actually completed normally (refused cancel ≠ broken merge)",
-    mergeResult.settled === true && mergeResult.ok === true && mergeResult.value?.merged === true);
+  if (mergeEntry) {
+    check("(B2-2) the merge itself is NEVER misreported as 'gate cancelled' — it settles for real",
+      !(mergeResult.ok === false && /gate cancelled/i.test(String(mergeResult.error?.message ?? mergeResult.error))));
+    check("(B2-2) the merge actually completed normally (refused cancel ≠ broken merge)",
+      mergeResult.settled === true && mergeResult.ok === true && mergeResult.value?.merged === true);
+  }
 }
 
 // ── (3) The never-settling kill case: cancelGateOp must report NOT cancelled, and the slot must stay
@@ -539,27 +554,79 @@ function makeRepo(repo) {
   const liveEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running[0]);
   check("(never-settling) the self-check is RUNNING (admitted) before cancel", !!liveEntry);
 
-  // "admitted" (RUNNING in the semaphore) fires BEFORE `fn` itself starts — runWorkerGate does its own
-  // real git work (computeWorktreeGateStamp) inside `fn` before ever invoking the injected gate function —
-  // so `cancelGateOp`'s (deliberately tiny, test-only) verify bound can genuinely elapse and this call can
-  // RETURN before the fake gate has even been invoked yet. That race is exactly why `cancelResult` and
-  // `abortObservedPromise` are asserted INDEPENDENTLY below, each on its own real completion signal, rather
-  // than assuming one implies the timing of the other.
-  const cancelResult = await sessions.cancelGateOp(workerId /* any manager id works here — same project */, liveEntry.opId);
-  check("(never-settling) cancelGateOp reports NOT cancelled (kill unverified)", cancelResult.outcome === "not_cancelled");
-  check("(never-settling) the reason names the verification bound, not a generic failure", /not verified dead/i.test(cancelResult.reason ?? ""));
-  await abortObservedPromise; // no timeout — see its own doc above
-  check("(never-settling) cancel was requested and (eventually) observed by the fake gate", true);
+  // Guard: a timed-out waitUntil yields undefined — dereferencing liveEntry.opId unguarded is the same
+  // shape card f5767961 fixed. Skip the dependent assertions rather than crash the file. (Also: if
+  // liveEntry were undefined, cancelGateOp below would never be called, so abortObservedPromise would
+  // never resolve — awaiting it unconditionally would hang the whole suite, not just fail an assertion.)
+  if (liveEntry) {
+    // "admitted" (RUNNING in the semaphore) fires BEFORE `fn` itself starts — runWorkerGate does its own
+    // real git work (computeWorktreeGateStamp) inside `fn` before ever invoking the injected gate function —
+    // so `cancelGateOp`'s (deliberately tiny, test-only) verify bound can genuinely elapse and this call can
+    // RETURN before the fake gate has even been invoked yet. That race is exactly why `cancelResult` and
+    // `abortObservedPromise` are asserted INDEPENDENTLY below, each on its own real completion signal, rather
+    // than assuming one implies the timing of the other.
+    const cancelResult = await sessions.cancelGateOp(workerId /* any manager id works here — same project */, liveEntry.opId);
+    check("(never-settling) cancelGateOp reports NOT cancelled (kill unverified)", cancelResult.outcome === "not_cancelled");
+    check("(never-settling) the reason names the verification bound, not a generic failure", /not verified dead/i.test(cancelResult.reason ?? ""));
+    await abortObservedPromise; // no timeout — see its own doc above
+    check("(never-settling) cancel was requested and (eventually) observed by the fake gate", true);
 
-  // OBSERVED STATE, not wall-clock: the semaphore must still show this op RUNNING (slot NOT freed) — a
-  // freed slot here would mean the daemon believes there's room for another op in a worktree whose work
-  // may still genuinely be executing, which is strictly worse than not cancelling at all.
-  const snapAfter = sessions.gateQueueForManager(projId);
-  check("(never-settling) the op is STILL reported running — the slot was NOT freed on an unverified kill",
-    snapAfter.running.some((e) => e.opId === liveEntry.opId));
-  check("(never-settling) activeCount still reflects the held (unfreed) slot", snapAfter.activeCount === 1);
+    // OBSERVED STATE, not wall-clock: the semaphore must still show this op RUNNING (slot NOT freed) — a
+    // freed slot here would mean the daemon believes there's room for another op in a worktree whose work
+    // may still genuinely be executing, which is strictly worse than not cancelling at all.
+    const snapAfter = sessions.gateQueueForManager(projId);
+    check("(never-settling) the op is STILL reported running — the slot was NOT freed on an unverified kill",
+      snapAfter.running.some((e) => e.opId === liveEntry.opId));
+    check("(never-settling) activeCount still reflects the held (unfreed) slot", snapAfter.activeCount === 1);
+  } else {
+    console.log("SKIP  (never-settling) cancel/abort assertions — setup sanity check above already failed");
+  }
 
   void pRun; // deliberately left unresolved — this session/db is torn down below regardless
+}
+
+// ── Positive control for the fix (card f5767961 DoD 3): force a waitUntil call to genuinely time out —
+//    a predicate that can NEVER become true, since this SessionService instance never runs a single gate
+//    op — with a short bound so this doesn't cost the real 8s production budget, then prove the guarded
+//    shape used at all three sites fixed above (the "refuse" block, B2-2, and "never-settling") now
+//    reports a clean FAIL and skips, rather than dereferencing undefined and crashing. "The suite went
+//    green" can't tell a repaired guard from a run that simply never hit the race — this deliberately
+//    hits it. Uses its own local check-alike so the FORCED sanity FAIL below doesn't pollute this file's
+//    real pass/fail signal; what's asserted with the real `check` is the control's own outcome.
+{
+  const sfx = `timeout-control-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const db = new Db();
+  dbs.push(db);
+  // Nothing is ever inserted or enqueued on this fresh SessionService — gateQueueForManager legitimately
+  // reports an empty queue forever, so this waitUntil is GUARANTEED to exhaust its (short, test-only)
+  // budget and yield undefined — deterministically reproducing the "op hadn't queued yet" shape from the
+  // live incident, without waiting out the real 8s production timeout or racing real host load.
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), {});
+
+  let controlFailures = 0;
+  const controlCheck = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) controlFailures++; };
+
+  const mergeEntry = await waitUntil(() => sessions.gateQueueForManager(`gc-tc-${sfx}`).queued.find((e) => e.gateType === "merge"), { intervalMs: 5, timeoutMs: 100 });
+  controlCheck("(timeout control) the forced-timeout waitUntil genuinely gives up and yields undefined", mergeEntry === undefined);
+
+  // The FIXED shape: guard before dereferencing — mirrors the if/else added at the three sites above.
+  let tookSkipBranch = false, threwInFixedShape = false;
+  try {
+    if (mergeEntry) { void mergeEntry.opId; } else { tookSkipBranch = true; }
+  } catch { threwInFixedShape = true; }
+  controlCheck("(timeout control) the fixed (guarded) shape takes the skip branch, never throws", tookSkipBranch && !threwInFixedShape);
+
+  // Not vacuous: the OLD unguarded shape (what actually shipped and crashed live, op 6e29e337) DOES throw
+  // a TypeError on this same undefined value — proves this control could have caught the original bug.
+  let oldShapeThrew = false;
+  try { void mergeEntry.opId; } catch (e) { oldShapeThrew = e instanceof TypeError; }
+  controlCheck("(timeout control) the OLD unguarded shape DOES throw TypeError here — control is not vacuous", oldShapeThrew);
+
+  // Assert on the CONTROL's own outcome with the real `check` — this is what should affect the suite's
+  // real pass/fail signal, not the deliberately-forced sanity FAIL inside the control itself.
+  check("(timeout control) forced timeout: sanity check correctly failed, the fixed guard skipped cleanly without throwing, and the old unguarded shape is proven non-vacuous",
+    controlFailures === 0);
 }
 
 console.log(failures === 0
