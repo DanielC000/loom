@@ -16,10 +16,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        column), project_id=NULL. `CREATE TABLE IF NOT EXISTS` alone is a silent no-op against this shape
 //        (per project memory verify-schema-change-against-upgraded-db) — this is the case that would ship
 //        green without the explicit migratePendingGateOps() ALTER.
+//   (1c) SCHEMA UPGRADE, card 4c5bf820's own case: a pre-existing DB with TODAY's real 10-column shape
+//        (the (1b) upgrade already applied — no verdict/verdict_payload_json yet), carrying a genuine
+//        SETTLED row from before this card, gains the two verdict columns via ALTER on open; the
+//        pre-existing settled row backfills verdict=null/verdictPayload=null (no verdict fabricated for a
+//        row that never recorded one), and a FRESH op settled WITH a verdict against the SAME migrated DB
+//        round-trips its full payload — proving the migration doesn't just avoid crashing, the new write
+//        path genuinely works post-upgrade, without disturbing the untouched legacy row alongside it.
 //   (2) CRUD: insertPendingGateOp/markPendingGateOpSurfaced/settlePendingGateOp/evictPendingGateOpDeadOwner/
 //       markPendingGateOpOrphaned/listPendingGateOps/listSurfacedPendingGateOps/findPendingGateOpByOpId all
 //       round-trip correctly; re-inserting the SAME op_id upserts in place rather than duplicating; every
 //       terminal transition UPDATES the row (never deletes it) — the row survives its own terminal state.
+//       (card 4c5bf820) settlePendingGateOp(opId, verdict) round-trips all FOUR verdict kinds (pass/fail/
+//       cancelled/error) with their full JSON payload; settlePendingGateOp(opId) with no verdict arg (the
+//       "merge" kind's own call site, and every pre-card call) leaves verdict/verdictPayload null; a
+//       genuinely CORRUPT stored verdict_payload_json reads back as "no payload" rather than throwing, and
+//       never contaminates a DIFFERENT, healthy row's own read.
 //   (3) reconcileOrphanedGateOps: a row that is BOTH surfaced_pending AND still state='pending' pushes the
 //       correct synthetic terminal nudge to its owning session and is marked 'orphaned-by-restart' (NOT
 //       deleted) — for BOTH "gate" (to the worker) and "merge" (to the manager) kinds. A row that already
@@ -108,7 +120,7 @@ const createDbFile = path.join(tmpHome, "create.db");
     const tables = raw2.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
     check("(1a) pending_gate_ops now exists on the upgraded (table-less) DB", tables.includes("pending_gate_ops"));
     const cols = raw2.prepare("PRAGMA table_info(pending_gate_ops)").all().map((c) => c.name);
-    check("(1a) the FRESH table has all 10 columns, including the three added ones", ["project_id", "state", "surfaced_pending"].every((c) => cols.includes(c)));
+    check("(1a) the FRESH table has every added column, incl. project_id/state/surfaced_pending and (card 4c5bf820) verdict/verdict_payload_json", ["project_id", "state", "surfaced_pending", "verdict", "verdict_payload_json"].every((c) => cols.includes(c)));
     raw2.close();
   }
   try { createdDb?.close(); } catch { /* ignore */ }
@@ -170,6 +182,77 @@ const upgradeDbFile = path.join(tmpHome, "upgrade.db");
   try { upgradedDb?.close(); } catch { /* ignore */ }
 }
 
+// ===== (1c) SCHEMA UPGRADE, card 4c5bf820's own case: a pre-existing DB with TODAY's real 10-column
+// pending_gate_ops shape (op_id/kind/key/owner_session_id/task_id/branch/started_at/project_id/state/
+// surfaced_pending — i.e. the (1b) upgrade already applied, no verdict/verdict_payload_json yet) — the
+// shape EVERY installed daemon actually has right now, carrying a genuine SETTLED row from before this
+// card. Per project memory verify-schema-change-against-upgraded-db: exercise against a copy of this real
+// pre-migration shape, not just a fresh DB (which never had a "before" state to be blind to). =====
+const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
+{
+  const raw = new Database(verdictUpgradeDbFile);
+  raw.pragma("journal_mode = WAL");
+  raw.exec(`
+    CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, repo_path TEXT NOT NULL, vault_path TEXT NOT NULL, config_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, archived_at TEXT);
+    CREATE TABLE agents (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), name TEXT NOT NULL, startup_prompt TEXT NOT NULL DEFAULT '', position INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE sessions (id TEXT PRIMARY KEY, project_id TEXT NOT NULL REFERENCES projects(id), agent_id TEXT NOT NULL REFERENCES agents(id), engine_session_id TEXT, title TEXT, cwd TEXT NOT NULL, process_state TEXT NOT NULL DEFAULT 'none', resumability TEXT NOT NULL DEFAULT 'unknown', busy INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, last_activity TEXT NOT NULL, last_error TEXT, role TEXT);
+    CREATE TABLE pending_gate_ops (
+      op_id TEXT PRIMARY KEY,
+      kind TEXT NOT NULL,
+      key TEXT NOT NULL,
+      owner_session_id TEXT NOT NULL,
+      task_id TEXT,
+      branch TEXT,
+      started_at TEXT NOT NULL,
+      project_id TEXT,
+      state TEXT NOT NULL DEFAULT 'pending',
+      surfaced_pending INTEGER NOT NULL DEFAULT 1
+    );
+  `);
+  // A REAL settled row from before card 4c5bf820 — this is the case that matters most: a legacy row that
+  // already reached its terminal state under the OLD (no-verdict) shape must NOT grow a fabricated verdict
+  // once the columns exist.
+  raw.prepare(
+    "INSERT INTO pending_gate_ops (op_id,kind,key,owner_session_id,task_id,branch,started_at,project_id,state,surfaced_pending) VALUES (?,?,?,?,?,?,?,?,?,?)",
+  ).run("pre-verdict-settled-1", "gate", "gate:pre-verdict-worker", "pre-verdict-worker", "pre-verdict-task", "loom/pre-verdict-task", now, "proj-legacy", "settled", 1);
+  const cols = raw.prepare("PRAGMA table_info(pending_gate_ops)").all().map((c) => c.name);
+  check("(1c) precondition: the pre-existing table has the CURRENT 10 columns but NOT verdict/verdict_payload_json yet", cols.length === 10 && !cols.includes("verdict") && !cols.includes("verdict_payload_json"));
+  raw.close();
+}
+{
+  let ctorError = null;
+  let verdictUpgradedDb;
+  try { verdictUpgradedDb = new Db(verdictUpgradeDbFile); } catch (err) { ctorError = err; }
+  check("(1c) constructing Db against the 10-column pre-verdict DB does not throw", ctorError === null);
+  if (!ctorError) {
+    const raw2 = new Database(verdictUpgradeDbFile, { readonly: true });
+    const cols = raw2.prepare("PRAGMA table_info(pending_gate_ops)").all().map((c) => c.name);
+    check("(1c) the ALTER added verdict + verdict_payload_json to the EXISTING table", cols.includes("verdict") && cols.includes("verdict_payload_json"));
+    raw2.close();
+
+    const legacy = verdictUpgradedDb.findPendingGateOpByOpId("pre-verdict-settled-1");
+    check("(1c) the pre-existing SETTLED row survives the ALTER (data preserved)", legacy.kind === "found" && legacy.record.state === "settled");
+    check("(1c) the legacy settled row backfills verdict=null — no verdict was ever recorded for it, and none may be fabricated", legacy.record.verdict === null);
+    check("(1c) the legacy settled row backfills verdictPayload=null too", legacy.record.verdictPayload === null);
+
+    // A FRESH op, settled WITH a verdict AFTER migration, against this SAME migrated DB — proves the
+    // migration doesn't just avoid crashing, the new write path genuinely works post-upgrade.
+    verdictUpgradedDb.insertPendingGateOp({ opId: "post-migration-op-1", kind: "gate", key: "gate:post-migration-worker", ownerSessionId: "post-migration-worker", projectId: "proj-legacy", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+    verdictUpgradedDb.settlePendingGateOp("post-migration-op-1", {
+      kind: "pass",
+      payload: { durationMs: 4200, validatedHead: "deadbeef", steps: [{ step: "pnpm test", durationMs: 4200, status: 0 }], outputTail: "42 passed" },
+    });
+    const fresh = verdictUpgradedDb.findPendingGateOpByOpId("post-migration-op-1");
+    check("(1c) a FRESH op settled post-migration carries the real verdict", fresh.kind === "found" && fresh.record.verdict === "pass");
+    check("(1c) ...and the full payload round-trips (durationMs/validatedHead/steps/outputTail)", fresh.record.verdictPayload?.durationMs === 4200 && fresh.record.verdictPayload?.validatedHead === "deadbeef" && fresh.record.verdictPayload?.steps?.length === 1 && fresh.record.verdictPayload?.outputTail === "42 passed");
+
+    // The pre-existing legacy row is UNTOUCHED by the fresh op's write — still verdict=null.
+    const legacyAfter = verdictUpgradedDb.findPendingGateOpByOpId("pre-verdict-settled-1");
+    check("(1c) the legacy row is still verdict=null after a DIFFERENT op writes a real verdict — no cross-row leakage", legacyAfter.record.verdict === null);
+  }
+  try { verdictUpgradedDb?.close(); } catch { /* ignore */ }
+}
+
 // ===== (2) CRUD against a fresh Db instance =====
 {
   const db = new Db(path.join(tmpHome, "crud.db"));
@@ -190,6 +273,50 @@ const upgradeDbFile = path.join(tmpHome, "upgrade.db");
   check("(2) settlePendingGateOp marks state='settled'", db.listPendingGateOps()[0].state === "settled");
   check("(2) the row is NEVER deleted by settling — it survives its own terminal state", db.listPendingGateOps().length === 1);
   check("(2) a settled row drops out of listSurfacedPendingGateOps (no longer 'pending')", !db.listSurfacedPendingGateOps().some((r) => r.opId === "op-a"));
+  // (card 4c5bf820) settlePendingGateOp called with NO verdict arg (the backward-compat overload, e.g. the
+  // "merge" onSettle call site) leaves verdict/verdictPayload null — never a fabricated value.
+  check("(2, card 4c5bf820) settlePendingGateOp(opId) with no verdict arg leaves verdict=null", db.listPendingGateOps()[0].verdict === null && db.listPendingGateOps()[0].verdictPayload === null);
+
+  // ===== (2, card 4c5bf820) settlePendingGateOp(opId, verdict) — the FOUR verdict kinds round-trip, and a
+  // corrupt/unparseable stored payload fails closed to "no payload" rather than throwing =====
+  db.insertPendingGateOp({ opId: "verdict-pass", kind: "gate", key: "gate:s-pass", ownerSessionId: "s-pass", projectId: "proj-1", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  db.settlePendingGateOp("verdict-pass", { kind: "pass", payload: { durationMs: 1234, validatedHead: "cafebabe", headWarning: undefined, steps: [{ step: "pnpm test", durationMs: 1234, status: 0 }], outputTail: "ok" } });
+  const passRow = db.findPendingGateOpByOpId("verdict-pass").record;
+  check("(2, verdict pass) verdict='pass', state='settled'", passRow.verdict === "pass" && passRow.state === "settled");
+  check("(2, verdict pass) payload round-trips durationMs/validatedHead/steps/outputTail", passRow.verdictPayload.durationMs === 1234 && passRow.verdictPayload.validatedHead === "cafebabe" && passRow.verdictPayload.steps.length === 1 && passRow.verdictPayload.outputTail === "ok");
+  check("(2, verdict pass) an omitted (undefined) payload field is genuinely absent from the round-trip, not a fabricated null", !("headWarning" in passRow.verdictPayload));
+
+  db.insertPendingGateOp({ opId: "verdict-fail", kind: "gate", key: "gate:s-fail", ownerSessionId: "s-fail", projectId: "proj-1", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  db.settlePendingGateOp("verdict-fail", { kind: "fail", payload: { reason: "build gate failed", durationMs: 500, gateDetail: { phase: "test", failedStep: "pnpm test", exitCode: 1, timedOut: false } } });
+  const failRow = db.findPendingGateOpByOpId("verdict-fail").record;
+  check("(2, verdict fail) verdict='fail' with reason + gateDetail", failRow.verdict === "fail" && failRow.verdictPayload.reason === "build gate failed" && failRow.verdictPayload.gateDetail.failedStep === "pnpm test");
+
+  db.insertPendingGateOp({ opId: "verdict-cancelled", kind: "gate", key: "gate:s-cancel", ownerSessionId: "s-cancel", projectId: "proj-1", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  db.settlePendingGateOp("verdict-cancelled", { kind: "cancelled", payload: { reason: "cancelled by manager while running" } });
+  const cancelledRow = db.findPendingGateOpByOpId("verdict-cancelled").record;
+  check("(2, verdict cancelled) verdict='cancelled', never 'fail' — a cancel must not be mistakable for a failure", cancelledRow.verdict === "cancelled" && cancelledRow.verdict !== "fail" && cancelledRow.verdictPayload.reason === "cancelled by manager while running");
+
+  db.insertPendingGateOp({ opId: "verdict-error", kind: "gate", key: "gate:s-error", ownerSessionId: "s-error", projectId: "proj-1", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  db.settlePendingGateOp("verdict-error", { kind: "error", payload: { reason: "gate errored: ENOENT" } });
+  const errorRow = db.findPendingGateOpByOpId("verdict-error").record;
+  check("(2, verdict error) verdict='error', distinct from 'fail'/'cancelled'", errorRow.verdict === "error" && errorRow.verdictPayload.reason === "gate errored: ENOENT");
+
+  // A row with a genuinely CORRUPT verdict_payload_json (hand-written directly, bypassing settlePendingGateOp
+  // entirely — the shape a real disk-level corruption or a future schema drift could produce) must read back
+  // as "no payload", NEVER throw and take down every OTHER op's gate_status lookup with it.
+  db.insertPendingGateOp({ opId: "verdict-corrupt", kind: "gate", key: "gate:s-corrupt", ownerSessionId: "s-corrupt", projectId: "proj-1", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
+  db.settlePendingGateOp("verdict-corrupt", { kind: "pass", payload: { durationMs: 1 } });
+  {
+    const raw3 = new Database(path.join(tmpHome, "crud.db"));
+    raw3.prepare("UPDATE pending_gate_ops SET verdict_payload_json = ? WHERE op_id = ?").run("{not valid json", "verdict-corrupt");
+    raw3.close();
+  }
+  let corruptReadError = null;
+  let corruptRow;
+  try { corruptRow = db.findPendingGateOpByOpId("verdict-corrupt"); } catch (err) { corruptReadError = err; }
+  check("(2, corrupt payload) reading a row with malformed verdict_payload_json does NOT throw", corruptReadError === null);
+  check("(2, corrupt payload) it reads back verdict='pass' (the discriminator column is untouched) but verdictPayload=null (fails closed, never a partial/garbage object)", corruptRow?.kind === "found" && corruptRow.record.verdict === "pass" && corruptRow.record.verdictPayload === null);
+  check("(2, corrupt payload) a DIFFERENT, healthy verdict row is unaffected by the corrupt one", db.findPendingGateOpByOpId("verdict-pass").record.verdictPayload.durationMs === 1234);
 
   db.insertPendingGateOp({ opId: "op-b", kind: "merge", key: "merge:s2", ownerSessionId: "s2", projectId: "proj-1", taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: false });
   db.evictPendingGateOpDeadOwner("op-b");

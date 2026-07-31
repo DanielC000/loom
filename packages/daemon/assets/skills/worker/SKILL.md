@@ -130,7 +130,11 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
      depth, not a stuck run. Compare it against how long this project's gate normally takes in that SAME
      phase before concluding it's wedged; a long wait behind a shared concurrency cap is routine, not proof
      of a stall. This is a CHECK, not a replacement for the nudge — don't poll it on a timer; use it when
-     you're genuinely deciding whether to keep waiting or escalate.
+     you're genuinely deciding whether to keep waiting or escalate. **Once your op's `state` reads
+     `"settled"`, `gate_status` also hands back the actual verdict** — pass/fail, duration, per-step
+     timings, a bounded output tail — not just the state word. If a completion nudge never arrived, or you
+     lost track of one, this is how you recover the result without re-running the gate: don't treat a
+     `"settled"` state as a dead end that forces a fresh `run_gate` call.
    - **A parked `run_gate` can end in a cancelled/superseded nudge instead of a pass/fail — that is NOT a
      failure.** Your manager can cancel a gate op it can see is now redundant (e.g. it already decided to
      merge, making your self-check moot) — you'll get a distinct nudge for this rather than an ordinary

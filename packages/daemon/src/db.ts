@@ -554,6 +554,18 @@ CREATE TABLE IF NOT EXISTS wakes (
 -- migrateWakes/migrateCompanionMessages) is REQUIRED for every DB opened since then — CREATE TABLE IF NOT
 -- EXISTS alone would silently no-op the column-add on any such DB. Contrast poll_jobs below, which really
 -- is brand-new and needs no ALTER.
+-- verdict/verdict_payload_json (card 4c5bf820) let a SETTLED "gate" (worker self-check) row carry its
+-- terminal result — pass/fail/error/cancelled + duration + per-step timings + a bounded output tail —
+-- readable via gate_status without the [loom:gate-done]/[loom:gate-failed] nudge being the only carrier.
+-- verdict stays its OWN column (the discriminator gate_status branches on: NULL means "no verdict
+-- recorded" — every legacy row, every "merge" row today, or a "gate" row that hasn't settled yet — never
+-- fabricate one from a partially-parsed payload). Everything else rides in ONE JSON blob
+-- (verdict_payload_json, see PendingGateOpVerdict's own doc, in this file's TS below, for its shape)
+-- rather than one column per field: nothing queries these field-by-field (always read whole, by opId), and
+-- a payload blob means a FUTURE verdict field (e.g. a mainline/suite sha) is a JSON addition, not another
+-- migration. Both columns stay NULL for a "merge" row — that kind's own verdict-surfacing is unchanged by
+-- this card (see confirmWorkerMergeTracked's own onSettle, which still calls settlePendingGateOp with no
+-- payload).
 CREATE TABLE IF NOT EXISTS pending_gate_ops (
   op_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,             -- "gate" | "merge"
@@ -564,10 +576,13 @@ CREATE TABLE IF NOT EXISTS pending_gate_ops (
   started_at TEXT NOT NULL,
   project_id TEXT,                                 -- added by migratePendingGateOps on an upgraded DB
   state TEXT NOT NULL DEFAULT 'pending',            -- added by migratePendingGateOps on an upgraded DB
-  surfaced_pending INTEGER NOT NULL DEFAULT 1       -- added by migratePendingGateOps; legacy rows backfill
+  surfaced_pending INTEGER NOT NULL DEFAULT 1,      -- added by migratePendingGateOps; legacy rows backfill
                                                      -- to 1 — under the OLD shape a row's mere EXISTENCE
                                                      -- meant "surfaced pending", so a leftover legacy row
                                                      -- must still be swept by reconcileOrphanedGateOps
+  verdict TEXT,                                     -- added by migratePendingGateOps; 'pass'|'fail'|'error'|
+                                                     -- 'cancelled', NULL until a "gate" op settles with one
+  verdict_payload_json TEXT                         -- added by migratePendingGateOps; see PendingGateOpVerdict
 );
 -- Local poll-job triggers (agent-tooling epic P3): the daemon PollService periodically fetches 'path' on
 -- 'connection_id' (through the SAME server-side P2 authenticated_request path — never a second outbound-
@@ -1599,6 +1614,12 @@ const PENDING_GATE_OPS_ADDED_COLUMNS: Record<string, string> = {
   project_id: "TEXT",
   state: "TEXT NOT NULL DEFAULT 'pending'",
   surfaced_pending: "INTEGER NOT NULL DEFAULT 1",
+  // Card 4c5bf820 (settled-gate-verdict readability) — both nullable, both NULL on every legacy row (no
+  // honest verdict exists for a row that settled before this card) exactly like `project_id`'s own
+  // no-honest-default nullable backfill just above. See the CREATE TABLE doc for why the shape is
+  // discriminator-column + one JSON blob rather than one column per field.
+  verdict: "TEXT",
+  verdict_payload_json: "TEXT",
 };
 
 /** Columns added to `companion_messages` after its initial ship (unified cross-channel chat, card
@@ -1731,6 +1752,43 @@ export interface ContextNudgeState {
  *  for what each value means and which call site writes it. Never re-mutated once terminal. */
 export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart";
 
+/** How a settled "gate" (worker self-check) op actually resolved — the `verdict` column's own value
+ *  (card 4c5bf820). `"pass"`/`"fail"` are a real, completed `run_gate` verdict; `"cancelled"` mirrors
+ *  {@link WorkerGateResult.cancelled} (a manager's `gate_cancel`, or auto-supersede-on-merge — no verdict
+ *  was ever reached, must never be read as a failure); `"error"` means the run() closure itself threw
+ *  (an unexpected exception, not an ordinary gate failure). Never written for a "merge" row today (see
+ *  the schema doc) — a `null` `verdict` column value is the ONLY thing meaning "no verdict recorded". */
+export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
+
+/**
+ * The `verdict_payload_json` column's parsed shape (card 4c5bf820) — everything about a settled "gate"
+ * op's outcome that doesn't need its own queryable column (see the `pending_gate_ops` schema doc for why
+ * this is one JSON blob, not one column per field). Every field is optional because which ones are
+ * meaningful depends on `verdict`: a `"pass"`/`"fail"` carries `durationMs`/`validatedHead`/`steps`/
+ * `outputTail` (mirrors {@link WorkerGateResult}'s own `ran:true` fields); `"fail"` additionally carries
+ * `gateDetail` (the SAME rich diagnostic — phase/failedStep/failingTest/exitCode/signal/timedOut — the
+ * `[loom:gate-failed]` nudge already embeds); `"cancelled"`/`"error"` carry `reason` only. A row written
+ * before this card, or a "merge" row (verdict-population is "gate"-kind only), has NO payload at all —
+ * `verdictPayload` reads back `null`, never a fabricated shape.
+ */
+export interface PendingGateOpVerdict {
+  reason?: string;
+  durationMs?: number;
+  validatedHead?: string;
+  headWarning?: string;
+  steps?: { step: string; durationMs: number | null; status: number | null }[];
+  outputTail?: string;
+  gateDetail?: {
+    phase?: string;
+    failedStep?: string;
+    failingTest?: string;
+    failingTestReason?: string;
+    exitCode?: number | null;
+    signal?: string | null;
+    timedOut?: boolean;
+  };
+}
+
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and
  *  SessionService.reconcileOrphanedGateOps (card edc1ec12, generalized by card e3e40167). */
 export interface PendingGateOp {
@@ -1749,6 +1807,18 @@ export interface PendingGateOp {
    *  under the pre-e3e40167 shape) — reconcileOrphanedGateOps' boot sweep selects ONLY rows that are both
    *  this AND still `state:"pending"`. */
   surfacedPending: boolean;
+  /** Card 4c5bf820: null for every row without a recorded verdict — every legacy row, every "merge" row
+   *  today, or a "gate" row not yet settled. `gate_status` must treat null here as "nothing to report",
+   *  never fabricate a verdict from a partial/missing payload. OPTIONAL on this interface (mint-time
+   *  callers of `insertPendingGateOp` never set it — `settlePendingGateOp` is the only writer, see its own
+   *  doc) — a read via `toPendingGateOp` always populates it (null or a real value), never leaves it
+   *  `undefined`. */
+  verdict?: PendingGateOpVerdictKind | null;
+  /** Parsed from `verdict_payload_json` — see {@link PendingGateOpVerdict}'s own doc for the shape. A
+   *  malformed/unparseable stored payload (should not happen in practice, but a corrupt row must never
+   *  break `gate_status` for every OTHER op) reads back `null`, exactly like "no payload at all" — see
+   *  {@link toPendingGateOp}'s own try/catch. OPTIONAL for the same mint-time reason as `verdict` above. */
+  verdictPayload?: PendingGateOpVerdict | null;
 }
 interface PendingGateOpRow {
   op_id: string;
@@ -1761,11 +1831,19 @@ interface PendingGateOpRow {
   started_at: string;
   state: PendingGateOpState;
   surfaced_pending: number;
+  verdict: PendingGateOpVerdictKind | null;
+  verdict_payload_json: string | null;
 }
 function toPendingGateOp(r: PendingGateOpRow): PendingGateOp {
+  let verdictPayload: PendingGateOpVerdict | null = null;
+  if (r.verdict_payload_json) {
+    try { verdictPayload = JSON.parse(r.verdict_payload_json) as PendingGateOpVerdict; }
+    catch { /* corrupt/malformed row — read back as "no payload", never throw (see the field's own doc) */ }
+  }
   return {
     opId: r.op_id, kind: r.kind, key: r.key, ownerSessionId: r.owner_session_id, projectId: r.project_id,
     taskId: r.task_id, branch: r.branch, startedAt: r.started_at, state: r.state, surfacedPending: !!r.surfaced_pending,
+    verdict: r.verdict ?? null, verdictPayload,
   };
 }
 
@@ -5623,9 +5701,22 @@ export class Db {
   /** Mark a genuinely-settled op — called from PendingOpRegistry's `onSettle` (fires for EVERY settle, fast
    *  or surfaced-pending; see its own doc for why this must be unconditional, not gated on surfacedPending
    *  the way the completion-nudge push is). NEVER fires for an op an `evictDeadOwner()` call force-removed
-   *  (that op's late settle, if it ever happens, fails the identity guard and never reaches here). */
-  settlePendingGateOp(opId: string): void {
-    this.db.prepare("UPDATE pending_gate_ops SET state = 'settled' WHERE op_id = ?").run(opId);
+   *  (that op's late settle, if it ever happens, fails the identity guard and never reaches here).
+   *  `verdict` (card 4c5bf820, OPTIONAL — the "merge" onSettle call site omits it, unchanged from before
+   *  this card, so a merge row's `verdict`/`verdict_payload_json` stay NULL exactly as today) persists the
+   *  terminal result so `gate_status` can read it back without the completion nudge being the only carrier
+   *  — see {@link PendingGateOpVerdictKind}/{@link PendingGateOpVerdict}'s own docs for the shape. */
+  settlePendingGateOp(opId: string, verdict?: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict }): void {
+    if (!verdict) {
+      this.db.prepare("UPDATE pending_gate_ops SET state = 'settled' WHERE op_id = ?").run(opId);
+      return;
+    }
+    this.db.prepare(
+      "UPDATE pending_gate_ops SET state = 'settled', verdict = @verdict, verdict_payload_json = @payloadJson WHERE op_id = @opId",
+    ).run({
+      opId, verdict: verdict.kind,
+      payloadJson: verdict.payload ? JSON.stringify(verdict.payload) : null,
+    });
   }
   /** Mark an op whose owning manager was confirmed dead and force-evicted (`evictDeadOwner`) — the op's
    *  own `run()` may STILL be executing, unreachable but uncancellable; this is explicitly NOT a verdict,

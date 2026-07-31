@@ -9,7 +9,7 @@ import {
   type AgentRun, type ColumnRole, type KanbanColumn, type DeliveryStatus, type CapabilityGrant,
   type GatesActive, type GateRun, type GateType, type CompanionRoute,
 } from "@loom/shared";
-import type { Db, IdleNudgePolicy } from "../db.js";
+import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
 import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
@@ -43,7 +43,7 @@ import type { CrashOrphanedWorker } from "../orchestration/crash-orphaned-worker
 import { RESUME_NUDGE_TAIL, DRAFT_LOSS_NOTE } from "../orchestration/resume-nudge.js";
 import type { ShutdownMarkerRecord } from "../shutdown-marker.js";
 import { nextFireAt } from "../orchestration/cron.js";
-import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner } from "../orchestration/gate-runner.js";
+import { runGateSequential, classifyGatePhase, extractFailingTest, classifyGateFailure, formatGateStepsDiagnostic, formatStepDurationMs, GATE_TIMEOUT_BREAKER_THRESHOLD, type GateSequentialResult, type GateStepDuration, type GateStepRunner } from "../orchestration/gate-runner.js";
 import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapshotEntry, type GateCancelKind } from "../orchestration/gate-semaphore.js";
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
@@ -213,16 +213,67 @@ const MERGE_OP_RETAIN_MS = 5_000;
  *  doc for the benign-vs-concerning wording split. `headCurrent:true` means nothing moved; `false` always
  *  comes with a `headWarning` explaining which of the two shapes it is. Set on every `ran:true` outcome,
  *  same as `validatedHead` — EXCEPT the circuit-breaker short-circuit path (no gate actually ran, no stamp
- *  taken, so neither field is set, same as `validatedHead`/`durationMs` there). */
+ *  taken, so neither field is set, same as `validatedHead`/`durationMs` there).
+ *  `steps`/`outputTail` (card 4c5bf820) are forwarded verbatim from {@link GateSequentialResult} — set on
+ *  EVERY `ran:true` outcome, PASS included: before this card the pass path discarded both (gate-runner.ts
+ *  itself never even retained an `outputTail` on its green return), leaving a passing worker self-check
+ *  with nothing durable to show for itself beyond a bare "gate passed" — the exact asymmetry this card
+ *  fixes. `outputTail` is sanitized of control chars the same way the failure path's tail already is. */
 type WorkerGateResult = {
   ran: boolean; passed?: boolean; reason?: string; gateDetail?: GateRejectionDetail; opId?: string;
   validatedHead?: string | null; durationMs?: number; headCurrent?: boolean; headWarning?: string;
+  steps?: GateStepDuration[]; outputTail?: string;
   /** Card 8d585277: a distinct "no verdict" outcome — never `passed`/`gateDetail`, never mistakable for a
    *  real pass or failure. `cancelKind` distinguishes the AUTOMATIC merge-decision supersede from a
    *  manager's explicit `gate_cancel`; see {@link GateCancelKind}'s own doc. */
   cancelled?: boolean;
   cancelKind?: GateCancelKind;
 };
+
+/**
+ * Card 4c5bf820: derive the durable `pending_gate_ops.verdict`/`verdict_payload_json` write from a
+ * settled `runWorkerGate` op's `attach()` outcome — the SAME four shapes the completion-nudge builder
+ * (right below this closure's own call site) already branches on, so the tombstone and the nudge can
+ * never tell two different stories about the same settle. Returns `undefined` ONLY for the `ran:false`
+ * shape (no gateCommand configured / the circuit-breaker short-circuit) — neither ever reaches this
+ * closure in practice (both return BEFORE `pendingOps.attach` is ever called, so no op — and no tombstone
+ * row — exists for them at all), but this stays a fail-closed "record nothing" rather than guessing at a
+ * shape for a case that shouldn't occur.
+ *   - a thrown exception (`outcome.ok:false`) → `"error"`, `reason` only (nothing else was computed before
+ *     whatever point the throw struck).
+ *   - a cancelled run (`outcome.value.cancelled`) → `"cancelled"`, `reason` only — mirrors the nudge's own
+ *     "NOT a failure — no verdict was reached" wording; must never be read as `"fail"`.
+ *   - `outcome.value.passed` → `"pass"`, carrying `durationMs`/`validatedHead`/`headWarning`/`steps`/
+ *     `outputTail` — no `gateDetail` (nothing to diagnose on a green run).
+ *   - otherwise → `"fail"`, the same fields PLUS `gateDetail` (the rich phase/failedStep/failingTest/
+ *     exitCode/signal/timedOut diagnosis the `[loom:gate-failed]` nudge already embeds).
+ */
+function deriveWorkerGateVerdict(
+  outcome: { ok: true; value: WorkerGateResult } | { ok: false; error: unknown },
+): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
+  if (!outcome.ok) {
+    return { kind: "error", payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error) } };
+  }
+  const v = outcome.value;
+  if (v.cancelled) return { kind: "cancelled", payload: { reason: v.reason } };
+  if (!v.ran) return undefined;
+  return {
+    kind: v.passed ? "pass" : "fail",
+    payload: {
+      reason: v.reason,
+      durationMs: v.durationMs,
+      validatedHead: v.validatedHead ?? undefined,
+      headWarning: v.headWarning,
+      steps: v.steps,
+      outputTail: v.outputTail,
+      ...(v.passed ? {} : { gateDetail: v.gateDetail && {
+        phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
+        failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
+        signal: v.gateDetail.signal ?? undefined, timedOut: v.gateDetail.timedOut,
+      } }),
+    },
+  };
+}
 
 /**
  * A worker's most recent SETTLED `run_gate` self-check outcome (card e50600d2 — reuse a green
@@ -2466,16 +2517,29 @@ export class SessionService {
    * live-registry miss (`GateSemaphore.findByOpId` → `kind:"none"`) is no longer reported as `"not_found"`
    * — it falls through to `Db.findPendingGateOpByOpId`, the SAME scoped id-or-prefix resolution over the
    * PERMANENT `pending_gate_ops` tombstone table (never pruned — see its schema doc), and returns that
-   * row's OWN terminal state: `"settled"` (a normal completion, fast or surfaced-pending — rely on the
-   * `[loom:gate-*]`/`[loom:merge-*]` nudge for the actual pass/fail outcome, this tool still never reports
-   * that itself), `"evicted-dead-owner"`, or `"orphaned-by-restart"` (see the schema doc for what each
-   * means). `"pending"` covers the narrow, genuinely-real window where a row was minted but is not yet
-   * visible in the live GateSemaphore (either about to register, or — after a real daemon restart —
-   * awaiting the next boot's `reconcileOrphanedGateOps` sweep): the op demonstrably EXISTS, so this must
-   * never collapse to `never_existed`. An AMBIGUOUS prefix at EITHER layer is a DISTINCT outcome,
-   * `state:"ambiguous"` with an `error` naming the matching opIds — it must never collapse into
-   * `never_existed`/`unknown` either: a miss that can't resolve is a different answer than a miss that
-   * means "gone" or "not visible to you", and none of the three may impersonate another.
+   * row's OWN terminal state: `"settled"`, `"evicted-dead-owner"`, or `"orphaned-by-restart"` (see the
+   * schema doc for what each means). `"pending"` covers the narrow, genuinely-real window where a row was
+   * minted but is not yet visible in the live GateSemaphore (either about to register, or — after a real
+   * daemon restart — awaiting the next boot's `reconcileOrphanedGateOps` sweep): the op demonstrably
+   * EXISTS, so this must never collapse to `never_existed`. An AMBIGUOUS prefix at EITHER layer is a
+   * DISTINCT outcome, `state:"ambiguous"` with an `error` naming the matching opIds — it must never
+   * collapse into `never_existed`/`unknown` either: a miss that can't resolve is a different answer than a
+   * miss that means "gone" or "not visible to you", and none of the three may impersonate another.
+   *
+   * SETTLED VERDICT (card 4c5bf820 — reusing the SAME tombstone row this method already falls back to):
+   * for a `"settled"` **"gate"** (worker self-check) op whose row carries a recorded `verdict` (written by
+   * `runWorkerGate`'s `onSettle` — see `deriveWorkerGateVerdict`'s doc), the return ALSO spreads
+   * `passed`/`cancelled`/`reason`/`durationMs`/`validatedHead`/`headWarning`/`steps`/`outputTail`/
+   * `gateDetail` — essentially what `run_gate` itself would have returned inline, had it not degraded to
+   * pending. Every field is OMITTED (not `null`/`false`) when there's nothing recorded — a legacy row (from
+   * before this card), a `"merge"` row (this card does not touch merge-kind verdict population — see
+   * `confirmWorkerMergeTracked`'s own `onSettle`, unchanged), a non-`"settled"` state, or a corrupt/
+   * unparseable stored payload (fails closed to "nothing recorded", never a throw — see
+   * `Db.toPendingGateOp`'s own try/catch). This is now the ONE exception to "this tool never reports a
+   * pass/fail outcome itself" — narrowly, for a settled worker gate with a verdict on file; the
+   * `[loom:gate-*]` nudge stays the primary, unprompted delivery, this is the queryable recovery path for
+   * a caller that missed it or wants to re-check. The **"merge"** kind is UNCHANGED: `gate_status` on a
+   * settled merge op still never reports pass/fail/rejected — rely on the `[loom:merge-*]` nudge for that.
    *
    * FOUR TERMINAL "not live, not found" outcomes now, not three — `never_existed` alone is not enough
    * once a scoped caller exists (see below): `"never_existed"` is a POSITIVE assertion the id was NEVER
@@ -2501,6 +2565,12 @@ export class SessionService {
   gateStatus(opId: string, scopeSessionId?: string, scopeProjectId?: string): {
     state: "queued" | "running" | "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart" | "never_existed" | "unknown" | "ambiguous";
     gateType: GateType | null; elapsedMs: number | null; error?: string;
+    /** Card 4c5bf820 — see the method doc's "SETTLED VERDICT" section. Present ONLY for a settled "gate"
+     *  row with a recorded verdict; every field below is independently optional and omitted (never a
+     *  fabricated `null`/`false`) when there's nothing to report. */
+    passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
+    validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
+    gateDetail?: PendingGateOpVerdict["gateDetail"];
   } {
     const scoped = scopeSessionId != null || scopeProjectId != null;
     const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
@@ -2518,7 +2588,29 @@ export class SessionService {
     const t = this.db.findPendingGateOpByOpId(opId, scopeSessionId, scopeProjectId);
     if (t.kind === "found") {
       const gateType: GateType = t.record.kind === "merge" ? "merge" : "worker";
-      return { state: t.record.state, gateType, elapsedMs: null };
+      // SETTLED VERDICT (card 4c5bf820): only ever populated for a "gate" row that recorded one — a
+      // "merge" row's verdict/verdictPayload stay NULL by construction (that onSettle call site never
+      // passes one), a legacy row predates the columns entirely, and a not-yet-settled row never has one
+      // either. `payload` itself is honest-null on a corrupt/unparseable stored blob (see
+      // `Db.toPendingGateOp`) — either way this spreads nothing rather than a fabricated shape.
+      const payload = t.record.verdictPayload;
+      const verdictFields = t.record.verdict === "pass" || t.record.verdict === "fail"
+        ? {
+          passed: t.record.verdict === "pass",
+          ...(payload?.reason !== undefined ? { reason: payload.reason } : {}),
+          ...(payload?.durationMs !== undefined ? { durationMs: payload.durationMs } : {}),
+          ...(payload?.validatedHead !== undefined ? { validatedHead: payload.validatedHead } : {}),
+          ...(payload?.headWarning !== undefined ? { headWarning: payload.headWarning } : {}),
+          ...(payload?.steps !== undefined ? { steps: payload.steps } : {}),
+          ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
+          ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
+        }
+        : t.record.verdict === "cancelled"
+          ? { cancelled: true, ...(payload?.reason !== undefined ? { reason: payload.reason } : {}) }
+          : t.record.verdict === "error"
+            ? { ...(payload?.reason !== undefined ? { reason: payload.reason } : {}) }
+            : {};
+      return { state: t.record.state, gateType, elapsedMs: null, ...verdictFields };
     }
     if (t.kind === "ambiguous") {
       return {
@@ -10125,7 +10217,16 @@ export class SessionService {
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
             evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart });
-            return { ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs, ...headCurrency };
+            // Card 4c5bf820: same INJECTION HYGIENE as the failure path below — strip C0 control chars
+            // before this raw process output can reach a `[loom:gate-done]` pty text or the durable
+            // verdict tombstone. `steps`/a sanitized `outputTail` are forwarded on the GREEN path too —
+            // before this card a passing run retained NEITHER (gate-runner.ts's own green return didn't
+            // even carry an outputTail), leaving nothing durable behind a bare "gate passed".
+            const passOutputTail = gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
+            return {
+              ran: true, passed: true, opId, validatedHead: startStamp.head, durationMs, ...headCurrency,
+              steps: gateResult.steps, outputTail: passOutputTail,
+            };
           }
           const finalClass = classifyGateFailure(gateResult);
           const phase = classifyGatePhase(gateResult.failedStep);
@@ -10159,6 +10260,10 @@ export class SessionService {
           return {
             ran: true, passed: false, reason: headline, opId, validatedHead: startStamp.head, durationMs: failDurationMs,
             ...headCurrency,
+            // Card 4c5bf820: mirrors the pass path's own top-level `steps`/`outputTail` — a caller reading
+            // the RESULT no longer has to reach into `gateDetail` for the tail on a failure while getting
+            // nothing at all on a pass; both branches now populate the same two top-level fields.
+            steps: gateResult.steps, outputTail,
             gateDetail: {
               phase, failedStep: gateResult.failedStep, failingTest, failingTestReason, stderrTail: outputTail,
               exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
@@ -10169,15 +10274,17 @@ export class SessionService {
         }
       },
       (outcome, opId) => {
-        // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
-        // EVERY settle — not just a surfaced-pending one, unlike this callback) has already flipped the
-        // durable row to `state:"settled"` by the time this runs — nothing to do here for the row itself.
+        // TOMBSTONE ALREADY MARKED (card e3e40167, verdict persistence added by card 4c5bf820): the
+        // `onSettle` opt below (fires unconditionally, for EVERY settle — not just a surfaced-pending one,
+        // unlike this callback) has already flipped the durable row to `state:"settled"` — AND, since
+        // 4c5bf820, persisted the pass/fail/error/cancelled verdict itself — by the time this runs; nothing
+        // to do here for the row.
         // CANCELLED (card 8d585277): a distinct "no verdict" settle — never fall through to the pass/fail
         // nudge below, which would otherwise read as a real gate result. `[loom:gate-superseded]` (the
         // manager's own merge decision made this self-check moot) vs `[loom:gate-cancelled]` (an explicit
         // manual gate_cancel) so a worker/manager reading the transcript later can tell WHICH happened
         // without parsing free text. Routed through `enqueueDurableMessage` (kind:"agent", durably
-        // persisted while held): this nudge is the worker's ONLY signal that its parked run_gate call is
+        // persisted while held): this nudge is the worker's PRIMARY signal that its parked run_gate call is
         // done, and it fires exactly once — a dropped one-shot terminal notification here leaves the
         // worker parked indefinitely on a result that will never arrive, the same indefinite-park class
         // this card's own hazard list calls out, so it must go through the durable channel regardless of
@@ -10203,15 +10310,19 @@ export class SessionService {
           return;
         }
         const headSuffix = outcome.ok && outcome.value.validatedHead ? ` (validated ${outcome.value.validatedHead.slice(0, 8)})` : "";
-        // Card 39196378: the nudge is the ONLY thing a worker ever sees for an async-settled gate (same
+        // Card 39196378: the nudge is the PRIMARY thing a worker sees for an async-settled gate (same
         // reasoning as the gateDetail mirroring below) — so a HEAD-currency warning belongs in the TEXT,
-        // not just the sync return value a worker never gets to read for this settle path.
+        // not just the sync return value a worker never gets to read for this settle path. (Card 4c5bf820:
+        // `gate_status(opId)` can now ALSO recover this once settled — see its own doc — but the nudge
+        // stays the primary, unprompted delivery; this text doesn't change on that account.)
         const currencyNote = outcome.ok && outcome.value.headWarning ? ` ⚠ ${outcome.value.headWarning}` : "";
-        // Card 55cba5c5: this nudge is the ONLY thing a worker ever sees for an async-settled gate — a
-        // worker's tool set has no fetch-by-opId to go back for the sync gateDetail object afterwards. It
-        // used to embed ONLY the raw stderr tail; mirror confirmWorkerMerge's own `detailBits` format here
-        // so the worker gets the SAME phase/failedStep/failingTest diagnosis the manager path already had,
-        // instead of an unattributed tail a worker can only guess at.
+        // Card 55cba5c5: this nudge is the PRIMARY thing a worker sees for an async-settled gate. It used
+        // to embed ONLY the raw stderr tail; mirror confirmWorkerMerge's own `detailBits` format here so
+        // the worker gets the SAME phase/failedStep/failingTest diagnosis the manager path already had,
+        // instead of an unattributed tail a worker can only guess at. (Card 4c5bf820: a worker that missed
+        // or lost this nudge is no longer stuck guessing either — `gate_status(opId)` on a settled op now
+        // returns this SAME diagnosis back, so "no fetch-by-opId" is no longer true; this nudge remains the
+        // unprompted, zero-effort delivery path, which is why it still carries the detail inline.)
         const gd = outcome.ok ? outcome.value.gateDetail : undefined;
         const killNote = gd?.circuitBroken
           ? undefined
@@ -10228,9 +10339,22 @@ export class SessionService {
           killNote,
           gd.failingTest ? `failing: ${gd.failingTest}` : (gd.failingTestReason ? `failing test: unknown (${gd.failingTestReason})` : undefined),
         ].filter(Boolean).join("; ") : "";
+        // Card 4c5bf820, DoD item 2: a PASSING self-check used to be near-silent — the verbatim before-
+        // state was the bare `"gate passed (validated <sha>)."`, no duration, no steps, nothing a
+        // duration-variance measurement could ever sample. Mirror the SAME per-step diagnostic line the
+        // green merge nudge already carries (`formatGateStepsDiagnostic`), plus the total duration
+        // formatted the SAME way (`formatStepDurationMs`) — deliberately NOT the raw output tail (that's
+        // noise on every routine green gate; it's retained instead in the queryable `gate_status` side
+        // channel, see the tombstone verdict write below).
+        const passStepsLine = outcome.ok && outcome.value.passed && outcome.value.steps?.length
+          ? ` ${formatGateStepsDiagnostic(outcome.value.steps)}`
+          : "";
+        const passDurationNote = outcome.ok && outcome.value.passed && outcome.value.durationMs != null
+          ? ` in ${formatStepDurationMs(outcome.value.durationMs)}`
+          : "";
         const msg = outcome.ok
           ? (outcome.value.passed
-            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}.${currencyNote}`
+            ? `[loom:gate-done] op ${opId} — gate passed${headSuffix}${passDurationNote}.${passStepsLine}${currencyNote}`
             : `[loom:gate-failed] op ${opId} — ${outcome.value.reason ?? "gate did not pass"}${detailBits ? ` (${detailBits})` : ""}${headSuffix}${currencyNote}${gd?.stderrTail ? `\n--- gate output tail ---\n${gd.stderrTail}` : ""}`)
           : `[loom:gate-failed] op ${opId} — gate errored: ${outcome.error instanceof Error ? outcome.error.message : String(outcome.error)}`;
         // LINEAGE-RESOLVED (card 05c36bf4): re-resolve to whoever is CURRENTLY live in workerSessionId's
@@ -10303,8 +10427,11 @@ export class SessionService {
         },
         // Fires for EVERY genuine settle (fast or surfaced-pending) — see PendingOpRegistry.attach's
         // `onSettle` doc for why this must be unconditional, unlike the completion-nudge push below.
-        onSettle: (_outcome, opId) => {
-          this.db.settlePendingGateOp(opId);
+        // Card 4c5bf820: also PERSISTS the terminal verdict onto the same tombstone row, so `gate_status`
+        // can read it back without the completion nudge above being the only carrier — see
+        // `deriveWorkerGateVerdict`'s own doc for the four outcome shapes and what each one records.
+        onSettle: (outcome, opId) => {
+          this.db.settlePendingGateOp(opId, deriveWorkerGateVerdict(outcome));
         },
       },
     );

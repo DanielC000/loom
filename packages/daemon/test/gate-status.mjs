@@ -28,6 +28,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // from "never existed" by the value returned), but is never itself a false non-existence claim the way
 // `never_existed` would be. See the "(e2e scope, unknown-sink)" checks below for the side-by-side proof.
 //
+// card 4c5bf820 — SETTLED VERDICT: for a settled "gate" (worker self-check) op specifically, `gate_status`
+// NO LONGER stops at the bare classification — it now ALSO reports the recorded verdict (passed/reason/
+// durationMs/validatedHead/headWarning/steps/outputTail/gateDetail), reusing the SAME tombstone row this
+// file already proves survives settle. The "merge" kind is UNCHANGED (still classification-only — see the
+// "(e2e, tombstone terminal states)" block, which still uses a "merge" row for its evicted-dead-owner
+// check). The "(e2e gate, SETTLED VERDICT, PASS/FAIL)" blocks below prove: a real settled PASS/FAIL is
+// readable via `gate_status` ALONE, with no nudge ever read in either test — the DoD-4 regression this
+// card exists to close (a passing self-check used to retain NOTHING beyond a bare "gate passed" string).
+//
 // Proves:
 //   (unit) GateSemaphore.findByOpId locates a RUNNING entry and a QUEUED entry by the FULL opId carried on
 //          their GateDescriptor; resolves an unambiguous 8-char PREFIX of a live opId to that SAME entry
@@ -42,9 +51,9 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //              elapsedMs — SCOPED to the owning worker/project (a stranger gets "unknown", never a peek at
 //              another session's live run; see the "unknown" bullet below for why that's a DIFFERENT value
 //              from the genuine-miss "never_existed" two bullets down).
-//            - "settled" (never "not_found") once a PENDING-PATH op settles — proving this never surfaces
-//              a terminal PASS/FAIL result itself, only the classification, and that a settled op stays
-//              positively queryable rather than reverting to a hole.
+//            - "settled" (never "not_found") once a PENDING-PATH op settles, and that a settled op stays
+//              positively queryable rather than reverting to a hole; for a "gate" row specifically (card
+//              4c5bf820), ALSO the recorded pass/fail verdict itself — see the header comment above.
 //            - "settled" for a FAST-PATH op too (the conflation repro above) — the case the original
 //              edc1ec12 shape could never distinguish from "never existed".
 //            - "never_existed" for a genuinely bogus, never-minted opId queried WITHOUT scoping (the
@@ -329,6 +338,81 @@ try {
     check("(e2e gate, fast path) an unambiguous 8-char prefix of the settled opId ALSO resolves via the tombstone", fastPrefixStatus.state === "settled");
   }
 
+  // ── (e2e gate, card 4c5bf820 — SETTLED VERDICT, PASS) THE central DoD-4 regression: a settled PASS is
+  // readable via gate_status with NO nudge involved at all. `ptyStub.enqueueStdin` below is a bare no-op —
+  // nothing is ever captured or read from it in this block; every assertion is derived ONLY from
+  // `sessions.gateStatus(opId)`, proving the verdict is recoverable independent of whether any nudge was
+  // ever delivered, read, or even inspectable. ──────────────────────────────────────────────────────────
+  {
+    const P = `gst-verdict-pass-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-VERDICT-PASS", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-VERDICT-PASS-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    // A rich, real-shaped GateSequentialResult — this is what runGateSequential actually returns on a
+    // green run post-card-4c5bf820 (steps + outputTail both populated, not just `{passed:true}`).
+    const richPassGate = async () => ({ passed: true, steps: [{ step: "pnpm test", durationMs: 4200, status: 0 }], outputTail: "42 passed, 0 failed" });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: richPassGate });
+
+    const result = await sessions.runWorkerGate(workerId);
+    check("(e2e verdict pass) settles INLINE, passed:true, and the sync result already carries steps/outputTail", result.settled === true && result.ok === true && result.value.passed === true && result.value.steps?.length === 1 && result.value.outputTail === "42 passed, 0 failed");
+    const opId = result.value.opId;
+
+    const status = sessions.gateStatus(opId);
+    check("(e2e verdict pass — THE FIX) gate_status alone reports passed:true for a settled PASS, no nudge read anywhere in this test", status.state === "settled" && status.passed === true);
+    check("(e2e verdict pass) durationMs is a real non-negative number", typeof status.durationMs === "number" && status.durationMs >= 0);
+    check("(e2e verdict pass) validatedHead is set (the worktree's real HEAD sha)", typeof status.validatedHead === "string" && status.validatedHead.length > 0);
+    check("(e2e verdict pass) steps round-trips through the tombstone", Array.isArray(status.steps) && status.steps.length === 1 && status.steps[0].step === "pnpm test");
+    check("(e2e verdict pass) outputTail round-trips through the tombstone — the DoD item 2 fix: a passing gate used to retain NOTHING here", status.outputTail === "42 passed, 0 failed");
+    check("(e2e verdict pass) cancelled/reason/gateDetail are all absent (never a fabricated value for fields that don't apply to a pass)", status.cancelled === undefined && status.reason === undefined && status.gateDetail === undefined);
+  }
+
+  // ── (e2e gate, card 4c5bf820 — SETTLED VERDICT, FAIL) same regression, the failure side: reason +
+  // gateDetail (the SAME rich diagnosis the [loom:gate-failed] nudge carries) are ALSO readable via
+  // gate_status alone, with no nudge read. ─────────────────────────────────────────────────────────────
+  {
+    const P = `gst-verdict-fail-${Date.now()}`;
+    const repo = path.join(os.tmpdir(), `${P}-repo`);
+    makeRepo(repo);
+    const db = new Db();
+    dbs.push(db);
+    db.insertProject({ id: P, name: "GST-VERDICT-FAIL", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+    db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
+    const taskId = `${P}-task`, workerId = `${P}-wkr`;
+    db.insertTask({ id: taskId, projectId: P, title: "GST-VERDICT-FAIL-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    const { worktreePath, branch } = await createWorktree(repo, P, taskId);
+    worktrees.push(worktreePath);
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath, branch });
+
+    const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
+    const richFailGate = async () => ({
+      passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false,
+      outputTail: "FAIL  some_test.mjs", failingTest: "some_test.mjs",
+      steps: [{ step: "pnpm test", durationMs: 900, status: 1 }],
+    });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: richFailGate });
+
+    const result = await sessions.runWorkerGate(workerId);
+    check("(e2e verdict fail) settles INLINE, passed:false", result.settled === true && result.ok === true && result.value.passed === false);
+    const opId = result.value.opId;
+
+    const status = sessions.gateStatus(opId);
+    check("(e2e verdict fail — THE FIX) gate_status alone reports passed:false for a settled FAIL, no nudge read anywhere in this test", status.state === "settled" && status.passed === false);
+    check("(e2e verdict fail) reason is the real headline (\"build gate failed\")", status.reason === "build gate failed");
+    check("(e2e verdict fail) gateDetail carries the SAME rich diagnosis the failure nudge embeds", status.gateDetail?.failedStep === "pnpm test" && status.gateDetail?.failingTest === "some_test.mjs" && status.gateDetail?.exitCode === 1);
+    check("(e2e verdict fail) steps/outputTail are ALSO present on the fail path (parity with pass)", Array.isArray(status.steps) && status.steps.length === 1 && status.outputTail === "FAIL  some_test.mjs");
+    check("(e2e verdict fail) cancelled is absent — a real failure must never read as a cancel", status.cancelled === undefined);
+  }
+
   // ── (e2e, tombstone terminal states) gate_status maps EVERY pending_gate_ops.state value through —
   // evicted-dead-owner and orphaned-by-restart, not just settled. Drives the DB layer directly (these two
   // states are already proven to be WRITTEN correctly by pending-gate-ops.mjs/merge-confirm-dead-owner-
@@ -369,6 +453,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — GateSemaphore.findByOpId locates a running/queued entry by its FULL opId or an unambiguous 8-char PREFIX (card 225bc7bd), distinguishes an ambiguous prefix (kind:\"ambiguous\") from no live match at all (kind:\"none\"), and nothing once settled; SessionService.gateStatus (card e3e40167) reports \"running\" (by full id or prefix) with a plausible elapsedMs for a genuinely in-flight gate op, SCOPED so a stranger session/project gets \"unknown\" rather than a peek at another session's live run; falls through to the durable pending_gate_ops tombstone once the live registry is empty and reports \"settled\" for BOTH a pending-path op that surfaced pending before settling AND — THE CENTRAL FIX — a FAST-PATH op that settled inline and never surfaced pending at all (the exact case the original edc1ec12 shape could never distinguish from a never-minted opId); that tombstone fallback is scope-checked identically to the live lookup (a stranger still can't learn a settled op's outcome, reading \"unknown\" rather than \"settled\" OR the false claim \"never_existed\"); \"evicted-dead-owner\" and \"orphaned-by-restart\" map through from their respective tombstone states; a minted-but-not-yet-live row reads \"pending\"; an UNSCOPED (manager-shaped) query for a genuinely bogus, never-minted opId reads \"never_existed\" — a POSITIVE assertion, proven side-by-side with a real settled op in the SAME run so the two are demonstrably NOT the same answer, the exact conflation this card exists to fix — while a SCOPED query for that SAME bogus id lands in \"unknown\" instead, identical to a stranger's query against a real foreign op, so nothing about a real op's existence ever leaks through the sink value."
+  ? "\n✅ ALL PASS — GateSemaphore.findByOpId locates a running/queued entry by its FULL opId or an unambiguous 8-char PREFIX (card 225bc7bd), distinguishes an ambiguous prefix (kind:\"ambiguous\") from no live match at all (kind:\"none\"), and nothing once settled; SessionService.gateStatus (card e3e40167) reports \"running\" (by full id or prefix) with a plausible elapsedMs for a genuinely in-flight gate op, SCOPED so a stranger session/project gets \"unknown\" rather than a peek at another session's live run; falls through to the durable pending_gate_ops tombstone once the live registry is empty and reports \"settled\" for BOTH a pending-path op that surfaced pending before settling AND a FAST-PATH op that settled inline and never surfaced pending at all (the exact case the original edc1ec12 shape could never distinguish from a never-minted opId); that tombstone fallback is scope-checked identically to the live lookup (a stranger still can't learn a settled op's outcome, reading \"unknown\" rather than \"settled\" OR the false claim \"never_existed\"); \"evicted-dead-owner\" and \"orphaned-by-restart\" map through from their respective tombstone states; a minted-but-not-yet-live row reads \"pending\"; an UNSCOPED (manager-shaped) query for a genuinely bogus, never-minted opId reads \"never_existed\" — a POSITIVE assertion, proven side-by-side with a real settled op in the SAME run so the two are demonstrably NOT the same answer, the exact conflation this card exists to fix — while a SCOPED query for that SAME bogus id lands in \"unknown\" instead, identical to a stranger's query against a real foreign op, so nothing about a real op's existence ever leaks through the sink value. Card 4c5bf820 — THE NEWEST FIX: for a settled \"gate\" op specifically, gate_status ALSO reports the real recorded verdict (passed/reason/durationMs/validatedHead/headWarning/steps/outputTail/gateDetail) for BOTH a pass and a fail, proven via the REAL runWorkerGate with NO nudge ever read in either test; a \"merge\" row's gate_status stays classification-only, unchanged."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

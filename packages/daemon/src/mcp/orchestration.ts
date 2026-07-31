@@ -104,10 +104,24 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "cannot use this to probe another worker's run. `opId` accepts the FULL id OR an unambiguous " +
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
-      "\"ambiguous\", gateType, elapsedMs, error?}. `queued`/`running` mean it's still LIVE. `settled` " +
-      "means the op reached a normal terminal result (pass, fail, or error) — rely on the `[loom:gate-" +
-      "done]`/`[loom:gate-failed]` nudge for the actual pass/fail outcome, this tool NEVER reports that " +
-      "itself. `evicted-dead-owner` and `orphaned-by-restart` are edge-case terminal states you're " +
+      "\"ambiguous\", gateType, elapsedMs, error?, passed?, cancelled?, reason?, durationMs?, " +
+      "validatedHead?, headWarning?, steps?, outputTail?, gateDetail?}. `queued`/`running` mean it's still " +
+      "LIVE. `settled` means the op reached a normal terminal result (pass, fail, error, or cancelled). " +
+      "The `[loom:gate-done]`/`[loom:gate-failed]` nudge is still the PRIMARY, unprompted way you learn the " +
+      "outcome — but once `state` reads `settled`, this tool NOW ALSO reports it directly: `passed:true` " +
+      "(a green run) or `passed:false` (a real failure, with `reason` + `gateDetail` — the SAME " +
+      "phase/failedStep/failingTest/exitCode/signal/timedOut diagnosis the failure nudge embeds) are set " +
+      "together with `durationMs`/`validatedHead`/`headWarning`/`steps` (the same per-step timings the " +
+      "green merge nudge already carries) and a bounded `outputTail` (present on BOTH a pass and a fail — " +
+      "a passing run used to retain none of this at all). `cancelled:true` (with `reason`, no `passed`) " +
+      "means no verdict was ever reached — a manager's `gate_cancel`, or your self-check being superseded " +
+      "by a merge decision — never read the ABSENCE of `passed` alone as a failure; check `cancelled` " +
+      "first. Every one of these fields is OMITTED, never a fabricated `null`/`false`, when there's nothing " +
+      "recorded — a settled op predating this capability, or one whose thrown-error settle only ever " +
+      "carries a bare `reason`. Use this to recover a verdict you missed or lost the nudge for; it is NOT a " +
+      "replacement for the nudge as your primary signal — don't poll this on a timer waiting for `passed` " +
+      "to appear, wait for the nudge and use this as the fallback. `evicted-dead-owner` and " +
+      "`orphaned-by-restart` are edge-case terminal states you're " +
       "unlikely to see for your OWN gate op (they're merge-op/restart shapes) — if you do, treat them like " +
       "`settled`: no verdict was ever reached, re-run `run_gate` if you still need one. `pending` is rare: " +
       "the op is known to exist but isn't visible in the live registry yet (a narrow just-started or " +
@@ -860,7 +874,8 @@ export class OrchestrationMcpRouter {
             "another in-flight gate before it even starts — that's expected, not a hang. Returns {ran:false, " +
             "reason} if this project has no gateCommand configured at all — fall back to running your own " +
             "build/test command directly (still pin LOOM_TEST_CONCURRENCY=1 yourself in that case). Otherwise " +
-            "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, gateDetail?} — " +
+            "returns {ran:true, passed, validatedHead, durationMs?, headCurrent?, headWarning?, steps?, " +
+            "outputTail?, gateDetail?} — " +
             "`validatedHead` is stamped when this run was ISSUED, before it's even admitted past the queue — " +
             "NOT when the build/test command actually starts. Read `headCurrent` on EVERY settled result, pass " +
             "or fail, not just on a failure: `true` means `validatedHead` is still your branch HEAD as of " +
@@ -879,15 +894,26 @@ export class OrchestrationMcpRouter {
             "time spent running alongside another concurrently-admitted gate. This is a real duration under " +
             "real fleet conditions, not an isolated benchmark; don't report it as one. `durationMs`, " +
             "`headCurrent`, and `headWarning` are all omitted (undefined) on the circuit-breaker short-circuit " +
-            "path, where no gate actually ran. On a failure, gateDetail " +
+            "path, where no gate actually ran. `steps` (per-step {step, durationMs, status}, diagnostic only — " +
+            "never compare these against a threshold or each other) and a bounded `outputTail` are set on " +
+            "EVERY `ran:true` result, PASS INCLUDED — a passing run used to retain neither at all, leaving a " +
+            "green self-check with nothing durable behind a bare pass/fail bit. On a failure, gateDetail " +
+            "ADDITIONALLY " +
             "carries {phase, failedStep, failingTest, " +
             "failingTestReason, stderrTail, exitCode, signal, timedOut} so you can diagnose a real test failure " +
             "vs. a flake without re-running blind — failingTest is `undefined` (never a guessed name) only when " +
-            "nothing recognizable was found, and failingTestReason then says why. The async [loom:gate-failed] " +
+            "nothing recognizable was found, and failingTestReason then says why (gateDetail's own `stderrTail` " +
+            "is the SAME string as the top-level `outputTail`, just alongside the rest of the failure diagnosis). " +
+            "The async [loom:gate-failed] " +
             "nudge (see below) carries this SAME phase/failedStep/failingTest detail in its own text, not just a " +
-            "raw stderr tail — you don't need the sync result in hand to get the diagnosis. Both the " +
+            "raw stderr tail — you don't need the sync result in hand to get the diagnosis. The [loom:gate-done] " +
+            "PASS nudge likewise now states its duration and the SAME per-step diagnostic line (never the raw " +
+            "output tail — that stays in the queryable side channel, see below). Both the " +
             "[loom:gate-done] AND [loom:gate-failed] nudges also inline `headWarning` when it's set, so an " +
-            "async-settled gate's HEAD-currency signal reaches you the same way the sync result does. " +
+            "async-settled gate's HEAD-currency signal reaches you the same way the sync result does. If you " +
+            "missed the nudge or need to re-check after the fact, `gate_status(opId)` on a SETTLED op now " +
+            "returns this SAME verdict (passed/reason/durationMs/steps/outputTail/gateDetail) directly — see " +
+            "its own tool description; it's a recovery path, not a substitute for waiting on the nudge. " +
             "CLIENT-TIMEOUT " +
             "RESILIENT, same shape as worker_merge_confirm: a fast run returns the full " +
             "result inline (stamped with a correlation `opId`); a genuinely slow one (a real multi-minute test " +

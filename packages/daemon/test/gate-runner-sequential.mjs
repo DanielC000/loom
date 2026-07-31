@@ -92,6 +92,20 @@ check("(durations) a single-step (no `&&`) gate behaves identically — one entr
   singleGreen.steps.length === 1 &&
   singleGreen.steps[0].step === "pnpm build" && singleGreen.steps[0].status === 0 && singleGreen.steps[0].durationMs === null);
 
+// --- card 4c5bf820: the GREEN return now also carries `outputTail` (the LAST step's own bounded tail) —
+// before this card, `runGateSequential`'s success return (`{passed:true, steps}`) discarded outputTail
+// entirely, even though every step's own GateStepResult always computes one; a passing gate had nothing
+// retained afterward. Same field, populated by the SAME mechanism a rejection already uses. ---
+const tailRunner = (command) => ({ status: 0, outputTail: `stdout from ${command}` });
+const greenWithTail = await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, tailRunner);
+check("(RED-first control) a runner that never sets outputTail leaves the green result's outputTail undefined — proves this isn't fabricated by runGateSequential itself",
+  green.outputTail === undefined);
+check("(outputTail, green — THE FIX) a passing gate's result carries the LAST step's own outputTail, not nothing",
+  greenWithTail.passed === true && greenWithTail.outputTail === "stdout from pnpm test");
+const redWithTail = await runGateSequential("pnpm lint && pnpm test", "/work/tree", 5000, (command) => ({ status: command === "pnpm test" ? 1 : 0, outputTail: `stdout from ${command}` }));
+check("(outputTail, parity) a failing gate's result ALSO carries the failed step's outputTail — green and red are symmetric now, not just red",
+  redWithTail.passed === false && redWithTail.outputTail === "stdout from pnpm test");
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — a `&&`-chained gate runs as separate sequential processes (memory frees between steps) and still fails closed on the first non-zero/errored step."
   : `\n❌ ${failures} FAILURE(S).`);

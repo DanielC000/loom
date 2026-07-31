@@ -374,7 +374,12 @@ export interface GateStepDuration {
 
 /** What {@link runGateSequential} resolves. On a rejection, carries enough to make the failure
  *  diagnosable instead of opaque: which step failed, its exit code/signal/timeout, and its bounded
- *  output tail (a caller derives a coarse phase + a best-effort failing-test line from these). */
+ *  output tail (a caller derives a coarse phase + a best-effort failing-test line from these).
+ *  Card 4c5bf820: `outputTail` is NOT failure-only — the GREEN path also sets it, to the LAST step's own
+ *  bounded tail (same {@link OUTPUT_TAIL_BYTES} ring as a rejection uses, nothing new invented). Before
+ *  this card the green return (`{passed:true, steps}`) discarded it entirely, even though every step's
+ *  `GateStepResult` always computes one — a passing gate had NOTHING retained for a caller to inspect
+ *  after the fact. */
 export interface GateSequentialResult {
   passed: boolean;
   failedStep?: string;
@@ -399,8 +404,10 @@ export interface GateSequentialResult {
 }
 
 /** Format one {@link GateStepDuration.durationMs} as `<m>m<s>s` (or bare `<s>s` under a minute) —
- *  `"n/a"` for `null`, never a fabricated `0s`. */
-function formatStepDurationMs(ms: number | null): string {
+ *  `"n/a"` for `null`, never a fabricated `0s`. Exported (card 4c5bf820) so the worker self-gate's own
+ *  `[loom:gate-done]` PASS nudge can format its total `durationMs` the SAME way the per-step diagnostic
+ *  line already does, instead of inventing a second duration-formatting convention. */
+export function formatStepDurationMs(ms: number | null): string {
   if (ms == null) return "n/a";
   const totalSec = Math.round(ms / 1000);
   const m = Math.floor(totalSec / 60);
@@ -446,6 +453,10 @@ export async function runGateSequential(
   // Card a2873f7e: per-step {step, durationMs, status} accumulated as each step settles — forwarded
   // verbatim on EVERY return below (green or rejected), same shape either way.
   const steps: GateStepDuration[] = [];
+  // Card 4c5bf820: the LAST step's own bounded tail, carried forward so the green return below can report
+  // it too — every rejection return already forwards `res.outputTail` from the step that failed; a passing
+  // run has no "failed step" to hang it off, so the last step actually run is the honest equivalent.
+  let lastOutputTail: string | undefined;
   for (const step of splitGateSteps(gate)) {
     // Card 8d585277: checked BEFORE spawning each step too — a cancel arriving in the gap BETWEEN two
     // steps (this run has already settled one step and hasn't started the next) must not spawn a step
@@ -455,6 +466,7 @@ export async function runGateSequential(
     const res = await runStep(step, cwd, timeoutMs, envOverride, allowExtend, cancelSignal);
     const durationMs = res.decidedAt != null ? res.decidedAt - startedAt : null;
     steps.push({ step, durationMs, status: res.status });
+    lastOutputTail = res.outputTail;
     if (res.cancelled) {
       return {
         passed: false, cancelled: true, failedStep: step, failedStatus: res.status, failedSignal: res.signal ?? null,
@@ -469,7 +481,7 @@ export async function runGateSequential(
       };
     }
   }
-  return { passed: true, steps };
+  return { passed: true, steps, outputTail: lastOutputTail };
 }
 
 /**
