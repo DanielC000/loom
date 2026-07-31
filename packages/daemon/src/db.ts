@@ -4906,7 +4906,7 @@ export class Db {
    * Fleet-lockout self-heal (P1): repair EXACTLY ONE worker row's stale `parent_session_id`, on demand,
    * regardless of process_state. Unlike `reparentLiveWorkers` (bulk, `process_state='live'`-gated, called
    * only from recycleManager/boot-reconcile), this is called from the per-op guard path in
-   * mcp/orchestration.ts (`ensureWorkerLinked`) the instant a manager/worker parent desync is caught —
+   * mcp/orchestration.ts (`selfHealWorkerLink`) the instant a manager/worker parent desync is caught —
    * so recovery no longer needs a daemon restart. The caller is responsible for verifying ownership
    * (lineage) BEFORE calling this — this method performs no ownership check of its own.
    */

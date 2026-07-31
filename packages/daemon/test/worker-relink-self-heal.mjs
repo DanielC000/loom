@@ -63,7 +63,7 @@ seedWorker("w-b", "MGR_B");
 
 // --- drive the REAL manager MCP tools in-process; stub `sessions` mirrors service.ts's UNCHANGED
 // exact-parent write-op guard (each throws "not your worker" for a non-exact parent), so worker_message/
-// worker_redirect exercise the real orchestration.ts wiring (ensureWorkerLinked) end-to-end without
+// worker_redirect exercise the real orchestration.ts wiring (selfHealWorkerLink) end-to-end without
 // needing a full PtyHost.
 const sessionsStub = {
   messageWorker(managerSessionId, workerSessionId) {

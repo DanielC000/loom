@@ -1331,7 +1331,10 @@ export class OrchestrationMcpRouter {
     // are UNCHANGED — they still reject a non-owned worker exactly as before; this only ever repairs a
     // row this manager's OWN lineage already owns, so it can never grant access across managers/projects.
     // Logs the disagreement (op, worker id, both session ids) so a genuine repro finally pins the seam.
-    const ensureWorkerLinked = (workerSessionId: string, op: string) => {
+    // Every real caller below re-derives ownership itself (the exact-match `parentSessionId !==
+    // managerSessionId` throw in each sessions.* method) — this helper never gates anything; it only
+    // repairs the row before that independent check runs. Hence the name: self-heal, not a guard.
+    const selfHealWorkerLink = (workerSessionId: string, op: string) => {
       const w = db.getSession(workerSessionId);
       if (!w || w.parentSessionId === managerSessionId) return w; // no row, or already correctly linked
       if (!workerReadableByManager(w)) return w; // genuinely not this manager's lineage — leave it to the "not your worker" guard
@@ -1495,7 +1498,7 @@ export class OrchestrationMcpRouter {
       async ({ workerSessionId }) => {
         // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
         if (!workerSessionId) return ok(fleetView());
-        const w = ensureWorkerLinked(workerSessionId, "worker_status");
+        const w = selfHealWorkerLink(workerSessionId, "worker_status");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         return ok({
           ...w,
@@ -1542,7 +1545,7 @@ export class OrchestrationMcpRouter {
         }),
       },
       async ({ workerSessionId, lastN, offset, limit, turnRange }) => {
-        const w = ensureWorkerLinked(workerSessionId, "worker_transcript");
+        const w = selfHealWorkerLink(workerSessionId, "worker_transcript");
         if (!w || !workerReadableByManager(w)) return ok({ error: "not your worker" });
         const turns = w.engineSessionId ? readTranscript(w.cwd, w.engineSessionId) : [];
         if (typeof lastN === "number" && lastN > 0) {
@@ -1581,7 +1584,7 @@ export class OrchestrationMcpRouter {
         if (!before) return ok({ found: false, wasStale: false, relinked: false, parentSessionId: null });
         const alreadyLinked = before.parentSessionId === managerSessionId;
         const owned = workerReadableByManager(before);
-        const after = ensureWorkerLinked(workerSessionId, "worker_relink");
+        const after = selfHealWorkerLink(workerSessionId, "worker_relink");
         return ok({
           found: true,
           wasStale: owned && !alreadyLinked,
@@ -1675,7 +1678,7 @@ export class OrchestrationMcpRouter {
         if (workerSessionId && opId) return ok({ error: "worker_stop takes EITHER workerSessionId OR opId, not both" });
         if (opId) return ok({ cancelled: sessions.cancelCapQueuedSpawn(managerSessionId, opId) });
         try {
-          ensureWorkerLinked(workerSessionId!, "worker_stop");
+          selfHealWorkerLink(workerSessionId!, "worker_stop");
           return ok(sessions.stopWorker(managerSessionId, workerSessionId!, mode ?? "graceful"));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -1701,7 +1704,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId }) => {
         try {
-          ensureWorkerLinked(workerSessionId, "worker_reap");
+          selfHealWorkerLink(workerSessionId, "worker_reap");
           return ok(await sessions.reapWorkerStrays(managerSessionId, workerSessionId));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -1733,7 +1736,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, mode }) => {
         try {
-          ensureWorkerLinked(workerSessionId, "worker_set_mode");
+          selfHealWorkerLink(workerSessionId, "worker_set_mode");
           const landed = await sessions.setWorkerMode(managerSessionId, workerSessionId, mode);
           return ok({ landed });
         } catch (e) {
@@ -1752,7 +1755,7 @@ export class OrchestrationMcpRouter {
         try {
           const resolvedText = resolveAlias(text, message);
           if (resolvedText === undefined) return ok({ error: "text (or message) is required" });
-          ensureWorkerLinked(workerSessionId, "worker_message");
+          selfHealWorkerLink(workerSessionId, "worker_message");
           return ok(sessions.messageWorker(managerSessionId, workerSessionId, resolvedText, resendOf));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -1809,7 +1812,7 @@ export class OrchestrationMcpRouter {
         try {
           const resolvedText = resolveAlias(text, message);
           if (resolvedText === undefined) return ok({ error: "text (or message) is required" });
-          ensureWorkerLinked(workerSessionId, "worker_redirect");
+          selfHealWorkerLink(workerSessionId, "worker_redirect");
           return ok(sessions.redirectWorker(managerSessionId, workerSessionId, resolvedText));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -2092,7 +2095,7 @@ export class OrchestrationMcpRouter {
         // restoring it here is a bugfix, not a behavior change worth re-litigating (CR minor 1).
         if (!summary) return ok({ error: "handoffSummary (or continuationPrompt) is required" });
         try {
-          ensureWorkerLinked(workerSessionId, "worker_recycle");
+          selfHealWorkerLink(workerSessionId, "worker_recycle");
           const fresh = await sessions.recycleWorker(managerSessionId, workerSessionId, summary);
           return ok({ newWorkerSessionId: fresh.id, gen: fresh.gen, recycledFrom: fresh.recycledFrom });
         } catch (e) {
@@ -2142,7 +2145,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, fullDiff, files, pathGlob }) => {
         try {
-          ensureWorkerLinked(workerSessionId, "worker_merge");
+          selfHealWorkerLink(workerSessionId, "worker_merge");
           return ok(await sessions.reviewWorkerMerge(managerSessionId, workerSessionId, { includePatch: fullDiff === true, files, pathGlob }));
         } catch (e) {
           return ok({ error: (e as Error).message });
@@ -2158,7 +2161,7 @@ export class OrchestrationMcpRouter {
       },
       async ({ workerSessionId, forceRemoveWorktree }) => {
         try {
-          ensureWorkerLinked(workerSessionId, "worker_merge_confirm");
+          selfHealWorkerLink(workerSessionId, "worker_merge_confirm");
           const r = await sessions.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree);
           if (!r.settled) return ok({ opId: r.op.opId, status: "pending", workerSessionId, note: "gate/merge still running — poll worker_list (this worker's pendingMerge field) or re-call worker_merge_confirm with the SAME workerSessionId to fetch the result once ready." });
           if (!r.ok) return ok({ error: r.error instanceof Error ? r.error.message : String(r.error) });

@@ -101,7 +101,7 @@ const parse = (res) => JSON.parse(res.content[0].text);
 const call = async (name, args) => parse(await client.callTool({ name, arguments: args }));
 
 // ============================ (1) READ scope walks the lineage (and self-heals the stale link too) ============================
-// Reads route through the SAME ensureWorkerLinked self-heal as writes (fleet-lockout fix) — a lineage-
+// Reads route through the SAME selfHealWorkerLink self-heal as writes (fleet-lockout fix) — a lineage-
 // owned worker's stale parent_session_id is repaired on the FIRST touch, read or write, so it's already
 // exact-match-correct (and thus visible to a plain worker_list) well before anything writes to it.
 const stPred = await call("worker_status", { workerSessionId: "w-pred" });
@@ -138,7 +138,7 @@ await clientOld.close();
 
 // ============================ (4) write ops self-heal a lineage-owned stale link, then succeed ============================
 // (fleet-lockout self-heal — see worker-relink-self-heal.mjs for the dedicated test) — worker_stop's own
-// guard fires FIRST here since w-pred's parent gets relinked to NEW as a side effect of ensureWorkerLinked,
+// guard fires FIRST here since w-pred's parent gets relinked to NEW as a side effect of selfHealWorkerLink,
 // so this also proves the relink actually PERSISTS: a plain db.getSession read below confirms it.
 const stopPred = await call("worker_stop", { workerSessionId: "w-pred" });
 check("worker_stop(w-pred) on successor NEW self-heals the stale link and succeeds", stopPred.stopped === true);
