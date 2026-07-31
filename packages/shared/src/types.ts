@@ -1093,8 +1093,62 @@ export type OrchestrationEventKind =
   // for the same tail-poll reason as `question_asked` above (a global `rateLimitedUntil` column change has
   // no event of its own today). Filed under the PARKED session (managerSessionId = its id, worker or
   // manager); `detail` carries { until, deadline } (the resume-at ISO timestamp and the episode give-up
-  // deadline, mirroring the two values the session row itself just received).
+  // deadline, mirroring the two values the session row itself just received), PLUS an OPTIONAL
+  // `detector: "stop_failure" | "weekly_text_sentinel"` naming which of pty/host.ts's two park sites fired
+  // (card 33d5aef1 — the structured StopFailure{error:"rate_limit"} check vs the weekly/account TEXT
+  // sentinel fallback). ⛔ `detector` is ABSENT on every row emitted before this field existed — a reader
+  // MUST treat absence as UNKNOWN, never default it to either value, and never back-infer it from another
+  // field (e.g. `resetsAtSeconds` presence loosely correlates but is not the same signal and must not be
+  // used to relabel historical rows).
   | "session_rate_limited"
+  // ── Usage-limit EPISODE lifecycle beyond the park (card 33d5aef1 — the park alone left "how did it end"
+  // and "who cleared it" untraceable once the transient session columns/global latch reset). Filed under
+  // the AFFECTED session (managerSessionId = its id, worker or manager) unless noted otherwise. ──────────
+  // The episode's park cleared because its resume-at passed (RateLimitWatcher.resume() ONLY — the manual
+  // clear routes below collapse resume+recovery into a single `rate_limit_recovered`, since they end the
+  // episode outright rather than re-arming a watched recovery window). `detail` is empty — the session
+  // row's own (now-null) `rateLimitedUntil` carried the specifics; this just marks WHEN the transition
+  // happened, durably, past the point the column itself gets nulled again on a later re-cap.
+  | "rate_limit_resumed"
+  // The episode ended WITHOUT ever hitting the give-up deadline: either the watcher observed the resumed
+  // turn complete cleanly (RateLimitWatcher.succeed()), or a human manually cleared the hold on one session
+  // (`POST /api/sessions/:id/rate-limit/clear`) or globally (`POST /api/usage/clear-hold`, one event per
+  // session actually resumed by that cascade). `detail` carries { actor: "watcher" | "manual_session_clear"
+  // | "manual_global_clear" } — the manual paths do NOT go through the watcher's phased resume→succeed
+  // state machine (they clear the park AND the episode deadline in one step), so they're recorded here
+  // rather than as a separate `rate_limit_resumed`.
+  | "rate_limit_recovered"
+  // The episode's give-up deadline was exceeded before it ever cleared (RateLimitWatcher.bail() — either
+  // still parked past the deadline, or recovering-but-hung past it) — auto-resume was abandoned; the
+  // session is left with `lastError` naming the abandonment. The MOST INVISIBLE and MOST CONSEQUENTIAL
+  // outcome named in the card: a silently-abandoned recovery previously left no trace once the deadline
+  // column cleared. `detail` carries { deadline } (the give-up horizon that was exceeded). Watcher-only —
+  // a manual clear can never "bail" (it always ends the episode as `rate_limit_recovered`).
+  | "rate_limit_bailed"
+  // The GLOBAL cross-session usage-awareness latch (`~/.loom/tmp/claude-usage.json`,
+  // orchestration/usage-awareness.ts `recordClaudeRateLimit`) was (re)armed — fired alongside index.ts's
+  // `onRateLimited` hook, immediately after its `recordClaudeRateLimit(...)` call. `detail` carries
+  // { resetsAtSeconds? } (present only when this specific hit extended the awareness hold — see index.ts's
+  // recencyFloorSeconds guard). Filed under the session whose park triggered the (re)arm, same as
+  // `session_rate_limited` — the latch is a single global file, but every arm is caused by ONE session's cap.
+  | "usage_latch_armed"
+  // The GLOBAL latch was DROPPED — `clearClaudeRateLimit()` fired. `detail.actor` discriminates the THREE
+  // call sites: `"watcher"` (RateLimitWatcher.resume(), automatic — the reset passed on its own),
+  // `"manual_clear_hold"` (`POST /api/usage/clear-hold`, session-less: managerSessionId = "" — a GLOBAL
+  // human action not scoped to one session), `"manual_session_clear"` (`POST /api/sessions/:id/rate-limit/
+  // clear`, filed under that session). This is the answer to the card's central forensic question — a
+  // manual clear-hold while a process still holds stale credentials resumes it straight back into the cap,
+  // and previously left no trace of WHO did it.
+  | "usage_latch_cleared"
+  // A `worker_spawn` was REFUSED because the account is already known-limited (sessions/service.ts's
+  // `UsageLimitError` throw site, §19c awareness gate) — the audit twin of the returned error, so a refused
+  // spawn is visible in the durable trail and not only in whatever caught the thrown error. Filed under the
+  // BLOCKED MANAGER (managerSessionId = its id) with `taskId` set when the spawn was tasked; `detail`
+  // carries { retryAfter?, agentId, parked: boolean } — `retryAfter` mirrors the structured deadline the
+  // caller receives (absent in the degenerate race where the limit cleared between the check and the
+  // throw); `parked` is whether this refusal ALSO armed the manager's own rate-limit park (true whenever
+  // `retryAfter` is present — the existing side effect right above this throw site).
+  | "worker_spawn_usage_blocked"
   // ── Companion attention-push (daemon-owned per-companion watcher — NOT a capability-registry lever;
   // see companion/attention-push.ts) — the push twin of companion_reminder_fired/companion_heartbeat_fired:
   // a subscribed fleet signal (see attention-push.ts's classify()) was pushed to the companion as a framed

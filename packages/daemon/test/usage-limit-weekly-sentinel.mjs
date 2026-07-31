@@ -204,6 +204,7 @@ try {
 
   check("PARK: onRateLimited fired exactly once via the TEXT-sentinel path (plain Stop, no StopFailure)",
     rateLimitedLog.length === 1 && rateLimitedLog[0].id === SID);
+  check("PARK: detector attributed as 'weekly_text_sentinel' (card 33d5aef1)", rateLimitedLog[0].detail?.detector === "weekly_text_sentinel");
   check("PARK: the park message names 'usage limit'",
     typeof rateLimitedLog[0].detail?.message === "string" && rateLimitedLog[0].detail.message.includes("usage limit"));
   check("PARK: busy fell to false", lastBusy() === false);

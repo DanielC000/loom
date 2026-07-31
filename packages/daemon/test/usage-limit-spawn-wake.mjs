@@ -103,6 +103,15 @@ try {
   check("(1) the refusal is side-effect-free (no worktree dir, no worker session row)", noSpawnSideEffects());
   check("(1) the card never left backlog (a refused spawn moves nothing)", db.getTask(taskGood).columnKey === "backlog");
 
+  // ════════ card 33d5aef1: the refusal is ATTRIBUTED as a durable event, not just the thrown error ════════
+  const blocked = db.listOrchestrationEventsBounded({ kind: ["worker_spawn_usage_blocked"], sessionId: "mgr1", limit: 10, offset: 0 });
+  check("(1) worker_spawn_usage_blocked event recorded exactly once", blocked.total === 1);
+  const blockedDetail = blocked.items[0]?.detail;
+  check("(1) event carries the same retryAfter the caller received", blockedDetail?.retryAfter === expectedRetryAfter);
+  check("(1) event carries the blocked agentId", blockedDetail?.agentId === "agentDev");
+  check("(1) event marks parked:true (a retryAfter was present)", blockedDetail?.parked === true);
+  check("(1) event is linked to the refused task", blocked.items[0]?.taskId === taskGood);
+
   // ════════ (2) AUTO-WAKE: the blocked manager is registered into the rate-limit park machinery ════════
   const parked = db.getSession("mgr1");
   check("(2) manager is parked with rate_limited_until === retryAfter", parked.rateLimitedUntil === expectedRetryAfter);
@@ -131,6 +140,15 @@ try {
     check("(2) manager episode deadline cleared too (rate_limit_deadline null)", woken.rateLimitDeadline === null);
     check("(2) GLOBAL latch dropped by the cascade", !fs.existsSync(LATCH));
     check("(2) nothing left parked", db.listRateLimited().length === 0);
+
+    // card 33d5aef1: the trail must survive EXACTLY the teardown above (rateLimitedUntil/rateLimitDeadline
+    // now null, latch file gone) — read it only NOW, after the transient state is already erased.
+    const recovered = db.listOrchestrationEventsBounded({ kind: ["rate_limit_recovered"], sessionId: "mgr1", limit: 10, offset: 0 });
+    check("(2) rate_limit_recovered recorded for the manually-woken manager, after teardown", recovered.total === 1);
+    check("(2) attributed to the manual global clear (watcher vs manual is answerable)", recovered.items[0]?.detail?.actor === "manual_global_clear");
+    const latchCleared = db.listOrchestrationEventsBounded({ kind: ["usage_latch_cleared"], limit: 10, offset: 0 });
+    check("(2) usage_latch_cleared recorded session-less, attributed to manual_clear_hold",
+      latchCleared.total === 1 && latchCleared.items[0]?.detail?.actor === "manual_clear_hold");
   } finally {
     try { await app.close(); } catch { /* ignore */ }
   }

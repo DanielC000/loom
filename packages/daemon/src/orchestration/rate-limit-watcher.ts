@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { Db } from "../db.js";
 import type { Session } from "@loom/shared";
 import { clearClaudeRateLimit } from "./usage-awareness.js";
@@ -76,6 +77,11 @@ export class RateLimitWatcher {
     this.deps.db.setRateLimitedUntil(s.id, null, null);
     clearClaudeRateLimit();
     this.deps.pty.resumeAfterRateLimit(s.id);
+    // card 33d5aef1: durable twins of the transition above — the resume-at column that just carried this
+    // information is about to be nulled by a re-cap or the eventual succeed/bail, so record it now.
+    const now = new Date().toISOString();
+    this.deps.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: s.id, kind: "rate_limit_resumed" });
+    this.deps.db.appendEvent({ id: randomUUID(), ts: now, managerSessionId: s.id, kind: "usage_latch_cleared", detail: { actor: "watcher" } });
     // card 902d089f: this resume is a genuine limit-clear for s itself — if s is a MANAGER, its own
     // cap-queue may hold an entry that maybeDrainCapQueue requeued on the very UsageLimitError this
     // park came from (worker_spawn parks its own manager on the same usage-limit machinery this watcher
@@ -85,11 +91,21 @@ export class RateLimitWatcher {
 
   private succeed(id: string): void {
     this.deps.db.clearRateLimitDeadline(id); // episode resolved — stop tracking it
+    this.deps.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: id,
+      kind: "rate_limit_recovered", detail: { actor: "watcher" },
+    });
   }
 
   private bail(id: string, deadline: string): void {
     this.deps.db.setRateLimitedUntil(id, null, `usage limit not cleared by ${deadline} — auto-resume abandoned`);
     this.deps.db.clearRateLimitDeadline(id);
+    // card 33d5aef1: the most invisible outcome — a silently-abandoned recovery previously left no trace
+    // once rate_limit_deadline cleared above.
+    this.deps.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: id,
+      kind: "rate_limit_bailed", detail: { deadline },
+    });
   }
 
   start(): void {

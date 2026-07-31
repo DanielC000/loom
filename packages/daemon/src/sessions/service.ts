@@ -4314,6 +4314,13 @@ export class SessionService {
         this.db.setRateLimitedUntil(managerSessionId, retryAfter, `usage limit active — worker_spawn deferred; resumes ${retryAfter}`);
         this.db.armRateLimitDeadline(managerSessionId, giveUp);
       }
+      // card 33d5aef1: the audit twin of the refusal — previously only the thrown UsageLimitError (whatever
+      // caught it) ever knew this happened; a manager that never surfaces the caught error to a human left
+      // no durable sign a spawn was ever blocked.
+      this.db.appendEvent({
+        id: randomUUID(), ts: usageNow.toISOString(), managerSessionId, taskId,
+        kind: "worker_spawn_usage_blocked", detail: { retryAfter: retryAfter ?? null, agentId: opts.agentId ?? null, parked: !!retryAfter },
+      });
       throw new UsageLimitError(retryAfter);
     }
 

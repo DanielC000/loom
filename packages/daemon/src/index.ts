@@ -312,9 +312,11 @@ async function main(): Promise<void> {
       db.armRateLimitDeadline(sessionId, deadline);
       // Event-emit twin (attention-push signal source, Lead fork 2b) — additive, no existing consumer
       // (alert-webhook's events[] allowlist, web attention) lists this new kind, so this is inert for them.
+      // `detector` (card 33d5aef1) is PtyHost's own attribution of which park site fired — passed straight
+      // through, never re-derived here.
       db.appendEvent({
         id: randomUUID(), ts: now.toISOString(), managerSessionId: sessionId,
-        kind: "session_rate_limited", detail: { until, deadline },
+        kind: "session_rate_limited", detail: { until, deadline, detector: detail.detector },
       });
       // Feed the SAME derived reset into GLOBAL awareness (not just this session's park) — otherwise
       // the Scheduler/worker_spawn gate (isLikelyNearClaudeUsageLimit) falls back to its own ~6h
@@ -326,6 +328,12 @@ async function main(): Promise<void> {
       const globalResetsAtSeconds =
         typeof resetsAtSeconds === "number" && resetsAtSeconds >= recencyFloorSeconds ? resetsAtSeconds : undefined;
       recordClaudeRateLimit(globalResetsAtSeconds);
+      // card 33d5aef1: the durable twin of the (re)arm itself — the file above is overwritten silently on
+      // every hit, so without this event nothing records that the global cross-session latch was touched.
+      db.appendEvent({
+        id: randomUUID(), ts: now.toISOString(), managerSessionId: sessionId,
+        kind: "usage_latch_armed", detail: { resetsAtSeconds: globalResetsAtSeconds },
+      });
     },
     // A hard stop fires no Stop hook, so clear busy on exit too — an exited pty is never busy.
     onExit: (sessionId, _code, info) => {

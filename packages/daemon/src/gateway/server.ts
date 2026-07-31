@@ -47,7 +47,7 @@ import { validateProjectConfigOverride, validatePlatformConfigOverride, validate
 import { setProjectConfigSafe } from "../tasks/columns.js";
 import type { OrchestrationControl } from "../orchestration/control.js";
 import type { UsageStatusPoller } from "../orchestration/usage-status.js";
-import { clearClaudeRateLimit } from "../orchestration/usage-awareness.js";
+import { clearClaudeRateLimit, readClaudeUsageState } from "../orchestration/usage-awareness.js";
 import { GitReader, checkCommitIdentity, isGitRepo } from "../git/reader.js";
 import { GitWriter, gitError } from "../git/writer.js";
 import { bootstrapProjectDir, isExistingDir } from "../setup/bootstrap.js";
@@ -664,9 +664,13 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   // resume — resumeAfterRateLimit also no-ops on a dead pty as a backstop). The global latch is dropped
   // ONCE up front (not per session). Returns how many live sessions were resumed.
   app.post("/api/usage/clear-hold", async () => {
+    // card 33d5aef1: was there actually a latch/park to clear? — a no-op clear-hold (nothing armed, no
+    // rows parked) must not fabricate an episode-end event (DoD item 5's positive control, applied here too).
+    const hadLatch = readClaudeUsageState().lastRateLimitAt != null;
     clearClaudeRateLimit();
     let resumed = 0;
-    for (const s of deps.db.listRateLimited()) {
+    const rows = deps.db.listRateLimited();
+    for (const s of rows) {
       deps.db.setRateLimitedUntil(s.id, null, null);
       deps.db.clearRateLimitDeadline(s.id);
       if (s.processState === "live" && deps.pty.resumeAfterRateLimit(s.id)) {
@@ -676,6 +680,30 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
         // unrelated worker to exit. Fire-and-forget + idempotent, like every other drain call site.
         if (s.role === "manager") void deps.sessions.maybeDrainCapQueue(s.id);
       }
+      // card 33d5aef1: per-session episode-end twin, same kind RateLimitWatcher.succeed() uses — this
+      // cascade collapses resume+recovery into one manual action rather than the watcher's phased
+      // resume→succeed. NON-FATAL: a logging fault must never change this route's response.
+      try {
+        deps.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: s.id,
+          kind: "rate_limit_recovered", detail: { actor: "manual_global_clear" },
+        });
+      } catch { /* best-effort audit trail — never break the clear itself */ }
+    }
+    // card 33d5aef1: session-less (a GLOBAL action, not scoped to one session) — this is the durable
+    // answer to "was the hold cleared by the watcher or manually," including the dangerous case where
+    // credentials were still stale. NON-FATAL, same rationale as the per-session emit above. Gates on
+    // `hadLatch` ALONE (mgr #82 review) — NOT `rows.length > 0` — so this event means the SAME thing on
+    // both clear routes: "the latch was armed and is now cleared," never "some session was also parked."
+    // Parked-but-no-latch rows are already fully covered by the per-session rate_limit_recovered emits
+    // in the loop above; conflating the two here would fabricate a latch clear that never happened.
+    if (hadLatch) {
+      try {
+        deps.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: "",
+          kind: "usage_latch_cleared", detail: { actor: "manual_clear_hold" },
+        });
+      } catch { /* best-effort audit trail — never break the clear itself */ }
     }
     return { cleared: true, resumed };
   });
@@ -4750,6 +4778,15 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     const id = (req.params as { id: string }).id;
     const session = deps.db.getSession(id);
     if (!session) return reply.code(404).send({ error: "session not found" });
+    // card 33d5aef1: was this session ACTUALLY in an episode? — a clear against an already-unparked
+    // session must emit ZERO episode events (DoD item 5's positive control), not fabricate one that never
+    // happened. Read BOTH gates BEFORE the clear below — reading either after always yields false.
+    // `wasParked` (this SESSION's own park state) and `hadLatch` (the GLOBAL latch's own armed state) are
+    // INDEPENDENT: `clearClaudeRateLimit()` below drops the latch unconditionally regardless of whether
+    // THIS session was parked, so a human clearing an unparked session while some OTHER session's cap
+    // armed the latch still genuinely clears it — that must not go unrecorded (mgr #82 review finding).
+    const wasParked = session.rateLimitedUntil != null || session.rateLimitDeadline != null;
+    const hadLatch = readClaudeUsageState().lastRateLimitAt != null;
     deps.db.setRateLimitedUntil(id, null, null);
     deps.db.clearRateLimitDeadline(id);
     clearClaudeRateLimit();
@@ -4757,6 +4794,26 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
     // card 902d089f: mirrors the /api/usage/clear-hold cascade above — drain a resumed manager's own
     // cap-queue rather than leaving a usage-limit-requeued entry to wait for an unrelated worker exit.
     if (resumed && session.role === "manager") void deps.sessions.maybeDrainCapQueue(id);
+    // card 33d5aef1: durable twins of this manual episode-end (same kind RateLimitWatcher.succeed() uses,
+    // + the actor-attributed latch clear — the card's central "watcher vs manual" forensic question).
+    // NON-FATAL: a logging fault must never change this route's response/status code. The two events gate
+    // on their OWN independent conditions (see the comment above) — never conflate them.
+    if (wasParked) {
+      try {
+        deps.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: id,
+          kind: "rate_limit_recovered", detail: { actor: "manual_session_clear" },
+        });
+      } catch { /* best-effort audit trail — never break the clear itself */ }
+    }
+    if (hadLatch) {
+      try {
+        deps.db.appendEvent({
+          id: randomUUID(), ts: new Date().toISOString(), managerSessionId: id,
+          kind: "usage_latch_cleared", detail: { actor: "manual_session_clear" },
+        });
+      } catch { /* best-effort audit trail — never break the clear itself */ }
+    }
     return reply.send(deps.db.getSession(id));
   });
   // Send a turn to a session through the busy-gated queue, so a human composer and the

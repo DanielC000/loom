@@ -112,6 +112,7 @@ try {
   host.deliverHook(SID, { hook_event_name: "StopFailure", error: "rate_limit" });
 
   check("PARK: onRateLimited fired exactly once for this session", rateLimitedLog.length === 1 && rateLimitedLog[0].id === SID);
+  check("PARK: detector attributed as 'stop_failure' (card 33d5aef1)", rateLimitedLog[0].detail?.detector === "stop_failure");
   check("PARK: busy fell to false (the killed turn ended)", lastBusy() === false);
   check("PARK: the held queue was NOT drained (pending still [MSG1, MSG2])",
     JSON.stringify(host.getPending(SID)) === JSON.stringify([MSG1, MSG2]));

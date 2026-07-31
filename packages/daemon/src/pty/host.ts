@@ -2012,8 +2012,12 @@ export interface PtyHostEvents {
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
+   * `detail.detector` (card 33d5aef1) names which of the two park sites below fired — `"stop_failure"`
+   * (the structured StopFailure{error:"rate_limit"} check) or `"weekly_text_sentinel"` (the weekly/account
+   * TEXT sentinel fallback, which never carries a `resetsAtSeconds`) — so the durable `session_rate_limited`
+   * event can distinguish them; ⛔ don't back-infer one from the other's absence downstream of this call.
    */
-  onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string }): void;
+  onRateLimited(sessionId: string, until: string, detail: { resetsAtSeconds?: number; message: string; detector: "stop_failure" | "weekly_text_sentinel" }): void;
   /**
    * The pty exited. `intended` distinguishes a DELIBERATE Loom termination (any pty.stop() — graceful/
    * idle/user-stop/recycle/merge-stop/run-teardown, which set `live.stopping`) from an UNEXPECTED process
@@ -4023,7 +4027,7 @@ export class PtyHost {
               // the ~10s reconcile timer (and any incoming enqueueStdin) would otherwise drain pending into the
               // capped account and submit() would CLOBBER lastPrompt, losing the killed turn we must replay.
               live.rateLimited = true;
-              this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}` });
+              this.events.onRateLimited(sessionId, until, { resetsAtSeconds: det.resetsAtSeconds, message: `usage limit — resumes ${until}`, detector: "stop_failure" });
               break;
             }
           }
@@ -4039,7 +4043,7 @@ export class PtyHost {
           if (stats?.lastAssistantText && isWeeklyUsageLimitSentinel(stats.lastAssistantText)) {
             const until = rateLimitedUntil(undefined);
             live.rateLimited = true;
-            this.events.onRateLimited(sessionId, until, { message: `usage limit — resumes ${until}` });
+            this.events.onRateLimited(sessionId, until, { message: `usage limit — resumes ${until}`, detector: "weekly_text_sentinel" });
             break;
           }
           // Card 343441bd: bump the completed-turn counter HERE, immediately before drain — NOT up at the
