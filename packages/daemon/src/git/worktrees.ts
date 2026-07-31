@@ -1827,16 +1827,33 @@ export function matchAddedDenyGlobs(files: DiffstatFile[], denyGlobs: string[]):
 }
 
 /**
- * Deliberately worded markers a human writes to declare a card's premise dead — NOT a bare "retract",
- * which reads as casual prose ("let's retract that comment") rather than a deliberate declaration. Each
- * phrase below is the kind of explicit label the `/orchestrate` retitle doctrine itself uses (e.g.
- * "premise retracted, not a bug") — kept narrow on purpose (card cf60a32a): a heuristic here is only
- * acceptable because it keys on wording a human chose to write, never on inferred intent.
+ * Builds a LINE-ANCHORED marker regex: the phrase must stand ALONE on its own line — optionally under
+ * markdown heading/bullet/blockquote/bold decoration (`#`, `*`, `_`, `>`, `-`, whitespace, a trailing
+ * `:`) — with nothing else on that line. The decoration char classes deliberately exclude letters/digits
+ * AND newlines, so a real sentence ("...and retracted before I'd checked.", "...the retracted count-floor
+ * idea...") can never satisfy the "nothing else on this line" requirement no matter where it falls, and
+ * the marker can never straddle two physical lines.
+ */
+function lineAnchoredMarker(phrase: string): RegExp {
+  return new RegExp(`^[ \\t#*_>-]{0,12}${phrase}[ \\t#*_>:-]{0,12}$`, "im");
+}
+
+/**
+ * Deliberate markers a human writes to declare a card's premise dead — each must appear as its OWN
+ * line in the body (see {@link lineAnchoredMarker}), NOT merely be mentioned anywhere in prose. This was
+ * originally a bare `\bretracted\b` substring match over the whole body; two live false positives (card
+ * `e7bcb0df`'s "the retracted count-floor idea", a discarded design option, and card `66d91a11`'s "...and
+ * retracted before I'd checked", a person retracting a belief) proved that "retraction" is an open
+ * vocabulary no keyword list converges on. Line-anchoring converts it to a closed one: a human declaring
+ * a card's premise dead writes a dedicated line (e.g. a `RETRACTED` heading), they don't rely on the word
+ * merely appearing somewhere in the body. Kept narrow on purpose (card cf60a32a, narrowed `637558ca`): a
+ * heuristic here is only acceptable because it keys on a deliberate declaration a human chose to write,
+ * never on inferred intent.
  */
 const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
-  { label: "retracted", re: /\bretracted\b/i },
-  { label: "won't-do", re: /\bwon'?t-do\b/i },
-  { label: "not a bug", re: /\bnot a bug\b/i },
+  { label: "retracted", re: lineAnchoredMarker("retracted") },
+  { label: "won't-do", re: lineAnchoredMarker("won'?t-do") },
+  { label: "not a bug", re: lineAnchoredMarker("not a bug") },
 ];
 
 /**
@@ -1848,8 +1865,9 @@ const RETRACTION_MARKER_RES: ReadonlyArray<{ label: string; re: RegExp }> = [
  * bug that never existed into permanent mainline history.
  *
  * Returns the matched marker label when the TITLE still starts with the literal `fix(` (lowercase, this
- * project's Conventional Commits type casing) AND the BODY contains one of {@link RETRACTION_MARKER_RES}
- * — else `null`. PURE (no I/O), so trivially unit-tested; mirrors {@link matchAddedDenyGlobs}'s shape.
+ * project's Conventional Commits type casing) AND the BODY carries one of {@link RETRACTION_MARKER_RES}
+ * as its OWN standalone line — else `null`. PURE (no I/O), so trivially unit-tested; mirrors
+ * {@link matchAddedDenyGlobs}'s shape.
  */
 export function matchRetractedPremiseTitle(title: string, body: string): string | null {
   if (!title.trim().startsWith("fix(")) return null;

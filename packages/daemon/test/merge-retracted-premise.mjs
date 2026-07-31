@@ -1,8 +1,8 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // RETRACTED-PREMISE merge-review backstop test (card cf60a32a — the mechanical half of `0fa32321`; doctrine
-// half merged as `514da7cf`). REAL git on temp repos, NO claude and NO live daemon — drives
-// SessionService.reviewWorkerMerge() directly against an isolated LOOM_HOME (mirrors merge-deny-glob.mjs's
-// and merge-review-commit-subject.mjs's in-process style).
+// half merged as `514da7cf`; NARROWED to a line-anchored marker by card `637558ca`). REAL git on temp
+// repos, NO claude and NO live daemon — drives SessionService.reviewWorkerMerge() directly against an
+// isolated LOOM_HOME (mirrors merge-deny-glob.mjs's and merge-review-commit-subject.mjs's in-process style).
 //
 // THE GAP IT GUARDS: card title = squash-commit subject on this project. When a card's premise is
 // retracted (the "bug" proved not to exist) but its branch still merges (usually to salvage a regression
@@ -12,20 +12,30 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // form, so `coerced` reads false on exactly the case this backstop exists to catch. This proves the new,
 // separate `matchRetractedPremiseTitle`-driven warning fires on body-vs-title CONTENT instead.
 //
+// CARD `637558ca`: the ORIGINAL predicate was a bare case-insensitive `\bretracted\b` substring match over
+// the whole body — it fired on two LIVE false positives from unrelated prose senses of the word (card
+// `e7bcb0df`'s "the retracted count-floor idea", a discarded design option; card `66d91a11`'s "...and
+// retracted before I'd checked", a person retracting a belief). The fix requires the marker to stand ALONE
+// on its own line (see `lineAnchoredMarker` in worktrees.ts) — a deliberate declaration, not any mention of
+// the word anywhere in the body. This file proves all THREE directions together so they can't drift apart:
+//   - POSITIVE CONTROL: a genuine standalone marker line + `fix(` title still fires.
+//   - NEGATIVE CONTROLS: both live false positives, verbatim, no longer fire.
+//
 // Proves (the DoD's 4 named cases):
-//   (A) MATCH — title starts with `fix(` and the body carries an explicit retraction marker: reviewWorkerMerge
-//       surfaces a "RETRACTED-PREMISE" warning clause; subjectPreview fields (rawTitle/commitSubject/coerced)
-//       are UNAFFECTED (coerced stays false — proving b88704bb's fields are untouched by this check).
+//   (A) MATCH — title starts with `fix(` and the body carries a standalone retraction marker line:
+//       reviewWorkerMerge surfaces a "RETRACTED-PREMISE" warning clause; subjectPreview fields
+//       (rawTitle/commitSubject/coerced) are UNAFFECTED (coerced stays false — proving b88704bb's fields
+//       are untouched by this check).
 //   (B) NO-MATCH — an unmatched card (fix( title, body with no marker; and separately a non-`fix(` title
-//       whose body DOES carry a marker word) produces a result BYTE-IDENTICAL to today: no RETRACTED-PREMISE
-//       clause, no warning at all.
+//       whose body DOES carry a marker word, but not as its own line) produces a result with no
+//       RETRACTED-PREMISE clause, no warning at all.
 //   (C) MISSING TASK — a taskless worker (no taskId at all): no warning, no throw — fails safe.
 //   (D) EXISTING WARNINGS INTACT — a branch that ALSO trips the deny-glob warning composes both clauses in
 //       one `warning` string; subjectPreview is still correct alongside it.
 //
 // Also exercises the pure matcher directly (no git, cheap) for the marker-variant + edge-case surface
-// (case sensitivity, apostrophe variants, no-body, no-title-prefix) that the integration cases above don't
-// each need their own temp repo for.
+// (case sensitivity, apostrophe variants, no-body, no-title-prefix, the two live false positives) that the
+// integration cases above don't each need their own temp repo for.
 // Run: 1) build daemon (pnpm build), 2) node test/merge-retracted-premise.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -46,22 +56,47 @@ const GIT_ID = "-c user.email=mrp@loom -c user.name=mrp";
 const now = new Date().toISOString();
 
 // ── Pure-matcher checks (no git, no DB) ───────────────────────────────────────────────────────────────────
-check("matcher: fix( title + 'premise retracted' body -> matches",
-  matchRetractedPremiseTitle("fix(orchestration): nudge text", "This premise retracted, not a bug.") === "retracted");
-check("matcher: fix( title + \"won't-do\" body -> matches",
-  matchRetractedPremiseTitle("fix(daemon): thing", "WON'T-DO — closing, this was never real.") === "won't-do");
-check("matcher: fix( title + 'not a bug' body -> matches",
-  matchRetractedPremiseTitle("fix(daemon): thing", "Turns out this is not a bug after all.") === "not a bug");
+// POSITIVE CONTROL FIRST (DoD item 2) — a genuine, DELIBERATELY-DECLARED retraction (its own standalone
+// line, as the narrowed predicate now requires) must still fire. Shown BEFORE the negative controls so a
+// reader can see the check is capable of a match at all before trusting its zeros below.
+check("matcher: fix( title + standalone 'RETRACTED' heading line -> matches (POSITIVE CONTROL)",
+  matchRetractedPremiseTitle("fix(orchestration): nudge text",
+    "## Root cause\n\nRETRACTED\n\nThe premise never held up under real load — keeping the added regression test as coverage.") === "retracted");
+check("matcher: fix( title + standalone \"WON'T-DO\" heading line -> matches",
+  matchRetractedPremiseTitle("fix(daemon): thing", "## WON'T-DO\n\nClosing this — it was never real.") === "won't-do");
+check("matcher: fix( title + standalone 'NOT A BUG' line -> matches",
+  matchRetractedPremiseTitle("fix(daemon): thing", "NOT A BUG\n\nTurns out this is expected behavior.") === "not a bug");
 check("matcher: fix( title + unrelated body -> null",
   matchRetractedPremiseTitle("fix(daemon): thing", "Implemented the fix as described.") === null);
 check("matcher: fix( title + incidental 'retract' (not 'retracted') -> null (narrow, not substring-y)",
   matchRetractedPremiseTitle("fix(daemon): thing", "We may need to retract this claim later.") === null);
-check("matcher: non-fix( title (already feat() + marker body -> null (title gate)",
-  matchRetractedPremiseTitle("feat(daemon): thing", "premise retracted, not a bug") === null);
-check("matcher: bare-prose title (no type at all) + marker body -> null",
-  matchRetractedPremiseTitle("Refresh the dashboard", "premise retracted") === null);
+check("matcher: non-fix( title (already feat() + standalone marker line -> null (title gate)",
+  matchRetractedPremiseTitle("feat(daemon): thing", "RETRACTED") === null);
+check("matcher: bare-prose title (no type at all) + standalone marker line -> null",
+  matchRetractedPremiseTitle("Refresh the dashboard", "RETRACTED") === null);
 check("matcher: empty body -> null, no throw",
   matchRetractedPremiseTitle("fix(daemon): thing", "") === null);
+
+// NEGATIVE CONTROLS (DoD item 3) — the two LIVE false positives that motivated this card, VERBATIM, must
+// no longer fire now the marker must stand on its own line.
+const FP1_E7BCB0DF = "⚠️ This is a floor on the instrument's INPUT, not on the measurement — " +
+  "categorically different from the retracted count-floor idea (which failed because executed-test count " +
+  "doesn't track coverage).";
+check("matcher: live FP e7bcb0df ('...the retracted count-floor idea...', mid-sentence, a discarded design option) -> null",
+  matchRetractedPremiseTitle("fix(daemon): the underscore-prefixed directory GAP 2 fix", FP1_E7BCB0DF) === null);
+
+const FP2_66D91A11 = "The Codescape peer did it for three failures, then caught themselves — 'I never " +
+  "established WHEN that number is sampled' — and retracted before I'd checked.";
+check("matcher: live FP 66d91a11 ('...and retracted before I'd checked', mid-sentence, a person retracting a belief) -> null",
+  matchRetractedPremiseTitle("fix(sessions): the gate detail renders concurrentAtStart as bare \"concurrent=\"", FP2_66D91A11) === null);
+
+// The two negative controls above are only meaningful if this exact check CAN return non-null on a body
+// that also contains that same false-positive prose — prove it's not vacuously silent by adding a real
+// standalone marker line alongside each FP's prose and confirming it now DOES match.
+check("matcher: FP1's prose PLUS a real standalone marker line elsewhere -> matches (control isn't vacuous)",
+  matchRetractedPremiseTitle("fix(daemon): thing", `${FP1_E7BCB0DF}\n\nRETRACTED\n\nExplanation.`) === "retracted");
+check("matcher: FP2's prose PLUS a real standalone marker line elsewhere -> matches (control isn't vacuous)",
+  matchRetractedPremiseTitle("fix(daemon): thing", `${FP2_66D91A11}\n\nRETRACTED\n\nExplanation.`) === "retracted");
 
 const db = new Db();
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
@@ -89,14 +124,14 @@ function commitChange(worktreePath, file, content, msg) {
 }
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
-const A = { projId: `mrp-a-proj-${sfx}`, agentId: `mrp-a-top-${sfx}`, taskId: `mrp-a-task-${sfx}`, mgrId: `mrp-a-mgr-${sfx}`, workerId: `mrp-a-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-match-${sfx}`), title: "fix(orchestration): the idle-watchdog nudge lacks the card id", body: "## Root cause was wrong\nThis premise retracted, not a bug — keeping the regression test as coverage." };
+const A = { projId: `mrp-a-proj-${sfx}`, agentId: `mrp-a-top-${sfx}`, taskId: `mrp-a-task-${sfx}`, mgrId: `mrp-a-mgr-${sfx}`, workerId: `mrp-a-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-match-${sfx}`), title: "fix(orchestration): the idle-watchdog nudge lacks the card id", body: "## Root cause was wrong\n\nRETRACTED\n\nThe original bug never reproduced under real load — keeping the added regression test as coverage." };
 const B1 = { projId: `mrp-b1-proj-${sfx}`, agentId: `mrp-b1-top-${sfx}`, taskId: `mrp-b1-task-${sfx}`, mgrId: `mrp-b1-mgr-${sfx}`, workerId: `mrp-b1-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-nomarker-${sfx}`), title: "fix(daemon): paste double-fires on rapid Ctrl-V", body: "Straightforward reproduction and fix, see the diff." };
 const B2 = { projId: `mrp-b2-proj-${sfx}`, agentId: `mrp-b2-top-${sfx}`, taskId: `mrp-b2-task-${sfx}`, mgrId: `mrp-b2-mgr-${sfx}`, workerId: `mrp-b2-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-notitle-${sfx}`), title: "test(daemon): regression coverage for the nudge text (premise retracted, not a bug)", body: "premise retracted, not a bug — see title." };
 const C = { projId: `mrp-c-proj-${sfx}`, agentId: `mrp-c-top-${sfx}`, taskId: `mrp-c-task-${sfx}`, mgrId: `mrp-c-mgr-${sfx}`, workerId: `mrp-c-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-taskless-${sfx}`) };
-const D = { projId: `mrp-d-proj-${sfx}`, agentId: `mrp-d-top-${sfx}`, taskId: `mrp-d-task-${sfx}`, mgrId: `mrp-d-mgr-${sfx}`, workerId: `mrp-d-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-composed-${sfx}`), title: "fix(daemon): the retitle warning is missing", body: "WON'T-DO: closing this, the premise didn't hold up — merging only to keep the added regression test." };
+const D = { projId: `mrp-d-proj-${sfx}`, agentId: `mrp-d-top-${sfx}`, taskId: `mrp-d-task-${sfx}`, mgrId: `mrp-d-mgr-${sfx}`, workerId: `mrp-d-wkr-${sfx}`, repo: path.join(os.tmpdir(), `loom-mrp-composed-${sfx}`), title: "fix(daemon): the retitle warning is missing", body: "WON'T-DO\n\nClosing this — the premise didn't hold up. Merging only to keep the added regression test as coverage." };
 
 try {
-  // ── (A) MATCH: fix( title + explicit retraction marker in the body ──────────────────────────────────────
+  // ── (A) MATCH: fix( title + a standalone retraction marker line in the body ─────────────────────────────
   initRepo(A.repo);
   {
     const { worktreePath, branch } = await createWorktree(A.repo, A.projId, A.taskId);
@@ -186,9 +221,10 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_merge's review step now flags a fix( titled card whose body carries an explicit " +
-    "retraction marker with a RETRACTED-PREMISE warning (never a block), stays silent on an unmatched card " +
-    "or a missing/unreadable task, and composes cleanly alongside the existing STRANDED/STALE-BASE/DENY-GLOB " +
+  ? "\n✅ ALL PASS — worker_merge's review step flags a fix( titled card whose body carries a STANDALONE " +
+    "retraction marker line with a RETRACTED-PREMISE warning (never a block), no longer fires on either live " +
+    "false positive (mid-sentence mentions of \"retract(ed)\"), stays silent on an unmatched card or a " +
+    "missing/unreadable task, and composes cleanly alongside the existing STRANDED/STALE-BASE/DENY-GLOB " +
     "warnings and b88704bb's subject-preview fields."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

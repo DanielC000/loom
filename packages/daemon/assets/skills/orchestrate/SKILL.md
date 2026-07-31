@@ -470,6 +470,12 @@ mid-report — before sending anything.
      (premise retracted, not a bug)`. The title becomes permanent mainline history; merging under the
      dead premise records a fix for a bug that never existed, misleading everyone who later reads the
      log to answer "is X already fixed?".
+     - **An automated backstop may warn you at merge-review time if you forget — but only when you
+       declare the retraction as its own standalone line**, e.g. a line reading just `RETRACTED`,
+       `WON'T-DO`, or `NOT A BUG` (a heading or bullet is fine: `## RETRACTED` also counts). Mentioning
+       the word in the middle of a sentence ("...categorically different from the retracted idea...")
+       is ordinary prose and deliberately does NOT count — the backstop looks for a declaration you
+       clearly meant as one, not any use of the word anywhere in the body.
    - **A slow gate degrades `worker_merge_confirm` to `{status:"pending", opId}` — don't spin-poll it.**
      Once you're told the op is pending, go do something else (review another worker, work your queue) and
      wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` nudge that
