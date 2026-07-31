@@ -31,6 +31,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
+import { waitUntil } from "./_wait.mjs";
 
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdo-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
@@ -42,7 +43,6 @@ const { createWorktree } = await import("../dist/git/worktrees.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const GIT_ID = "-c user.email=mdo@loom -c user.name=mdo";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 const now = new Date().toISOString();
@@ -82,7 +82,15 @@ try {
   // live continuation for, but the map still shows "running" until something reconciles it away).
   const key = `merge:${workerId}`;
   void sessions.pendingOps.attach(key, "merge", deadMgrId, 10, () => new Promise(() => {}));
-  await sleep(30); // let the attach() call above actually degrade to "pending" (its own 10ms wait budget)
+  // POLLED, not a fixed wait (card 5f42aab2): wait for the zombie to actually be OBSERVABLE via peek()
+  // instead of sleeping a guessed duration and assuming attach()'s own internal 10ms degrade-to-"pending"
+  // race has completed by then. attach() registers the entry synchronously (before its own first await),
+  // so this resolves on its very first poll — but it asserts the real condition rather than a timing guess,
+  // so it can never under-wait no matter how starved the host's event loop gets.
+  await waitUntil(
+    () => { const v = sessions.pendingOps.peek(key); return v?.state === "running" && v?.managerSessionId === deadMgrId; },
+    { label: "zombie merge op observable as running under the dead manager" },
+  );
 
   // ── (1) precondition: worker_list's pendingMerge view shows the zombie with the DEAD manager's id ───
   const pre = sessions.peekPendingMerge(workerId);
@@ -121,7 +129,7 @@ try {
   // ── (3) reconcileDeadOwnerMergeOps() (the boot-reconcile sweep) clears a dead-owner op directly ─────
   const key2 = `merge:${workerId}-b`;
   void sessions.pendingOps.attach(key2, "merge", deadMgrId, 10, () => new Promise(() => {}));
-  await sleep(30);
+  await waitUntil(() => sessions.pendingOps.peek(key2)?.state === "running", { label: "second zombie op observable as running" });
   const zombie2 = sessions.pendingOps.peek(key2);
   check("(boot-sweep precondition) a second zombie op is tracked as running", zombie2?.state === "running");
   db.insertPendingGateOp({ opId: zombie2.opId, kind: "merge", key: key2, ownerSessionId: deadMgrId, projectId: projId, taskId, branch: null, startedAt: now, state: "pending", surfacedPending: true });
@@ -135,7 +143,7 @@ try {
   // ── (4) SURGICAL: a running op owned by a LIVE manager is untouched by either recovery path ────────
   const key3 = `merge:${workerId}-c`;
   void sessions.pendingOps.attach(key3, "merge", liveMgrId, 10, () => new Promise(() => {}));
-  await sleep(30);
+  await waitUntil(() => sessions.pendingOps.peek(key3)?.state === "running", { label: "live-owner op observable as running" });
   check("(healthy-path precondition) a live-owner op is tracked as running", sessions.pendingOps.peek(key3)?.state === "running");
   const clearedHealthy = sessions.reconcileDeadOwnerMergeOps();
   check("(healthy path) the boot-sweep clears NOTHING for a live-owner op", clearedHealthy === 0);
