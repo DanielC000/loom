@@ -2252,15 +2252,21 @@ export class OrchestrationMcpRouter {
           "fleet), deployStaleness}. ⚠️ Card 5e30c4bd, measured first-hand across a real deploy: `version` " +
           "and `webBundle` are BOTH byte-identical before/after a daemon-`src`-only deploy (no package bump, " +
           "no web rebuild) — do NOT use either as a staleness proxy. `deployStaleness` is the real signal: " +
-          "{available, stale, commitsBehind, distBuiltAt, mainlineHeadSha, mainlineHeadDate, reason?} — " +
-          "DERIVED fresh on every call (stat this daemon's own built entry + `git log` mainline, never " +
-          "cached/persisted), scoped to ONLY `packages/daemon/src`/`packages/shared/src` commits (an " +
-          "assets/docs/vault-only merge does NOT need a restart and never counts). `available:false` " +
-          "(with `reason`) means this daemon isn't running from a Loom source checkout (e.g. a packaged " +
-          "`loomctl` install) or the check failed — not a claim of freshness either way. `stale:true` means " +
-          "mainline HEAD carries `commitsBehind` daemon-src/shared commit(s) this running process was not " +
-          "built with — a `daemon_restart` (or a human `pnpm daemon:stable` relaunch) is needed before they " +
-          "take effect, for every project this daemon serves.",
+          "{available, stale, commitsBehind, distBuiltAt, mainlineHeadSha, mainlineHeadDate, webStale, " +
+          "webCommitsBehind, webDistBuiltAt, reason?} — DERIVED fresh on every call (stat this daemon's own " +
+          "built entry + `git log` mainline, never cached/persisted). `stale`/`commitsBehind` are scoped to " +
+          "ONLY `packages/daemon/src`/`packages/shared/src` commits (an assets/docs/vault-only merge does " +
+          "NOT need a restart and never counts): `stale:true` means mainline HEAD carries `commitsBehind` " +
+          "daemon-src/shared commit(s) this running process was not built with — a `daemon_restart` (or a " +
+          "human `pnpm daemon:stable` relaunch) is needed before they take effect, for every project this " +
+          "daemon serves. `webStale`/`webCommitsBehind` (card c3ce92ea) are the SEPARATE web signal — " +
+          "`packages/web/src` commits not yet reflected in the served `packages/web/dist`. `webStale:true` " +
+          "means REBUILD web, NOT restart the daemon: the daemon serves `packages/web/dist` live from disk, " +
+          "so a rebuilt file is served on the very next request — do not advise a `daemon_restart` for a " +
+          "web-only staleness reading; that drops every live session across ALL projects for no reason. " +
+          "`available:false` (with `reason`) means this daemon isn't running from a Loom source checkout " +
+          "(e.g. a packaged `loomctl` install) or the check failed — not a claim of freshness either way, " +
+          "and it applies to BOTH signals together (never one without the other).",
         inputSchema: strictShape({}),
       },
       async () => {

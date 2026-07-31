@@ -7,6 +7,7 @@ import { simpleGit } from "simple-git";
 import type { SessionRole } from "@loom/shared";
 import { LOOM_HOME } from "../paths.js";
 import { writeJsonAtomic } from "../pty/claude-config.js";
+import { DEPLOY_PACKAGES } from "../deploy-packages.js";
 
 const require = createRequire(import.meta.url);
 
@@ -299,9 +300,12 @@ export function deployBuildSteps(root: string): BuildStep[] {
     // bypasses turbo's content-keyed cache so a deploy ALWAYS does a real compile. ⚠️ Do NOT "simplify"
     // this to `pnpm --filter @loom/web build --force`: there `--force` is forwarded to the package's build
     // SCRIPT (vite), NOT to turbo, so the cache is NOT defeated and a stale build replays green (the
-    // aad5fff3 footgun). Build BOTH @loom/daemon AND @loom/web — the daemon serves packages/web/dist
-    // statically, so a deploy that only rebuilt the daemon left the SERVED UI stale.
-    { label: "build", command: process.execPath, args: [turboBin(), "build", "--filter=@loom/daemon", "--filter=@loom/web", "--force"], shell: false, timeoutMs: 0 },
+    // aad5fff3 footgun). Filters come from DEPLOY_PACKAGES (../deploy-packages.js) — the single source of
+    // truth this deploy build shares with deploy-staleness.ts's signal (card c3ce92ea), so the two can't
+    // silently diverge on which packages a deploy actually rebuilds. Covers @loom/daemon, @loom/shared, AND
+    // @loom/web — the daemon serves packages/web/dist statically, so a deploy that only rebuilt the daemon
+    // left the SERVED UI stale.
+    { label: "build", command: process.execPath, args: [turboBin(), "build", ...DEPLOY_PACKAGES.map((p) => `--filter=${p.name}`), "--force"], shell: false, timeoutMs: 0 },
   ];
 }
 

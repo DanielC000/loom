@@ -43,6 +43,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       dist happens to have a uniform mtime (e.g. a from-scratch build where every file lands in one
 //       tsc pass) instead of asserting a fixed, possibly-flaky gap.
 //
+// Card c3ce92ea — the WEB signal (webStale/webCommitsBehind), independent of the above:
+//   (9) POSITIVE CONTROL, reproducing the exact bug this card fixes: a web-only commit landing after
+//       BOTH dists were built must flip webStale:true while leaving stale/commitsBehind COMPLETELY
+//       UNCHANGED (stale:false, commitsBehind:0) — proving the fix adds a new signal rather than
+//       perturbing the existing one the card says must stay byte-identical.
+//   (9b) NEGATIVE CONTROL on the SAME corpus: a daemon-src-only commit must NOT add to webCommitsBehind
+//        (it stays at the pre-existing count from (9), not incremented), while it DOES correctly flip
+//        stale/commitsBehind — proving the two signals are genuinely decoupled, not just both "true".
+//   (9c) CLEAN control: rebuilding ONLY packages/web/dist after the web commit clears webStale without
+//        touching the (still-genuinely-stale) daemon signal — the web signal goes both ways too.
+//   (10) missing packages/web/dist entirely (never built / API-only deploy) must NOT make the whole
+//        result unavailable — degrades to webDistBuiltAt:null with every web/src commit ever counting
+//        as unbuilt, same tolerant-of-absence style as packages/shared/dist in section (7).
+//
 // Run: 1) build (turbo builds shared first), 2) node test/deploy-staleness.mjs
 import fs from "node:fs";
 import os from "node:os";
@@ -245,6 +259,99 @@ try {
   } else {
     check("(8) on THIS checkout, dist/index.js's own mtime genuinely DIFFERS from the newest mtime across packages/daemon/dist — proves the incremental-build bug class is real here, not just fixture-constructible", true);
   }
+
+  // ===================== (9) WEB SIGNAL — POSITIVE CONTROL (card c3ce92ea) =====================
+  // Reproduces the exact bug this card fixes: a web-only commit after BOTH dists were built must flip
+  // webStale WITHOUT moving the daemon-restart signal at all.
+  const webRepo = path.join(os.tmpdir(), `loom-dpstl-webrepo-${Date.now()}`);
+  fs.mkdirSync(path.join(webRepo, "packages", "daemon", "src"), { recursive: true });
+  fs.mkdirSync(path.join(webRepo, "packages", "web", "src"), { recursive: true });
+  const gitWeb = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: webRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitWeb("init -q");
+  gitWeb('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-09-01T00:00:00Z");
+
+  const webDaemonDistDir = path.join(os.tmpdir(), `loom-dpstl-webdaemondist-${Date.now()}`);
+  fs.mkdirSync(webDaemonDistDir, { recursive: true });
+  const webDaemonDistEntry = path.join(webDaemonDistDir, "index.js");
+  const buildWebDaemonDistAt = (iso) => {
+    fs.writeFileSync(webDaemonDistEntry, "// fixture daemon dist\n");
+    fs.utimesSync(webDaemonDistEntry, new Date(iso), new Date(iso));
+  };
+  const webWebDistDir = path.join(os.tmpdir(), `loom-dpstl-webwebdist-${Date.now()}`);
+  fs.mkdirSync(webWebDistDir, { recursive: true });
+  const webWebDistEntry = path.join(webWebDistDir, "index.html");
+  const buildWebWebDistAt = (iso) => {
+    fs.writeFileSync(webWebDistEntry, "<!-- fixture web dist -->\n");
+    fs.utimesSync(webWebDistEntry, new Date(iso), new Date(iso));
+  };
+
+  buildWebDaemonDistAt("2026-09-01T12:00:00Z");
+  buildWebWebDistAt("2026-09-01T12:00:00Z");
+
+  fs.writeFileSync(path.join(webRepo, "packages", "web", "src", "App.tsx"), "export const App = () => null;\n");
+  gitWeb("add packages/web/src/App.tsx");
+  gitWeb('-c user.email=t@loom -c user.name=t commit -q -m "feat(web): tweak App"', "2026-09-02T00:00:00Z"); // AFTER both dists
+
+  const rWebOnly = computeDeployStaleness(webDaemonDistEntry, webRepo, undefined, webWebDistDir);
+  check("(9) a web-only commit after both dists were built ⇒ webStale:true, webCommitsBehind:1 (POSITIVE CONTROL — the exact bug this card fixes)",
+    rWebOnly.available === true && rWebOnly.webStale === true && rWebOnly.webCommitsBehind === 1);
+  check("(9) the SAME web-only commit leaves the daemon-restart signal COMPLETELY UNCHANGED: stale:false, commitsBehind:0 (a web-only merge must never advise a daemon_restart)",
+    rWebOnly.stale === false && rWebOnly.commitsBehind === 0);
+  check("(9) webDistBuiltAt reflects the fixture web dist mtime (Sept 1)", (rWebOnly.webDistBuiltAt ?? "").startsWith("2026-09-01"));
+
+  // ===================== (9b) WEB SIGNAL — NEGATIVE CONTROL, same corpus: daemon-src-only commit =====================
+  fs.writeFileSync(path.join(webRepo, "packages", "daemon", "src", "foo.ts"), "export const foo = 1;\n");
+  gitWeb("add packages/daemon/src/foo.ts");
+  gitWeb('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add foo"', "2026-09-03T00:00:00Z"); // AFTER both dists
+  const rDaemonOnly = computeDeployStaleness(webDaemonDistEntry, webRepo, undefined, webWebDistDir);
+  check("(9b) a daemon-src-only commit on the SAME corpus does NOT add to the web signal — webCommitsBehind stays exactly 1 (the Sept 2 web commit from (9), not 2)",
+    rDaemonOnly.webCommitsBehind === 1);
+  check("(9b) the SAME daemon-src commit correctly flips the daemon-restart signal: stale:true, commitsBehind:1",
+    rDaemonOnly.stale === true && rDaemonOnly.commitsBehind === 1);
+
+  // ===================== (9c) WEB SIGNAL — CLEAN control: rebuild web dist AFTER the web commit =====================
+  buildWebWebDistAt("2026-09-04T00:00:00Z"); // web dist rebuilt after the Sept 2 web commit; daemon dist left untouched
+  const rWebRebuilt = computeDeployStaleness(webDaemonDistEntry, webRepo, undefined, webWebDistDir);
+  check("(9c) web dist rebuilt AFTER the web commit ⇒ webStale:false (the web signal goes BOTH ways)",
+    rWebRebuilt.available === true && rWebRebuilt.webStale === false && rWebRebuilt.webCommitsBehind === 0);
+  check("(9c) the daemon-restart signal is UNCHANGED by a pure web-dist rebuild — still stale:true (the Sept 3 daemon commit is still unbuilt)",
+    rWebRebuilt.stale === true && rWebRebuilt.commitsBehind === 1);
+
+  try { fs.rmSync(webRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(webDaemonDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(webWebDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (10) WEB SIGNAL — missing web dist entirely (never built / API-only deploy) =====================
+  const noWebRepo = path.join(os.tmpdir(), `loom-dpstl-nowebrepo-${Date.now()}`);
+  fs.mkdirSync(path.join(noWebRepo, "packages", "web", "src"), { recursive: true });
+  const gitNoWeb = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: noWebRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitNoWeb("init -q");
+  gitNoWeb('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-10-01T00:00:00Z");
+  fs.writeFileSync(path.join(noWebRepo, "packages", "web", "src", "App.tsx"), "export const App = () => null;\n");
+  gitNoWeb("add packages/web/src/App.tsx");
+  gitNoWeb('-c user.email=t@loom -c user.name=t commit -q -m "feat(web): add App"', "2026-10-02T00:00:00Z");
+
+  const noWebDistDir = path.join(os.tmpdir(), `loom-dpstl-missingwebdist-${Date.now()}`); // never created
+  const noWebDaemonDistDir = path.join(os.tmpdir(), `loom-dpstl-nowebdaemondist-${Date.now()}`);
+  fs.mkdirSync(noWebDaemonDistDir, { recursive: true });
+  const noWebDaemonDistEntry = path.join(noWebDaemonDistDir, "index.js");
+  fs.writeFileSync(noWebDaemonDistEntry, "// fixture daemon dist\n");
+  fs.utimesSync(noWebDaemonDistEntry, new Date("2026-10-03T00:00:00Z"), new Date("2026-10-03T00:00:00Z"));
+
+  const rNoWebDist = computeDeployStaleness(noWebDaemonDistEntry, noWebRepo, undefined, noWebDistDir);
+  check("(10) a missing packages/web/dist does NOT make the whole signal unavailable", rNoWebDist.available === true);
+  check("(10) a missing packages/web/dist ⇒ webDistBuiltAt:null (never built, not epoch-stamped as a fake date)", rNoWebDist.webDistBuiltAt === null);
+  check("(10) a missing packages/web/dist ⇒ every web/src commit ever counts as unbuilt (webCommitsBehind:1, webStale:true)",
+    rNoWebDist.webCommitsBehind === 1 && rNoWebDist.webStale === true);
+
+  try { fs.rmSync(noWebRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(noWebDaemonDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 } finally {
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(distDir, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -252,6 +359,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), and that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree."
+  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, and (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, and degrades gracefully when packages/web/dist is entirely missing."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
