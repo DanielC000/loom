@@ -447,6 +447,13 @@ export class OrchestrationMcpRouter {
    * without a new tool. Resolved through the ONE config mechanism (`resolveConfig`) — never the default
    * ad hoc — so a per-project override or human PATCH is reflected with no daemon restart.
    *
+   * `timeoutMs` is resolved through the SAME `resolveConfig(...).orchestration.gateCommandTimeoutMs`
+   * path the gate itself enforces (`sessions/service.ts` confirmWorkerMerge + the worker `run_gate`
+   * call-site) — never re-derived or hardcoded — so it tracks a per-project override, not the platform
+   * default (card 89257222: an unreadable timeout was propagating as manager-to-manager folklore instead
+   * of being read from the artifact). Reported unconditionally, even when no gateCommand is configured,
+   * since the timeout still governs whatever gate a project later sets.
+   *
    * TRUST BOUNDARY — this is READ-ONLY by design (PL Auditor finding #9, signed off on option (b)).
    * `gateCommand` runs arbitrary host shell at daemon privilege, so it stays HUMAN-only-to-SET (same
    * class as the vault/git writers + alertWebhook). NO set/propose/confirm-queue surface exists here.
@@ -455,14 +462,17 @@ export class OrchestrationMcpRouter {
    * hand-rolling a gate string into a worker's DoD.
    */
   private resolvedGateCommand(projectId: string | undefined):
-    | { configured: true; command: string }
-    | { configured: false; command: null; note: string } {
+    | { configured: true; command: string; timeoutMs: number }
+    | { configured: false; command: null; note: string; timeoutMs: number } {
     const project = projectId ? this.db.getProject(projectId) : undefined;
-    const command = resolveConfig(project?.config).orchestration.gateCommand;
-    if (command && command.trim() !== "") return { configured: true, command };
+    const resolved = resolveConfig(project?.config).orchestration;
+    const command = resolved.gateCommand;
+    const timeoutMs = resolved.gateCommandTimeoutMs;
+    if (command && command.trim() !== "") return { configured: true, command, timeoutMs };
     return {
       configured: false,
       command: null,
+      timeoutMs,
       note: "none configured — this project has no build/DoD gateCommand. Ask the OWNER to set one " +
         "(a HUMAN-only action; agents cannot set it). Do NOT hand-roll a gate command into a worker's DoD.",
     };
@@ -558,9 +568,20 @@ export class OrchestrationMcpRouter {
           "If not yet measured (no completed turn), pct is null and `measured:false` is set explicitly — " +
           "contextWindow/model in that case reflect your CONFIGURED profile model (still accurate), not a " +
           "fake reading. `gateCommand` is the project's RESOLVED build/DoD gate, READ-ONLY: " +
-          "{configured:true, command} when set, else {configured:false, command:null, note} — when " +
-          "unconfigured, ASK THE OWNER to set one (a human-only action); never hand-roll a gate command " +
-          "into a worker's DoD. If you are a Companion (chat_reply is on your tool list), the response ALSO " +
+          "{configured:true, command, timeoutMs} when set, else {configured:false, command:null, note, " +
+          "timeoutMs} — when unconfigured, ASK THE OWNER to set one (a human-only action); never " +
+          "hand-roll a gate command into a worker's DoD. `timeoutMs` is the RESOLVED gate timeout (the " +
+          "same number the gate itself enforces, per-project override or platform default — never guess " +
+          "or carry an inherited figure). Read all four facts about it before reasoning about margin: " +
+          "(1) a step is auto-extended past `timeoutMs` while it keeps producing output, so exceeding " +
+          "this number does NOT by itself mean failure — but (2) the merge gate's retry-after-timeout " +
+          "runs with NO extension (allowExtend:false, deliberately) — so first attempt = timeoutMs + one " +
+          "extension (~2x), while a retry is a HARD timeout with no net; state (1) and (2) together, " +
+          "never (1) alone, or the reader computes margin against the wrong ceiling. (3) The extension " +
+          "is refused if the child has been idle for a while (it rescues 'working hard', never " +
+          "'stalled'). (4) A retry only fires when the failure is classified non-genuine — a timeout is " +
+          "retry-eligible, a clean non-zero exit (a real test failure) never retries. If you are a " +
+          "Companion (chat_reply is on your tool list), the response ALSO " +
           "includes `companion`: {bindings: [{channel, voiceReplies}], lastDelivery: {channel, text, " +
           "viaVoice, sentAt} | null} — your OWN bound channel(s) + effective voice-reply mode, and the last " +
           "reply you actually delivered (`text` IS that clip's transcript when `viaVoice` is true). Use it " +
