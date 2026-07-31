@@ -40,18 +40,29 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (LOOM_TEST=1) — no 
 //   (a) a direct sibling `kill` member in the same object literal or class body — the shape
 //       `_seam-host-fixture.mjs` ships (`pid/write/onData/onExit/kill/resize`). The events-bag never has
 //       `kill`.
-//   (b) a spread element whose expression is a CALL to a method literally named `createPty` — e.g.
-//       `{ ...super.createPty(opts), onExit: () => ({ dispose() {} }) }`, the established way 26 files in
-//       this corpus customize ONE field (usually `pid`) of the inherited fixture's handle without kill
-//       appearing as a literal sibling. Requiring the spread to be a `.createPty(...)` CALL (not "any
-//       spread") is deliberate: a broader "any spread" rule was measured to false-positive on a
-//       hypothetical `{ ...someDefaults, onExit() {} }` events-bag construction — narrowing to the actual
-//       call shape clears that case while still catching the real risk. MEASURED counts, this corpus,
-//       2026-07-31: 17 containers qualify via (a), 26 additional qualify via (b) and ONLY (b) (no direct
-//       `kill`) — 43 total scanned surface, 0 false positives, 0 discard hits. The 26 today only touch
-//       `pid`; none define `onExit` — (b) exists to catch the FIRST one that does, which is exactly the
-//       idiom-4 risk this card was filed to close (a `kill`-less spread override is the single most likely
-//       NEXT idiom, being the established customization pattern for everything else on this fixture).
+//   (b) a spread element that is EITHER (b1) a direct CALL to a method literally named `createPty` — e.g.
+//       `{ ...super.createPty(opts), onExit: () => ({ dispose() {} }) }` — OR (b2) a spread of a plain
+//       IDENTIFIER whose declaration, in the SAME enclosing function scope as the spread itself,
+//       initialises from such a call — e.g. `const base = super.createPty(opts); return { ...base, onExit:
+//       ... };`, the HOISTED spelling of the identical idiom (card `2876a4ef`, filed the same day this guard
+//       first landed as `82dc680f`: (b) originally covered only (b1), and (b1) turned out to be the
+//       MINORITY real-corpus spelling — (b2)'s hoisted form is the majority one, so the original header's
+//       claim that (b) covered "the single most likely NEXT idiom" was true of the idiom but not of the
+//       spelling actually in majority use). (b2) is a deliberate ONE-HOP, SAME-FUNCTION-SCOPE lookup — it
+//       walks up to the nearest enclosing function-like node and looks for a `const`/`let` declaration of
+//       that exact name initialised from a `.createPty(...)` call in THAT function's own body only (never
+//       descending into a nested function, never reaching into an outer/enclosing scope) — a materially
+//       narrower, closed-form check than the general data-flow tracing that blind spots #1-#3 below need
+//       and that this guard deliberately declines. Requiring (b1)'s spread to be a `.createPty(...)` CALL
+//       (not "any spread"), and (b2)'s identifier to resolve to one (not just any local var), is deliberate:
+//       a broader "any spread"/"any identifier" rule was measured to false-positive on a hypothetical
+//       `{ ...someDefaults, onExit() {} }` / `{ ...baseEvents, onExit() {} }` events-bag construction —
+//       narrowing to the actual call shape (direct or one hop back) clears that case while still catching
+//       the real risk. MEASURED counts, this corpus, 2026-07-31 (post-widening): 23 containers qualify via
+//       (a) only, 26 via (b1) only, 44 via (b2) only (spanning 41 distinct files — a few files use it
+//       twice) — 93 total handle-shaped surface across 656 scanned files, 0 false positives, 0 discard hits
+//       (no (a)/(b) overlaps observed). None of the 93 today define an onExit that discards its callback —
+//       (b) exists to catch the FIRST one that does, in EITHER spelling.
 //
 // WHAT THIS CANNOT SEE — stated plainly, per DoD-2, because a guard silently blind to a shape is the same
 // failure one level up:
@@ -165,11 +176,65 @@ function firstParamName(fn) {
   return p && ts.isIdentifier(p.name) ? p.name.text : null;
 }
 
-/** A spread element whose expression is a CALL to a method literally named `createPty` — see header §(b). */
+/** Is `expr` itself a CALL to a method literally named `createPty`? */
+function isCreatePtyCall(expr) {
+  return ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) && expr.expression.name.text === "createPty";
+}
+
+function isFunctionLikeScope(node) {
+  return (
+    ts.isFunctionDeclaration(node) ||
+    ts.isFunctionExpression(node) ||
+    ts.isArrowFunction(node) ||
+    ts.isMethodDeclaration(node) ||
+    ts.isConstructorDeclaration(node) ||
+    ts.isGetAccessorDeclaration(node) ||
+    ts.isSetAccessorDeclaration(node)
+  );
+}
+
+/** The nearest enclosing function-like node, walking up `.parent` (set because `createSourceFile` is
+ *  called with `setParentNodes: true`). Null at module top level. */
+function enclosingFunctionScope(node) {
+  let cur = node.parent;
+  while (cur) {
+    if (isFunctionLikeScope(cur)) return cur;
+    cur = cur.parent;
+  }
+  return null;
+}
+
+/** Does `scope` itself declare `const/let NAME = <expr>.createPty(...)`? Only descends into `scope`'s
+ *  OWN body — deliberately does not follow into a nested function-like node, so this stays a one-hop,
+ *  same-function-scope lookup rather than the general data-flow tracing DoD-1 rules out of scope. */
+function scopeDeclaresCreatePtyIdentifier(scope, name) {
+  let found = false;
+  const visit = (node) => {
+    if (found || (isFunctionLikeScope(node) && node !== scope)) return;
+    if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name) && node.name.text === name) {
+      if (node.initializer && isCreatePtyCall(node.initializer)) found = true;
+      return;
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(scope);
+  return found;
+}
+
+/** A spread element whose expression is a CALL to a method literally named `createPty` (§(b), original
+ *  signal), OR a spread of a plain IDENTIFIER whose declaration, in the SAME enclosing function scope as
+ *  the spread itself, initialises from such a call (§(b) widened — the hoisted-local-variable spelling of
+ *  the exact same idiom, e.g. `const base = super.createPty(opts); return { ...base, onExit: ... };`). One
+ *  hop, one scope — NOT a general reachability trace back through arbitrary reassignment/indirection. */
 function isCreatePtySpread(member) {
   if (!ts.isSpreadAssignment(member)) return false;
   const expr = member.expression;
-  return ts.isCallExpression(expr) && ts.isPropertyAccessExpression(expr.expression) && expr.expression.name.text === "createPty";
+  if (isCreatePtyCall(expr)) return true;
+  if (ts.isIdentifier(expr)) {
+    const scope = enclosingFunctionScope(member);
+    if (scope && scopeDeclaresCreatePtyIdentifier(scope, expr.text)) return true;
+  }
+  return false;
 }
 
 /** Does this container look like a fake-pty HANDLE (vs. e.g. the unrelated PtyHost `events` bag)? See header. */
@@ -263,6 +328,10 @@ function scanSnippet(text) {
     scanSnippet(`class S extends Base { createPty(opts) { return { ...super.createPty(opts), onExit: () => ({ dispose(){} }) }; } }`).length > 0
   );
   check(
+    "[falsification] catches the HOISTED spelling of the SAME idiom — a same-scope local var initialised from createPty(...), then spread (the majority real-corpus form, discriminating-pair proof: card 2876a4ef)",
+    scanSnippet(`class S extends Base { createPty(opts) { const base = super.createPty(opts); return { ...base, onExit: () => ({ dispose(){} }) }; } }`).length > 0
+  );
+  check(
     "[falsification] catches a CLASS-FIELD arrow onExit, zero params (PropertyDeclaration — a real miss found by manager review, not a hypothetical)",
     scanSnippet(`class Fake extends Base { onExit = () => ({ dispose(){} }); kill(){} }`).length > 0
   );
@@ -287,6 +356,10 @@ function scanSnippet(text) {
     scanSnippet(`class S extends Base { createPty(opts) { return { ...super.createPty(opts), onExit(cb) { this._cb = cb; return {dispose(){}}; } }; } }`).length === 0
   );
   check(
+    "[falsification] clears the HOISTED spelling when onExit legitimately captures cb",
+    scanSnippet(`class S extends Base { createPty(opts) { const base = super.createPty(opts); return { ...base, onExit(cb) { this._cb = cb; return {dispose(){}}; } }; } }`).length === 0
+  );
+  check(
     "[falsification] clears a legitimate CLASS-FIELD arrow capture (references cb)",
     scanSnippet(`class Fake extends Base { onExit = (cb) => { this._cb = cb; return { dispose(){} }; }; kill(){ this._cb?.(); } }`).length === 0
   );
@@ -305,6 +378,14 @@ function scanSnippet(text) {
   check(
     "[discriminator] does NOT flag a hypothetical events-bag built via spread of a plain identifier (no call at all)",
     scanSnippet(`const events = { ...baseEvents, onExit(){} };`).length === 0
+  );
+  check(
+    "[discriminator] widened signal (b) still does NOT flag a same-scope local var initialised from a NON-createPty call, spread with zero-param onExit",
+    scanSnippet(`function make() { const base = factory.createFoo(); return { ...base, onExit(){} }; }`).length === 0
+  );
+  check(
+    "[discriminator] widened signal (b) does NOT reach OUTSIDE the enclosing function scope — a module-top-level var initialised from createPty(...) but spread inside an UNRELATED function is still not treated as a handle (one-hop same-scope only, not general data-flow — DoD-1)",
+    scanSnippet(`const outer = something.createPty(opts); function unrelated() { return { ...outer, onExit(){} }; }`).length === 0
   );
 }
 
