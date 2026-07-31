@@ -86,13 +86,20 @@ try {
   }
 
   {
-    // budget-cap truncation: many notes, small budget ⇒ never exceeds budget, deterministic prefix.
+    // budget-cap truncation: many notes, small budget ⇒ packed content never exceeds budget, deterministic prefix.
     const many = Array.from({ length: 50 }, (_, i) => mk({ id: `r${i}`, key: `note-${String(i).padStart(2, "0")}`, text: "x".repeat(200) }));
     const budget = 300; // tokens
-    const { digest, includedIds } = composeProjectMemoryDigest([], many, budget);
-    check("(budget) digest never exceeds the configured token budget", estimateTokens(digest) <= budget);
+    const { digest, includedIds, droppedRelatedKeys } = composeProjectMemoryDigest([], many, budget);
     check("(budget) NOT every note was included (truncation actually happened)", includedIds.length < many.length);
     check("(budget) at least one note fit", includedIds.length > 0);
+    // Card fddd58ef: the related-tier drop notice is deliberately EXEMPT from the budget check, same as
+    // the pinned tiers' own notice (see the doc comment above composeProjectMemoryDigest) — so it's the
+    // PACKED note content, not the digest as a whole, that's bounded by `budget`.
+    check("(budget) truncation produced a drop notice", droppedRelatedKeys.length > 0);
+    const noticeIdx = digest.indexOf("\n\n⚠️");
+    const packedContent = noticeIdx === -1 ? digest : digest.slice(0, noticeIdx);
+    check("(budget) the PACKED note content (excluding the exempt drop notice) respects the token budget",
+      estimateTokens(packedContent) <= budget);
   }
 
   {
@@ -102,6 +109,31 @@ try {
     const tightBudget = 60; // fits pinned's header+block roughly, not much else
     const { includedIds } = composeProjectMemoryDigest(pinned, related, tightBudget);
     check("(budget) pinned survives a tight budget that drops all/most related notes", includedIds.includes("p1"));
+  }
+
+  {
+    // Card fddd58ef — the RELATED tier now reports its own budget drops, same idiom as the pinned
+    // tiers (summarizeDroppedKeys, unconditional once known), but as "N of M" so a reader can tell
+    // "a couple got trimmed" from "this tier delivered nothing" (see the doc comment in source).
+    const related = [
+      mk({ id: "r0", key: "rel-fits", text: "x".repeat(20) }),
+      mk({ id: "r1", key: "rel-drop-a", text: "y".repeat(200) }),
+      mk({ id: "r2", key: "rel-drop-b", text: "y".repeat(200) }),
+    ];
+    const budget = 60; // fits only the first, small related note
+    const { digest, includedIds, droppedRelatedKeys } = composeProjectMemoryDigest([], related, budget);
+    check("(related-drop) droppedRelatedKeys names exactly the notes that didn't fit",
+      droppedRelatedKeys.length === 2 && droppedRelatedKeys.includes("rel-drop-a") && droppedRelatedKeys.includes("rel-drop-b"));
+    check("(related-drop) the fitting note is still included", includedIds.includes("r0"));
+    check("(related-drop) digest renders 'N of M' (not a bare count)", digest.includes("⚠️ 2 of 3 related note(s) dropped for budget:"));
+    check("(related-drop) digest names both dropped keys", digest.includes("rel-drop-a") && digest.includes("rel-drop-b"));
+
+    // NEGATIVE CONTROL: every related note fits ⇒ no drop, no notice line, empty droppedRelatedKeys.
+    const smallRelated = [mk({ id: "r-small", key: "rel-small", text: "tiny" })];
+    const fits = composeProjectMemoryDigest([], smallRelated, 4000);
+    check("(related-drop) NEGATIVE CONTROL: nothing dropped ⇒ droppedRelatedKeys is empty", fits.droppedRelatedKeys.length === 0);
+    check("(related-drop) NEGATIVE CONTROL: nothing dropped ⇒ no overflow line in the digest",
+      !fits.digest.includes("related note(s) dropped"));
   }
 
   {
@@ -576,6 +608,53 @@ try {
     }
     check("(at-scale log-floor) NEGATIVE CONTROL: no '+N more' folding text in the ALARM log line",
       !/\+\d+ more/.test(floorErrorCalls[0] ?? ""));
+
+    // ----- RELATED-tier overflow (card fddd58ef): console.warn, same idiom, "N of M" wording -----
+    // topK raised so FTS actually returns 30+ candidates for one kickoff to overflow the budget against
+    // (the project default topK=8 would cap candidates well below the 30+ this positive control needs).
+    const logRelatedProj = "proj-at-scale-log-related";
+    db.insertProject({
+      id: logRelatedProj, name: "At-Scale Log Related Project", repoPath: tmpHome, vaultPath: tmpHome,
+      config: { memory: { budgetTokens: 100, topK: 50 } }, createdAt: now, archivedAt: null,
+    });
+    const relatedKeys = [];
+    for (let i = 0; i < N; i++) {
+      const key = `at-scale-log-related-dropped-${String(i).padStart(2, "0")}`;
+      relatedKeys.push(key);
+      writeProjectMemory(db, logRelatedProj, { key, text: `frobnicator matches this kickoff ${"y".repeat(190)}` });
+    }
+    const { warnCalls: relatedWarnCalls, errorCalls: relatedErrorCalls } = captureConsole(
+      () => retrieveProjectMemoryForKickoff(db, logRelatedProj, "frobnicator"),
+    );
+    check("(at-scale log-related) exactly one console.warn line emitted", relatedWarnCalls.length === 1);
+    check("(at-scale log-related) no console.error (related drops are never a broken-guarantee ALARM)", relatedErrorCalls.length === 0);
+    {
+      const relatedNow = db.searchProjectMemory(logRelatedProj, "frobnicator", 50);
+      const { droppedRelatedKeys, includedIds } = composeProjectMemoryDigest([], relatedNow, 100);
+      check("(at-scale log-related) forces 30+ real drops (cross-checked against compose directly)", droppedRelatedKeys.length >= 30);
+      check("(at-scale log-related) the log line names EVERY key compose reports dropped",
+        droppedRelatedKeys.every((k) => relatedWarnCalls[0]?.includes(k)));
+      check("(at-scale log-related) the log line reports 'N of M', not a bare count",
+        relatedWarnCalls[0]?.includes(`${droppedRelatedKeys.length} of ${relatedNow.length} related note(s) dropped for budget:`));
+      // ARITHMETIC INVARIANT (mirrors DIRECTIVE #2's pinned coverage): delivered + listed === total corpus
+      // considered — catches a bug where droppedRelatedKeys is right but the rendered line silently folds.
+      check("(at-scale log-related) ARITHMETIC INVARIANT: delivered + keys ACTUALLY LISTED in the rendered log line === candidates considered",
+        includedIds.length + parseListedKeys(relatedWarnCalls[0] ?? "", "related note(s) dropped for budget: ").length === relatedNow.length);
+    }
+    check("(at-scale log-related) NEGATIVE CONTROL: no '+N more' folding text in the log line",
+      !/\+\d+ more/.test(relatedWarnCalls[0] ?? ""));
+
+    // ----- RELATED-tier NEGATIVE CONTROL: nothing dropped ⇒ no notice, no log line -----
+    const logRelatedFitsProj = "proj-at-scale-log-related-fits";
+    db.insertProject({
+      id: logRelatedFitsProj, name: "At-Scale Log Related Fits Project", repoPath: tmpHome, vaultPath: tmpHome,
+      config: {}, createdAt: now, archivedAt: null,
+    });
+    writeProjectMemory(db, logRelatedFitsProj, { key: "small-related-note", text: "frobnicator tiny note" });
+    const { warnCalls: fitsWarnCalls } = captureConsole(
+      () => retrieveProjectMemoryForKickoff(db, logRelatedFitsProj, "frobnicator"),
+    );
+    check("(at-scale log-related) NEGATIVE CONTROL: everything fits ⇒ zero console.warn calls", fitsWarnCalls.length === 0);
   }
 
   // ===================== zero metered tokens (structural check) =====================

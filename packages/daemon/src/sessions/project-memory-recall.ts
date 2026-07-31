@@ -117,8 +117,8 @@ function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[
  * remains), each built incrementally so the byte/token check is always against the ACTUAL joined
  * candidate string. Returns the digest plus the ids of notes actually INCLUDED (the caller bumps
  * `lastRetrievedAt`/`retrievalCount` only for those — a note dropped for budget was never really
- * "retrieved" into context), plus `droppedFloorKeys`/`droppedRestKeys` for the caller to log. `null`
- * digest ⇒ nothing to inject (both tiers empty, or nothing fit at all).
+ * "retrieved" into context), plus `droppedFloorKeys`/`droppedRestKeys`/`droppedRelatedKeys` for the
+ * caller to log. `null` digest ⇒ nothing to inject (both tiers empty, or nothing fit at all).
  *
  * PINNED delivery order (card 15503722 — replaces the original key-alphabetical sort, which delivered
  * notes by spelling and size, not importance: `db.ts`'s `listPinnedProjectMemory` doc comment already
@@ -137,7 +137,15 @@ function sortPinnedByRecency(entries: ProjectMemoryEntry[]): ProjectMemoryEntry[
  *
  * RELATED tier still `break`s at the first overflow — a rank-ordered PREFIX is the correct truncation there
  * (the top-ranked matches are the ones worth keeping; skipping past a big one to pack a worse-ranked one
- * would invert the ranking).
+ * would invert the ranking). Card fddd58ef — unlike PINNED (which promises "injected IN FULL on EVERY
+ * kickoff," so a drop breaks a stated guarantee), RELATED is relevance-matched and best-effort BY
+ * CONSTRUCTION: nothing ever promised a given related note survives. That alone would argue for silence.
+ * But MEASURED on this project's real corpus at its live `budgetTokens`, the drop rate was 100% (200/200
+ * candidates across 25/25 real kickoffs) — not an occasional near-miss, a structurally dead tier with zero
+ * way for a reader to discover it. That volume is what earns RELATED the same `droppedRelatedKeys` +
+ * notice treatment as the pinned tiers (reusing {@link summarizeDroppedKeys} — one idiom, not a second
+ * convention): the everything-past-the-break-point suffix of `related` (already rank-ordered, so no
+ * per-note `continue`-and-collect is needed the way the pinned sub-tiers need it).
  */
 export function composeProjectMemoryDigest(
   pinned: ProjectMemoryEntry[],
@@ -148,9 +156,15 @@ export function composeProjectMemoryDigest(
    *  entries with no DB) stays byte-identical. The real caller ({@link retrieveProjectMemoryForKickoff})
    *  passes a callback backed by {@link annotateRequestLinks}. */
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
-): { digest: string | null; includedIds: string[]; droppedFloorKeys: string[]; droppedRestKeys: string[] } {
+): {
+  digest: string | null;
+  includedIds: string[];
+  droppedFloorKeys: string[];
+  droppedRestKeys: string[];
+  droppedRelatedKeys: string[];
+} {
   if (pinned.length === 0 && related.length === 0) {
-    return { digest: null, includedIds: [], droppedFloorKeys: [], droppedRestKeys: [] };
+    return { digest: null, includedIds: [], droppedFloorKeys: [], droppedRestKeys: [], droppedRelatedKeys: [] };
   }
   const includedIds: string[] = [];
 
@@ -205,21 +219,42 @@ export function composeProjectMemoryDigest(
   // `related` arrives already ranked (FTS5 bm25 `rank` order from searchProjectMemory) — preserve that
   // order rather than re-sorting, so the MOST relevant matches survive truncation first.
   let relatedSection: string | null = null;
+  const droppedRelatedKeys: string[] = [];
   {
     const blocks: string[] = [];
     const remaining = budgetTokens - usedTokens - (pinnedSection ? estimateTokens(SECTION_SEP) : 0);
-    for (const m of related) {
+    for (const [i, m] of related.entries()) {
       const block = noteBlock(m, annotate(m));
       const candidate = ["## Related project memory (matched your kickoff)", ...blocks, block].join(SECTION_SEP);
-      if (estimateTokens(candidate) > remaining) break;
+      if (estimateTokens(candidate) > remaining) {
+        // `break`, not `continue` (unlike the pinned sub-tiers): the remaining suffix is EXACTLY the
+        // notes past this point in rank order — no per-note fit-check needed to know they're dropped.
+        droppedRelatedKeys.push(...related.slice(i).map((r) => r.key));
+        break;
+      }
       blocks.push(block);
       relatedSection = candidate;
       includedIds.push(m.id);
     }
+    // Card fddd58ef — "N of M", not a bare count: the denominator is what separates "a couple got
+    // trimmed" from "this tier delivered nothing" (see the doc comment above). Same idiom as the pinned
+    // tiers otherwise: unconditional once known, uncapped key list via summarizeDroppedKeys.
+    if (droppedRelatedKeys.length > 0) {
+      const overflowLine = `⚠️ ${droppedRelatedKeys.length} of ${related.length} related note(s) dropped for budget: ${summarizeDroppedKeys(droppedRelatedKeys)}`;
+      relatedSection = relatedSection
+        ? [relatedSection, overflowLine].join(SECTION_SEP)
+        : ["## Related project memory (matched your kickoff)", overflowLine].join(SECTION_SEP);
+    }
   }
 
   const sections = [pinnedSection, relatedSection].filter((s): s is string => s != null);
-  return { digest: sections.length > 0 ? sections.join(SECTION_SEP) : null, includedIds, droppedFloorKeys, droppedRestKeys };
+  return {
+    digest: sections.length > 0 ? sections.join(SECTION_SEP) : null,
+    includedIds,
+    droppedFloorKeys,
+    droppedRestKeys,
+    droppedRelatedKeys,
+  };
 }
 
 /** Frame a digest as SILENT, untrusted-adjacent DATA/CONTEXT — never a new instruction, never able to
@@ -242,9 +277,16 @@ export function buildFramedProjectMemory(
   related: ProjectMemoryEntry[],
   budgetTokens: number,
   annotate: (m: ProjectMemoryEntry) => string[] = () => [],
-): { framed: string | null; includedIds: string[]; droppedFloorKeys: string[]; droppedRestKeys: string[] } {
-  const { digest, includedIds, droppedFloorKeys, droppedRestKeys } = composeProjectMemoryDigest(pinned, related, budgetTokens, annotate);
-  return { framed: digest == null ? null : framedProjectMemory(digest), includedIds, droppedFloorKeys, droppedRestKeys };
+): {
+  framed: string | null;
+  includedIds: string[];
+  droppedFloorKeys: string[];
+  droppedRestKeys: string[];
+  droppedRelatedKeys: string[];
+} {
+  const { digest, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
+    composeProjectMemoryDigest(pinned, related, budgetTokens, annotate);
+  return { framed: digest == null ? null : framedProjectMemory(digest), includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys };
 }
 
 /**
@@ -258,7 +300,9 @@ export function buildFramedProjectMemory(
  * Card 15503722 — the SECOND overflow-visibility surface (the first is the in-digest line itself, seen by
  * the spawned agent): a daemon log line for a human/dev scanning logs. `console.error` for a
  * `NEVER_DROP_TAG` drop (a broken guarantee — an operational alarm), `console.warn` for a routine budget
- * drop — kept as two distinct calls so the alarm doesn't read as routine in the logs either.
+ * drop — kept as two distinct calls so the alarm doesn't read as routine in the logs either. Card
+ * fddd58ef adds a third `console.warn` for RELATED-tier drops, same routine severity as the pinned-rest
+ * one (RELATED never promised full inclusion, so it's not a broken guarantee either).
  */
 export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kickoffText: string): string | null {
   const project = db.getProject(projectId);
@@ -268,7 +312,7 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
   const related = kickoffText.trim() ? db.searchProjectMemory(projectId, kickoffText, memoryConfig.topK) : [];
   if (pinned.length === 0 && related.length === 0) return null;
   const annotate = (m: ProjectMemoryEntry) => annotateRequestLinks(db, projectId, m.requestIds);
-  const { framed, includedIds, droppedFloorKeys, droppedRestKeys } =
+  const { framed, includedIds, droppedFloorKeys, droppedRestKeys, droppedRelatedKeys } =
     buildFramedProjectMemory(pinned, related, memoryConfig.budgetTokens, annotate);
   if (droppedFloorKeys.length > 0) {
     console.error(
@@ -280,6 +324,12 @@ export function retrieveProjectMemoryForKickoff(db: Db, projectId: string, kicko
     console.warn(
       `[project-memory] project ${projectId}: ${droppedRestKeys.length} pinned note(s) dropped for budget: ` +
       summarizeDroppedKeys(droppedRestKeys),
+    );
+  }
+  if (droppedRelatedKeys.length > 0) {
+    console.warn(
+      `[project-memory] project ${projectId}: ${droppedRelatedKeys.length} of ${related.length} related note(s) ` +
+      `dropped for budget: ${summarizeDroppedKeys(droppedRelatedKeys)}`,
     );
   }
   if (framed) db.touchProjectMemoryRetrieved(includedIds);
