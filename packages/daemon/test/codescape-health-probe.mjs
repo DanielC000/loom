@@ -15,9 +15,11 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       the health-probe timer keeps ticking.
 //   (3) a SUB-threshold wedge window (recovers before enough consecutive failures accumulate) does NOT
 //       trigger any restart at all.
-//   (4) codescape enabled but with ZERO codescape-enabled projects (repoPaths === []) never starts the
-//       health-probe timer at all — no restart even under a sustained wedge with a low threshold and a
-//       fast interval that would otherwise trip quickly.
+//   (4) codescape enabled but with ZERO codescape-enabled projects (repoPaths === []) STILL arms the
+//       health-probe timer — a sustained wedge is detected and restarted the same as any other boot. (The
+//       probe used to be gated off by project count, leaving that boot's serve unwatched for its entire
+//       lifetime — since v1 has no runtime project registration, a project enabling codescape later in the
+//       same boot could never re-arm it either.)
 //
 // Run: 1) build (turbo builds shared first), 2) node test/codescape-health-probe.mjs
 import fs from "node:fs";
@@ -254,30 +256,43 @@ const readServeCalls = (callsFile) => readCalls(callsFile).filter((c) => c.cmd =
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
 }
 
-// ===================== (4) codescape enabled but ZERO codescape-enabled projects: no probe traffic at all ====
+// ===================== (4) codescape enabled but ZERO codescape-enabled projects: the probe is STILL armed ====
+// Bugfix: `startHealthMonitor()` used to be gated on a `hasEnabledProjects` flag latched from
+// `repoPaths.length` at `start()` time, so a daemon that booted with no codescape-enabled projects never
+// armed the probe at all — for that boot's ENTIRE lifetime, since v1 has no runtime project registration
+// (a project enabling codescape after boot still needs a daemon restart to ever be ingested, regardless of
+// anything this probe does — see gateway/server.ts's config-PATCH log line). `serve` still spawns
+// unconditionally either way (see `start()`), so that boot's serve ran fully unwatched — exactly the wedge
+// blind spot this probe exists to close. The fix arms the probe unconditionally whenever `start()` spawns
+// `serve`, letting `probeHealth`'s own `!alive` guard do the "nothing to watch yet" gating instead. This is
+// the SAME proof shape as scenario (1) (a sustained wedge detected + restarted through the existing death
+// path) — just started with repoPaths=[] to prove the probe is no longer silently disarmed by an empty
+// project list.
 {
   const homeDir = path.join(tmpHome, "noproj-wedge-home");
-  const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
   const wedgeFile = path.join(tmpHome, "noproj-wedge-flag");
-  fs.writeFileSync(wedgeFile, "1"); // wedged from the start — if probing ran at all, this trips immediately
+  fs.writeFileSync(wedgeFile, "1"); // wedged from the very first probe onward
   process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
 
   const sup = new CodescapeSupervisor({
     homeDir,
     restartBackoffMs: [50, 100, 150],
     healthyRunMs: 60_000,
-    healthProbeIntervalMs: 60, // fast + low threshold — a real prober would trip well within the wait below
-    healthProbeTimeoutMs: 40,
-    healthProbeFailureThreshold: 2,
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
   });
-  await sup.start([]); // NO repoPaths ⇒ hasEnabledProjects=false ⇒ the health-probe timer never starts
-  for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
+  await sup.start([]); // NO repoPaths — the health probe must arm anyway
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 1, () => sup.getCompletedProbeTickCount());
   const pidBefore = sup.getPid();
-  check("(4) serve still spawns normally with zero repoPaths", typeof pidBefore === "number" && pidBefore > 0);
+  const portBefore = sup.getPort();
+  check("(4) serve still spawns normally with zero repoPaths", sup.getSpawnCount() === 1 && typeof pidBefore === "number");
 
-  await sleep(500); // far more than enough for the fast interval/threshold above to have tripped if it ran
-  check("(4) with zero codescape-enabled projects, the health-probe timer never started — sustained wedge, still no restart",
-    readServeCalls(callsFile).length === 1 && sup.getPid() === pidBefore);
+  await waitForCompletedCondition(() => sup.getSpawnCount() >= 2, () => sup.getCompletedProbeTickCount());
+  check("(4) a sustained wedge is detected and restarted even with ZERO codescape-enabled projects (a new serve spawn recorded)",
+    sup.getSpawnCount() === 2);
+  check("(4) restart reused the SAME port", sup.getPort() === portBefore);
+  check("(4) restart produced a genuinely NEW pid", sup.getPid() !== pidBefore && sup.getPid() !== null);
 
   sup.stop();
   delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
@@ -919,6 +934,6 @@ delete process.env.FAKE_CODESCAPE_HEALTH_VERSION;
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and with zero codescape-enabled projects the health-probe timer never starts at all, so a sustained wedge there produces no restart either. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, and (card ebd755ab, Gap 2) a successful read after a latched failure now ALSO announces the recovery transition exactly once (inert -> recovered is no longer indistinguishable from still-inert); and (card ebd755ab, Gap 1) a drift that persists after its ONE allowed restart is already spent is now LOUD exactly once (never silent forever, never once per tick), with its own resolution — the installed side matching the running build again — likewise announced exactly once, and the restart guard itself unchanged throughout; and (card f0718488) a version probe that TIMES OUT specifically is retried (a genuine timeout rescued by a retry never even reaches the loud diagnostic, asserted on the observed attempt COUNT, never wall-clock), while a persistently-timing-out probe still exhausts EXACTLY its bounded attempt budget, still fails the tick loudly (latched, once, same discipline as (8)), and — the property most likely to break under a refactor of this retry loop — STILL never triggers a restart, across repeated ticks — claude-free, network-free beyond loopback."
+  ? "\n✅ ALL PASS — Codescape supervisor health probe: a sustained wedge (alive, port bound, unresponsive) is detected via GET /graph/health and restarted through the EXISTING child-exit restart path (same port, new pid, no second restart channel); the give-up state stays terminal under repeated health-driven kills (no probe can resurrect an exhausted budget); a sub-threshold wedge window that recovers before enough CONSECUTIVE failures accumulate never restarts; and the health-probe timer now arms regardless of codescape-enabled project count, so a sustained wedge with ZERO codescape-enabled projects is detected and restarted the same as any other boot. Build-id drift detection (card 90550a97) + the stability window on top of it (card 9e6f984d): a genuine running-vs-installed build mismatch restarts exactly ONCE through that same existing path — but only once the installed build has sat UNCHANGED for the stability window, not on the first probe tick that observes it — and does not loop even under a persisting mismatch, while a NEW drift (installed build changes again) restarts again once IT stabilizes; a BURST of several distinct installed builds inside the window collapses into exactly ONE restart, fired only once the LAST build in the burst settles, with the deferral logged distinguishably from both 'no drift detected' and the eventual restart; `build` absent or `build:null` on the RUNNING side, and on the INSTALLED side a genuine couldn't-read (non-zero exit OR malformed stdout at exit 0 — two INDEPENDENT failure paths, both proven) all correctly never restart; an HONEST installed `build:null` at exit 0 is a real answer, not a failure — also never restarts, and stays SILENT (no diagnostic); a `version` mismatch alone never restarts (version is not the drift signal); the drift path (including the stability window) is bound by the SAME restartAttempts give-up ceiling; a genuine installed-side read failure is reported LOUDLY exactly once per distinct reason (never once per probe tick, never silent) — a changed reason warns again, and (card ebd755ab, Gap 2) a successful read after a latched failure now ALSO announces the recovery transition exactly once (inert -> recovered is no longer indistinguishable from still-inert); and (card ebd755ab, Gap 1) a drift that persists after its ONE allowed restart is already spent is now LOUD exactly once (never silent forever, never once per tick), with its own resolution — the installed side matching the running build again — likewise announced exactly once, and the restart guard itself unchanged throughout; and (card f0718488) a version probe that TIMES OUT specifically is retried (a genuine timeout rescued by a retry never even reaches the loud diagnostic, asserted on the observed attempt COUNT, never wall-clock), while a persistently-timing-out probe still exhausts EXACTLY its bounded attempt budget, still fails the tick loudly (latched, once, same discipline as (8)), and — the property most likely to break under a refactor of this retry loop — STILL never triggers a restart, across repeated ticks — claude-free, network-free beyond loopback."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

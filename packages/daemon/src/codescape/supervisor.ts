@@ -360,9 +360,6 @@ export class CodescapeSupervisor {
   private spawnedAt: number | null = null;
   private restartAttempts = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
-  /** True once `start()` was called with at least one repoPath — gates the health-probe timer so it
-   *  never runs (and never sends traffic) when the daemon has no codescape-enabled projects at all. */
-  private hasEnabledProjects = false;
   private healthProbeTimer: ReturnType<typeof setInterval> | null = null;
   /** Resets to 0 on any successful `/graph/health` probe — see {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
   private consecutiveHealthFailures = 0;
@@ -583,7 +580,6 @@ export class CodescapeSupervisor {
     }
     this.starting = true;
     this.stopped = false;
-    this.hasEnabledProjects = repoPaths.length > 0;
     try {
       fs.mkdirSync(this.homeDir, { recursive: true });
       for (const repoPath of repoPaths) {
@@ -742,13 +738,21 @@ export class CodescapeSupervisor {
   /**
    * Start the periodic `GET /graph/health` liveness probe — idempotent (a re-entrant `start()` call is
    * already blocked by the `this.child` guard at its own top, but this guard makes the intent explicit:
-   * never stack a second interval). Gated on {@link hasEnabledProjects} so a daemon with codescape
-   * enabled but zero codescape-enabled projects sends no probe traffic at all (there's nothing for it to
-   * watch); `probeHealth` itself gates on `alive`, so the timer is a harmless no-op tick whenever serve
-   * isn't currently believed up (never started, mid-restart-backoff, or given up for good).
+   * never stack a second interval). Armed UNCONDITIONALLY whenever {@link start} spawns `serve` —
+   * including with ZERO codescape-enabled projects, since `spawnServe()` itself always runs regardless of
+   * `repoPaths.length` (see {@link start}'s own doc). This used to be gated on a `hasEnabledProjects` flag
+   * latched from `repoPaths.length` at boot, which meant a daemon that booted with no codescape-enabled
+   * projects never armed the probe AT ALL for that boot's entire lifetime — and since v1 has no runtime
+   * project registration (a project whose `codescape.enabled` flips on after boot still needs a daemon
+   * restart to ever be ingested — see the CWD CONTRACT doc above and the config-PATCH log line in
+   * `gateway/server.ts`), there was no in-process event that could ever re-arm it. The result: `serve` ran
+   * fully unwatched — exactly the wedge blind spot this probe exists to close. `probeHealth` itself gates
+   * on `alive`, so the timer is a harmless no-op tick whenever serve isn't currently believed up (never
+   * started, mid-restart-backoff, or given up for good) — THAT check, not a project count, is what keeps
+   * an idle timer cheap.
    */
   private startHealthMonitor(): void {
-    if (this.healthProbeTimer || !this.hasEnabledProjects) return;
+    if (this.healthProbeTimer) return;
     this.healthProbeTimer = setInterval(() => { void this.probeHealth(); }, this.healthProbeIntervalMs);
   }
 
