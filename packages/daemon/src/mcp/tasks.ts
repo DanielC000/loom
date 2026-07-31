@@ -135,10 +135,18 @@ export async function resolveDeferredEffective(
  * themselves. Best-effort / NON-FATAL by design (card 793ac76d review): a board read must never fail or
  * alter its OWN result because this persist failed — the caller already computed the correct in-memory
  * value from `resolveDeferredEffective` and returns that regardless of whether this write lands.
+ *
+ * Also clears `deferredUntilTaskId` to `null` in the SAME write (card cf62c1ef) — once a named blocker's
+ * merge has been observed and acted on, the companion field has served its purpose. Leaving it set was a
+ * footgun: a LATER, unrelated `tasks_update(deferred:true)` (with no new `deferredUntilTaskId`) would
+ * silently inherit the stale blocker reference, and since that blocker is already merged, the very next
+ * read would auto-clear the manager's fresh, deliberate re-defer without ever reporting it. Clearing the
+ * companion here means a re-defer always starts clean — it lands on the plain "deferred with no blocker"
+ * path (never auto-clears, see resolveDeferredEffective) unless the caller explicitly names a NEW blocker.
  */
 function persistDeferredAutoClearBestEffort(db: Db, taskId: string): void {
   try {
-    db.updateTask(taskId, { deferred: false });
+    db.updateTask(taskId, { deferred: false, deferredUntilTaskId: null });
   } catch (e) {
     console.warn(`[mcp/tasks] best-effort deferred auto-clear write failed for task ${taskId} (read result is unaffected):`, e);
   }
@@ -268,7 +276,10 @@ export async function listProjectTasks(
       const merged = (await resolveMergedInfo(db, projectId, t, includeMerged)).merged;
       const { deferred, autoCleared } = await resolveDeferredEffective(db, projectId, t, includeMerged);
       if (autoCleared) persistDeferredAutoClearBestEffort(db, t.id);
-      return { ...t, deferred, merged };
+      // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredAutoClearBestEffort) —
+      // mirror that in THIS response too, so the read that reports the clear never echoes a stale
+      // non-null blocker id alongside deferred:false (card cf62c1ef).
+      return { ...t, deferred, deferredUntilTaskId: autoCleared ? null : t.deferredUntilTaskId, merged };
     }),
   );
   return includeBody ? withMerged : withMerged.map(toTaskSummary);
@@ -363,7 +374,12 @@ export async function getProjectTask(
   // Deferred auto-clear (card 793ac76d) — see resolveDeferredEffective's own doc.
   const { deferred, autoCleared } = await resolveDeferredEffective(db, projectId, found, includeMerged);
   if (autoCleared) persistDeferredAutoClearBestEffort(db, found.id);
-  return { ...found, deferred, merged, requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)) };
+  // autoCleared also nulls deferredUntilTaskId in the DB (see persistDeferredAutoClearBestEffort) — mirror
+  // that here too, so this same read never echoes a stale non-null blocker id alongside deferred:false.
+  return {
+    ...found, deferred, deferredUntilTaskId: autoCleared ? null : found.deferredUntilTaskId, merged,
+    requests: summarizeTaskRequests(db.listQuestionsForTask(projectId, found.id)),
+  };
 }
 
 /** The lightweight row {@link listProjectTaskRequests} returns per connected request — title-altitude, not

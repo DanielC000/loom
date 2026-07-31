@@ -1394,9 +1394,17 @@ export interface Task {
    * to a real task on THIS board (full id or unambiguous prefix, normalized to the full id since the
    * read-time check does an exact-id lookup) and a self-reference is rejected. A blocker that's since
    * been deleted (dangling reference) degrades to "stays deferred" at read time — never throws, never
-   * silently drops the card. Meaningless while `deferred` is false; not cleared automatically when
-   * `deferred` is cleared some other way (an explicit `tasks_update` deferred:false) — it simply becomes
-   * inert until `deferred` is set true again.
+   * silently drops the card. Meaningless while `deferred` is false.
+   *
+   * Cleared to `null` in the SAME write-through that auto-clears `deferred` (card cf62c1ef) — once the
+   * named blocker's merge has been observed and acted on, this field has served its purpose. This is
+   * DELIBERATE, not incidental: leaving it set after the clear was a footgun — a LATER, unrelated
+   * `tasks_update(deferred:true)` with no new `deferredUntilTaskId` would silently inherit the stale,
+   * already-merged blocker reference, and the very next read would auto-clear that fresh, deliberate
+   * re-defer without ever reporting it. Clearing it means a re-defer always starts clean: it lands on the
+   * plain "deferred with no blocker" path (never auto-clears) unless the caller names a NEW blocker. NOTE:
+   * an explicit `tasks_update(deferred:false)` — i.e. a MANUAL clear, not an auto-clear — does NOT touch
+   * this field; only the auto-clear write-through does.
    */
   deferredUntilTaskId?: string | null;
   /**
