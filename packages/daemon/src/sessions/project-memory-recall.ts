@@ -51,14 +51,20 @@ export const PROJECT_MEMORY_TAG = "[loom:project-memory]";
  *  `composeProjectMemoryDigest`. */
 export const NEVER_DROP_TAG = "never-drop";
 
-/** How many dropped keys `composeProjectMemoryDigest`'s overflow/alarm lines list by name before folding
- *  the rest into a "+N more" — keeps those lines bounded even against a pathological corpus (pinned notes
- *  are never evicted/capped, so the dropped-count itself has no upper bound). */
-const MAX_LISTED_DROPPED_KEYS = 8;
-
+/** Card b4c4699e — lists EVERY dropped key, uncapped, by design. This notice IS the recovery path (a
+ *  reader `memory_read`s a named key to get what didn't fit the digest); a list that folds keys past some
+ *  threshold into a "+N more" destroys that path for exactly the notes it declined to name — and does so
+ *  worst precisely when the drop count is largest (8-of-33 named left 25 notes unrecoverable). There used
+ *  to be a cap here (`MAX_LISTED_DROPPED_KEYS`, previously 8) reasoned as "keeps these lines bounded even
+ *  against a pathological corpus" — that traded recoverability for digest size, and any replacement
+ *  threshold just moves the identical failure to a larger drop count (a cap that never fires is untested;
+ *  if it ever does fire, this bug is back). No cap is kept. A long list here is DIAGNOSTIC, not noise: many
+ *  dropped keys means the pinned set has outgrown its budget, and that fact is exactly what the reader
+ *  needs to see, not something to hide from them. Keys are cheap (~20-40 bytes each) relative to a note
+ *  BODY — the actual expensive thing `budgetTokens` protects — so this was never the part worth economising
+ *  on. */
 function summarizeDroppedKeys(keys: string[]): string {
-  if (keys.length <= MAX_LISTED_DROPPED_KEYS) return keys.join(", ");
-  return `${keys.slice(0, MAX_LISTED_DROPPED_KEYS).join(", ")}, +${keys.length - MAX_LISTED_DROPPED_KEYS} more`;
+  return keys.join(", ");
 }
 
 const SECTION_SEP = "\n\n";
@@ -174,8 +180,10 @@ export function composeProjectMemoryDigest(
     // suppress the very warning that flags the tight budget. It still counts toward `usedTokens` below
     // (computed from the FINAL pinnedSection), so the related tier doesn't over-pack on top of it — the
     // overall digest stays close to budgetTokens even though these lines aren't budget-gated themselves.
-    // Bounded in size regardless of corpus (see MAX_LISTED_DROPPED_KEYS), so this can't itself balloon the
-    // digest. The floor alarm is a DIFFERENT signal from the routine line on purpose — "a note declared
+    // Card b4c4699e — deliberately UNBOUNDED in key-list length (no MAX_LISTED_DROPPED_KEYS cap; see
+    // summarizeDroppedKeys): completeness of this list IS the recovery path, so it can legitimately balloon
+    // the digest on a large drop set — that is accepted, intended cost, not a bug to guard against.
+    // The floor alarm is a DIFFERENT signal from the routine line on purpose — "a note declared
     // undroppable was dropped" is an alarm about a broken guarantee, "the budget overflowed" is routine;
     // collapsing them would let the alarm arrive wearing the routine case's costume.
     if (droppedFloorKeys.length > 0) {

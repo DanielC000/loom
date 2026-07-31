@@ -15,6 +15,16 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
+// Card b4c4699e DIRECTIVE #2 — parses the ACTUALLY-RENDERED key list out of a log line, rather than
+// trusting its reported COUNT (derived straight from the dropped-keys array length, which stays correct
+// even when the LIST text was truncated — that's exactly what made the original bug invisible to a
+// count-only check). `marker` is the fixed prose immediately preceding the comma-joined key list.
+const parseListedKeys = (text, marker) => {
+  const idx = text.indexOf(marker);
+  if (idx === -1) return [];
+  return text.slice(idx + marker.length).split(",").map((s) => s.trim()).filter(Boolean);
+};
+
 const tmpHome = path.join(os.tmpdir(), `loom-project-memory-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
@@ -22,7 +32,7 @@ process.env.LOOM_HOME = tmpHome;
 const { Db } = await import("../dist/db.js");
 const {
   composeProjectMemoryDigest, buildFramedProjectMemory, framedProjectMemory, estimateTokens,
-  PROJECT_MEMORY_TAG, retrieveProjectMemoryForKickoff,
+  PROJECT_MEMORY_TAG, retrieveProjectMemoryForKickoff, NEVER_DROP_TAG,
 } = await import("../dist/sessions/project-memory-recall.js");
 const { annotateRequestLinks } = await import("../dist/sessions/project-memory-request-links.js");
 const { writeProjectMemory, forgetProjectMemory, listProjectMemoryEntries, readProjectMemory } = await import("../dist/mcp/memory.js");
@@ -481,6 +491,91 @@ try {
     check("(annotate-fn) empty requestIds ⇒ []", annotateRequestLinks(db, linkProj, [], fixedNow).length === 0);
     const direct = annotateRequestLinks(db, linkProj, [pendingReqId, crossProjReqId, "nope"], fixedNow);
     check("(annotate-fn) the 'as of' date matches the injected clock, not wall time", direct[0].includes("2026-07-24"));
+  }
+
+  // ===================== AT-SCALE positive control (card b4c4699e): the DAEMON-LOG drop notices =====================
+  // The digest-text drop notices (routine ⚠️ and never-drop 🚨 ALARM) are covered at scale, against the
+  // real compiled composeProjectMemoryDigest, in project-memory-pinned-order.mjs. This section covers the
+  // OTHER two call sites of the same summarizeDroppedKeys helper — the daemon console.warn/console.error
+  // log lines emitted by retrieveProjectMemoryForKickoff — which that hermetic file can't reach (no DB).
+  // Forces 30+ drops in EACH of the routine and never-drop sub-tiers — genuinely above the OLD
+  // MAX_LISTED_DROPPED_KEYS=8 threshold, unlike the pre-existing 4-drop coverage elsewhere in this file,
+  // which would pass identically whether or not the truncation bug existed.
+  {
+    const N = 45;
+    const captureConsole = (fn) => {
+      const warnCalls = [];
+      const errorCalls = [];
+      const origWarn = console.warn;
+      const origError = console.error;
+      console.warn = (...args) => warnCalls.push(args.join(" "));
+      console.error = (...args) => errorCalls.push(args.join(" "));
+      try { fn(); } finally { console.warn = origWarn; console.error = origError; }
+      return { warnCalls, errorCalls };
+    };
+
+    // ----- routine (rest-tier) overflow: console.warn -----
+    const logRestProj = "proj-at-scale-log-rest";
+    db.insertProject({
+      id: logRestProj, name: "At-Scale Log Rest Project", repoPath: tmpHome, vaultPath: tmpHome,
+      config: { memory: { budgetTokens: 100 } }, createdAt: now, archivedAt: null,
+    });
+    const restKeys = [];
+    for (let i = 0; i < N; i++) {
+      const key = `at-scale-log-rest-dropped-${String(i).padStart(2, "0")}`;
+      restKeys.push(key);
+      writeProjectMemory(db, logRestProj, { key, text: "y".repeat(200), pinned: true });
+    }
+    const { warnCalls: restWarnCalls, errorCalls: restErrorCalls } = captureConsole(
+      () => retrieveProjectMemoryForKickoff(db, logRestProj, ""),
+    );
+    check("(at-scale log-rest) exactly one console.warn line emitted", restWarnCalls.length === 1);
+    check("(at-scale log-rest) no console.error (nothing never-drop-tagged here)", restErrorCalls.length === 0);
+    // Cross-check against the pure compose function directly, so completeness doesn't depend on guessing
+    // which (if any) of the 45 fit under the tight budget — compose is the authority on what was dropped.
+    {
+      const pinnedNow = db.listPinnedProjectMemory(logRestProj);
+      const { droppedRestKeys, includedIds } = composeProjectMemoryDigest(pinnedNow, [], 100);
+      check("(at-scale log-rest) forces 30+ real drops (cross-checked against compose directly)", droppedRestKeys.length >= 30);
+      check("(at-scale log-rest) the log line names EVERY key compose reports dropped",
+        droppedRestKeys.every((k) => restWarnCalls[0]?.includes(k)));
+      // ARITHMETIC INVARIANT (DIRECTIVE #2), parsed from the RENDERED log line — catches a bug where
+      // droppedRestKeys itself is right and only the STRINGIFIED log line truncates, which is exactly this
+      // card's original bug (the reported COUNT was always correct; only the LIST was folded to "+N more").
+      check("(at-scale log-rest) ARITHMETIC INVARIANT: delivered + keys ACTUALLY LISTED in the rendered log line === total corpus",
+        includedIds.length + parseListedKeys(restWarnCalls[0] ?? "", "pinned note(s) dropped for budget: ").length === N);
+    }
+    check("(at-scale log-rest) NEGATIVE CONTROL: no '+N more' folding text in the log line",
+      !/\+\d+ more/.test(restWarnCalls[0] ?? ""));
+
+    // ----- never-drop (floor-tier) ALARM: console.error -----
+    const logFloorProj = "proj-at-scale-log-floor";
+    db.insertProject({
+      id: logFloorProj, name: "At-Scale Log Floor Project", repoPath: tmpHome, vaultPath: tmpHome,
+      config: { memory: { budgetTokens: 100 } }, createdAt: now, archivedAt: null,
+    });
+    const floorKeys = [];
+    for (let i = 0; i < N; i++) {
+      const key = `at-scale-log-floor-dropped-${String(i).padStart(2, "0")}`;
+      floorKeys.push(key);
+      writeProjectMemory(db, logFloorProj, { key, text: "y".repeat(200), pinned: true, tags: [NEVER_DROP_TAG] });
+    }
+    const { warnCalls: floorWarnCalls, errorCalls: floorErrorCalls } = captureConsole(
+      () => retrieveProjectMemoryForKickoff(db, logFloorProj, ""),
+    );
+    check("(at-scale log-floor) exactly one console.error ALARM line emitted", floorErrorCalls.length === 1);
+    {
+      const pinnedNow = db.listPinnedProjectMemory(logFloorProj);
+      const { droppedFloorKeys, includedIds } = composeProjectMemoryDigest(pinnedNow, [], 100);
+      check("(at-scale log-floor) forces 30+ real ALARM drops (cross-checked against compose directly)", droppedFloorKeys.length >= 30);
+      check("(at-scale log-floor) the ALARM log line names EVERY key compose reports dropped",
+        droppedFloorKeys.every((k) => floorErrorCalls[0]?.includes(k)));
+      // ARITHMETIC INVARIANT (DIRECTIVE #2), parsed from the RENDERED ALARM log line.
+      check("(at-scale log-floor) ARITHMETIC INVARIANT: delivered + keys ACTUALLY LISTED in the rendered ALARM log line === total corpus",
+        includedIds.length + parseListedKeys(floorErrorCalls[0] ?? "", "dropped for budget (broken guarantee): ").length === N);
+    }
+    check("(at-scale log-floor) NEGATIVE CONTROL: no '+N more' folding text in the ALARM log line",
+      !/\+\d+ more/.test(floorErrorCalls[0] ?? ""));
   }
 
   // ===================== zero metered tokens (structural check) =====================

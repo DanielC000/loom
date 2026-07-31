@@ -57,6 +57,18 @@ const LIVE_CORPUS = [
 const TEST_BUDGET_TOKENS = 4000;
 const FLAGSHIP = "gate-cap-is-2-by-owner-decision-never-change-silently";
 
+// Card b4c4699e DIRECTIVE #2 — parses the ACTUALLY-RENDERED key list out of a notice, rather than trusting
+// the notice's own reported COUNT (which is derived from droppedRestKeys.length directly and stays correct
+// even when the LIST itself was truncated — that's exactly what made the original bug invisible to a
+// count-only check). `marker` is the fixed prose immediately preceding the comma-joined key list; everything
+// from there to the end of `text` is taken as the list (safe here because the notice line is always the
+// last thing appended in these fixtures — no related-tier text follows it).
+const parseListedKeys = (text, marker) => {
+  const idx = text.indexOf(marker);
+  if (idx === -1) return [];
+  return text.slice(idx + marker.length).split(",").map((s) => s.trim()).filter(Boolean);
+};
+
 const mkEntry = ([key, textBytes, updatedAt], overrides = {}) => ({
   id: `id-${key}`,
   projectId: "proj-order-test",
@@ -108,12 +120,18 @@ try {
   // ===================== 2. overflow is REPORTED in the digest text itself =====================
   {
     const liveEntries = LIVE_CORPUS.map((row) => mkEntry(row));
-    const { digest } = composeProjectMemoryDigest(liveEntries, [], TEST_BUDGET_TOKENS);
+    const { digest, includedIds } = composeProjectMemoryDigest(liveEntries, [], TEST_BUDGET_TOKENS);
     check("(overflow-visible) the digest text names the drop count", digest.includes("4 pinned note(s) dropped for budget"));
     check("(overflow-visible) the digest text names the actual dropped KEYS, not just a count",
       digest.includes("codescape-is-private-no-user-visible-surface") && digest.includes("read-which-assertions-failed-not-how-many"));
     check("(overflow-visible) a note that WAS delivered does not ALSO appear inside the drop line",
       !digest.slice(digest.indexOf("pinned note(s) dropped for budget")).includes(FLAGSHIP));
+    // ⚠️ NOT a truncation-discriminating check (card b4c4699e DIRECTIVE #2): at this N=10, only 4 notes
+    // drop — well under the OLD MAX_LISTED_DROPPED_KEYS=8, so no truncation would fire even on the PRE-FIX
+    // code. This only guards the arithmetic identity itself as a cheap always-on regression net; it CANNOT
+    // catch the +N-more truncation class. See section 7 below for the corpus that actually discriminates.
+    check("(overflow-visible, N=10 — arithmetic sanity net, NOT a truncation control, see comment above) delivered + keys listed in the notice === total corpus",
+      includedIds.length + parseListedKeys(digest, "pinned note(s) dropped for budget: ").length === LIVE_CORPUS.length);
   }
 
   // ===================== 3. never-drop floor: packs first, priority over recency =====================
@@ -168,6 +186,59 @@ try {
     const { digest } = composeProjectMemoryDigest(roomy, [], 100000);
     check("(no-overflow) plenty of budget ⇒ no overflow/alarm line appears at all",
       !digest.includes("dropped for budget") && !digest.includes("ALARM"));
+  }
+
+  // ===================== 7. AT-SCALE positive control (card b4c4699e): 30+ drops, EVERY key named =====================
+  // The overflow assertions in section 2 above exercise only 4 drops — well UNDER the OLD
+  // MAX_LISTED_DROPPED_KEYS cap of 8, so they'd pass identically whether or not the "+N more" truncation
+  // bug existed (the exact trap this card warns against: a below-threshold test passes for the wrong
+  // reason). This section forces 30+ drops in BOTH the routine (rest) and never-drop (floor) sub-tiers —
+  // genuinely above where the old cap used to bite — and asserts every single dropped key is named, with a
+  // negative control proving the "+N more" folding branch is GONE, not merely raised to a bigger number.
+  {
+    const N = 45;
+    const restCorpus = Array.from({ length: N }, (_, i) =>
+      mkEntry([`at-scale-rest-dropped-key-${String(i).padStart(2, "0")}`, 300, `2026-01-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`]));
+    const TIGHT_BUDGET = 600; // fits only a handful of the 45 notes — forces the rest well past the old cap of 8
+    const { digest, droppedRestKeys, droppedFloorKeys, includedIds } = composeProjectMemoryDigest(restCorpus, [], TIGHT_BUDGET);
+    check("(at-scale rest) forces 30+ drops, genuinely above the old MAX_LISTED_DROPPED_KEYS=8 threshold",
+      droppedRestKeys.length >= 30);
+    check("(at-scale rest) EVERY dropped key is named in the digest text, none folded away",
+      droppedRestKeys.every((k) => digest.includes(k)));
+    check("(at-scale rest) the drop count in the digest text matches the real drop count",
+      digest.includes(`${droppedRestKeys.length} pinned note(s) dropped for budget`));
+    check("(at-scale rest) NEGATIVE CONTROL: no '+N more' folding text appears anywhere — the truncation branch is GONE, not merely raised",
+      !/\+\d+ more/.test(digest));
+    check("(at-scale rest) sanity: nothing tagged never-drop in this corpus, so no ALARM drops", droppedFloorKeys.length === 0);
+    check("(at-scale rest) included + dropped accounts for the whole corpus", includedIds.length + droppedRestKeys.length === N);
+    // Card b4c4699e DIRECTIVE #2 — the ARITHMETIC INVARIANT, parsed from the RENDERED text (not the
+    // function's own droppedRestKeys array, which is checked above but can't catch a bug where the array is
+    // right and only the STRINGIFIED notice truncates — exactly this card's original bug: the reported
+    // COUNT was always correct, only the LIST was folded to "+N more"). This is the check that actually
+    // discriminates at scale.
+    check("(at-scale rest) ARITHMETIC INVARIANT: delivered + keys ACTUALLY LISTED in the rendered notice === total corpus",
+      includedIds.length + parseListedKeys(digest, "pinned note(s) dropped for budget: ").length === N);
+  }
+  {
+    const N = 45;
+    const floorCorpus = Array.from({ length: N }, (_, i) =>
+      mkEntry([`at-scale-floor-dropped-key-${String(i).padStart(2, "0")}`, 300, `2026-01-${String((i % 28) + 1).padStart(2, "0")}T00:00:00.000Z`], { tags: [NEVER_DROP_TAG] }));
+    const TIGHT_BUDGET = 600;
+    const { digest, droppedFloorKeys, droppedRestKeys, includedIds } = composeProjectMemoryDigest(floorCorpus, [], TIGHT_BUDGET);
+    check("(at-scale floor) forces 30+ ALARM drops, genuinely above the old cap of 8",
+      droppedFloorKeys.length >= 30);
+    check("(at-scale floor) EVERY dropped never-drop key is named in the ALARM line, none folded away",
+      droppedFloorKeys.every((k) => digest.includes(k)));
+    check("(at-scale floor) the ALARM count in the digest text matches the real drop count",
+      digest.includes(`🚨 ALARM: ${droppedFloorKeys.length} note(s) tagged "${NEVER_DROP_TAG}"`));
+    check("(at-scale floor) NEGATIVE CONTROL: no '+N more' folding text appears anywhere in the ALARM line",
+      !/\+\d+ more/.test(digest));
+    check("(at-scale floor) sanity: nothing in the routine sub-tier (all 45 are never-drop-tagged)", droppedRestKeys.length === 0);
+    check("(at-scale floor) included + dropped accounts for the whole corpus", includedIds.length + droppedFloorKeys.length === N);
+    // Card b4c4699e DIRECTIVE #2 — same arithmetic invariant as the rest-tier block above, parsed from the
+    // RENDERED ALARM text rather than the function's own droppedFloorKeys array.
+    check("(at-scale floor) ARITHMETIC INVARIANT: delivered + keys ACTUALLY LISTED in the rendered ALARM line === total corpus",
+      includedIds.length + parseListedKeys(digest, "not routine overflow: ").length === N);
   }
 } catch (err) {
   console.error(err);
