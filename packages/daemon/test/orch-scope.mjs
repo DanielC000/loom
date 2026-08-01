@@ -148,12 +148,14 @@ check("agent_list DTO carries name/profileId/position + role resolved from the b
 
 await M.close();
 
-// 5) ROLE-BASED surface: a WORKER connects but sees ONLY [gate_queue, gate_status, my_context, run_gate,
-//    worker_report] (no manager coordination tools — the depth-1 tree holds at the surface, not just a
-//    gate). my_context is the own-occupancy self-assessment tool, available to any role; worker_report is
-//    NOT a manager tool; run_gate (card 7f96aa09) is the daemon-mediated DoD self-gate; gate_status (card
-//    fc243a43) is the read-only, own-op-scoped complement to run_gate; gate_queue (card d04f9c76) is the
-//    read-only, project-scoped daemon-wide queue snapshot — all added since this check was written.
+// 5) ROLE-BASED surface: a WORKER connects but sees ONLY [directive_status, gate_queue, gate_status,
+//    my_context, run_gate, worker_report] (no manager coordination tools — the depth-1 tree holds at the
+//    surface, not just a gate). my_context is the own-occupancy self-assessment tool, available to any
+//    role; worker_report is NOT a manager tool; run_gate (card 7f96aa09) is the daemon-mediated DoD
+//    self-gate; gate_status (card fc243a43) is the read-only, own-op-scoped complement to run_gate;
+//    gate_queue (card d04f9c76) is the read-only, project-scoped daemon-wide queue snapshot;
+//    directive_status (card 35c96aa6) is the read-only, own-lineage-scoped delivery-history complement to
+//    the manager's staleDirectiveProjection — all added since this check was written.
 //    DERIVED from ORCH_WORKER_TOOLS (promptLint.ts), same rationale as the manager check above.
 const W = await connect("W1");
 const wTools = (await W.listTools()).tools.map((t) => t.name).sort();

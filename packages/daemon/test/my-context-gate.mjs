@@ -298,12 +298,13 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",
     gateSetTool(workerTools) === undefined);
-  // The worker surface is exactly { gate_queue, gate_status, my_context, run_gate, worker_report } —
-  // run_gate (card 7f96aa09), gate_status (card fc243a43, read-only + own-op-scoped), and gate_queue
-  // (card d04f9c76, read-only + project-scoped) are the deliberate additions since this assertion was
-  // first written; anything else would be a surface leak.
-  check("(S) worker surface is STILL exactly { gate_queue, gate_status, my_context, run_gate, worker_report }",
-    workerTools.slice().sort().join(",") === "gate_queue,gate_status,my_context,run_gate,worker_report");
+  // The worker surface is exactly { directive_status, gate_queue, gate_status, my_context, run_gate,
+  // worker_report } — run_gate (card 7f96aa09), gate_status (card fc243a43, read-only + own-op-scoped),
+  // gate_queue (card d04f9c76, read-only + project-scoped), and directive_status (card 35c96aa6, read-only
+  // + own-lineage-scoped) are the deliberate additions since this assertion was first written; anything
+  // else would be a surface leak.
+  check("(S) worker surface is STILL exactly { directive_status, gate_queue, gate_status, my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
   // my_context is present on BOTH role branches (it's the tool the gate is folded into).
   check("(S) my_context registered on both manager + worker surfaces",
     managerTools.includes("my_context") && workerTools.includes("my_context"));

@@ -5,13 +5,14 @@ import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session } from "@loom/shared";
+import { contextWindowForModel, resolveConfig, resolveProfile, QUESTION_STATES, QUESTION_TYPES, type SessionRole, type KanbanColumn, type Session, type OrchestrationEvent } from "@loom/shared";
 import { QUESTION_ASK_INPUT_SHAPE, buildQuestionAsk, questionPullItem, auditRequestItem, pageRequests, cancelQuestionForAgent, resolveQuestionForAgent, applySupersede } from "./questionTool.js";
 import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
+import { possibleDuplicateRootLabel } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
 import { readTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
 import { UsageLimitError } from "../orchestration/usage-awareness.js";
@@ -394,6 +395,194 @@ export interface CompanionHooks {
    * companion's reminder watcher.
    */
   rearmReminders?: (sessionId: string) => Promise<void>;
+}
+
+/**
+ * Resolve ONE directive's (a `message_worker`/`redirect_worker` send's) current fate from durable event
+ * history alone, walking its give-up/re-mint chain from `rootMsgId` forward. Card 35c96aa6: hoisted out of
+ * `buildServer`'s `staleDirectiveProjection` closure to MODULE scope (unchanged logic — it never closed
+ * over anything but its own three parameters; `events`' type was previously spelled via
+ * `ReturnType<typeof db.listEventsForWorker>` purely for convenience, now the equivalent `OrchestrationEvent[]`)
+ * so a second caller — the worker-facing `directive_status` tool below — can reuse the EXACT SAME walk
+ * instead of a parallel reimplementation that could silently drift from it. `staleDirectiveProjection`'s own
+ * call site is untouched; this is a pure scope move, not a behavior change.
+ *
+ * Each msgId gives up AT MOST ONCE (a give-up either re-mints to a brand-new msgId or parks terminally —
+ * see handleGiveUpExhausted's doc) — so walking msgId -> its one give-up event -> the next msgId cannot
+ * loop; `seen` is a cheap defensive bound, not a real cycle guard.
+ */
+export function resolveDirectiveOutcome(
+  events: OrchestrationEvent[], rootDirective: OrchestrationEvent, rootMsgId: string,
+):
+  | { state: "parked"; msgId: string; parkedAt: string }
+  | { state: "confirmed-after-park"; msgId: string; parkedAt: string; confirmedAt: string }
+  | { state: "delivered"; msgId: string; deliveredAt: string; turnSeqAtDelivery: number }
+  | { state: "pending"; msgId: string } {
+  let msgId = rootMsgId;
+  const seen = new Set<string>();
+  while (!seen.has(msgId)) {
+    seen.add(msgId);
+    const gaveUp = events.find((e) => e.kind === "session_message_gave_up" && e.detail?.msgId === msgId);
+    if (!gaveUp) break;
+    if (gaveUp.detail?.outcome === "parked") {
+      // Card 3c712d4e: a "parked" outcome is NOT always terminal — `handleGiveUpConfirmed`
+      // (sessions/service.ts) can append a LATER `session_message_gave_up` event for this SAME msgId,
+      // `outcome: "confirmed-after-park"`, once a late-arriving confirming hook proves the engine
+      // actually ran the turn Loom's own retry budget had already given up on (the 232s-lag scenario —
+      // see memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`). Returning "parked"
+      // unconditionally here — the pre-fix behavior — is exactly the defect this card fixes: a sender
+      // re-reading worker_list/worker_status after that confirmation lands would still see a STICKY
+      // parkedDirective and this tool's own "RE-SEND" advice, manufacturing a real duplicate of a
+      // message that already landed. `events` is chronological (see this function's own callers), so a
+      // `confirmed-after-park` row for this msgId can only appear AFTER the `parked` row `find` just
+      // matched — checking for it here, not before, is deliberate.
+      const confirmedAfter = events.find((e) =>
+        e.kind === "session_message_gave_up" && e.detail?.msgId === msgId && e.detail?.outcome === "confirmed-after-park");
+      if (confirmedAfter) {
+        return { state: "confirmed-after-park", msgId, parkedAt: gaveUp.ts, confirmedAt: confirmedAfter.ts };
+      }
+      return { state: "parked", msgId, parkedAt: gaveUp.ts };
+    }
+    const remintedAs = gaveUp.detail?.remintedAs as string | undefined;
+    // CR follow-up [8] (card 9da2a435): a malformed give-up (gave up, but neither "parked" nor a
+    // usable `remintedAs`) must fail toward "pending", NEVER fall through to the delivered-check
+    // below — this msgId DID give up; reporting it as cleanly delivered would resurrect the exact
+    // lie this card exists to remove, just triggered by corrupted data instead of an optimistic stamp.
+    if (!remintedAs) return { state: "pending", msgId };
+    msgId = remintedAs;
+  }
+  // `msgId` is now the chain's current (not-yet-given-up) candidate. Only the ROOT msgId's own
+  // message_worker event ever carries an immediate-delivery turnSeqAtDelivery; every OTHER msgId in
+  // the chain (a remint) always takes the HELD path (handleGiveUpExhausted forces giveUpHeldUntil —
+  // see its own doc), so its delivery record — if any — is a session_message_delivered event instead.
+  if (msgId === rootMsgId && typeof rootDirective.detail?.turnSeqAtDelivery === "number") {
+    return {
+      state: "delivered", msgId, deliveredAt: rootDirective.ts,
+      turnSeqAtDelivery: rootDirective.detail.turnSeqAtDelivery,
+    };
+  }
+  const delivery = events.find((e) =>
+    e.kind === "session_message_delivered" && e.detail?.msgId === msgId
+    && typeof e.detail?.turnSeqAtDelivery === "number");
+  if (!delivery) return { state: "pending", msgId }; // still queued/held, or mid-retry — nothing to judge yet
+  return { state: "delivered", msgId, deliveredAt: delivery.ts, turnSeqAtDelivery: delivery.detail!.turnSeqAtDelivery as number };
+}
+
+/**
+ * Card 35c96aa6 — walk `sessionId`'s OWN `recycledFrom` ancestor chain, self included, bounded/cycle-
+ * guarded. Same shape as `lineageRootId` (sessions/platform-lead-prompt.ts), but returns the FULL chain
+ * instead of just the root: `directiveDeliveriesForCaller` needs every ancestor's own event history, not
+ * just an identity comparison. This IS the capability-widening argument for `directive_status` made
+ * concrete — a caller can only ever reach rows keyed to itself or its own direct predecessors, never a
+ * sibling worker, another project, or an arbitrary session id supplied as a parameter (there is no such
+ * parameter).
+ */
+function ownLineageIds(db: Db, sessionId: string): string[] {
+  const ids: string[] = [];
+  const seen = new Set<string>();
+  let current: string | undefined = sessionId;
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    ids.push(current);
+    current = db.getSession(current)?.recycledFrom ?? undefined;
+  }
+  return ids;
+}
+
+/**
+ * Card 35c96aa6 — the read behind the worker-facing `directive_status` tool: "which durable, turn-
+ * confirmed hand-offs, of a message whose root label matches `rootLabel` (or of ANY root, when
+ * `rootLabel` is omitted), has `callerSessionId` — or a predecessor in its own recycle lineage — ever
+ * received?" DELIVERY history only, never a claim about action — see the tool's own description for the
+ * explicit non-claim.
+ *
+ * Reuses `resolveDirectiveOutcome` per directive event (same function `staleDirectiveProjection` calls,
+ * see its own doc) rather than re-deriving chain state, applied to EVERY `message_worker`/`redirect_worker`
+ * event found in scope — not just the latest one `staleDirectiveProjection` tracks — because a manual
+ * resend (`resendOf`) can create a SEPARATE top-level directive event sharing the SAME true root, and each
+ * must be walked on its own.
+ *
+ * LABEL, not internal id: a worker only ever sees the 8-hex-char label `framePossibleDuplicate` puts in a
+ * `[loom:possible-duplicate root:…]` tag — never the raw internal `rootMsgId` — so matching must use
+ * `possibleDuplicateRootLabel` (pty/host.ts), the SAME function that produced the tag, not a re-derived
+ * approximation. A directive's TRUE internal root (needed to compute that label) is recovered from
+ * `session_message_queued`/`session_message_gave_up` events' own `detail.rootMsgId` field — NOT from
+ * `message_worker`/`redirect_worker`'s own `detail.msgId`/`detail.queuedMsgId`, which is always a FRESH
+ * per-call mint (see `enqueueDurableMessage`, sessions/service.ts) and only coincidentally equals the true
+ * root for a plain first-ever send with no `resendOf`. A directive event whose own msgId is absent from
+ * that map (never queued, never gave up — a clean first-ever immediate delivery) self-roots to its own
+ * msgId; per `framePossibleDuplicate`'s own doc, such a send is never tagged, so a real worker-supplied
+ * label can never legitimately match one — harmless.
+ *
+ * Only `state: "delivered"` and `state: "confirmed-after-park"` outcomes ever produce a delivery record —
+ * `"parked"`/`"pending"` never reached any turn, so they carry no information relevant to "have I seen
+ * this before". A `confirmed-after-park` entry's `turnSeq` is `null` (no hand-off was ever cleanly
+ * stamped — that's the whole shape of the bug it corrects) but is STILL a genuine, durably-recorded prior
+ * delivery. CAUGHT IN SELF-AUDIT: an earlier draft of this doc claimed such an entry "always predates the
+ * caller's current turn" — NOT verified. The confirming hook that produces it fires asynchronously off
+ * engine-side evidence (see `onGiveUpConfirmed`'s own doc, pty/host.ts), and this function has no way to
+ * establish it can never resolve mid-way through the very turn that's asking. The turnSeq-comparison
+ * technique above simply does not apply to a null entry — its presence is evidence of a genuine delivery,
+ * not evidence of WHEN relative to the caller's current turn; don't claim more than that.
+ *
+ * Each entry carries BOTH `fromSession` (the event's own `managerSessionId` — the actual SENDER) and
+ * `receivedBy` (the event's own `workerSessionId` — which id in the CALLER's OWN lineage actually took the
+ * hand-off; may be a predecessor, never anyone outside the lineage). Do not collapse these into one field:
+ * `receivedBy` differing from the live caller's own sessionId is precisely the recycle-boundary signal
+ * DoD-3 exists to make visible — "a predecessor of mine received this, not me."
+ *
+ * Bounded to the 20 MOST RECENT deliveries when `rootLabel` is omitted (an unfiltered call is meant to be
+ * a cheap standing habit, not a full-history dump); a single-label filtered call returns its complete
+ * history uncapped (inherently small — one logical chain's own deliveries).
+ */
+const UNFILTERED_DELIVERY_CAP = 20;
+function directiveDeliveriesForCaller(
+  db: Db, callerSessionId: string, rootLabel?: string,
+): {
+  deliveries: Array<{ root: string; at: string; turnSeq: number | null; msgId: string; fromSession: string; receivedBy: string }>;
+  currentTurnSeq: number;
+  truncated: boolean;
+} {
+  const lineage = ownLineageIds(db, callerSessionId);
+  const events = lineage.flatMap((id) => db.listEventsForWorker(id));
+  events.sort((a, b) => (a.ts < b.ts ? -1 : a.ts > b.ts ? 1 : 0));
+  // msgId -> the TRUE internal rootMsgId this msgId's own chain was minted under (see this function's own
+  // doc for why message_worker/redirect_worker's own msgId field is NOT reliable for this).
+  const rootMap = new Map<string, string>();
+  for (const e of events) {
+    if (
+      (e.kind === "session_message_queued" || e.kind === "session_message_gave_up")
+      && typeof e.detail?.msgId === "string" && typeof e.detail?.rootMsgId === "string"
+    ) {
+      rootMap.set(e.detail.msgId, e.detail.rootMsgId);
+    }
+  }
+  const deliveries: Array<{ root: string; at: string; turnSeq: number | null; msgId: string; fromSession: string; receivedBy: string }> = [];
+  for (const d of events) {
+    if (d.kind !== "message_worker" && d.kind !== "redirect_worker") continue;
+    const ownMsgId = (d.kind === "message_worker" ? d.detail?.msgId : d.detail?.queuedMsgId) as string | undefined;
+    if (typeof ownMsgId !== "string") continue; // defensive — mirrors staleDirectiveProjection's own guard
+    const trueRoot = rootMap.get(ownMsgId) ?? ownMsgId;
+    const label = possibleDuplicateRootLabel(trueRoot);
+    if (rootLabel && label !== rootLabel) continue;
+    const outcome = resolveDirectiveOutcome(events, d, ownMsgId);
+    // CAUGHT IN REVIEW (manager, card 35c96aa6): this event's own `workerSessionId` is the RECIPIENT — the
+    // lineage id it was delivered to — never the sender. `managerSessionId` is the sender (see
+    // `messageWorker`/`deliverRedirect`, sessions/service.ts, which both stamp this event with BOTH fields
+    // at once). An earlier draft read `workerSessionId` into a field literally named `fromSession`, which
+    // is structurally guaranteed wrong: `db.listEventsForWorker` selects `WHERE worker_session_id = ?`, so
+    // that value can only ever be one of `lineage`'s own ids — it could never have named a sender.
+    if (outcome.state === "delivered") {
+      deliveries.push({ root: label, at: outcome.deliveredAt, turnSeq: outcome.turnSeqAtDelivery, msgId: outcome.msgId, fromSession: d.managerSessionId, receivedBy: d.workerSessionId ?? callerSessionId });
+    } else if (outcome.state === "confirmed-after-park") {
+      deliveries.push({ root: label, at: outcome.confirmedAt, turnSeq: null, msgId: outcome.msgId, fromSession: d.managerSessionId, receivedBy: d.workerSessionId ?? callerSessionId });
+    }
+  }
+  deliveries.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  const truncated = !rootLabel && deliveries.length > UNFILTERED_DELIVERY_CAP;
+  const bounded = rootLabel ? deliveries : deliveries.slice(-UNFILTERED_DELIVERY_CAP);
+  const currentTurnSeq = db.getSession(callerSessionId)?.turnSeq ?? 0;
+  return { deliveries: bounded, currentTurnSeq, truncated };
 }
 
 export class OrchestrationMcpRouter {
@@ -1131,9 +1320,72 @@ export class OrchestrationMcpRouter {
       // `sessionId`), never the caller's role, so a worker sees exactly the same cross-project redaction a
       // manager on this project would, nothing more.
       registerGateQueue(server, sessions, db, sessionId);
-      // The worker's tested depth-1 surface is now EXACTLY { gate_queue, gate_status, my_context, run_gate,
-      // worker_report } — my-context-gate.mjs, idle-report.mjs, inbox-pull.mjs, orch-scope.mjs, and
-      // mgmt-surface.mjs all pin this sorted list; update ALL of them if this surface ever changes again.
+      // directive_status (card 35c96aa6): the RECIPIENT half of the idempotency-key argument card
+      // 3c712d4e built the SENDER half of. A worker that receives a `[loom:possible-duplicate root:…]`
+      // tag (card 78e4b3f2) previously had only that visible marker to notice — an attention-dependent
+      // fix for an attention-failure problem. This gives a mechanical answer instead, read from the SAME
+      // durable event history `staleDirectiveProjection` already uses for the manager side (never
+      // transcript text). `root` is OPTIONAL and deliberately so (CR follow-up on this card's own design
+      // checkpoint): a REQUIRED root would still depend on the worker noticing the tag to call this at
+      // all, inheriting that exact failure rate — omitting it lets a worker call this as a standing habit
+      // at the start of any turn, not only when it happens to spot a marker.
+      server.registerTool(
+        "directive_status",
+        {
+          description:
+            "Read your OWN durable delivery history — the mechanical complement to the visible " +
+            "`[loom:possible-duplicate root:XXXXXXXX]` tag (card 78e4b3f2). Scoped server-side to YOUR " +
+            "session only (there is no session/worker parameter): reads YOUR OWN recycle lineage (this " +
+            "session plus any predecessor it was recycled from) and nothing else — never another worker, " +
+            "another project, or message TEXT. " +
+            "Call with NO argument to see your most recent known deliveries across every root in your " +
+            "lineage (bounded to the 20 most recent — `truncated:true` means older ones exist; call with " +
+            "`root` for one label's complete history). Call with `root` set to the exact 8 lowercase-hex " +
+            "characters copied verbatim from a duplicate-tag you just received to filter to that one label. " +
+            "A malformed `root` (not 8 hex chars) returns `{error}` — distinguishable from a well-formed " +
+            "root that legitimately has zero matches, never silently identical to it. " +
+            "Returns `{deliveries, deliveryCount, currentTurnSeq, truncated}`. Each entry in `deliveries` " +
+            "is a DURABLE, TURN-CONFIRMED hand-off (never a merely-queued or parked attempt, those carry no " +
+            "signal about what you've seen) with fields: `root` (the label it matched); `at` (when this " +
+            "hand-off/confirmation was recorded); `msgId` (the internal id of the specific hop that actually " +
+            "delivered — NOT necessarily the id printed in the tag you saw, which names the CHAIN's root, " +
+            "not this particular hop); `turnSeq` (see below); `fromSession` (the session that actually SENT " +
+            "it — a manager, another session, or occasionally empty for a system-originated redirect); " +
+            "`receivedBy` (which session in YOUR OWN lineage took the hand-off — this session, OR a " +
+            "predecessor you were recycled from; it is NOT always you, and a value other than your own " +
+            "current session id is exactly the recycle-boundary case: a predecessor of yours received this, " +
+            "not you personally, but it is still genuinely part of your own history). " +
+            "HAVE-I-SEEN-THIS-BEFORE, mechanically: compare each entry's `turnSeq` against the `currentTurnSeq` " +
+            "this same reply carries — `turnSeq < currentTurnSeq` means that delivery happened in an EARLIER " +
+            "turn than this one. `turnSeq` is `null` on a `confirmed-after-park` entry (Loom's own retry " +
+            "budget gave up before a hand-off was cleanly stamped, and a late independent signal proved the " +
+            "engine ran it anyway) — its presence is still a genuine, durably-recorded delivery, but the " +
+            "turnSeq-comparison technique above does not apply to it: Loom cannot mechanically place it " +
+            "relative to your current turn. Treat it as evidence you may have seen this content before, not " +
+            "as proof it was an EARLIER turn specifically. " +
+            "`deliveryCount === 0` is a legitimate, expected answer: despite the tag you may have seen, " +
+            "Loom's own durable history shows no record of this content having reached any of your turns " +
+            "before — the sender-side 'possible duplicate' framing was a false alarm for this instance. " +
+            "KNOWN LIMITATION: matching is by the 8-character LABEL you see in the tag, not by the full " +
+            "internal id the label is derived from — an extremely rare label collision could in principle " +
+            "merge two unrelated messages' history into one answer. " +
+            "THE ONE THING THIS CANNOT TELL YOU: whether you actually ACTED on a prior delivery — only that " +
+            "the text reached one of your turns. Delivery is recorded; action is not. Use your own " +
+            "transcript/memory to judge whether you already acted on it.",
+          inputSchema: strictShape({ root: z.string().optional() }),
+        },
+        async ({ root }) => {
+          if (root !== undefined && !/^[0-9a-f]{8}$/i.test(root)) {
+            return ok({ error: "not a valid root label — expected exactly 8 lowercase hex characters, copied verbatim from a [loom:possible-duplicate root:XXXXXXXX] tag" });
+          }
+          const result = directiveDeliveriesForCaller(db, sessionId, root?.toLowerCase());
+          return ok({ ...result, deliveryCount: result.deliveries.length });
+        },
+      );
+      // The worker's tested depth-1 surface is now EXACTLY { directive_status, gate_queue, gate_status,
+      // my_context, run_gate, worker_report } — my-context-gate.mjs, idle-report.mjs, inbox-pull.mjs,
+      // gate-queue.mjs, mgmt-surface.mjs, and (indirectly, via ORCH_WORKER_TOOLS in agents/promptLint.ts)
+      // orch-scope.mjs all pin this sorted list; update ALL of them if this surface ever changes again.
       return server;
     }
 
@@ -1225,67 +1477,10 @@ export class OrchestrationMcpRouter {
     // looked for that event: a parked directive never gets a worker_report (nothing was ever handed to the
     // worker to act on) AND never advances the worker's own turnSeq (no turn ran), so `turnsSinceDelivery`
     // stayed 0 forever and `staleDirective` read `null` — indistinguishable from "recently delivered, no
-    // problem yet". `resolveDirectiveOutcome` below walks the give-up chain first so a parked directive is
-    // reported as parked, never silently as "no signal".
-    const resolveDirectiveOutcome = (
-      events: ReturnType<typeof db.listEventsForWorker>, rootDirective: (typeof events)[number], rootMsgId: string,
-    ):
-      | { state: "parked"; msgId: string; parkedAt: string }
-      | { state: "confirmed-after-park"; msgId: string; parkedAt: string; confirmedAt: string }
-      | { state: "delivered"; msgId: string; deliveredAt: string; turnSeqAtDelivery: number }
-      | { state: "pending"; msgId: string } => {
-      // Each msgId gives up AT MOST ONCE (a give-up either re-mints to a brand-new msgId or parks
-      // terminally — see handleGiveUpExhausted's doc) — so walking msgId -> its one give-up event -> the
-      // next msgId cannot loop; `seen` is a cheap defensive bound, not a real cycle guard.
-      let msgId = rootMsgId;
-      const seen = new Set<string>();
-      while (!seen.has(msgId)) {
-        seen.add(msgId);
-        const gaveUp = events.find((e) => e.kind === "session_message_gave_up" && e.detail?.msgId === msgId);
-        if (!gaveUp) break;
-        if (gaveUp.detail?.outcome === "parked") {
-          // Card 3c712d4e: a "parked" outcome is NOT always terminal — `handleGiveUpConfirmed`
-          // (sessions/service.ts) can append a LATER `session_message_gave_up` event for this SAME msgId,
-          // `outcome: "confirmed-after-park"`, once a late-arriving confirming hook proves the engine
-          // actually ran the turn Loom's own retry budget had already given up on (the 232s-lag scenario —
-          // see memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`). Returning "parked"
-          // unconditionally here — the pre-fix behavior — is exactly the defect this card fixes: a sender
-          // re-reading worker_list/worker_status after that confirmation lands would still see a STICKY
-          // parkedDirective and this tool's own "RE-SEND" advice, manufacturing a real duplicate of a
-          // message that already landed. `events` is chronological (see this closure's own callers), so a
-          // `confirmed-after-park` row for this msgId can only appear AFTER the `parked` row `find` just
-          // matched — checking for it here, not before, is deliberate.
-          const confirmedAfter = events.find((e) =>
-            e.kind === "session_message_gave_up" && e.detail?.msgId === msgId && e.detail?.outcome === "confirmed-after-park");
-          if (confirmedAfter) {
-            return { state: "confirmed-after-park", msgId, parkedAt: gaveUp.ts, confirmedAt: confirmedAfter.ts };
-          }
-          return { state: "parked", msgId, parkedAt: gaveUp.ts };
-        }
-        const remintedAs = gaveUp.detail?.remintedAs as string | undefined;
-        // CR follow-up [8] (card 9da2a435): a malformed give-up (gave up, but neither "parked" nor a
-        // usable `remintedAs`) must fail toward "pending", NEVER fall through to the delivered-check
-        // below — this msgId DID give up; reporting it as cleanly delivered would resurrect the exact
-        // lie this card exists to remove, just triggered by corrupted data instead of an optimistic stamp.
-        if (!remintedAs) return { state: "pending", msgId };
-        msgId = remintedAs;
-      }
-      // `msgId` is now the chain's current (not-yet-given-up) candidate. Only the ROOT msgId's own
-      // message_worker event ever carries an immediate-delivery turnSeqAtDelivery; every OTHER msgId in
-      // the chain (a remint) always takes the HELD path (handleGiveUpExhausted forces giveUpHeldUntil —
-      // see its own doc), so its delivery record — if any — is a session_message_delivered event instead.
-      if (msgId === rootMsgId && typeof rootDirective.detail?.turnSeqAtDelivery === "number") {
-        return {
-          state: "delivered", msgId, deliveredAt: rootDirective.ts,
-          turnSeqAtDelivery: rootDirective.detail.turnSeqAtDelivery,
-        };
-      }
-      const delivery = events.find((e) =>
-        e.kind === "session_message_delivered" && e.detail?.msgId === msgId
-        && typeof e.detail?.turnSeqAtDelivery === "number");
-      if (!delivery) return { state: "pending", msgId }; // still queued/held, or mid-retry — nothing to judge yet
-      return { state: "delivered", msgId, deliveredAt: delivery.ts, turnSeqAtDelivery: delivery.detail!.turnSeqAtDelivery as number };
-    };
+    // problem yet". `resolveDirectiveOutcome` walks the give-up chain first so a parked directive is
+    // reported as parked, never silently as "no signal". Card 35c96aa6: hoisted to MODULE scope (was a
+    // closure-local `const` here) so the worker-facing `directive_status` tool can call the SAME chain
+    // walk instead of reimplementing it — this call site is unchanged, only where the function lives moved.
 
     // CR follow-up [2] (card 9da2a435): `directive` is the raw discriminator a manager can read
     // directly — "none" (never messaged) / "pending" (queued or mid give-up-retry, not yet resolved

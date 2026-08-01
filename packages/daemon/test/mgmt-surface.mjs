@@ -145,10 +145,11 @@ await M.close();
 //    — it never accounted for my_context, added to the worker branch by 5561afb8 — fixed as a drive-by
 //    while updating it for run_gate, the same worker-surface-enumeration assertion category. gate_status,
 //    card fc243a43's read-only own-op-scoped complement to run_gate, and gate_queue, card d04f9c76's
-//    read-only project-scoped daemon-wide queue snapshot, are the latest additions.)
+//    read-only project-scoped daemon-wide queue snapshot, and directive_status, card 35c96aa6's read-only
+//    own-lineage-scoped delivery-history complement, are the latest additions.)
 const W = await connect("mcp-orch", "W");
 const wTools = (await W.listTools()).tools.map((t) => t.name).sort();
-check(`role-gate: worker sees ONLY [gate_queue, gate_status, my_context, run_gate, worker_report] (got ${wTools.join(",")})`, wTools.join(",") === "gate_queue,gate_status,my_context,run_gate,worker_report");
+check(`role-gate: worker sees ONLY [directive_status, gate_queue, gate_status, my_context, run_gate, worker_report] (got ${wTools.join(",")})`, wTools.join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
 check("role-gate: worker sees NONE of the six management tools", six.every((t) => !wTools.includes(t)));
 await W.close();
 // A plain session gets no orchestration surface at all (404 → throw).

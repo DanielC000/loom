@@ -136,8 +136,15 @@ const HEX8_RE = /^[0-9a-f]{8}$/;
  * `fnv1a32` (already used elsewhere in this file for exactly this "always 8 lowercase hex chars,
  * deterministic" shape) — still correlatable (same input ⇒ same label) but never breaks the regex
  * invariant, regardless of how the irregularity entered the chain.
+ *
+ * Exported (card 35c96aa6): the worker-facing `directive_status` MCP tool (mcp/orchestration.ts) needs
+ * this SAME label computation to match a root a worker supplies against the internal rootMsgId values in
+ * its own durable event history. Reusing this function (a pure function of its own input) guarantees that
+ * ONE step — computing a label from a candidate rootMsgId — is byte-identical to what produced the tag a
+ * worker sees, rather than a re-derived approximation that could silently drift from it; it says nothing
+ * about whether the tool's SURROUNDING logic correctly identifies the right rootMsgId to feed in.
  */
-function possibleDuplicateRootLabel(rootMsgId: string): string {
+export function possibleDuplicateRootLabel(rootMsgId: string): string {
   const slice = rootMsgId.slice(0, 8);
   return HEX8_RE.test(slice) ? slice : fnv1a32(rootMsgId);
 }

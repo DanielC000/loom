@@ -204,10 +204,11 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
   // tool available to ANY role (5561afb8 added it to both role branches); worker_report is the
   // worker-coordination tool; run_gate (card 7f96aa09) is the daemon-mediated DoD self-gate; gate_status
   // (card fc243a43) is the read-only, own-op-scoped complement to run_gate; gate_queue (card d04f9c76) is
-  // the read-only, project-scoped daemon-wide queue snapshot — all added since this anchor was first
+  // the read-only, project-scoped daemon-wide queue snapshot; directive_status (card 35c96aa6) is the
+  // read-only, own-lineage-scoped delivery-history complement — all added since this anchor was first
   // written.
-  check("(T) worker surface is exactly { gate_queue, gate_status, my_context, run_gate, worker_report }",
-    workerTools.slice().sort().join(",") === "gate_queue,gate_status,my_context,run_gate,worker_report");
+  check("(T) worker surface is exactly { directive_status, gate_queue, gate_status, my_context, run_gate, worker_report }",
+    workerTools.slice().sort().join(",") === "directive_status,gate_queue,gate_status,my_context,run_gate,worker_report");
   // Sanity: idle_report sits ALONGSIDE its siblings recycle_me / worker_report-less manager tools.
   check("(T) manager surface also carries its siblings (recycle_me, worker_spawn)",
     managerTools.includes("recycle_me") && managerTools.includes("worker_spawn"));
