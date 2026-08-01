@@ -93,6 +93,18 @@ class SeamHost extends createSeamHost(PtyHost) {}
 class SpyHost extends SeamHost {
   enqueueCalls = [];
   stoppedIds = new Set();
+  spawn(opts) {
+    super.spawn(opts);
+    // Card 5ff6586d: this scenario's whole point is a settle nudge that ACTUALLY DELIVERS (the "(2)"
+    // claim below), so the successor must reach genuine ready+idle — a real worker spawn only gets
+    // there via SessionStart + mode-cycling + a completed first turn, none of which this fake pty ever
+    // fires (no real claude output). Force it straight there instead of faking the hook sequence: this
+    // is what exposed the underlying defect in the first place — before the fix, EVERY push here was
+    // actually "held" (never delivered), and the fallback wake was only ever reaped because
+    // autoCancelSettleWakes ran unconditionally, not because delivery genuinely succeeded.
+    const live = this.live.get(opts.sessionId);
+    if (live) { live.ready = true; live.busy = false; }
+  }
   enqueueStdin(sessionId, text, source, onDeliver, route, kind, questionId) {
     this.enqueueCalls.push({ sessionId, text, kind });
     return super.enqueueStdin(sessionId, text, source, onDeliver, route, kind, questionId);
