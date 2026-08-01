@@ -49,7 +49,7 @@ import { GateSemaphore, GateCancelledError, type GateDescriptor, type GateSnapsh
 import { checkDeployRateLimit, DEPLOY_RATE_LIMIT_MAX, DEPLOY_RATE_LIMIT_WINDOW_MS } from "../orchestration/deploy.js";
 import { PendingOpRegistry, SYNC_ATTACH_BUDGET_MS, type AttachResult, type PendingOpView } from "../orchestration/pending-ops.js";
 import { CapQueueRegistry, CapQueueRejectedError, type CapQueuedSpawn } from "../orchestration/cap-queue.js";
-import { validateAgentProjectConfigOverride } from "../mcp/platform.js";
+import { mergeConfigOverride, validateAgentProjectConfigOverride } from "../mcp/platform.js";
 import { PLATFORM_PROJECT_NAME } from "../platform/seed.js";
 import { SETUP_PROJECT_NAME } from "../setup/seed.js";
 import { checkPeerMessageRateLimit, checkNotifyLeadRateLimit } from "./peer-message-guard.js";
@@ -8310,12 +8310,21 @@ export class SessionService {
     if (patch.config !== undefined) {
       const v = validateAgentProjectConfigOverride(patch.config);
       if (!v.ok) throw new Error(`invalid config: ${v.error}`);
+      // PATCH/MERGE (card 6483ddfa): deep-merge the VALIDATED partial into the project's EXISTING config
+      // override instead of replacing it, so patching one key never clobbers the rest (gateCommand,
+      // sessionEnv, kanbanColumns, …). The trust boundary is unchanged: a human-only key is a rejected
+      // unknown on the agent validator above and can never be INTRODUCED through this path; the merged
+      // whole is deliberately NOT re-validated — re-running the agent validator over a result that
+      // legitimately preserves a pre-existing human-set key (e.g. gateCommand) would falsely reject it.
+      // Validate the patch, merge, store — see mergeConfigOverride's own doc comment for the full reasoning.
+      const merged = mergeConfigOverride(project.config, v.value);
       // SAFE writer (not a blind setProjectConfig): a kanbanColumns key-set change re-keys orphaned cards
       // to the landing lane instead of orphaning them on a non-existent column; a non-column patch stays
-      // byte-identical to the blind path. (tasks/columns.ts — mirrors the platform/REST config-PATCH path.)
+      // byte-identical to the blind path. (tasks/columns.ts — mirrors the platform/REST config-PATCH path,
+      // which now this path genuinely does.)
       // actor (card a0cafef2): this is an AGENT-facing surface (the manager's own project_update) —
       // hardcoding "human" would be a false attribution, so the caller's own session id is threaded through.
-      const wrote = setProjectConfigSafe(this.db, projectId, v.value, `manager:${managerSessionId}`);
+      const wrote = setProjectConfigSafe(this.db, projectId, merged, `manager:${managerSessionId}`);
       if (!wrote.ok) throw new Error(wrote.error);
     }
     this.db.updateProject(projectId, { name: patch.name, vaultPath: patch.vaultPath });

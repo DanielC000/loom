@@ -2719,8 +2719,10 @@ export class OrchestrationMcpRouter {
           "Update a project's structural fields (name / vaultPath) and/or its config override — YOUR project " +
           "only (a projectId outside your own is REJECTED; platform_escalate is your one cross-project write). " +
           "config is schema-validated on the AGENT path: orchestration.gateCommand (host-RCE) and unknown keys " +
-          "are REJECTED (that capability stays human-only). repoPath is not editable here. Omitted fields are " +
-          "left as-is.",
+          "are REJECTED (that capability stays human-only). repoPath is not editable here. Omitted top-level " +
+          "fields (name / vaultPath / config) are left as-is — but config ITSELF is a deep MERGE onto the " +
+          "project's existing override, not a replace: a key you omit inside config (including a human-only " +
+          "one like gateCommand you cannot even name) is PRESERVED, not dropped.",
         inputSchema: strictShape({
           projectId: z.string(),
           name: z.string().optional(),
