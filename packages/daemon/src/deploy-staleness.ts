@@ -59,6 +59,31 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * applies uniformly to BOTH the restart signal and the web signal: a failure computing either degrades
  * the WHOLE result, so `webStale` never reports a false clean/stale independent of `stale`'s own guarantee.
  *
+ * Card 8ff7ccde — `distBuiltAt` (above) is an ON-DISK ARTIFACT clock: the newest mtime under the dist
+ * directories, RIGHT NOW, at call time. It is NOT "when this running process was built" — a rebuild that
+ * lands without a restart advances `distBuiltAt` while the process keeps executing whatever it loaded at
+ * its OWN start (Node reads a module's file once, at import time, and never re-reads it off disk again).
+ * Measured live: a process that started at `04:14:01Z` was still reporting `distBuiltAt` of `10:05:14Z` —
+ * a build that landed nearly six hours AFTER the process began, that the process could not possibly be
+ * executing — and every gate-kind DB row this process wrote in between (1880 of them) was missing a field
+ * a merge at `07:30:24Z` unconditionally adds, proving the process really was still running pre-merge code
+ * the whole time. `processStartedAt` fixes this: computed fresh at call time from `process.uptime()` (never
+ * cached — same DoD #4 discipline as everything else in this module), it is the moment this process's OWN
+ * currently-loaded code was read from disk. `runningCodeBuiltAt` is `min(distBuiltAt, processStartedAt)` —
+ * the EARLIER of the two is always a safe upper bound on what the process could actually be executing: if
+ * the dist is newer than the process, the process cannot have loaded that newer code no matter what its
+ * mtime says, so the process's own start time is the honest clock; if the process is newer than the dist
+ * (the normal case — no rebuild has happened since it started), the dist clock is already correct on its
+ * own. `stale`/`commitsBehind` are computed against THIS clock, not the raw dist clock, so staleness can no
+ * longer be UNDERSTATED by a rebuild that outpaced a restart. `distAheadOfProcess` (`distBuiltAt` after
+ * `processStartedAt`) makes that exact divergence VISIBLE as its own field, rather than folding it silently
+ * into a corrected number — a manager reading it can tell "this daemon needs a restart to catch up to its
+ * own dist" even in the (rare) case `commitsBehind` itself happens to read 0.
+ *
+ * This does NOT apply to the web signal (`webStale`/`webCommitsBehind`/`webDistBuiltAt`) — the daemon
+ * serves `packages/web/dist` live from disk on every request (see the module doc above), so there is no
+ * "loaded at process start" gap for web assets to fall into; `webBuildMaxMs` alone stays correct.
+ *
  * ⚠️ KNOWN LIMITATION — this is a DATE comparison, not an ANCESTRY computation, for BOTH signals.
  * `commitsBehind`/`webCommitsBehind` count commits whose COMMITTER DATE is later than the relevant dist's
  * mtime — the only signal available from an mtime (there is no built-from-sha stamped anywhere to diff
@@ -77,8 +102,25 @@ export interface DeployStalenessResult {
   reason?: string;
   /** ISO mtime of the NEWEST file across this daemon's built output (`packages/daemon/dist`) and
    * `packages/shared/dist`, recursively — see the module doc for why a single file's mtime (e.g.
-   * `dist/index.js`) is unusable as a build clock under an incremental `tsc` build. */
+   * `dist/index.js`) is unusable as a build clock under an incremental `tsc` build. An ON-DISK ARTIFACT
+   * clock ONLY — card 8ff7ccde: it can be NEWER than the code this process is actually executing (a
+   * rebuild without a restart). Use `runningCodeBuiltAt` for staleness; this field is for display/
+   * transparency (see `distAheadOfProcess`). */
   distBuiltAt: string | null;
+  /** ISO instant this process itself started — i.e. when its OWN currently-loaded code was read off disk
+   * (Node imports a module's file once and never re-reads it). Card 8ff7ccde. Derived fresh at call time
+   * from `process.uptime()`, never cached. */
+  processStartedAt: string | null;
+  /** `min(distBuiltAt, processStartedAt)` — the clock `commitsBehind`/`stale` are actually computed
+   * against. Card 8ff7ccde: the earlier of the two is always a safe bound on what this process could
+   * possibly be executing — a dist rebuilt after this process started can't have been loaded by it, so the
+   * process's own start time is the honest clock in that case; otherwise the dist clock is already correct. */
+  runningCodeBuiltAt: string | null;
+  /** `distBuiltAt` is later than `processStartedAt` — the on-disk artifact has been rebuilt since this
+   * process started and never picked that rebuild up (needs a restart to catch up). Card 8ff7ccde: kept as
+   * its OWN visible field rather than folded silently into `commitsBehind`, so this is legible even in the
+   * (rare) case `commitsBehind` itself still reads 0. */
+  distAheadOfProcess: boolean;
   /** Mainline HEAD's full commit sha (unfiltered — the repo's actual current tip). */
   mainlineHeadSha: string | null;
   /** Mainline HEAD's committer date, ISO. */
@@ -121,6 +163,9 @@ function unavailable(reason: string): DeployStalenessResult {
     available: false,
     reason,
     distBuiltAt: null,
+    processStartedAt: null,
+    runningCodeBuiltAt: null,
+    distAheadOfProcess: false,
     mainlineHeadSha: null,
     mainlineHeadDate: null,
     commitsBehind: 0,
@@ -183,12 +228,15 @@ function newestMtimeMs(dir: string): number | null {
  * `distEntryOverride`/`repoRootOverride`/`sharedDistOverride`/`webDistOverride` are test seams (a fixture
  * `dist/index.js` path, a fixture git repo, a fixture `packages/shared/dist` dir, and a fixture
  * `packages/web/dist` dir); production callers omit all four and get the real running daemon's own paths.
+ * `processStartedAtOverride` (card 8ff7ccde) is a 5th test seam (a fixture ISO instant standing in for
+ * this process's own start); a real caller omits it and gets the real `process.uptime()`-derived value.
  */
 export function computeDeployStaleness(
   distEntryOverride?: string,
   repoRootOverride?: string,
   sharedDistOverride?: string,
   webDistOverride?: string,
+  processStartedAtOverride?: string,
 ): DeployStalenessResult {
   const distIndex = distEntryOverride ?? path.join(__dirname, "index.js");
   try {
@@ -208,6 +256,18 @@ export function computeDeployStaleness(
   // sharedDistDir may legitimately be absent (newestMtimeMs ⇒ null) without making the signal unavailable.
   const buildMaxMs = Math.max(newestMtimeMs(distDir) ?? 0, newestMtimeMs(sharedDistDir) ?? 0);
   const distBuiltAt = new Date(buildMaxMs).toISOString();
+
+  // Card 8ff7ccde: when this process itself started (i.e. when its OWN currently-loaded code was read off
+  // disk) — derived fresh at call time from `process.uptime()`, exactly like every other clock in this
+  // module (DoD #4: never cached/memoized). `runningCodeBuiltAt` is the earlier of the two clocks — a safe
+  // bound on what this process could actually be executing (see the module doc for why).
+  const processStartedAtMs = processStartedAtOverride
+    ? new Date(processStartedAtOverride).getTime()
+    : Date.now() - process.uptime() * 1000;
+  const processStartedAt = new Date(processStartedAtMs).toISOString();
+  const runningCodeBuiltAtMs = Math.min(buildMaxMs, processStartedAtMs);
+  const runningCodeBuiltAt = new Date(runningCodeBuiltAtMs).toISOString();
+  const distAheadOfProcess = buildMaxMs > processStartedAtMs;
 
   // Card c3ce92ea — the web build clock is INDEPENDENT of the daemon/shared one above: a web-only rebuild
   // must not read clean off the daemon's dist, and vice versa. `packages/web/dist` may legitimately be
@@ -233,7 +293,9 @@ export function computeDeployStaleness(
   } catch (err) {
     return unavailable(`could not read daemon-src/shared commit history: ${err instanceof Error ? err.message : String(err)}`);
   }
-  const commitsBehind = countCommitsAfter(relevantLog, buildMaxMs);
+  // Card 8ff7ccde: computed against `runningCodeBuiltAtMs`, NOT the raw dist clock `buildMaxMs` — a
+  // rebuild-without-restart must not UNDERSTATE staleness (see the module doc).
+  const commitsBehind = countCommitsAfter(relevantLog, runningCodeBuiltAtMs);
 
   let webRelevantLog: string;
   try {
@@ -246,6 +308,9 @@ export function computeDeployStaleness(
   return {
     available: true,
     distBuiltAt,
+    processStartedAt,
+    runningCodeBuiltAt,
+    distAheadOfProcess,
     mainlineHeadSha,
     mainlineHeadDate: mainlineHeadDate ?? null,
     commitsBehind,

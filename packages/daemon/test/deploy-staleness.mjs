@@ -43,6 +43,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       dist happens to have a uniform mtime (e.g. a from-scratch build where every file lands in one
 //       tsc pass) instead of asserting a fixed, possibly-flaky gap.
 //
+// Card 8ff7ccde — the banner's `distBuiltAt` is an ON-DISK ARTIFACT clock (newest dist mtime); it is NOT
+// "the build this running process executes" — a rebuild that lands without a restart advances distBuiltAt
+// while the process keeps running whatever it loaded at its OWN start. `processStartedAt` (new, 5th param
+// `processStartedAtOverride` is its test seam) + `runningCodeBuiltAt` (= min(distBuiltAt, processStartedAt)
+// — the EARLIER of the two is always what the process could possibly be executing) + `distAheadOfProcess`
+// (distBuiltAt > processStartedAt — a rebuild happened that this process never picked up, made VISIBLE as
+// its own field rather than folded silently into a corrected number) fix this. `stale`/`commitsBehind` are
+// now computed against `runningCodeBuiltAt`, not the raw dist clock, so staleness can no longer be
+// UNDERSTATED by a rebuild-without-restart:
+//   (11) PROCESS-STALE POSITIVE CONTROL — the actual defect, reproduced: dist rebuilt AFTER a relevant
+//        commit (so the OLD dist-only algorithm reads clean) while the process started BEFORE that commit
+//        and never restarted — must still read stale:true. Deliberately sets build != running (see the
+//        DoD's own warning: "a test exercising only build == running passes against the broken code").
+//   (11n) CLEAN control, same shape: process started AFTER the last rebuild (the healthy case) — reads
+//        exactly like before this card (runningCodeBuiltAt reduces to distBuiltAt, distAheadOfProcess:false).
+//
 // Card c3ce92ea — the WEB signal (webStale/webCommitsBehind), independent of the above:
 //   (9) POSITIVE CONTROL, reproducing the exact bug this card fixes: a web-only commit landing after
 //       BOTH dists were built must flip webStale:true while leaving stale/commitsBehind COMPLETELY
@@ -71,7 +87,19 @@ const tmpHome = path.join(os.tmpdir(), `loom-dpstl-${Date.now()}-${process.pid}`
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { computeDeployStaleness } = await import("../dist/deploy-staleness.js");
+const { computeDeployStaleness: computeDeployStalenessRaw } = await import("../dist/deploy-staleness.js");
+// Card 8ff7ccde: the new 5th param (processStartedAtOverride) lets a test control the "since when has the
+// CURRENTLY RUNNING code been in effect" clock independently of `distBuiltAt`. No section BEFORE (11)
+// intends to exercise that axis — left to the real default (derived from this test process's own
+// `process.uptime()`), its value would depend on what wall-clock day this test happens to run on relative
+// to each section's fixture mtimes, which is exactly the non-hermetic coupling this suite's own header
+// promises never to have. Pin it far enough in the future that it can never be the EARLIER of the two
+// clocks for any fixture mtime any section below sets, so every section's behavior stays IDENTICAL to
+// before this card; only (11)/(11n) call `computeDeployStalenessRaw` directly with an explicit override to
+// actually exercise the new axis.
+const FAR_FUTURE_PROCESS_START = "2030-01-01T00:00:00Z";
+const computeDeployStaleness = (distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride) =>
+  computeDeployStalenessRaw(distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride ?? FAR_FUTURE_PROCESS_START);
 
 const repo = path.join(os.tmpdir(), `loom-dpstl-repo-${Date.now()}`);
 fs.mkdirSync(path.join(repo, "packages", "daemon", "src"), { recursive: true });
@@ -352,6 +380,56 @@ try {
 
   try { fs.rmSync(noWebRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(noWebDaemonDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (11) PROCESS-STALE POSITIVE CONTROL (card 8ff7ccde) =====================
+  // The actual defect: dist rebuilt AFTER a relevant commit (so a dist-only clock reads CLEAN) while the
+  // process itself started BEFORE that commit and never restarted — so it never loaded the rebuild. Must
+  // still read stale:true. Deliberately build (T3) != running (T1) — the DoD's own warning is that a test
+  // exercising only build == running passes against the broken code.
+  const procRepo = path.join(os.tmpdir(), `loom-dpstl-procrepo-${Date.now()}`);
+  fs.mkdirSync(path.join(procRepo, "packages", "daemon", "src"), { recursive: true });
+  const gitProc = (args, dateIso) => execSync(`git ${args}`, {
+    cwd: procRepo,
+    env: { ...process.env, ...(dateIso ? { GIT_AUTHOR_DATE: dateIso, GIT_COMMITTER_DATE: dateIso } : {}) },
+  });
+  gitProc("init -q");
+  gitProc('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-11-01T00:00:00Z");
+
+  const procDistDir = path.join(os.tmpdir(), `loom-dpstl-procdist-${Date.now()}`);
+  fs.mkdirSync(procDistDir, { recursive: true });
+  const procDistEntry = path.join(procDistDir, "index.js");
+  const buildProcDistAt = (iso) => {
+    fs.writeFileSync(procDistEntry, "// fixture proc dist\n");
+    fs.utimesSync(procDistEntry, new Date(iso), new Date(iso));
+  };
+
+  const T1_PROCESS_STARTED = "2026-11-01T01:00:00Z"; // the process's own start — never restarted since
+  buildProcDistAt(T1_PROCESS_STARTED); // dist starts level with the process's own start
+
+  fs.writeFileSync(path.join(procRepo, "packages", "daemon", "src", "proc.ts"), "export const proc = 1;\n");
+  gitProc("add packages/daemon/src/proc.ts");
+  gitProc('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add proc"', "2026-11-02T00:00:00Z"); // AFTER T1
+
+  buildProcDistAt("2026-11-03T00:00:00Z"); // dist REBUILT after the commit — someone rebuilt, nobody restarted
+
+  const rProcStale = computeDeployStalenessRaw(procDistEntry, procRepo, undefined, undefined, T1_PROCESS_STARTED);
+  check("(11) distBuiltAt reflects the on-disk REBUILD (Nov 3), not the process's own start", (rProcStale.distBuiltAt ?? "").startsWith("2026-11-03"));
+  check("(11) processStartedAt echoes the override (Nov 1 01:00) — the process's own, never-restarted, start", (rProcStale.processStartedAt ?? "").startsWith("2026-11-01T01:00"));
+  check("(11) runningCodeBuiltAt is the EARLIER of the two (the process's own start, not the newer on-disk rebuild)", (rProcStale.runningCodeBuiltAt ?? "").startsWith("2026-11-01T01:00"));
+  check("(11) distAheadOfProcess:true — the on-disk artifact moved past what this process ever loaded", rProcStale.distAheadOfProcess === true);
+  check("(11) THE FIX: stale:true, commitsBehind:1 — the Nov 2 commit is correctly still-unbuilt-by-this-PROCESS, even though the on-disk dist (Nov 3) is newer than it (the pre-fix, dist-only algorithm would have read this clean)",
+    rProcStale.available === true && rProcStale.stale === true && rProcStale.commitsBehind === 1);
+
+  // ===================== (11n) CLEAN control, same shape: process started AFTER the rebuild =====================
+  const T4_PROCESS_STARTED_AFTER_REBUILD = "2026-11-04T00:00:00Z"; // AFTER the Nov 3 rebuild — the healthy case
+  const rProcClean = computeDeployStalenessRaw(procDistEntry, procRepo, undefined, undefined, T4_PROCESS_STARTED_AFTER_REBUILD);
+  check("(11n) a process started AFTER the last rebuild ⇒ runningCodeBuiltAt reduces to distBuiltAt (Nov 3)", (rProcClean.runningCodeBuiltAt ?? "").startsWith("2026-11-03"));
+  check("(11n) distAheadOfProcess:false — the process's own start is not behind the artifact (the healthy/normal case)", rProcClean.distAheadOfProcess === false);
+  check("(11n) stale:false, commitsBehind:0 — the signal reverts to normal once the process is caught up (goes BOTH ways)",
+    rProcClean.available === true && rProcClean.stale === false && rProcClean.commitsBehind === 0);
+
+  try { fs.rmSync(procRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
+  try { fs.rmSync(procDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 } finally {
   try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(distDir, { recursive: true, force: true }); } catch { /* best-effort */ }

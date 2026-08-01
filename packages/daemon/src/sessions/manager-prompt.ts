@@ -86,12 +86,20 @@ export function composeManagerStartupPrompt(
   // about: a line that's nearly always present is a line nobody reads, and it breaks byte-identical
   // output for every project unaffected by this feature. The startup block is for the ALARM; a manager
   // wanting positive confirmation already has the full detail via `served_status.deployStaleness`.
+  // Card 8ff7ccde: `staleness.distBuiltAt` is an ON-DISK ARTIFACT clock — it can be NEWER than the code
+  // this process is actually executing (a rebuild that landed without a restart). Report the EXECUTING
+  // clock (`runningCodeBuiltAt`) as "its own", and when the two diverge (`distAheadOfProcess`), say so
+  // explicitly rather than silently swapping one number for the other — a manager reading this should be
+  // able to tell "rebuilt but not yet running" from "not rebuilt at all".
+  const divergenceNote = staleness.distAheadOfProcess
+    ? ` (a newer build ALSO exists on disk, dated ${staleness.distBuiltAt}, that this process has not picked up — restarting would additionally pick that up)`
+    : "";
   const deployStaleNote = staleness.available && staleness.stale
     ? `[loom:deploy-stale] ⚠️ THIS DAEMON PROCESS IS RUNNING STALE CODE. Mainline HEAD \`${shortSha(staleness.mainlineHeadSha!)}\` ` +
       `(committed ${staleness.mainlineHeadDate}) carries ${staleness.commitsBehind} \`packages/daemon/src\`/\`packages/shared/src\` ` +
-      `commit(s) this running process was NOT built with (its own build dates to ${staleness.distBuiltAt}). Those changes are ` +
-      `MERGED but NOT LIVE — for EVERY project this shared daemon serves, not just this one. Do not assume a recently-merged ` +
-      `daemon fix or feature is actually in effect; a manager holding it can bring it live via \`daemon_restart\`.`
+      `commit(s) this running process was NOT built with (its own EXECUTING code dates to ${staleness.runningCodeBuiltAt}${divergenceNote}). ` +
+      `Those changes are MERGED but NOT LIVE — for EVERY project this shared daemon serves, not just this one. Do not assume a ` +
+      `recently-merged daemon fix or feature is actually in effect; a manager holding it can bring it live via \`daemon_restart\`.`
     : "";
   const block =
     "## Where things live (this project's absolute paths)\n" +

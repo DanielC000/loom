@@ -2688,14 +2688,24 @@ export class OrchestrationMcpRouter {
           "fleet), deployStaleness}. ⚠️ Card 5e30c4bd, measured first-hand across a real deploy: `version` " +
           "and `webBundle` are BOTH byte-identical before/after a daemon-`src`-only deploy (no package bump, " +
           "no web rebuild) — do NOT use either as a staleness proxy. `deployStaleness` is the real signal: " +
-          "{available, stale, commitsBehind, distBuiltAt, mainlineHeadSha, mainlineHeadDate, webStale, " +
-          "webCommitsBehind, webDistBuiltAt, reason?} — DERIVED fresh on every call (stat this daemon's own " +
-          "built entry + `git log` mainline, never cached/persisted). `stale`/`commitsBehind` are scoped to " +
-          "ONLY `packages/daemon/src`/`packages/shared/src` commits (an assets/docs/vault-only merge does " +
-          "NOT need a restart and never counts): `stale:true` means mainline HEAD carries `commitsBehind` " +
-          "daemon-src/shared commit(s) this running process was not built with — a `daemon_restart` (or a " +
-          "human `pnpm daemon:stable` relaunch) is needed before they take effect, for every project this " +
-          "daemon serves. `webStale`/`webCommitsBehind` (card c3ce92ea) are the SEPARATE web signal — " +
+          "{available, stale, commitsBehind, distBuiltAt, processStartedAt, runningCodeBuiltAt, " +
+          "distAheadOfProcess, mainlineHeadSha, mainlineHeadDate, webStale, webCommitsBehind, webDistBuiltAt, " +
+          "reason?} — DERIVED fresh on every call (stat this daemon's own built entry + `git log` mainline, " +
+          "never cached/persisted). `stale`/`commitsBehind` are scoped to ONLY `packages/daemon/src`/" +
+          "`packages/shared/src` commits (an assets/docs/vault-only merge does NOT need a restart and never " +
+          "counts): `stale:true` means mainline HEAD carries `commitsBehind` daemon-src/shared commit(s) " +
+          "this running process was not built with — a `daemon_restart` (or a human `pnpm daemon:stable` " +
+          "relaunch) is needed before they take effect, for every project this daemon serves. Card 8ff7ccde: " +
+          "`distBuiltAt` is an ON-DISK ARTIFACT clock (newest dist mtime) and can be NEWER than the code " +
+          "this process is actually executing — a rebuild that lands without a restart advances it while " +
+          "the process keeps running whatever it loaded at its own start. `stale`/`commitsBehind` are " +
+          "computed against `runningCodeBuiltAt` (= `min(distBuiltAt, processStartedAt)`, the honest bound " +
+          "on what this process could actually be executing), NOT the raw `distBuiltAt` — do not compute " +
+          "your own staleness from `distBuiltAt` alone, it can UNDERSTATE it. `distAheadOfProcess:true` " +
+          "means the on-disk artifact has been rebuilt since this process started and it hasn't picked that " +
+          "rebuild up yet (a restart would additionally pick it up), surfaced as its own field so it's " +
+          "legible even when `commitsBehind` itself still reads 0. `webStale`/`webCommitsBehind` (card " +
+          "c3ce92ea) are the SEPARATE web signal — " +
           "`packages/web/src` commits not yet reflected in the served `packages/web/dist`. `webStale:true` " +
           "means REBUILD web, NOT restart the daemon: the daemon serves `packages/web/dist` live from disk, " +
           "so a rebuilt file is served on the very next request — do not advise a `daemon_restart` for a " +

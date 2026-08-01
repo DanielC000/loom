@@ -120,19 +120,30 @@ try {
   // noise DoD #2 warns about, and it broke the multi-repo-prompt.mjs byte-identity pin for every project
   // unaffected by this feature — see that file's own note). "Goes both ways" here means the ALARM
   // reliably fires when true and reliably stays SILENT when false, not that there are two distinct texts.
-  const staleResult = { available: true, stale: true, commitsBehind: 2, distBuiltAt: "2026-06-01T00:00:00.000Z", mainlineHeadSha: "abc123def4567890abc123def4567890abc123d", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
-  const cleanResult = { available: true, stale: false, commitsBehind: 0, distBuiltAt: "2026-06-03T00:00:00.000Z", mainlineHeadSha: "1112223334445556667778889990001112223334", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
-  const unavailableResult = { available: false, reason: "not a Loom source checkout", distBuiltAt: null, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
+  // Card 8ff7ccde: `runningCodeBuiltAt`/`processStartedAt`/`distAheadOfProcess` are now REQUIRED fields of
+  // DeployStalenessResult — every fixture below carries them explicitly, distinct from `distBuiltAt`, so
+  // this test can prove the banner reports the EXECUTING clock, not the on-disk artifact clock.
+  const staleResult = { available: true, stale: true, commitsBehind: 2, distBuiltAt: "2026-06-01T00:00:00.000Z", processStartedAt: "2026-06-01T00:00:00.000Z", runningCodeBuiltAt: "2026-06-01T00:00:00.000Z", distAheadOfProcess: false, mainlineHeadSha: "abc123def4567890abc123def4567890abc123d", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
+  const cleanResult = { available: true, stale: false, commitsBehind: 0, distBuiltAt: "2026-06-03T00:00:00.000Z", processStartedAt: "2026-06-03T00:00:00.000Z", runningCodeBuiltAt: "2026-06-03T00:00:00.000Z", distAheadOfProcess: false, mainlineHeadSha: "1112223334445556667778889990001112223334", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
+  const unavailableResult = { available: false, reason: "not a Loom source checkout", distBuiltAt: null, processStartedAt: null, runningCodeBuiltAt: null, distAheadOfProcess: false, mainlineHeadSha: null, mainlineHeadDate: null, commitsBehind: 0, stale: false };
 
   const staleComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, staleResult);
   check("(3j-stale) fires the [loom:deploy-stale] note", staleComposed.includes("[loom:deploy-stale]"));
   check("(3j-stale) names the commitsBehind count", staleComposed.includes("2 `packages/daemon/src`"));
   check("(3j-stale) names the short mainline HEAD sha", staleComposed.includes("abc123de"));
-  check("(3j-stale) names the dist build date", staleComposed.includes("2026-06-01T00:00:00.000Z"));
+  check("(3j-stale) names the EXECUTING code date (runningCodeBuiltAt), not the raw dist artifact clock (card 8ff7ccde)", staleComposed.includes("2026-06-01T00:00:00.000Z"));
   check("(3j-stale) tells the manager it applies to EVERY project this daemon serves", /EVERY project this shared daemon serves/.test(staleComposed));
   check("(3j-stale) points at daemon_restart as the remedy", staleComposed.includes("daemon_restart"));
   check("(3j-stale) the note precedes the 'Where things live' block (mirrors sizeNote/invalidNote ordering)", staleComposed.indexOf("[loom:deploy-stale]") < staleComposed.indexOf("Where things live"));
   check("(3j-stale) the agent's own doctrine still rides along", staleComposed.includes("DOCTRINE_BODY"));
+
+  // ===================== (3j-divergence) card 8ff7ccde: distAheadOfProcess makes a rebuild-without-restart
+  // VISIBLE in the banner, even though it reports the EXECUTING clock (not the artifact clock) as primary.
+  const divergentResult = { available: true, stale: true, commitsBehind: 1, distBuiltAt: "2026-06-05T00:00:00.000Z", processStartedAt: "2026-06-01T00:00:00.000Z", runningCodeBuiltAt: "2026-06-01T00:00:00.000Z", distAheadOfProcess: true, mainlineHeadSha: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", mainlineHeadDate: "2026-06-02T00:00:00.000Z" };
+  const divergentComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, divergentResult);
+  check("(3j-divergence) still leads with the EXECUTING clock (June 1, not June 5)", divergentComposed.includes("2026-06-01T00:00:00.000Z"));
+  check("(3j-divergence) ALSO surfaces the newer on-disk build date (June 5) — the divergence is visible, not silently dropped", divergentComposed.includes("2026-06-05T00:00:00.000Z"));
+  check("(3j-divergence) says the process has not picked the newer build up", divergentComposed.includes("has not picked up"));
 
   const cleanComposed = composeManagerStartupPrompt("DOCTRINE_BODY", { repoPath: "/abs/repo", vaultPath: "/abs/vault", name: "Demo" }, cleanResult);
   check("(3j-clean) does NOT fire the [loom:deploy-stale] note", !cleanComposed.includes("[loom:deploy-stale]"));
