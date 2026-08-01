@@ -196,25 +196,49 @@ export function stripPossibleDuplicateFrame(text: string): string {
  * zero turns run, delivery at G+1 — that is NOT "1 turn ago"). "N submit generations ago" is true by
  * construction: it's exactly what `currentGen - mintedAtGen` counts, nothing inferred beyond it.
  *
- * EXHAUSTIVE no-op conditions (code review, card 4af5aefa): (1) `mintedAtGen` is `undefined` — set only
- * for a paste-recovery mint, so `text` for anything else is returned unchanged; (2) `currentGen` no
- * greater than `mintedAtGen` — delivered before anything else ran, nothing to disclose; (3) the text,
- * once any possible-duplicate frame is stripped, doesn't start with `PASTE_RECOVERY_TAG` at all — not a
- * recovery notice. Checking the STRIPPED text (not the raw `text`) for (3) matters: a recovery notice
- * that itself gave up once and redrained arrives here PREFIXED with `[loom:possible-duplicate root:…]`
- * (`joinSubmittedText` applies that framing first) — a raw `startsWith` check would silently no-op on
- * EXACTLY the notices whose age is largest (a give-up hold adds minutes on top of the ordinary queue
- * wait this function exists to disclose), which is this fix failing in its own motivating case. Any
+ * EXHAUSTIVE no-op / branch conditions (code review, card 4af5aefa; extended by card 1c47454b): (1) BOTH
+ * `mintedAtGen` and `mintedAtWallClock` are `undefined` — set only for a paste-recovery mint, so `text`
+ * for anything else is returned unchanged; (2) `mintedAtGen` is defined but `currentGen` is no greater
+ * than it — delivered before anything else ran IN THIS SAME SESSION, nothing to disclose yet; (3) the
+ * text, once any possible-duplicate frame is stripped, doesn't start with `PASTE_RECOVERY_TAG` at all —
+ * not a recovery notice. Checking the STRIPPED text (not the raw `text`) for (3) matters: a recovery
+ * notice that itself gave up once and redrained arrives here PREFIXED with `[loom:possible-duplicate
+ * root:…]` (`joinSubmittedText` applies that framing first) — a raw `startsWith` check would silently
+ * no-op on EXACTLY the notices whose age is largest (a give-up hold adds minutes on top of the ordinary
+ * queue wait this function exists to disclose), which is this fix failing in its own motivating case. Any
  * possible-duplicate prefix is preserved verbatim ahead of the tag; the note always lands immediately
  * after `PASTE_RECOVERY_TAG` itself, regardless of what (if anything) precedes it.
+ *
+ * TWO DISTINCT disclosures, card 1c47454b: `mintedAtGen` defined (and `currentGen` has advanced) means
+ * this entry is being read in the SAME session it was minted in — the existing "N submit generations
+ * ago" wording, unchanged. `mintedAtGen` UNDEFINED but `mintedAtWallClock` defined means this entry just
+ * crossed a `worker_recycle`/`daemon_restart` boundary — `carryPendingToSuccessor`/the restart replay
+ * both deliberately omit `mintedAtGen` when threading a carried entry onto its successor (see
+ * `mintedAtGen`'s own doc on `QueuedMessage` for why: comparing a predecessor's generation count against
+ * a fresh successor's, which always restarts at 0, is a unit error — "47 submit generations ago" would
+ * be reported against a session that has run at most a handful), so this branch reports the one thing
+ * that DOES survive the boundary honestly: an absolute wall-clock mint time, for the recipient to weigh
+ * against their own handoff/transcript. Never both branches at once — `mintedAtGen`'s presence alone
+ * selects between them, independent of whether `mintedAtWallClock` also happens to be set (it always is,
+ * stamped alongside `mintedAtGen` at mint time, but only READ when `mintedAtGen` is absent).
  */
-function annotatePasteRecoveryAge(text: string, mintedAtGen: number | undefined, currentGen: number): string {
-  if (mintedAtGen === undefined || currentGen <= mintedAtGen) return text;
+function annotatePasteRecoveryAge(
+  text: string, mintedAtGen: number | undefined, currentGen: number, mintedAtWallClock: number | undefined,
+): string {
+  if (mintedAtGen === undefined && mintedAtWallClock === undefined) return text;
+  if (mintedAtGen !== undefined && currentGen <= mintedAtGen) return text; // in-session, nothing to disclose yet
   const stripped = stripPossibleDuplicateFrame(text);
   if (!stripped.startsWith(PASTE_RECOVERY_TAG)) return text;
   const framePrefix = text.slice(0, text.length - stripped.length); // "" when no possible-duplicate frame
-  const gensSince = currentGen - mintedAtGen;
-  const note = `[this refers to an EARLIER message (${gensSince} submit generation${gensSince === 1 ? "" : "s"} ago), not your most recent one.]`;
+  let note: string;
+  if (mintedAtGen !== undefined) {
+    const gensSince = currentGen - mintedAtGen;
+    note = `[this refers to an EARLIER message (${gensSince} submit generation${gensSince === 1 ? "" : "s"} ago), not your most recent one.]`;
+  } else if (mintedAtWallClock !== undefined) {
+    note = `[this refers to a message minted at ${new Date(mintedAtWallClock).toISOString()}, from BEFORE this session began — compare that timestamp against your own handoff/transcript to judge whether it's still current.]`;
+  } else {
+    return text; // unreachable given the guard above; kept for exhaustiveness
+  }
   return `${framePrefix}${PASTE_RECOVERY_TAG} ${note} ${stripped.slice(PASTE_RECOVERY_TAG.length).trimStart()}`;
 }
 
@@ -391,7 +415,7 @@ function joinSubmittedText(messages: QueuedMessage[], currentGen: number): strin
   return messages
     .map((m) => {
       const t = m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text;
-      return annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen);
+      return annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen, m.mintedAtWallClock);
     })
     .join(DRAIN_SEPARATOR);
 }
@@ -1598,8 +1622,28 @@ export type QueuedMessageKind = "warning" | "agent";
  * `annotatePasteRecoveryAge`, which compares it against the generation count at ACTUAL WRITE time to
  * disclose a fact we genuinely know (how many turns ran since this was queued) — never touched by any
  * other caller, so every existing enqueue stays byte-identical.
+ *
+ * `submitGeneration` is a PER-SESSION counter that starts at 0 for every fresh `Live` (a `worker_recycle`
+ * successor, or a session resumed after a `daemon_restart`) — so `mintedAtGen`, a value from a
+ * DIFFERENT session's counter, is MEANINGLESS once that boundary is crossed: comparing a predecessor's
+ * gen 47 against a successor's gen 0 doesn't mean "47 generations ago", it silently means nothing
+ * (`annotatePasteRecoveryAge`'s own `currentGen <= mintedAtGen` guard reads that as "nothing to
+ * disclose yet" and stays quiet — the exact silent-degrade card `1c47454b` names). Every caller that
+ * carries a `QueuedMessage` across such a boundary (`SessionService.carryPendingToSuccessor`, the
+ * `daemon_restart` replay in `resumeFleetOnBoot`) MUST NOT thread `mintedAtGen` through to the far side
+ * — see `mintedAtWallClock` below for the field that actually survives a boundary honestly.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number };
+/**
+ * `mintedAtWallClock` (card 1c47454b) — `Date.now()` at the SAME moment `mintedAtGen` is stamped (the
+ * paste-recovery mint site only). Unlike `mintedAtGen`, an absolute wall-clock timestamp is NOT
+ * session-relative, so it is the one piece of age evidence that survives a `worker_recycle` /
+ * `daemon_restart` boundary honestly: `carryPendingToSuccessor` and the restart replay both thread THIS
+ * field onto the far side (while deliberately leaving `mintedAtGen` behind — see its own doc). Its only
+ * consumer is `annotatePasteRecoveryAge`, which uses it EXACTLY when `mintedAtGen` is absent (i.e. the
+ * entry just crossed a boundary) to disclose an absolute mint time instead of a now-meaningless
+ * generation count — never touched by any other caller, so every existing enqueue stays byte-identical.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -4236,12 +4280,16 @@ export class PtyHost {
               // before that closure ever runs; capturing there would silently record the WRONG (already-
               // advanced) baseline instead of "how many turns have run since detection."
               const mintedAtGen = live.submitGeneration;
+              // Card 1c47454b: stamped alongside `mintedAtGen`, same reasoning (capture NOW, not inside the
+              // setTimeout(0) closure) — an absolute wall-clock time that survives a session boundary
+              // `mintedAtGen` cannot (see QueuedMessage.mintedAtWallClock's own doc).
+              const mintedAtWallClock = Date.now();
               // Card 4a0af485 (adopting the shared primitive for 38c687bb, the paste-recovery site named
               // there as "carries no id in EITHER space" — that card's own recipient-side consumption
               // check is its own scope, not this one): mint a logicalId so this re-injection is no longer
               // untracked. Fresh, not derived from the original turn — a raw human/agent-authored turn that
               // collapsed has no durable msgId of its own to inherit.
-              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID(), mintedAtGen); }, 0);
+              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID(), mintedAtGen, mintedAtWallClock); }, 0);
             }
           }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
@@ -4365,7 +4413,7 @@ export class PtyHost {
    * or re-mint through, however it happened to be delivered. See {@link QueuedMessage}'s own doc for why
    * this is a distinct hook from `onDeliver`.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string, mintedAtGen?: number): EnqueueResult {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string, mintedAtGen?: number, mintedAtWallClock?: number): EnqueueResult {
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -4418,7 +4466,7 @@ export class PtyHost {
         // same function the drain path uses, so there is exactly one place this logic lives. In practice
         // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
         // correct rather than assumed.
-        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) };
+        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) };
         this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
@@ -4448,7 +4496,7 @@ export class PtyHost {
       const id = randomUUID();
       // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
       // (`joinSubmittedText`, called from `drainPending`), never baked in here.
-      live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}) });
+      live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(mintedAtWallClock !== undefined ? { mintedAtWallClock } : {}) });
     }
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary UNLESS redelivery is ultimately exhausted, in which
@@ -4612,18 +4660,27 @@ export class PtyHost {
    *
    * `holds` is `{index: giveUpHeldUntil}` for every entry in `texts` that is currently `isGiveUpHeld`,
    * keyed by that entry's position in `texts`. An ordinary entry has no key at all (byte-identical-by-
-   * omission for the common case). Returns `{ texts: [], holds: {} }` for a dead/unknown session or one
-   * with nothing queued/held.
+   * omission for the common case). Returns `{ texts: [], holds: {}, mintedAt: {} }` for a dead/unknown
+   * session or one with nothing queued/held.
+   *
+   * `mintedAt` (card 1c47454b) is `{index: mintedAtWallClock}`, the SAME additive-sibling-field shape as
+   * `holds` and for the identical on-disk-compat reason (see `RestartIntent.pendingHolds`'s doc — an
+   * older daemon reading a newer intent must see only strings in `pending`, never a richer shape folded
+   * into `texts` itself). This is what lets a still-pending paste-recovery notice's age evidence survive
+   * a `daemon_restart`: without it, the notice's `mintedAtWallClock` would die with this process exactly
+   * like `mintedAtGen` already (correctly) does not attempt to survive it.
    */
-  getPersistablePendingSnapshot(sessionId: string): { texts: string[]; holds: Record<number, number> } {
+  getPersistablePendingSnapshot(sessionId: string): { texts: string[]; holds: Record<number, number>; mintedAt: Record<number, number> } {
     const texts: string[] = [];
     const holds: Record<number, number> = {};
+    const mintedAt: Record<number, number> = {};
     for (const m of this.live.get(sessionId)?.pending ?? []) {
       if (m.onDeliver) continue;
       if (this.isGiveUpHeld(m)) holds[texts.length] = m.giveUpHeldUntil!;
+      if (m.mintedAtWallClock !== undefined) mintedAt[texts.length] = m.mintedAtWallClock;
       texts.push(m.text);
     }
-    return { texts, holds };
+    return { texts, holds, mintedAt };
   }
 
   /**
@@ -4634,13 +4691,16 @@ export class PtyHost {
    * renders read-only. Returns [] for an unknown session. Entries are shallow-copied so a caller can't
    * mutate the live FIFO through them.
    */
-  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source" | "kind" | "giveUpGen">> {
+  getPendingEntries(sessionId: string): Array<Pick<QueuedMessage, "id" | "text" | "source" | "kind" | "giveUpGen" | "mintedAtGen" | "mintedAtWallClock">> {
     // Strip the internal `onDeliver` callback — the UI only needs {id,text,source,kind}, and a function
     // must never escape the host (it isn't serializable and is meaningless outside this process).
     // `giveUpGen` (card 4a0af485 CR follow-up #7) is additive — small, serializable debugging metadata (was
     // this entry ever itself given up, and under which generation) that lets a test assert the REAL
-    // give-up-tag state of an entry instead of hardcoding an assumption about it.
-    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source, kind, giveUpGen }) => ({ id, text, source, kind, giveUpGen }));
+    // give-up-tag state of an entry instead of hardcoding an assumption about it. `mintedAtGen`/
+    // `mintedAtWallClock` (card 1c47454b) are additive for the SAME reason — a test asserting a carried
+    // paste-recovery notice's age evidence survived (or was deliberately dropped) a recycle/restart
+    // boundary needs to read the REAL post-carry state, not assume it.
+    return (this.live.get(sessionId)?.pending ?? []).map(({ id, text, source, kind, giveUpGen, mintedAtGen, mintedAtWallClock }) => ({ id, text, source, kind, giveUpGen, mintedAtGen, mintedAtWallClock }));
   }
 
   /**

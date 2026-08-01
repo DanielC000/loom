@@ -128,6 +128,20 @@ export interface RestartIntent {
    * nothing captured was still held (the overwhelmingly common case).
    */
   pendingHolds?: Record<string, Record<number, number>>;
+  /**
+   * Card 1c47454b — a THIRD, wholly separate additive sibling field alongside `pending`/`pendingHolds`,
+   * same shape and same on-disk-compat reasoning as `pendingHolds` (see its own doc): `pending[id][i]`'s
+   * `mintedAtWallClock` (the paste-recovery mint's absolute wall-clock time — see
+   * `PtyHost.QueuedMessage.mintedAtWallClock`'s doc), keyed by that entry's index into `pending[id]`,
+   * carried here instead of folded into `pending`'s own element type. Without this, a still-pending
+   * paste-recovery notice that survives a `daemon_restart` (via `pending` itself) would lose its ONLY
+   * evidence that it's old — `mintedAtGen` was ALREADY, correctly, never carried across this boundary
+   * (a fresh resumed session's `submitGeneration` restarts at 0, making a carried predecessor generation
+   * count meaningless — see that field's own doc), so this is the sole surviving signal. Absent when
+   * nothing captured carried an age stamp (the overwhelmingly common case — this field is set ONLY by
+   * the paste-recovery mint).
+   */
+  pendingMintedAt?: Record<string, Record<number, number>>;
   requestedAt: string;
 }
 

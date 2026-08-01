@@ -2500,17 +2500,23 @@ export class SessionService {
     const PENDING_MAX_MSG_LEN = 100_000;
     const pending: Record<string, string[]> = {};
     const pendingHolds: Record<string, Record<number, number>> = {};
+    const pendingMintedAt: Record<string, Record<number, number>> = {};
     for (const { sessionId } of resume) {
-      const { texts: rawTexts, holds: rawHolds } = this.pty.getPersistablePendingSnapshot(sessionId);
+      const { texts: rawTexts, holds: rawHolds, mintedAt: rawMintedAt } = this.pty.getPersistablePendingSnapshot(sessionId);
       const kept = rawTexts
-        .map((text, i) => ({ text, heldUntil: rawHolds[i] }))
+        .map((text, i) => ({ text, heldUntil: rawHolds[i], mintedAtWallClock: rawMintedAt[i] }))
         .filter((e) => e.text.length <= PENDING_MAX_MSG_LEN)
         .slice(0, PENDING_MAX_MSGS);
       if (kept.length > 0) {
         pending[sessionId] = kept.map((e) => e.text);
         const holds: Record<number, number> = {};
-        kept.forEach((e, i) => { if (e.heldUntil !== undefined) holds[i] = e.heldUntil; });
+        const mintedAt: Record<number, number> = {};
+        kept.forEach((e, i) => {
+          if (e.heldUntil !== undefined) holds[i] = e.heldUntil;
+          if (e.mintedAtWallClock !== undefined) mintedAt[i] = e.mintedAtWallClock;
+        });
         if (Object.keys(holds).length > 0) pendingHolds[sessionId] = holds;
+        if (Object.keys(mintedAt).length > 0) pendingMintedAt[sessionId] = mintedAt;
       }
     }
     // Crash/shutdown transcript backstop (same as the SIGTERM/SIGINT path): snapshot every LIVE
@@ -2526,6 +2532,7 @@ export class SessionService {
       requestedAt: new Date().toISOString(),
       ...(Object.keys(pending).length > 0 ? { pending } : {}),
       ...(Object.keys(pendingHolds).length > 0 ? { pendingHolds } : {}),
+      ...(Object.keys(pendingMintedAt).length > 0 ? { pendingMintedAt } : {}),
     });
     // Exit AFTER this MCP response flushes; the pty (incl. this caller) dies with the process, the
     // supervisor relaunches the freshly-built daemon, and boot re-resumes us from the intent.
@@ -3208,6 +3215,11 @@ export class SessionService {
     // already gone — nothing left to retry from. Skip-and-log beats fail-fast for this one caller.
     const replayPending = (id: string): void => {
       const holds = intent.pendingHolds?.[id] ?? {};
+      // Card 1c47454b: `mintedAt[i]` is a still-pending paste-recovery notice's `mintedAtWallClock` —
+      // never `mintedAtGen` (this replay deliberately omits it; see QueuedMessage.mintedAtGen's own doc
+      // for why threading a generation count across a restart into a resumed session's freshly-restarted
+      // `submitGeneration` would be a unit error, not a fix).
+      const mintedAt = intent.pendingMintedAt?.[id] ?? {};
       (intent.pending?.[id] ?? []).forEach((m, i) => {
         try {
           if (typeof m !== "string") {
@@ -3218,7 +3230,8 @@ export class SessionService {
           if (giveUpHeldUntil !== undefined) {
             console.log(`[restart] ${id} restoring a give-up hold onto a replayed entry (~${Math.max(0, giveUpHeldUntil - Date.now())}ms remaining) — this entry will still deliver as a duplicate once the hold expires (no confirming hook can reach a dead process's generation), held from drain until then; card 9e27f4d2`);
           }
-          this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, giveUpHeldUntil);
+          const mintedAtWallClock = typeof mintedAt[i] === "number" ? mintedAt[i] : undefined;
+          this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, giveUpHeldUntil, undefined, undefined, undefined, mintedAtWallClock);
         } catch (e) {
           console.warn(`[restart] ${id} failed to replay a pending entry at index ${i}: ${(e as Error)?.message ?? e}`);
         }
@@ -5997,7 +6010,14 @@ export class SessionService {
         // doesn't start coalescing). DELIVER, never hold — deliberately omit `m.giveUpHeldUntil` even when
         // set: see this method's own doc above for why a fresh, non-resumed successor gets none of the
         // benefit a hold would provide on a restarted/resumed SAME conversation, only the needless delay.
-        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind);
+        //
+        // Card 1c47454b: carry `m.mintedAtWallClock` (a still-pending paste-recovery notice's absolute
+        // mint time) but deliberately NEVER `m.mintedAtGen` — the successor is a FRESH `Live`, whose
+        // `submitGeneration` restarts at 0, so a predecessor's generation count carried verbatim would be
+        // compared against an unrelated counter (a unit error, not evidence) and `annotatePasteRecoveryAge`
+        // would silently disclose nothing, exactly the defect this card exists to close. See
+        // `QueuedMessage.mintedAtGen`/`mintedAtWallClock`'s own docs (pty/host.ts) for the full reasoning.
+        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, m.mintedAtWallClock);
       }
     }
     // Re-mint each unresolved durable record onto the successor (recipient ← successor), so crash-survival
