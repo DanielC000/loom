@@ -16,7 +16,7 @@ import { injectSkills } from "../skills/inject.js";
 import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
-import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText } from "../orchestration/paste-tripwire.js";
+import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG } from "../orchestration/paste-tripwire.js";
 import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
@@ -172,6 +172,50 @@ export function framePossibleDuplicate(text: string, rootMsgId: string): string 
  */
 export function stripPossibleDuplicateFrame(text: string): string {
   return text.replace(POSSIBLE_DUPLICATE_TAG_RE, "");
+}
+
+/**
+ * Card 4af5aefa: a real, live false positive showed a paste-recovery notice minted CORRECTLY (its
+ * resent content genuinely was the most recent inbound at the moment of detection) but delivered
+ * ~293s and TWO genuine intervening turns later — by which point a newer message had already arrived
+ * and been actioned, making the resend read as stale. Reconstructed from `daemon-output.log`'s own
+ * per-line epoch-ms timestamps for the actual specimen: the gap was ordinary FIFO queue-wait behind
+ * two successfully-confirmed turns, not a give-up/re-mint retry, and not a stale `originalText` capture.
+ *
+ * The fix is NOT to suppress or re-verify "is this still current" at delivery time — that would ask a
+ * question the detector still can't answer (engine/recipient VISIBILITY), reintroducing the exact
+ * proxy-for-the-claim substitution this card exists to name, one level up. What IS genuinely observable
+ * at delivery time is a fact about OUR OWN QUEUE: how many `Live.submitGeneration` bumps happened since
+ * this was minted. So this only ever ANNOTATES — it never drops, never gates, never alters ordering.
+ *
+ * Code review correction: the disclosed count is worded as "submit generations", never "turns" — a
+ * SECOND, independent false claim was caught here, inside this very card's own remedy. `submitGeneration`
+ * counts submit ATTEMPTS ISSUED (`submit()`'s own `++`) plus out-of-band bumps (a give-up via
+ * `healIfStuck`, both stop paths) — NOT completed turns. A give-up can consume a whole generation with NO
+ * turn ever actually running, so "N turns ago" would sometimes be false (e.g. mint at G, one give-up with
+ * zero turns run, delivery at G+1 — that is NOT "1 turn ago"). "N submit generations ago" is true by
+ * construction: it's exactly what `currentGen - mintedAtGen` counts, nothing inferred beyond it.
+ *
+ * EXHAUSTIVE no-op conditions (code review, card 4af5aefa): (1) `mintedAtGen` is `undefined` — set only
+ * for a paste-recovery mint, so `text` for anything else is returned unchanged; (2) `currentGen` no
+ * greater than `mintedAtGen` — delivered before anything else ran, nothing to disclose; (3) the text,
+ * once any possible-duplicate frame is stripped, doesn't start with `PASTE_RECOVERY_TAG` at all — not a
+ * recovery notice. Checking the STRIPPED text (not the raw `text`) for (3) matters: a recovery notice
+ * that itself gave up once and redrained arrives here PREFIXED with `[loom:possible-duplicate root:…]`
+ * (`joinSubmittedText` applies that framing first) — a raw `startsWith` check would silently no-op on
+ * EXACTLY the notices whose age is largest (a give-up hold adds minutes on top of the ordinary queue
+ * wait this function exists to disclose), which is this fix failing in its own motivating case. Any
+ * possible-duplicate prefix is preserved verbatim ahead of the tag; the note always lands immediately
+ * after `PASTE_RECOVERY_TAG` itself, regardless of what (if anything) precedes it.
+ */
+function annotatePasteRecoveryAge(text: string, mintedAtGen: number | undefined, currentGen: number): string {
+  if (mintedAtGen === undefined || currentGen <= mintedAtGen) return text;
+  const stripped = stripPossibleDuplicateFrame(text);
+  if (!stripped.startsWith(PASTE_RECOVERY_TAG)) return text;
+  const framePrefix = text.slice(0, text.length - stripped.length); // "" when no possible-duplicate frame
+  const gensSince = currentGen - mintedAtGen;
+  const note = `[this refers to an EARLIER message (${gensSince} submit generation${gensSince === 1 ? "" : "s"} ago), not your most recent one.]`;
+  return `${framePrefix}${PASTE_RECOVERY_TAG} ${note} ${stripped.slice(PASTE_RECOVERY_TAG.length).trimStart()}`;
 }
 
 /**
@@ -336,9 +380,20 @@ const DRAIN_SEPARATOR = "\n\n────────\n\n";
  * late-confirmation content-match/purge mechanism the instant a marked (giveUpGen-tagged) retry itself
  * gives up: the engine's real echo would carry the tag, but a signature computed from the pristine text
  * would never match it.
+ *
+ * Card 4af5aefa: `currentGen` — the generation count at the moment THIS text is being assembled for a
+ * real write — is threaded through the SAME way, for the SAME reason: `annotatePasteRecoveryAge` must
+ * run on whatever `drainPending` is about to actually write, and `requeueGiveUpOrigin` must reconstruct
+ * that exact same annotated text (not the pristine one) to seed a matching signature. See both call
+ * sites for why each passes the value it passes.
  */
-function joinSubmittedText(messages: QueuedMessage[]): string {
-  return messages.map((m) => (m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text)).join(DRAIN_SEPARATOR);
+function joinSubmittedText(messages: QueuedMessage[], currentGen: number): string {
+  return messages
+    .map((m) => {
+      const t = m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text;
+      return annotatePasteRecoveryAge(t, m.mintedAtGen, currentGen);
+    })
+    .join(DRAIN_SEPARATOR);
 }
 
 /**
@@ -1535,7 +1590,16 @@ export type QueuedMessageKind = "warning" | "agent";
  * duplicate copy that arrived via a completely different dispatch (a remint, or a manager's own resend),
  * not just a same-generation retry.
  */
-export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string };
+/**
+ * `mintedAtGen` (card 4af5aefa) — the value of `Live.submitGeneration` at the moment THIS entry was
+ * minted, set ONLY by the paste-recovery re-injection (`host.ts`'s Stop-hook tripwire call site). Never
+ * used to suppress or reorder anything (that would recreate this card's own defect one level up —
+ * acting on a proxy for engine visibility rather than what's actually observable). Its ONLY consumer is
+ * `annotatePasteRecoveryAge`, which compares it against the generation count at ACTUAL WRITE time to
+ * disclose a fact we genuinely know (how many turns ran since this was queued) — never touched by any
+ * other caller, so every existing enqueue stays byte-identical.
+ */
+export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number };
 /**
  * Distinguishes `enqueueStdin`'s `delivered:false` outcomes, which otherwise read identically at a
  * glance: `"session-dead"` = no live pty at all — the text was DROPPED, nothing will ever deliver it.
@@ -4166,12 +4230,18 @@ export class PtyHost {
               // whole deliverHook call (through the `finally` below) has returned control to the event
               // loop, so `finalizingTurn` is guaranteed false by the time this runs.
               const recoveryText = buildPasteRecoveryText(submittedText!);
+              // Card 4af5aefa: snapshot the mint generation HERE, synchronously — NOT inside the
+              // setTimeout(0) closure below. This Stop-hook's OWN drainPending call (further down,
+              // outside this `if`) can dispatch an already-queued message and bump `live.submitGeneration`
+              // before that closure ever runs; capturing there would silently record the WRONG (already-
+              // advanced) baseline instead of "how many turns have run since detection."
+              const mintedAtGen = live.submitGeneration;
               // Card 4a0af485 (adopting the shared primitive for 38c687bb, the paste-recovery site named
               // there as "carries no id in EITHER space" — that card's own recipient-side consumption
               // check is its own scope, not this one): mint a logicalId so this re-injection is no longer
               // untracked. Fresh, not derived from the original turn — a raw human/agent-authored turn that
               // collapsed has no durable msgId of its own to inherit.
-              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID()); }, 0);
+              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID(), mintedAtGen); }, 0);
             }
           }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
@@ -4295,7 +4365,7 @@ export class PtyHost {
    * or re-mint through, however it happened to be delivered. See {@link QueuedMessage}'s own doc for why
    * this is a distinct hook from `onDeliver`.
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string): EnqueueResult {
+  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string, mintedAtGen?: number): EnqueueResult {
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.
@@ -4342,8 +4412,14 @@ export class PtyHost {
       // discarding it after this call already returns `delivered:true`.
       {
         const id = randomUUID();
-        this.submit(sessionId, text, route, ownerText, proactive, senderId, "immediate",
-          [{ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) }]);
+        // Card 4af5aefa: the origin entry keeps the PRISTINE `text` (never mutated on the entry itself —
+        // same principle as the possible-duplicate tag), `mintedAtGen` travels alongside it, and
+        // `joinSubmittedText` (a single-element array here) is what actually applies the age annotation —
+        // same function the drain path uses, so there is exactly one place this logic lives. In practice
+        // this is a no-op for the immediate path (nothing has run yet to make it stale), but it stays
+        // correct rather than assumed.
+        const entry: QueuedMessage = { id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(mintedAtGen !== undefined ? { mintedAtGen } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) };
+        this.submit(sessionId, joinSubmittedText([entry], live.submitGeneration), route, ownerText, proactive, senderId, "immediate", [entry]);
       }
       // M1 GUARD: submit() MUST arm busy=true SYNCHRONOUSLY (the optimistic set), so that a concurrent
       // enqueue arriving next sees busy and QUEUES instead of racing this turn's pending `\r`. If busy
@@ -4370,7 +4446,9 @@ export class PtyHost {
     // harmless: `isGiveUpHeld` just reads false immediately, same as never having been stamped).
     {
       const id = randomUUID();
-      live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}) });
+      // `mintedAtGen` rides along PRISTINE (card 4af5aefa) — annotated fresh at actual drain time
+      // (`joinSubmittedText`, called from `drainPending`), never baked in here.
+      live.pending.push({ id, text, source, onDeliver, route, kind, questionId, ownerText, proactive, senderId, logicalId: logicalId ?? id, ...(giveUpHeldUntil !== undefined ? { giveUpHeldUntil } : {}), ...(onGiveUpExhausted ? { onGiveUpExhausted } : {}), ...(mintedAtGen !== undefined ? { mintedAtGen } : {}) });
     }
     // `queued:true` reports this HELD outcome as the success it is (this text is durably recorded and
     // WILL be delivered at the next turn boundary UNLESS redelivery is ultimately exhausted, in which
@@ -5036,7 +5114,14 @@ export class PtyHost {
     // handleGiveUpExhausted) is a SEPARATE trigger that bakes the tag into `.text` at message CREATION,
     // before it's ever enqueued, so a re-minted entry sitting in `pending` already carries the tag (see
     // `purgeQueuedWorkerIdleNudges`'s own doc for a real consumer this distinction mattered to).
-    this.submit(sessionId, joinSubmittedText(drained), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
+    // Card 4af5aefa: `live.submitGeneration` here is still the PRE-increment value — submit() below does
+    // its own `++` for THIS write. Code review correction: this is NOT "the last completed turn's own
+    // generation number" — `submitGeneration` counts submit ATTEMPTS ISSUED (`submit()`'s own `++`) plus
+    // out-of-band bumps (`healIfStuck`, both stop paths), so a give-up that consumed a generation with NO
+    // turn ever running would be silently folded into a "turns" count. `annotatePasteRecoveryAge`'s own
+    // wording says "submit generations", not "turns", precisely so this snapshot stays true to what it
+    // actually counts.
+    this.submit(sessionId, joinSubmittedText(drained, live.submitGeneration), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -5613,7 +5698,13 @@ export class PtyHost {
     // `.map(m => m.text)`) is now load-bearing here for a SECOND reason too — it's the same function that
     // decided whether the attempt that just failed carried the possible-duplicate marker, so this seeds the
     // signature from EXACTLY what was written, not from `.text`'s own possibly-pristine value.
-    const submittedText = joinSubmittedText(origin);
+    // Card 4af5aefa: `gen` is the ACTUAL (post-increment) generation number the failing write ran under —
+    // `joinSubmittedText`'s own `currentGen` needs the value `live.submitGeneration` held at the moment
+    // that write's text was ORIGINALLY assembled (pre-increment, i.e. `gen - 1`), or a message that got an
+    // age annotation baked into what was actually sent would have its reconstructed signature disagree
+    // with what the engine really echoes back — exactly the class of bug this function's OWN doc already
+    // documents for the possible-duplicate tag.
+    const submittedText = joinSubmittedText(origin, gen - 1);
     const submittedSig = textSignature(submittedText);
     const kept: QueuedMessage[] = [];
     for (const m of origin) {

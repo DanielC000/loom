@@ -26,10 +26,23 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { randomUUID } from "node:crypto";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Card 1addef27 (fixed-wait-negative-guard): bounded POLL on the actual completion signal, not a fixed
+// clock — mirrors dev-server.mjs's own `waitUntil`. Used ONLY where a negative-polarity assertion needs
+// to know a write genuinely happened (positive signal) before inspecting its content, so a too-short
+// window fails loudly (timeout) instead of passing vacuously on the negative check for the wrong reason.
+const waitUntil = async (predicate, timeoutMs = 2000, stepMs = 20) => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await predicate()) return true;
+    await sleep(stepMs);
+  }
+  return false;
+};
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()). Set BEFORE any
 // dynamic import of a dist/ module — paths.ts reads LOOM_HOME at import time.
@@ -103,6 +116,20 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
     isPasteRecoveryAttempt(buildPasteRecoveryText("anything")) === true);
   check("recovery: isPasteRecoveryAttempt does NOT flag an ordinary (non-recovery) submitted turn",
     isPasteRecoveryAttempt("just a normal long paste\nwith multiple lines") === false);
+
+  // --- claim-defect fix (card 4af5aefa): the detector only OBSERVES that the transcript recorded a
+  // placeholder — it has no access to engine/recipient visibility, so the notice must not ASSERT
+  // visibility as fact. "Lost ... before you could see it" is a categorical claim the evidence can't
+  // support (two live false positives: Codescape mgr #19 and Loom mgr #91 both HAD seen and acted on
+  // the resent content). The notice must instead state what was observed and hand the recipient a cheap
+  // way to self-check, since a notice cannot see what the recipient already did.
+  const recoveryTextSample = buildPasteRecoveryText("the lost content");
+  check("recovery: does NOT assert the categorical 'before you could see it' claim (card 4af5aefa)",
+    !recoveryTextSample.toLowerCase().includes("before you could see it"));
+  check("recovery: states what was actually OBSERVED (a placeholder in the transcript), not a visibility claim",
+    recoveryTextSample.includes("transcript recorded a placeholder"));
+  check("recovery: tells the recipient to check their OWN artifact if they already acted on it (card 4af5aefa)",
+    /already (saw|acted)/i.test(recoveryTextSample) && /ignore/i.test(recoveryTextSample));
 
   // --- readContextStats.lastUserText: raw user-turn text extraction, folded into the single-pass scan ---
   const cwd = path.join(os.tmpdir(), `loom-ppt-txt-${Date.now()}`);
@@ -403,6 +430,152 @@ try {
       newWarnings[0]?.includes("ALSO collapsed"));
     check("(l) THE FIX: NO further corrective turn is written for a marked recovery's own collapse (one-shot bound holds through the tag)",
       fake.writes.length === writesBeforeStop);
+  }
+
+  // (m) STALENESS ANNOTATION (card 4af5aefa): the actual live specimen was minted CORRECTLY (its content
+  // genuinely was the most recent inbound at detection time) but delivered ~293s and TWO genuine
+  // intervening turns later, by which point a newer message had superseded it — reconstructed from real
+  // production log timestamps, not a repro. The fix does not suppress or reorder anything (that would
+  // recreate the same "acting on a proxy for engine visibility" defect one level up) — it annotates the
+  // delivered text with a fact we DO genuinely observe: how many turns ran since mint.
+  {
+    // Reproduce the real ordering: the collapsing turn is dispatched (delivered immediately, session goes
+    // busy), and a SECOND, unrelated message is enqueued WHILE busy — so it's already sitting in
+    // `live.pending` ahead of the recovery mint's own setTimeout(0), exactly like the real specimen's
+    // already-queued worker-report that drained ahead of the recovery.
+    const longPaste3 = "third scenario line\n".repeat(4) + "final line three";
+    const rp = host.enqueueStdin(SID, `[loom:test] ${longPaste3}`);
+    if (!rp.delivered) throw new Error("test setup: collapsing turn did not submit immediately");
+    const nextRp = host.enqueueStdin(SID, "[loom:test] an unrelated already-queued message");
+    check("(m) setup: the next message queues (HELD) while the collapsing turn is in flight",
+      nextRp.queued === true && nextRp.delivered === false);
+
+    const beforeWarn = warnLog.length;
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "[Pasted text #33 +7 lines]" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    const writesBeforeStop = fake.writes.length;
+    // Trips the tripwire and mints the recovery (setTimeout(0)); THIS Stop's own synchronous drain then
+    // dispatches the already-queued unrelated message as the NEXT turn — before the recovery mint's own
+    // enqueue ever runs, so the recovery finds the session busy and gets HELD.
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    check("(m) detection trips on the collapse", warnLog.length - beforeWarn === 1);
+
+    await sleep(10);
+    const drainedUnrelated = fake.writes.slice(writesBeforeStop).join("");
+    check("(m) the already-queued unrelated message drains as the NEXT turn, ahead of the recovery mint",
+      drainedUnrelated.includes("an unrelated already-queued message"));
+    check("(m) the recovery notice is NOT part of that same write (it was minted too late to join it)",
+      !drainedUnrelated.includes(PASTE_RECOVERY_TAG));
+
+    await sleep(250); // let the recovery's own setTimeout(0) run — it finds the session busy → HELD onto pending
+
+    // Complete the ONE intervening (unrelated) turn. This Stop's own drain then pops the recovery notice —
+    // the only thing left queued — as the NEXT turn, exactly ONE turn (this one) after mint.
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "an unrelated already-queued message" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    const writesBeforeRecoveryDrain = fake.writes.length;
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    await sleep(10);
+    const recoveryWrite = fake.writes.slice(writesBeforeRecoveryDrain).join("");
+
+    check("(m) THE FIX: the delivered recovery still carries the recovery tag", recoveryWrite.includes(PASTE_RECOVERY_TAG));
+    check("(m) THE FIX: the delivered recovery still carries the ORIGINAL lost content (annotation never drops it)",
+      recoveryWrite.includes("third scenario line"));
+    check("(m) THE FIX: delivered exactly 1 generation after mint — the text discloses that age, not silence",
+      /1 submit generation ago/.test(recoveryWrite));
+    check("(m) THE FIX: the age note names an EARLIER message, not the recipient's most recent one",
+      /not your most recent/i.test(recoveryWrite));
+
+    // That delivered recovery turn is now in flight (busy). Resolve it CLEANLY (not a further collapse)
+    // before the next scenario, or the next enqueue below won't deliver immediately.
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "the recovered content came through fine this time" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+
+    // Negative control: an ORDINARY delivery with ZERO intervening turns carries NO age annotation —
+    // confirms this isn't just always-on boilerplate.
+    const cleanPaste = "clean scenario line\n".repeat(4) + "final clean line";
+    const rp2 = host.enqueueStdin(SID, `[loom:test] ${cleanPaste}`);
+    if (!rp2.delivered) throw new Error("test setup: clean collapsing turn did not submit immediately");
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "[Pasted text #44 +5 lines]" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    const writesBeforeCleanMint = fake.writes.length;
+    host.deliverHook(SID, { hook_event_name: "Stop" }); // nothing else queued → the recovery mint delivers IMMEDIATELY, zero turns later
+    // Wait on the delivery signal itself (the recovery's setTimeout(0) mint actually landing a write),
+    // never a fixed clock — a too-short fixed wait would let the negative conjunct below pass for the
+    // WRONG reason (not-yet-written, not genuinely absent). The positive conjunct (tag present) still
+    // anchors this against a vacuous pass; this poll additionally makes the wait itself sound.
+    const cleanRecoveryLanded = await waitUntil(() => fake.writes.length > writesBeforeCleanMint);
+    const cleanRecoveryWrite = fake.writes.slice(writesBeforeCleanMint).join("");
+    check("(m) NEGATIVE CONTROL setup: the recovery genuinely landed a write before this control inspects it", cleanRecoveryLanded);
+    check("(m) NEGATIVE CONTROL: a recovery delivered with ZERO intervening generations carries NO age annotation",
+      cleanRecoveryWrite.includes(PASTE_RECOVERY_TAG) && !/generation(s)? ago/.test(cleanRecoveryWrite));
+    await drainRecoveryIfAny(1); // this mint was itself a fresh loss — resolve it cleanly so it can't leak into anything after
+  }
+
+  // (n) CODE REVIEW FIX, RED-FIRST (card 4af5aefa): a recovery notice that itself GIVES UP once and
+  // REDRAINS arrives at `joinSubmittedText` PREFIXED with a possible-duplicate frame
+  // (`[loom:possible-duplicate root:…] `) — `annotatePasteRecoveryAge`'s tag check must see PAST that
+  // frame, or exactly the notices whose age is largest (a give-up hold adds minutes on top of the
+  // ordinary queue wait) get NO disclosure at all, which is this fix failing in its own motivating case.
+  // Drives this directly at the pure-function level (Part 1 already established `framePossibleDuplicate`
+  // ordering; this isolates the ONE thing in question: does annotation still fire on FRAMED text, and
+  // does the original possible-duplicate frame survive verbatim).
+  {
+    const original = buildPasteRecoveryText("some lost content here");
+    const framed = framePossibleDuplicate(original, "cafebabe");
+    check("(n) setup: the framed text carries the possible-duplicate tag AHEAD of the recovery tag (mirrors (l))",
+      framed.startsWith("[loom:possible-duplicate root:") && !framed.startsWith(PASTE_RECOVERY_TAG));
+
+    // Exercise the SAME internal function the drain path calls, via the exported host module — mirror its
+    // signature by round-tripping through a fresh single-element QueuedMessage-shaped drain. Since
+    // `annotatePasteRecoveryAge`/`joinSubmittedText` aren't exported (internal to host.ts's drain
+    // machinery), drive this through the SAME PtyHost seam Part 2 already uses: enqueue framed text with a
+    // real generation gap, and inspect what actually gets written.
+    const rp = host.enqueueStdin(SID, `[loom:test] setup for (n)`);
+    if (!rp.delivered) throw new Error("test setup: (n) setup turn did not submit immediately");
+    // Queue the ALREADY-FRAMED recovery text directly (simulating a give-up-redrained recovery) while busy.
+    const heldRp = host.enqueueStdin(SID, framed, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID(), 0);
+    check("(n) setup: the framed recovery queues (HELD) behind the in-flight setup turn",
+      heldRp.queued === true && heldRp.delivered === false);
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "setup for (n)" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    // Enqueue ONE more unrelated turn (queues behind the framed recovery) so a genuine generation gap
+    // exists by the time the framed recovery itself drains.
+    const writesBeforeSetupStop = fake.writes.length;
+    host.deliverHook(SID, { hook_event_name: "Stop" }); // drains the framed recovery next (mintedAtGen=0, currentGen now > 0)
+    await sleep(10);
+    const drainedFramed = fake.writes.slice(writesBeforeSetupStop).join("");
+    check("(n) THE FIX: a FRAMED recovery still carries its possible-duplicate frame verbatim",
+      drainedFramed.includes("[loom:possible-duplicate root:"));
+    check("(n) THE FIX: a FRAMED recovery still carries the recovery tag AFTER the frame",
+      /\[loom:possible-duplicate root:[0-9a-f]{8}\] \[loom:paste-recovery\]/.test(drainedFramed));
+    check("(n) THE FIX: a FRAMED recovery STILL gets the age annotation (this was the bug — it silently did NOT before)",
+      /generation(s)? ago/.test(drainedFramed));
+    check("(n) THE FIX: a FRAMED recovery still carries the original lost content",
+      drainedFramed.includes("some lost content here"));
+    // Resolve cleanly so nothing leaks into the finally-block teardown.
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "(n) resolved cleanly" } },
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    host.deliverHook(SID, { hook_event_name: "Stop" });
   }
 } finally {
   console.warn = realWarn;

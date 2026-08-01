@@ -110,7 +110,15 @@ export function isPasteRecoveryAttempt(submittedText: string): boolean {
  * Loom already holds the full text it wrote to the pty; the CLI is what failed to preserve it, so
  * resending it costs nothing new to reconstruct. Carries `PASTE_RECOVERY_TAG` so a second collapse on
  * THIS text is recognized by `isPasteRecoveryAttempt` instead of triggering a third attempt.
+ *
+ * Card 4af5aefa (two live false positives observed by peer managers): the wording used to
+ * assert the content "was lost ... before you could see it" — a claim about ENGINE/RECIPIENT
+ * VISIBILITY. `detectBarePastePlaceholderTripwire` has no access to that: it only OBSERVES that the
+ * transcript recorded a placeholder in place of the submitted text. Evidence is a proxy for the claim,
+ * not the claim itself, so the wording now states only what was observed, and hands the recipient the
+ * cheap own-artifact check (a reply they sent, a memory write, a turn count) instead of asserting
+ * something the notice cannot actually see.
  */
 export function buildPasteRecoveryText(originalText: string): string {
-  return `${PASTE_RECOVERY_TAG} Your previous message's pasted content was lost to a CLI paste-collapse bug before you could see it — resending the original content now:\n\n${originalText}`;
+  return `${PASTE_RECOVERY_TAG} The transcript recorded a placeholder instead of your previous message's pasted content — it may not have reached you (a known upstream CLI paste-collapse race; see card eef4883c). If you already saw and acted on that message, ignore this — check your own artifact (a reply you sent, a memory write, a turn count) rather than this notice, since it cannot see what you already did. Otherwise, here is the original content, resent:\n\n${originalText}`;
 }
