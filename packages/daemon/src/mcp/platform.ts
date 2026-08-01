@@ -43,7 +43,7 @@ import { WORKFLOW_TEMPLATES, findWorkflowTemplate, applyWorkflowTemplate } from 
 import { createProjectTaskChecked, getProjectTask, updateProjectTask, listProjectTasks, toTaskSummary, DEFAULT_TASK_SUMMARY_CAP, type TaskWithMerged } from "./tasks.js";
 import { prioritySchema } from "./server.js";
 import { getByIdPrefix, MIN_ID_PREFIX_LEN } from "../id-prefix.js";
-import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap, spillableTurnsResponse } from "../sessions/transcript.js";
 import { AMBIGUOUS_ID_ERROR } from "./transcript-read.js";
 import { spawnableRoleError } from "./spawnable-role.js";
 
@@ -1511,7 +1511,13 @@ export class PlatformMcpRouter {
           s = matches[0];
           if (!s) return ok({ error: "session not found" });
         }
-        const turns = s.archivedAt != null
+        // Prefer the captured snapshot, but a session CAN be archived with no usable snapshot (a failed
+        // best-effort snapshotTranscript on exit — card 0138c09b: the write never threw, but also never
+        // landed, and archivedAt got stamped regardless). Fall back to the raw engine JSONL by cwd +
+        // engineSessionId in that case rather than silently returning [] for a transcript that still
+        // exists on disk — mirrors the already-correct fallback in gateway/server.ts's transcript route.
+        const useSnapshot = s.archivedAt != null && archivedTranscriptExists(s.projectId, s.id);
+        const turns = useSnapshot
           ? readArchivedTranscript(s.projectId, s.id)
           : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId) : [];
         if (finalMessageOnly) {
@@ -1527,7 +1533,7 @@ export class PlatformMcpRouter {
         // off the live engine session id when there is one; an archived transcript (no engineSessionId)
         // is keyed off its stable (projectId, sessionId) snapshot identity instead, so a chained
         // offset->nextOffset walk of an archived transcript is bounded too.
-        const walkKey = s.engineSessionId ?? (s.archivedAt != null ? `archived:${s.projectId}:${s.id}` : null);
+        const walkKey = s.engineSessionId ?? (useSnapshot ? `archived:${s.projectId}:${s.id}` : null);
         const bounded = walkKey ? applyAggregateWalkCap(walkKey, page.offset, page) : page;
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
         // No caller session to spill against (should not happen on a real request path) — fall back to the

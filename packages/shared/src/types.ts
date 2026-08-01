@@ -1211,8 +1211,11 @@ export interface SessionListItem extends Session {
 
 /**
  * An archived session row for the per-project Archive tab — a SessionListItem plus whether a
- * transcript SNAPSHOT was captured on exit (false ⇒ "no transcript captured" — the session was
- * already dead when archived, so its engine JSONL was gone before a snapshot could be taken).
+ * transcript SNAPSHOT was captured on exit. A cheap, bulk-computed HINT only: `false` usually means
+ * the session was already dead when archived (its engine JSONL was gone before a snapshot could be
+ * taken), but it can ALSO mean the on-exit snapshot attempt simply failed (a disk error, a race) while
+ * the raw engine JSONL is still readable — card 0138c09b. Don't treat `false` as proof no transcript
+ * is viewable; the transcript read routes fall back to the raw path and may still return real turns.
  */
 export interface ArchivedSessionListItem extends SessionListItem {
   snapshotExists: boolean;

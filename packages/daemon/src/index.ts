@@ -392,8 +392,15 @@ async function main(): Promise<void> {
       // Auto-snapshot the engine transcript on exit, while the JSONL still exists — so an archived
       // session keeps a readable transcript even after Claude later prunes the original (a session
       // goes 'dead' BECAUSE its JSONL was deleted). Best-effort: snapshotTranscript never throws.
+      // The return value used to be discarded outright — a failed snapshot then stamped archivedAt
+      // (below, via archiveOnExit) with NO signal anywhere that it happened, which is why nobody could
+      // ever measure how often it occurs (card 0138c09b). Readers now fall back to the raw JSONL when
+      // the snapshot is missing, so this log is purely OBSERVABILITY, not a correctness fix on its own.
       try {
-        if (exited?.engineSessionId) snapshotTranscript(exited.cwd, exited.engineSessionId, exited.projectId, exited.id);
+        if (exited?.engineSessionId) {
+          const snapshotted = snapshotTranscript(exited.cwd, exited.engineSessionId, exited.projectId, exited.id);
+          if (!snapshotted) console.warn(`[transcript] on-exit snapshot failed for session ${exited.id} (project ${exited.projectId}) — falling back to the raw engine transcript on read`);
+        }
       } catch { /* never disturb the exit path */ }
       // Agent Runs R2: finalize the run row + GC its disposable snapshot cwd (the pty is now gone, so
       // its handles are released). Runs the SAME teardown whether the run completed via submit_result or

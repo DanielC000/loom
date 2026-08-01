@@ -227,6 +227,29 @@ try {
     db.close();
   }
 
+  // ============ (e2) card 0138c09b: archivedAt set but the on-exit snapshot FAILED (no archive file) —
+  // the raw engine JSONL is still on disk (engineSessionId + cwd still resolve it), so the reader must
+  // fall back to it instead of returning [] just because archivedAt is set ============
+  {
+    const db = tmpDb();
+    const proj = "proj-archived-failed-snapshot";
+    seedProject(db, proj, "Archived failed snapshot");
+    const companionSess = "companion-archived-failed-snapshot";
+    seedSession(db, companionSess, proj, "assistant");
+    seedSession(db, "target-archived-no-snap", proj, "manager", { engineSessionId: "eng-archived-no-snap", processState: "exited" });
+    writeLiveTranscript(proj, "eng-archived-no-snap", ["raw turn survives a failed snapshot"]);
+    db.archiveSession("target-archived-no-snap"); // archivedAt stamped — but NO archive file written (the defect's premise)
+    db.upsertCompanionCapabilityGrant({ sessionId: companionSess, capability: "transcript-read", projectId: proj, mode: "read" });
+
+    const orch = new OrchestrationMcpRouter(db, {}, {}, makeFakePty(null, "the owner said: read the archived-but-unsnapshotted one"));
+    const client = await connect(orch.buildServer(companionSess, "assistant"));
+    const result = await call(client, "transcript_read", { sessionId: "target-archived-no-snap" });
+    check("(e2) archivedAt set + no archive file + raw JSONL present -> falls back to the raw transcript, NOT []",
+      Array.isArray(result) && result.length === 1 && result[0].text === "raw turn survives a failed snapshot");
+    await client.close();
+    db.close();
+  }
+
   // ============ (f) pagination envelope: offset/limit/turnRange + nextOffset paging to completion ============
   {
     const db = tmpDb();

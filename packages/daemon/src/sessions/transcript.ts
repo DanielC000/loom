@@ -533,6 +533,19 @@ export function archivedTranscriptExists(projectId: string, sessionId: string): 
 }
 
 /**
+ * Whether a session's transcript is readable AT ALL — either the on-exit snapshot was captured, or
+ * (when it wasn't) the raw engine JSONL is still on disk. Distinct from `archivedTranscriptExists`:
+ * `snapshotTranscript` is best-effort and can silently fail (a disk error, a race) while the raw file
+ * survives — that failure alone must not be read as "no transcript" (card 0138c09b). A caller deciding
+ * whether to OFFER a transcript view (as opposed to reading its content) should use this, not
+ * `archivedTranscriptExists` alone, or a failed-but-recoverable snapshot renders as "nothing to show".
+ */
+export function transcriptAvailable(s: { projectId: string; id: string; cwd: string; engineSessionId: string | null }): boolean {
+  if (archivedTranscriptExists(s.projectId, s.id)) return true;
+  return s.engineSessionId != null && engineTranscriptExists(s.cwd, s.engineSessionId);
+}
+
+/**
  * Session ids (within one project's archive dir) that have a captured snapshot — ONE `readdir` instead
  * of a per-row `fs.existsSync` stat. Built for bulk-enriching an archived-sessions list page: a caller
  * enriching N rows across P distinct projects does P readdirs total, not N stats (the archived-sessions

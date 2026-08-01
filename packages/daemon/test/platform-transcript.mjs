@@ -101,6 +101,21 @@ fs.writeFileSync(archFile, Array.from({ length: 4 }, (_, i) =>
   JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: `arch-turn-${i}` }] } })
 ).join("\n") + "\n");
 
+// S-ARCHIVED-NO-SNAPSHOT: archivedAt set, project p2 — card 0138c09b's exact premise: the on-exit
+// snapshot FAILED (no archive file written for this session), but the raw engine JSONL is still on disk
+// under (cwd, engineSessionId). Proves the reader falls back to the raw path instead of returning []
+// just because archivedAt is set.
+db.insertSession({
+  id: "66666666-archived-no-snap", projectId: "p2", agentId: "a2", engineSessionId: "eng-archived-no-snap", title: null, cwd: repo2,
+  processState: "exited", resumability: "dead", busy: false, createdAt: now, lastActivity: now, lastError: null, role: null,
+});
+const rawSurvivingFile = engineTranscriptPath(repo2, "eng-archived-no-snap");
+fs.mkdirSync(path.dirname(rawSurvivingFile), { recursive: true });
+fs.writeFileSync(rawSurvivingFile, Array.from({ length: 2 }, (_, i) =>
+  JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: `raw-survives-${i}` }] } })
+).join("\n") + "\n");
+db.archiveSession("66666666-archived-no-snap"); // archivedAt stamped — deliberately NO archive file written
+
 // S-MIXED: LIVE, project p1 — a realistic trace with tool_use / tool_result noise BEFORE the final
 // written assistant message, proving finalMessageOnly filters out the mid-trace tail rather than just
 // returning the transcript's last turn regardless of role.
@@ -241,6 +256,14 @@ try {
   const archRead = await call("session_transcript", { sessionId: "33333333-archived" });
   check("(d) session_transcript(S-ARCHIVED) auto-detects archived and reads the captured snapshot (no live file exists)",
     Array.isArray(archRead) && archRead.length === 4 && archRead[0].text === "arch-turn-0");
+
+  // (d2) card 0138c09b: archivedAt set but the on-exit snapshot FAILED (no archive file on disk) — the
+  // raw engine JSONL still resolves via (cwd, engineSessionId), so the reader must fall back to it
+  // instead of returning [] just because archivedAt is set (a failed best-effort write must not read as
+  // "nothing to preserve" when the source is still right there).
+  const noSnapRead = await call("session_transcript", { sessionId: "66666666-archived-no-snap" });
+  check("(d2) session_transcript(S-ARCHIVED-NO-SNAPSHOT) falls back to the raw transcript, NOT []",
+    Array.isArray(noSnapRead) && noSnapRead.length === 2 && noSnapRead[0].text === "raw-survives-0");
 
   // (e) id-prefix resolution: an unambiguous 8-char prefix resolves to the same session. lastN:100
   // exceeds BIG_TURN_COUNT (10), so this also exercises the budget-bounded lastN path (c2) — it resolves

@@ -22,7 +22,7 @@ import { MIN_ID_PREFIX_LEN } from "../id-prefix.js";
 import { AMBIGUOUS_ID_ERROR } from "../mcp/transcript-read.js";
 import { spawnableRoleError } from "../mcp/spawnable-role.js";
 import { createProjectTask, getProjectTask, listProjectTasks, relocateProjectTask, updateProjectTask, type TaskSummary, type TaskUpdateAck } from "../mcp/tasks.js";
-import { readTranscript, readArchivedTranscript, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
+import { readTranscript, readArchivedTranscript, archivedTranscriptExists, pageTranscript, lastNTurns, applyAggregateWalkCap } from "../sessions/transcript.js";
 import { listVaultTree, readVaultFile, resolveVaultFilePath, statVaultFile } from "../vault/browser.js";
 import type { OwnerAttestation, AuthoredContentGrantScope } from "./attestation.js";
 import { CompanionTrustWindow } from "./trust-window.js";
@@ -2267,7 +2267,13 @@ const TRANSCRIPT_READ: CompanionCapability = {
           s = matches[0];
           if (!s) return ok({ error: TRANSCRIPT_READ_NOT_FOUND });
         }
-        const turns = s.archivedAt != null
+        // Prefer the captured snapshot, but a session CAN be archived with no usable snapshot (a failed
+        // best-effort snapshotTranscript on exit — card 0138c09b: the write never threw, but also never
+        // landed, and archivedAt got stamped regardless). Fall back to the raw engine JSONL by cwd +
+        // engineSessionId in that case rather than silently returning [] for a transcript that still
+        // exists on disk — mirrors the already-correct fallback in gateway/server.ts's transcript route.
+        const useSnapshot = s.archivedAt != null && archivedTranscriptExists(s.projectId, s.id);
+        const turns = useSnapshot
           ? readArchivedTranscript(s.projectId, s.id)
           : s.engineSessionId ? readTranscript(s.cwd, s.engineSessionId) : [];
         if (typeof lastN === "number" && lastN > 0) return ok(lastNTurns(turns, lastN));
@@ -2277,7 +2283,7 @@ const TRANSCRIPT_READ: CompanionCapability = {
         // archived transcript (no engineSessionId) is keyed off its stable (projectId, sessionId)
         // snapshot identity instead, so a chained offset->nextOffset walk of an archived transcript is
         // bounded too. BOUNDING ONLY — same bytes readable, just capped like every other mirror.
-        const walkKey = s.engineSessionId ?? (s.archivedAt != null ? `archived:${s.projectId}:${s.id}` : null);
+        const walkKey = s.engineSessionId ?? (useSnapshot ? `archived:${s.projectId}:${s.id}` : null);
         const bounded = walkKey ? applyAggregateWalkCap(walkKey, page.offset, page) : page;
         const explicit = offset !== undefined || limit !== undefined || turnRange !== undefined;
         return ok(!explicit && bounded.offset === 0 && bounded.nextOffset === null ? bounded.turns : bounded);

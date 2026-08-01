@@ -131,12 +131,12 @@ export default function Archive() {
         <SectionLabel>{selected ? `Transcript · ${selected.id.slice(0, 8)}` : "Transcript"}</SectionLabel>
         <Panel style={{ height: "76vh", padding: 6 }}>
           {!selected && <span style={{ color: color.textMuted, fontSize: 12 }}>Select an archived session to view its stored transcript.</span>}
-          {selected && !selected.snapshotExists && (
-            <span style={{ color: color.textMuted, fontSize: 12 }}>
-              No transcript captured — this session was already dead (its engine transcript was gone) when archived.
-            </span>
-          )}
-          {selected && selected.snapshotExists && <TranscriptPane sessionId={selected.id} />}
+          {/* Always attempt the real read rather than gating on `snapshotExists` — that flag is only a
+              cheap, bulk-computed hint about the ARCHIVE snapshot and can be false while a transcript is
+              still readable from the raw engine JSONL (a failed on-exit snapshot, card 0138c09b); the
+              transcript route itself falls back to that raw path and TranscriptPane already renders its
+              own "no turns" message when genuinely nothing exists. */}
+          {selected && <TranscriptPane sessionId={selected.id} />}
         </Panel>
       </div>
     </div>
@@ -244,7 +244,10 @@ function ArchiveRow({ s, selected, onSelect, onRestore, restoring, onDelete, del
           {s.role === "manager" ? "★ " : ""}{s.id.slice(0, 8)} · {roleDisplay(s.role).short}
         </span>
         <span style={{ flex: 1 }} />
-        {s.snapshotExists ? <Badge tone="phosphor">transcript</Badge> : <Badge tone="muted">no transcript</Badge>}
+        {/* A cheap, bulk-computed hint (archive snapshot presence) — NOT a guarantee either way; a
+            missing snapshot doesn't mean no transcript is viewable (the raw engine JSONL can still be
+            there, see the transcript panel's own fallback), so this reads "snapshot", not "transcript". */}
+        {s.snapshotExists ? <Badge tone="phosphor">snapshot</Badge> : <Badge tone="muted">no snapshot</Badge>}
         <StatusPill tone={dead ? "red" : "muted"} label={dead ? "dead · view-only" : s.processState} />
       </div>
       <div style={{ marginTop: 8, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
