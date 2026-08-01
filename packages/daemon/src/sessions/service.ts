@@ -11,7 +11,7 @@ import {
 } from "@loom/shared";
 import type { Db, IdleNudgePolicy, PendingGateOpVerdictKind, PendingGateOpVerdict } from "../db.js";
 import type { PtyHost, QueuedMessage, LandedMode, EnqueueDeliveryReason, EnqueueResult, QueuedMessageKind } from "../pty/host.js";
-import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT } from "../pty/host.js";
+import { modeAfterCyclesFromAcceptEdits, cyclesToReachFromAcceptEdits, reapProcessesRootedInWorktree, CONTROL_CHAR_RE, disallowedToolsForRole, GIVE_UP_HOLD_MS, SUBMIT_MAX_ATTEMPTS, GIVE_UP_REQUEUE_LIMIT, framePossibleDuplicate, stripPossibleDuplicateFrame } from "../pty/host.js";
 import { agentUpdatePromptWarning } from "../agents/promptLint.js";
 import { composeRoleSessionName, composeWorkerSessionName, PLATFORM_LEAD_SESSION_NAME } from "../pty/session-name.js";
 import { createWorktree, removeWorktree, deleteBranch, deleteBranches, diffBranch, mergeBranch, mergeMainIntoWorktree, findLandedSquashCommit, findLandedSquashCommitViaMap, findNestedGitRepos, worktreeHasWork, worktreeStatusHasWork, detectStrandedWork, countCommitsBehind, getWorktreeLatestNonMergeSha, computeWorktreeGateStamp, gateStampsDiffer, precheckWorkerDone, toConventionalSubject, codescapeWorktreeId, matchAddedDenyGlobs, matchRetractedPremiseTitle, resolveMainlineBranch, listMergedLoomBranches, listCheckedOutBranches, taskKey, resolveGitRef, type BoundedGitDeps, type DiffstatFile, type MergeEmptyKind, type ReusedDirtyWorktreeInfo, type StaleBaseInfo, type WorktreeGateStamp } from "../git/worktrees.js";
@@ -5659,7 +5659,12 @@ export class SessionService {
       // internally) — recording a separately-generated id here would silently break the very audit chain
       // this event exists to provide. giveUpHeldUntil (CR follow-up, finding [1]) forces the HELD branch —
       // see this method's own doc above for why the immediate path was a live bug, not a simplification.
-      const reminted = this.enqueueDurableMessage(recipientId, text, {
+      // Card 78e4b3f2: this re-mint is a re-delivery of a message whose first write was never confirmed —
+      // mark it (idempotent — see framePossibleDuplicate's own doc) so the recipient can tell it apart from
+      // new direction. `text` here is the pristine original (this callback's own closure — never mutated by
+      // any in-session requeue `m.text` may have undergone at the pty layer), so this can only ever apply
+      // the tag once per re-mint.
+      const reminted = this.enqueueDurableMessage(recipientId, framePossibleDuplicate(text, rootMsgId), {
         sender, taskId, kind, rootMsgId, chainDepth: chainDepth + 1, giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS,
       });
       // eslint-disable-next-line no-console
@@ -5728,9 +5733,13 @@ export class SessionService {
         ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status before assuming it's gone.`
         : `Loom has no read you can use to check on ${recipientId.slice(0, 8)} from here — there is no cross-session ` +
           `transcript/state read available to a sender in your position.`;
+      // Card 78e4b3f2: the head preview is taken from the tag-STRIPPED text — `text` here may already carry
+      // our own possible-duplicate tag (a re-mint frames it at creation, before any further give-up), and
+      // showing that as the "head" would push the sender's actually-identifying content out of the fixed
+      // 60-char slice window instead of showing it clearly (see stripPossibleDuplicateFrame's own doc).
       const note =
         `[loom:redelivery-parked] a message you sent to ${recipientId.slice(0, 8)} (root ${rootMsgId.slice(0, 8)}, head: ` +
-        `${JSON.stringify(text.slice(0, 60))}) has been PARKED — Loom exhausted its own redelivery budget (${PARK_SUBMIT_CYCLES} ` +
+        `${JSON.stringify(stripPossibleDuplicateFrame(text).slice(0, 60))}) has been PARKED — Loom exhausted its own redelivery budget (${PARK_SUBMIT_CYCLES} ` +
         `submission attempts, ~${PARK_ENTER_WRITES} Enter-key writes, across ${PARK_MESSAGE_OBJECTS} independent retry levels, ` +
         `spanning ${PARK_HOLDS} ${GIVE_UP_HOLD_MS / 1000}s hold(s) — at least ${PARK_MIN_HOLD_SECONDS}s) and has STOPPED ` +
         `retrying it automatically. ${giveUpConfirmationHedge("the message")} ${recipientCheckClause} If you resend the SAME content, Loom usually recognizes and ` +
@@ -7466,7 +7475,14 @@ export class SessionService {
 
     if (!w.engineSessionId) return { kind: "broken-spawn" };
 
-    if (this.pty.getPendingEntries(w.parentSessionId).some((e) => e.text.startsWith(`[loom:worker-report] worker ${workerSessionId} `))) {
+    // Card 78e4b3f2: strip a leading possible-duplicate tag before this prefix match. Unlike an in-session
+    // requeue (whose `.text` stays pristine until the moment of actual redrain — see drainPending/
+    // joinSubmittedText), a CROSS-REMINT (chainDepth > 0) bakes the tag into `.text` at MESSAGE CREATION —
+    // enqueueDurableMessage's `framePossibleDuplicate(text, rootMsgId)` call — so a re-minted worker-report
+    // notification carries the tag from the moment it's queued, not just once redelivered. Left unstripped,
+    // this check would miss it and this function could falsely report the worker as stranded even though
+    // its report is genuinely pending, just tagged.
+    if (this.pty.getPendingEntries(w.parentSessionId).some((e) => stripPossibleDuplicateFrame(e.text).startsWith(`[loom:worker-report] worker ${workerSessionId} `))) {
       return { kind: "not-stranded" };
     }
 

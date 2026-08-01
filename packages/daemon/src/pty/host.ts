@@ -97,6 +97,84 @@ function textSignature(text: string): { len: number; hash: string } {
 }
 
 /**
+ * Card 78e4b3f2 — the RECIPIENT-side half of duplicate legibility (the sender-side half, card 417cea0a,
+ * is the `[loom:redelivery-parked]`/`[loom:redelivery-confirmed]` notices above). Duplicate-over-loss
+ * (`bc0774c4`) stays exactly as it is — this does not reduce or gate a single re-delivery — it only marks
+ * one so the recipient can tell it apart from genuine new direction, per that card's own recommended
+ * direction.
+ *
+ * Applied to a re-delivery of a message whose FIRST write was never confirmed, via TWO distinct triggers:
+ * an in-session requeue (`requeueGiveUpOrigin` stamps `giveUpGen` on the kept entry; the actual call to
+ * THIS function happens later, at the moment of physical re-write — `joinSubmittedText`, this file, shared
+ * by `drainPending`'s real write and `requeueGiveUpOrigin`'s own signature-seed) or a cross-remint
+ * (`handleGiveUpExhausted`, sessions/service.ts, `chainDepth > 0` — applied immediately at message
+ * CREATION, before it's ever enqueued). The ORIGINAL, first-ever write of a logical message never triggers
+ * either path — see each site's own doc — so a genuine first-time directive is never marked (marking it
+ * would train recipients to discount real direction, exactly the outcome card 78e4b3f2 rules out).
+ *
+ * `rootMsgId` is `QueuedMessage.logicalId` — stable across every requeue/re-mint (card 4a0af485) — so
+ * every re-delivery of the SAME logical message carries the SAME tag; no new identifier is minted.
+ */
+const POSSIBLE_DUPLICATE_TAG_RE = /^\[loom:possible-duplicate root:[0-9a-f]{8}\] /;
+const HEX8_RE = /^[0-9a-f]{8}$/;
+
+/**
+ * CR follow-up (card 78e4b3f2, found in review): `rootMsgId` is NOT always a UUID. `worker_message`'s
+ * `resendOf` (sessions/service.ts, `messageWorker`) is a raw, UNVALIDATED MCP string argument
+ * (`mcp/orchestration.ts`'s `z.string().optional()`) that a caller can set to anything and that then flows
+ * straight through as `rootMsgId` — a non-hex or short value would produce a tag `POSSIBLE_DUPLICATE_TAG_RE`
+ * can never recognize again, breaking the frame/strip pair's inverse property (a later re-tag would
+ * double-prefix instead of correctly no-op-ing, and `stripPossibleDuplicateFrame` would never remove it).
+ * The common case — every self-minted `msgId` IS a UUID, and a chain whose `rootMsgId` was never set via
+ * `resendOf` at ANY point in its OWN history resolves to that UUID's own `.slice(0, 8)` — short-circuits
+ * there so the tag stays the SAME 8 chars the `[loom:redelivery-parked]` notice's own
+ * `root ${rootMsgId.slice(0, 8)}` wording already shows a human. NOT scoped to "this call didn't pass
+ * `resendOf`": `ctx.rootMsgId` wins priority over `ctx.resendOf` (service.ts's `enqueueDurableMessage`), so
+ * a later re-mint that itself never sets `resendOf` still carries an earlier hop's tainted value forward
+ * via `ctx.rootMsgId` — this function validates the ACTUAL VALUE it receives, not which path it arrived
+ * by, so any irregular id (a direct `resendOf`, or one inherited from an earlier hop) falls back to
+ * `fnv1a32` (already used elsewhere in this file for exactly this "always 8 lowercase hex chars,
+ * deterministic" shape) — still correlatable (same input ⇒ same label) but never breaks the regex
+ * invariant, regardless of how the irregularity entered the chain.
+ */
+function possibleDuplicateRootLabel(rootMsgId: string): string {
+  const slice = rootMsgId.slice(0, 8);
+  return HEX8_RE.test(slice) ? slice : fnv1a32(rootMsgId);
+}
+
+/**
+ * PROVABLY IDEMPOTENT regardless of lineage: strips any EXISTING possible-duplicate tag before applying
+ * the current one, rather than short-circuiting only on an exact match for THIS `rootMsgId`. Needed for a
+ * chain-identity boundary a plain `text.startsWith(tag)` guard would miss — e.g. `carryPendingToSuccessor`
+ * (sessions/service.ts) carries an already-tagged durable record to a recycle successor that self-roots a
+ * FRESH chain (a new `rootMsgId`); if that successor's own give-up later re-mints, the OLD tag (a
+ * different root id) would not match the NEW tag's exact-string check and would double-prefix instead of
+ * being replaced. Stripping first makes this correct for that case too, at zero cost to the common
+ * single-lineage case (strip finds nothing, then applies the one tag — same net result as before).
+ */
+export function framePossibleDuplicate(text: string, rootMsgId: string): string {
+  const tag = `[loom:possible-duplicate root:${possibleDuplicateRootLabel(rootMsgId)}]`;
+  return `${tag} ${stripPossibleDuplicateFrame(text)}`;
+}
+
+/**
+ * The inverse of {@link framePossibleDuplicate} — strips a leading possible-duplicate tag if present,
+ * else returns `text` unchanged. Card 78e4b3f2: a SENDER-facing notice (`[loom:redelivery-parked]`, card
+ * 417cea0a) that previews a message's own `head: text.slice(0, 60)` needs THIS, not the raw closure-
+ * captured text — a re-mint's `text` already carries our tag by the time it reaches that notice (a
+ * cross-remint frames at creation, before any further give-up), and the tag alone is ~40+ chars, so a
+ * bare slice(0, 60) would show mostly tag and cut off before the actual identifying content the sender
+ * needs to recognise which message this is about. The notice already states the correlating `rootMsgId`
+ * separately in its own wording — the head preview's job is to show real content, not repeat the tag.
+ * PROVABLY the exact inverse of `framePossibleDuplicate` for every input: that function only ever
+ * produces a root label matching `[0-9a-f]{8}` (see `possibleDuplicateRootLabel`'s doc), which is exactly
+ * what this regex requires — there is no `rootMsgId` value the two can ever disagree about.
+ */
+export function stripPossibleDuplicateFrame(text: string): string {
+  return text.replace(POSSIBLE_DUPLICATE_TAG_RE, "");
+}
+
+/**
  * How long to wait for `UserPromptSubmit` (or a Stop/StopFailure, either of which proves a turn ran)
  * to confirm a written Enter actually registered, before re-sending it. Bounds the verify-and-retry
  * loop in `sendEnterAndVerify`. Env-overridable so tests can shrink it instead of waiting real seconds.
@@ -241,6 +319,27 @@ const BRACKET_PASTE_END = "\x1b[201~";
  * FIFO order (so e.g. 3 superseding manager redirects arrive together, newest last, not one-per-Stop).
  */
 const DRAIN_SEPARATOR = "\n\n────────\n\n";
+
+/**
+ * Card 78e4b3f2: the text ACTUALLY submitted for a batch of drained (or `Live.giveUpOrigin`-captured)
+ * messages — coalesces them with `DRAIN_SEPARATOR` exactly like before this card, but ALSO frames any
+ * member whose `giveUpGen` is already set (this write is a genuine re-delivery of a message that was never
+ * confirmed) as a possible duplicate — see `framePossibleDuplicate`'s own doc. A first-ever write
+ * (`giveUpGen` undefined) or an already-tagged cross-remint (the idempotency guard) passes through
+ * unmarked/unchanged.
+ *
+ * SHARED, deliberately, between `drainPending` (computes what to actually write) and `requeueGiveUpOrigin`
+ * (must seed `Live.ambiguousDispatches`'s signature from EXACTLY what was written for the failing attempt,
+ * never from `QueuedMessage.text`'s own possibly-pristine value — `giveUpGen` has not yet been bumped to
+ * the NEW generation at the point `requeueGiveUpOrigin` reads it, so this reconstructs the SAME text
+ * `drainPending` used to write the attempt that just gave up). Letting these two drift would break the
+ * late-confirmation content-match/purge mechanism the instant a marked (giveUpGen-tagged) retry itself
+ * gives up: the engine's real echo would carry the tag, but a signature computed from the pristine text
+ * would never match it.
+ */
+function joinSubmittedText(messages: QueuedMessage[]): string {
+  return messages.map((m) => (m.giveUpGen !== undefined ? framePossibleDuplicate(m.text, m.logicalId) : m.text)).join(DRAIN_SEPARATOR);
+}
 
 /**
  * The coalescing key for a queued message's route (Loom Companion multi-channel routing). A NO-route
@@ -4024,7 +4123,15 @@ export class PtyHost {
           // recent — and thus more likely relevant to THIS turn — baseline; fall back to `lastPrompt`
           // (the structured-submit path, the tripwire's original coverage) otherwise. Consumed (cleared)
           // right after, win or lose, so a leftover raw baseline never gets attributed to a LATER Stop.
-          const submittedText = live.lastRawSubmit ?? live.lastPrompt;
+          // Card 78e4b3f2: strip a leading possible-duplicate tag BEFORE any tripwire logic sees this text —
+          // `lastPrompt`/`lastRawSubmit` hold what was ACTUALLY written, which for a re-delivered turn (an
+          // in-session requeue that redrained) now carries our tag. Left untouched, `isPasteRecoveryAttempt`
+          // below would read `startsWith(PASTE_RECOVERY_TAG)` as false for a re-delivered recovery
+          // re-injection (paste-tripwire.ts's own `buildPasteRecoveryText` output IS routed through
+          // `enqueueStdin`, so it CAN acquire a `giveUpGen` requeue like any other message — verified
+          // reachable, not assumed), defeating the one-shot recovery bound that function exists to enforce.
+          const rawSubmittedText = live.lastRawSubmit ?? live.lastPrompt;
+          const submittedText = rawSubmittedText !== null ? stripPossibleDuplicateFrame(rawSubmittedText) : null;
           live.lastRawSubmit = null;
           // A future recurrence of a submitted paste silently collapsing to a bare placeholder is now
           // LOGGED instead of silent — over EITHER delivery channel.
@@ -4586,7 +4693,18 @@ export class PtyHost {
     const removed: QueuedMessage[] = [];
     for (let i = live.pending.length - 1; i >= 0; i--) {
       const m = live.pending[i]!;
-      if (prefixes.some((p) => m.text.startsWith(p))) {
+      // Card 78e4b3f2: strip a leading possible-duplicate tag before the prefix match — a re-minted
+      // idle/spawn-broken nudge (chainDepth > 0, sessions/service.ts's handleGiveUpExhausted) carries our
+      // tag baked into `.text` at the moment it's CREATED (before it's ever enqueued), so it can already be
+      // tagged while still sitting in `live.pending` — exactly what this function scans. This is NOT the
+      // in-session-requeue case: `.text` for a giveUpGen-tagged entry stays PRISTINE the whole time it's
+      // queued (see drainPending/joinSubmittedText's own doc — marking is applied only at the moment of the
+      // actual physical write, which also removes the entry from `pending`), so the strip below is a no-op
+      // for that case here, never something it needed to handle. Left unstripped for the cross-remint case
+      // it DOES apply to, a stale re-delivered nudge would MISS this purge and drain into the manager's
+      // turn falsely claiming the worker is still idle — exactly the bug this function exists to prevent
+      // (see its own doc).
+      if (prefixes.some((p) => stripPossibleDuplicateFrame(m.text).startsWith(p))) {
         removed.push(m);
         live.pending.splice(i, 1);
       }
@@ -4907,7 +5025,18 @@ export class PtyHost {
     // `writtenAt`. Scoped to `giveUpGen !== undefined` only (an entry that never itself gave up, e.g. an
     // auto-joined resend that never became ambiguous on its own, has nothing stale to clear here).
     for (const m of drained) { if (m.giveUpGen !== undefined) live.ambiguousDispatches.delete(m.logicalId); }
-    this.submit(sessionId, drained.map((m) => m.text).join(DRAIN_SEPARATOR), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
+    // Card 78e4b3f2: `joinSubmittedText` frames any `giveUpGen`-tagged member — a genuine physical
+    // re-delivery of a message whose first write was never confirmed — as a possible duplicate, so the
+    // recipient can tell it apart from new direction. For THIS mechanism specifically (an in-session
+    // requeue), the mark is applied ONLY here, at the actual write — never when the entry is merely
+    // requeued/held (`QueuedMessage.text` itself is never mutated by `requeueGiveUpOrigin`'s kept branch,
+    // so a reader of a still-giveUpGen-tagged-but-not-yet-redrained entry sees the pristine original): it
+    // isn't a re-delivery yet while it's just sitting in `pending` waiting for its retry. This does NOT
+    // generalize to every queued entry, though — a CROSS-REMINT (chainDepth > 0, sessions/service.ts's
+    // handleGiveUpExhausted) is a SEPARATE trigger that bakes the tag into `.text` at message CREATION,
+    // before it's ever enqueued, so a re-minted entry sitting in `pending` already carries the tag (see
+    // `purgeQueuedWorkerIdleNudges`'s own doc for a real consumer this distinction mattered to).
+    this.submit(sessionId, joinSubmittedText(drained), drained[0]!.route, drained[0]!.ownerText, drained[0]!.proactive, drained[0]!.senderId, "drain", drained); // one submit, one busy re-arm, FIFO order preserved, ONE route (+ ONE ownerText/proactive/senderId — the head's, mirroring the route); `drained` doubles as the give-up origin (card 441499ee) — same objects, so identity is preserved for free
     // ADDITIVE delivery hook (card 2ca18433): every drained entry was just handed to the recipient as
     // part of this turn — fire each callback (durable-message resolution) AFTER submit, outside the
     // M1/M2 ordering. Guarded so a faulty callback can never disturb the drain. Undefined for every
@@ -5474,14 +5603,17 @@ export class PtyHost {
     if (!origin || origin.length === 0) return;
     // Code Review Major finding (card 4a0af485, Major 4): seed the signature from the text ACTUALLY
     // SUBMITTED, never each message's own individual `.text` — `drainPending` may have COALESCED several
-    // origin messages into ONE physical write (`drained.map(m => m.text).join(DRAIN_SEPARATOR)`, mirrored
-    // exactly here), and `live.lastPrompt`/the engine's echo reflect that JOINED text, not any one member's
-    // own. Seeding from the individual text meant NO stored signature could ever match a coalesced turn's
-    // real confirmation — content matching silently never fired for the default `warning`-kind drain path,
-    // nor for ANY `agent` message once the daemon-global `coalesceAgentMessages` setting is on. A
-    // single-element `origin` (the common case — one message, one turn) is unaffected: joining one element
-    // with a separator is that element itself, byte-identical to before this fix.
-    const submittedText = origin.map((m) => m.text).join(DRAIN_SEPARATOR);
+    // origin messages into ONE physical write (`joinSubmittedText`, mirrored exactly here), and
+    // `live.lastPrompt`/the engine's echo reflect that JOINED text, not any one member's own. Seeding from
+    // the individual text meant NO stored signature could ever match a coalesced turn's real confirmation —
+    // content matching silently never fired for the default `warning`-kind drain path, nor for ANY `agent`
+    // message once the daemon-global `coalesceAgentMessages` setting is on. A single-element `origin` (the
+    // common case — one message, one turn) is unaffected: joining one element with a separator is that
+    // element itself, byte-identical to before this fix. Card 78e4b3f2: `joinSubmittedText` (not a bare
+    // `.map(m => m.text)`) is now load-bearing here for a SECOND reason too — it's the same function that
+    // decided whether the attempt that just failed carried the possible-duplicate marker, so this seeds the
+    // signature from EXACTLY what was written, not from `.text`'s own possibly-pristine value.
+    const submittedText = joinSubmittedText(origin);
     const submittedSig = textSignature(submittedText);
     const kept: QueuedMessage[] = [];
     for (const m of origin) {
@@ -5551,6 +5683,14 @@ export class PtyHost {
    * null if there's no ambiguity for this session or nothing matches. Read-only; does not consume/delete
    * the entry (only an actual confirming hook, via `purgeConfirmedGiveUpRequeue`, resolves it) — a caller
    * may legitimately query this more than once before the ambiguity actually resolves.
+   *
+   * Card 78e4b3f2: a stored entry's signature is seeded from `joinSubmittedText` — EXACTLY what was
+   * physically written for the failing attempt, which is now the possible-duplicate-TAGGED text once an
+   * entry has itself already been redelivered once in-session (`giveUpGen` set). A human/agent typing a
+   * manual resend after a `[loom:redelivery-parked]` notice has no way to know about that internal tag —
+   * they resend the plain ORIGINAL content the notice's own (tag-stripped) head quoted back to them. So
+   * `text` is tried BOTH as-is AND with the tag this SPECIFIC candidate `logicalId` would carry — the tag
+   * embeds the logicalId itself, so it must be reconstructed per-entry, not once outside the loop.
    */
   hasAmbiguousMatch(sessionId: string, text: string): string | null {
     const live = this.live.get(sessionId);
@@ -5558,6 +5698,8 @@ export class PtyHost {
     const sig = textSignature(text);
     for (const [logicalId, entry] of live.ambiguousDispatches) {
       if (entry.len === sig.len && entry.hash === sig.hash) return logicalId;
+      const markedSig = textSignature(framePossibleDuplicate(text, logicalId));
+      if (entry.len === markedSig.len && entry.hash === markedSig.hash) return logicalId;
     }
     return null;
   }

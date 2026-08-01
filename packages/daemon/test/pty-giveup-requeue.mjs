@@ -78,6 +78,12 @@ console.log = (...args) => { if (typeof args[0] === "string" && args[0].startsWi
 console.error = (...args) => { if (typeof args[0] === "string" && args[0].startsWith("[submit]")) submitLog.push(args[0]); realConsoleError(...args); };
 const giveUpLinesFor = (sid) => submitLog.filter((l) => l.startsWith(`[submit] ${sid} `) && l.includes("GIVE-UP"));
 
+// Card 78e4b3f2: a genuine physical RE-DELIVERY (an in-session requeue actually redrained, or a
+// cross-remint) is now FRAMED with this prefix so the recipient can tell it apart from new direction —
+// see framePossibleDuplicate's own doc (pty/host.ts). Applied only at the actual write, never while an
+// entry merely sits requeued/held — `QueuedMessage.text` (what `getPendingEntries` reads) stays pristine.
+const POSSIBLE_DUP_PREFIX = "[loom:possible-duplicate root:";
+
 const tmpHome = path.join(os.tmpdir(), `loom-giveuprequeue-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
@@ -186,7 +192,7 @@ try {
   {
     const SID = "sess-requeue-basic";
     const TEXT = "LOST_MESSAGE_BUT_RECOVERED_ONCE";
-    const { bodyCount, entryCount } = spawnReady(SID);
+    const { bodyCount, entryCount, written } = spawnReady(SID);
     const r = host.enqueueStdin(SID, TEXT);
     check("(1) setup: immediate idle-submit delivered, busy armed", r.delivered === true && busyLog[SID].at(-1) === true);
     check("(1) setup: nothing queued yet (this went out immediately)", host.getPendingEntries(SID).length === 0);
@@ -199,6 +205,11 @@ try {
       host.getPendingEntries(SID).length === 1 && host.getPendingEntries(SID)[0].text === TEXT);
     check("(1) busy stays false — give-up does not itself force an immediate re-drain",
       busyLog[SID].at(-1) === false);
+    // Card 78e4b3f2 — RECIPIENT-SIDE LEGIBILITY, positive control: the ORIGINAL write (the only one so far)
+    // must carry NO possible-duplicate marker — only a RE-delivery gets framed (see framePossibleDuplicate's
+    // own doc, pty/host.ts). A test that can't show the marker ABSENT here isn't proof it's ever present.
+    check("(1) card 78e4b3f2 positive control: the ORIGINAL write carries NO possible-duplicate marker",
+      !written().includes(POSSIBLE_DUP_PREFIX));
 
     // Simulate the daemon's own periodic reconcile tick (wired externally in production — see
     // PtyHost.reconcile's doc) — this is the real mechanism that would eventually pick this back up. Wait
@@ -215,6 +226,11 @@ try {
       entryCount() === MAX_ATTEMPTS * 2);
     check("(1) cycle 2: the message body was written to the pty TWICE (actually re-delivered, not just re-counted)",
       bodyCount(TEXT) === 2);
+    // Card 78e4b3f2 — THE FIX ITSELF: cycle 2's write is a genuine re-delivery of a message whose first
+    // write was never confirmed — it must now be FRAMED as a possible duplicate, so the recipient (reading
+    // an indistinguishable byte-identical resend before this fix) can tell it apart from new direction.
+    check("(1) card 78e4b3f2: the RETRIED write IS framed as a possible duplicate",
+      written().includes(POSSIBLE_DUP_PREFIX) && bodyCount(`${POSSIBLE_DUP_PREFIX}`) === 1);
     check("(1) BOUNDED: the message is finally gone from pending — requeue budget exhausted, dropped for real",
       host.getPendingEntries(SID).length === 0);
     // Sanity: a further reconcile tick (the ONLY thing that would pick up a requeued message) is a genuine

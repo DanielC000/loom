@@ -268,8 +268,11 @@ try {
     // been an unrecoverable total loss the instant this fires — nothing to even find here. Give it up and
     // confirm it survives exactly like population A did.
     pty.giveUpOn(wkr);
+    // Card 78e4b3f2: a re-mint's text now carries a leading possible-duplicate tag (see
+    // framePossibleDuplicate's own doc, pty/host.ts), so this checks CONTAINMENT — same as population A's
+    // equivalent check above — not exact array membership.
     check("(5) THE FIX (the actual merge-done specimen's shape): the settle nudge is RE-MINTED, never lost",
-      pty.getPending(wkr).includes("[loom:merge-done] worker abc123 merged."));
+      pty.getPending(wkr).some((t) => t.includes("[loom:merge-done] worker abc123 merged.")));
     check("(5) a session_message_gave_up event was recorded for it (was previously impossible — no record existed at all)",
       gaveUpEventsFor(wkr, r.msgId).some((e) => e.detail?.outcome === "reminted"));
     // Sentinel sender ("system") has no live session — db.getSession("system") is undefined — the

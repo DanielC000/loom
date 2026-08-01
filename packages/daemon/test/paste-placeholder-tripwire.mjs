@@ -43,7 +43,7 @@ const {
   detectBarePastePlaceholderTripwire, couldCliCollapseToPlaceholder, isBarePastedTextPlaceholder,
   isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG,
 } = await import("../dist/orchestration/paste-tripwire.js");
-const { PtyHost } = await import("../dist/pty/host.js");
+const { PtyHost, framePossibleDuplicate } = await import("../dist/pty/host.js");
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 const USAGE = { input_tokens: 100, output_tokens: 10 };
@@ -369,6 +369,40 @@ try {
       newWarnings[0]?.includes("ALSO collapsed"));
     check("RECOVERY (k): NO third corrective turn is written — the one-shot bound holds (no infinite loop)",
       fake.writes.length === writesBeforeEscalate);
+  }
+  // (l) card 78e4b3f2 REGRESSION GUARD, RED-FIRST: the recovery re-injection ITSELF can be a genuine
+  // physical RE-DELIVERY — an in-session give-up requeue that redrained marks its text
+  // `[loom:possible-duplicate root:...]` AHEAD of its own PASTE_RECOVERY_TAG (see framePossibleDuplicate's
+  // own doc, pty/host.ts; the give-up-family suite already covers HOW a message gets marked — this isolates
+  // the ONE thing in question here: does the Stop-hook's tripwire logic still recognize a MARKED recovery
+  // text as a recovery attempt). Before the fix, `isPasteRecoveryAttempt` read `live.lastPrompt` RAW, so the
+  // tag sitting in front of PASTE_RECOVERY_TAG defeated the `startsWith` check — this Stop would wrongly
+  // treat a marked recovery's own collapse as an ORIGINAL loss and schedule a SECOND corrective
+  // re-injection instead of escalating, defeating the one-shot bound.
+  {
+    const originalLostContent = "line one of a long pasted block\nline two\nfinal line l-scenario";
+    const recoveryText = buildPasteRecoveryText(originalLostContent);
+    const markedRecoveryText = framePossibleDuplicate(recoveryText, "deadbeef");
+    check("(l) setup: the marked text carries the possible-duplicate tag AHEAD of the recovery tag",
+      markedRecoveryText.startsWith("[loom:possible-duplicate root:") && !markedRecoveryText.startsWith(PASTE_RECOVERY_TAG));
+
+    const rp = host.enqueueStdin(SID, markedRecoveryText);
+    if (!rp.delivered) throw new Error(`test setup: marked recovery turn did not submit immediately (${JSON.stringify(rp)})`);
+    await sleep(120);
+    writeTranscript([
+      { type: "user", message: { content: "[Pasted text #77 +2 lines]" } }, // THIS recovery attempt ALSO collapsed
+      { type: "assistant", message: { content: [{ type: "text", text: "ok" }], usage: USAGE } },
+    ]);
+    const beforeWarn = warnLog.length;
+    const writesBeforeStop = fake.writes.length;
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+    await sleep(250); // give a (wrongly-chained) second recovery every chance to fire if this regressed
+    const newWarnings = warnLog.slice(beforeWarn);
+    check("(l) THE FIX: exactly one new warning fires for this collapse", newWarnings.length === 1);
+    check("(l) THE FIX: a MARKED recovery text's own collapse is recognized as a recovery attempt — ESCALATES, never treated as a fresh loss",
+      newWarnings[0]?.includes("ALSO collapsed"));
+    check("(l) THE FIX: NO further corrective turn is written for a marked recovery's own collapse (one-shot bound holds through the tag)",
+      fake.writes.length === writesBeforeStop);
   }
 } finally {
   console.warn = realWarn;
