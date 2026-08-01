@@ -352,6 +352,22 @@ position — is the only genuine drop: re-check `worker_list`/`worker_transcript
 state and re-dispatch or recycle it. Don't collapse the two — a queued message is handled; only a
 dead-dropped one needs re-sending.
 
+**A PARKED directive notice is not proof of loss — verify before recycling.** Loom's own redelivery
+retries are internally bounded; when they're exhausted before the engine confirms a write landed, you get
+a notice saying the message was PARKED. That is Loom's own retry budget giving up, not evidence the
+worker never received it — the underlying engine can confirm a write minutes after Loom stopped retrying
+(no established upper bound), and a late confirmation can still arrive after the notice does. Before
+treating a parked notice as a reason to `worker_recycle` or `worker_stop`+respawn, check that SPECIFIC
+message's own status — `worker_status({workerSessionId, msgId})` resolves it independently of whatever
+you've sent since, even once a newer message has become "the tracked directive." This matters doubly once
+you've sent a SECOND message to the same worker: the tracked latest-directive state moves on to the new
+one, but the first message's own resolution doesn't stop happening in the background — check it by its
+own id, don't assume the newest status covers it. If the check comes back still unresolved, give it real
+time before acting — a safe floor is on the order of several minutes, not seconds, and even that is not a
+hard ceiling; treat "no confirmation yet" as "still pending," never as "confirmed lost." A manager that
+recycles on a parked notice alone risks discarding a session that was healthy and simply slow, throwing
+away real accumulated work for nothing.
+
 **Don't double-dispatch an already-approved worker.** Once you've unblocked or approved a worker to
 proceed, a redundant "start now" / "keep driving" nudge queues on top of work already in flight — and if
 it lands while the worker is mid-report, it trips the `worker_report(done)` pending-guard (the daemon

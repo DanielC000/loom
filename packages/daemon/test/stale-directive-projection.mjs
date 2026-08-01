@@ -295,6 +295,27 @@ ev("w-parked-then-confirmed-recycled", "MGR", "session_message_gave_up", at(5), 
 ev("w-parked-then-confirmed-recycled", "MGR", "session_message_gave_up", at(10), { msgId: "m-pcr-1", rootMsgId: "m-pcr", chainDepth: 1, outcome: "parked" });
 ev("w-parked-then-confirmed-recycled", "MGR", "session_message_gave_up", at(240), { msgId: "m-pcr-1", rootMsgId: "m-pcr", outcome: "confirmed-after-park", latencyMs: 230000 });
 
+// ============ Card 867e64f1 DoD-3 — the per-message consumed/not-consumed READ, keyed to a SPECIFIC
+// msgId rather than "whichever directive is most recent". Reproduces the incident's own shape: a manager
+// sends directive #1 (which goes on to park then confirm-after-park), sends a NEWER directive #2 to the
+// SAME worker BEFORE #1 resolves, and only THEN does #1's late confirmation land. At that point
+// `directive` (staleDirectiveProjection's "latest wins" field) tracks #2, not #1 — #1's own resolution is
+// invisible there even though its durable event chain keeps existing. `worker_status(w, {msgId:"m-vfirst"})`
+// must resolve #1 independently, from the SAME durable history, regardless of what's been sent since.
+
+// (v) RED-FIRST: query an OLDER root msgId's own status after a NEWER directive has superseded it in the
+// tracked `directive` field.
+seedWorker("w-multi-directive", "MGR", { turnSeq: 0 });
+ev("w-multi-directive", "MGR", "message_worker", at(0), { msgId: "m-vfirst", turnSeqAtDelivery: 0 });
+ev("w-multi-directive", "MGR", "session_message_gave_up", at(5), { msgId: "m-vfirst", rootMsgId: "m-vfirst", chainDepth: 0, outcome: "reminted", remintedAs: "m-vfirst-1" });
+ev("w-multi-directive", "MGR", "session_message_gave_up", at(10), { msgId: "m-vfirst-1", rootMsgId: "m-vfirst", chainDepth: 1, outcome: "parked" });
+// Directive #2 sent at t=15s — BEFORE #1's confirmed-after-park at t=240s — held/unresolved (mirrors the
+// incident: the manager did not wait for #1 to resolve before sending #2). This is what supersedes #1 in
+// `directive`.
+ev("w-multi-directive", "MGR", "message_worker", at(15), { msgId: "m-vsecond" });
+// #1's late confirmation finally lands.
+ev("w-multi-directive", "MGR", "session_message_gave_up", at(240), { msgId: "m-vfirst-1", rootMsgId: "m-vfirst", outcome: "confirmed-after-park", latencyMs: 225000 });
+
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ ({
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
@@ -309,6 +330,7 @@ const client = new Client({ name: "stale-directive-test", version: "0" });
 await client.connect(clientT);
 const parse = (res) => JSON.parse(res.content[0].text);
 const status = async (id) => parse(await client.callTool({ name: "worker_status", arguments: { workerSessionId: id } }));
+const statusForMsg = async (id, msgId) => parse(await client.callTool({ name: "worker_status", arguments: { workerSessionId: id, msgId } }));
 
 // Second manager identity (MGR2) — the recycle-boundary case (u) queries as the SUCCESSOR, since
 // worker_list/worker_status are scoped to the calling manager and "w-parked-then-confirmed-recycled" is
@@ -472,6 +494,29 @@ check("(u) worker_status via the successor manager (MGR2) resolves confirmed-aft
   && uViaMgr2.directive?.msgId === "m-pcr"
   && uViaMgr2.parkedDirective === null
   && uViaMgr2.staleDirective === null);
+
+// ============ Card 867e64f1 DoD-3 — per-message consumed/not-consumed read (queriedDirective) ============
+const vNoMsgId = await status("w-multi-directive");
+check("(v) baseline: without msgId, `directive` tracks the NEWER directive (#2, m-vsecond), not #1 — proves the gap this fix closes",
+  vNoMsgId.directive?.msgId === "m-vsecond" && vNoMsgId.directive?.state === "pending"
+  && vNoMsgId.queriedDirective === undefined);
+
+const vFirst = await statusForMsg("w-multi-directive", "m-vfirst");
+check("(v) RED-FIRST: worker_status(w, {msgId:'m-vfirst'}) resolves directive #1's OWN outcome (confirmed-after-park) independently of what #2 (the tracked `directive`) currently reads",
+  vFirst.queriedDirective?.found === true
+  && vFirst.queriedDirective?.msgId === "m-vfirst"
+  && vFirst.queriedDirective?.state === "confirmed-after-park"
+  && vFirst.queriedDirective?.at === at(240)
+  // the tracked `directive` field is UNCHANGED by passing msgId — still #2, additive not a replacement
+  && vFirst.directive?.msgId === "m-vsecond");
+
+const vSecond = await statusForMsg("w-multi-directive", "m-vsecond");
+check("(v) querying the CURRENTLY-tracked msgId directly still resolves correctly (pending — genuinely unresolved, matches `directive`)",
+  vSecond.queriedDirective?.found === true && vSecond.queriedDirective?.state === "pending");
+
+const vUnknown = await statusForMsg("w-multi-directive", "does-not-exist");
+check("(v) querying a msgId never sent to this worker → found:false, state:null — distinct from a msgId that WAS sent",
+  vUnknown.queriedDirective?.found === false && vUnknown.queriedDirective?.state === null && vUnknown.queriedDirective?.at === null);
 
 // ============================ worker_status mirrors worker_list ============================
 const sStale = await status("w-stale");

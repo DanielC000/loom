@@ -470,6 +470,44 @@ export function resolveDirectiveOutcome(
 }
 
 /**
+ * Card 867e64f1 DoD-3 — the manager-facing per-message consumed/not-consumed read, keyed to a SPECIFIC
+ * `msgId` rather than "whichever directive is most recent" (`staleDirectiveProjection`'s own `directive`
+ * field). Both `staleDirectiveProjection` and the worker-facing `directive_status` tool already resolve a
+ * chain via `resolveDirectiveOutcome`; what neither offers is a way to re-check an OLDER root msgId once a
+ * NEWER worker_message/worker_redirect has become "the tracked directive" — `staleDirectiveProjection`
+ * scans backward and keeps only the LATEST `message_worker`/`redirect_worker` event by design (see its own
+ * "latest wins" doc), so an earlier directive's own resolution is invisible there the moment a second one
+ * is sent, even though its OWN durable event chain (give-up/re-mint/park/confirmed-after-park) keeps
+ * existing and keeps resolving independently. That is exactly the incident shape this card measured: a
+ * manager sent directive #2 before directive #1 had resolved, and had no way — while #2 was outstanding —
+ * to re-ask "did #1 specifically land?"
+ *
+ * `msgId` here is the ROOT msgId a manager's own worker_message/worker_redirect call returned to it —
+ * the SAME id `resolveDirectiveOutcome`'s callers already key on (see that function's own doc: a mid-chain
+ * remint id is never handed to the sender and would be meaningless to query). `found:false` means this
+ * worker has no `message_worker`/`redirect_worker` event carrying that exact root msgId at all — a
+ * distinct signal from `state:null` on a msgId that WAS sent but has no further resolution (there is no
+ * such case: every found root either resolves via `resolveDirectiveOutcome` or is defensively `pending`).
+ */
+function directiveByMsgId(
+  events: OrchestrationEvent[], msgId: string,
+): { msgId: string; found: boolean; state: "pending" | "delivered" | "parked" | "confirmed-after-park" | null; at: string | null } {
+  const directiveEvent = events.find((e) => {
+    if (e.kind === "message_worker") return e.detail?.msgId === msgId;
+    if (e.kind === "redirect_worker") return e.detail?.queuedMsgId === msgId;
+    return false;
+  });
+  if (!directiveEvent) return { msgId, found: false, state: null, at: null };
+  const outcome = resolveDirectiveOutcome(events, directiveEvent, msgId);
+  const at =
+    outcome.state === "parked" ? outcome.parkedAt
+    : outcome.state === "confirmed-after-park" ? outcome.confirmedAt
+    : outcome.state === "delivered" ? outcome.deliveredAt
+    : null;
+  return { msgId, found: true, state: outcome.state, at };
+}
+
+/**
  * Card 35c96aa6 — walk `sessionId`'s OWN `recycledFrom` ancestor chain, self included, bounded/cycle-
  * guarded. Same shape as `lineageRootId` (sessions/platform-lead-prompt.ts), but returns the FULL chain
  * instead of just the root: `directiveDeliveriesForCaller` needs every ancestor's own event history, not
@@ -1859,10 +1897,10 @@ export class OrchestrationMcpRouter {
     server.registerTool(
       "worker_status",
       {
-        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `archivedWithoutReport` (see worker_list) — true only when this worker's pty EXITED WITHOUT EVER CALLING worker_report and the strand is still unresolved; NEVER true for a worker that reported (even `noChanges`) and cleanly auto-retired. Also includes `directive` (see worker_list) — your most recent worker_message OR worker_redirect's raw resolved state (`\"none\"|\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`), whichever you sent most recently. Also includes `staleDirective` (see worker_list) — a delivered worker_message or worker_redirect with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `parkedDirective` (see worker_list) — a worker_message or HELD worker_redirect Loom gave up redelivering entirely (exhausted its internal retry/re-mint budget with no confirmed hand-off); mutually exclusive with `staleDirective`, STICKY (a worker_report does NOT clear it — only a newer worker_message or worker_redirect does — OR a late confirming hook resolving it to `directive.state:\"confirmed-after-park\"`, see worker_list's own docs for that third state), and the signal that catches a directive that never reached the worker at all — re-send it, UNLESS `directive.state` already reads `\"confirmed-after-park\"`, in which case the original landed and resending would duplicate it. (A worker_redirect is tracked this way on either delivery path — held or immediately-delivered; see worker_redirect's own docs.) Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent means the engine is alive and emitting, stale means it may be wedged; neither proves the work is actually converging (see worker_list for why, and what to check instead). Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works.",
-        inputSchema: strictShape({ workerSessionId: z.string().optional() }),
+        description: "Get the full session record for one of your workers, by workerSessionId. Includes the derived `reportedState` (done|blocked|null) + `awaitingReview` flag — set when the worker has called worker_report and is idle awaiting your review, cleared once it resumes a turn / is merged. Also includes `archivedWithoutReport` (see worker_list) — true only when this worker's pty EXITED WITHOUT EVER CALLING worker_report and the strand is still unresolved; NEVER true for a worker that reported (even `noChanges`) and cleanly auto-retired. Also includes `directive` (see worker_list) — your most recent worker_message OR worker_redirect's raw resolved state (`\"none\"|\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`), whichever you sent most recently. Also includes `staleDirective` (see worker_list) — a delivered worker_message or worker_redirect with no worker_report since, once several of the worker's own real turns have passed with no report. Also includes `parkedDirective` (see worker_list) — a worker_message or HELD worker_redirect Loom gave up redelivering entirely (exhausted its internal retry/re-mint budget with no confirmed hand-off); mutually exclusive with `staleDirective`, STICKY (a worker_report does NOT clear it — only a newer worker_message or worker_redirect does — OR a late confirming hook resolving it to `directive.state:\"confirmed-after-park\"`, see worker_list's own docs for that third state), and the signal that catches a directive that never reached the worker at all — re-send it, UNLESS `directive.state` already reads `\"confirmed-after-park\"`, in which case the original landed and resending would duplicate it. (A worker_redirect is tracked this way on either delivery path — held or immediately-delivered; see worker_redirect's own docs.) Also includes `lastEngineOutputAt`, the intra-turn liveness signal (see worker_list) — recent means the engine is alive and emitting, stale means it may be wedged; neither proves the work is actually converging (see worker_list for why, and what to check instead). Called with NO workerSessionId, it returns the fleet view (same as worker_list) so a reflexive no-arg call just works. OPTIONAL `msgId`: `directive`/`staleDirective`/`parkedDirective` above only ever track your MOST RECENT worker_message/worker_redirect to this worker — the instant you send a newer one, an OLDER directive's own resolution becomes invisible there even though it keeps resolving on its own. Pass the ROOT msgId a PRIOR worker_message/worker_redirect call returned to you (never a re-mint id — you were never handed one) to get `queriedDirective: {msgId, found, state, at}` for THAT SPECIFIC directive regardless of what you've sent since: `found:false` means this worker has no record of that root msgId at all; `found:true` gives its own `state` (`\"pending\"|\"delivered\"|\"parked\"|\"confirmed-after-park\"`) independent of the tracked `directive` field. This is the per-message consumed/not-consumed read — check a specific earlier directive before treating a `parked` notice about it as a reason to recycle or re-spawn, even after you've since sent something newer to the same worker.",
+        inputSchema: strictShape({ workerSessionId: z.string().optional(), msgId: z.string().optional() }),
       },
-      async ({ workerSessionId }) => {
+      async ({ workerSessionId, msgId }) => {
         // No id → fleet view (alias worker_list), so worker_status({}) never throws a schema error.
         if (!workerSessionId) return ok(await fleetView());
         const w = selfHealWorkerLink(workerSessionId, "worker_status");
@@ -1874,6 +1912,7 @@ export class OrchestrationMcpRouter {
           ...reportedProjection(w.id),
           ...staleDirectiveProjection(w.id, w.turnSeq ?? 0),
           ...archivedWithoutReport(w.id),
+          ...(msgId ? { queriedDirective: directiveByMsgId(db.listEventsForWorker(w.id), msgId) } : {}),
         });
       },
     );
