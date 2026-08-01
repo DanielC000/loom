@@ -171,6 +171,17 @@ interface RunResult {
 }
 
 /**
+ * Card 545ef479 (Defect 1): the DISTINGUISHABLE outcome of the most recent {@link CodescapeSupervisor.checkBuildDrift}
+ * call — `"match"` and `"mismatch"` are genuine drift-checked answers; the two `"not-checked:*"` variants
+ * are an honest UNKNOWN (no comparable build id on one side) and must never look like `"match"` in the log
+ * or in {@link CodescapeSupervisor.getDriftCheckState}. `"not-checked:installed-read-failed"` is its own
+ * bucket too (not left at a stale prior value) — a genuine couldn't-read is a THIRD kind of unknown,
+ * distinct from an honest `build: null` answer, even though both were previously silent, byte-identical
+ * early returns.
+ */
+type DriftCheckState = "match" | "mismatch" | "not-checked:running-absent" | "not-checked:installed-null" | "not-checked:installed-read-failed";
+
+/**
  * Run a child process to completion ASYNCHRONOUSLY, resolving a {@link RunResult}. NEVER rejects — a
  * spawn error, non-zero exit, or timeout all resolve `ok:false`. Captures a bounded stdout+stderr tail
  * for diagnostics. Mirrors `python/venv.ts`'s `runAsync` (a fresh copy: different subsystem, same
@@ -423,6 +434,27 @@ export class CodescapeSupervisor {
    */
   private lastInstalledBuildFailureReason: string | null = null;
   /**
+   * Card 545ef479 (Defect 1): the last DISTINGUISHABLE {@link DriftCheckState}, latched so a
+   * TRANSITION is logged/exposed once rather than every ~30s tick — mirrors
+   * {@link lastInstalledBuildFailureReason}'s discipline. `null` until the first probe tick that reaches
+   * {@link checkBuildDrift} completes. Exposed via {@link getDriftCheckState} so "drift detection is
+   * running and finding nothing" (`"match"`) is never silently identical to "drift detection is inert"
+   * (a `"not-checked:*"` state) — before this field existed, both were pure early-returns with zero
+   * signal at all, downstream-indistinguishable. Reset on {@link stop}/{@link start}, same as every other
+   * drift-tracking field — a fresh supervisor lifetime starts with no drift-check memory.
+   */
+  private driftCheckState: DriftCheckState | null = null;
+  /**
+   * Card 545ef479 (Defect 2): the HTTP status of the last `/graph/health` response that ARRIVED but was
+   * not `res.ok` (e.g. a 500), or `null` if none is currently latched. A response that arrives — even an
+   * error one — is proof the process is alive and serving; it is NOT wedge evidence (only a genuine
+   * no-answer is), so {@link probeHealth} never counts it toward {@link consecutiveHealthFailures}. This
+   * latch exists purely so that fact is reported ONCE per distinct status (not once per ~30s tick
+   * forever) and its recovery (back to 200) is announced once too — same discriminator discipline as
+   * {@link lastInstalledBuildFailureReason}. Reset on {@link stop}/{@link start}.
+   */
+  private lastHealthAnsweredErrorStatus: number | null = null;
+  /**
    * Test seam: count of {@link probeHealth} invocations that ran to full completion (a tick skipped by the
    * `probeInFlight` guard does NOT count). A REAL subprocess spawn now sits inside every successful probe
    * (`checkBuildDrift` -> `readInstalledBuild`), so the number of probes that complete in any given
@@ -523,6 +555,11 @@ export class CodescapeSupervisor {
     return this.versionProbeAttempts;
   }
 
+  /** Diagnostic/test seam — see {@link driftCheckState}. `null` before the first probe tick completes. */
+  getDriftCheckState(): DriftCheckState | null {
+    return this.driftCheckState;
+  }
+
   /**
    * Run `codescape ingest <repoPath>` from the shared `homeDir` (creating it if absent). Async, bounded,
    * NEVER throws — a failure is logged + reflected in the returned outcome, never escapes. Public so a
@@ -592,6 +629,8 @@ export class CodescapeSupervisor {
       this.driftCandidateBuild = null;
       this.driftCandidateFirstSeenAt = null;
       this.lastExhaustedDriftAnnounced = null;
+      this.driftCheckState = null;
+      this.lastHealthAnsweredErrorStatus = null;
       this.spawnServe();
       this.startHealthMonitor();
       console.log(`[boot] codescape on (CLI detected at "${codescapeBinCandidate(dbPath)}"; port ${this.port}, cwd ${this.homeDir}, ${repoPaths.length} project(s) ingested)`);
@@ -639,6 +678,8 @@ export class CodescapeSupervisor {
     this.driftCandidateBuild = null;
     this.driftCandidateFirstSeenAt = null;
     this.lastExhaustedDriftAnnounced = null;
+    this.driftCheckState = null;
+    this.lastHealthAnsweredErrorStatus = null;
     if (this.child) {
       try { this.child.kill(); } catch { /* best-effort */ }
       this.child = null;
@@ -767,6 +808,13 @@ export class CodescapeSupervisor {
    * {@link healthProbeFailureThreshold} consecutive failures (reset to 0 by any success — see
    * `spawnServe`'s own reset on a fresh spawn) counts as a wedge.
    *
+   * Card 545ef479 (Defect 2): "failure" here means the request never got an answer at all (timeout /
+   * connection refused / network error — `res.status` absent). A response that DID arrive, even a 5xx, is
+   * proof the process is alive and serving — it is reported (once, latched) but never counted toward
+   * {@link consecutiveHealthFailures} and never kills the child. Before this, any non-2xx (including a 500
+   * meaning "I can't determine something") was scored as a wedge failure — three consecutive 500s killed a
+   * perfectly healthy process.
+   *
    * On a sustained failure, this does NOT call `scheduleRestart`/`spawnServe` itself — it kills the live
    * child. That kill is a REAL process death, so it fires the exact same `child.on("exit")` → `onDeath` →
    * `scheduleRestart` path a crash would (same `restartAttempts` budget, same backoff, same give-up
@@ -788,7 +836,27 @@ export class CodescapeSupervisor {
       if (this.stopped) return;
       if (res.ok) {
         this.consecutiveHealthFailures = 0;
+        if (this.lastHealthAnsweredErrorStatus != null) {
+          console.warn(`[codescape] /graph/health recovered — was answering HTTP ${this.lastHealthAnsweredErrorStatus}, now 200`);
+          this.lastHealthAnsweredErrorStatus = null;
+        }
         await this.checkBuildDrift(res.json);
+        return;
+      }
+      if (res.status != null) {
+        // Card 545ef479 (Defect 2): a response ARRIVED — even an error one (e.g. a 500 from a route that
+        // can't determine something) — which is proof the process is ALIVE and serving. That is the
+        // opposite of wedge evidence (only a genuine no-answer — timeout/connection failure — is), so this
+        // does NOT count toward consecutiveHealthFailures and must never reach the kill below. It also does
+        // NOT call checkBuildDrift: `res.json` was never a trustworthy health payload, and widening `res.ok`
+        // to accept 5xx would silently re-enable drift-checking on a body we could not parse — this is its
+        // own third outcome, not a relaxed version of either existing one. Latched so the fact is reported
+        // ONCE per distinct status, not on every ~30s tick forever.
+        this.consecutiveHealthFailures = 0;
+        if (res.status !== this.lastHealthAnsweredErrorStatus) {
+          this.lastHealthAnsweredErrorStatus = res.status;
+          console.warn(`[codescape] /graph/health answered HTTP ${res.status} (process alive and serving, just couldn't determine something) — NOT counted as a wedge; only a no-answer is wedge evidence`);
+        }
         return;
       }
       this.consecutiveHealthFailures++;
@@ -804,6 +872,13 @@ export class CodescapeSupervisor {
   }
 
   /**
+   * Card 545ef479 (Defect 1): every exit path of this method — including its two silent no-op returns
+   * below (running build absent, installed build honestly `null`) — now latches a {@link DriftCheckState}
+   * via {@link announceDriftCheckState} before returning. Before this, those two no-ops and the ordinary
+   * steady-state MATCH were THREE code paths that all produced zero observable signal — "drift detection
+   * is running and finding nothing" was byte-identical, downstream, to "drift detection is inert". See
+   * {@link getDriftCheckState} for the diagnostic/test seam this exposes.
+   *
    * Card 90550a97: build-id drift detection, layered onto a SUCCESSFUL health probe above. Compares the
    * RUNNING serve's `build` (from THIS `/graph/health` response) against the INSTALLED binary's build
    * (a fresh, bounded read below) — NEVER `healthJson`'s `version` field, which is the static
@@ -856,9 +931,31 @@ export class CodescapeSupervisor {
    * classified result and the {@link lastInstalledBuildFailureReason} latch below for how "loud" stays
    * bounded to once per distinct reason, not once per 30s tick forever.
    */
+  /**
+   * Card 545ef479 (Defect 1): latch-and-announce a {@link DriftCheckState} TRANSITION only — never on
+   * every ~30s probe tick, mirroring {@link lastInstalledBuildFailureReason}'s discipline. A steady-state
+   * `"match"` (or a steady `"not-checked:*"`) logs nothing further after its first announcement; only a
+   * genuine change of state (including into/out of an UNKNOWN bucket) is worth a human's attention.
+   * `console.log`, not `console.warn` — a mismatch is already loudly warned in detail by the caller's own
+   * existing branches (deferring/STABLE/UNRESOLVED); this line exists so the coarse three-way signal
+   * (match / mismatch / not-checked) is ALSO visible without reading those detailed lines.
+   */
+  private announceDriftCheckState(state: DriftCheckState): void {
+    if (state === this.driftCheckState) return;
+    this.driftCheckState = state;
+    console.log(`[codescape] drift-check state: ${state}`);
+  }
+
   private async checkBuildDrift(healthJson: unknown): Promise<void> {
     const runningBuild = (healthJson as { build?: unknown } | null)?.build;
-    if (typeof runningBuild !== "string" || runningBuild.length === 0) return; // absent or null -> no-op
+    if (typeof runningBuild !== "string" || runningBuild.length === 0) {
+      // Card 545ef479 (Defect 1): this used to be a bare, silent early return — byte-identical downstream
+      // to a steady-state MATCH (also silent) and to an honest installed-side null (also silent below).
+      // "Drift detection is running and finding nothing" must never be indistinguishable from "drift
+      // detection is inert" — announce the transition (latched, not every tick).
+      this.announceDriftCheckState("not-checked:running-absent");
+      return; // absent or null -> no-op
+    }
     const installed = await this.readInstalledBuild();
     // stop() may have raced this in-flight read (the version-probe subprocess was already spawned when
     // stop() ran) — abandon silently. Otherwise a stray warn/kill could land on an already-dead instance,
@@ -873,6 +970,7 @@ export class CodescapeSupervisor {
       // is a per-instance field reset in start()/stop() — verified called at most once each per daemon
       // process (constructed + started once at boot in index.ts, never stopped in normal operation) — so
       // in practice this also means "not again this daemon's lifetime".
+      this.announceDriftCheckState("not-checked:installed-read-failed");
       if (installed.reason !== this.lastInstalledBuildFailureReason) {
         console.warn(`[codescape] cannot read the INSTALLED build id — drift detection is inert until this resolves (${installed.reason}). Won't repeat this warning again this daemon lifetime unless the reason changes.`);
         this.lastInstalledBuildFailureReason = installed.reason ?? null;
@@ -887,9 +985,16 @@ export class CodescapeSupervisor {
       console.warn(`[codescape] drift detection recovered — installed build id is readable again (was inert: ${this.lastInstalledBuildFailureReason})`);
     }
     this.lastInstalledBuildFailureReason = null; // any non-failed read (a real build OR an honest null) resets the latch
-    if (installed.build == null) return; // an HONEST "no build id available" answer — fail-safe, SILENT: not a failure to report
+    if (installed.build == null) {
+      // Card 545ef479 (Defect 1): same silent-collapse hazard as the running-absent branch above — an
+      // HONEST "no build id available" answer stays a fail-safe no-op (never a failure to report), but the
+      // STATE is now announced (latched) so it reads distinguishably from MATCH rather than as more silence.
+      this.announceDriftCheckState("not-checked:installed-null");
+      return;
+    }
     const installedBuild = installed.build;
     if (installedBuild === runningBuild) {
+      this.announceDriftCheckState("match");
       // The running side has caught up (or the installed side moved back to it) — nothing left to watch.
       // Clears any in-progress stability window so a LATER new drift starts a fresh one, not a stale one.
       this.driftCandidateBuild = null;
@@ -902,6 +1007,7 @@ export class CodescapeSupervisor {
       }
       return;
     }
+    this.announceDriftCheckState("mismatch");
     if (installedBuild === this.lastDriftRestartInstalledBuild) {
       // Card ebd755ab (Gap 1): the one-restart-per-build guard is correct policy (unchanged below) — the
       // defect was that this path returned silently forever, making a permanently-broken deploy

@@ -22,8 +22,14 @@
 //     handler deliberately never responds (no `res.end`, connection just sits open) — simulating a serve
 //     that's alive and port-bound but genuinely not answering, the exact "wedged" case the supervisor's
 //     periodic health probe exists to catch. Checked live per-request (not just at spawn), so a test can
-//     flip a running fixture from healthy to wedged (and back) by creating/removing that file. The
-//     `build` field is driven by env `FAKE_CODESCAPE_HEALTH_BUILD` (default `"fake"` — matches the
+//     flip a running fixture from healthy to wedged (and back) by creating/removing that file.
+//     Card 545ef479: env `FAKE_CODESCAPE_HEALTH_500_FILE` — same shape, checked live per-request — answers
+//     a 500 (with a JSON body) instead of 200 while that path exists, simulating a route that ANSWERS but
+//     can't determine something. Deliberately distinct from the wedge file: the connection is accepted AND
+//     a response is sent, never left hanging — this is NOT the wedge case, it is what {@link
+//     ../../src/codescape/supervisor.ts}'s health probe must treat as a THIRD outcome (arrived, but not
+//     `res.ok`), never counted as wedge evidence.
+//     The `build` field is driven by env `FAKE_CODESCAPE_HEALTH_BUILD` (default `"fake"` — matches the
 //     `--version` default below, so an env-untouched test sees NO drift): the literal `"__ABSENT__"`
 //     omits the `build` key entirely (simulating a pre-build-id serve), `"__NULL__"` sends `build:null`
 //     (simulating a build that genuinely can't resolve), anything else is sent verbatim. `version` is
@@ -124,6 +130,17 @@ if (args[0] === "ingest") {
       if (req.method === "GET" && req.url === "/graph/health") {
         const wedgeFile = process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
         if (wedgeFile && fs.existsSync(wedgeFile)) return; // simulate wedged: accept, never respond
+        // Card 545ef479 (Defect 2): env FAKE_CODESCAPE_HEALTH_500_FILE, checked live per-request (same
+        // shape as the wedge file above) — when set AND that path exists, answers a 500 instead of 200,
+        // simulating a route that genuinely can't determine something (e.g. their own from-source build-id
+        // resolution failing) WITHOUT ever failing to respond at all. This is deliberately NOT the wedge
+        // case: the connection is accepted AND answered, just with an error status.
+        const errorFile = process.env.FAKE_CODESCAPE_HEALTH_500_FILE;
+        if (errorFile && fs.existsSync(errorFile)) {
+          res.writeHead(500, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "simulated internal error" }));
+          return;
+        }
         const rawBuild = process.env.FAKE_CODESCAPE_HEALTH_BUILD;
         const rawVersion = process.env.FAKE_CODESCAPE_HEALTH_VERSION;
         const body = { live: true, projects: registered.size, version: rawVersion === undefined ? "fake" : rawVersion };
