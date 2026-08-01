@@ -301,6 +301,21 @@ export function auditDiscoveryAgainstGit(testDir) {
   return { inGitNotWalked, walkedNotInGit };
 }
 
+// Card 05724a32: `--count`/`--list`/`--help` were the only recognized flags, but an unrecognized one
+// (a typo, e.g. `--nope`) fell straight through to a full suite run — ~20min of CPU, silently, since the
+// broken invocation and a bare `node scripts/test-daemon.mjs` produced identical observable behaviour.
+// Pure classifier, exported so a test can exercise every outcome directly against the REAL flag set —
+// never a hand-copied duplicate that could drift — without spawning this script as a subprocess (which
+// for the "no flags" case would nest an entire hermetic-suite run inside a test).
+export const KNOWN_CLI_FLAGS = new Set(["--count", "--list", "--help", "-h"]);
+
+export function classifyCliArgs(argv) {
+  if (argv.some((a) => a === "--help" || a === "-h")) return { mode: "help" };
+  const unrecognized = argv.filter((a) => !KNOWN_CLI_FLAGS.has(a));
+  if (unrecognized.length) return { mode: "error", unrecognized };
+  return { mode: (argv.includes("--count") || argv.includes("--list")) ? "count" : "run" };
+}
+
 const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS, notHermeticNames: NOT_HERMETIC_NAMES } = discoverHermeticTests(TEST_DIR);
 
 // Ceiling — unchanged. `LOOM_GATE_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
@@ -453,11 +468,34 @@ const isMain = selfPath !== null && argvPath !== null && selfPath === argvPath;
 const resolutionThrew = selfResolved.threw || argvResolved.threw;
 
 if (isMain) {
+  // Card 05724a32: validate argv FIRST, before any discovery work, and FAIL CLOSED — an unrecognized flag
+  // is a hard error, never a warn-then-proceed, because a warning that scrolls past on a run which then
+  // takes ~20 minutes is the bug with extra text, not a fix.
+  const cliMode = classifyCliArgs(process.argv.slice(2));
+
+  if (cliMode.mode === "help") {
+    console.log([
+      "Usage: node scripts/test-daemon.mjs [--count | --list | --help]",
+      "",
+      "  (no flags)   run the full hermetic daemon suite",
+      "  --count      print discovery counts only (no tests run)",
+      "  --list       alias for --count",
+      "  --help, -h   print this usage and exit",
+    ].join("\n"));
+    process.exit(0);
+  }
+  if (cliMode.mode === "error") {
+    console.error(`❌ test-daemon.mjs: unrecognized argument(s): ${cliMode.unrecognized.join(", ")}`);
+    console.error(`   Supported flags: ${[...KNOWN_CLI_FLAGS].sort().join(", ")}`);
+    console.error("   Refusing to fall through to a full suite run on an unrecognized argument — run with --help for usage.");
+    process.exit(1);
+  }
+
   // Card fa52f555 Part 1: a `--count`/`--list` invocation does discovery ONLY — no test spawns — so a
   // manager can read the authoritative number without paying for a full run. Read here, before any of the
   // loud discovery-integrity refusals below, so those refusals also cover this mode (a count computed over
   // a broken discovery state would itself be a lie).
-  const countOnly = process.argv.includes("--count") || process.argv.includes("--list");
+  const countOnly = cliMode.mode === "count";
 
   if (DISCOVERY_VIOLATIONS.length) {
     // Card b122c7d4's positive-control scenario: a file under test/ that is neither underscore-prefixed
