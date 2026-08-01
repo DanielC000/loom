@@ -30,7 +30,22 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs in spawn()). Set BEFORE any
 // dynamic import of a dist/ module.
-const tmpHome = path.join(os.tmpdir(), `loom-rotate-${Date.now()}-${process.pid}`);
+//
+// RUN_SUFFIX (card 7d70b27b): shared by tmpHome AND every engine session id below. engineTranscriptPath
+// resolves under the REAL os.homedir(), not tmpHome — a FIXED literal engine id (the old
+// "engine-session-alpha/beta/gamma/delta") is therefore visible to resolveTranscriptFile's cross-project
+// fallback scan on EVERY run, not just this one. If a run's own cleanup (below, in `finally`) is ever
+// skipped — a SIGKILL from an external test-runner timeout, an EPERM/EBUSY on Windows — the leftover
+// file survives under a fixed name forever. A LATER run then does its own `fs.existsSync(direct)` miss
+// (correct — that file doesn't exist in THIS run's own dir) and falls through to the global scan, which
+// finds the OLD run's leftover and returns it as if it were fresh: proven in production against merge
+// gate c3233e27 (`gamma` resolved to a stale `found-but-no-usage-line` file where the test required
+// `file-not-found`). Suffixing every id here (not just the directory) closes that hole regardless of
+// WHY a prior cleanup failed — a leftover with a stale suffix can never again collide with a fresh run's
+// own (differently-suffixed) lookups. Cleanup (below) still matters too: without it the leftover
+// directories accumulate under ~/.claude/projects forever, one per run.
+const RUN_SUFFIX = `${Date.now()}-${process.pid}`;
+const tmpHome = path.join(os.tmpdir(), `loom-rotate-${RUN_SUFFIX}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
@@ -87,8 +102,8 @@ const events = {
 const host = new TestPtyHost(events);
 const watcher = new ContextWatcher({ db, pty: { isAlive: (id) => host.isAlive(id), enqueueStdin: (id, t) => host.enqueueStdin(id, t) }, ratio: 0 });
 
-const ENGINE_1 = "engine-session-alpha";
-const ENGINE_2 = "engine-session-beta"; // the rotated (untracked-until-fixed) id
+const ENGINE_1 = `engine-session-alpha-${RUN_SUFFIX}`;
+const ENGINE_2 = `engine-session-beta-${RUN_SUFFIX}`; // the rotated (untracked-until-fixed) id
 
 const writeTranscript = (engineId, lines) => {
   const file = engineTranscriptPath(tmpHome, engineId);
@@ -151,7 +166,7 @@ try {
     engineIdEvents.length === eventsCountBefore && warnLog.length === warnCountBefore);
 
   // === 8) The null-branch fail-visible logging DISTINGUISHES its two causes (both used to be silent). ===
-  const ENGINE_3 = "engine-session-gamma";
+  const ENGINE_3 = `engine-session-gamma-${RUN_SUFFIX}`;
   host.deliverHook(SID, { hook_event_name: "SessionStart", session_id: ENGINE_3 }); // rotate again, no transcript written yet
   const ctxBefore8 = db.getSession(SID)?.ctxInputTokens;
   host.deliverHook(SID, { hook_event_name: "Stop", session_id: ENGINE_3 }); // no engine-3 transcript on disk at all
@@ -169,7 +184,7 @@ try {
 
   // === 9) Card dbc6bcac: a PERSISTENTLY-missing transcript (no file ever appears) must not re-pay the
   // O(projects) fallback scan/log on every subsequent Stop — throttled to once per session per miss. ===
-  const ENGINE_4 = "engine-session-delta";
+  const ENGINE_4 = `engine-session-delta-${RUN_SUFFIX}`;
   host.deliverHook(SID, { hook_event_name: "SessionStart", session_id: ENGINE_4 }); // rotate again, no transcript ever written for this one
   host.deliverHook(SID, { hook_event_name: "Stop", session_id: ENGINE_4 }); // first miss — diagnosed + logged
   const engine4WarnCountAfterFirst = warnLog.filter((w) => w.includes("context-stats read failed (file-not-found") && w.includes(ENGINE_4)).length;
@@ -186,10 +201,16 @@ try {
   // Also clean up the transcript fixtures written under the REAL ~/.claude/projects (engineTranscriptPath
   // resolves there, not under tmpHome — mirrors context-stats.mjs's / paste-placeholder-tripwire.mjs's
   // own cleanup of the same real-home fixture pattern).
-  try {
+  {
     const dir = path.dirname(engineTranscriptPath(tmpHome, ENGINE_1));
-    fs.rmSync(dir, { recursive: true, force: true });
-  } catch { /* ignore */ }
+    // Retry (Windows can transiently EBUSY/EPERM a just-closed file handle) — mirrors the same retry
+    // shape agent-runs-hardening.mjs/companion-transcript-read.mjs already use for their own tmpHome
+    // removal. A silently-swallowed single-shot failure here is exactly how a leftover survives to
+    // poison a later run (see the RUN_SUFFIX comment above) — best-effort, but not zero-effort.
+    for (let i = 0; i < 5; i++) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); break; } catch { await sleep(50); }
+    }
+  }
 }
 
 console.log(failures === 0

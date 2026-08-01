@@ -31,6 +31,33 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
  * common case), else scan `~/.claude/projects/*` for `<engineSessionId>.jsonl` — the id is a
  * globally-unique UUID, so a match is unambiguous regardless of how Claude encoded the dir. This
  * makes transcript reads resilient to any future dir-encoding drift. Returns null if not found.
+ *
+ * DoD-3 determination (card 7d70b27b, the second reader to ask this) — TWO SEPARATE QUESTIONS, only one
+ * of them settled by "engine ids are UUIDs":
+ *
+ * CORRECTNESS — can this scan resolve to the WRONG file? The global fallback scan below is
+ * CORRECT-BY-DESIGN for production and is NOT being changed here. Every real engine session id is a
+ * Claude-CLI-minted UUID, so an accidental collision between two DIFFERENT sessions is implausible — the
+ * scan's whole reason to exist (dir-encoding drift resilience, see encodeProjectDir's own doc comment)
+ * depends on exactly that global-uniqueness property. The production defect this card actually fixes
+ * lives entirely on the TEST side: `test/engine-session-rotation.mjs` used to write FIXED literal ids
+ * ("engine-session-alpha/beta/gamma/delta") instead of real UUIDs, so a leftover from one run could
+ * collide with a later run's lookup for the exact same literal name — a hazard this function's own
+ * contract doesn't create and can't detect. Any HERMETIC test that exercises this scan must mint
+ * globally-unique-shaped ids (e.g. suffixed with `${Date.now()}-${process.pid}`) for the same reason
+ * real engine ids already are unique — not because this function should scope its search.
+ *
+ * COST — what does this scan PAY, regardless of correctness? This is NOT settled by the UUID argument,
+ * and is a real, currently-unbounded, currently-growing production cost: measured against this repo's
+ * OWN dev box, `~/.claude/projects/` held 5772 directories, ~69% of them test-run leakage (a handful of
+ * `test/*.mjs` files write real-homedir fixtures — via {@link engineTranscriptPath} above — under a
+ * unique-but-never-cleaned-up directory per run; see project memory
+ * `real-homedir-transcript-leak-sibling-audit` for the accounting). `fs.readdirSync(root)` here walks
+ * EVERY one of those entries on every fallback hit, so the scan's wall-clock cost scales with however
+ * much test garbage has accumulated on the host, not with anything about the session being looked up.
+ * That's a distinct problem from this card's scope (fixing it means bounding or cleaning the leak
+ * sources, not changing this function) but it's a real, measured cost this determination should not be
+ * read as dismissing.
  */
 export function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {
   const direct = engineTranscriptPath(cwd, engineSessionId);
