@@ -232,13 +232,23 @@ try {
     worktrees.push(worktreePath);
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath, branch });
 
-    let releaseGate;
-    const fakeGate = () => new Promise((res) => { releaseGate = res; });
+    // DETERMINISTIC SYNC (manager finding, DIRECTIVE #1 on card 63bdd2cc): runWorkerGate awaits a REAL git
+    // call (computeWorktreeGateStamp) BEFORE it ever invokes the injected runGate/fakeGate — a genuine
+    // async gap this test never synchronized on, previously masked by the old 12s budget (that real git
+    // call always finished well inside 12s, so fakeGate had always already run by the time this test
+    // reached `releaseGate(...)` below). Shrinking the budget to 300ms exposed the race for real:
+    // `releaseGate` could still be undefined here. Fixed at the source — wait for PROOF fakeGate was
+    // entered (gateEnteredP), not for a budget to elapse — robust at ANY budget, per card c062a307.
+    let releaseGate, gateEntered;
+    const gateEnteredP = new Promise((r) => { gateEntered = r; });
+    const fakeGate = () => new Promise((res) => { releaseGate = res; gateEntered(); });
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate });
+    // TUNABLE-FAST (card 63bdd2cc): the injected fakeGate never resolves on its own — no real subprocess
+    // is involved here at all (unlike the completion-nudge tests, which need a REAL gate for realism) — so
+    // there is zero realism cost to shrinking the sync-wait budget via the `syncAttachBudgetMs` DI seam
+    // (card 0faaaa55). runWorkerGate still genuinely degrades to pending, just against a much smaller wait.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: fakeGate, syncAttachBudgetMs: 300 });
 
-    // The injected fakeGate never resolves on its own — runWorkerGate genuinely degrades to pending past
-    // SYNC_ATTACH_BUDGET_MS (12s, not injectable — same wait every completion-nudge test already pays).
     const first = await sessions.runWorkerGate(workerId);
     check("(e2e gate) degrades to pending past the sync-wait budget", first.settled === false);
     const opId = first.op.opId;
@@ -295,6 +305,7 @@ try {
     await owner.client.close();
     await stranger.client.close();
 
+    await gateEnteredP; // the gate is provably entered; releaseGate is assigned — no race on the budget
     releaseGate({ passed: true });
     // POLL, don't guess (card 0fa5beef's own anti-pattern — a blind sleep here races the REAL post-settle
     // work runWorkerGate does before the durable row flips to 'settled': a second computeWorktreeGateStamp

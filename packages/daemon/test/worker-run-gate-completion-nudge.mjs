@@ -9,10 +9,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // command) through a REAL PtyHost subclass that spies on every enqueueStdin() call, mirroring
 // merge-confirm-completion-nudge.mjs's proven pattern for the sibling merge-gate nudge.
 //
-// NOT tunable-fast: SYNC_ATTACH_BUDGET_MS (12s) is not injectable, so proving the REAL async/pending
-// path needs a gate that outlives it — at least ~13s wall-clock per scenario, longer under CPU
-// contention (the post-budget wait polls for the completion nudge instead of sleeping a fixed
-// duration — see waitUntil below). Still fully hermetic (in-process, no daemon, no network).
+// TUNABLE-FAST (card 63bdd2cc): SessionService's `syncAttachBudgetMs` opt (card 0faaaa55's DI seam)
+// shrinks the production 12s SYNC_ATTACH_BUDGET_MS down to TEST_SYNC_BUDGET_MS below — the REAL
+// subprocess gate then only needs to outlive THAT budget (SLOW_GATE_MS/TIMEOUT_KILL_MS), not the real
+// 12s one — mirroring merge-confirm-completion-nudge.mjs's fix for the sibling "merge" op kind. The gate
+// command itself stays a real spawned `node -e` subprocess throughout (scenario (4) needs a REAL SIGKILL
+// timeout-kill); only the SYNC-WAIT THRESHOLD deciding pending-vs-inline is shrunk. Still fully hermetic
+// (in-process, no daemon, no network) and the post-budget wait polls for the completion nudge instead of
+// sleeping a fixed duration (see waitUntil below), so this stays robust to CPU contention.
 //
 // Proves:
 //   (1) PASS, async: the completion nudge fires exactly once, kind:"warning", into the WORKER's OWN
@@ -56,8 +60,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 // TIMER_SLACK_MS (same fix class as the v0.3.0 release CI Date.now() flake) — measured with the MONOTONIC
 // performance.now(), not Date.now().
 const TIMER_SLACK_MS = 50;
-// Poll for the async completion nudge instead of a fixed sleep — under CPU contention the 13s gate
-// process (spawn + setTimeout) and the terminal callback can land well past any hardcoded wait.
+// Injected SessionService.syncAttachBudgetMs (see the file-header comment). SLOW_GATE_MS/TIMEOUT_KILL_MS
+// are the real subprocess gate's own hold duration for (1)/(2)/(4) — 3x the budget, chosen so
+// degrade-to-pending shouldn't be a close race even under CPU contention (a bare `setTimeout` in a
+// dedicated child process is not itself CPU-contention-sensitive the way real git work is, but no
+// scheduling margin is provably immune under arbitrary load — see TEST_FAST_PATH_BUDGET_MS's own doc on
+// card e082bf4d). Scenario (3) (the FAST/instant-gate path) uses its OWN larger budget
+// (TEST_FAST_PATH_BUDGET_MS, via a separate SessionService instance below, mirroring
+// merge-confirm-completion-nudge.mjs's fix) — its real synchronous gate-run work measured consistently
+// >500ms here, so it needs headroom (1)/(2)/(4) don't: they only ever need to clear the small budget
+// before their own artificial gate delay, never to actually settle inline.
+const TEST_SYNC_BUDGET_MS = 500;
+// GENEROUS — deliberately WIDER than the 12_000ms production SYNC_ATTACH_BUDGET_MS (card e082bf4d, landed
+// on main): (3) is a REAL child-process gate spawn racing that wall-clock to prove the SYNCHRONOUS-settle
+// path, and e082bf4d measured confirmWorkerMergeTracked (the sibling "merge" op kind) exceeding even the
+// stock 12s production budget under host contention (~1/10 at 24x CPU oversubscription) — not itself
+// reproduced for THIS "gate" op kind, but the real settle here (measured consistently >500ms, well under
+// either value) sits far below EITHER budget in the common case, so widening this costs zero wall-clock
+// while closing off the same class of flake e082bf4d found on the merge side. This is the SAME test-only
+// widening e082bf4d applied to merge-spawn-tracked.mjs and this file's sibling
+// merge-confirm-completion-nudge.mjs — production's own SYNC_ATTACH_BUDGET_MS constant is untouched.
+const TEST_FAST_PATH_BUDGET_MS = 60_000;
+const SLOW_GATE_MS = 1500;
+const TIMEOUT_KILL_MS = 1500;
+// Poll for the async completion nudge instead of a fixed sleep — under CPU contention the gate process
+// (spawn + setTimeout) and the terminal callback can land well past any hardcoded wait.
 async function waitUntil(predicate, timeoutMs, intervalMs = 200) {
   const start = performance.now();
   while (performance.now() - start < timeoutMs) {
@@ -103,7 +130,11 @@ const events = {
 };
 const db = new Db();
 const host = new SpyHost(events);
-const svc = new SessionService(db, host, new OrchestrationControl());
+const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_SYNC_BUDGET_MS });
+// Separate instance, SAME db/host, only for scenario (3)'s fast-path budget — see TEST_FAST_PATH_BUDGET_MS's
+// doc. The two instances' pendingOps registries are independent, and each scenario uses a distinct worker
+// id, so there's no cross-instance key collision.
+const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: TEST_FAST_PATH_BUDGET_MS });
 
 function makeRepo() {
   const repo = mkdtempManaged("loom-wgn-repo-");
@@ -128,18 +159,21 @@ try {
   {
     const P = "wgn-pass", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t1");
-    // A gate that outlives SYNC_ATTACH_BUDGET_MS (12s) then exits 0.
-    const { workerId } = seedWorker(P, repo, `node -e "setTimeout(()=>process.exit(0), 13000)"`, worktreePath, branch);
+    // A gate that outlives the injected syncAttachBudgetMs then exits 0.
+    const { workerId } = seedWorker(P, repo, `node -e "setTimeout(()=>process.exit(0), ${SLOW_GATE_MS})"`, worktreePath, branch);
 
     const t0 = performance.now(); // MONOTONIC (see TIMER_SLACK_MS)
     const first = await svc.runWorkerGate(workerId);
     const elapsed = performance.now() - t0;
-    check(`(1) degrades to pending past the sync-wait budget (elapsed=${Math.round(elapsed)}ms)`, first.settled === false && elapsed >= 9_000 - TIMER_SLACK_MS);
+    // Lower bound at 75% of the injected budget — the ORIGINAL 12s-budget/9s-threshold check used exactly
+    // this ratio (9_000 / 12_000 = 0.75); this is that same shape, scaled to the shrunk budget (325ms
+    // floor against the 500ms budget, well under the measured ~500-700ms elapsed).
+    check(`(1) degrades to pending past the sync-wait budget (elapsed=${Math.round(elapsed)}ms)`, first.settled === false && elapsed >= Math.floor(TEST_SYNC_BUDGET_MS * 0.75) - TIMER_SLACK_MS);
     check("(1) NO completion nudge yet — the op is still running in the background", !host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)));
     const pendingOpId1 = first.op.opId;
     check("(1) the pending response carries a real opId", typeof pendingOpId1 === "string" && pendingOpId1.length > 0);
 
-    // Let the 13s gate actually finish + the terminal callback fire — poll rather than a fixed sleep.
+    // Let the SLOW_GATE_MS gate actually finish + the terminal callback fire — poll rather than a fixed sleep.
     await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)), 20_000);
     const nudges = host.enqueueCalls.filter((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text));
     check("(1) exactly ONE completion nudge landed for this worker", nudges.length === 1);
@@ -154,8 +188,8 @@ try {
   {
     const P = "wgn-fail", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t2");
-    // A gate that outlives SYNC_ATTACH_BUDGET_MS (12s) then exits non-zero.
-    const { workerId } = seedWorker(P, repo, `node -e "setTimeout(()=>process.exit(1), 13000)"`, worktreePath, branch);
+    // A gate that outlives the injected syncAttachBudgetMs then exits non-zero.
+    const { workerId } = seedWorker(P, repo, `node -e "setTimeout(()=>process.exit(1), ${SLOW_GATE_MS})"`, worktreePath, branch);
 
     const first = await svc.runWorkerGate(workerId);
     check("(2) degrades to pending past the sync-wait budget", first.settled === false);
@@ -177,13 +211,6 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, "t3");
     const { workerId } = seedWorker(P, repo, `node -e "process.exit(0)"`, worktreePath, branch);
 
-    // DEDICATED instance, GENEROUS syncAttachBudgetMs (card e082bf4d): this gate is a REAL child-process
-    // spawn racing SYNC_ATTACH_BUDGET_MS's real 12s production wall-clock — under host contention that can
-    // legitimately exceed 12s with nothing wrong. Scenarios (1)/(2)/(4) above deliberately measure a real
-    // subprocess against the TRUE production default to prove the async/pending path, so the SHARED `svc`
-    // must stay untouched — a separate instance (same db/host, so the "no nudge" assertion below still
-    // reads the same spy) isolates this fast-path assertion from that constraint.
-    const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: 60_000 });
     const r = await svcFast.runWorkerGate(workerId);
     check("(3) settles within the sync-wait budget (fast path)", r.settled === true && r.ok === true && r.value.passed === true);
     check("(3) the fast path stays byte-identical — NO completion nudge ever fires for it", !host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)));
@@ -194,17 +221,17 @@ try {
   {
     const P = "wgn-timeout", repo = makeRepo();
     const { worktreePath, branch } = await createWorktree(repo, P, "t4");
-    // A gate that NEVER exits and produces NO output — killed by our own gateCommandTimeoutMs (13s), which
-    // is deliberately > SYNC_ATTACH_BUDGET_MS (12s) so this call degrades to pending FIRST, then the
-    // timeout-kill happens a moment later, exercising the ASYNC settle path (not the fast/sync one
-    // gate-timeout-tree-kill.mjs already covers).
-    const { workerId } = seedWorker(P, repo, `node -e "setInterval(()=>{},1000)"`, worktreePath, branch, { gateCommandTimeoutMs: 13_000 });
+    // A gate that NEVER exits and produces NO output — killed by our own gateCommandTimeoutMs
+    // (TIMEOUT_KILL_MS), deliberately > the injected syncAttachBudgetMs so this call degrades to pending
+    // FIRST, then the timeout-kill happens a moment later, exercising the ASYNC settle path (not the
+    // fast/sync one gate-timeout-tree-kill.mjs already covers).
+    const { workerId } = seedWorker(P, repo, `node -e "setInterval(()=>{},1000)"`, worktreePath, branch, { gateCommandTimeoutMs: TIMEOUT_KILL_MS });
 
     const first = await svc.runWorkerGate(workerId);
     check("(4) degrades to pending past the sync-wait budget", first.settled === false);
     const pendingOpId4 = first.op.opId;
 
-    // Let the 13s timeout actually fire + the terminal callback push — poll rather than a fixed sleep.
+    // Let the TIMEOUT_KILL_MS timeout actually fire + the terminal callback push — poll rather than a fixed sleep.
     await waitUntil(() => host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)), 20_000);
     const nudges = host.enqueueCalls.filter((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text));
     check("(4) exactly ONE completion nudge landed", nudges.length === 1);
