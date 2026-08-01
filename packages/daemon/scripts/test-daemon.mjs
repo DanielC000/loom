@@ -49,6 +49,117 @@ import { fileURLToPath } from "node:url";
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TEST_DIR = path.join(__dirname, "..", "test");
 
+// Card 17069e7e (DoD-2): per-file test durations, on the normal gate path, no flag required. Written
+// LOOM_HOME-relative — NOT into this worktree — because a worker's (or the merge gate's) worktree is
+// force-removed (`git worktree remove --force`, git/worktrees.ts `removeWorktree`) on the ORDINARY
+// successful-merge path (SessionService's `gcWorktreeDir`), so anything written inside it is destroyed the
+// moment the task merges. `process.env.LOOM_HOME || path.join(os.homedir(), ".loom")` duplicates
+// packages/daemon/src/paths.ts's own `LOOM_HOME` constant rather than importing it — this script is plain
+// JS, run standalone before any build, and importing the TS source (or a maybe-stale dist/) here would be
+// its own footgun. This resolves correctly for every zero-argv caller: run_gate/the merge gate (the gate
+// child inherits the daemon's full `process.env` unconditionally — see gate-runner.ts's `runGateStep`, so
+// the daemon's real LOOM_HOME is just there), a human's local `pnpm --filter @loom/daemon test:daemon` (their
+// own real ~/.loom — the same daemon they're running), and CI (ci.yml/release.yml — lands in the runner's
+// own ephemeral home; harmless, just not persisted, which is fine since CI isn't this artifact's consumer).
+//
+// Deliberately a DIFFERENT filename from the investigation's own committed snapshot
+// (docs/investigations/6c1aadf7-daemon-suite-timing/data/per-file-timing.ndjson) — that file is a
+// point-in-time, git-tracked artifact; this one is live-accumulating gate telemetry, and the two must never
+// be confused. Same per-row schema (kind:"file"/kind:"run-summary", same field names), so the two stay
+// trivially concatenable for comparison — plus one ADDITIVE field (`runUid` on both row kinds; see the
+// gate-timing emission block in the isMain run below for why `runIndex` alone isn't collision-safe here).
+const LOOM_HOME = process.env.LOOM_HOME || path.join(os.homedir(), ".loom");
+const GATE_TIMING_NDJSON = path.join(LOOM_HOME, "gate-timing", "daemon-per-file-timing.ndjson");
+
+// Card 17069e7e (CR follow-up, DIRECTIVE #3): tally, don't print, on each individual write failure. A
+// single gate run calls `appendGateTimingRow` up to ~631 times (1 run-summary + one per test file) — if
+// `LOOM_HOME` were ever unwritable, warning ON EVERY CALL would print up to 631 near-identical lines to
+// stderr. The merge gate surfaces only a bounded ~4KB stdout+stderr TAIL on rejection (see gate-runner.ts's
+// OUTPUT_TAIL_BYTES); that many lines would push the actual failing test's assertion clean out of that
+// tail — the failure mode of this OBSERVABILITY feature would destroy the diagnostic output of the very
+// suite it observes. So: silently count here; the isMain block prints ONE summary warning (if any failures
+// occurred at all), after every row for the run has been attempted. NEVER reintroduce a per-call
+// console.warn in the catch below.
+let gateTimingWriteFailureCount = 0;
+let gateTimingWriteFailureLastMessage = null;
+
+/** Best-effort NDJSON append — mkdir -p then append one JSON line. NEVER throws: a write failure (an
+ *  unwritable LOOM_HOME, a full disk, a permissions issue on some CI runner) must not affect this gate's own
+ *  pass/fail or exit code — an observability feature that can fail a gate is strictly worse than no
+ *  observability feature. `filePath` is a parameter (not read from the module-level constant) so a test can
+ *  point this at a scratch file instead of the real LOOM_HOME. Mirrors test/census/lib.mjs's own
+ *  `appendNdjson` (not imported — this script has no existing dependency on that harness and one helper
+ *  doesn't warrant creating one). */
+export function appendGateTimingRow(filePath, record) {
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.appendFileSync(filePath, JSON.stringify(record) + "\n");
+  } catch (err) {
+    gateTimingWriteFailureCount++;
+    gateTimingWriteFailureLastMessage = err.message;
+  }
+}
+
+/** Read-only tally of every `appendGateTimingRow` failure so far this process — `{count, lastMessage}`.
+ *  Exported so the isMain block can print ONE summary warning (see the doc above) and so a test can assert
+ *  on the count directly instead of scraping console output. Monotonic within a process (this script exits
+ *  after each real gate invocation, so there is no cross-run contamination in production) — a test that
+ *  triggers a failure must read the count BEFORE and AFTER its own block and assert the DELTA, since
+ *  earlier test blocks in the same file may have already incremented it. */
+export function gateTimingWriteFailureSummary() {
+  return { count: gateTimingWriteFailureCount, lastMessage: gateTimingWriteFailureLastMessage };
+}
+
+/** Cheap, synchronous, no-added-subprocess host snapshot — matches test/census/lib.mjs's `hostSnapshot`
+ *  field NAMES (so a row here is shape-compatible with the existing NDJSON), but `nodeLikeProcessCount`/
+ *  `nodeLikeWorkingSetMB` are always `null` here (honest-null, not a guess): that census helper gets those
+ *  via a `powershell`/`Get-Process` subprocess, and this file already has a standing rule against adding a
+ *  subprocess for observability (see `createRssTracker`'s own scope-caveat doc above). */
+export function cheapHostSnapshot() {
+  return {
+    ts: new Date().toISOString(),
+    cpuCount: os.cpus().length,
+    freeMemMB: Math.round(os.freemem() / 1e6),
+    totalMemMB: Math.round(os.totalmem() / 1e6),
+    nodeLikeProcessCount: null,
+    nodeLikeWorkingSetMB: null,
+  };
+}
+
+/** Pure: the slowest `n` TIMED results (skipped/never-run entries have no `durationMs` and are excluded),
+ *  descending. Exported so a test can drive it against synthetic result arrays directly. */
+export function topSlowestFiles(results, n = 20) {
+  return results
+    .filter((r) => typeof r.durationMs === "number")
+    .slice()
+    .sort((a, b) => b.durationMs - a.durationMs)
+    .slice(0, n);
+}
+
+function formatSeconds(ms) {
+  return `${(ms / 1000).toFixed(1)}s`;
+}
+
+/** Pure formatter for the human-readable gate-path summary (DoD-2): aggregate timed test time, wall-clock,
+ *  and the slowest `topN` files. Returns an array of lines (never prints itself) so a test can assert the
+ *  content directly. Printed UNCONDITIONALLY (pass or fail), same placement as the existing RSS-floor/
+ *  max-gap lines — never behind a flag. */
+export function formatGateTimingSummaryLines(results, wallClockMs, { topN = 20 } = {}) {
+  const timed = results.filter((r) => typeof r.durationMs === "number");
+  const aggregateMs = timed.reduce((sum, r) => sum + r.durationMs, 0);
+  const lines = [
+    `# per-file test timing — aggregate ${formatSeconds(aggregateMs)} across ${timed.length} file(s), wall-clock ${formatSeconds(wallClockMs)}`,
+  ];
+  const slowest = topSlowestFiles(results, topN);
+  if (slowest.length) {
+    lines.push(`# slowest ${slowest.length} file(s):`);
+    slowest.forEach((r, i) => {
+      lines.push(`   ${String(i + 1).padStart(2)}. ${formatSeconds(r.durationMs).padStart(6)}  ${r.name}`);
+    });
+  }
+  return lines;
+}
+
 // Exported so an out-of-band census/probe harness (test/census/*) can import the REAL exclusion list
 // instead of keeping its own copy — a duplicated copy is exactly the shared-unit-divergence anti-pattern
 // this codebase keeps paying for (see card ec7983c6's 116-copy SeamHost fixture).
@@ -564,6 +675,10 @@ function runOne(name, lane) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    // Card 17069e7e: Date.now() (not performance.now()) to match the existing NDJSON schema's
+    // startTs/endTs, which the standalone investigation script (test/census/lib.mjs's `runOneTimed`)
+    // already stamps this same way.
+    const startTs = Date.now();
     const child = spawn(process.execPath, [file], {
       env: { ...process.env, LOOM_HOME: home, LOOM_PORT: String(port), LOOM_TEST: "1" },
     });
@@ -575,10 +690,12 @@ function runOne(name, lane) {
 
     child.on("error", (err) => {
       clearTimeout(timer);
-      resolve({ name, ok: false, status: null, stdout, stderr: `${stderr}\n${err.message}` });
+      const endTs = Date.now();
+      resolve({ name, ok: false, status: null, stdout, stderr: `${stderr}\n${err.message}`, lane, startTs, endTs, durationMs: endTs - startTs });
     });
     child.on("close", (status) => {
       clearTimeout(timer);
+      const endTs = Date.now();
       const ok = !timedOut && status === 0;
       resolve({
         name,
@@ -586,6 +703,7 @@ function runOne(name, lane) {
         status: timedOut ? "timeout" : status,
         stdout, stderr,
         tail: ok ? undefined : (stdout.split("\n").filter(Boolean).slice(-1)[0] || stderr.split("\n").filter(Boolean).slice(-1)[0]),
+        lane, startTs, endTs, durationMs: endTs - startTs,
       });
     });
   });
@@ -792,6 +910,12 @@ if (isMain) {
   // prints the two lines itself (labelled partial) before rethrowing — see that function's own comment.
   const RSS_SAMPLE_INTERVAL_MS = 5000;
   const results = new Array(SELECTED.length);
+  // Card 17069e7e: wall-clock bounds for the gate-timing run-summary row + human summary below — captured
+  // around the WHOLE instrumented run (lane execution + tmp cleanup + the executed-set assertion), not just
+  // the lane dispatch, so it reads as "how long this gate run's test phase actually took" end to end.
+  const gateTimingRunStartTs = new Date().toISOString();
+  const gateTimingRunStartEpoch = Date.now();
+  const gateTimingHostBefore = cheapHostSnapshot();
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
     const nextIndex = makeCursor(SELECTED.length);
     await Promise.all(
@@ -815,6 +939,8 @@ if (isMain) {
       process.exit(1);
     }
   }, { sampleIntervalMs: RSS_SAMPLE_INTERVAL_MS });
+  const gateTimingRunEndTs = new Date().toISOString();
+  const gateTimingWallClockMs = Date.now() - gateTimingRunStartEpoch;
 
   const pass = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok);
@@ -830,6 +956,67 @@ if (isMain) {
   // run's, arguably more, since rejections are disproportionately the interesting ones.
   console.log(formatRssFloorLine(rssTracker.sampleCount(), RSS_SAMPLE_INTERVAL_MS, rssTracker.floorBytes()));
   console.log(formatMaxGapLine(maxGapMs(completionTimestamps)));
+
+  // Card 17069e7e (DoD-2): per-file timing — human summary (unconditional, pass or fail, same placement as
+  // the RSS/gap lines above) + a best-effort NDJSON artifact. Wrapped whole: this is observation only, and
+  // must never affect this gate's own exit code — see appendGateTimingRow's own doc for why each write is
+  // already individually guarded; this outer try/catch also guards the (pure, should-never-throw) summary
+  // computation itself, belt-and-suspenders.
+  try {
+    // Card 6185fbfc reviewer note carried forward here too: a bare Date.now() run key collides across two
+    // gates admitted in the same millisecond (maxConcurrentGates >= 2) — the exact defect card f5421d27
+    // found in test/deploy-staleness.mjs's fixture names. `runIndex` stays numeric (Date.now()) for schema
+    // compatibility with the existing investigation NDJSON; `runUid` adds process.pid so two concurrent gate
+    // runs on this host can never share a join key, even if they start in the same ms.
+    const gateTimingRunIndex = gateTimingRunStartEpoch;
+    const gateTimingRunUid = `${gateTimingRunStartEpoch}-${process.pid}`;
+    // gateTimingHostBefore was captured BEFORE runInstrumentedSuite ran (see above) — only the "after" side
+    // is taken here, so the two snapshots actually bracket the run instead of both landing post-run.
+    const gateTimingHostAfter = cheapHostSnapshot();
+    appendGateTimingRow(GATE_TIMING_NDJSON, {
+      kind: "run-summary",
+      runIndex: gateTimingRunIndex,
+      runUid: gateTimingRunUid,
+      runStartTs: gateTimingRunStartTs,
+      runEndTs: gateTimingRunEndTs,
+      durationMs: gateTimingWallClockMs,
+      poolSize: EFFECTIVE_POOL_SIZE,
+      testCount: SELECTED.length,
+      executedCount: results.filter((r) => !r.skipped).length,
+      failedCount: failed.length,
+      failedNames: failed.map((f) => f.name),
+      hostBefore: gateTimingHostBefore,
+      hostAfter: gateTimingHostAfter,
+    });
+    for (const r of results) {
+      appendGateTimingRow(GATE_TIMING_NDJSON, {
+        kind: "file",
+        runIndex: gateTimingRunIndex,
+        runUid: gateTimingRunUid,
+        name: r.name,
+        startTs: r.startTs ?? null,
+        startTsIso: r.startTs != null ? new Date(r.startTs).toISOString() : null,
+        endTs: r.endTs ?? null,
+        endTsIso: r.endTs != null ? new Date(r.endTs).toISOString() : null,
+        durationMs: r.durationMs ?? null,
+        ok: r.ok,
+        status: r.status ?? null,
+        skipped: !!r.skipped,
+        lane: r.lane ?? null,
+      });
+    }
+    for (const line of formatGateTimingSummaryLines(results, gateTimingWallClockMs)) console.log(line);
+    // Card 17069e7e (CR follow-up): ONE summary line for every write failure this run, never one per row —
+    // see gateTimingWriteFailureSummary's own doc for why per-row warnings would blind a rejected gate's
+    // bounded output tail.
+    const gateTimingFailures = gateTimingWriteFailureSummary();
+    if (gateTimingFailures.count > 0) {
+      console.warn(`⚠ gate-timing: ${gateTimingFailures.count} row write(s) to ${GATE_TIMING_NDJSON} failed this run (non-fatal, not repeated per row): ${gateTimingFailures.lastMessage}`);
+    }
+  } catch (err) {
+    console.warn(`⚠ gate-timing observability block failed (non-fatal): ${err.message}`);
+  }
+
   if (failed.length) {
     console.log("FAILURES:");
     // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
