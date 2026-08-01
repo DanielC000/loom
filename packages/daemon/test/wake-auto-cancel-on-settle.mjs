@@ -9,10 +9,10 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // This test drives the "gate" kind (runWorkerGate) through a REAL pending→settle cycle — the fast path
 // never surfaces `[settled:false]`, so onSettledAfterPending (where the cancel lives) never fires; only
-// a gate that outlives SYNC_ATTACH_BUDGET_MS (12s, non-injectable) exercises it. Mirrors
-// pending-op-settle-lineage.mjs's own "real gate that outlives 12s" convention, and folds the
-// predecessor/successor recycle question into the SAME scenario (worker_recycle mid-gate) rather than
-// paying the ~15s wall-clock cost twice.
+// a gate that outlives the SessionService's own `syncAttachBudgetMs` (shrunk to 100ms via test-only DI —
+// card 0faaaa55) exercises it. Mirrors pending-op-settle-lineage.mjs's own "real gate that outlives the
+// budget" convention, and folds the predecessor/successor recycle question into the SAME scenario
+// (worker_recycle mid-gate) rather than paying the wall-clock cost twice.
 //
 // Proves, all in one scenario:
 //   (1) a wake scheduled BEFORE run_gate started (unrelated — createdAt < opStartedAt) SURVIVES the
@@ -114,10 +114,12 @@ const events = {
 };
 const db = new Db();
 const host = new SpyHost(events);
-// A gate that outlives SYNC_ATTACH_BUDGET_MS (12s, non-injectable) then resolves — comfortable margin
-// (15s), same convention as pending-op-settle-lineage.mjs.
-const slowGate = async () => { await sleep(15_000); return { passed: true }; };
-const svc = new SessionService(db, host, new OrchestrationControl(), { runGate: slowGate });
+// A gate that outlives the SessionService's own `syncAttachBudgetMs` then resolves — comfortable margin,
+// same convention as pending-op-settle-lineage.mjs. Shrunk to 100ms budget / 400ms sleep here (from the
+// 12s production SYNC_ATTACH_BUDGET_MS / 15s sleep) via the same test-only DI seam `gateOpRetainMs`/
+// `gateCancelVerifyMs` already use — card 0faaaa55 made SYNC_ATTACH_BUDGET_MS injectable.
+const slowGate = async () => { await sleep(400); return { passed: true }; };
+const svc = new SessionService(db, host, new OrchestrationControl(), { runGate: slowGate, syncAttachBudgetMs: 100 });
 
 function makeRepo() {
   const repo = path.join(os.tmpdir(), `loom-wacs-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);
@@ -144,7 +146,7 @@ try {
   const unrelatedWakeAt = new Date(Date.now() + 3600_000).toISOString(); // far future; must never fire in-test
   db.insertWake({ id: "wake-unrelated", sessionId: workerAId, wakeAt: unrelatedWakeAt, note: "unrelated — check the owner decision", createdAt: new Date(Date.now() - 60_000).toISOString() });
 
-  // Kick off the gate — degrades to pending past SYNC_ATTACH_BUDGET_MS (12s).
+  // Kick off the gate — degrades to pending past this instance's (shrunk) syncAttachBudgetMs.
   diagPreCallInstant = new Date().toISOString();
   const firstPromise = svc.runWorkerGate(workerAId);
 

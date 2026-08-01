@@ -101,18 +101,25 @@ try {
     let freshGateCalls = 0;
     let freshGateEntered;
     const freshGateEnteredSignal = new Promise((resolve) => { freshGateEntered = resolve; });
-    // Bounded (16s), not unbounded — mirrors run-gate-result-consumption.mjs scenario (B)'s own reasoning:
-    // this only runs long enough to comfortably exceed SYNC_ATTACH_BUDGET_MS (12s), so the RE-CALL below
-    // (after the cancel) degrades to a pending handle we can directly inspect for attachedToInFlight/opId,
-    // instead of settling inline where those fields wouldn't be present at all.
+    // Bounded (2s), not unbounded — mirrors run-gate-result-consumption.mjs scenario (B)'s own reasoning:
+    // this only runs long enough to comfortably exceed the SessionService's own `syncAttachBudgetMs` (shrunk
+    // to 500ms below, from the 12s production SYNC_ATTACH_BUDGET_MS via the same test-only DI seam
+    // `gateOpRetainMs`/`gateCancelVerifyMs` already use), so the RE-CALL below (after the cancel) degrades to
+    // a pending handle we can directly inspect for attachedToInFlight/opId, instead of settling inline where
+    // those fields wouldn't be present at all. Same logical shape as the real 12s/16s budget/sleep, at a
+    // fraction of the wall-clock cost (card 0faaaa55). 500ms (not something tighter like 100ms) because
+    // THIS SAME budget also bounds the earlier QUEUE-then-CANCEL round trip a few lines below (the target's
+    // own `pTargetRun` must settle INLINE with the cancelled shape, not degrade to pending) — that round trip
+    // (semaphore queue + cancelGateOp's async DB/notify work) measurably exceeded 100ms under this session's
+    // real host contention, so 100ms was too tight for that OTHER purpose sharing this same budget value.
     const sharedGate = async (_gate, cwd) => {
       if (cwd === wtH.worktreePath) { await holderHold; return { passed: true }; }
       freshGateCalls++;
       freshGateEntered();
-      await sleep(16_000);
+      await sleep(2000);
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate });
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: 500 });
 
     const pHolderRun = sessions.runWorkerGate(workerH);
     await waitUntil(() => sessions.gateQueueForManager(projH).activeCount === 1);
@@ -138,7 +145,7 @@ try {
       const p2 = sessions.runWorkerGate(workerX);
       const entered = await Promise.race([
         freshGateEnteredSignal.then(() => true),
-        sleep(8000).then(() => false),
+        sleep(2000).then(() => false),
       ]);
       check("(D) THE FIX: the re-call after a cancel triggers a genuinely FRESH gate invocation (not a cache hit)", entered && freshGateCalls === 1);
       const r2 = await p2;

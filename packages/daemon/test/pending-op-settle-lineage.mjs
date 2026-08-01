@@ -39,18 +39,21 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        recycling while its own background run_gate is still in flight is a live fleet pattern, not just
 //        a theoretical mirror of the merge case.)
 //
-// (A)/(B)/(C) run SEQUENTIALLY — each needs a real gate that outlives the non-injectable
-// SYNC_ATTACH_BUDGET_MS (12s). A concurrent variant (all three sharing one ~15-17s window via a raised
-// maxConcurrentGates) was tried first to cut wall-clock, but proved flaky under this harness's own
-// concurrent-spawn overhead (recycleManager/recycleWorker's real PtyHost spawn/readiness bookkeeping,
-// times three, contending on one event loop) — not worth chasing on a component with prior clobber-guard
-// review history; reliability wins over shaving ~30s here.
+// (A)/(B)/(C) run SEQUENTIALLY — each needs a real gate that outlives the SessionService's own
+// `syncAttachBudgetMs` (shrunk to 100ms here via a test-only DI seam — card 0faaaa55 — from the 12s
+// production SYNC_ATTACH_BUDGET_MS, which was NOT injectable when the note below was first written). A
+// concurrent variant (all three sharing one window via a raised maxConcurrentGates) was tried first to cut
+// wall-clock, but proved flaky under this harness's own concurrent-spawn overhead (recycleManager/
+// recycleWorker's real PtyHost spawn/readiness bookkeeping, times three, contending on one event loop) —
+// not worth chasing on a component with prior clobber-guard review history; reliability wins over
+// concurrency here. (The wall-clock case for concurrency is largely moot now regardless — three sequential
+// 400ms sleeps cost ~1.2s, not the ~45s three sequential 15s sleeps used to.)
 //
 // Uses the injectable `runGate` seam (SessionService opts.runGate) instead of a real spawned gate command
 // (unlike merge-confirm-completion-nudge.mjs, which deliberately needs a REAL process for its timeout/kill
 // scenario) — this test is about NOTIFICATION ROUTING, not gate execution semantics, so a controllable
 // async function is the right-sized fake, keyed by worktree path so (A) can pass while (B) fails. The real
-// async GAP between "pending" and "settled" stays real wall-clock (bounded by SYNC_ATTACH_BUDGET_MS) — that
+// async GAP between "pending" and "settled" stays real wall-clock (bounded by `syncAttachBudgetMs`) — that
 // timing IS the bug, so it is not mocked away, only the gate's own child-process plumbing is.
 // Run: 1) build daemon (pnpm build), 2) node packages/daemon/test/pending-op-settle-lineage.mjs
 import fs from "node:fs";
@@ -122,15 +125,19 @@ const host = new SpyHost(events);
 // Worktree paths added here make the injected gate FAIL instead of pass — lets (A)/(B) share one gate
 // function while running concurrently against different worktrees.
 const FAIL_WORKTREES = new Set();
-// A gate that outlives SYNC_ATTACH_BUDGET_MS (12s, non-injectable) then resolves — comfortable margin
-// (15s) so each scenario's recycle + manual teardown bookkeeping (well under 1s) never races the settle.
+// A gate that outlives the SessionService's own `syncAttachBudgetMs` then resolves — comfortable margin
+// so each scenario's recycle + manual teardown bookkeeping (well under 1s) never races the settle. Shrunk
+// to 100ms budget / 400ms sleep here (from the 12s production SYNC_ATTACH_BUDGET_MS / 15s sleep) via the
+// same test-only DI seam `gateOpRetainMs`/`gateCancelVerifyMs` already use — card 0faaaa55 made
+// SYNC_ATTACH_BUDGET_MS injectable specifically for sites like this one. Same logical shape (the sleep
+// must outlive the budget) at 1/37th the wall-clock cost, ×3 since (A)/(B)/(C) each pay this sequentially.
 const slowGate = async (_gate, cwd) => {
-  await sleep(15_000);
+  await sleep(400);
   return FAIL_WORKTREES.has(cwd)
     ? { passed: false, failedStep: "gate", failedStatus: 1 } // plain non-zero exit ⇒ classifyGateFailure "genuine" (no retry, no kill/timeout wording)
     : { passed: true };
 };
-const svc = new SessionService(db, host, new OrchestrationControl(), { runGate: slowGate });
+const svc = new SessionService(db, host, new OrchestrationControl(), { runGate: slowGate, syncAttachBudgetMs: 100 });
 
 function makeRepo() {
   const repo = path.join(os.tmpdir(), `loom-posl-repo-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`);

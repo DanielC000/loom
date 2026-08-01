@@ -1031,6 +1031,12 @@ export class SessionService {
    *  case (an injected `runGate` whose returned promise never settles even after its `cancelSignal`
    *  aborts) sets this small so the test doesn't have to wait out the real production bound. */
   private readonly gateCancelVerifyMs: number;
+  /** Test-only override for {@link SYNC_ATTACH_BUDGET_MS} (mirrors `gateOpRetainMs`/`gateCancelVerifyMs`
+   *  just above) — defaults to the real production constant. A hermetic test whose injected `runGate`
+   *  deliberately outlives the budget to exercise the pending-degrade path (e.g. cancel/retention,
+   *  settle-lineage) no longer has to block on a real ~12-16s wall-clock sleep to cross it — it sets this
+   *  small and sleeps just past IT instead, at the same logical outcome. */
+  private readonly syncAttachBudgetMs: number;
   /**
    * Test-only seam for {@link findNestedGitRepos} (card b6d41db1's follow-up — the shared-chokepoint
    * fix). `undefined` in production ⇒ {@link gcWorktreeDir} falls back to the real scan. Lets a test
@@ -1240,6 +1246,7 @@ export class SessionService {
       codescape?: CodescapeSupervisor;
       gateOpRetainMs?: number;
       gateCancelVerifyMs?: number;
+      syncAttachBudgetMs?: number;
     },
   ) {
     this.gitOpMs = opts?.gitOpMs == null ? undefined : Math.max(GIT_TIMEOUT_FLOOR_MS, opts.gitOpMs);
@@ -1250,6 +1257,7 @@ export class SessionService {
     this.runGate = opts?.runGate;
     this.gateOpRetainMs = opts?.gateOpRetainMs ?? GATE_OP_RETAIN_MS;
     this.gateCancelVerifyMs = opts?.gateCancelVerifyMs ?? SessionService.DEFAULT_GATE_CANCEL_VERIFY_MS;
+    this.syncAttachBudgetMs = opts?.syncAttachBudgetMs ?? SYNC_ATTACH_BUDGET_MS;
     this.wedgeSweepIntervalMs = opts?.wedgeSweepIntervalMs ?? SessionService.DEFAULT_WEDGE_SWEEP_INTERVAL_MS;
     this.wedgeGiveUpAttempts = opts?.wedgeGiveUpAttempts ?? SessionService.DEFAULT_WEDGE_GIVE_UP_ATTEMPTS;
     this.wedgeGiveUpMs = opts?.wedgeGiveUpMs ?? SessionService.DEFAULT_WEDGE_GIVE_UP_MS;
@@ -4836,7 +4844,7 @@ export class SessionService {
     const taskRef = (opts.taskId ?? "").trim();
     const key = taskRef ? `spawn:${taskRef}` : `spawn:taskless:${randomUUID()}`;
     return this.pendingOps.attach<Session & { shippedMatch: ShippedCardMatch | null; reusedDirtyWorktree?: ReusedDirtyWorktreeInfo; staleBase?: StaleBaseInfo; reviewOf?: ReviewOfInfo }>(
-      key, "spawn", managerSessionId, SYNC_ATTACH_BUDGET_MS,
+      key, "spawn", managerSessionId, this.syncAttachBudgetMs,
       () => this.spawnWorker(managerSessionId, opts),
     );
   }
@@ -10232,7 +10240,7 @@ export class SessionService {
     const inFlight = this.pendingOps.peek(key);
     const opStartedAt = inFlight?.state === "running" ? inFlight.startedAt : new Date().toISOString();
     return this.pendingOps.attach<ConfirmMergeResult>(
-      key, "merge", managerSessionId, SYNC_ATTACH_BUDGET_MS,
+      key, "merge", managerSessionId, this.syncAttachBudgetMs,
       (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt),
       (outcome, opId) => {
         // TOMBSTONE ALREADY MARKED (card e3e40167): the `onSettle` opt below (fires unconditionally, for
@@ -10551,7 +10559,7 @@ export class SessionService {
     // it was considered and rejected for exactly this reason — don't reintroduce it.
     const opStartedAt = attachedToInFlight ? preAttachPeek!.startedAt : fnEntryInstant;
     const result = await this.pendingOps.attach<WorkerGateResult>(
-      key, "gate", workerSessionId, SYNC_ATTACH_BUDGET_MS,
+      key, "gate", workerSessionId, this.syncAttachBudgetMs,
       async (opId) => {
         // WORKTREE STAMP (card 50c1e0d0): recorded ONCE, at the true start of a genuinely fresh run — never
         // re-recorded by a call that merely attaches to this same running op. Cleared in `finally` so the

@@ -349,7 +349,10 @@ try {
       return { passed: true };
     };
     const { stub } = ptyStub();
-    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: crashThenRecover });
+    // gateOpRetainMs shrunk to 100ms (from the 5s production GATE_OP_RETAIN_MS default) via its existing
+    // test-only DI seam (service.ts, mirrors gateCancelVerifyMs) — card 0faaaa55. Same logical shape (a
+    // re-call outside the retention window genuinely retries) at a fraction of the wall-clock cost.
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: crashThenRecover, gateOpRetainMs: 100 });
 
     // A rejecting run() is caught INSIDE PendingOpRegistry.attach (its `.then(_, onError)` never rethrows
     // — see pending-ops.ts) and surfaces as a normal {settled:true, ok:false, error} result, not a thrown
@@ -357,7 +360,7 @@ try {
     const r1 = await sessions.runWorkerGate(gateWorkerId);
     check("(G) a rejecting gate run surfaces as ok:false (not swallowed, not a throw)", r1.settled === true && r1.ok === false);
 
-    // An IMMEDIATE re-call lands inside GATE_OP_RETAIN_MS (card 50c1e0d0's settle-grace window, 5s) —
+    // An IMMEDIATE re-call lands inside this instance's (shrunk) gateOpRetainMs settle-grace window —
     // it must be served the SAME cached errored outcome, NOT trigger a second (recovering) run.
     const rImmediate = await sessions.runWorkerGate(gateWorkerId);
     check("(G) an immediate re-call within the retention window replays the SAME errored outcome (no new run)", rImmediate.settled === true && rImmediate.ok === false);
@@ -365,7 +368,7 @@ try {
 
     // Only OUTSIDE the retention window does a re-call genuinely retry — proving the slot isn't
     // PERMANENTLY leaked by a rejecting run, which is what this case is actually about.
-    await new Promise((r) => setTimeout(r, 5_200));
+    await new Promise((r) => setTimeout(r, 250));
     const r2 = await sessions.runWorkerGate(gateWorkerId);
     check("(G) a SUBSEQUENT gate run (past the retention window) still acquires the semaphore slot (no permanent leak)", r2.settled === true && r2.ok === true && r2.value.passed === true);
     // AUDIT-ON-ERROR (CR follow-up): a genuine throw (not a gate FAILURE) used to leave NO durable
@@ -495,7 +498,8 @@ try {
   // ── (K) card 55cba5c5: the ASYNC [loom:gate-failed] nudge — the ONLY thing a worker sees for a
   //        genuinely slow gate (its tool set has no fetch-by-opId) — carries the structured
   //        phase/failedStep/failingTest detail, not just a raw stderr tail. Forces the real pending→
-  //        settle→nudge path (the fake gate sleeps past SYNC_ATTACH_BUDGET_MS=12s) through the ACTUAL
+  //        settle→nudge path (the fake gate sleeps past this instance's shrunk syncAttachBudgetMs — see
+  //        card 0faaaa55, from the 12s production SYNC_ATTACH_BUDGET_MS) through the ACTUAL
   //        runWorkerGate/PendingOpRegistry wiring — not a re-derivation — and supplies a `failingTest`
   //        separately from `outputTail` (an unrelated epilogue), exactly the truncation shape the card
   //        was filed over: the tail alone would never reveal the failing test's identity. ────────────
@@ -504,7 +508,7 @@ try {
     const reposDir = path.join(os.tmpdir(), `loom-wg-repos-k-${sfx}`);
     const { db, gateWorkerId } = await seedWorkers(sfx, reposDir);
     const failingAsyncGate = async () => {
-      await sleep(12_300); // past the 12s SYNC_ATTACH_BUDGET_MS — forces the pending→settle→nudge path
+      await sleep(350); // past this instance's 150ms syncAttachBudgetMs — forces the pending→settle→nudge path
       return {
         passed: false, failedStep: "pnpm test", failedStatus: 1, failedSignal: null, failedTimedOut: false,
         // Live-scanned by gate-runner.ts independently of outputTail (card 55cba5c5) — outputTail here is
@@ -515,7 +519,7 @@ try {
       };
     };
     const { stub, enqueued } = ptyStub();
-    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: failingAsyncGate });
+    const sessions = new SessionService(db, stub, new OrchestrationControl(), { runGate: failingAsyncGate, syncAttachBudgetMs: 150 });
 
     const pending = await sessions.runWorkerGate(gateWorkerId);
     check("(K) the slow gate degrades to the pending shape", pending.settled === false);

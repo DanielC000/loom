@@ -106,8 +106,11 @@ try {
     db.insertAgent({ id: `${P}-dev`, projectId: P, name: "t", startupPrompt: "", position: 0 });
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId: null, worktreePath, branch });
 
-    // Comfortably longer than SYNC_ATTACH_BUDGET_MS (12s) so BOTH calls degrade to pending, with real
-    // margin left before the underlying op actually settles.
+    // Comfortably longer than the SessionService's own `syncAttachBudgetMs` (shrunk to 100ms below, from
+    // the 12s production SYNC_ATTACH_BUDGET_MS, via the same test-only DI seam `gateOpRetainMs`/
+    // `gateCancelVerifyMs` already use — card 0faaaa55) so BOTH calls degrade to pending, with real margin
+    // left before the underlying op actually settles — same logical shape as the real 12s/16s budget/sleep,
+    // at a fraction of the wall-clock cost.
     //
     // Bounded gate-entry SIGNAL, not a blind sleep (card 47a515ff — 5th instance of this file's blind-
     // sleep class in one day): in runWorkerGate, `computeWorktreeGateStamp` is awaited — and its result
@@ -135,8 +138,8 @@ try {
     const GATE_ENTRY_BOUND_MS = 8000;
     let gateEntered;
     const gateEnteredSignal = new Promise((resolve) => { gateEntered = resolve; });
-    const slowGate = async () => { gateEntered(); await sleep(16_000); return { passed: true }; };
-    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: slowGate });
+    const slowGate = async () => { gateEntered(); await sleep(400); return { passed: true }; };
+    const sessions = new SessionService(db, ptyStub(), new OrchestrationControl(), { runGate: slowGate, syncAttachBudgetMs: 100 });
 
     const p1 = sessions.runWorkerGate(workerId); // don't await — runs in the background
     const enteredInTime = await Promise.race([
