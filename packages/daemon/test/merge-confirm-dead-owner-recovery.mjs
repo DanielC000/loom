@@ -51,7 +51,14 @@ const db = new Db();
 // confirmWorkerMerge only touches pty.stop / pty.isAlive / pty.enqueueStdin; a no-pty worker row
 // (processState 'exited') is !isAlive anyway, so a stub keeps this hermetic (mirrors merge-confirm-idempotent.mjs).
 const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+// GENEROUS syncAttachBudgetMs (card e082bf4d): every merge here is a REAL git worktree merge racing the
+// production SYNC_ATTACH_BUDGET_MS (12s) wall-clock — under host contention that real op can legitimately
+// exceed 12s even though nothing is wrong (measured: the same defect fired under an ORDINARY merge gate,
+// no artificial load). This file has no scenario that depends on exceeding the budget — every "(recovery)"
+// assertion below wants the SYNCHRONOUS-settle shape, not a host-speed race — so widen it here, test-only;
+// production's own SYNC_ATTACH_BUDGET_MS is untouched (this constant is not the banned "raise the budget").
+const GENEROUS_SYNC_BUDGET_MS = 60_000;
+const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
 const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 const projId = `mdo-proj-${sfx}`, agentId = `mdo-agent-${sfx}`, taskId = `mdo-task-${sfx}`;

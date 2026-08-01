@@ -177,7 +177,14 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, "t3");
     const { workerId } = seedWorker(P, repo, `node -e "process.exit(0)"`, worktreePath, branch);
 
-    const r = await svc.runWorkerGate(workerId);
+    // DEDICATED instance, GENEROUS syncAttachBudgetMs (card e082bf4d): this gate is a REAL child-process
+    // spawn racing SYNC_ATTACH_BUDGET_MS's real 12s production wall-clock — under host contention that can
+    // legitimately exceed 12s with nothing wrong. Scenarios (1)/(2)/(4) above deliberately measure a real
+    // subprocess against the TRUE production default to prove the async/pending path, so the SHARED `svc`
+    // must stay untouched — a separate instance (same db/host, so the "no nudge" assertion below still
+    // reads the same spy) isolates this fast-path assertion from that constraint.
+    const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: 60_000 });
+    const r = await svcFast.runWorkerGate(workerId);
     check("(3) settles within the sync-wait budget (fast path)", r.settled === true && r.ok === true && r.value.passed === true);
     check("(3) the fast path stays byte-identical — NO completion nudge ever fires for it", !host.enqueueCalls.some((c) => c.sessionId === workerId && /\[loom:gate-(done|failed)\]/.test(c.text)));
     worktrees.push([repo, worktreePath]);

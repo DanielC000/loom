@@ -65,7 +65,15 @@ const events = {
 };
 const db = new Db();
 const host = new SeamHost(events);
-const svc = new SessionService(db, host, new OrchestrationControl());
+// GENEROUS syncAttachBudgetMs (card e082bf4d): every spawn/merge below is a REAL git/worktree op racing
+// the production SYNC_ATTACH_BUDGET_MS (12s) wall-clock — under host contention that real op can
+// legitimately exceed 12s even though nothing is wrong (measured: the exact "(merge fast) settles within
+// the sync-wait budget" assertion below false-rejected an unrelated, test-only diff under an ORDINARY merge
+// gate, no artificial load). No scenario in this file depends on exceeding the budget — every "fast"/
+// "race"/"stale"/"retain" assertion wants the SYNCHRONOUS-settle shape, not a host-speed race — so widen it
+// here, test-only; production's own SYNC_ATTACH_BUDGET_MS is untouched (not the banned "raise the budget").
+const GENEROUS_SYNC_BUDGET_MS = 60_000;
+const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
 // One project shared across scenarios; a fresh repo/agents/manager per scenario keeps them isolated.
 function makeRepo() {

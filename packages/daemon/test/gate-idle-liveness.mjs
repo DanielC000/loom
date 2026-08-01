@@ -151,8 +151,13 @@ try {
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
     // NO injected `runGate` — this is the REAL runGateSequential/runGateStep pipeline, so idleMs reflects
-    // ACTUAL child-process liveness, not a test double standing in for it.
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+    // ACTUAL child-process liveness, not a test double standing in for it. GENEROUS syncAttachBudgetMs
+    // (card e082bf4d): this script's own real ~6s runtime leaves only a 2x margin against the production
+    // SYNC_ATTACH_BUDGET_MS default (12s) — under host contention the real op can legitimately exceed it
+    // with nothing wrong, and `result?.settled === true` below wants the SYNCHRONOUS-settle shape, not a
+    // host-speed race. Widening here is test-only; the live-polling assertions above read `gateQueueForManager`/
+    // `gateStatus` directly and are unaffected either way.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000 });
 
     const p1 = sessions.runWorkerGate(workerId).catch((e) => { console.error("gil idle run rejected:", e); });
     await waitUntil(() => sessions.gateQueueForManager(P).activeCount === 1, { label: "(2) gate genuinely admitted" });
@@ -219,7 +224,11 @@ try {
     db.insertSession({ id: workerId, projectId: P, agentId: "gil-a2", engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", taskId, worktreePath, branch });
 
     const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() {} };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl());
+    // GENEROUS syncAttachBudgetMs (card e082bf4d): this run takes ~2×TIMEOUT_MS (~6s) real wall-clock
+    // before its final settle at line 251 — under host contention that can legitimately exceed the
+    // production SYNC_ATTACH_BUDGET_MS default (12s) with nothing wrong. Widening here is test-only; the
+    // live-polling assertions above read `gateQueueForManager`/`gateStatus` directly and are unaffected.
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { syncAttachBudgetMs: 60_000 });
 
     const p1 = sessions.runWorkerGate(workerId).catch((e) => { console.error("gil extend run rejected:", e); });
     await waitUntil(() => sessions.gateQueueForManager(P).activeCount === 1, { label: "(3) gate genuinely admitted" });

@@ -84,7 +84,13 @@ const events = {
   onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
 };
 const host = new SeamHost(events);
-const svc = new SessionService(db, host, new OrchestrationControl());
+// GENEROUS syncAttachBudgetMs (card e082bf4d): scenario (7) below runs a REAL git worktree merge via
+// confirmWorkerMergeTracked, racing the production SYNC_ATTACH_BUDGET_MS (12s) wall-clock — under host
+// contention that real op can legitimately exceed 12s with nothing actually wrong. No scenario in this
+// file depends on exceeding the budget, so widen it here, test-only; production's own
+// SYNC_ATTACH_BUDGET_MS is untouched (not the banned "raise the budget").
+const GENEROUS_SYNC_BUDGET_MS = 60_000;
+const svc = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
 // --- main scenario project (generous cap — the cap admission itself is tested in isolation below) ---
 // pid-disambiguated (matches tmpHome above) — a bare Date.now() name can collide across two concurrent

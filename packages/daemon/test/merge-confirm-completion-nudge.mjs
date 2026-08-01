@@ -215,7 +215,14 @@ try {
     db.insertTask({ id: "t3", projectId: P, title: "t3", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
     db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: "t3", worktreePath, branch });
 
-    const r = await svc.confirmWorkerMergeTracked(mgrId, workerId);
+    // DEDICATED instance, GENEROUS syncAttachBudgetMs (card e082bf4d): this merge is a REAL git worktree
+    // merge racing SYNC_ATTACH_BUDGET_MS's real 12s production wall-clock — under host contention that can
+    // legitimately exceed 12s with nothing wrong. Scenarios (1)/(2)/(4) above deliberately measure a real
+    // subprocess against the TRUE production default to prove the async/pending path, so the SHARED `svc`
+    // must stay untouched — a separate instance (same db/host, so the "no nudge" assertion below still
+    // reads the same spy) isolates this fast-path assertion from that constraint.
+    const svcFast = new SessionService(db, host, new OrchestrationControl(), { syncAttachBudgetMs: 60_000 });
+    const r = await svcFast.confirmWorkerMergeTracked(mgrId, workerId);
     check("(3) settles within the sync-wait budget (fast path)", r.settled === true && r.ok === true && r.value.merged === true);
     check("(3) the fast path stays byte-identical — NO completion nudge ever fires for it", !host.enqueueCalls.some((c) => c.sessionId === mgrId && /\[loom:merge-(done|failed)\]/.test(c.text)));
   }
