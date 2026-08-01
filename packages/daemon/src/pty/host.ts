@@ -2031,8 +2031,21 @@ export interface PtyHostEvents {
    * `onGiveUpConfirmed` above). OPTIONAL, same rationale as `onGiveUpConfirmed`/`onTurnCompleted`: every
    * existing `PtyHostEvents` test double is unaffected until it opts in. The implementer (sessions/
    * service.ts, via index.ts) decides how to park + notify — see `handleKickoffGiveUpExhausted`'s own doc.
+   *
+   * Card 00bd3b4a: `msgId`/`rootMsgId` are the synthetic origin's OWN `id`/`logicalId` (see
+   * `QueuedMessage.logicalId`'s doc) — passed through so the implementer can record the SAME durable
+   * `session_message_gave_up` (outcome:"parked") event every OTHER give-up-exhausted path already records
+   * (`handleGiveUpExhausted`'s park branch), keyed the same way `onGiveUpConfirmed`'s `logicalId` above
+   * already correlates against. Without this, a late confirming hook that content-matches this exact
+   * `rootMsgId` (line 5490's `requeueGiveUpOrigin` seeds `Live.ambiguousDispatches` for this message
+   * REGARDLESS of which branch it took, so a late match fires `onGiveUpConfirmed` even after exhaustion)
+   * has no durable "parked" record to retract — `handleGiveUpConfirmed`'s lookup finds nothing and silently
+   * no-ops, so the notice this hook already sent can never be corrected. This was the structural gap card
+   * 00bd3b4a's incident exposed: a healthy, 35-turn-deep worker whose kickoff confirmed LATE (per pinned
+   * memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`) got a categorical
+   * "nothing began at all" notice with no way for Loom to ever say otherwise once the confirmation caught up.
    */
-  onKickoffGiveUpExhausted?(sessionId: string): void;
+  onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string): void;
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
@@ -6243,10 +6256,17 @@ export class PtyHost {
       // generic idle-watchdog eventually noticing the idle, never-started session — slow and indirect,
       // not a signal at the exact seam that failed. Wired to `events.onKickoffGiveUpExhausted` (DB-agnostic,
       // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can park + notify.
+      // Card 00bd3b4a: `kickoffMsgId`/`kickoffLogicalId` captured into locals (not inlined twice) so the
+      // give-up hook reports the EXACT SAME ids the QueuedMessage itself carries — this is what lets the
+      // implementer record a durable "parked" event keyed to the same `rootMsgId` a later content-matched
+      // `onGiveUpConfirmed` will report, closing the retraction gap `onKickoffGiveUpExhausted`'s own doc
+      // describes.
+      const kickoffMsgId = randomUUID();
+      const kickoffLogicalId = randomUUID();
       this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
         [{
-          id: randomUUID(), text: kickoff, source: "system", kind: "agent", logicalId: randomUUID(),
-          onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId),
+          id: kickoffMsgId, text: kickoff, source: "system", kind: "agent", logicalId: kickoffLogicalId,
+          onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId),
         }]);
       // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
       // depth, not load-bearing. Card 0050a17e.
@@ -6692,6 +6712,19 @@ export class PtyHost {
    *  spending a worker_transcript pull. */
   getLastOutputAt(sessionId: string): number | undefined {
     return this.live.get(sessionId)?.lastOutputAt;
+  }
+
+  /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on
+   *  the first `UserPromptSubmit` hook, see that field's own doc). Card 00bd3b4a: the discriminator
+   *  `handleKickoffGiveUpExhausted` (sessions/service.ts) reads before treating an exhausted kickoff
+   *  give-up as a genuine "nothing began at all" drop — Loom's own delivery-confirmation budget exhausting
+   *  proves only that ITS confirmation is stale, never that the engine never received the write (see pinned
+   *  memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`); a session already past its
+   *  first confirmed turn is proof-by-construction that the kickoff was NOT dropped, whatever Loom's own
+   *  give-up signal reads. `false` (never `undefined`) for a session that isn't live — not-live also means
+   *  not-started, the correct read for that case too. */
+  hasFirstTurnStarted(sessionId: string): boolean {
+    return this.live.get(sessionId)?.firstTurnStarted ?? false;
   }
 
   private appendRing(live: Live, buf: Buffer): void {

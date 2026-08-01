@@ -19,7 +19,7 @@ import { simpleGit } from "simple-git";
 import { GitReader } from "../git/reader.js";
 import { resolveRepo, resolveRepoByKey, UnknownRepoKeyError, type ResolvedRepo } from "../projects/resolve-repo.js";
 import { sessionScratchDir, isCodescapeEnabled } from "../paths.js";
-import { engineTranscriptExists, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
+import { engineTranscriptExists, readTranscript, snapshotTranscript, deleteArchivedTranscript, archivedTranscriptExists, archivedTranscriptPath } from "./transcript.js";
 import { deleteAgentCore } from "./delete-agent-core.js";
 import { readRunUsage, readRunUsageFromFile, readContextStats } from "./context.js";
 import { computeRunCostUsd } from "./pricing.js";
@@ -425,6 +425,24 @@ function nestedRepoBlockWarning(block: { paths: string[]; truncated: boolean }):
       "clone, then remove it yourself, or re-run worker_merge_confirm with forceRemoveWorktree:true to force removal."
     : `worktree retained — nested git repo(s) found and NOT removed: ${block.paths.join(", ")}. ` +
       "Move/push that content out of the worktree yourself, then remove it, or re-run worker_merge_confirm with forceRemoveWorktree:true to force removal.";
+}
+
+/**
+ * Card 00bd3b4a: the shared hedge every give-up-EXHAUSTED-derived notice states — Loom's own redelivery/
+ * give-up budget exhausting is NOT proof the underlying write was never received, and a later
+ * `[loom:redelivery-confirmed]`-shaped follow-up is possible but not guaranteed, so its absence proves
+ * nothing either way. Originally authored ONCE, inline, for `[loom:redelivery-parked]` (this method's own
+ * park branch, below) — `handleKickoffGiveUpExhausted`'s `[loom:worker-spawn-broken]` notice used to assert
+ * unhedged certainty ("nothing began at all") on the IDENTICAL evidentiary position (budget exhausted, no
+ * engine confirmation) before this card fixed it. Extracted here so both call sites state ONE idiom instead
+ * of two independently-worded strings that can silently drift apart — `subject` is the noun phrase "it"
+ * refers to (e.g. "the message", "the kickoff").
+ */
+function giveUpConfirmationHedge(subject: string): string {
+  return `This is NOT proof it was never received: the engine can confirm a write minutes late under load, so the ` +
+    `original may still land on its own — Loom MAY follow up with a [loom:redelivery-confirmed] notice if it can ` +
+    `later prove that turn ran, but that follow-up is NOT guaranteed even when ${subject} did land, so its absence ` +
+    `is NOT evidence ${subject} failed.`;
 }
 
 /**
@@ -5609,10 +5627,7 @@ export class SessionService {
         `${JSON.stringify(text.slice(0, 60))}) has been PARKED — Loom exhausted its own redelivery budget (${PARK_SUBMIT_CYCLES} ` +
         `submission attempts, ~${PARK_ENTER_WRITES} Enter-key writes, across ${PARK_MESSAGE_OBJECTS} independent retry levels, ` +
         `spanning ${PARK_HOLDS} ${GIVE_UP_HOLD_MS / 1000}s hold(s) — at least ${PARK_MIN_HOLD_SECONDS}s) and has STOPPED ` +
-        `retrying it automatically. This is NOT proof it was never received: the engine can confirm a write minutes late under ` +
-        `load, so the original may still land on its own — Loom MAY follow up with a [loom:redelivery-confirmed] notice if it ` +
-        `can later prove that turn ran, but that follow-up is NOT guaranteed even when the message did land, so its absence is ` +
-        `NOT evidence the message failed. ${recipientCheckClause} If you resend the SAME content, Loom usually recognizes and ` +
+        `retrying it automatically. ${giveUpConfirmationHedge("the message")} ${recipientCheckClause} If you resend the SAME content, Loom usually recognizes and ` +
         `joins it to this original instead of creating a duplicate turn — but that join is NOT guaranteed: (a) it matches on ` +
         `the exact framed text, which embeds YOUR OWN session id, so it breaks if you've been recycled since sending; (b) the ` +
         `join window closes the instant Loom itself confirms the original landed — so if that happens before you resend, your ` +
@@ -5653,21 +5668,69 @@ export class SessionService {
    * `onGiveUpExhausted` wiring recursively (re-mint, then park to nobody — sender is the `"system"`
    * sentinel) if IT also can't get through.
    *
-   * Names the ONE recovery known to work for a session that never started a turn (worker_stop + fresh
-   * worker_spawn) and explicitly rules out the two actions that look plausible but are wrong: worker_message
+   * Names the non-destructive verification step FIRST, then the ONE recovery known to work if that
+   * verification confirms nothing ever started (worker_stop + fresh worker_spawn), and explicitly rules
+   * out — until verified — the two actions that look plausible but are wrong before then: worker_message
    * (returns a false `delivered:true` against a session running no turn) and worker_merge (would review an
    * empty branch) — see this card's own DEFINITION OF DONE.
+   *
+   * Card 00bd3b4a — TWO fixes on top of the original a8f8a8f2 wiring, both from a first-hand incident where
+   * this notice fired against a healthy, 35-turn-deep worker (Loom's own give-up budget is calibrated in
+   * seconds; pinned memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` records a
+   * measured 232s confirmation lag with no known ceiling — exhaustion proves only that LOOM's OWN
+   * confirmation is stale, never that the engine never received the write):
+   * (1) DISCRIMINATE before accusing. Card `f91c8634` already converged on, and card-documented, the
+   *     working discriminator for "did this session ever really start": `busy:false` + EMPTY transcript.
+   *     That card's own DoD item 3 asked for exactly this notice to be keyed on it — `a8f8a8f2` instead
+   *     keyed the trigger on give-up-budget exhaustion (a delivery-channel signal) without adopting the
+   *     specified discriminator, which is the root of this card's incident. Fixed here by reading the
+   *     `f91c8634`-shape check DIRECTLY: `readTranscript(w.cwd, w.engineSessionId)` non-empty is
+   *     proof-by-construction the kickoff was NOT dropped (the same ground-truth artifact
+   *     `worker_transcript` exposes, and the one that refuted this exact notice in production — session
+   *     405985b5 showed `totalTurns:35` there while this notice was still asserting "nothing began at
+   *     all"). `busy` is NOT re-checked here: at this exact call site it is ALREADY false by construction
+   *     (`fireEnterAndVerify`'s GIVE-UP RECOVERY branch always calls `setBusy(false, "give-up-recovery")`
+   *     before `onGiveUpExhausted` can fire), so it adds no discrimination at THIS seam — unlike the
+   *     generic idle watchdog `f91c8634` built the check for, which polls `busy` at an arbitrary moment.
+   *     Also deliberately ONE read, not `f91c8634`'s "≥2 reads": that guard exists for a periodic watchdog
+   *     that can race a transcript write within a cold start's first ~50s; this handler fires only AFTER
+   *     Loom's own give-up budget has fully exhausted (two submit-retry cycles plus a hold — see
+   *     `requeueGiveUpOrigin`'s own doc — genuinely multiple minutes), well past that race window.
+   *     `this.pty.hasFirstTurnStarted` is kept as an ADDITIONAL (OR'd), zero-I/O pre-check — cheap and
+   *     strictly safe to keep since it can only ever suppress MORE eagerly, never less — but it is
+   *     downstream of the SAME hook-relay confirmation channel already shown unreliable/delayed in this
+   *     incident, so it is not, by itself, the specified reference discriminator; the transcript read is.
+   * (2) CLOSE THE RETRACTION GAP for the genuine-exhaustion case: record the SAME durable
+   *     `session_message_gave_up` (outcome:"parked") event `handleGiveUpExhausted`'s own park branch
+   *     records, keyed to `msgId`/`rootMsgId` (the synthetic origin's own ids — see
+   *     `PtyHostEvents.onKickoffGiveUpExhausted`'s doc). `requeueGiveUpOrigin` (pty/host.ts) seeds
+   *     `Live.ambiguousDispatches` for this exact `rootMsgId` REGARDLESS of which give-up branch fired, so
+   *     a later content-matched confirming hook still fires `onGiveUpConfirmed` even after exhaustion —
+   *     but before this fix, `handleGiveUpConfirmed`'s lookup found no "parked" event to retract and
+   *     silently no-op'd, leaving this notice's claim permanently uncorrected even once the engine's late
+   *     confirmation proved it wrong. Recording the event here is what lets that ALREADY-CORRECT retraction
+   *     machinery (card 417cea0a) reach the kickoff path too.
    */
-  handleKickoffGiveUpExhausted(sessionId: string): void {
+  handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string): void {
     const w = this.db.getSession(sessionId);
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) {
       // eslint-disable-next-line no-console
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget with no parent session to notify (role=${w?.role ?? "none"}) — the dispatch was DROPPED; only the generic idle-watchdog can still catch this`);
       return;
     }
+    const transcriptNonEmpty = !!w.engineSessionId && readTranscript(w.cwd, w.engineSessionId).length > 0;
+    if (this.pty.hasFirstTurnStarted(sessionId) || transcriptNonEmpty) {
+      // eslint-disable-next-line no-console
+      console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing the worker-spawn-broken notice`);
+      return;
+    }
     // eslint-disable-next-line no-console
     console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget — the engine never confirmed receiving it; PARKING and notifying manager ${w.parentSessionId} instead of a bare drop`);
-    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff was DROPPED — Loom exhausted its own give-up requeue budget without the engine ever confirming it received the kickoff, so NO turn ever started (this is not a stall mid-task; nothing began at all). Loom will not retry this automatically. Recovery: worker_stop this worker, then worker_spawn it fresh with the same task direction — do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch is empty).`;
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
+      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth: 0, outcome: "parked" },
+    });
+    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget without the engine ever confirming it received the kickoff. ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript/worker_list before acting: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Only if that shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
     this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
   }
 

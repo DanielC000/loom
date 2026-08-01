@@ -294,7 +294,7 @@ async function main(): Promise<void> {
     // (forward reference, same pattern as onBusy/onGiveUpConfirmed above) decides who spawned this and
     // parks + notifies them instead of the bare drop that used to happen here. See
     // PtyHostEvents.onKickoffGiveUpExhausted's own doc / SessionService.handleKickoffGiveUpExhausted's doc.
-    onKickoffGiveUpExhausted: (sessionId) => sessions.handleKickoffGiveUpExhausted(sessionId),
+    onKickoffGiveUpExhausted: (sessionId, msgId, rootMsgId) => sessions.handleKickoffGiveUpExhausted(sessionId, msgId, rootMsgId),
     // §19c: persist the per-session park (resume-at + human lastError), arm the episode give-up
     // deadline (first cap sets it; re-caps keep it via COALESCE), AND record GLOBAL awareness (so
     // the Scheduler / worker_spawn won't fire into a known-limited account).

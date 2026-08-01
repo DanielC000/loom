@@ -20,6 +20,18 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       every settle-nudge uses (never a bare fire-and-forget `pty.enqueueStdin`), naming the ONE known-good
 //       recovery (worker_stop + fresh worker_spawn) and explicitly ruling out worker_message/worker_merge.
 //
+// Card 00bd3b4a — this notice fired against a healthy, 35-turn-deep worker in production (Loom's own
+// give-up budget is calibrated in seconds; the engine can confirm a write minutes late under load — pinned
+// memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`). TWO further fixes, both covered
+// below by (S7)/(S8):
+//   - `handleKickoffGiveUpExhausted` now takes `msgId`/`rootMsgId` (the synthetic origin's own ids) and
+//     consults `pty.hasFirstTurnStarted(sessionId)` — a session that already confirmed a turn gets NO
+//     destructive notice at all, regardless of what Loom's own give-up signal reads.
+//   - the genuine-exhaustion case now records the SAME durable `session_message_gave_up`(outcome:"parked")
+//     event `handleGiveUpExhausted`'s sibling park branch already records, keyed to `rootMsgId` — closing
+//     the retraction gap where a later content-matched confirming hook (`handleGiveUpConfirmed`, the
+//     ALREADY-CORRECT card-417cea0a machinery) had nothing durable to retract.
+//
 // This suite proves, via a fake pty that NEVER emits output (so every give-up is a genuine drop — mirrors
 // pty-giveup-requeue.mjs's own SilentTestPtyHost):
 //   (H1) POSITIVE, forced deterministically (not sampled): a kickoff that gives up TWICE in a row —
@@ -42,6 +54,15 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        null) with a parent → IS covered (same as the existing broken-spawn nudge's own role-less fix,
 //        card df48366b).
 //   (S6) an unknown sessionId is a silent no-op, never a throw.
+//   (S7) THE FALSE-POSITIVE CASE card 00bd3b4a IS ABOUT: hasFirstTurnStarted:true ⇒ NO notice at all, even
+//        though the give-up budget genuinely exhausted.
+//   (S8) THE RETRACTION GAP card 00bd3b4a CLOSES: a genuine exhaustion parks + notifies as before, records
+//        a durable "parked" event keyed to rootMsgId, and a subsequent handleGiveUpConfirmed(rootMsgId) —
+//        simulating the late confirming hook — now produces a [loom:redelivery-confirmed] follow-up.
+//   (S9)-(S10) THE BOARD-SPECIFIED REFERENCE DISCRIMINATOR (manager directive, card f91c8634 — "busy:false
+//        + EMPTY transcript" — NOT an invented signal): a real, non-empty on-disk transcript alone
+//        suppresses the notice even with hasFirstTurnStarted never set (S9); an EXISTING but EMPTY
+//        transcript does NOT suppress it — proves the check reads turn content, not file presence (S10).
 //
 // RUN: pnpm build (from packages/daemon) then `node test/kickoff-giveup-exhausted.mjs`.
 import fs from "node:fs";
@@ -65,6 +86,14 @@ async function waitUntil(predicate, timeoutMs = 10_000) {
 const tmpHome = path.join(os.tmpdir(), `loom-kickoff-exhausted-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
+// Card 00bd3b4a (S9/S10): the new transcript-based discriminator reads real files off os.homedir()
+// (engineTranscriptPath — see sessions/transcript.ts). Sandbox HOME/USERPROFILE BEFORE anything reads
+// it, so this suite never touches the real ~/.claude/projects (mirrors companion-transcript-read.mjs's
+// own convention).
+const sandboxHome = path.join(tmpHome, "home");
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 const ENTER_DELAY = 20;
 const VERIFY_TIMEOUT = 150;
 const MAX_ATTEMPTS = 2;
@@ -196,17 +225,32 @@ try {
   const { Db } = await import("../dist/db.js");
   const { SessionService } = await import("../dist/sessions/service.js");
   const { OrchestrationControl } = await import("../dist/orchestration/control.js");
+  const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+
+  /** Writes a real transcript JSONL to the (sandboxed) `~/.claude/projects/...` path `readTranscript`
+   *  resolves — mirrors companion-transcript-read.mjs's own `writeLiveTranscript` fixture helper. */
+  function writeLiveTranscript(cwd, engineSessionId, turnTexts) {
+    const file = engineTranscriptPath(cwd, engineSessionId);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, turnTexts.map((t, i) =>
+      JSON.stringify({ type: i % 2 === 0 ? "user" : "assistant", message: { content: [{ type: "text", text: t }] } })
+    ).join("\n") + "\n");
+  }
 
   const NOW = new Date();
   const now = NOW.toISOString();
   const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
 
   /** Minimal contract-faithful PtyStub — just enough for enqueueDurableMessage/enqueueSystemNudge's
-   *  full enqueueStdin signature (mirrors give-up-exhausted-durable.mjs's own PtyStub). */
+   *  full enqueueStdin signature (mirrors give-up-exhausted-durable.mjs's own PtyStub). Card 00bd3b4a:
+   *  `hasFirstTurnStarted` (default false, per-session settable) lets (S7)/(S8) below drive
+   *  `handleKickoffGiveUpExhausted`'s new discriminator check directly, without needing a real pty. */
   class PtyStub {
-    constructor() { this.live = new Set(); this.busy = new Set(); this.sent = []; }
+    constructor() { this.live = new Set(); this.busy = new Set(); this.sent = []; this.firstTurnStarted = new Set(); }
     setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }
     setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
+    setFirstTurnStarted(id, on = true) { if (on) this.firstTurnStarted.add(id); else this.firstTurnStarted.delete(id); }
+    hasFirstTurnStarted(id) { return this.firstTurnStarted.has(id); }
     enqueueStdin(id, text, _source = "system", onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, giveUpHeldUntil) {
       this.sent.push({ id, text });
       if (!this.live.has(id)) return { delivered: false, reason: "session-dead", queued: false };
@@ -238,7 +282,7 @@ try {
       pty.setLive(mgr); // idle
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s1-${sfx}`, `root-s1-${sfx}`);
       const toMgr = pty.sent.filter((s) => s.id === mgr).map((s) => s.text);
       check("(S1) the manager was notified exactly once", toMgr.length === 1);
       const note = toMgr[0];
@@ -249,6 +293,17 @@ try {
         !!note && /worker_stop/.test(note) && /worker_spawn/.test(note));
       check("(S1) explicitly rules out worker_message (would report false delivered:true)", !!note && /do NOT worker_message/i.test(note));
       check("(S1) explicitly rules out worker_merge (would review an empty branch)", !!note && /do NOT worker_merge/i.test(note));
+      // Card 00bd3b4a manager DIRECTIVE #2: the notice now shares ONE hedge idiom with the pre-existing
+      // [loom:redelivery-parked] notice (give-up-exhausted-durable.mjs's own (417cea0a #2) checks) instead
+      // of asserting unhedged certainty — same phrasing, same posture, not a bespoke second convention.
+      check("(S1) leads the recovery with the NON-DESTRUCTIVE check (worker_transcript) before naming worker_stop",
+        !!note && note.indexOf("worker_transcript") >= 0 && note.indexOf("worker_transcript") < note.indexOf("worker_stop"));
+      check("(S1) the confirmed-after-park follow-up is HEDGED ('MAY follow up'), never promised",
+        !!note && /MAY follow up/.test(note) && !/Loom will (tell you|follow up)/i.test(note));
+      check("(S1) the corollary is stated: no follow-up is NOT evidence the kickoff failed",
+        !!note && /not evidence the kickoff failed/i.test(note));
+      check("(S1) no longer asserts unverifiable certainty ('nothing began at all')",
+        !!note && !/nothing began at all/i.test(note));
     }
 
     // (S2) DURABLE, not fire-and-forget: a BUSY manager still gets a persisted session_message_queued record.
@@ -260,7 +315,7 @@ try {
       pty.setLive(mgr); pty.setBusy(mgr); // busy manager → the notice must be HELD, not lost
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s2-${sfx}`, `root-s2-${sfx}`);
       check("(S2) DURABLE: a session_message_queued event was persisted for the held notice",
         db.listEventsForWorker(mgr).some((e) => e.kind === "session_message_queued" && e.detail?.text?.includes("worker-spawn-broken")));
     }
@@ -271,7 +326,7 @@ try {
       mkSession({ id: wkr, role: "worker", parentSessionId: null });
       const pty = new PtyStub();
       const sessions = new SessionService(db, pty, new OrchestrationControl());
-      sessions.handleKickoffGiveUpExhausted(wkr);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s3-${sfx}`, `root-s3-${sfx}`);
       check("(S3) no parentSessionId → no-op, nothing dispatched", pty.sent.length === 0);
     }
 
@@ -283,7 +338,7 @@ try {
       const pty = new PtyStub();
       pty.setLive(top);
       const sessions = new SessionService(db, pty, new OrchestrationControl());
-      sessions.handleKickoffGiveUpExhausted(child);
+      sessions.handleKickoffGiveUpExhausted(child, `msg-s4-${sfx}`, `root-s4-${sfx}`);
       check("(S4) role scoped exactly like notifyManagerOfIdleWorker: a non-worker/non-null role → no-op", pty.sent.length === 0);
     }
 
@@ -296,7 +351,7 @@ try {
       const pty = new PtyStub();
       pty.setLive(mgr);
       const sessions = new SessionService(db, pty, new OrchestrationControl());
-      sessions.handleKickoffGiveUpExhausted(child);
+      sessions.handleKickoffGiveUpExhausted(child, `msg-s5-${sfx}`, `root-s5-${sfx}`);
       check("(S5) role-less child (role:null) with a parent IS covered", pty.sent.filter((s) => s.id === mgr).length === 1);
     }
 
@@ -305,8 +360,100 @@ try {
       const pty = new PtyStub();
       const sessions = new SessionService(db, pty, new OrchestrationControl());
       let threw = false;
-      try { sessions.handleKickoffGiveUpExhausted(`does-not-exist-${sfx}`); } catch { threw = true; }
+      try { sessions.handleKickoffGiveUpExhausted(`does-not-exist-${sfx}`, `msg-s6-${sfx}`, `root-s6-${sfx}`); } catch { threw = true; }
       check("(S6) unknown sessionId: no-op, no throw", !threw && pty.sent.length === 0);
+    }
+
+    // (S7) THE FALSE-POSITIVE CASE THIS CARD IS ABOUT: a healthy, turn-producing session (the pty reports
+    // hasFirstTurnStarted:true) whose kickoff give-up budget ALSO happens to exhaust must NOT get the
+    // destructive [loom:worker-spawn-broken] notice — the session already proved the kickoff was received.
+    // RED against pre-fix code (which never consulted hasFirstTurnStarted at all and always fired).
+    {
+      const mgr = `kge-mgr7-${sfx}`, wkr = `kge-wkr7-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge7-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      pty.setFirstTurnStarted(wkr, true); // the discriminator: this session already confirmed a turn
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s7-${sfx}`, `root-s7-${sfx}`);
+      check("(S7) DISCRIMINATOR: a session that already confirmed its first turn gets NO worker-spawn-broken notice",
+        pty.sent.filter((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")).length === 0);
+      check("(S7) nothing dispatched to the manager at all for this (healthy) case", pty.sent.filter((s) => s.id === mgr).length === 0);
+    }
+
+    // (S8) THE RETRACTION GAP THIS CARD CLOSES: a genuine exhaustion (hasFirstTurnStarted:false) parks +
+    // notifies as before, but NOW records a durable session_message_gave_up("parked") event keyed to the
+    // same rootMsgId a later content-matched confirming hook reports — so when that late confirmation
+    // arrives (handleGiveUpConfirmed, the ALREADY-CORRECT card-417cea0a retraction machinery), it can
+    // actually find something to retract instead of silently no-op'ing. RED against pre-fix code (which
+    // never appended that event, so handleGiveUpConfirmed always found nothing here).
+    {
+      const mgr = `kge-mgr8-${sfx}`, wkr = `kge-wkr8-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge8-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+      const rootMsgId = `root-s8-${sfx}`;
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s8-${sfx}`, rootMsgId);
+      check("(S8) setup: the genuine-exhaustion case still parks + notifies (unchanged behavior)",
+        pty.sent.some((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")));
+      check("(S8) setup: the park was recorded durably, keyed to this exact rootMsgId",
+        db.listEventsForWorker(wkr).some((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "parked"));
+
+      // The late confirmation arrives — content-matched against the SAME rootMsgId (this is exactly what
+      // requeueGiveUpOrigin's ambiguousDispatches seeding + purgeConfirmedGiveUpRequeue's content match do
+      // in production; this test drives the DB-level consumer directly, as (S1)-(S7) already do for the
+      // sibling park path).
+      sessions.handleGiveUpConfirmed(wkr, rootMsgId, 232_000);
+      // Card 00bd3b4a: anchored on startsWith, not a bare substring — the ORIGINAL worker-spawn-broken
+      // notice above ITSELF mentions the literal "[loom:redelivery-confirmed]" tag as its own hedge (the
+      // "Loom MAY follow up with a […] notice" sentence), so a bare .includes() would wrongly match both
+      // messages. The real retraction notice (mirrors handleGiveUpConfirmed's own sibling notice, see
+      // give-up-exhausted-durable.mjs's (9)) begins with the tag; the hedge only mentions it mid-sentence.
+      const retraction = pty.sent.filter((s) => s.id === mgr && s.text.startsWith("[loom:redelivery-confirmed]"));
+      check("(S8) RETRACTION: the manager now gets a [loom:redelivery-confirmed] follow-up for the kickoff path",
+        retraction.length === 1);
+      check("(S8) the retraction names the worker + root (sliced, mirrors the sibling notice's own format)",
+        !!retraction[0] && retraction[0].text.includes(wkr.slice(0, 8)) && retraction[0].text.includes(rootMsgId.slice(0, 8)));
+    }
+
+    // (S9) THE BOARD-SPECIFIED REFERENCE DISCRIMINATOR (manager DIRECTIVE #1, card f91c8634): a session
+    // with hasFirstTurnStarted:false (the (S7) signal alone would NOT suppress this) but a REAL, non-empty
+    // on-disk transcript (the SAME artifact worker_transcript exposes, and the one that refuted this exact
+    // notice in production) must STILL get NO destructive notice — proving the transcript read is now
+    // independently consulted, not just the pty-level hook flag.
+    {
+      const mgr = `kge-mgr9-${sfx}`, wkr = `kge-wkr9-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge9-${sfx}` });
+      writeLiveTranscript(os.tmpdir(), `eng-${wkr}`, ["orchestrate task tk-kge9", "on it — reading the card now"]);
+      const pty = new PtyStub();
+      pty.setLive(mgr); // hasFirstTurnStarted NOT set — the transcript alone must carry this
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s9-${sfx}`, `root-s9-${sfx}`);
+      check("(S9) TRANSCRIPT DISCRIMINATOR: a non-empty on-disk transcript alone suppresses the notice (hasFirstTurnStarted was never set)",
+        pty.sent.filter((s) => s.id === mgr).length === 0);
+    }
+
+    // (S10) NEGATIVE CONTROL for (S9): a transcript file that EXISTS but is EMPTY (zero parsed turns) must
+    // NOT suppress the notice — proves the check reads actual turn content, not mere file presence.
+    {
+      const mgr = `kge-mgr10-${sfx}`, wkr = `kge-wkr10-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge10-${sfx}` });
+      writeLiveTranscript(os.tmpdir(), `eng-${wkr}`, []); // file exists, zero turns
+      const pty = new PtyStub();
+      pty.setLive(mgr);
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s10-${sfx}`, `root-s10-${sfx}`);
+      check("(S10) NEGATIVE CONTROL: an EXISTING but EMPTY transcript does NOT suppress — the genuine-exhaustion notice still fires",
+        pty.sent.some((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")));
     }
 
     db.close();
@@ -317,6 +464,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands); SessionService.handleKickoffGiveUpExhausted parks + notifies the manager through the SAME durable enqueueSystemNudge machinery every settle-nudge uses (persisted even when the manager is busy), naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge, scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session."
+  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands); SessionService.handleKickoffGiveUpExhausted parks + notifies the manager through the SAME durable enqueueSystemNudge machinery every settle-nudge uses (persisted even when the manager is busy), naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge, scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion now records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10)."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
