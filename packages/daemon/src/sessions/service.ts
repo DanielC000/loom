@@ -9403,11 +9403,17 @@ export class SessionService {
     // `gateBaseBranchHead`, captured as the branch's OWN tip sha at the same moment as `gateBaseMainHead`,
     // is the fix: `mergeBranch` re-reads the branch's CURRENT tip inside its own lock and, if it still
     // matches this captured sha, SKIPS the `requireCanonicalHead` enforcement entirely rather than
-    // re-checking main. This is sound, not just convenient — `preLanded` already proved (via
-    // `branchContentLandedInCommit`) that this branch's content matched what's landed AT the capture
-    // moment; a commit sha is content-addressed, so an UNCHANGED tip proves that match still holds now,
-    // regardless of anything main did meanwhile. Given that, the eventual squash can only land as a true
-    // no-op (safe) or hit a genuine line-level conflict on the branch's own already-landed paths (already
+    // re-checking main. This is sound, but only as far as it's actually proven (card 24c22912) —
+    // `preLanded` proved (via `branchContentLandedInCommit`) that this branch's content matched what's
+    // landed AS OF `findLandedSquashCommit`'s OWN read, BEFORE this capture, not AT it: two more separate
+    // awaited git calls run in between (the `resolveGitRef(repoPath, "HEAD", ...)` just above for
+    // `gateBaseMainHead`, then this `resolveGitRef(repoPath, branch, ...)` itself) — three sequential
+    // awaits total, never one atomic read. What THIS capture actually proves is narrower and
+    // forward-only — an UNCHANGED tip FROM HERE ON shows that match still holds, regardless of anything
+    // main did meanwhile — but a commit landing in the window BETWEEN `findLandedSquashCommit` returning
+    // and this capture resolving would be captured here as the new "stable" tip with `preLanded` never
+    // having proved anything about it. Given that, the eventual squash can only land as a true no-op
+    // (safe) or hit a genuine line-level conflict on the branch's own already-landed paths (already
     // handled elsewhere, fails loud, zero side effects) — never silently land unverified new content. Only
     // when the branch itself has moved since capture (new commits landed during the gate — see
     // `gateBaseMainHead`'s preLanded doc above for that race) does this signal no longer apply, and
