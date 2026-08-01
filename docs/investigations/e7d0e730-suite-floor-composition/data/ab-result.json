@@ -1,0 +1,274 @@
+{
+  "startedAt": "2026-08-01T15:10:16.414Z",
+  "files": {
+    "companion-messages": {
+      "warmup": {
+        "old": {
+          "durationMs": 510,
+          "ok": true,
+          "err": null,
+          "startIso": "2026-08-01T15:10:16.418Z",
+          "endIso": "2026-08-01T15:10:16.928Z"
+        },
+        "new": {
+          "durationMs": 474,
+          "ok": true,
+          "err": null,
+          "startIso": "2026-08-01T15:10:16.928Z",
+          "endIso": "2026-08-01T15:10:17.402Z"
+        }
+      },
+      "pairs": [
+        {
+          "pairIndex": 1,
+          "order": "old->new",
+          "old": {
+            "durationMs": 471,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:17.403Z",
+            "endIso": "2026-08-01T15:10:17.874Z"
+          },
+          "new": {
+            "durationMs": 474,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:17.874Z",
+            "endIso": "2026-08-01T15:10:18.348Z"
+          },
+          "diffNewMinusOld": 3
+        },
+        {
+          "pairIndex": 2,
+          "order": "new->old",
+          "old": {
+            "durationMs": 542,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:18.850Z",
+            "endIso": "2026-08-01T15:10:19.392Z"
+          },
+          "new": {
+            "durationMs": 502,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:18.348Z",
+            "endIso": "2026-08-01T15:10:18.850Z"
+          },
+          "diffNewMinusOld": -40
+        },
+        {
+          "pairIndex": 3,
+          "order": "old->new",
+          "old": {
+            "durationMs": 486,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:19.392Z",
+            "endIso": "2026-08-01T15:10:19.878Z"
+          },
+          "new": {
+            "durationMs": 507,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:19.878Z",
+            "endIso": "2026-08-01T15:10:20.385Z"
+          },
+          "diffNewMinusOld": 21
+        },
+        {
+          "pairIndex": 4,
+          "order": "new->old",
+          "old": {
+            "durationMs": 554,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:21.106Z",
+            "endIso": "2026-08-01T15:10:21.660Z"
+          },
+          "new": {
+            "durationMs": 721,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:20.385Z",
+            "endIso": "2026-08-01T15:10:21.106Z"
+          },
+          "diffNewMinusOld": 167
+        },
+        {
+          "pairIndex": 5,
+          "order": "old->new",
+          "old": {
+            "durationMs": 586,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:21.660Z",
+            "endIso": "2026-08-01T15:10:22.246Z"
+          },
+          "new": {
+            "durationMs": 586,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:22.246Z",
+            "endIso": "2026-08-01T15:10:22.832Z"
+          },
+          "diffNewMinusOld": 0
+        },
+        {
+          "pairIndex": 6,
+          "order": "new->old",
+          "old": {
+            "durationMs": 464,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:23.328Z",
+            "endIso": "2026-08-01T15:10:23.792Z"
+          },
+          "new": {
+            "durationMs": 496,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:22.832Z",
+            "endIso": "2026-08-01T15:10:23.328Z"
+          },
+          "diffNewMinusOld": 32
+        }
+      ]
+    },
+    "config-bounds": {
+      "warmup": {
+        "old": {
+          "durationMs": 845,
+          "ok": true,
+          "err": null,
+          "startIso": "2026-08-01T15:10:23.793Z",
+          "endIso": "2026-08-01T15:10:24.638Z"
+        },
+        "new": {
+          "durationMs": 656,
+          "ok": true,
+          "err": null,
+          "startIso": "2026-08-01T15:10:24.638Z",
+          "endIso": "2026-08-01T15:10:25.294Z"
+        }
+      },
+      "pairs": [
+        {
+          "pairIndex": 1,
+          "order": "old->new",
+          "old": {
+            "durationMs": 644,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:25.295Z",
+            "endIso": "2026-08-01T15:10:25.939Z"
+          },
+          "new": {
+            "durationMs": 639,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:25.939Z",
+            "endIso": "2026-08-01T15:10:26.578Z"
+          },
+          "diffNewMinusOld": -5
+        },
+        {
+          "pairIndex": 2,
+          "order": "new->old",
+          "old": {
+            "durationMs": 718,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:27.359Z",
+            "endIso": "2026-08-01T15:10:28.077Z"
+          },
+          "new": {
+            "durationMs": 781,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:26.578Z",
+            "endIso": "2026-08-01T15:10:27.359Z"
+          },
+          "diffNewMinusOld": 63
+        },
+        {
+          "pairIndex": 3,
+          "order": "old->new",
+          "old": {
+            "durationMs": 681,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:28.077Z",
+            "endIso": "2026-08-01T15:10:28.758Z"
+          },
+          "new": {
+            "durationMs": 573,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:28.758Z",
+            "endIso": "2026-08-01T15:10:29.331Z"
+          },
+          "diffNewMinusOld": -108
+        },
+        {
+          "pairIndex": 4,
+          "order": "new->old",
+          "old": {
+            "durationMs": 513,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:30.021Z",
+            "endIso": "2026-08-01T15:10:30.534Z"
+          },
+          "new": {
+            "durationMs": 690,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:29.331Z",
+            "endIso": "2026-08-01T15:10:30.021Z"
+          },
+          "diffNewMinusOld": 177
+        },
+        {
+          "pairIndex": 5,
+          "order": "old->new",
+          "old": {
+            "durationMs": 550,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:30.534Z",
+            "endIso": "2026-08-01T15:10:31.084Z"
+          },
+          "new": {
+            "durationMs": 559,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:31.084Z",
+            "endIso": "2026-08-01T15:10:31.643Z"
+          },
+          "diffNewMinusOld": 9
+        },
+        {
+          "pairIndex": 6,
+          "order": "new->old",
+          "old": {
+            "durationMs": 487,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:32.244Z",
+            "endIso": "2026-08-01T15:10:32.731Z"
+          },
+          "new": {
+            "durationMs": 600,
+            "ok": true,
+            "err": null,
+            "startIso": "2026-08-01T15:10:31.644Z",
+            "endIso": "2026-08-01T15:10:32.244Z"
+          },
+          "diffNewMinusOld": 113
+        }
+      ]
+    }
+  },
+  "endedAt": "2026-08-01T15:10:32.731Z"
+}
