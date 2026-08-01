@@ -2380,10 +2380,14 @@ export class SessionService {
           // PRESERVE the hold (card f25bf3bf): this is the SAME session/process, never stopped — any
           // still-held give-up requeue (`msg.giveUpHeldUntil`) is exactly as ambiguous as it was the
           // instant we drained it, so putting it back with the hold intact just restores the status quo.
-          // CR follow-up (card ccb407eb, finding [6]): carry msg.onGiveUpExhausted too — every other
-          // QueuedMessage field here is preserved by identity; dropping this one silently reverted a
-          // durable message's give-up policy back to a bare drop the instant it re-entered this FIFO.
-          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted);
+          // CR follow-up (card ccb407eb, finding [6]): carry msg.onGiveUpExhausted too. And (card
+          // 02baa3a5): carry msg.logicalId, msg.mintedAtGen, AND msg.mintedAtWallClock — ALL THREE,
+          // mintedAtGen included. This path never reaches `resume()` below (the throw two lines down
+          // fires first), so these entries go back onto the SAME, still-alive pty: no boundary is
+          // crossed, `submitGeneration` never resets, and mintedAtGen is still valid age evidence here
+          // (unlike the post-resume() loop below, which deliberately omits it — see that call's own
+          // comment for why).
+          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted, msg.logicalId, msg.mintedAtGen, msg.mintedAtWallClock);
           throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
         }
       } finally {
@@ -2411,9 +2415,12 @@ export class SessionService {
       if (msg.onDeliver) continue;
       // Card ccb407eb, finding [6]: a durable (onDeliver-bearing) entry is skipped above, so this loop only
       // ever carries plain (non-durable) entries — msg.onGiveUpExhausted is always undefined here in
-      // practice, but pass it through anyway for the same reason every other field is: identity, not
-      // re-derivation, is this loop's whole contract.
-      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted);
+      // practice, but pass it through anyway. Card 02baa3a5: also carry msg.logicalId and
+      // msg.mintedAtWallClock, but deliberately OMIT msg.mintedAtGen — `resume()` above just produced a
+      // brand-new Live, whose submitGeneration restarts at 0, so the predecessor's generation count
+      // compared against it would be a unit error, not evidence (the same boundary carryPendingToSuccessor
+      // / card 1c47454b treats identically — see QueuedMessage.mintedAtGen's own doc, pty/host.ts).
+      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted, msg.logicalId, undefined, msg.mintedAtWallClock);
     }
     return resumed;
   }
