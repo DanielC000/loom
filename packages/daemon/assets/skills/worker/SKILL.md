@@ -247,6 +247,12 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    case-sensitivity). A test that leans on such state can PASS on the dev or CI host that happens to have
    it and FAIL on a clean CI runner or a real end-user machine. Make it self-contained — provide or
    redirect the state it needs to test-owned files — so it proves the same thing everywhere it runs.
+   **A test asserting something did NOT happen, gated only by a fixed wait, is unfalsifiable in one
+   trial** — a timer that expires before the bad thing occurs is indistinguishable from the bad thing
+   never occurring at all, so the test can pass for the wrong reason every single run. If you add or
+   change a test shaped this way, check whether the project has its own mechanical check for exactly
+   this pattern (its `CLAUDE.md` or testing docs) and run it before you commit — don't rely on noticing
+   the shape yourself.
    **Verifying by booting a fresh/isolated instance of the service under test** (its own throwaway data
    dir or config)? Check first whether it has a first-run/onboarding auto-action — auto-provisioning,
    spawning a process, sending a notification — that could fire before you're ready for it; the project's
