@@ -957,23 +957,34 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
 }
 
 // ===================== (15) card 545ef479 (Defect 2): a sustained /graph/health 500 is NOT wedge evidence — no kill, no unbounded respawn cycle ====
-// ⭐ TIMING IS LOAD-BEARING HERE, not just a speed choice — get this wrong and the scenario proves nothing.
 // `scheduleRestart`'s give-up ceiling is only skipped when `ranHealthy` (spawnServe's
 // `Date.now() - spawnedAt >= healthyRunMs`) is TRUE at kill time. A large `healthyRunMs` (e.g. the 60_000
 // default, or this file's other scenarios' typical value) makes `ranHealthy` FALSE for any fast kill —
 // which on PRE-fix code makes the bug look BOUNDED (it exhausts `restartBackoffMs` and gives up loudly)
 // rather than UNBOUNDED (the card's actual claim: the give-up ceiling is never reached, only a quiet
-// `warn`, never the loud "needs a human" `console.error`). Measured directly against pre-fix code
-// (temporarily reverted, same fixture/harness, `healthyRunMs:10` + these intervals): spawnCount climbed
-// LINEARLY without bound (12 -> 30 spawns over 3s, still climbing) and the "gave up" console.error NEVER
-// fired once — genuinely unbounded, not merely a slow bounded failure. `healthyRunMs:10` here is
-// DELIBERATELY far below the real per-cycle kill time (empirically ~100-160ms at these intervals — a
-// cycle needs >= 2 real HTTP round trips, `healthProbeFailureThreshold`(2) apart by
-// `healthProbeIntervalMs`(60ms) each), so on PRE-fix code `ranHealthy` is true on essentially every kill —
-// this is what actually exercises the unbounded state, not merely a "didn't die once" check (which DoD-8
-// explicitly warns passes on pre-fix code too, since a single early kill is always bounded until it isn't).
-// intervalMs/timeoutMs (60/40, threshold 2) reuse scenario (2)'s own already-proven-safe tight combo
-// (that scenario's own comment explains why it's safe below real child-startup latency).
+// `warn`, never the loud "needs a human" `console.error`). `healthyRunMs:10` is kept DELIBERATELY tiny so a
+// regression that reintroduces "500 counts as wedge" still shows up as genuinely unbounded growth, not a
+// merely-bounded failure that DoD-8 already warns can pass on pre-fix code too (a single early kill is
+// always bounded until it isn't).
+//
+// 🔴 CARD 09e56fd5 — CORRECTED: intervalMs/timeoutMs used to be 60/40 (threshold 2), reused from scenario
+// (2)'s "already-proven-safe tight combo". That reuse was a SCOPE ERROR: scenario (2) proved 60/40 safe
+// for RELIABLY PRODUCING a wanted wedge-kill fast — the opposite of what THIS scenario needs, which is
+// margin against an UNWANTED false kill under real host load (the same margin every other "never
+// restarts" scenario in this file already carries at 300/180 — see (3)'s own measured history: 100/50
+// false-restarted 6/15 runs under synthetic contention, 300/180 false-restarted 0/15). At 60/40 this
+// scenario is genuinely unsafe: a forced-delay rig (card 09e56fd5) proved that ANY response latency at or
+// above ~30ms — a loopback HTTP round-trip easily stretched by ordinary host contention (concurrent gate
+// lanes, other live sessions) — makes the client-side `AbortController` fire before the 500 ever arrives,
+// which `probeHealth` cannot distinguish from a genuine no-answer wedge; two such timeouts in a row (the
+// threshold) trigger a REAL kill, and since the fixture keeps answering (slowly), this repeats until the
+// restart budget exhausts and the supervisor gives up entirely. The SAME rig confirmed 300/180 survives
+// an injected 150ms delay (2.5x what broke 60/40) without a single restart. This is why the original
+// merge-gate failure (specimen 7, card 09e56fd5) was IN-SUITE-ONLY and never reproduced standalone on an
+// idle box: it needed exactly this kind of transient host-load latency spike, and 60/40 had essentially
+// no margin to absorb one. Production's real defaults (30_000/5_000, threshold 3) are
+// ~28x more generous than even the FIXED 300/180 here, so this was a TEST-ONLY timing artifact, never a
+// production defect — nothing about the fix touches `src/codescape/supervisor.ts`.
 {
   const homeDir = path.join(tmpHome, "health-500-home");
   const callsFile = path.join(homeDir, "fake-codescape-calls.jsonl");
@@ -988,9 +999,11 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     // healthyRunMs (this file's usual choice) would make `ranHealthy` false and mask the true UNBOUNDED
     // defect behind a merely-bounded one.
     healthyRunMs: 10,
-    healthProbeIntervalMs: 60,
-    healthProbeTimeoutMs: 40,
-    healthProbeFailureThreshold: 2,
+    // Card 09e56fd5: widened from 60/40 (threshold 2) to this file's OTHER established-safe combo — see
+    // this scenario's own corrected header comment for why the tight pair was unsafe here specifically.
+    healthProbeIntervalMs: 300,
+    healthProbeTimeoutMs: 180,
+    healthProbeFailureThreshold: 3,
   });
   const warnings = captureWarnings();
   await sup.start(["/fake/repo/health-500"]);
@@ -998,9 +1011,10 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   const pidBefore = sup.getPid();
   const portBefore = sup.getPort();
 
-  // Empirically, pre-fix code under these exact parameters produced ~9-12 spawns within the first 500ms
-  // alone (measured directly, see header). Waiting for many completed ticks here gives pre-fix code ample
-  // room to show its unbounded climb if the fix ever regressed.
+  // Card 09e56fd5: at the widened 300/180 combo (see header), a regression to pre-fix code would need
+  // several seconds rather than ~500ms to show its unbounded climb — the old ~9-12-spawns-in-500ms figure
+  // was measured at the since-replaced 60/40 combo and no longer applies; not re-measured at 300/180.
+  // Waiting for many completed ticks here still gives pre-fix code ample room to show unbounded growth.
   const MIN_TICKS = 15;
   await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= MIN_TICKS, () => sup.getCompletedProbeTickCount());
   check(`(15) at least ${MIN_TICKS} probe ticks completed against a sustained 500`,
