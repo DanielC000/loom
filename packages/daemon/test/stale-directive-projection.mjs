@@ -62,6 +62,7 @@ const ev = (workerId, mgrId, kind, ts, detail) => db.appendEvent({
 const at = (sec) => new Date(Date.parse(now) + sec * 1000).toISOString();
 
 seedManager("MGR");
+seedManager("MGR2"); // card 3c712d4e's recycle-boundary case (u) — a successor manager post-recycle
 
 // (a) FIRES: immediate delivery at turnSeq=0, worker now at turnSeq=3 (three real turns, no report at all).
 seedWorker("w-stale", "MGR", { turnSeq: 3 });
@@ -256,6 +257,44 @@ ev("w-message-supersedes-parked-redirect", "MGR", "session_message_gave_up", at(
 ev("w-message-supersedes-parked-redirect", "MGR", "session_message_gave_up", at(10), { msgId: "r-parked-old-1", rootMsgId: "r-parked-old", chainDepth: 1, outcome: "parked" });
 ev("w-message-supersedes-parked-redirect", "MGR", "message_worker", at(20), { msgId: "m-new-after-redirect", turnSeqAtDelivery: 1 });
 
+// ============ Card 3c712d4e — "parked" is not always terminal: a LATE confirming hook can prove the
+// original delivery actually landed (handleGiveUpConfirmed, sessions/service.ts, appends a
+// `session_message_gave_up` event on the SAME msgId with `outcome: "confirmed-after-park"`). Pre-fix,
+// `resolveDirectiveOutcome` returns the instant it finds the FIRST (chronologically earliest)
+// `outcome:"parked"` event for a msgId and never looks further — so a sender re-reading worker_list/
+// worker_status AFTER the confirmation lands still sees a STICKY `parkedDirective` and the tool's own
+// "RE-SEND — Loom will not retry it for you" advice, even though the message demonstrably already ran.
+// Following that advice manufactures the exact duplicate this whole family of cards exists to prevent
+// (see `engine-confirmation-can-lag-minutes-timeouts-assume-seconds` / card 417cea0a's own hedge: "MAY
+// follow up... its absence is NOT evidence"). THE FIX makes this mechanically decidable AT READ TIME —
+// from the SAME durable event history, not from a best-effort notice landing in time.
+
+// (t) RED-FIRST: parked, then a LATER confirmed-after-park event for the SAME msgId lands. Must resolve
+// to a NEW, distinct state — NOT a plain "parked" — and parkedDirective must clear (a confirmed message
+// is not one you should re-send).
+seedWorker("w-parked-then-confirmed", "MGR", { turnSeq: 0 });
+ev("w-parked-then-confirmed", "MGR", "message_worker", at(0), { msgId: "m-pc", turnSeqAtDelivery: 0 });
+ev("w-parked-then-confirmed", "MGR", "session_message_gave_up", at(5), { msgId: "m-pc", rootMsgId: "m-pc", chainDepth: 0, outcome: "reminted", remintedAs: "m-pc-1" });
+ev("w-parked-then-confirmed", "MGR", "session_message_gave_up", at(10), { msgId: "m-pc-1", rootMsgId: "m-pc", chainDepth: 1, outcome: "parked" });
+ev("w-parked-then-confirmed", "MGR", "session_message_gave_up", at(240), { msgId: "m-pc-1", rootMsgId: "m-pc", outcome: "confirmed-after-park", latencyMs: 230000 });
+
+// (u) RECYCLE-BOUNDARY: the identical parked-then-confirmed shape, but the worker's OWNING manager has
+// since changed (parentSessionId now points at MGR2, a successor — mirroring reparentLiveWorkers on a
+// real worker_recycle) while the original give-up chain events still carry the PREDECESSOR's
+// managerSessionId ("MGR"). Failure mode (a) named in the card body is a DIFFERENT mechanism
+// (`hasAmbiguousMatch`'s text-signature match, which embeds the sender's own session id) breaking across
+// this exact boundary — this test does NOT exercise that mechanism and proves nothing about it either
+// way. What THIS test proves, from reading `resolveDirectiveOutcome`/`staleDirectiveProjection` itself:
+// they never match on text or on managerSessionId at all — only on the WORKER's own msgId-keyed durable
+// events — so this projection's confirmed-after-park resolution must hold regardless of which manager
+// (predecessor or successor) is asking, i.e. it does not regress across the SAME boundary failure mode
+// (a) names for the other mechanism.
+seedWorker("w-parked-then-confirmed-recycled", "MGR2", { turnSeq: 0 });
+ev("w-parked-then-confirmed-recycled", "MGR", "message_worker", at(0), { msgId: "m-pcr", turnSeqAtDelivery: 0 });
+ev("w-parked-then-confirmed-recycled", "MGR", "session_message_gave_up", at(5), { msgId: "m-pcr", rootMsgId: "m-pcr", chainDepth: 0, outcome: "reminted", remintedAs: "m-pcr-1" });
+ev("w-parked-then-confirmed-recycled", "MGR", "session_message_gave_up", at(10), { msgId: "m-pcr-1", rootMsgId: "m-pcr", chainDepth: 1, outcome: "parked" });
+ev("w-parked-then-confirmed-recycled", "MGR", "session_message_gave_up", at(240), { msgId: "m-pcr-1", rootMsgId: "m-pcr", outcome: "confirmed-after-park", latencyMs: 230000 });
+
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ ({
   peekPendingMerge() { return undefined; },
   listPendingSpawns() { return []; },
@@ -269,6 +308,16 @@ const client = new Client({ name: "stale-directive-test", version: "0" });
 await client.connect(clientT);
 const parse = (res) => JSON.parse(res.content[0].text);
 const status = async (id) => parse(await client.callTool({ name: "worker_status", arguments: { workerSessionId: id } }));
+
+// Second manager identity (MGR2) — the recycle-boundary case (u) queries as the SUCCESSOR, since
+// worker_list/worker_status are scoped to the calling manager and "w-parked-then-confirmed-recycled" is
+// now parented to MGR2, not MGR.
+const serverMgr2 = router.buildServer("MGR2", "manager");
+const [clientT2, serverT2] = InMemoryTransport.createLinkedPair();
+await serverMgr2.connect(serverT2);
+const clientMgr2 = new Client({ name: "stale-directive-test-mgr2", version: "0" });
+await clientMgr2.connect(clientT2);
+const statusMgr2 = async (id) => parse(await clientMgr2.callTool({ name: "worker_status", arguments: { workerSessionId: id } }));
 
 const list = parse(await client.callTool({ name: "worker_list", arguments: {} }));
 const byId = Object.fromEntries(list.map((w) => [w.workerSessionId, w]));
@@ -404,6 +453,25 @@ check("directive: parked → state \"parked\", at === parkedAt",
   && byId["w-parked"]?.directive?.msgId === "m-parked"
   && byId["w-parked"]?.directive?.at === byId["w-parked"]?.parkedDirective?.parkedAt);
 
+// ============ Card 3c712d4e — "parked" is not always terminal (confirmed-after-park) ============
+check("(t) RED-FIRST: a LATER confirmed-after-park event resolves directive.state to \"confirmed-after-park\", NOT a sticky \"parked\"",
+  byId["w-parked-then-confirmed"]?.directive?.state === "confirmed-after-park"
+  && byId["w-parked-then-confirmed"]?.directive?.msgId === "m-pc");
+
+check("(t) parkedDirective clears once confirmed-after-park lands — a confirmed message must not carry the tool's own \"RE-SEND\" advice",
+  byId["w-parked-then-confirmed"]?.parkedDirective === null
+  && byId["w-parked-then-confirmed"]?.staleDirective === null);
+
+check("(u) RECYCLE-BOUNDARY: the SAME resolution holds when queried by a SUCCESSOR manager (parentSessionId changed, give-up events still carry the predecessor's managerSessionId) — the decision is keyed to the worker's own msgId history, not to any session-embedded text",
+  byId["w-parked-then-confirmed-recycled"] === undefined); // not MGR's worker — sanity: absent from MGR's own fleet view
+
+const uViaMgr2 = await statusMgr2("w-parked-then-confirmed-recycled");
+check("(u) worker_status via the successor manager (MGR2) resolves confirmed-after-park identically",
+  uViaMgr2.directive?.state === "confirmed-after-park"
+  && uViaMgr2.directive?.msgId === "m-pcr"
+  && uViaMgr2.parkedDirective === null
+  && uViaMgr2.staleDirective === null);
+
 // ============================ worker_status mirrors worker_list ============================
 const sStale = await status("w-stale");
 check("worker_status(w-stale) carries the same staleDirective as worker_list",
@@ -421,6 +489,7 @@ check("worker_status(w-redirect-immediate-parked) carries the same parkedDirecti
   sRedirectImmediateParked.parkedDirective?.msgId === "ri-parked" && sRedirectImmediateParked.staleDirective === null);
 
 await client.close();
+await clientMgr2.close();
 try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
