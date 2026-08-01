@@ -163,6 +163,18 @@ interface RegistryEntry {
   lastOutputAt: number | null;
   /** See {@link GateSnapshotEntry.extended} — mirrors the CURRENT step's `runGateStep` `extended` flag. */
   extended: boolean;
+  /** Card c6750500: the HIGHEST `active` count observed at any point WHILE this entry has held a slot —
+   *  i.e. the true max-concurrent-over-run, not just at-admission. `0` while queued (never admitted).
+   *  Updated ONLY inside {@link GateSemaphore.admit}, which is the ONLY place `active` can ever INCREASE —
+   *  a release can only decrease it, so it can never raise anyone's max, and no separate bookkeeping is
+   *  needed there. On every admission, EVERY currently-running entry's `maxConcurrent` (not just the one
+   *  just admitted) is bumped to `max(current, active)` — this is what correctly captures "admitted alone,
+   *  joined mid-run": the joined entry's OWN recorded max must reflect the join too, not just the joiner's.
+   *  Frozen (no further updates possible) the instant this entry is removed from {@link registry} — see
+   *  {@link runExclusive}'s `finally`, which deletes before releasing, so no other admission can ever touch
+   *  a completed entry's value again. This is a derived-from-admit/release bookkeeping field, NOT a
+   *  polling sample — no timer is involved, so no transition between updates can ever be missed. */
+  maxConcurrent: number;
 }
 
 /** One reason a queued/running gate op can be cancelled (card 8d585277): `"superseded-by-merge"` is the
@@ -244,6 +256,14 @@ export class GateSemaphore {
     entry.startedAt = Date.now();
     const wt = entry.descriptor.worktreePath;
     if (wt != null) this.activeWorktrees.add(wt);
+    // Card c6750500: an admission is the ONLY event that can raise `active` — a release only ever lowers
+    // it — so it's the only place a running entry's max-over-run can change. Bump EVERY currently-running
+    // entry (this newly-admitted one included, since it's already in `registry` with `startedAt` set
+    // above), not just the one just admitted: an entry admitted solo and joined 10 minutes later must have
+    // ITS OWN `maxConcurrent` reflect that join, which is exactly the defect this card fixes.
+    for (const e of this.registry.values()) {
+      if (e.startedAt != null && this.active > e.maxConcurrent) e.maxConcurrent = this.active;
+    }
   }
 
   /** Acquire a slot under `cap`, queueing (awaiting) if it's already saturated OR its worktree is
@@ -327,10 +347,19 @@ export class GateSemaphore {
    * the runner's own clock, never a second one computed here). A caller whose `fn` ignores it (ever pre-
    * existing call site — TS permits a callback to omit trailing params) simply leaves `lastOutputAt` null
    * and `extended` false forever, byte-identical to before this parameter existed.
+   *
+   * `fn` ALSO receives a fourth param (card c6750500), `getMaxConcurrentGates`: a live getter reading THIS
+   * entry's {@link RegistryEntry.maxConcurrent} directly off the closed-over `entry` object — NOT a
+   * registry lookup by id, which is deliberate: it stays correct even called AFTER this entry has already
+   * been deleted from {@link registry} in the `finally` below (the value is frozen at that point anyway,
+   * since no further admission can touch a deleted entry). A caller can therefore capture the getter
+   * reference inside `fn` and call it any time after — even outside `fn`, once `runExclusive` itself has
+   * resolved — and always read the true final max-over-run. A caller whose `fn` ignores it (every call
+   * site that predates this param) is byte-identical to before it existed.
    */
   async runExclusive<T>(
     cap: number, descriptor: GateDescriptor,
-    fn: (startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks) => Promise<T>,
+    fn: (startedAt: number, cancelSignal: AbortSignal, hooks: GateLivenessHooks, getMaxConcurrentGates: () => number) => Promise<T>,
     priority: GatePriority = "high",
   ): Promise<T> {
     // TRANSITION LOG (card 424ed9a8): fires exactly when THIS semaphore observes `cap` change from what
@@ -344,9 +373,12 @@ export class GateSemaphore {
     this.lastKnownCap = cap;
     const entry: RegistryEntry = {
       id: `gate-${++this.seq}`, descriptor, priority, enqueuedAt: Date.now(), startedAt: null,
-      controller: new AbortController(), lastOutputAt: null, extended: false,
+      controller: new AbortController(), lastOutputAt: null, extended: false, maxConcurrent: 0,
     };
     this.registry.set(entry.id, entry);
+    // Card c6750500: closes over `entry` directly (not a registry lookup), so it reads correctly even
+    // after this entry is deleted from `registry` in the `finally` below — see this method's own doc.
+    const getMaxConcurrentGates = (): number => entry.maxConcurrent;
     // Mirrors gate-runner.ts's own per-step lastOutputAt/extended state into this entry — see
     // GateLivenessHooks' doc. onStepStart resets BOTH (a fresh step's own state starts clean, matching
     // runGateStep's local vars exactly), onOutput/onExtend update forward as the step actually runs.
@@ -360,7 +392,7 @@ export class GateSemaphore {
       const outcome = await this.acquire(cap, priority, entry);
       if (!outcome.admitted) throw new GateCancelledError(outcome.kind, outcome.detail);
       acquired = true;
-      return await fn(entry.startedAt!, entry.controller.signal, hooks);
+      return await fn(entry.startedAt!, entry.controller.signal, hooks, getMaxConcurrentGates);
     } finally {
       this.registry.delete(entry.id);
       if (acquired) this.release(entry);

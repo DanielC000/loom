@@ -2599,21 +2599,26 @@ export class SessionService {
     let deployStartedAt = 0;
     // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the full
     // rationale — the semaphore's own active count at admission, carried onto the audit event below.
+    // `deployConcurrentGatesMax` (card c6750500) is the max-over-run companion — see confirmWorkerMerge's
+    // extended doc comment (~9603) for what each field means and why `concurrentGates` stays unchanged.
     let deployConcurrentAtStart = 0;
+    let getDeployConcurrentGatesMax: (() => number) | undefined;
     const result = await this.gateSemaphore.runExclusive(
       orchestration.maxConcurrentGates, deployDescriptor,
-      (startedAt, _cancelSignal, hooks) => {
+      (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
         deployStartedAt = startedAt;
         deployConcurrentAtStart = this.gateSemaphore.snapshot().active;
+        getDeployConcurrentGatesMax = getMaxConcurrentGates;
         return runGateSeq(deployCommand, project.repoPath, orchestration.deployCommandTimeoutMs, undefined, undefined, undefined, undefined, hooks);
       },
       "high",
     );
+    const deployConcurrentGatesMax = getDeployConcurrentGatesMax?.() ?? deployConcurrentAtStart;
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId, kind: "deploy",
       detail: {
         reason, ok: result.passed, durationMs: Date.now() - deployStartedAt,
-        gateCap: orchestration.maxConcurrentGates, concurrentGates: deployConcurrentAtStart,
+        gateCap: orchestration.maxConcurrentGates, concurrentGates: deployConcurrentAtStart, concurrentGatesMax: deployConcurrentGatesMax,
         ...(result.passed ? {} : {
           exitCode: result.failedStatus ?? null,
           signal: result.failedSignal ?? null,
@@ -9630,14 +9635,34 @@ export class SessionService {
       // fix: cheap to carry on every event, and the ONLY way the *next* such pair is attributable instead
       // of another permanent mystery. Do not prune these as noise — they look unused right up until the
       // one investigation that needs them, at which point there is no way to backfill them retroactively.
+      //
+      // ⚠️ `concurrentGates` (this field) answers ONE question — "how many gates were admitted together
+      // AT THE INSTANT this one started" — and answers it perfectly. It does NOT answer "how many ran
+      // AT ANY POINT during this run", and reading it as if it did is exactly the mistake card c6750500
+      // was filed to fix: a gate admitted solo and joined 30s later by a second project's gate reads as
+      // uncontended here even though it spent ~95% of its runtime alongside another run. `concurrentGates`
+      // keeps this EXACT meaning and value going forward — unchanged, unrenamed — because the 600+-row
+      // historical corpus it built up is the only long baseline this project has and a rename/reinterpret
+      // would break every existing comparison against it.
+      //
+      // `concurrentGatesMax` (below, card c6750500) is the companion field that DOES answer "how many
+      // ran at any point during this run" — the true max-over-run, derived from `GateSemaphore`'s own
+      // admit/release bookkeeping (never a polling sample, so no transition between updates can be
+      // missed; see `GateSemaphore.admit`'s own doc). It starts EMPTY for historical rows (never
+      // backfilled) and is populated only on runs from this card forward — any analysis spanning older
+      // and newer rows must handle both fields being present separately, never assume one implies the
+      // other.
       let concurrentAtStart = 0;
+      let concurrentGatesMax = 0;
+      let getConcurrentGatesMax: (() => number) | undefined;
       // NOTE (card eda70da6): `gateBaseMainHead` for this real-run path is ALREADY set above, at the
       // union-merge — not captured here at admission. The gap between the union-merge and this admission
       // is unbounded semaphore queue wait; capturing here instead would leave that whole gap unverified
       // (a real defect found on review of this card's first draft — see `gateBaseMainHead`'s own doc).
-      let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks) => {
+      let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
         gateStartedAt = startedAt;
         concurrentAtStart = this.gateSemaphore.snapshot().active;
+        getConcurrentGatesMax = getMaxConcurrentGates;
         // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — never a REPLACEMENT
         // of the semaphore's hook (the live registry's own `entry.extended`, read by gate_queue/gate_status
         // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
@@ -9645,8 +9670,12 @@ export class SessionService {
         const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
         return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
       }, "high");
+      // Card c6750500: read AFTER `runExclusive` has fully resolved — the getter closes over the entry
+      // directly, so the value is already frozen-final by this point (see GateSemaphore.runExclusive's own
+      // doc). `?? concurrentAtStart` covers the reuse case (runExclusive never called, getter never set).
+      concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
       evt("build_gate", {
-        passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart,
+        passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
         ...(gateRan ? {} : { reused: true, reusedOpId }),
       });
       if (gateRan) {
@@ -9685,14 +9714,16 @@ export class SessionService {
         // means gate-runner.ts's own `canExtend` gate never lets `onExtend` fire on a retry at all.
         gateResult = await this.gateSemaphore.runExclusive(
           gateCap, gateDescriptor,
-          (startedAt, _cancelSignal, hooks) => {
+          (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
             retryStartedAt = startedAt;
             concurrentAtStart = this.gateSemaphore.snapshot().active;
+            getConcurrentGatesMax = getMaxConcurrentGates;
             return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
           },
           "high",
         );
-        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart });
+        concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
         if (gateResult.failedTimedOut) {
           try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
         }
@@ -9765,11 +9796,13 @@ export class SessionService {
           phase ? `phase: ${phase}` : undefined,
           killNote,
           gateRetried ? `retried once (settled ${orchestration.gateRetry.settleMs}ms)` : undefined,
-          // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): the cap in force + how many gates were admitted
-          // together with this run — the exact context a byte-identical-tree pass/fail pair (a real
-          // incident: op f954fb86 failed where op 8c7f078e had just passed) needs to be attributable to
-          // its concurrency neighbourhood instead of an unexplained code-defect hunt.
-          `cap=${gateCap} concurrentAtStart=${concurrentAtStart}`,
+          // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8, extended by c6750500): the cap in force + how many
+          // gates were admitted together with this run AT START, plus the true max-over-run (which can
+          // exceed the at-start figure if another gate joined mid-run) — the exact context a byte-
+          // identical-tree pass/fail pair (a real incident: op f954fb86 failed where op 8c7f078e had just
+          // passed) needs to be attributable to its concurrency neighbourhood instead of an unexplained
+          // code-defect hunt.
+          `cap=${gateCap} concurrentAtStart=${concurrentAtStart} concurrentGatesMax=${concurrentGatesMax}`,
           failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
@@ -9797,7 +9830,7 @@ export class SessionService {
           reason: "gate", phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
           exitCode: gateResult.failedStatus, signal: gateResult.failedSignal, timedOut: gateResult.failedTimedOut,
           killClass: finalClass, retried: gateRetried,
-          gateCap, concurrentGates: concurrentAtStart,
+          gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
           ...(suppressed ? { suppressed: true } : {}),
         });
         // Card 522cf573 DoD 3: correlate this settled op's gate output to its opId in the daemon's own
@@ -10509,8 +10542,12 @@ export class SessionService {
           // CONCURRENCY NEIGHBOURHOOD (card 424ed9a8): see confirmWorkerMerge's identical capture for the
           // full rationale — the semaphore's own active count at admission, carried onto every audit event
           // below so a failure (or a byte-identical-tree pass/fail pair) is attributable to the concurrency
-          // it actually ran under.
+          // it actually ran under. `getConcurrentGatesMax` (card c6750500) is the max-over-run companion —
+          // see confirmWorkerMerge's extended doc comment (~9603) for what each field means. Computed once,
+          // right after the try/catch below settles (or inside the `catch` itself), and reused across every
+          // emission point in this function — mirrors `concurrentAtStart`'s own reuse pattern exactly.
           let concurrentAtStart = 0;
+          let getConcurrentGatesMax: (() => number) | undefined;
           // ADMISSION STAMP (card 39196378, verified-mechanism revision): taken as the FIRST thing inside
           // `fn`, before `runGateSeq` is ever called — i.e. at the exact moment this run is admitted past
           // the semaphore, strictly before the build/test child process is spawned against the worktree.
@@ -10526,15 +10563,21 @@ export class SessionService {
             // above, which this function deliberately does not share).
             gateResult = await this.gateSemaphore.runExclusive(
               gateCap, gateDescriptor,
-              async (startedAt, cancelSignal, hooks) => {
+              async (startedAt, cancelSignal, hooks, getMaxConcurrentGates) => {
                 gateStartedAt = startedAt;
                 concurrentAtStart = this.gateSemaphore.snapshot().active;
+                getConcurrentGatesMax = getMaxConcurrentGates;
                 admitStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
                 return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, WORKER_GATE_ENV_OVERRIDE, undefined, cancelSignal, hooks);
               },
               "low",
             );
           } catch (err) {
+            // Card c6750500: `getConcurrentGatesMax` is assigned as the FIRST thing inside `fn`, before
+            // any `await` — so it's already set here for ANY throw that happens after admission (a
+            // GateCancelledError before admission is the one case it's never set, and `?? concurrentAtStart`
+            // covers that exactly the way `concurrentAtStart` itself stays 0 in that same case).
+            const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
             // CANCELLED-WHILE-QUEUED (card 8d585277): thrown by GateSemaphore.runExclusive when THIS op
             // was withdrawn before it was ever admitted — never a real runner exception, so it must never
             // fall into the generic error-audit/rethrow path below (that would misreport a deliberate
@@ -10543,7 +10586,7 @@ export class SessionService {
             // for this op, so there is nothing to sweep/record against the timeout breaker either — return
             // immediately with a distinct, never-conflated-with-pass/fail shape.
             if (err instanceof GateCancelledError) {
-              evt({ cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart });
+              evt({ cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
               return { ran: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId };
             }
             // AUDIT-ON-ERROR (CR follow-up, card 7f96aa09): an unexpected throw (a genuine runner exception,
@@ -10551,9 +10594,13 @@ export class SessionService {
             // reached after a normal settle. Record it here, then rethrow unchanged: this closure's own
             // caller (PendingOpRegistry.attach) already turns a rejection into a normal {ok:false} outcome —
             // this audit write adds a durable record, it does not change that error-handling behavior.
-            evt({ passed: false, error: err instanceof Error ? err.message : String(err), gateCap, concurrentGates: concurrentAtStart, ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
+            evt({ passed: false, error: err instanceof Error ? err.message : String(err), gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, ...(gateStartedAt ? { durationMs: Date.now() - gateStartedAt } : {}) });
             throw err;
           }
+          // Card c6750500: read AFTER the try/catch settles successfully — same frozen-final guarantee as
+          // confirmWorkerMerge's own post-`runExclusive` read (see that site's comment for why timing here
+          // doesn't matter). Reused across every emission point below, mirroring `concurrentAtStart`.
+          const concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
           // CANCELLED-WHILE-RUNNING (card 8d585277): unlike the queued case above, this settles as a
           // NORMAL resolved value (gate-runner.ts's abort handling resolves, it never rejects) — reached
           // only via the manual `gate_cancel` tool (auto-supersede-on-merge is deliberately queued-only,
@@ -10564,7 +10611,7 @@ export class SessionService {
           // currency, the reuse-a-green-self-check record) since nothing about this run reached a real
           // verdict to record.
           if (gateResult.cancelled) {
-            evt({ cancelled: true, cancelKind: "manual", gateCap, concurrentGates: concurrentAtStart, durationMs: Date.now() - gateStartedAt });
+            evt({ cancelled: true, cancelKind: "manual", gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax, durationMs: Date.now() - gateStartedAt });
             return { ran: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager while running", opId };
           }
           if (worker.branch) {
@@ -10597,7 +10644,7 @@ export class SessionService {
           }
           if (gateResult.passed) {
             const durationMs = Date.now() - gateStartedAt;
-            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart });
+            evt({ passed: true, durationMs, headCurrent: headCurrency.headCurrent, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
             // Card 4c5bf820: same INJECTION HYGIENE as the failure path below — strip C0 control chars
             // before this raw process output can reach a `[loom:gate-done]` pty text or the durable
             // verdict tombstone. `steps`/a sanitized `outputTail` are forwarded on the GREEN path too —
@@ -10635,7 +10682,7 @@ export class SessionService {
             failingTestReason: failingTestReason ?? null,
             exitCode: gateResult.failedStatus ?? null, signal: gateResult.failedSignal ?? null, timedOut: gateResult.failedTimedOut ?? false,
             durationMs: failDurationMs, headCurrent: headCurrency.headCurrent,
-            gateCap, concurrentGates: concurrentAtStart,
+            gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
             ...(outputTail ? { outputTail } : {}),
           });
           return {

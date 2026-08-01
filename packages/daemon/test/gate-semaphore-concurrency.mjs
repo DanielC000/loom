@@ -122,6 +122,73 @@ const worktrees = [];
   }
 }
 
+// ── MAX-CONCURRENT-OVER-RUN (card c6750500): `concurrentGates` (at-admission only) can never see a gate
+// that starts ALONE and is joined mid-run — it reads 1 forever, even though the run spent most of its
+// wall-clock contended. `concurrentGatesMax`, exposed via `runExclusive`'s 4th `fn` param
+// `getMaxConcurrentGates`, is the fix: derived purely from GateSemaphore's own admit/release bookkeeping
+// (no polling — see `admit()`'s own doc), it must reflect the true max concurrency observed at ANY point
+// during the run, INCLUDING an entry that was already running when a later one joined it. Manually-
+// released holders (no sleep-based timing races) make the admit/join/release sequence fully deterministic.
+{
+  const sem = new GateSemaphore();
+  const descA = { gateType: "worker", projectId: "pA", sessionId: "sA" };
+  const descB = { gateType: "worker", projectId: "pB", sessionId: "sB" };
+
+  let releaseA, releaseB;
+  let aConcurrentAtStart, aGetMax, bGetMax;
+  const holdA = new Promise((res) => { releaseA = res; });
+  const holdB = new Promise((res) => { releaseB = res; });
+
+  // (1) A admits ALONE (cap 2 has headroom, but B hasn't even been started yet).
+  const pA = sem.runExclusive(2, descA, async (_startedAt, _cancelSignal, _hooks, getMaxConcurrentGates) => {
+    aConcurrentAtStart = sem.snapshot().active; // mirrors production's `concurrentGates` capture exactly
+    aGetMax = getMaxConcurrentGates;
+    await holdA;
+    return "a-done";
+  });
+  await sleep(20); // let A genuinely acquire its slot before B ever starts
+  check("(join) (1) A's at-admission concurrency reads 1 (admitted alone)", aConcurrentAtStart === 1);
+  check("(join) (1) A's max reads 1 before anything joins it", aGetMax() === 1);
+
+  // (2) B admits WHILE A is still running (cap 2 has headroom) — the "joined mid-run" shape (dbf1cd62:
+  // admitted solo at 02:20:05Z, joined 02:33:03Z, recorded concurrentGates:1 for its whole run).
+  const pB = sem.runExclusive(2, descB, async (_startedAt, _cancelSignal, _hooks, getMaxConcurrentGates) => {
+    bGetMax = getMaxConcurrentGates;
+    await holdB;
+    return "b-done";
+  });
+  await sleep(20); // let B genuinely admit
+
+  // ⭐ THE ASSERTION THAT MATTERS: BOTH A and B now read 2 — A's OWN recorded max reflects the join, not
+  // just the joiner's. This is exactly the defect the card was filed against.
+  check("(join) (2) A's max is bumped to 2 by B's admission — the ALREADY-RUNNING entry is attributed the join too", aGetMax() === 2);
+  check("(join) (2) B's own max also reads 2 (it joined into an already-contended slot)", bGetMax() === 2);
+
+  // (3) Release B first, let A keep running — A's recorded max must NOT decay back down when B leaves.
+  // NO fixed wait here (a sleep-then-negative-assertion is unfalsifiable in one trial — see
+  // fixed-wait-negative-guard.mjs): `await pB` is itself the deterministic wait for the precondition —
+  // `runExclusive`'s `finally` (registry.delete then release(), see that method's own doc) is fully
+  // synchronous with no yield point, so pB's OWN promise cannot settle until B's release has already been
+  // fully processed. And there is no remaining path that could decrement `maxConcurrent` after that point
+  // ANYWAY — it's bump-only by construction (`admit()`'s `e.maxConcurrent = this.active`, a monotonic
+  // ratchet with no decrement anywhere in this file), so this assertion needs no clock at all: it is sound
+  // the instant `pB` resolves, not merely "probably true by then."
+  releaseB("go");
+  await pB;
+  check("(join) (3) A's max STAYS 2 after B releases — non-decreasing, not a live/current reading", aGetMax() === 2);
+
+  // ⭐ DISCRIMINATING CONTROL (4): `concurrentGates` (at-admission, captured once at A's own start) must
+  // STILL read 1 here — proving the two fields genuinely differ, not that `concurrentGatesMax` silently
+  // became a copy of `concurrentGates`. Without this, a test where both fields read 2 can't tell a
+  // working new field from one wired to the wrong source.
+  check("(join) (4) A's at-admission concurrency (the concurrentGates field) is UNCHANGED at 1 — the two fields diverge", aConcurrentAtStart === 1);
+
+  releaseA("go");
+  const [ra, rb] = await Promise.all([pA, pB]);
+  check("(join) both settle cleanly", ra === "a-done" && rb === "b-done");
+  check("(join) registry empty after both settle (no leak)", sem.snapshot().entries.length === 0);
+}
+
 // ── Cap-transition logging (card 424ed9a8): `orchestration.maxConcurrentGates` is a daemon-global,
 // safety-critical setting (cap>=1 is what makes the concurrent-squash-merge corruption trigger
 // reachable at all) that was never logged anywhere — neither at boot nor on change — making an
