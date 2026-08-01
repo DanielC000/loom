@@ -62,6 +62,12 @@ function describe(value) {
  * Poll `predicate` (sync or async) until it returns a truthy value. Throws on timeout naming `label`
  * and the LAST observed (falsy) value — a bare "timed out" is barely better than the blind sleep this
  * replaces.
+ *
+ * On expiry (card 3fcd06d6): a bare "timed out" cannot tell an ABSENT event (never fires) apart from a
+ * LATE one (fires after we stopped watching) — two states, one signature, needing opposite fixes. So
+ * before failing, keep polling into a bounded GRACE window purely to characterise which one this was.
+ * ⛔ This NEVER changes the outcome — the throw still happens either way, with the SAME budget in the
+ * message. A passing predicate never reaches this code at all, so a green run's wall-clock is unchanged.
  * @param {() => unknown} predicate
  * @param {{ timeoutMs?: number, intervalMs?: number, label?: string }} [opts]
  */
@@ -71,11 +77,30 @@ export async function waitUntil(predicate, { timeoutMs = 5000, intervalMs = 10, 
   for (;;) {
     last = await predicate();
     if (last) return last;
-    if (Date.now() - t0 > timeoutMs) {
-      throw new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} (last observed: ${describe(last)})`);
-    }
+    if (Date.now() - t0 > timeoutMs) break;
     await sleep(intervalMs);
   }
+
+  // Budget exhausted. Poll into a bounded grace window (never widening the budget that just failed)
+  // to see whether the event arrives late or never arrives at all — diagnostic only, see doc above.
+  const graceMs = Math.min(timeoutMs * 4, 120_000);
+  const graceDeadline = t0 + timeoutMs + graceMs;
+  while (Date.now() < graceDeadline) {
+    await sleep(intervalMs);
+    last = await predicate();
+    if (last) {
+      const elapsed = Date.now() - t0;
+      const overshoot = (elapsed / timeoutMs).toFixed(1);
+      const outcome = `[waitUntil-outcome] ARRIVED LATE at ${elapsed}ms (budget ${timeoutMs}ms, overshoot ${overshoot}x) for ${label}`;
+      console.error(outcome);
+      throw new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome}`);
+    }
+  }
+  const elapsed = Date.now() - t0;
+  const overshoot = (elapsed / timeoutMs).toFixed(1);
+  const outcome = `[waitUntil-outcome] ABSENT through ${elapsed}ms (${overshoot}x budget) for ${label}`;
+  console.error(outcome);
+  throw new Error(`waitUntil: timed out after ${timeoutMs}ms waiting for ${label} — ${outcome} (last observed: ${describe(last)})`);
 }
 
 /**
