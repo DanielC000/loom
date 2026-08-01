@@ -43,7 +43,12 @@ class RoutePtyStub {
   constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); this.sent = []; }
   setLive(id, on = true) { if (on) this.live.add(id); else this.live.delete(id); }
   setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
-  enqueueStdin(id, text, _source = "system", onDeliver, route, kind = "warning", _questionId, _ownerText, _proactive, _senderId, giveUpHeldUntil, onGiveUpExhausted) {
+  // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
+  // (production's `enqueueDurableMessage`/`redriveQueuedMessage` migrated to it) — discriminate by shape.
+  enqueueStdin(id, text, _source = "system", onDeliver, route, kind = "warning", _questionId, _ownerText, _proactive, _senderId, tail, onGiveUpExhaustedPositional) {
+    const isTailObject = typeof tail === "object" && tail !== null;
+    const giveUpHeldUntil = isTailObject ? tail.giveUpHeldUntil : tail;
+    const onGiveUpExhausted = isTailObject ? tail.onGiveUpExhausted : onGiveUpExhaustedPositional;
     this.sent.push({ id, text, kind, route });
     if (!this.live.has(id)) return { delivered: false };
     const stillGiveUpHeld = giveUpHeldUntil !== undefined && Date.now() < giveUpHeldUntil;

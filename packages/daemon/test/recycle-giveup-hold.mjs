@@ -45,7 +45,11 @@ class PtyStub {
   constructor() { this.q = new Map(); this.live = new Set(); this.busy = new Set(); }
   setLive(id, on = true) { if (on) this.live.add(id); else { this.live.delete(id); this.busy.delete(id); } }
   setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
-  enqueueStdin(id, text, source = "system", onDeliver, route, kind, questionId, ownerText, proactive, senderId, giveUpHeldUntil) {
+  // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
+  // (production's `carryPendingToSuccessor` migrated to it) — discriminate by shape, same as the real
+  // implementation.
+  enqueueStdin(id, text, source = "system", onDeliver, route, kind, questionId, ownerText, proactive, senderId, tail) {
+    const giveUpHeldUntil = (typeof tail === "object" && tail !== null) ? tail.giveUpHeldUntil : tail;
     if (!this.live.has(id)) return { delivered: false };
     if (!this.busy.has(id)) { const a = this.q.get(id) ?? []; a.push({ id: `d-${a.length}`, text, source, delivered: true }); this.q.set(id, a); return { delivered: true }; }
     const a = this.q.get(id) ?? []; a.push({ id: `qm-${a.length}`, text, source, onDeliver, kind, giveUpHeldUntil }); this.q.set(id, a);

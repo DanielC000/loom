@@ -2395,7 +2395,13 @@ export class SessionService {
           // crossed, `submitGeneration` never resets, and mintedAtGen is still valid age evidence here
           // (unlike the post-resume() loop below, which deliberately omits it — see that call's own
           // comment for why).
-          for (const msg of carried) this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted, msg.logicalId, msg.mintedAtGen, msg.mintedAtWallClock);
+          for (const msg of carried) {
+            this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
+              giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
+              mintedAtGen: msg.mintedAtGen, // SAME still-alive pty, no boundary crossed — carries (see comment above)
+              mintedAtWallClock: msg.mintedAtWallClock,
+            });
+          }
           throw new Error("companion process did not stop in time — upgrade aborted (capability changes are saved and will apply on the next successful resume)");
         }
       } finally {
@@ -2428,7 +2434,11 @@ export class SessionService {
       // brand-new Live, whose submitGeneration restarts at 0, so the predecessor's generation count
       // compared against it would be a unit error, not evidence (the same boundary carryPendingToSuccessor
       // / card 1c47454b treats identically — see QueuedMessage.mintedAtGen's own doc, pty/host.ts).
-      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, msg.giveUpHeldUntil, msg.onGiveUpExhausted, msg.logicalId, undefined, msg.mintedAtWallClock);
+      this.pty.enqueueStdin(sessionId, msg.text, msg.source, msg.onDeliver, msg.route, msg.kind, msg.questionId, msg.ownerText, msg.proactive, msg.senderId, {
+        giveUpHeldUntil: msg.giveUpHeldUntil, onGiveUpExhausted: msg.onGiveUpExhausted, logicalId: msg.logicalId,
+        mintedAtGen: undefined, // DELIBERATELY OMITTED — fresh Live's submitGeneration restarts at 0 (see comment above)
+        mintedAtWallClock: msg.mintedAtWallClock,
+      });
     }
     return resumed;
   }
@@ -3246,7 +3256,7 @@ export class SessionService {
             console.log(`[restart] ${id} restoring a give-up hold onto a replayed entry (~${Math.max(0, giveUpHeldUntil - Date.now())}ms remaining) — this entry will still deliver as a duplicate once the hold expires (no confirming hook can reach a dead process's generation), held from drain until then; card 9e27f4d2`);
           }
           const mintedAtWallClock = typeof mintedAt[i] === "number" ? mintedAt[i] : undefined;
-          this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, giveUpHeldUntil, undefined, undefined, undefined, mintedAtWallClock);
+          this.pty.enqueueStdin(id, m, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { giveUpHeldUntil, mintedAtWallClock });
         } catch (e) {
           console.warn(`[restart] ${id} failed to replay a pending entry at index ${i}: ${(e as Error)?.message ?? e}`);
         }
@@ -3741,9 +3751,11 @@ export class SessionService {
         recipientId, text, "system", (reason?: string) => {
           this.redriveInFlightMsgIds.delete(msgId);
           this.resolveQueuedMessage(msgId, { recipientId, reason });
-        }, route, kind, undefined, undefined, undefined, undefined, giveUpHeldUntil,
-        () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
-        rootMsgId, // logicalId (card 4a0af485 CR follow-up #6) — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
+        }, route, kind, undefined, undefined, undefined, undefined, {
+          giveUpHeldUntil,
+          onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, text, msgId, rootMsgId, chainDepth, sender, e.taskId ?? null, kind),
+          logicalId: rootMsgId, // card 4a0af485 CR follow-up #6 — `rootMsgId` was already read back three lines above but never threaded through; without it a redrive self-minted a FRESH logicalId, breaking chain identity (and this card's own content-match correlation) across a restart
+        },
       );
       if (r.delivered || r.position !== undefined) return "reEnqueued";
       // delivered:false with no position ⇒ the host has no live pty for it (DB/host skew) → not actually
@@ -5595,9 +5607,11 @@ export class SessionService {
     // records WHY the durable record closed without being delivered as a turn.
     const r = this.pty.enqueueStdin(
       recipientId, framedText, "system", (reason?: string) => this.resolveQueuedMessage(msgId, { recipientId, reason }),
-      ctx.route, kind, undefined, undefined, undefined, undefined, ctx.giveUpHeldUntil,
-      () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
-      rootMsgId, // logicalId (card 4a0af485) — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
+      ctx.route, kind, undefined, undefined, undefined, undefined, {
+        giveUpHeldUntil: ctx.giveUpHeldUntil,
+        onGiveUpExhausted: () => this.handleGiveUpExhausted(recipientId, framedText, msgId, rootMsgId, chainDepth, ctx.sender, ctx.taskId ?? null, kind),
+        logicalId: rootMsgId, // card 4a0af485 — unifies PtyHost's own per-enqueue id with this chain's cross-remint identity
+      },
     );
     if (!r.delivered) {
       // Held (busy / not-ready) — persist the durable inbox record. delivered:false with no position also
@@ -6032,7 +6046,7 @@ export class SessionService {
         // compared against an unrelated counter (a unit error, not evidence) and `annotatePasteRecoveryAge`
         // would silently disclose nothing, exactly the defect this card exists to close. See
         // `QueuedMessage.mintedAtGen`/`mintedAtWallClock`'s own docs (pty/host.ts) for the full reasoning.
-        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, m.mintedAtWallClock);
+        this.pty.enqueueStdin(successorId, m.text, m.source, undefined, undefined, m.kind, undefined, undefined, undefined, undefined, { mintedAtWallClock: m.mintedAtWallClock });
       }
     }
     // Re-mint each unresolved durable record onto the successor (recipient ← successor), so crash-survival

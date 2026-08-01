@@ -251,7 +251,10 @@ try {
     setBusy(id, on = true) { if (on) this.busy.add(id); else this.busy.delete(id); }
     setFirstTurnStarted(id, on = true) { if (on) this.firstTurnStarted.add(id); else this.firstTurnStarted.delete(id); }
     hasFirstTurnStarted(id) { return this.firstTurnStarted.has(id); }
-    enqueueStdin(id, text, _source = "system", onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, giveUpHeldUntil) {
+    // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
+    // (production's `enqueueDurableMessage` migrated to it) — discriminate by shape, same as the real impl.
+    enqueueStdin(id, text, _source = "system", onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, tail) {
+      const giveUpHeldUntil = (typeof tail === "object" && tail !== null) ? tail.giveUpHeldUntil : tail;
       this.sent.push({ id, text });
       if (!this.live.has(id)) return { delivered: false, reason: "session-dead", queued: false };
       const stillHeld = giveUpHeldUntil !== undefined && Date.now() < giveUpHeldUntil;

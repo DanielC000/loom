@@ -123,7 +123,13 @@ try {
     // carrying a still-in-the-future `giveUpHeldUntil` is held even for an otherwise-idle recipient — without
     // this the stub could never exercise the symptom this card fixes (a lost hold silently taking the
     // immediate-delivery branch).
-    enqueueStdin(id, text, _source = "system", onDeliver, _route, kind = "warning", _questionId, _ownerText, _proactive, _senderId, giveUpHeldUntil, onGiveUpExhausted) {
+    // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
+    // (production's `enqueueDurableMessage`/`redriveQueuedMessage` migrated to it) — discriminate by
+    // shape, same as the real implementation, so this stub keeps modelling both call shapes correctly.
+    enqueueStdin(id, text, _source = "system", onDeliver, _route, kind = "warning", _questionId, _ownerText, _proactive, _senderId, tail, onGiveUpExhaustedPositional) {
+      const isTailObject = typeof tail === "object" && tail !== null;
+      const giveUpHeldUntil = isTailObject ? tail.giveUpHeldUntil : tail;
+      const onGiveUpExhausted = isTailObject ? tail.onGiveUpExhausted : onGiveUpExhaustedPositional;
       this.sent.push({ id, text, kind });
       if (!this.live.has(id)) return { delivered: false };          // not alive → dropped (no position)
       const stillGiveUpHeld = giveUpHeldUntil !== undefined && Date.now() < giveUpHeldUntil;

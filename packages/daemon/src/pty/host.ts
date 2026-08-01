@@ -1705,6 +1705,19 @@ export type EnqueueResult = {
   deliveryState: "handed-off" | "queued" | "dropped";
 };
 /**
+ * Card 3f09f9ce: `enqueueStdin`'s TAIL (`giveUpHeldUntil` onward) as a single named options object — an
+ * additive overload alongside the original positional tail (see `enqueueStdin`'s own doc), so a call site
+ * can name each field instead of leaving a reader to count commas. Positions 1-10 (`sessionId`..`senderId`)
+ * are unaffected and stay positional either way.
+ */
+export type EnqueueStdinTail = {
+  giveUpHeldUntil?: number;
+  onGiveUpExhausted?: () => void;
+  logicalId?: string;
+  mintedAtGen?: number;
+  mintedAtWallClock?: number;
+};
+/**
  * Shape guard (card 78a16dc5) for a `kind:"warning"` entry only (Loom's OWN operational nudges:
  * idle/context/busy-stuck watchdogs, restart/boot continuation notes, rate-limit/usage nudges,
  * memory-recall injection — see `QueuedMessageKind`). An `"agent"`-kind entry (a worker report, a
@@ -4289,7 +4302,7 @@ export class PtyHost {
               // check is its own scope, not this one): mint a logicalId so this re-injection is no longer
               // untracked. Fresh, not derived from the original turn — a raw human/agent-authored turn that
               // collapsed has no durable msgId of its own to inherit.
-              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, undefined, undefined, randomUUID(), mintedAtGen, mintedAtWallClock); }, 0);
+              setTimeout(() => { this.enqueueStdin(sessionId, recoveryText, "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, { logicalId: randomUUID(), mintedAtGen, mintedAtWallClock }); }, 0);
             }
           }
           // §19c usage-limit park: a StopFailure with error==="rate_limit" means the turn died on the
@@ -4412,8 +4425,42 @@ export class PtyHost {
    * durable "agent"/settle-nudge message that later exhausts its give-up budget always has a hook to park
    * or re-mint through, however it happened to be delivered. See {@link QueuedMessage}'s own doc for why
    * this is a distinct hook from `onDeliver`.
+   *
+   * Card 3f09f9ce: the tail (`giveUpHeldUntil` onward) also accepts a SINGLE OPTIONS OBJECT ({@link
+   * EnqueueStdinTail}) in place of the five trailing positional params, via the overload below — additive,
+   * so every existing positional call site (and every `.mjs` test double standing in for this method —
+   * untyped, so nothing here typechecks them; see the card for the test-double audit this required) keeps
+   * working byte-identical. New call sites should prefer the options form: a miscount among 5 same-typed
+   * trailing positions typechecks cleanly and fails silently — which is exactly how two call sites
+   * silently dropped `logicalId`/`mintedAtGen`/`mintedAtWallClock` before (card 02baa3a5).
    */
-  enqueueStdin(sessionId: string, text: string, source: QueueSource = "system", onDeliver?: () => void, route?: TurnRoute, kind: QueuedMessageKind = "warning", questionId?: string, ownerText?: string, proactive = false, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string, mintedAtGen?: number, mintedAtWallClock?: number): EnqueueResult {
+  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string, ownerText?: string, proactive?: boolean, senderId?: string | null, tail?: EnqueueStdinTail): EnqueueResult;
+  enqueueStdin(sessionId: string, text: string, source?: QueueSource, onDeliver?: () => void, route?: TurnRoute, kind?: QueuedMessageKind, questionId?: string, ownerText?: string, proactive?: boolean, senderId?: string | null, giveUpHeldUntil?: number, onGiveUpExhausted?: () => void, logicalId?: string, mintedAtGen?: number, mintedAtWallClock?: number): EnqueueResult;
+  enqueueStdin(
+    sessionId: string,
+    text: string,
+    source: QueueSource = "system",
+    onDeliver?: () => void,
+    route?: TurnRoute,
+    kind: QueuedMessageKind = "warning",
+    questionId?: string,
+    ownerText?: string,
+    proactive = false,
+    senderId?: string | null,
+    tailOrGiveUpHeldUntil?: EnqueueStdinTail | number,
+    onGiveUpExhaustedPositional?: () => void,
+    logicalIdPositional?: string,
+    mintedAtGenPositional?: number,
+    mintedAtWallClockPositional?: number,
+  ): EnqueueResult {
+    // Discriminated by SHAPE, not by an arity count: `giveUpHeldUntil` is always `number | undefined` on
+    // the positional form and never an object, so an options object at this position is unambiguous.
+    const isTailObject = typeof tailOrGiveUpHeldUntil === "object" && tailOrGiveUpHeldUntil !== null;
+    const giveUpHeldUntil = isTailObject ? tailOrGiveUpHeldUntil.giveUpHeldUntil : tailOrGiveUpHeldUntil;
+    const onGiveUpExhausted = isTailObject ? tailOrGiveUpHeldUntil.onGiveUpExhausted : onGiveUpExhaustedPositional;
+    const logicalId = isTailObject ? tailOrGiveUpHeldUntil.logicalId : logicalIdPositional;
+    const mintedAtGen = isTailObject ? tailOrGiveUpHeldUntil.mintedAtGen : mintedAtGenPositional;
+    const mintedAtWallClock = isTailObject ? tailOrGiveUpHeldUntil.mintedAtWallClock : mintedAtWallClockPositional;
     const live = this.live.get(sessionId);
     // `queued: false` makes the negative explicit: nothing is recorded, nothing will ever deliver this —
     // unlike the `held` path below, where `queued: true` is exactly as durable/successful as it sounds.

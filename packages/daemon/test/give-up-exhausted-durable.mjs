@@ -96,7 +96,16 @@ class PtyStub {
   // `getPending` (which only reflects what's currently WAITING in the FIFO), this is the right primitive
   // for "was this text ever actually sent to this recipient", since an immediately-idle recipient's text
   // never sits in the FIFO at all.
-  enqueueStdin(id, text, _source = "system", onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, giveUpHeldUntil, onGiveUpExhausted) {
+  // Card 3f09f9ce: position 11 now also accepts the REAL enqueueStdin's options-object tail overload
+  // (`{giveUpHeldUntil, onGiveUpExhausted, ...}`) alongside the plain positional form — production's
+  // `enqueueDurableMessage` (sessions/service.ts) migrated to the options form, and this stub stands in
+  // for the real PtyHost on that exact call path, so it must understand both shapes or it silently
+  // misreads the object as `giveUpHeldUntil` (see the card: this is the exact "typechecks fine in prod,
+  // wrong in an untyped .mjs double" defect class, one layer down).
+  enqueueStdin(id, text, _source = "system", onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, tail, onGiveUpExhaustedPositional) {
+    const isTailObject = typeof tail === "object" && tail !== null;
+    const giveUpHeldUntil = isTailObject ? tail.giveUpHeldUntil : tail;
+    const onGiveUpExhausted = isTailObject ? tail.onGiveUpExhausted : onGiveUpExhaustedPositional;
     this.enqueueCount.set(id, (this.enqueueCount.get(id) ?? 0) + 1);
     this.sent.push({ id, text });
     if (!this.live.has(id)) return { delivered: false, reason: "session-dead", queued: false };

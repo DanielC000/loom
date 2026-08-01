@@ -97,7 +97,12 @@ class SeamHost extends createSeamHost(PtyHost) {
   // existing assertion reads only id/text/source/kind off `enqueued` entries, so this is purely additive.
   // The park-coverage scenario below invokes it directly (mirrors give-up-exhausted-durable.mjs's own
   // `giveUpOn` primitive) to simulate a give-up without modelling the real host's pty/hook lifecycle.
-  enqueueStdin(id, text, source, _onDeliver, _opts, kind, _questionId, _ownerText, _proactive, _senderId, _giveUpHeldUntil, onGiveUpExhausted) {
+  // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
+  // (production's `enqueueDurableMessage` migrated to it, bundling `onGiveUpExhausted` INTO that object
+  // instead of a separate 12th positional arg) — discriminate by shape, same as the real implementation.
+  enqueueStdin(id, text, source, _onDeliver, _opts, kind, _questionId, _ownerText, _proactive, _senderId, tail, onGiveUpExhaustedPositional) {
+    const isTailObject = typeof tail === "object" && tail !== null;
+    const onGiveUpExhausted = isTailObject ? tail.onGiveUpExhausted : onGiveUpExhaustedPositional;
     this.enqueued.push({ id, text, source, kind, onGiveUpExhausted });
     return { delivered: true };
   }
