@@ -1321,6 +1321,33 @@ export interface GateHistoryRow {
   /** ISO timestamp the run settled. */
   endedAt: string;
   failingTest: string | null;
+  /** `outcome === "pass"` — a plain boolean sibling of `outcome` (card 753d9911: agent-facing consumers
+   *  asked for a pass/fail flag rather than deriving it from the outcome enum themselves). A `false` row
+   *  is exactly the rejected-run case that carries `durationMs` too (recorded unconditionally, before any
+   *  pass/fail branching) — this field never being true for a rejection is the whole point. */
+  passed: boolean;
+  /** The resolved `maxConcurrentGates` cap in effect when this run was recorded, and how many gates were
+   *  concurrently active at its admission — both read straight from the event's own `detail_json` (every
+   *  gate kind stamps them unconditionally, same as `durationMs`). `null` only for a row recorded before
+   *  this stamping shipped. */
+  gateCap: number | null;
+  /** ⚠️ Answers ONE narrow question — "how many gates were admitted together AT THE INSTANT this one
+   *  started" — and answers it perfectly. Does NOT answer "how many ran at any point during this run":
+   *  a gate admitted solo and joined 30s later by a second run reads as uncontended HERE even though it
+   *  spent ~95% of its own runtime alongside another one. Treating this as a max-over-run figure is
+   *  exactly the mistake card c6750500 was filed to fix. See `concurrentGatesMax` (below) for the field
+   *  that actually answers max-over-run — the two are NOT interchangeable and a caller must pick the one
+   *  that answers the question actually being asked. */
+  concurrentGates: number | null;
+  /** The TRUE max-over-run companion to `concurrentGates` (card c6750500) — how many gates were admitted
+   *  at ANY point while this run was in flight, derived from `GateSemaphore`'s own admit/release
+   *  bookkeeping (not a poll, so no transition can be missed). This is the field to use for "was this run
+   *  actually contended", never `concurrentGates` alone. NEVER BACKFILLED: `null` for every row recorded
+   *  before card c6750500 shipped, populated only from that point forward — a `null` here does NOT imply
+   *  `concurrentGates` is also null (or vice versa), and an analysis spanning older and newer rows must
+   *  handle the two fields' independent availability separately rather than assuming one's presence
+   *  implies the other's. */
+  concurrentGatesMax: number | null;
 }
 
 /** A bounded page of gate history (mirrors {@link ArchivedSessionsPage}'s {items,total,limit} contract so

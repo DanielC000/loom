@@ -11,6 +11,7 @@ import { DEFAULT_REQUESTS_LIST_CAP } from "./audit.js";
 import { resolveAlias, strictShape } from "./arg-alias.js";
 import { currentColumns, type DesiredColumn } from "../tasks/columns.js";
 import type { Db } from "../db.js";
+import { MAX_GATE_HISTORY_PAGE } from "../db.js";
 import type { PtyHost } from "../pty/host.js";
 import { possibleDuplicateRootLabel } from "../pty/host.js";
 import type { SessionService } from "../sessions/service.js";
@@ -2560,6 +2561,80 @@ export class OrchestrationMcpRouter {
     );
     registerGateStatus(server, sessions);
     registerGateQueue(server, sessions, db, managerSessionId);
+
+    // gate_history (card 753d9911): `listGateEvents` (db.ts) already reads the complete, paginated,
+    // JOIN-enriched settled-gate-run series — INCLUDING rejected runs, whose `durationMs`/`gateCap`/
+    // `concurrentGates` are stamped unconditionally, before any pass/fail branching — but until now it was
+    // wired to exactly one consumer, the human-only web Gates page (`gateway/server.ts` `/api/gates/
+    // history`). A manager had no read path to it at all and, on card `99fb882e`, spent weeks treating a
+    // fully-recorded series as unrecoverable. This is that read path: a THIN wrapper, no new query — same
+    // `db.listGateEvents` the web endpoint calls, reused verbatim.
+    // CROSS-PROJECT SCOPING (the load-bearing risk this card called out): unlike the web endpoint, which
+    // takes an optional `projectId` and defaults to the WHOLE PLATFORM, this tool takes NO projectId
+    // argument at all — the project is resolved SERVER-SIDE from the caller's OWN session
+    // (`db.getSession(managerSessionId)?.projectId`), the same pattern `registerGateQueue` above uses, so
+    // there is no argument shape through which a caller could ask for a different project's rows. This is
+    // STRICTER than `gate_queue`'s own redaction (which still returns a foreign project's row with
+    // taskId/branch/workerLabel omitted): `gate_history` never returns a foreign-project row at all, so it
+    // cannot widen anything `gate_queue` already exposes.
+    server.registerTool(
+      "gate_history",
+      {
+        description:
+          "Read-only, PAGINATED history of settled daemon-executed gate runs for YOUR OWN project ONLY " +
+          "(merge/build gates, their transient-kill retries, worker self-checks, and deploys) — INCLUDING " +
+          "REJECTED runs, which carry the same `durationMs`/`gateCap`/`concurrentGates`/`concurrentGatesMax` " +
+          "a passed run does (recorded unconditionally, before any pass/fail branching — the exact data " +
+          "`gate_queue` and `gate_status` cannot give you, since both only ever describe LIVE ops, never " +
+          "settled history). Use this to recover a real gate-duration trend (e.g. \"is the floor climbing\") " +
+          "instead of hand-maintaining a readings table from nudge text. Returns {items: GateHistoryRow[], " +
+          "total, limit, offset, nextOffset} — `items` is newest-first; each row is {id, gateType " +
+          "(\"merge\"|\"worker\"|\"deploy\"), outcome (\"pass\"|\"reject\"|\"timeout\"|\"kill\"), passed " +
+          "(the same outcome as a plain boolean — `outcome===\"pass\"`), durationMs, gateCap, " +
+          "concurrentGates, concurrentGatesMax, endedAt, failingTest, taskId, branch, workerLabel, " +
+          "sessionId, projectId, projectName}. " +
+          "⚠️ `concurrentGates` vs `concurrentGatesMax` — DO NOT CONFUSE THESE, they answer DIFFERENT " +
+          "questions: `concurrentGates` is a SNAPSHOT AT ADMISSION ONLY — \"how many gates were admitted " +
+          "together the instant this one started\" — and says NOTHING about a second gate joining 30s " +
+          "later; a run that spent 95% of its wall time contended can still read `concurrentGates:1` " +
+          "(uncontended-looking) if it happened to be admitted solo. `concurrentGatesMax` is the TRUE " +
+          "max-over-run figure — how many were ever admitted at once while this run was in flight — and is " +
+          "the field to reach for when the question is \"was this run actually contended\", never " +
+          "`concurrentGates` alone. `concurrentGatesMax` is ALSO NEVER BACKFILLED: it is `null` for every " +
+          "row recorded before that field shipped and populated only from that point forward, INDEPENDENTLY " +
+          "of `concurrentGates`'s own availability — a `null` `concurrentGatesMax` on a row that DOES carry " +
+          "`concurrentGates` is the NORMAL historical shape, not a data-quality problem, and neither field's " +
+          "presence may be assumed from the other's. " +
+          "`durationMs`/`gateCap`/`concurrentGates`/`concurrentGatesMax` are each `null` only for a row " +
+          "recorded before THAT SPECIFIC field was stamped — the four were NOT all added in the same " +
+          "change, so there is no single date/card that scopes all of them at once; a caller that needs to " +
+          "reason about when a particular field became reliable should check that field's own history, not " +
+          "assume the others share it. Never null for a REJECTED row once the field in question is being " +
+          "stamped at all — a rejection carries the same fields a pass does. `limit`/`offset` paginate " +
+          "(default 100, clamped to " +
+          MAX_GATE_HISTORY_PAGE + "); `nextOffset` is `offset+items.length` when more rows remain, else " +
+          "`null` — page deterministically via offset:nextOffset until it is null, same contract as " +
+          "`events_search`. " +
+          "PROJECT-SCOPED SERVER-SIDE, NOT BY ARGUMENT: there is no `projectId` parameter — the project is " +
+          "always the CALLER's own, resolved from this session, exactly like `gate_queue`. A caller cannot " +
+          "request another project's rows through any input this tool accepts, and a foreign-project row " +
+          "is never returned at all (not merely redacted), so this cannot expose anything `gate_queue`'s " +
+          "own cross-project redaction doesn't already allow. Reuses `db.listGateEvents` verbatim — no " +
+          "duplicate query logic.",
+        inputSchema: strictShape({
+          limit: z.number().int().positive().optional(),
+          offset: z.number().int().nonnegative().optional(),
+        }),
+      },
+      async ({ limit, offset }) => {
+        const projectId = db.getSession(managerSessionId)?.projectId;
+        if (!projectId) return ok({ error: "no project for this session" });
+        const off = offset ?? 0;
+        const page = db.listGateEvents({ projectId, limit: limit ?? 100, offset: off });
+        const nextOffset = off + page.items.length < page.total ? off + page.items.length : null;
+        return ok({ items: page.items, total: page.total, limit: page.limit, offset: off, nextOffset });
+      },
+    );
 
     // gate_cancel (card 8d585277): the manual cancel/supersede escalation for a case auto-supersede-on-
     // merge does NOT cover — no merge decision exists yet (a known-failing base, a stale/UNVERIFIED

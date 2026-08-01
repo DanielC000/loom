@@ -1329,8 +1329,10 @@ const SCHEDULE_FIRE_KINDS = ["schedule_fired", "schedule_fire_deferred", "schedu
 
 /** Clamp for a bounded gate-history page (listGateEvents, card a1c86452) — same posture as
  *  MAX_ARCHIVED_PAGE: a caller's `limit` is clamped into [1, MAX_GATE_HISTORY_PAGE] so a huge value can't
- *  return an unbounded event set. A "load more" client reads the effective `limit` back to detect capping. */
-const MAX_GATE_HISTORY_PAGE = 200;
+ *  return an unbounded event set. A "load more" client reads the effective `limit` back to detect capping.
+ *  Exported (card 753d9911) so the `gate_history` MCP tool's description can cite the same number without
+ *  redeclaring it, mirroring MAX_EVENTS_SEARCH_PAGE's own export for `events_search`. */
+export const MAX_GATE_HISTORY_PAGE = 200;
 
 /** Clamp for a bounded, kind-filterable events-forensics page (listOrchestrationEventsBounded, card
  *  80b7a33b) — same posture as MAX_GATE_HISTORY_PAGE: a caller's `limit` is clamped into [1,
@@ -6974,10 +6976,16 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
   }
   const durationMs = typeof detail.durationMs === "number" ? detail.durationMs : null;
   const failingTest = typeof detail.failingTest === "string" ? detail.failingTest : null;
+  const outcome = gateOutcomeFromDetail(detail);
+  const gateCap = typeof detail.gateCap === "number" ? detail.gateCap : null;
+  const concurrentGates = typeof detail.concurrentGates === "number" ? detail.concurrentGates : null;
+  // NEVER BACKFILLED (card c6750500) — null for every row recorded before this field shipped, independent
+  // of whether `concurrentGates` itself is present on that same row. See GateHistoryRow's own doc.
+  const concurrentGatesMax = typeof detail.concurrentGatesMax === "number" ? detail.concurrentGatesMax : null;
   return {
     id: r.id,
     gateType: gateTypeForKind(r.kind),
-    outcome: gateOutcomeFromDetail(detail),
+    outcome,
     projectId: r.projectId,
     projectName: r.projectName,
     sessionId: r.sessionId,
@@ -6987,6 +6995,10 @@ function toGateHistoryRow(r: GateEventJoinRow): GateHistoryRow {
     durationMs,
     endedAt: r.ts,
     failingTest,
+    passed: outcome === "pass",
+    gateCap,
+    concurrentGates,
+    concurrentGatesMax,
   };
 }
 

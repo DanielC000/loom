@@ -285,19 +285,26 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
   // READ-ONLY: folding the gate into my_context must add NO set/propose/confirm gate surface anywhere.
   // `run_gate` (card 7f96aa09), `gate_status` (card edc1ec12, now on BOTH surfaces per card fc243a43 —
   // the worker's own call is scoped to its own ops), `gate_queue` (card fa359824, now on BOTH surfaces
-  // per card d04f9c76 — same project-scoped redaction either way, see registerGateQueue's doc), and
-  // `gate_cancel` (card 8d585277, MANAGER-ONLY) are DELIBERATE, reviewed exceptions to the /gate/i sweep
-  // below: `run_gate` only EXECUTES the project's EXISTING gateCommand (daemon-mediated, through the
-  // GateSemaphore), `gate_status` only READS the live GateSemaphore registry by opId, `gate_queue` only
-  // READS the same live registry's whole running/queued snapshot (cap/depth/holder), and `gate_cancel`
-  // only CANCELS a live gate OP already admitted/queued through that same registry (project-scoped,
-  // refuses cross-project) — none of the four ever sets/configures `gateCommand` itself, so the trust
+  // per card d04f9c76 — same project-scoped redaction either way, see registerGateQueue's doc),
+  // `gate_cancel` (card 8d585277, MANAGER-ONLY), and `gate_history` (card 753d9911, MANAGER-ONLY) are
+  // DELIBERATE, reviewed exceptions to the /gate/i sweep below: `run_gate` only EXECUTES the project's
+  // EXISTING gateCommand (daemon-mediated, through the GateSemaphore), `gate_status` only READS the live
+  // GateSemaphore registry by opId, `gate_queue` only READS the same live registry's whole running/queued
+  // snapshot (cap/depth/holder), `gate_cancel` only CANCELS a live gate OP already admitted/queued through
+  // that same registry (project-scoped, refuses cross-project), and `gate_history` only READS the durable
+  // settled-gate-run history (a thin wrapper over `db.listGateEvents`, project-scoped server-side, no
+  // `projectId` argument) — none of the five ever sets/configures `gateCommand` itself, so the trust
   // boundary this check protects (no agent-writable gateCommand surface) is untouched by any of them.
-  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue" && n !== "gate_cancel");
+  const gateSetTool = (names) => names.find((n) => /gate/i.test(n) && n !== "run_gate" && n !== "gate_status" && n !== "gate_queue" && n !== "gate_cancel" && n !== "gate_history");
   check("(S) NO gate-setting tool on the manager surface (read-only — trust boundary intact)",
     gateSetTool(managerTools) === undefined);
   check("(S) NO gate-setting tool on the worker surface (run_gate EXECUTES, never SETS, the gate)",
     gateSetTool(workerTools) === undefined);
+  // POSITIVE CONTROL (required alongside the exception above): prove the allowlist edit above did NOT
+  // defang the matcher itself — a genuine setter-shaped name (never registered for real; this is a
+  // synthetic probe of the `gateSetTool` function, not the live surface) must still be caught.
+  check("(S) gateSetTool positive control: a genuine setter-shaped name is STILL caught, not swallowed by the allowlist",
+    gateSetTool(["gate_configure", "my_context"]) === "gate_configure");
   // The worker surface is exactly { directive_status, gate_queue, gate_status, my_context, run_gate,
   // worker_report } — run_gate (card 7f96aa09), gate_status (card fc243a43, read-only + own-op-scoped),
   // gate_queue (card d04f9c76, read-only + project-scoped), and directive_status (card 35c96aa6, read-only
