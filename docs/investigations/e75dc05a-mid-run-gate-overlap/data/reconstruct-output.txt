@@ -1,0 +1,128 @@
+Floor population (Loom, passed, build_gate(+retry)): n=293
+Labelled-solo rows (concurrentGates===1): n=119
+overlappedAtAll/joinedMidRun equivalence breaks among labelled-solo: 0
+
+=== DoD-1/2: per UTC day, labelled-solo (L) vs gate-uncontended-throughout (T) ===
+date       | L(n) | contaminated(n) | join-rate | T(n)
+2026-07-23 |    5 |               4 |     80.0% |    1
+2026-07-24 |   17 |               4 |     23.5% |   13
+2026-07-25 |    3 |               0 |      0.0% |    3
+2026-07-28 |   14 |               9 |     64.3% |    5
+2026-07-29 |   16 |               9 |     56.3% |    7
+2026-07-30 |   23 |              13 |     56.5% |   10
+2026-07-31 |   35 |              18 |     51.4% |   17
+2026-08-01 |    6 |               3 |     50.0% |    3
+
+=== DoD-3: daily min/mean/max restricted to gate-uncontended-throughout (T), FULL WINDOW ===
+date       | n(T) | min(s) | max(s) | mean(s)
+2026-07-21 |    7 |    458 |    544 |    493
+2026-07-22 |    5 |    534 |    687 |    586
+2026-07-23 |    3 |    680 |    729 |    705
+2026-07-24 |   13 |    691 |    756 |    721
+2026-07-25 |    3 |    711 |    741 |    729
+2026-07-28 |    5 |    738 |    877 |    774
+2026-07-29 |    7 |    779 |    959 |    864
+2026-07-30 |   10 |    809 |   1064 |    916
+2026-07-31 |   17 |    798 |   1563 |    934
+2026-08-01 |    3 |   1152 |   1206 |   1172
+
+=== Comparison: T (gate-uncontended-throughout) vs 99fb882e's SOLO-at-admission (L) ===
+date       | n(T) min(T) mean(T) | n(L) min(L) mean(L) | n(all) min(all) mean(all)
+2026-07-21 |   7    458     493 |   (no 99fb882e row) |   24     458      554
+2026-07-22 |   5    534     586 |   (no 99fb882e row) |   42     534      647
+2026-07-23 |   3    680     705 |   5    729     827 |   43     643      745
+2026-07-24 |  13    691     721 |  17    691     729 |   47     691      775
+2026-07-25 |   3    711     729 |   3    711     729 |    3     711      729
+2026-07-28 |   5    738     774 |  14    738     866 |   15     738      877
+2026-07-29 |   7    779     864 |  16    779     886 |   37     779      927
+2026-07-30 |  10    809     916 |  23    809     980 |   31     809      998
+2026-07-31 |  17    798     934 |  35    798    1024 |   45     798     1019
+2026-08-01 |   3   1152    1172 |   (no 99fb882e row) | (n/a)
+
+=== DoD-4: is a contaminated (mid-run-joined) row ever the daily minimum among L? ===
+2026-07-23: min-among-L = 729s (taskId=2c3c4aff) contaminated=false
+2026-07-24: min-among-L = 691s (taskId=fb61047b) contaminated=false
+2026-07-25: min-among-L = 711s (taskId=78159bf0) contaminated=false
+2026-07-28: min-among-L = 738s (taskId=4d5ea403) contaminated=false
+2026-07-29: min-among-L = 779s (taskId=73d5c34a) contaminated=false
+2026-07-30: min-among-L = 809s (taskId=08723d94) contaminated=false
+2026-07-31: min-among-L = 798s (taskId=f0718488) contaminated=false
+2026-08-01: min-among-L = 1079s (taskId=00bd3b4a) contaminated=true
+
+Days where the daily minimum (among labelled-solo) was actually a contaminated/mid-run-joined row: 1/8
+Restricted to 99fb882e's own 2026-07-23 -> 2026-07-31 window (the only days with a labelled-solo population at all): 0/7.
+The 1 violation found (2026-08-01) sits OUTSIDE that window, on a partial day (only ~4h of data as of extraction) -- see dose analysis below.
+
+=== Contamination DOSE for every mid-run-joined labelled-solo row (all days) ===
+date       | taskId    | duration(s) | dose(s) | dose% | dayTmin(s)
+2026-07-23 | bf0b902c |         797 |     214 | 26.8% | 680
+2026-07-23 | 0f9268cc |         736 |     161 | 21.9% | 680
+2026-07-23 | a0cafef2 |         854 |     137 | 16.1% | 680
+2026-07-23 | 8d431c2f |        1020 |     440 | 43.2% | 680
+2026-07-24 | 1105c2c8 |         802 |     120 | 15.0% | 691
+2026-07-24 | 07ce7c0c |         772 |     686 | 88.8% | 691
+2026-07-24 | c34d3e67 |         742 |     461 | 62.1% | 691
+2026-07-24 | 40deea6f |         710 |      69 |  9.7% | 691
+2026-07-28 | d50d457e |         833 |      10 |  1.2% | 738
+2026-07-28 | 82fafb8f |         874 |       3 |  0.4% | 738
+2026-07-28 | c9046964 |         779 |       6 |  0.8% | 738
+2026-07-28 | 45ffb33b |         759 |       6 |  0.8% | 738
+2026-07-28 | 0eb97fa1 |         866 |     818 | 94.4% | 738
+2026-07-28 | 7a86df32 |        1039 |     276 | 26.5% | 738
+2026-07-28 | 4baa7a08 |        1084 |     508 | 46.9% | 738
+2026-07-28 | 76a393e9 |         974 |     453 | 46.6% | 738
+2026-07-28 | e50600d2 |        1040 |     463 | 44.5% | 738
+2026-07-29 | ef32ef97 |        1031 |    1010 | 98.0% | 779
+2026-07-29 | 0742f8c3 |         878 |     831 | 94.7% | 779
+2026-07-29 | 231e0c0f |         851 |     287 | 33.7% | 779
+2026-07-29 | 9e27f4d2 |         992 |     611 | 61.6% | 779
+2026-07-29 | adea9e96 |         884 |     542 | 61.3% | 779
+2026-07-29 | 44d1dfd8 |         822 |     502 | 61.0% | 779
+2026-07-29 | b27f54b0 |         843 |     212 | 25.2% | 779
+2026-07-29 | 8f58c354 |         820 |     627 | 76.5% | 779
+2026-07-29 | 99339bcd |        1011 |     274 | 27.1% | 779
+2026-07-30 | 0a542ede |        1031 |      17 |  1.6% | 809
+2026-07-30 | 4a0af485 |         995 |     240 | 24.1% | 809
+2026-07-30 | d39db2db |        1009 |     285 | 28.3% | 809
+2026-07-30 | a2873f7e |         945 |     645 | 68.2% | 809
+2026-07-30 | abcf0eba |         982 |     273 | 27.8% | 809
+2026-07-30 | 995be21f |         970 |     953 | 98.3% | 809
+2026-07-30 | 5b221bf2 |        1081 |     309 | 28.6% | 809
+2026-07-30 | e7bcb0df |        1026 |     327 | 31.9% | 809
+2026-07-30 | 08638e79 |         988 |     277 | 28.1% | 809
+2026-07-30 | 9fea4196 |         954 |     269 | 28.2% | 809
+2026-07-30 | e3e40167 |         915 |     263 | 28.7% | 809
+2026-07-30 | a242c747 |        1333 |     625 | 46.9% | 809
+2026-07-30 | d4f60cc1 |        1148 |     258 | 22.5% | 809
+2026-07-31 | 5e30c4bd |        1336 |     849 | 63.6% | 798
+2026-07-31 | ed9c448d |         867 |     283 | 32.6% | 798
+2026-07-31 | 4c5bf820 |         856 |     283 | 33.0% | 798
+2026-07-31 | 793ac76d |         862 |     282 | 32.7% | 798
+2026-07-31 | 31df7e2f |         949 |     331 | 34.9% | 798
+2026-07-31 | 05e043eb |         842 |     141 | 16.8% | 798
+2026-07-31 | 565e1b45 |         853 |      39 |  4.6% | 798
+2026-07-31 | d67725c1 |         996 |     493 | 49.5% | 798
+2026-07-31 | a44c6b46 |         962 |     326 | 33.9% | 798
+2026-07-31 | cf62c1ef |         937 |     210 | 22.4% | 798
+2026-07-31 | ec994992 |        1197 |     428 | 35.7% | 798
+2026-07-31 | 1addef27 |        1202 |     470 | 39.1% | 798
+2026-07-31 | 434a8ca8 |        1239 |     468 | 37.8% | 798
+2026-07-31 | 44458809 |        1180 |     736 | 62.4% | 798
+2026-07-31 | b4c4699e |        1647 |    1107 | 67.2% | 798
+2026-07-31 | 2876a4ef |        1310 |     559 | 42.7% | 798
+2026-07-31 | fddd58ef |        1447 |     540 | 37.3% | 798
+2026-07-31 | 89257222 |        1287 |     159 | 12.4% | 798
+2026-08-01 | 00bd3b4a |        1079 |      69 |  6.4% | 1152
+2026-08-01 | 3fcd06d6 |        1384 |     510 | 36.8% | 1152
+2026-08-01 | 48365fda |        1292 |     755 | 58.5% | 1152
+
+=== DoD-6: which statistic is +342s/10.5d consistent with? ===
+ALL-passed population (99fb882e's own first table), 2026-07-21 -> 2026-07-31:
+  min:  458 -> 798  (delta 340s)
+  mean: 554 -> 1019  (delta 465s)
+
+T (gate-uncontended-throughout, THIS reconstruction), 2026-07-21 -> 2026-07-31 (same window as 99fb882e):
+  min:  458 -> 798  (delta 340s)
+  mean: 493 -> 934  (delta 441s)
+
+(2026-08-01 excluded from the above -- it's outside 99fb882e's 07-21->07-31 window and is a partial day as of when this script ran.)

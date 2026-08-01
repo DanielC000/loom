@@ -111,9 +111,22 @@ date       | n  | min(s) | max(s) | mean(s)
 The same rise (691s→798s+, allowing 07-23's n=5 as a noisy start) shows up **even restricted to runs
 that were solo at admission** — so this is not simply "more overlap happened later." (Caveat, inherited
 from this card's own pinned reading aids: `concurrentGates` is an admission-instant snapshot, not a
-throughout-run measure — a "solo" run by this filter could still have had a peer gate start mid-run. That
-residual is real and unmeasurable with what the daemon currently records; it does not change the
-direction of the result, only its precision.)
+throughout-run measure — a "solo" run by this filter could still have had a peer gate start mid-run.)
+
+**UPDATE (card `e75dc05a`, retrospective reconstruction) — that residual turned out to be measurable
+after all, and large.** Reconstructing admission/settle intervals from `admitMs = settleMs - durationMs`
+across every gate-semaphore admission (all four kinds, all projects — the semaphore is one daemon-global
+instance) found **50-65% of "solo at admission" runs on every well-sampled day were actually joined
+mid-run.** The rising-minimum verdict below *survives* this correction — recomputed against the fully
+verified gate-solo-throughout population, every daily minimum in the 07-21→07-31 window is IDENTICAL to
+the one reported here (458s→798s) — but the specific `b4c4699e` "solo run crossed the ceiling" citation
+in this card's DoD-2 section below turned out to be 67.2%-dosed by a Codescape admission for most of its
+runtime; see `docs/investigations/e75dc05a-mid-run-gate-overlap/findings.md` for the full reconstruction,
+its DoD-0 controls, and that correction. **Also add the ceiling from that card here:** every
+"solo"/"uncontended" claim in this document means gate-uncontended only — `concurrentGates`/`activeCount`
+and the mid-run reconstruction both count only `GateSemaphore`-admitted lanes, never host load from
+worker sessions, ingest subprocesses, or hand-run builds; neither instrument can rule out non-gate
+contention.
 
 **What the rise is NOT plausibly explained by:** the card's own build-log notes put suite size at ~607
 files on 07-21ish and 616 by 07-31 — under 1.5% growth, nowhere near enough to explain a ~75% duration
@@ -147,6 +160,13 @@ merged sha:       493dce1, mergedDate 2026-07-31T17:31:34.360Z (17s after this e
                    with gate-pass → squash-merge)
 ```
 
+**⚠️ CORRECTION (card `e75dc05a`): `concurrentGates: 1` means solo AT ADMISSION only — it does not mean
+solo throughout.** A retrospective overlap reconstruction found a Codescape admission overlapped **67.2%
+of this run's own duration** (1107s of 1646.9s). This does NOT undo the 1646.9s duration or the "the old
+1500s ceiling was crossed" fact below, but it DOES undo citing this run as clean solo-throughout evidence
+against a contention-first explanation — it was contended for two-thirds of its runtime. See
+`docs/investigations/e75dc05a-mid-run-gate-overlap/findings.md`, "Headline finding 2."
+
 The ~4s gap between 1643 and the recovered 1646.9 is well within what a manual re-read (rounding, or
 reading a slightly different reference point than `Date.now() - gateStartedAt`) would produce, and no
 other candidate exists anywhere in the DB within ±10s — this is very likely the same event.
@@ -154,11 +174,12 @@ other candidate exists anywhere in the DB within ±10s — this is very likely t
 **This run happened at 17:31Z, well before the budget raise (~23:30Z that night), so it ran under the
 OLD 1500000ms ceiling.** 1646.9s exceeds 1500s by 146.9s — it could only have passed by consuming the
 one auto-extension a first attempt gets while still emitting output (memory
-`gate-retry-runs-with-no-auto-extend`). **This corroborates the card's framing exactly: the old ceiling
-was measurably crossed, on a real, attributable, solo run, hours before anyone flagged it** — it was not
-noticed because it passed (an extended pass looks identical to a comfortable one unless someone reads
-the `extended` flag, which — per `9f6598dd`'s Finding 1 above — doesn't survive settle for merge ops
-today).
+`gate-retry-runs-with-no-auto-extend`). **The old ceiling was measurably crossed, on a real, attributable
+run, hours before anyone flagged it** — it was not noticed because it passed (an extended pass looks
+identical to a comfortable one unless someone reads the `extended` flag, which — per `9f6598dd`'s
+Finding 1 above — doesn't survive settle for merge ops today). ⚠️ *Per the correction above, this was NOT
+a clean solo-throughout run (67.2% dosed) — the crossing-the-ceiling fact stands, the "solo, therefore
+not a contention artifact" framing does not.*
 
 ## What this does not cover
 
