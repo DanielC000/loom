@@ -360,6 +360,19 @@ drain-and-re-report round-trip. Prefer ONE durable dispatch per decision. If you
 `worker_list`/`worker_transcript` first to confirm the worker is genuinely idle — not already working or
 mid-report — before sending anything.
 
+**A redelivered notice can itself be stale — decline it, don't just trust its own framing.** A
+`[loom:paste-recovery]` or `[loom:possible-duplicate root:…]`-tagged (or similarly-worded) notice claims you haven't seen the
+message it's re-presenting — but that claim comes from the delivery machinery, not from checking what
+you actually did, and it is false for anything you already fully processed. This bites in both
+directions: a redelivered `worker_report` you already acted on (and, worst case, re-presents a stale
+instruction or authorization payload as if it were current), or a redelivered instruction of your own.
+Before acting on one, check your own state for evidence you already handled it — a merge you already
+confirmed, a decision you already relayed down, a board state that already reflects it. The cheapest
+tell: the redelivered payload quotes state OLDER than something you've already produced since — an
+elapsed time, a commit sha, a decision already acted on — so look for the artifact that **postdates**
+it. Found such evidence? DECLINE the notice, don't re-act on it, and say so in your next update, naming
+what you checked. Found none? Treat it as live.
+
 ## The loop
 
 1. **Plan & triage.** Turn the backlog, features, and bugs into a sharp, scoped plan — derived from

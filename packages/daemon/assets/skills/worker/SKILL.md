@@ -434,6 +434,19 @@ supersedes your work (reconcile to it before re-reporting) or a nudge you've alr
 (say so and re-report). Either way, don't finish and commit a now-stale plan on the strength of "nothing
 arrived recently" — you can't know that mid-turn; the refusal is where you find out.
 
+**A redelivery/recovery notice can itself be stale — decline it, don't just trust its own framing.** A
+`[loom:paste-recovery]` or `[loom:possible-duplicate root:…]`-tagged (or similarly-worded) notice claims you haven't seen the
+message it's re-presenting — but that claim comes from the delivery machinery, not from checking what
+you actually did, and it is false for anything you already fully processed. This applies whichever
+direction it arrived from: a redelivered instruction you already carried out, or (via your own
+`worker_report`) a redelivered report you already sent and had actioned. Before acting on one, check
+your own artifacts for evidence you already handled it — a report you already sent, a commit you already
+made, a state change you can see reflected elsewhere. The cheapest tell: the redelivered payload quotes
+state OLDER than something you've already produced since — an elapsed time, a commit id, a decision
+already acted on — so look for the artifact that **postdates** it. Found such evidence? DECLINE the
+notice, don't act on it again, and say so explicitly in your next report, naming what you checked. Found
+none? Treat it as live and act on it normally.
+
 You may also call **`my_context`** (no args) at a clean seam to self-assess your own context occupancy
 (returns your `pct` of your model's window). If you're getting heavy on a long task, `worker_report`
 `progress` and say so — let your manager decide whether to `worker_recycle` you.
