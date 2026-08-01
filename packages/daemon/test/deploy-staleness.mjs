@@ -83,7 +83,15 @@ import { fileURLToPath } from "node:url";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const tmpHome = path.join(os.tmpdir(), `loom-dpstl-${Date.now()}-${process.pid}`);
+// Card f5421d27: every fixture root is suffixed with process.pid (not just Date.now()) and registered
+// here so the outer finally below can sweep ALL of them unconditionally — a thrown error partway
+// through (e.g. a git call) used to skip every fixture created after the throw point, since each
+// section previously only cleaned up its OWN dirs inline; this array is the single source of truth
+// for "what got created" regardless of where execution stops.
+const createdDirs = [];
+const trackDir = (dir) => { createdDirs.push(dir); return dir; };
+
+const tmpHome = trackDir(path.join(os.tmpdir(), `loom-dpstl-${Date.now()}-${process.pid}`));
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
@@ -101,7 +109,7 @@ const FAR_FUTURE_PROCESS_START = "2030-01-01T00:00:00Z";
 const computeDeployStaleness = (distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride) =>
   computeDeployStalenessRaw(distEntry, repoRoot, sharedDist, webDist, processStartedAtOverride ?? FAR_FUTURE_PROCESS_START);
 
-const repo = path.join(os.tmpdir(), `loom-dpstl-repo-${Date.now()}`);
+const repo = trackDir(path.join(os.tmpdir(), `loom-dpstl-repo-${Date.now()}-${process.pid}`));
 fs.mkdirSync(path.join(repo, "packages", "daemon", "src"), { recursive: true });
 fs.mkdirSync(path.join(repo, "packages", "shared", "src"), { recursive: true });
 fs.mkdirSync(path.join(repo, "assets", "skills", "demo"), { recursive: true });
@@ -112,7 +120,7 @@ const git = (args, dateIso) => execSync(`git ${args}`, {
 git("init -q");
 git('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-01-01T00:00:00Z");
 
-const distDir = path.join(os.tmpdir(), `loom-dpstl-dist-${Date.now()}`);
+const distDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-dist-${Date.now()}-${process.pid}`));
 fs.mkdirSync(distDir, { recursive: true });
 const distEntry = path.join(distDir, "index.js");
 const buildDistAt = (iso) => {
@@ -122,7 +130,7 @@ const buildDistAt = (iso) => {
 
 try {
   // ===================== (4) unavailable, gracefully =====================
-  const noRepo = path.join(os.tmpdir(), `loom-dpstl-norepo-${Date.now()}`);
+  const noRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-norepo-${Date.now()}-${process.pid}`));
   fs.mkdirSync(noRepo, { recursive: true });
   buildDistAt("2026-06-01T00:00:00Z");
   const rNoRepo = computeDeployStaleness(distEntry, noRepo);
@@ -184,7 +192,7 @@ try {
 
   // ===================== (6) c1072385's actual bug class — reproduced deterministically =====================
   // Own throwaway repo + dist so this doesn't perturb the sequential history/state the sections above rely on.
-  const incRepo = path.join(os.tmpdir(), `loom-dpstl-increpo-${Date.now()}`);
+  const incRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-increpo-${Date.now()}-${process.pid}`));
   fs.mkdirSync(path.join(incRepo, "packages", "daemon", "src"), { recursive: true });
   const gitInc = (args, dateIso) => execSync(`git ${args}`, {
     cwd: incRepo,
@@ -193,7 +201,7 @@ try {
   gitInc("init -q");
   gitInc('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-07-01T00:00:00Z");
 
-  const incDistDir = path.join(os.tmpdir(), `loom-dpstl-incdist-${Date.now()}`);
+  const incDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-incdist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(incDistDir, { recursive: true });
   const incDistEntry = path.join(incDistDir, "index.js");
   fs.writeFileSync(incDistEntry, "// fixture: dist/index.js — NOT rewritten by the incremental build below\n");
@@ -217,7 +225,7 @@ try {
   try { fs.rmSync(incDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (7) packages/shared/dist is genuinely IN SCOPE (c1072385 DoD 1) =====================
-  const shRepo = path.join(os.tmpdir(), `loom-dpstl-shrepo-${Date.now()}`);
+  const shRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-shrepo-${Date.now()}-${process.pid}`));
   fs.mkdirSync(path.join(shRepo, "packages", "shared", "src"), { recursive: true });
   const gitSh = (args, dateIso) => execSync(`git ${args}`, {
     cwd: shRepo,
@@ -226,14 +234,14 @@ try {
   gitSh("init -q");
   gitSh('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-08-01T00:00:00Z");
 
-  const shDaemonDistDir = path.join(os.tmpdir(), `loom-dpstl-shdaemondist-${Date.now()}`);
+  const shDaemonDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-shdaemondist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(shDaemonDistDir, { recursive: true });
   const shDaemonDistEntry = path.join(shDaemonDistDir, "index.js");
   const buildShDaemonDistAt = (iso) => {
     fs.writeFileSync(shDaemonDistEntry, "// fixture daemon dist\n");
     fs.utimesSync(shDaemonDistEntry, new Date(iso), new Date(iso));
   };
-  const shSharedDistDir = path.join(os.tmpdir(), `loom-dpstl-shshareddist-${Date.now()}`);
+  const shSharedDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-shshareddist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(shSharedDistDir, { recursive: true });
   const shSharedDistEntry = path.join(shSharedDistDir, "types.js");
   const buildShSharedDistAt = (iso) => {
@@ -291,7 +299,7 @@ try {
   // ===================== (9) WEB SIGNAL — POSITIVE CONTROL (card c3ce92ea) =====================
   // Reproduces the exact bug this card fixes: a web-only commit after BOTH dists were built must flip
   // webStale WITHOUT moving the daemon-restart signal at all.
-  const webRepo = path.join(os.tmpdir(), `loom-dpstl-webrepo-${Date.now()}`);
+  const webRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-webrepo-${Date.now()}-${process.pid}`));
   fs.mkdirSync(path.join(webRepo, "packages", "daemon", "src"), { recursive: true });
   fs.mkdirSync(path.join(webRepo, "packages", "web", "src"), { recursive: true });
   const gitWeb = (args, dateIso) => execSync(`git ${args}`, {
@@ -301,14 +309,14 @@ try {
   gitWeb("init -q");
   gitWeb('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-09-01T00:00:00Z");
 
-  const webDaemonDistDir = path.join(os.tmpdir(), `loom-dpstl-webdaemondist-${Date.now()}`);
+  const webDaemonDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-webdaemondist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(webDaemonDistDir, { recursive: true });
   const webDaemonDistEntry = path.join(webDaemonDistDir, "index.js");
   const buildWebDaemonDistAt = (iso) => {
     fs.writeFileSync(webDaemonDistEntry, "// fixture daemon dist\n");
     fs.utimesSync(webDaemonDistEntry, new Date(iso), new Date(iso));
   };
-  const webWebDistDir = path.join(os.tmpdir(), `loom-dpstl-webwebdist-${Date.now()}`);
+  const webWebDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-webwebdist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(webWebDistDir, { recursive: true });
   const webWebDistEntry = path.join(webWebDistDir, "index.html");
   const buildWebWebDistAt = (iso) => {
@@ -353,7 +361,7 @@ try {
   try { fs.rmSync(webWebDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 
   // ===================== (10) WEB SIGNAL — missing web dist entirely (never built / API-only deploy) =====================
-  const noWebRepo = path.join(os.tmpdir(), `loom-dpstl-nowebrepo-${Date.now()}`);
+  const noWebRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-nowebrepo-${Date.now()}-${process.pid}`));
   fs.mkdirSync(path.join(noWebRepo, "packages", "web", "src"), { recursive: true });
   const gitNoWeb = (args, dateIso) => execSync(`git ${args}`, {
     cwd: noWebRepo,
@@ -365,8 +373,8 @@ try {
   gitNoWeb("add packages/web/src/App.tsx");
   gitNoWeb('-c user.email=t@loom -c user.name=t commit -q -m "feat(web): add App"', "2026-10-02T00:00:00Z");
 
-  const noWebDistDir = path.join(os.tmpdir(), `loom-dpstl-missingwebdist-${Date.now()}`); // never created
-  const noWebDaemonDistDir = path.join(os.tmpdir(), `loom-dpstl-nowebdaemondist-${Date.now()}`);
+  const noWebDistDir = path.join(os.tmpdir(), `loom-dpstl-missingwebdist-${Date.now()}-${process.pid}`); // never created
+  const noWebDaemonDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-nowebdaemondist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(noWebDaemonDistDir, { recursive: true });
   const noWebDaemonDistEntry = path.join(noWebDaemonDistDir, "index.js");
   fs.writeFileSync(noWebDaemonDistEntry, "// fixture daemon dist\n");
@@ -386,7 +394,7 @@ try {
   // process itself started BEFORE that commit and never restarted — so it never loaded the rebuild. Must
   // still read stale:true. Deliberately build (T3) != running (T1) — the DoD's own warning is that a test
   // exercising only build == running passes against the broken code.
-  const procRepo = path.join(os.tmpdir(), `loom-dpstl-procrepo-${Date.now()}`);
+  const procRepo = trackDir(path.join(os.tmpdir(), `loom-dpstl-procrepo-${Date.now()}-${process.pid}`));
   fs.mkdirSync(path.join(procRepo, "packages", "daemon", "src"), { recursive: true });
   const gitProc = (args, dateIso) => execSync(`git ${args}`, {
     cwd: procRepo,
@@ -395,7 +403,7 @@ try {
   gitProc("init -q");
   gitProc('-c user.email=t@loom -c user.name=t commit -q -m init --allow-empty', "2026-11-01T00:00:00Z");
 
-  const procDistDir = path.join(os.tmpdir(), `loom-dpstl-procdist-${Date.now()}`);
+  const procDistDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-procdist-${Date.now()}-${process.pid}`));
   fs.mkdirSync(procDistDir, { recursive: true });
   const procDistEntry = path.join(procDistDir, "index.js");
   const buildProcDistAt = (iso) => {
@@ -431,9 +439,13 @@ try {
   try { fs.rmSync(procRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(procDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
 } finally {
-  try { fs.rmSync(repo, { recursive: true, force: true }); } catch { /* best-effort */ }
-  try { fs.rmSync(distDir, { recursive: true, force: true }); } catch { /* best-effort */ }
-  try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
+  // Sweeps EVERY fixture root registered via trackDir() above, not just this section's own —
+  // the per-section rmSync calls above only run on the happy path; a thrown error anywhere in the
+  // try block (e.g. a git call) used to skip every not-yet-reached inline cleanup, leaking those
+  // dirs. force:true makes re-removing an already-cleaned dir a no-op, so this is safe alongside them.
+  for (const dir of createdDirs) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); } catch { /* best-effort */ }
+  }
 }
 
 console.log(failures === 0
