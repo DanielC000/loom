@@ -16,7 +16,9 @@ import {
   type OAuthProviderSlug,
   type PollJob,
   type CapabilityProvisionKind,
+  type MsBounds,
   GOOGLE_ANALYTICS_SCOPE_PRESETS,
+  ORCHESTRATION_TIMEOUT_MS_BOUNDS,
 } from "@loom/shared";
 import { api, type ProjectPatchError } from "../lib/api";
 import { useActiveProject } from "../lib/activeProject";
@@ -326,6 +328,18 @@ function ConfigEditor({ project }: { project: Project }) {
   const baseline = useRef(builtJson);
   const dirty = builtJson !== baseline.current;
 
+  // The three seconds-labelled timeout fields, validated against the SHARED canonical-ms bounds before
+  // submit (card 48365fda) — an out-of-range entry blocks Save rather than round-tripping to a server
+  // error that quotes the raw ms ceiling into a field measured in seconds. Each field also renders its
+  // own inline message; this list is what names the offending field next to the Save button.
+  const timeoutRangeErrors = ([
+    ["Gate command timeout", gateTimeout, ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs],
+    ["Deploy command timeout", deployTimeout, ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs],
+    ["Alert webhook timeout", webhookTimeout, ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs],
+  ] as const)
+    .map(([label, value, b]) => { const e = msRangeError(value, "s", b); return e ? `${label} ${e}` : null; })
+    .filter((e): e is string => e !== null);
+
   const save = useMutation({
     mutationFn: () => api.updateProjectConfig(project.id, built),
     // Surface this mutation's failures INLINE (see the Save row below); tell the global mutation-error
@@ -396,9 +410,9 @@ function ConfigEditor({ project }: { project: Project }) {
           </label>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginTop: 12 }}>
-          <MsField label="Gate command timeout (s)" value={gateTimeout} set={setGateTimeout} effectiveMs={resolved.orchestration.gateCommandTimeoutMs} defMs={defaults.orchestration.gateCommandTimeoutMs} unit="s" />
-          <MsField label="Deploy command timeout (s)" value={deployTimeout} set={setDeployTimeout} effectiveMs={resolved.orchestration.deployCommandTimeoutMs} defMs={defaults.orchestration.deployCommandTimeoutMs} unit="s" />
-          <MsField label="Alert webhook timeout (s)" value={webhookTimeout} set={setWebhookTimeout} effectiveMs={resolved.orchestration.alertWebhookTimeoutMs} defMs={defaults.orchestration.alertWebhookTimeoutMs} unit="s" />
+          <MsField label="Gate command timeout (s)" value={gateTimeout} set={setGateTimeout} effectiveMs={resolved.orchestration.gateCommandTimeoutMs} defMs={defaults.orchestration.gateCommandTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs} />
+          <MsField label="Deploy command timeout (s)" value={deployTimeout} set={setDeployTimeout} effectiveMs={resolved.orchestration.deployCommandTimeoutMs} defMs={defaults.orchestration.deployCommandTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs} />
+          <MsField label="Alert webhook timeout (s)" value={webhookTimeout} set={setWebhookTimeout} effectiveMs={resolved.orchestration.alertWebhookTimeoutMs} defMs={defaults.orchestration.alertWebhookTimeoutMs} unit="s" bounds={ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs} />
         </div>
         <div style={{ marginTop: 12 }}>
           <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -449,14 +463,20 @@ function ConfigEditor({ project }: { project: Project }) {
       </Panel>
 
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        <Button variant="primary" disabled={!dirty || save.isPending} onClick={() => save.mutate()}>
+        <Button variant="primary" disabled={!dirty || save.isPending || timeoutRangeErrors.length > 0} onClick={() => save.mutate()}>
           {save.isPending ? "Saving…" : "Save"}
         </Button>
         {dirty
           ? <span style={{ color: color.amber, fontSize: 12, fontFamily: font.mono }}>unsaved changes</span>
           : <span style={{ color: color.phosphor, fontSize: 12, fontFamily: font.mono }}>saved</span>}
         <span style={{ flex: 1 }} />
-        {save.isError && (
+        {/* An out-of-range timeout takes the error slot: it's what's blocking Save, and it states the
+            limit in the field's own unit — unlike a stale server error still quoting raw ms. */}
+        {timeoutRangeErrors.length > 0 ? (
+          <span role="alert" style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
+            {timeoutRangeErrors.join(" · ")}
+          </span>
+        ) : save.isError && (
           <span style={{ color: color.red, fontSize: 12, fontFamily: font.mono, textAlign: "right" }}>
             {(save.error as Error).message}
           </span>
@@ -2213,14 +2233,24 @@ function NumField({ label, value, set, effective, def, note }:
 // Unit-aware sibling of NumField for a CANONICAL-MS value. The form shows a human unit (s/m/h); the
 // stored value is always ms. `effectiveMs`/`defMs` are ms and rendered in `unit` (÷ the unit's ms).
 // Blank → inherit (the field is omitted from the override → falls back to the platform default).
-function MsField({ label, value, set, effectiveMs, defMs, unit, note }:
-  { label: string; value: string; set: (v: string) => void; effectiveMs: number; defMs: number; unit: Unit; note?: string }) {
+//
+// `bounds` (optional, canonical ms — pass the field's ORCHESTRATION_TIMEOUT_MS_BOUNDS entry) turns on the
+// unit-translated range hint + inline out-of-range error. Every caller that passes it must ALSO gate its
+// Save on `msRangeError` for the same field, so an out-of-range value never reaches the server and comes
+// back quoting the raw ms bound. Omitting it leaves the field exactly as it was (card 48365fda).
+function MsField({ label, value, set, effectiveMs, defMs, unit, note, bounds }:
+  { label: string; value: string; set: (v: string) => void; effectiveMs: number; defMs: number; unit: Unit; note?: string; bounds?: MsBounds }) {
   const div = UNIT_MS[unit];
+  const err = msRangeError(value, unit, bounds);
   return (
     <label style={{ display: "flex", flexDirection: "column", gap: 4 }}>
       <span style={fieldLabel}>{label}</span>
-      <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${defMs / div}${unit})`} />
+      <Input value={value} onChange={(e) => set(e.target.value)} inputMode="decimal" placeholder={`inherit (${defMs / div}${unit})`}
+        aria-invalid={err ? true : undefined}
+        style={err ? { borderColor: color.red } : undefined} />
       <Hint>{effHint(`${effectiveMs / div}${unit}`)}</Hint>
+      {bounds && <Hint>{msRangeHint(bounds, unit)}</Hint>}
+      {err && <span role="alert" style={{ color: color.red, fontSize: 11, fontFamily: font.mono }}>{err}</span>}
       {note && <Hint>{note}</Hint>}
     </label>
   );
@@ -2277,4 +2307,36 @@ function msStr(v: number | undefined, unit: Unit): string {
 function applyMs(orch: Partial<OrchestrationConfig>, key: keyof OrchestrationConfig, s: string, unit: Unit): void {
   if (s.trim() === "") delete (orch as Record<string, unknown>)[key];
   else (orch as Record<string, unknown>)[key] = Number(s) * UNIT_MS[unit];
+}
+
+// --- ms-bound translation (state the schema's limit in the FIELD'S OWN unit) ---------------------
+//
+// Card 48365fda. An MsField is labelled and entered in a human unit (s/m/h) but stores canonical ms, so
+// the server's own rejection quoted the raw MILLISECOND bound into a field measured in seconds: typing
+// `2000` into "Gate command timeout (s)" sent 2_000_000 and came back "expected number to be <=1800000".
+// The rejection was CORRECT — the true ceiling is 1800s — but there was no way to derive that from the
+// message. Two different project owners read it as a broken validator on the same night.
+//
+// Fix: divide the shared bound by the field's own unit and both (a) show the range up front and (b) catch
+// an out-of-range entry client-side, so the raw-ms server error is never the thing the user reads.
+
+/** A canonical-ms bound rendered in `unit` — e.g. 1_800_000 in "s" → "1800s", 500 in "s" → "0.5s". */
+function msInUnit(ms: number, unit: Unit): string {
+  return `${ms / UNIT_MS[unit]}${unit}`;
+}
+/** The always-on range hint shown under a bounded MsField, in the field's own unit. */
+function msRangeHint(b: MsBounds, unit: Unit): string {
+  return `min ${msInUnit(b.min, unit)} · max ${msInUnit(b.max, unit)}`;
+}
+// Validate an MsField entry (a string in `unit`) against its canonical-ms bounds, returning the error
+// STATED IN `unit` — or null when there is nothing to report. Blank is always fine (blank = inherit the
+// default). A non-numeric entry is deliberately NOT claimed here: the existing NaN→null→strict-zod path
+// already 400s it readably, and inventing a range message for "abc" would be the wrong complaint.
+function msRangeError(value: string, unit: Unit, b: MsBounds | undefined): string | null {
+  if (!b || value.trim() === "") return null;
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  const ms = n * UNIT_MS[unit];
+  if (ms < b.min || ms > b.max) return `must be between ${msInUnit(b.min, unit)} and ${msInUnit(b.max, unit)}`;
+  return null;
 }

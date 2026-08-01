@@ -745,3 +745,76 @@ test("editing the project Alert webhook URL + events persists, and clearing both
   await expect.poll(readWebhook).toBeNull();
 });
 
+
+// Card 48365fda — the three seconds-labelled timeout fields state their limit IN SECONDS, and an
+// over-limit entry is caught client-side rather than round-tripping to the server's raw-millisecond
+// rejection. Regression target: typing `2000` into "Gate command timeout (s)" used to send 2_000_000 and
+// come back "orchestration.gateCommandTimeoutMs: Too big: expected number to be <=1800000" — a correct
+// rejection quoting a bound in a unit the field is not measured in. Two project owners read that as a
+// broken validator on the same night.
+test("timeout fields state their bound in seconds and block an over-limit entry (card 48365fda)", async ({ page, loomDaemon }) => {
+  const project = await loomDaemon.createProject(`settings-timeout-bounds-${Date.now()}`);
+  await pinActiveProject(page, project.id);
+  await page.goto(`${loomDaemon.baseURL}/settings`);
+
+  // DoD-2 — the permitted range is visible in the field's own unit BEFORE anything goes wrong. This is
+  // what actually prevents the confusion; the error message below is the backstop.
+  const gateBox = page.locator('label:has(> span:text-is("Gate command timeout (s)"))');
+  const deployBox = page.locator('label:has(> span:text-is("Deploy command timeout (s)"))');
+  const webhookBox = page.locator('label:has(> span:text-is("Alert webhook timeout (s)"))');
+  await expect(gateBox.getByText("min 1s · max 1800s")).toBeVisible();
+  await expect(deployBox.getByText("min 1s · max 1800s")).toBeVisible();
+  // The webhook field's own bounds differ (500ms-60s) — proving the hint is driven from the SHARED
+  // per-field schema bounds, not one hardcoded pair reused for all three.
+  await expect(webhookBox.getByText("min 0.5s · max 60s")).toBeVisible();
+
+  const projectSave = page.getByRole("button", { name: "Save", exact: true }).first();
+  const gate = field(page, "Gate command timeout (s)");
+  const deploy = field(page, "Deploy command timeout (s)");
+  const webhook = field(page, "Alert webhook timeout (s)");
+
+  // BEFORE: an untouched form has no range error and Save is merely not-dirty.
+  await expect(gateBox.getByRole("alert")).toHaveCount(0);
+
+  // DoD-1, field 1 — the exact value from the bug report.
+  await gate.fill("2000");
+  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 1800s");
+  await expect(projectSave).toBeDisabled();
+  // The raw millisecond bound never reaches the user. (Asserted as the server error's own phrasing so a
+  // legitimate ms-derived value elsewhere on the page can't make this vacuously pass.)
+  await expect(page.getByText(/<=\s*1800000/)).toHaveCount(0);
+  // AFTER: back in range → the error clears and Save is reachable again.
+  await gate.fill("1800");
+  await expect(gateBox.getByRole("alert")).toHaveCount(0);
+  await expect(projectSave).toBeEnabled();
+  await gate.fill("");
+
+  // DoD-3, field 2 — the same helper, so the same behaviour, without a per-call-site fix.
+  await deploy.fill("2000");
+  await expect(deployBox.getByRole("alert")).toHaveText("must be between 1s and 1800s");
+  await expect(projectSave).toBeDisabled();
+  await deploy.fill("");
+
+  // DoD-3, field 3 — a DIFFERENT bound, reported in the same unit (60s, not 60000).
+  await webhook.fill("700");
+  await expect(webhookBox.getByRole("alert")).toHaveText("must be between 0.5s and 60s");
+  await expect(projectSave).toBeDisabled();
+  await webhook.fill("");
+
+  // The under-limit end of the range is caught too, not just the ceiling.
+  await gate.fill("0.5");
+  await expect(gateBox.getByRole("alert")).toHaveText("must be between 1s and 1800s");
+
+  // And an in-range value still SAVES — the guard rejects out-of-range entries, it doesn't wedge the form.
+  await gate.fill("300");
+  await expect(gateBox.getByRole("alert")).toHaveCount(0);
+  await expect(projectSave).toBeEnabled();
+  await projectSave.click();
+  await expect
+    .poll(async () => {
+      const res = await fetch(`${loomDaemon.baseURL}/api/projects`);
+      const projects = (await res.json()) as Array<{ id: string; config?: { orchestration?: { gateCommandTimeoutMs?: number } } }>;
+      return projects.find((p) => p.id === project.id)?.config?.orchestration?.gateCommandTimeoutMs ?? null;
+    })
+    .toBe(300_000);
+});

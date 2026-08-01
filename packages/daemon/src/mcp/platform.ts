@@ -4,8 +4,8 @@ import { isIP as netIsIP } from "node:net";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { z } from "zod";
-import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry } from "@loom/shared";
-import { MEMORY_CONFIG_MAX, resolveConfig } from "@loom/shared";
+import type { Project, ProjectConfigOverride, PlatformConfigOverride, PlatformConfigPatch, Profile, Schedule, RepoRegistryEntry, MsBounds } from "@loom/shared";
+import { MEMORY_CONFIG_MAX, ORCHESTRATION_TIMEOUT_MS_BOUNDS, resolveConfig } from "@loom/shared";
 import type { Db } from "../db.js";
 import { MAX_EVENTS_SEARCH_PAGE } from "../db.js";
 import type { SessionService } from "../sessions/service.js";
@@ -131,11 +131,18 @@ const resumeDocFilenameSchema = z
   .refine((s) => !/^[a-zA-Z]:/.test(s), {
     message: "must not be an absolute/drive-qualified path",
   });
+/** An optional canonical-MS timeout field bounded by its `ORCHESTRATION_TIMEOUT_MS_BOUNDS` entry — so the
+ *  accepted range is declared ONCE, in @loom/shared, and read by both this validator and the Settings UI
+ *  (which restates it in the field's own display unit). */
+const msBounded = (b: MsBounds) => z.number().int().min(b.min).max(b.max).optional();
+
 const orchestrationOverride = z.object({
   gateCommand: z.string().optional(),
   // Per-project, HUMAN-only timeout (ms) capping a gateCommand run. Pairs with gateCommand and is
-  // omitted from the agent path with it (see agentOrchestrationOverride). Bounded 1000–1800000.
-  gateCommandTimeoutMs: z.number().int().min(1000).max(1800000).optional(),
+  // omitted from the agent path with it (see agentOrchestrationOverride). Bounds come from
+  // ORCHESTRATION_TIMEOUT_MS_BOUNDS (@loom/shared) — the SAME table the Settings UI reads to state the
+  // range in the field's own unit, so the schema and the UI's message can never drift (card 48365fda).
+  gateCommandTimeoutMs: msBounded(ORCHESTRATION_TIMEOUT_MS_BOUNDS.gateCommandTimeoutMs),
   // Scoped per-project DEPLOY command (design [[Scoped Per-Project Deploy — Design]] 13235b62) — a
   // manager's own-project outward-exec primitive, mirroring gateCommand exactly (host-RCE by design;
   // see the trust-boundary note on `confirmWorkerMerge`'s gate run and `deployOwnProject`). HUMAN-only:
@@ -143,13 +150,14 @@ const orchestrationOverride = z.object({
   deployCommand: z.string().optional(),
   // Per-project, HUMAN-only timeout (ms) capping a deployCommand run. Pairs with deployCommand; same
   // bounds as gateCommandTimeoutMs.
-  deployCommandTimeoutMs: z.number().int().min(1000).max(1800000).optional(),
+  deployCommandTimeoutMs: msBounded(ORCHESTRATION_TIMEOUT_MS_BOUNDS.deployCommandTimeoutMs),
   // HUMAN-only (data-exfiltration vector — see agentOrchestrationOverride). Accepted on this human
   // path; dropped from the agent path so an agent can't redirect orchestration data off-box.
   alertWebhook: alertWebhookSchema.optional(),
   // Per-project, HUMAN-only timeout (ms) capping an alertWebhook POST. Pairs with alertWebhook and is
-  // omitted from the agent path with it (see agentOrchestrationOverride). Bounded 500–60000.
-  alertWebhookTimeoutMs: z.number().int().min(500).max(60000).optional(),
+  // omitted from the agent path with it (see agentOrchestrationOverride). Bounds from the same shared
+  // table as the two above.
+  alertWebhookTimeoutMs: msBounded(ORCHESTRATION_TIMEOUT_MS_BOUNDS.alertWebhookTimeoutMs),
   // Concurrency caps gate worker_spawn / Scheduler manager launches: whole-number, ≥1 (a cap of 0
   // would deadlock all spawning), with a generous safety ceiling so a fat-fingered value can't
   // authorize a fleet-bomb.

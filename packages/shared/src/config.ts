@@ -206,6 +206,37 @@ export const MEMORY_CONFIG_MAX = {
 } as const;
 
 /**
+ * The accepted range (in canonical MS) of each per-project, human-only orchestration TIMEOUT field —
+ * the SINGLE source of truth for those bounds. The daemon's human config validator
+ * (`mcp/platform.ts` › `orchestrationOverride`) builds its zod `.min()/.max()` from this table, and the
+ * Settings UI reads the same table to state each field's permitted range — and to reject an
+ * out-of-range entry — IN THE UNIT THE FIELD IS ENTERED IN.
+ *
+ * Why it's exported rather than left inline in the zod schema (card 48365fda): those Settings fields are
+ * labelled and entered in SECONDS and multiply by 1000 on submit, so the server's own rejection quoted a
+ * raw millisecond figure into a seconds field — a user who typed `2000` was told "expected number to be
+ * <=1800000" and had no way to derive "max 1800s" from it. Two different project owners hit that the same
+ * night and both concluded the validator was broken. Translating the bound into the field's unit needs
+ * the bound to be READABLE from the web package; duplicating the literal there would just move the drift
+ * risk one layer up, so both sides consume this.
+ *
+ * ⚠️ These ceilings are deliberate platform-wide caps, not tuning knobs — a gate/deploy command holds a
+ * shared gate lane for its whole timeout, and a webhook POST blocks the best-effort event path. Raising
+ * one is an owner decision, not a UI concern.
+ */
+export const ORCHESTRATION_TIMEOUT_MS_BOUNDS = {
+  gateCommandTimeoutMs: { min: 1000, max: 1_800_000 },
+  deployCommandTimeoutMs: { min: 1000, max: 1_800_000 },
+  alertWebhookTimeoutMs: { min: 500, max: 60_000 },
+} as const;
+
+/** One field's accepted canonical-MS range — the shape of an `ORCHESTRATION_TIMEOUT_MS_BOUNDS` entry. */
+export interface MsBounds {
+  min: number;
+  max: number;
+}
+
+/**
  * Outbound alert webhook (Richer-notifications, external delivery). When set, the daemon POSTs a
  * small JSON payload to `url` on each orchestration event whose `kind` is in `events`, so the human
  * is alerted OUTSIDE the UI (a generic webhook works for Slack/Discord incoming-webhook URLs + any
