@@ -1,20 +1,25 @@
-// Regression guard for card f432cbb8 — HERMETIC, no daemon, no real claude, no build-dist import (this
-// spawns OTHER test files as child processes; it never imports dist/ itself).
+// Regression guard for card f432cbb8, EXTENDED by card 9878e520 — HERMETIC, no daemon, no real claude,
+// no build-dist import (this spawns OTHER test files as child processes; it never imports dist/ itself).
 //
-// companion-memory-recall.mjs and resume-already-live-guard.mjs both write real transcript fixtures via
-// engineTranscriptPath (sessions/transcript.ts), which resolves under os.homedir()/.claude/projects —
-// NOT under either file's own tmpHome. Before this card, neither file sandboxed HOME/USERPROFILE, so
-// EVERY run left a never-cleaned directory under the RUNNING USER'S real ~/.claude/projects. Measured on
-// this repo's own dev box: the `loom-mem-recall-repo-*` and `loom-ralg-cwd-*` prefixes these two files
-// produce accounted for 1983 + 1938 = 3921 of the 3987 total leaked dirs found (98.3%) — by far the two
-// dominant leakers. Both use per-run-unique ids/paths (Date.now()-suffixed), so this was NEVER a
-// correctness landmine like engine-session-rotation.mjs's fixed-literal-id collision (card 7d70b27b, see
-// engine-session-rotation-isolation.mjs) — purely hygiene + unbounded scan-cost (the growth
-// resolveTranscriptFile's fallback scan pays for, see transcript.ts's DoD-3 doc comment).
+// companion-memory-recall.mjs, resume-already-live-guard.mjs, periodic-snapshot.mjs and
+// shutdown-snapshot.mjs all write real transcript fixtures via engineTranscriptPath
+// (sessions/transcript.ts), which resolves under os.homedir()/.claude/projects — NOT under any of their
+// own tmpHome/LOOM_HOME. Before f432cbb8, none of them sandboxed HOME/USERPROFILE, so EVERY run left a
+// never-cleaned directory under the RUNNING USER'S real ~/.claude/projects. Measured on this repo's own
+// dev box (f432cbb8): the `loom-mem-recall-repo-*` and `loom-ralg-cwd-*` prefixes the first two produce
+// accounted for 1983 + 1938 = 3921 of the 3987 total leaked dirs found (98.3%) — by far the two dominant
+// leakers, which is why f432cbb8's audit (a top-N-by-volume pass) never reached the other two. Card
+// 9878e520 found `loom-periodic-snap-cwd-*`/`loom-shutdown-snap-cwd-*` still leaking from
+// periodic-snapshot.mjs/shutdown-snapshot.mjs — same defect, smaller volume, missed by that audit's
+// threshold rather than by the fix shape being wrong. All four use per-run-unique ids/paths
+// (Date.now()-suffixed), so this was NEVER a correctness landmine like engine-session-rotation.mjs's
+// fixed-literal-id collision (card 7d70b27b, see engine-session-rotation-isolation.mjs) — purely hygiene
+// + unbounded scan-cost (the growth resolveTranscriptFile's fallback scan pays for, see transcript.ts's
+// DoD-3 doc comment).
 //
-// The fix (this card): both files now sandbox HOME/USERPROFILE to their OWN managed temp root, set
-// BEFORE importing dist — so os.homedir() (read at CALL time by engineTranscriptPath, not cached at
-// import) never resolves to the real home for any call either file makes.
+// The fix: every target file sandboxes HOME/USERPROFILE to its OWN managed temp root, set BEFORE
+// importing dist — so os.homedir() (read at CALL time by engineTranscriptPath, not cached at import)
+// never resolves to the real home for any call any of them makes.
 //
 // This test proves that WITHOUT touching the real user's ~/.claude/projects at all: it spawns each
 // target file with HOME/USERPROFILE pre-set (via the child's env) to a FAKE "real home" this test fully
@@ -40,6 +45,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const TARGETS = [
   { file: "companion-memory-recall.mjs", leakPrefix: "loom-mem-recall-repo-" },
   { file: "resume-already-live-guard.mjs", leakPrefix: "loom-ralg-cwd-" },
+  { file: "periodic-snapshot.mjs", leakPrefix: "loom-periodic-snap-cwd-" },
+  { file: "shutdown-snapshot.mjs", leakPrefix: "loom-shutdown-snap-cwd-" },
 ];
 
 /** Run `targetFile` as a child process with HOME/USERPROFILE pointed at `fakeRealHome`; LOOM_HOME is
@@ -96,8 +103,8 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — companion-memory-recall.mjs and resume-already-live-guard.mjs both sandbox HOME/" +
-    "USERPROFILE before touching engineTranscriptPath, so neither leaks a directory into the real user's " +
-    "~/.claude/projects on any run."
+  ? "\n✅ ALL PASS — companion-memory-recall.mjs, resume-already-live-guard.mjs, periodic-snapshot.mjs " +
+    "and shutdown-snapshot.mjs all sandbox HOME/USERPROFILE before touching engineTranscriptPath, so none " +
+    "of them leaks a directory into the real user's ~/.claude/projects on any run."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

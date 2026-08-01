@@ -21,6 +21,19 @@ process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-shutdown-snap-${Date.now()}
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
 
+// Card 9878e520: fakeCwd below backs a real transcript fixture written via engineTranscriptPath
+// (sessions/transcript.ts), which resolves under os.homedir()/.claude/projects — NOT LOOM_HOME. Left
+// unsandboxed, every run of this file left a never-cleaned directory under the RUNNING USER'S real
+// ~/.claude/projects (same defect b7f758f4 fixed for companion-memory-recall.mjs/
+// resume-already-live-guard.mjs — missed here because this file wasn't among the top-volume leakers that
+// audit measured). Sandbox HOME/USERPROFILE to its own temp root — cleaned up in the `finally` below —
+// BEFORE importing dist, so os.homedir() (read at call time, not cached) resolves inside the sandbox for
+// every call this file makes.
+const sandboxHome = path.join(os.tmpdir(), `loom-shutdown-snap-home-${Date.now()}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { encodeProjectDir, archivedTranscriptExists } = await import("../dist/sessions/transcript.js");
@@ -114,6 +127,7 @@ try {
   try { fs.rmSync(path.join(claudeDir, `${engineA}.jsonl`), { force: true }); } catch { /* ignore */ }
   try { fs.rmSync(path.join(claudeDir, `${engineB}.jsonl`), { force: true }); } catch { /* ignore */ }
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
+  fs.rmSync(sandboxHome, { recursive: true, force: true });
 }
 
 console.log(failures === 0
