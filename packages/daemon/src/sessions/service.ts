@@ -244,6 +244,15 @@ type ConfirmMergeResult = {
   merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
   warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
   gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
+  /** Card 9f6598dd: whether ANY step of whichever gate run(s) actually spawned for THIS merge ever
+   *  consumed its one-time auto-extend — see the `gateExtended`/`anyExtended` locals in confirmWorkerMerge
+   *  for how this is derived. `undefined` when no gate actually spawned (gateless project, or a REUSED
+   *  self-check), same "nothing to report" discipline as `gateSteps`. Set on every return path from the
+   *  point the gate run is known onward (pass, gate-rejection, and every post-gate rejection — merge
+   *  conflict, gate-base-invalidated, orphaned/stage-empty) — NOT on a pre-gate rejection (stranded work,
+   *  union-merge failure, circuit breaker), where a gate genuinely never ran. Read by
+   *  confirmWorkerMergeTracked's onSettle to persist the durable per-op record `gate_status` exposes. */
+  gateExtended?: boolean;
   /** Card 522cf573: the FULL rejection detail suffix (everything after "— " in the rich
    *  `[loom:merge-rejected]` pty text this same rejection would have sent, incl. the squash-phase-began
    *  state and the canonical-repo-state clause) — captured verbatim at EVERY `merged:false` return site so
@@ -341,6 +350,61 @@ function deriveWorkerGateVerdict(
       steps: v.steps,
       outputTail: v.outputTail,
       ...(v.passed ? {} : { gateDetail: v.gateDetail && {
+        phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
+        failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
+        signal: v.gateDetail.signal ?? undefined, timedOut: v.gateDetail.timedOut,
+      } }),
+    },
+  };
+}
+
+/**
+ * Card 9f6598dd: the `confirmWorkerMergeTracked` analogue of {@link deriveWorkerGateVerdict} — derives the
+ * durable `pending_gate_ops.verdict`/`verdict_payload_json` write from a settled `confirmWorkerMerge`
+ * outcome, closing the exact gap Finding 1 measured (`gate_status` on a settled MERGE op returning
+ * `{state:"settled",gateType:"merge",elapsedMs:null,idleMs:null}` — no `extended`, no duration, no
+ * outcome, because the merge-kind `onSettle` call site never passed a verdict at all before this).
+ *   - a thrown exception (`outcome.ok:false`) → `"error"`, `reason` only (nothing else is trustworthy —
+ *     the throw could have struck at literally any point, see `ConfirmMergeResult`'s own doc).
+ *   - `outcome.value.merged` → `"pass"`, carrying `gateExtended` (renamed `extended` in the payload, same
+ *     field every other kind uses) when a gate actually ran for this merge — `undefined` for a gateless
+ *     project or a REUSED self-check, never a fabricated `false`.
+ *   - otherwise (a RESOLVED rejection — gate failure, merge conflict, stranded work, etc. — never a
+ *     throw) → `"fail"`, the same `extended` field PLUS `gateDetail` when this rejection was gate-caused
+ *     (every other rejection reason has none to report — `gateDetail` stays `undefined`, not fabricated).
+ * `settledAt`/`totalDurationMs` are computed HERE, at the one point both the op's own `startedAt` (closed
+ * over as `opStartedAt`, see the call site) and "now" are both known — `totalDurationMs` is the REAL op
+ * wall time (worktree prep + union-merge + gate + squash), not `Σ(gateSteps)`'s floor (see the card's own
+ * "WHY settledAt SPECIFICALLY" doc). Set on every branch, including the thrown-exception one — a caller
+ * diagnosing an errored op still wants to know how long it ran before it errored.
+ */
+function deriveMergeGateVerdict(
+  outcome: { ok: true; value: ConfirmMergeResult } | { ok: false; error: unknown },
+  opStartedAt: string | undefined,
+): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } {
+  // ONE captured instant, not two separate clock reads: `settledAt` and `totalDurationMs` must satisfy
+  // `totalDurationMs === Date.parse(settledAt) - Date.parse(opStartedAt)` EXACTLY (the identity gate_status
+  // callers rely on) — deriving them from a single `settledAtMs` guarantees that BY CONSTRUCTION. Two
+  // independent `new Date().toISOString()` / `Date.now()` calls looked equivalent but genuinely aren't:
+  // under host contention, a GC pause (or just scheduler jitter) between the two statements can land them
+  // on different milliseconds, breaking the identity intermittently (caught via a real flake, gate-status.mjs
+  // run 2/3, card 9f6598dd follow-up) — a round-trip-exact case, `toISOString()`/`Date.parse` preserve full
+  // millisecond precision, so this is lossless, not an approximation.
+  const settledAtMs = Date.now();
+  const settledAt = new Date(settledAtMs).toISOString();
+  const totalDurationMs = opStartedAt != null ? settledAtMs - Date.parse(opStartedAt) : undefined;
+  if (!outcome.ok) {
+    return {
+      kind: "error",
+      payload: { reason: outcome.error instanceof Error ? outcome.error.message : String(outcome.error), settledAt, totalDurationMs },
+    };
+  }
+  const v = outcome.value;
+  return {
+    kind: v.merged ? "pass" : "fail",
+    payload: {
+      reason: v.reason, settledAt, totalDurationMs, extended: v.gateExtended,
+      ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
         signal: v.gateDetail.signal ?? undefined, timedOut: v.gateDetail.timedOut,
@@ -2687,6 +2751,32 @@ export class SessionService {
     passed?: boolean; cancelled?: boolean; reason?: string; durationMs?: number;
     validatedHead?: string; headWarning?: string; steps?: GateStepDuration[]; outputTail?: string;
     gateDetail?: PendingGateOpVerdict["gateDetail"];
+    /** Card 9f6598dd: the op's own mint instant (ISO) — present for EVERY tombstone-branch result (any
+     *  non-live state: settled, evicted-dead-owner, orphaned-by-restart, or the narrow real `pending`
+     *  window), not gated on a recorded verdict, since it's the row's own `started_at` column, always
+     *  known once a row exists at all. Absent only for the two "no row at all" outcomes
+     *  (`never_existed`/`unknown`) and the live `queued`/`running`/`ambiguous` returns above, which report
+     *  `since`/`elapsedMs` instead. */
+    admittedAt?: string;
+    /** Card 9f6598dd — closes Finding 1 (a settled "merge" op used to report NEITHER of these three
+     *  fields at all: `{state:"settled",gateType:"merge",elapsedMs:null,idleMs:null}`, nothing else).
+     *  `settledAt` (ISO) / `totalDurationMs` (`settledAt - admittedAt`) are the REAL total op wall time —
+     *  worktree prep + union-merge + gate + squash for a merge op — strictly ≥ `Σ(steps)`'s own floor (see
+     *  `deriveMergeGateVerdict`'s doc for why `Σ(steps)` alone systematically understates it). `extended`
+     *  is whether ANY step of the gate this op ran ever consumed its one-time auto-extend — `undefined`
+     *  when no gate actually spawned for this op (gateless project, or a REUSED self-check), never a
+     *  fabricated `false`. All three are currently populated for "merge" rows only (see
+     *  `deriveMergeGateVerdict`) — omitted (not fabricated) for a "gate" row, a legacy row, or a
+     *  not-yet-settled row, exactly like every other verdict-payload field above. */
+    settledAt?: string; totalDurationMs?: number;
+    /** Card 9f6598dd: the SAME `pass`/`fail`/`error`/`cancelled` classification `passed`/`cancelled`
+     *  above already encode as two separate booleans — surfaced ALSO as one literal string so a caller
+     *  doesn't have to reconstruct it (`extended:true` paired with `outcome:"fail"` is the specific
+     *  "over-budget AND it failed" signal the card's DoD calls out as the whole point of pairing the two).
+     *  Present whenever a verdict was recorded at all (any of the four kinds, either gate/merge row) —
+     *  `undefined` only when nothing was ever recorded (a legacy row, a not-yet-settled row). Purely
+     *  additive: does not replace `passed`/`cancelled`, which stay exactly as before this card. */
+    outcome?: PendingGateOpVerdictKind;
   } {
     const scoped = scopeSessionId != null || scopeProjectId != null;
     const r = this.gateSemaphore.findByOpId(opId, scopeSessionId, scopeProjectId);
@@ -2708,12 +2798,22 @@ export class SessionService {
     const t = this.db.findPendingGateOpByOpId(opId, scopeSessionId, scopeProjectId);
     if (t.kind === "found") {
       const gateType: GateType = t.record.kind === "merge" ? "merge" : "worker";
-      // SETTLED VERDICT (card 4c5bf820): only ever populated for a "gate" row that recorded one — a
-      // "merge" row's verdict/verdictPayload stay NULL by construction (that onSettle call site never
-      // passes one), a legacy row predates the columns entirely, and a not-yet-settled row never has one
-      // either. `payload` itself is honest-null on a corrupt/unparseable stored blob (see
-      // `Db.toPendingGateOp`) — either way this spreads nothing rather than a fabricated shape.
+      // SETTLED VERDICT (card 4c5bf820, widened by 9f6598dd): populated for a "gate" row via
+      // deriveWorkerGateVerdict, and — since 9f6598dd — for a "merge" row too, via deriveMergeGateVerdict
+      // (previously a "merge" row's verdict/verdictPayload stayed NULL by construction; that was exactly
+      // Finding 1). A legacy row (from before either card) predates the columns entirely, and a
+      // not-yet-settled row never has one either. `payload` itself is honest-null on a corrupt/unparseable
+      // stored blob (see `Db.toPendingGateOp`) — either way this spreads nothing rather than a fabricated
+      // shape. `settledAt`/`totalDurationMs`/`extended` (card 9f6598dd) are independently optional on
+      // `payload` regardless of `verdict` kind — currently only ever set by the merge-kind derivation, so
+      // they spread through for "pass"/"fail" today and are simply absent for "cancelled"/"error"/a "gate"
+      // row, never fabricated.
       const payload = t.record.verdictPayload;
+      const settleTimingFields = {
+        ...(payload?.settledAt !== undefined ? { settledAt: payload.settledAt } : {}),
+        ...(payload?.totalDurationMs !== undefined ? { totalDurationMs: payload.totalDurationMs } : {}),
+        ...(payload?.extended !== undefined ? { extended: payload.extended } : {}),
+      };
       const verdictFields = t.record.verdict === "pass" || t.record.verdict === "fail"
         ? {
           passed: t.record.verdict === "pass",
@@ -2724,13 +2824,19 @@ export class SessionService {
           ...(payload?.steps !== undefined ? { steps: payload.steps } : {}),
           ...(payload?.outputTail !== undefined ? { outputTail: payload.outputTail } : {}),
           ...(payload?.gateDetail !== undefined ? { gateDetail: payload.gateDetail } : {}),
+          ...settleTimingFields,
         }
         : t.record.verdict === "cancelled"
-          ? { cancelled: true, ...(payload?.reason !== undefined ? { reason: payload.reason } : {}) }
+          ? { cancelled: true, ...(payload?.reason !== undefined ? { reason: payload.reason } : {}), ...settleTimingFields }
           : t.record.verdict === "error"
-            ? { ...(payload?.reason !== undefined ? { reason: payload.reason } : {}) }
+            ? { ...(payload?.reason !== undefined ? { reason: payload.reason } : {}), ...settleTimingFields }
             : {};
-      return { state: t.record.state, gateType, elapsedMs: null, idleMs: null, ...verdictFields };
+      return {
+        state: t.record.state, gateType, elapsedMs: null, idleMs: null,
+        admittedAt: t.record.startedAt,
+        ...(t.record.verdict != null ? { outcome: t.record.verdict } : {}),
+        ...verdictFields,
+      };
     }
     if (t.kind === "ambiguous") {
       return {
@@ -9196,6 +9302,16 @@ export class SessionService {
     // is: the plain GREEN return at the bottom of this method sits OUTSIDE the `if (gate)` block. `undefined`
     // for a gateless project (no gate ran) and for a REUSED gate (nothing spawned, see `reuseResult` above).
     let gateStepsResult: GateStepDuration[] | undefined;
+    // Card 9f6598dd: whether ANY step of whichever gate run(s) actually spawned below (the first attempt,
+    // OR'd with the transient-kill retry if one fires) ever consumed its one-time auto-extend — the ONLY
+    // direct signal that a run breached its `gateCommandTimeoutMs` budget (see GATE_EXTEND_IDLE_MS's doc).
+    // `anyExtended` accumulates via the wrapped `hooks.onExtend` at each `runExclusive` call site below;
+    // `gateExtended` is the FINAL, reportable value — `undefined` (not `false`) for a gateless project or a
+    // REUSED gate, same "nothing to report" discipline `gateStepsResult` already follows, so a caller can
+    // tell "never spawned" apart from "spawned and never extended". Read by confirmWorkerMergeTracked's
+    // onSettle to persist the durable per-op record `gate_status` exposes after settle.
+    let anyExtended = false;
+    let gateExtended: boolean | undefined;
     // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
     // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
     // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
@@ -9506,7 +9622,12 @@ export class SessionService {
       let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks) => {
         gateStartedAt = startedAt;
         concurrentAtStart = this.gateSemaphore.snapshot().active;
-        return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, hooks);
+        // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — never a REPLACEMENT
+        // of the semaphore's hook (the live registry's own `entry.extended`, read by gate_queue/gate_status
+        // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
+        // event, not a second independently-computed signal.
+        const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
+        return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
       }, "high");
       evt("build_gate", {
         passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart,
@@ -9544,6 +9665,8 @@ export class SessionService {
         // breaker's streak-count even starts moving toward its trip threshold. `startedAt` (card a1c86452)
         // drives the `build_gate_retry` event's real run-time `durationMs`, excluding queue wait.
         let retryStartedAt = 0;
+        // No `anyExtended` mirroring needed here (unlike the first attempt above): `allowExtend:false`
+        // means gate-runner.ts's own `canExtend` gate never lets `onExtend` fire on a retry at all.
         gateResult = await this.gateSemaphore.runExclusive(
           gateCap, gateDescriptor,
           (startedAt, _cancelSignal, hooks) => {
@@ -9565,6 +9688,10 @@ export class SessionService {
       // this card and returns a bare `{passed:true}` with no `steps` field at all — `?.` so those hermetic
       // doubles keep working byte-identical rather than throwing on a field they were never asked to supply.
       gateStepsResult = gateResult.steps?.length ? gateResult.steps : undefined;
+      // Card 9f6598dd: `undefined` for a gateless project or a REUSED gate (nothing spawned — mirrors
+      // `gateStepsResult`'s own "nothing to report" discipline just above), else whatever `anyExtended`
+      // accumulated across whichever attempt(s) actually ran.
+      gateExtended = gateRan ? anyExtended : undefined;
       if (!gateResult.passed) {
         // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
         // failing phase/step, the first failing test/assertion, and the child's own output — a manager
@@ -9630,14 +9757,25 @@ export class SessionService {
           failingTest ? `failing: ${failingTest}` : `failing test: unknown (${failingTestReason})`,
         ].filter(Boolean).join("; ");
         const tailBlock = outputTail ? `\n--- gate output tail ---\n${outputTail}` : "";
+        // Card 9f6598dd: the ONE piece of `gateDetail` the tool description promised was "folded into the
+        // notification text" but genuinely wasn't — `steps` (a real rejection's `[loom:merge-rejected]`
+        // carried step/phase/exitCode/failingTest/stderr, but no steps line at all, even though `gateDetail`
+        // below already had it). Every OTHER gateDetail field (phase, failedStep, failingTest, exitCode/
+        // signal/timedOut) was already in detailBits/headline — this was the sole gap. Same rendering the
+        // green `[loom:merge-done]` echo already uses (`formatGateStepsDiagnostic`), so a step's duration is
+        // comparable across a green run and a red one from the notification text alone, not just the return
+        // value. Absent (not a stray " ") when `gateStepsResult` is empty/undefined — mirrors `stepsLine`'s
+        // own omit-when-empty convention on the green path.
+        const stepsLine = gateStepsResult?.length ? ` ${formatGateStepsDiagnostic(gateStepsResult)}` : "";
         // Card 522cf573 DoD 1/4: this IS the rich detail — headline + detailBits (incl. `failingTest`, the
         // single highest-value field per the card) + the squash-phase-began state + the canonical-repo
-        // clause + the raw output tail. Captured into ONE variable so BOTH the rich `[loom:merge-rejected]`
-        // notify below AND the generic `[loom:merge-failed]` completion echo (fired instead, whenever this
-        // notify is reconciled away by shouldSuppressMergeReject — confirmWorkerMergeTracked's onSettle
-        // callback reads `detailText` off the return) carry the IDENTICAL detail, by construction. The gate
-        // runs strictly before the squash, so squash phase never reached is always true here.
-        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${tailBlock}`;
+        // clause + the steps line + the raw output tail. Captured into ONE variable so BOTH the rich
+        // `[loom:merge-rejected]` notify below AND the generic `[loom:merge-failed]` completion echo (fired
+        // instead, whenever this notify is reconciled away by shouldSuppressMergeReject —
+        // confirmWorkerMergeTracked's onSettle callback reads `detailText` off the return) carry the
+        // IDENTICAL detail, by construction. The gate runs strictly before the squash, so squash phase never
+        // reached is always true here.
+        const detailText = `${headline}${detailBits ? ` (${detailBits})` : ""}; squash phase never reached, canonical repo untouched, worktree retained.${stepsLine}${tailBlock}`;
         const suppressed = await rejectNotify("gate", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", {
           reason: "gate", phase, failedStep: gateResult.failedStep, failingTest, failingTestReason,
@@ -9665,6 +9803,7 @@ export class SessionService {
           },
           notified: !suppressed,
           opId: thisOpId,
+          gateExtended,
         };
       }
     }
@@ -9697,7 +9836,7 @@ export class SessionService {
         const detailText = `${why}; squash phase aborted before writing — canonical repo AND worktree untouched — just re-run worker_merge_confirm.`;
         const suppressed = await rejectNotify("gate_base_invalidated", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "gate_base_invalidated", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}) };
+        return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateRan, ...(reusedOpId ? { reusedOpId } : {}), gateExtended };
       }
       const why = merge.conflict ? "merge conflict" : (merge.reason ?? "merge failed");
       const failReason = merge.conflict ? "conflict" : "merge_failed";
@@ -9707,7 +9846,7 @@ export class SessionService {
       const detailText = `${why}; squash was attempted but never committed — canonical repo untouched, worktree retained. Re-task a rebase.`;
       const suppressed = await rejectNotify(failReason, `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
       evt("merge_rejected", { reason: failReason, ...(suppressed ? { suppressed: true } : {}) });
-      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId };
+      return { merged: false, reason: why, detailText, notified: !suppressed, opId: thisOpId, gateExtended };
     }
     // GENUINE no-op (nothing staged): the staged set was re-derived from a clean index, so this is NOT a
     // stale-state false negative — it is a true empty merge. Distinguish the two kinds for the manager:
@@ -9735,6 +9874,7 @@ export class SessionService {
             reportedState: reported,
             notified: !suppressed,
             opId: thisOpId,
+            gateExtended,
           };
         }
         // No report of work → a genuine empty no-op. Fail-closed (worktree retained so the manager can see
@@ -9743,7 +9883,7 @@ export class SessionService {
         const detailText = "STAGE_EMPTY_RETRY: the branch has no diff to merge (squash staged nothing, no commit made); canonical repo + worktree untouched. The worker committed nothing that differs from main — re-task or close the task by hand.";
         const suppressed = await rejectNotify("stage_empty", `[loom:merge-rejected] worker ${workerSessionId} (task ${taskId ?? "none"}) [op ${thisOpId}] — ${detailText}`);
         evt("merge_rejected", { reason: "stage_empty", ...(suppressed ? { suppressed: true } : {}) });
-        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", detailText, emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId };
+        return { merged: false, reason: "no diff to merge (STAGE_EMPTY_RETRY)", detailText, emptyKind: "STAGE_EMPTY_RETRY", notified: !suppressed, opId: thisOpId, gateExtended };
       }
       // ALREADY_MERGED: the branch's work is already in main (a prior squash with its trailer). Finish the
       // bookkeeping idempotently via the SAME helper the early-idempotency check above uses. `merge.sha`
@@ -9801,8 +9941,8 @@ export class SessionService {
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}) }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}) };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended };
   }
 
   /**
@@ -10114,8 +10254,11 @@ export class SessionService {
         },
         // Fires for EVERY genuine settle (fast or surfaced-pending) — see PendingOpRegistry.attach's
         // `onSettle` doc for why this must be unconditional, unlike the completion-nudge push above.
-        onSettle: (_outcome, opId) => {
-          this.db.settlePendingGateOp(opId);
+        // Card 9f6598dd: now ALSO derives + persists a verdict (see `deriveMergeGateVerdict`'s own doc) —
+        // previously this called `settlePendingGateOp(opId)` with NO verdict, the exact root cause of
+        // Finding 1 (a settled "merge" tombstone row carrying no extended/duration/outcome at all).
+        onSettle: (outcome, opId) => {
+          this.db.settlePendingGateOp(opId, deriveMergeGateVerdict(outcome, opStartedAt));
         },
       },
     );

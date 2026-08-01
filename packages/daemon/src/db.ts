@@ -1792,6 +1792,24 @@ export interface PendingGateOpVerdict {
     signal?: string | null;
     timedOut?: boolean;
   };
+  /** Card 9f6598dd: the op's own settle instant (ISO), captured at the SAME `settlePendingGateOp` call
+   *  that writes this payload — paired with `startedAt` (a top-level PendingGateOp column, already stored
+   *  at mint time under BOTH kinds) so a reader gets the REAL total wall time (`totalDurationMs` below),
+   *  not just `durationMs`'s narrower "queue-wait-excluded gate run" span. Currently populated for "merge"
+   *  rows only (confirmWorkerMergeTracked's onSettle) — a "gate" row's own onSettle (deriveWorkerGateVerdict)
+   *  doesn't set it yet; omitted there, not a fabricated value. */
+  settledAt?: string;
+  /** Card 9f6598dd: `Date.parse(settledAt) - Date.parse(startedAt)` — the FULL op wall time, including
+   *  whatever sits outside the gate's own step timings (worktree prep, union-merge, squash, for a merge
+   *  op). `Σ(steps)` (the `steps` field above) is only ever a FLOOR on this — this is the exact number,
+   *  not an approximation. Currently populated for "merge" rows only, same scope as `settledAt`. */
+  totalDurationMs?: number;
+  /** Card 9f6598dd: whether ANY step of the gate run this op's verdict is about ever consumed its
+   *  one-time auto-extend (see `GATE_EXTEND_IDLE_MS`'s doc in gate-runner.ts) — the only direct signal
+   *  that the run breached its `gateCommandTimeoutMs` budget. `undefined` when no gate actually spawned
+   *  for this op (gateless project, or a REUSED self-check) — distinct from `false` ("spawned, never
+   *  extended"). Currently populated for "merge" rows only, same scope as `settledAt`. */
+  extended?: boolean;
 }
 
 /** A durable TOMBSTONE for a gate/merge PendingOpRegistry op — see the `pending_gate_ops` schema doc and

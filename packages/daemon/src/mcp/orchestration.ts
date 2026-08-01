@@ -113,8 +113,10 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "cannot use this to probe another worker's run. `opId` accepts the FULL id OR an unambiguous " +
       "8-char id-prefix (the short id `run_gate` returned). Returns {state:\"queued\"|\"running\"|" +
       "\"pending\"|\"settled\"|\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"unknown\"|" +
-      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, passed?, cancelled?, reason?, " +
-      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?}. `queued`/`running` mean it's still " +
+      "\"ambiguous\", gateType, elapsedMs, idleMs, extended?, error?, admittedAt?, passed?, cancelled?, reason?, " +
+      "durationMs?, validatedHead?, headWarning?, steps?, outputTail?, gateDetail?}. `admittedAt` (ISO, when " +
+      "the op was minted) is present whenever a row exists at all — live or settled — not gated on a " +
+      "recorded verdict. `queued`/`running` mean it's still " +
       "LIVE. `settled` means the op reached a normal terminal result (pass, fail, error, or cancelled). " +
       "The `[loom:gate-done]`/`[loom:gate-failed]` nudge is still the PRIMARY, unprompted way you learn the " +
       "outcome — but once `state` reads `settled`, this tool NOW ALSO reports it directly: `passed:true` " +
@@ -174,9 +176,23 @@ function registerGateStatus(server: McpServer, sessions: SessionService, scopeSe
       "id-prefix (the short id Loom displays everywhere else — same resolution as `tasks_get`/" +
       "`worker_spawn`/`escalation_status`). Returns {state:\"queued\"|\"running\"|\"pending\"|\"settled\"|" +
       "\"evicted-dead-owner\"|\"orphaned-by-restart\"|\"never_existed\"|\"ambiguous\", gateType, elapsedMs, " +
-      "idleMs, extended?, error?}. `queued`/`running` mean it's still LIVE. `settled` means the op reached a normal terminal " +
+      "idleMs, extended?, error?, admittedAt?, settledAt?, totalDurationMs?, outcome?}. `queued`/`running` " +
+      "mean it's still LIVE. `settled` means the op reached a normal terminal " +
       "result (merged, rejected, or errored) — rely on the `[loom:merge-done]`/`[loom:merge-rejected]`/" +
-      "`[loom:merge-failed]` nudge for the actual outcome, this tool NEVER reports that itself. " +
+      "`[loom:merge-failed]` nudge for the ACTUAL rejection/failure diagnosis (phase, failing test, " +
+      "stderr — this tool never reports that level of detail itself), but a settled op now retains a " +
+      "durable, queryable RECORD too: `admittedAt` (ISO, when the op was minted — present whenever a row " +
+      "exists at all, live or settled) and, once settled, `outcome` (`\"pass\"`|`\"fail\"`|`\"error\"`|" +
+      "`\"cancelled\"` — `\"pass\"` means merged, `\"fail\"` means a resolved rejection, `\"error\"` means a " +
+      "thrown exception mid-confirm), `settledAt` (ISO) and `totalDurationMs` (`settledAt - admittedAt`, " +
+      "the FULL op wall time — worktree prep + union-merge + gate + squash, not just the gate step itself; " +
+      "strictly ≥ the `steps` line the completion nudge carries, which is only ever a FLOOR on the real " +
+      "total). `extended` here means something different from the LIVE `extended` below: once settled, it " +
+      "reports whether ANY step of the gate this op actually ran ever consumed its one-time auto-extend — " +
+      "`undefined` (not `false`) when no gate spawned for this op at all (gateless project, or a REUSED " +
+      "self-check), so `extended:true` paired with `outcome:\"fail\"` is the specific \"this run was over " +
+      "budget AND it failed\" signal worth flagging, distinct from either fact alone. These four settled- " +
+      "record fields are OMITTED, never fabricated, for a settled op that predates this capability. " +
       "`evicted-dead-owner` means the op's OWNING MANAGER died before it settled and a later confirm force-" +
       "evicted it — its own run() may STILL be executing unreachable in the background; no verdict was " +
       "ever delivered for it, treat it like `settled` for planning purposes and just re-run " +

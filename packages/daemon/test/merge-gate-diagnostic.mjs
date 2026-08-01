@@ -10,12 +10,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // stdout+stderr tail, and confirmWorkerMerge folds a best-effort phase + failing-test extraction into BOTH
 // the sync `gateDetail` result field and the `[loom:merge-rejected]` notification text.
 //
+// Card 9f6598dd (Finding 2): `gateDetail.steps` was ALWAYS populated on the sync return value (never the
+// actual gap — every other gateDetail field, phase/failedStep/failingTest/stderrTail/exitCode/signal/
+// timedOut, was already folded into the notify text too) — but `steps` specifically was genuinely ABSENT
+// from the `[loom:merge-rejected]` text itself, contradicting the tool description's "the same detail is
+// also folded into the notification text" claim for exactly that one field. (A) below now asserts the text
+// carries the steps diagnostic line too, discriminating against the pre-fix text (which lacked it).
+//
 // Proves:
 //   (A) GATE REJECTION IS DIAGNOSTIC — a real failing `node` step populates gateDetail.{phase, failedStep,
-//       failingTest, stderrTail, exitCode, signal, timedOut} in the SYNC result, the SAME detail appears in
-//       the `[loom:merge-rejected]` signal text delivered to the manager's pty, `reason` stays the bare
-//       "build gate failed" string for back-compat, and exactly ONE merge_rejected event is recorded (no
-//       merge_done).
+//       failingTest, stderrTail, exitCode, signal, timedOut, steps} in the SYNC result, the SAME detail
+//       (steps included, since card 9f6598dd) appears in the `[loom:merge-rejected]` signal text delivered
+//       to the manager's pty, `reason` stays the bare "build gate failed" string for back-compat, and
+//       exactly ONE merge_rejected event is recorded (no merge_done).
 //   (B) ONE-TERMINAL-SIGNAL INVARIANT ON SUCCESS — a green gate still merges cleanly with NO gateDetail,
 //       and fires exactly ONE merge_done event (never a merge_rejected alongside it).
 // Run: 1) build daemon (pnpm build), 2) node test/merge-gate-diagnostic.mjs
@@ -31,6 +38,7 @@ const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 const { createWorktree } = await import("../dist/git/worktrees.js");
+const { formatStepDurationMs } = await import("../dist/orchestration/gate-runner.js");
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -102,6 +110,9 @@ try {
     check("(A) gateDetail.exitCode is the real exit code (1)", confirmA.gateDetail?.exitCode === 1);
     check("(A) gateDetail.signal is null (a plain non-zero exit, not a kill)", confirmA.gateDetail?.signal === null);
     check("(A) gateDetail.timedOut is false (failed on its own, not the timeout bound)", confirmA.gateDetail?.timedOut === false);
+    // Card 9f6598dd: `gateDetail.steps` was ALREADY populated on the return value before this card (never
+    // the actual gap) — asserted here as the baseline the text-side check right below discriminates against.
+    check("(A) gateDetail.steps is populated on the sync return value (this part was NEVER the gap)", Array.isArray(confirmA.gateDetail?.steps) && confirmA.gateDetail.steps.length === 1 && confirmA.gateDetail.steps[0].step === "node run-tests.mjs");
 
     // The SAME detail must reach the manager's pty via the `[loom:merge-rejected]` signal text — not just
     // the sync return value — so a manager reading its own turn sees the diagnosis too.
@@ -112,6 +123,20 @@ try {
     check("(A) signal text names the failed step", text.includes("step: node run-tests.mjs"));
     check("(A) signal text names the failing test", text.includes("FAIL widget.spec.js"));
     check("(A) signal text carries the gate output tail", text.includes("--- gate output tail ---") && text.includes("AssertionError"));
+    // Card 9f6598dd — THE ACTUAL FIX (Finding 2): before this card, `gateDetail.steps` was populated on the
+    // return value (asserted above) but genuinely ABSENT from this notification text — the tool description
+    // claimed "the same detail is also folded into the notification text", which was false for exactly this
+    // one field (every OTHER gateDetail field was already present, per the checks above). This is the
+    // DISCRIMINATING assertion: it fails on the pre-fix text (no steps line at all) and passes on the fixed
+    // text, unlike the checks above which passed on both.
+    check("(A) signal text NOW carries the steps diagnostic line — the exact gap Finding 1/2 (card 9f6598dd) closed", text.includes("steps (diagnostic only") && text.includes("node run-tests.mjs"));
+    // The step's OWN duration formatting must match what formatGateStepsDiagnostic would render for the
+    // SAME `confirmA.gateDetail.steps` entry — proving the text isn't just A steps line, but the CORRECT
+    // one, in sync with the return value (never two independently-derived strings that could drift apart).
+    // Uses the REAL formatStepDurationMs (not a reimplementation) so this can never silently diverge from
+    // what the production code actually renders.
+    const expectedStepsFragment = `node run-tests.mjs ${formatStepDurationMs(confirmA.gateDetail.steps[0].durationMs)}`;
+    check("(A) the steps line's duration matches gateDetail.steps verbatim (text and return value never drift apart)", text.includes(expectedStepsFragment));
     check("(A) signal text still says build gate failed + retains the untouched/retained language", /build gate failed/.test(text) && /canonical repo untouched, worktree retained/.test(text));
 
     check("(A) exactly ONE merge_rejected event recorded", eventsOfKind(A.mgrId, "merge_rejected").length === 1);
@@ -171,6 +196,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a gate rejection is now DIAGNOSTIC: the failing phase, the failed step, a best-effort failing-test extraction, and a bounded output tail all populate BOTH the sync gateDetail result AND the [loom:merge-rejected] signal text, while `reason` stays the bare back-compat string; a green gate still fires exactly one merge_done with no gateDetail, preserving the one-terminal-signal invariant."
+  ? "\n✅ ALL PASS — a gate rejection is now DIAGNOSTIC: the failing phase, the failed step, a best-effort failing-test extraction, a bounded output tail, AND (card 9f6598dd) the per-step diagnostic line all populate BOTH the sync gateDetail result AND the [loom:merge-rejected] signal text (verbatim, via the real formatStepDurationMs — text and return value can never drift apart), while `reason` stays the bare back-compat string; a green gate still fires exactly one merge_done with no gateDetail, preserving the one-terminal-signal invariant."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
