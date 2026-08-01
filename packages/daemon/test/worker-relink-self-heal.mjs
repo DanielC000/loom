@@ -61,6 +61,15 @@ seedWorker("w-desync-2", "OLD"); // for the explicit worker_relink tool
 seedManager("MGR_B");
 seedWorker("w-b", "MGR_B");
 
+// Card ba41b402 defect 2: worker_relink rejects an unambiguous 8-char id-PREFIX (every sibling tool —
+// tasks_get, tasks_update, worker_spawn's taskId, project_get — accepts one). Real session ids are
+// full UUIDs; a manager only ever has the 8-char short id Loom displays. w-prefix-1 is seeded with a
+// realistic UUID so its first 8 chars are a genuine, unambiguous prefix.
+seedWorker("5e3eb1af-e5a1-4597-b1a3-18d8a1ab56a5", "OLD");
+// Two workers sharing the SAME 8-char prefix — must resolve as AMBIGUOUS, never silently pick one.
+seedWorker("aaaaaaaa-1111-1111-1111-111111111111", "OLD");
+seedWorker("aaaaaaaa-2222-2222-2222-222222222222", "OLD");
+
 // --- drive the REAL manager MCP tools in-process; stub `sessions` mirrors service.ts's UNCHANGED
 // exact-parent write-op guard (each throws "not your worker" for a non-exact parent), so worker_message/
 // worker_redirect exercise the real orchestration.ts wiring (selfHealWorkerLink) end-to-end without
@@ -138,6 +147,35 @@ check("no repeat desync is logged for an already-correct link", warnBuf.length =
 // A missing workerSessionId reports found:false, never throws.
 const relinkMissing = await call("worker_relink", { workerSessionId: "does-not-exist" });
 check("worker_relink on a nonexistent id returns found:false (never throws)", relinkMissing.found === false);
+
+// ============================ (3b) card ba41b402 defect 2: an 8-char id-PREFIX resolves like every sibling tool ============================
+warnBuf.length = 0;
+const fullId = "5e3eb1af-e5a1-4597-b1a3-18d8a1ab56a5";
+const prefix = fullId.slice(0, 8); // "5e3eb1af" — what Loom actually displays as the short id
+check("prefix fixture starts parented to the retired predecessor OLD", db.getSession(fullId).parentSessionId === "OLD");
+
+const relinkByPrefix = await call("worker_relink", { workerSessionId: prefix });
+check("worker_relink(prefix) resolves the SAME worker an equivalent full-id call would (found:true — NOT the false-negative the card reports)",
+  relinkByPrefix.found === true);
+check("worker_relink(prefix) relinks it (proves it resolved to the REAL row, not a hollow found:true)",
+  relinkByPrefix.relinked === true && relinkByPrefix.wasStale === true);
+check("worker_relink(prefix) returns the NEW parentSessionId", relinkByPrefix.parentSessionId === "NEW");
+check("the fixture's parent_session_id is persisted as NEW via the prefix call", db.getSession(fullId).parentSessionId === "NEW");
+
+// An ambiguous prefix (matches >1 session) must be DISTINCT from a genuine not-found — never silently
+// resolved to either candidate and never collapsed into the same found:false a real miss returns.
+const relinkAmbiguous = await call("worker_relink", { workerSessionId: "aaaaaaaa" });
+check("an ambiguous 8-char prefix is NOT silently resolved (found stays false)", relinkAmbiguous.found === false);
+check("an ambiguous prefix returns a DISTINCT error naming both candidates (not the bare not-found signature)",
+  typeof relinkAmbiguous.error === "string" && relinkAmbiguous.error.includes("aaaaaaaa-1111") && relinkAmbiguous.error.includes("aaaaaaaa-2222"));
+check("neither ambiguous candidate was relinked", db.getSession("aaaaaaaa-1111-1111-1111-111111111111").parentSessionId === "OLD"
+  && db.getSession("aaaaaaaa-2222-2222-2222-222222222222").parentSessionId === "OLD");
+
+// A too-short, non-full ref (< 8 chars) stays a plain not-found — same convention every sibling
+// id-prefix resolver already uses (getByIdPrefix's `r.kind === "none"` collapses too-short and true-miss
+// alike), so this is NOT a regression target — just confirming the boundary.
+const relinkTooShort = await call("worker_relink", { workerSessionId: "5e3eb1a" });
+check("a too-short (<8 char) non-full ref returns found:false, not a partial match", relinkTooShort.found === false);
 
 // ============================ (4) scoping: a genuinely unrelated manager's worker is NEVER relinked ============================
 warnBuf.length = 0;

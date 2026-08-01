@@ -90,6 +90,8 @@ const sessionsStub = {
   listCapQueuedSpawns() { return []; },
   // card ae0b7891: worker_status now also reads this — no archived-without-report worker in this test.
   isArchivedWithoutReport() { return false; },
+  // card ba41b402: fleetView now also reads this — no stopped-but-unmerged worker in this test.
+  async getDanglingWorkers() { return []; },
 };
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));
 const server = router.buildServer("NEW", "manager");

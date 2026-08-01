@@ -183,6 +183,22 @@ export interface RetainedWorktreeEntry {
   commitsAhead: number | null;
 }
 
+/**
+ * One entry in {@link SessionService.getDanglingWorkers}'s result (card ba41b402 defect 1) — a STOPPED
+ * (archived) worker whose branch/worktree is still on disk and whose bound task (if any) has no recorded
+ * `mergedSha` — see that method's own doc for the full discriminator design and why it's task-level, not
+ * branch-level.
+ */
+export interface DanglingWorkerEntry {
+  workerSessionId: string;
+  taskId: string | null;
+  branch: string | null;
+  worktreePath: string;
+  /** The owning session's last DB write — same proxy-for-exit-time caveat as {@link
+   *  RetainedWorktreeEntry.lastActivityAt}. */
+  lastActivity: string;
+}
+
 /** {@link SessionService.confirmWorkerMerge}'s settled result shape — named so it can be threaded
  *  through {@link PendingOpRegistry} (card fb8df559 Part 1) without repeating the inline object type.
  *  `notified` (card 9eea3901, widened by 187f5b76): true iff a `[loom:merge-*]` nudge was ALREADY pushed
@@ -944,6 +960,19 @@ export class SessionService {
    * {@link getRetainedWorktrees} for the read-time derivation of the fuller {@link RetainedWorktreeEntry} shape.
    */
   private retainedWorktreeRecords: RetainedWorktreeRecord[] = [];
+
+  /**
+   * Memoizes {@link commitsAheadOfMain} per ARCHIVED worker (card ba41b402 mgr review). Keyed on
+   * `${sessionId}:${archivedAt}`, not just `sessionId`: an archived worker's branch is frozen (nothing
+   * commits to it again while it stays archived — only a resume, which clears `archivedAt`, could change
+   * that), so the count for a GIVEN `archivedAt` stamp never changes and is safe to cache forever. If the
+   * session is later resumed and re-stopped, `archiveSession` stamps a FRESH `archivedAt`, which changes
+   * the cache key and naturally misses — no explicit invalidation needed. Bounded in practice by
+   * `listArchivedWorkersInProject`'s own `limit`: only candidates that survive the pool bound and the
+   * cheaper mergedSha/existence filters ever populate this (same "grows slowly, not unboundedly" shape as
+   * `retainedWorktreeRecords` above).
+   */
+  private readonly danglingAheadCache = new Map<string, number | null>();
   /**
    * Test-only seam for {@link removeWorktree}'s killable-removal backstop (task dea6728e). `undefined` in
    * production ⇒ removeWorktree falls back to its own real {@link killableRemoveDir}. Lets a test drive
@@ -11920,6 +11949,139 @@ export class SessionService {
     if (!dirty && !aheadOrUnknown) return null; // both probes cleanly agree: no longer holds work
     const reason: RetainedWorktreeEntry["reason"] = dirty && aheadOrUnknown ? "both" : dirty ? "dirty-tree" : "unmerged-commits";
     return { reason, commitsAhead };
+  }
+
+  /**
+   * Card ba41b402 defect 1: a worker STOPPED (archived) before its work was merged is otherwise
+   * invisible to `worker_list` — `archiveOnExit` archives every exited worker-role session
+   * unconditionally, and `listWorkers`/fleetView filter `archived_at IS NULL`. An empty `worker_list` is
+   * the NORMAL reading for "clean seam, nothing in flight" — which is exactly why this gap is dangerous:
+   * the bad state looks identical to the healthy one. This surfaces the candidates that make it look
+   * different.
+   *
+   * THE DISCRIMINATOR IS THE BOUND TASK'S `mergedSha`, NOT branch content or branch existence — measured
+   * against this project's own real history, not assumed. A branch-NAME-keyed check (grep main for THIS
+   * branch's `Loom-Worker-Branch:` trailer, the mechanism behind {@link findLandedSquashCommit}) still
+   * false-positives when a SIBLING branch shipped the same task's content under a different name
+   * (confirmed on this box: `loom/334766209ca5` and `loom/519072235f5d`'s content actually landed as
+   * `loom/049954da61c5` → squash commit `b4fa85a4`, task `0050a17e`). A content/path-set-hash equivalence
+   * check across ALL landed commits (not just same-named) ALSO false-positives when the task was
+   * resolved by a genuinely different superseding fix — not a re-dispatch of the same diff (confirmed:
+   * `loom/fe8f48e20cde`'s task `4af5aefa` landed via `loom/f5994214094c` → `31eace03`, a different diff
+   * entirely). `Task.mergedSha` doesn't care which branch or diff shipped, only whether the TASK is
+   * resolved — it resolves BOTH false-positive modes in one DB read, no git shellout for the common
+   * (tasked) case.
+   *
+   * A TASKLESS worker has no task-level signal at all. Rather than always surfacing it — which would
+   * permanently flag every zero-commit, no-task rig (e.g. this project's own Code Reviewer, spawned
+   * taskless BY CONVENTION with `filesChanged:0` as its CORRECT outcome) as perpetually "dangling", never
+   * resolvable, training a manager to ignore the whole surface (the exact failure this card warns
+   * against) — a taskless candidate additionally requires its branch to carry at least one commit not
+   * already on the repo's mainline (`git rev-list --count HEAD..branch` > 0, HEAD of the canonical
+   * repoPath being this codebase's existing stand-in for "mainline" — see worktreeHasWork/
+   * classifyRetainedWorktree above). This is used ONLY as a NECESSARY condition to EXCLUDE a genuinely
+   * empty branch, never as a SUFFICIENT condition to INCLUDE one: DoD-3 on card ba41b402 is still correct
+   * that a non-empty `main..branch` is NOT proof of unmerged content under squash (a landed branch's tip
+   * is never main's ancestor either) — but a genuinely EMPTY one is a decisive negative regardless, since
+   * there is nothing to lose. On a git probe failure this fails SAFE toward INCLUDING the candidate (same
+   * asymmetry as `worktreeHasWork`/`precheckWorkerDone` throughout this file) — an unproven "maybe empty"
+   * must never suppress a real row.
+   *
+   * Scoped by LINEAGE, not exact parent match — mirrors orchestration.ts's `archivedUnreported` fleetView
+   * category (card 93609ef3's reasoning applies verbatim): a stopped worker's `parentSessionId` still
+   * points at whichever manager session issued the stop, which may be a recycled predecessor — the exact
+   * incident this card documents (a manager recovering a branch its own earlier session had stopped).
+   *
+   * Excludes anything whose worktree dir no longer exists on disk — current truth, not a stale snapshot
+   * (mirrors {@link getRetainedWorktrees}'s own "gone since boot → exclude" convention). Nothing here
+   * changes any GC policy or runs a destructive op — purely observational, same posture as
+   * `getRetainedWorktrees`.
+   *
+   * COST (mgr review, card ba41b402): this runs on EVERY `worker_list`/`worker_status({})` call — the
+   * manager's most-polled tool — so cost matters here in a way it doesn't for a one-off read.
+   * `listArchivedWorkersInProject` is itself BOUNDED (see its own doc for the trade-off). Below, the
+   * CHEAP checks (worktree existence via `fs.existsSync`, the task's `mergedSha` via a plain DB read) run
+   * BEFORE the one EXPENSIVE check (`commitsAheadOfMain`'s git subprocess) — deliberately ordered so the
+   * subprocess only ever runs on a candidate that survived every cheaper filter, never on the full pool.
+   * The subprocess is further MEMOIZED per archived worker (see `danglingAheadCache`'s own doc), so a
+   * taskless candidate's git call only ever fires once per archive lifetime, not once per `worker_list`
+   * poll.
+   */
+  async getDanglingWorkers(managerSessionId: string): Promise<DanglingWorkerEntry[]> {
+    const managerSession = this.db.getSession(managerSessionId);
+    if (!managerSession) return [];
+    const managerRoot = lineageRootId(this.db, managerSession);
+    // BOUNDED candidate pool (see listArchivedWorkersInProject's own doc for the trade-off) — this is the
+    // primary defense against unbounded growth. On a long-lived project the fast exact-match path below
+    // rarely hits (a stopped worker's parentSessionId is usually whichever PAST manager generation
+    // stopped it, not the current one calling this), so most candidates would otherwise pay a full
+    // recycledFrom-chain walk (lineageRootId) EACH — an O(distinct-manager-generations) DB-read cost, not
+    // O(1). PER-CALL memoized here by parentSessionId (a plain local Map, not a persisted field: many
+    // candidates typically share the same one or few stopping managers, so this collapses repeat walks of
+    // the SAME chain within one call to a single walk) — this is in addition to, not instead of, the pool
+    // bound above; bounding N caps the worst case, this cuts the per-candidate cost within that bound.
+    const rootByParent = new Map<string, string | null>();
+    const parentRoot = (parentSessionId: string): string | null => {
+      const cached = rootByParent.get(parentSessionId);
+      if (cached !== undefined) return cached;
+      const parentSession = this.db.getSession(parentSessionId);
+      const root = parentSession ? lineageRootId(this.db, parentSession) : null;
+      rootByParent.set(parentSessionId, root);
+      return root;
+    };
+    const candidates = this.db.listArchivedWorkersInProject(managerSession.projectId).filter((w) => {
+      if (!w.parentSessionId) return false;
+      if (w.parentSessionId === managerSessionId) return true;
+      return parentRoot(w.parentSessionId) === managerRoot;
+    });
+
+    const entries: DanglingWorkerEntry[] = [];
+    for (const w of candidates) {
+      // CHEAP (fs stat, no subprocess): nothing left on disk to recover.
+      if (!w.worktreePath || !fs.existsSync(w.worktreePath)) continue;
+      // CHEAP (plain DB read): the TASK already shipped — not unmerged, whichever branch did it.
+      const task = w.taskId ? this.db.getTask(w.taskId) : undefined;
+      if (task?.mergedSha) continue;
+      if (!w.taskId) {
+        // EXPENSIVE (git subprocess, memoized — see commitsAheadOfMain's own doc): reached ONLY after
+        // both cheap filters above have already passed. Taskless has no task-level signal, so — see this
+        // method's own doc for why a zero-commit branch is excluded here (necessary, not sufficient)
+        // rather than surfaced by default.
+        const ahead = await this.commitsAheadOfMain(w);
+        if (ahead === 0) continue; // provably empty: nothing exists to lose
+        // ahead > 0, or null (probe failed — fail safe toward surfacing), both fall through to inclusion.
+      }
+      entries.push({
+        workerSessionId: w.id, taskId: w.taskId ?? null, branch: w.branch ?? null,
+        worktreePath: w.worktreePath, lastActivity: w.lastActivity,
+      });
+    }
+    return entries;
+  }
+
+  /** `git rev-list --count HEAD..<branch>` for a session's own repo, read live — MEMOIZED per {@link
+   *  danglingAheadCache}'s own doc for an ARCHIVED session (its branch is frozen, so a real result never
+   *  changes). `null` only when the probe itself failed/timed out or the session's project/repo couldn't
+   *  be resolved — see {@link getDanglingWorkers}'s doc for why a `null` here is treated as "unknown",
+   *  never as zero. A `null` (probe failure) is deliberately NEVER cached — only a real numeric result is,
+   *  so a transient git hiccup retries next call instead of being pinned as "unknown" forever. */
+  private async commitsAheadOfMain(w: Session): Promise<number | null> {
+    if (!w.branch) return null;
+    const cacheKey = w.archivedAt ? `${w.id}:${w.archivedAt}` : null;
+    if (cacheKey && this.danglingAheadCache.has(cacheKey)) return this.danglingAheadCache.get(cacheKey)!;
+    const project = this.db.getProject(w.projectId);
+    if (!project) return null;
+    try {
+      const repoPath = resolveRepoByKey(project, w.repoKey).path;
+      const timeoutMs = this.gitOpMs ?? 15_000;
+      const raw = await simpleGit(repoPath, { timeout: { block: timeoutMs } }).raw(["rev-list", "--count", `HEAD..${w.branch}`]);
+      const parsed = parseInt(raw.trim(), 10);
+      const result = Number.isFinite(parsed) ? parsed : null;
+      if (cacheKey && result !== null) this.danglingAheadCache.set(cacheKey, result);
+      return result;
+    } catch {
+      return null; // fail safe — unknown, not zero
+    }
   }
 }
 

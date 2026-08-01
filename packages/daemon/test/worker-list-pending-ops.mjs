@@ -50,6 +50,7 @@ const sessionsStub = {
   listPendingSpawns(managerSessionId) { return managerSessionId === "mgr" ? [PENDING_SPAWN] : []; },
   listCapQueuedSpawns() { return []; }, // no cap-queued markers in this stub's scenario — exercised for real in worker-spawn-cap-queue.mjs
   isArchivedWithoutReport() { return false; }, // card ae0b7891: no archived-without-report worker in this stub's scenario
+  async getDanglingWorkers() { return []; }, // card ba41b402: no stopped-but-unmerged worker in this stub's scenario
 };
 
 const router = new OrchestrationMcpRouter(db, /** @type {any} */ (sessionsStub));

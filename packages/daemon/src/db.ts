@@ -4337,6 +4337,28 @@ export class Db {
     return (this.db.prepare("SELECT * FROM sessions WHERE parent_session_id = ? AND archived_at IS NOT NULL ORDER BY created_at")
       .all(managerSessionId) as Row[]).map(toSession);
   }
+  /**
+   * The `limit` most-recently-created archived worker-role sessions in a project that still carry a
+   * `branch` — the candidate pool for {@link SessionService.getDanglingWorkers} (card ba41b402).
+   * Deliberately PROJECT-scoped, not manager-scoped like {@link listArchivedWorkers} above: a stopped
+   * worker's `parent_session_id` may point at a recycled predecessor manager, and the caller applies its
+   * own lineage-tolerant filter on top of this broad set (mirrors orchestration.ts's `archivedUnreported`
+   * category, which does the same "broad candidate query, then lineage-filter in the caller" split for
+   * the identical reason).
+   *
+   * BOUNDED (mgr review, card ba41b402): this set only ever GROWS — every worker a project has ever
+   * archived stays in it forever, and `worker_list`/`worker_status({})` call this on every read, so an
+   * unbounded scan is a real, ever-worsening cost on the manager's most-polled tool. `LIMIT` +
+   * `ORDER BY created_at DESC` caps it to the newest N regardless of the project's total archived-worker
+   * history. TRADE-OFF, stated plainly: a genuinely-dangling branch OLDER than the newest `limit` archived
+   * workers stops being surfaced by this view. Accepted deliberately — the incident this card documents
+   * was hours old, not months — but it is a real coverage loss, not just a performance tweak.
+   */
+  listArchivedWorkersInProject(projectId: string, limit = 50): Session[] {
+    return (this.db.prepare(
+      "SELECT * FROM sessions WHERE project_id = ? AND role = 'worker' AND archived_at IS NOT NULL AND branch IS NOT NULL ORDER BY created_at DESC LIMIT ?",
+    ).all(projectId, limit) as Row[]).map(toSession);
+  }
   /** Soft-archive a session (stamp archived_at) — hidden from the rail/god-eye lists; row retained. */
   archiveSession(id: string): void {
     this.db.prepare("UPDATE sessions SET archived_at = ? WHERE id = ?").run(new Date().toISOString(), id);
