@@ -47,11 +47,38 @@ const DEFAULT_REINGEST_TIMEOUT_MS = 45_000;
  * Bounded backoff (ms) between restart attempts after `serve` dies — increasing, never a tight loop.
  * Exhausting the array without a "healthy run" resetting it (see `healthyRunMs`) means the supervisor
  * gives up: `getPort()` reports null and stays that way ("broken stays visibly down") until a fresh
- * `start()`.
+ * `start()`. Card 4c7a337d: this budget ALONE is not the whole give-up story any more — see
+ * {@link DEFAULT_MAX_RESTARTS_PER_WINDOW} for the second, `ranHealthy`-proof ceiling layered on top.
  */
 const DEFAULT_RESTART_BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000];
 /** A `serve` that ran at least this long before dying is treated as a fresh failure — resets the backoff. */
 const DEFAULT_HEALTHY_RUN_MS = 30_000;
+/**
+ * Card 4c7a337d: the sliding window (ms) {@link DEFAULT_MAX_RESTARTS_PER_WINDOW} is measured over — see
+ * that constant's own doc for what this pair exists to fix.
+ */
+const DEFAULT_RESTART_WINDOW_MS = 60 * 60_000;
+/**
+ * Card 4c7a337d: a SECOND, independent ceiling on restarts, measured over a sliding
+ * {@link DEFAULT_RESTART_WINDOW_MS} — this one CANNOT be cleared by `ranHealthy`, unlike
+ * `restartAttempts` above.
+ *
+ * THE BUG THIS CLOSES: `scheduleRestart`'s `if (ranHealthy) this.restartAttempts = 0` is legitimate
+ * policy for a long-lived healthy process that dies once — it shouldn't be permanently penalised by
+ * ancient restart history. But it has no notion of CADENCE: any kill that recurs on a period LONGER than
+ * `healthyRunMs` (30s by default) sees `ranHealthy` true on essentially every single death, so
+ * `restartAttempts` resets to 0 before it can ever reach `restartBackoffMs.length` — the give-up ceiling
+ * becomes structurally unreachable, and the loud "codescape serve is DOWN … needs a human" diagnostic
+ * never fires. Measured directly against this exact defect (card 4c7a337d): 12 -> 30 spawns over 3s with
+ * zero give-ups, and separately 92 kill cycles over 30s with zero give-ups.
+ *
+ * This window-based count is orthogonal to `ranHealthy`/`restartAttempts` entirely — it just asks "how
+ * many times has `serve` actually been restarted recently", independent of whether any individual run
+ * happened to clear the `healthyRunMs` bar. A single isolated restart (the legitimate case the
+ * `ranHealthy` reset exists to protect) never comes close to this ceiling; only a GENUINE, sustained
+ * crash loop — on ANY cadence, not just one faster than `healthyRunMs` — does.
+ */
+const DEFAULT_MAX_RESTARTS_PER_WINDOW = 10;
 /**
  * How often to probe a believed-alive `serve` with `GET /graph/health` — process-exit detection alone
  * (`spawnServe`'s `child.on("exit")`) never sees a serve that's up, port bound, but wedged and not
@@ -120,6 +147,10 @@ export interface CodescapeSupervisorOpts {
   restartBackoffMs?: number[];
   /** Test seam: shrink the "was this a healthy run" threshold. */
   healthyRunMs?: number;
+  /** Test seam: shrink {@link DEFAULT_RESTART_WINDOW_MS} so a rate-ceiling test doesn't wait a real hour. */
+  restartWindowMs?: number;
+  /** Test seam: shrink {@link DEFAULT_MAX_RESTARTS_PER_WINDOW} so a rate-ceiling test doesn't need 10 real restarts. */
+  maxRestartsPerWindow?: number;
   ingestTimeoutMs?: number;
   registerTimeoutMs?: number;
   reingestTimeoutMs?: number;
@@ -336,6 +367,8 @@ export class CodescapeSupervisor {
   private readonly homeDir: string;
   private readonly restartBackoffMs: number[];
   private readonly healthyRunMs: number;
+  private readonly restartWindowMs: number;
+  private readonly maxRestartsPerWindow: number;
   private readonly ingestTimeoutMs: number;
   private readonly registerTimeoutMs: number;
   private readonly reingestTimeoutMs: number;
@@ -370,6 +403,15 @@ export class CodescapeSupervisor {
   private starting = false;
   private spawnedAt: number | null = null;
   private restartAttempts = 0;
+  /**
+   * Card 4c7a337d: epoch-ms timestamps of every restart {@link scheduleRestart} has actually SCHEDULED
+   * (never the give-up call itself) — pruned to the trailing {@link restartWindowMs} on every call. Unlike
+   * {@link restartAttempts}, `ranHealthy` can NEVER clear this: it is the independent ceiling that catches
+   * a genuine crash loop on a cadence longer than `healthyRunMs`, where the `ranHealthy` reset would
+   * otherwise forgive every single death and make the backoff-exhaustion ceiling unreachable. Reset (like
+   * `restartAttempts`) in {@link start} — a fresh supervisor lifetime starts with no restart-rate memory.
+   */
+  private restartTimestamps: number[] = [];
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private healthProbeTimer: ReturnType<typeof setInterval> | null = null;
   /** Resets to 0 on any successful `/graph/health` probe — see {@link DEFAULT_HEALTH_PROBE_FAILURE_THRESHOLD}. */
@@ -505,6 +547,8 @@ export class CodescapeSupervisor {
     this.homeDir = opts?.homeDir ?? CODESCAPE_HOME_DIR;
     this.restartBackoffMs = opts?.restartBackoffMs ?? DEFAULT_RESTART_BACKOFF_MS;
     this.healthyRunMs = opts?.healthyRunMs ?? DEFAULT_HEALTHY_RUN_MS;
+    this.restartWindowMs = opts?.restartWindowMs ?? DEFAULT_RESTART_WINDOW_MS;
+    this.maxRestartsPerWindow = opts?.maxRestartsPerWindow ?? DEFAULT_MAX_RESTARTS_PER_WINDOW;
     this.ingestTimeoutMs = opts?.ingestTimeoutMs ?? DEFAULT_INGEST_TIMEOUT_MS;
     this.registerTimeoutMs = opts?.registerTimeoutMs ?? DEFAULT_REGISTER_TIMEOUT_MS;
     this.reingestTimeoutMs = opts?.reingestTimeoutMs ?? DEFAULT_REINGEST_TIMEOUT_MS;
@@ -624,6 +668,7 @@ export class CodescapeSupervisor {
       }
       if (this.port == null) this.port = await pickLoopbackPort();
       this.restartAttempts = 0;
+      this.restartTimestamps = [];
       this.lastDriftRestartInstalledBuild = null;
       this.lastInstalledBuildFailureReason = null;
       this.driftCandidateBuild = null;
@@ -760,17 +805,42 @@ export class CodescapeSupervisor {
     child.on("exit", (code, signal) => onDeath(`exited (code ${code ?? "null"}, signal ${signal ?? "null"})`));
   }
 
-  /** Schedule a bounded-backoff restart; `ranHealthy` (computed by the caller, which alone knows whether
-   *  THIS attempt ever came up) resets the backoff schedule. Gives up (stays down, logs loudly) once the
-   *  backoff schedule is exhausted without a healthy run resetting it in between. */
+  /**
+   * Schedule a bounded-backoff restart; `ranHealthy` (computed by the caller, which alone knows whether
+   * THIS attempt ever came up) resets the backoff schedule — legitimate policy so a long-lived healthy
+   * process that dies once isn't permanently penalised by ancient restart history. Gives up (stays down,
+   * logs loudly) once EITHER of two independent ceilings is reached:
+   *   1. the backoff schedule ({@link restartBackoffMs}) is exhausted without a healthy run resetting it
+   *      in between — the ORIGINAL mechanism, unchanged; or
+   *   2. {@link restartTimestamps} shows {@link maxRestartsPerWindow} restarts already scheduled inside
+   *      the trailing {@link restartWindowMs} — a ceiling `ranHealthy` CANNOT clear.
+   * Card 4c7a337d: (1) alone left a hole — any kill that recurs on a cadence LONGER than `healthyRunMs`
+   * sees `ranHealthy` true on essentially every death, so `restartAttempts` resets to 0 before it can ever
+   * reach `restartBackoffMs.length`; the give-up ceiling became structurally unreachable and the loud
+   * "needs a human" diagnostic never fired, for ANY sustained crash loop on that cadence — not just the
+   * one specific 500-misclassification trigger `545ef479` fixed. (2) is what makes the diagnostic
+   * reachable again regardless of cadence, while leaving the legitimate `ranHealthy` reset itself intact
+   * for the isolated-single-restart case it exists to protect (one restart never comes close to the rate
+   * ceiling).
+   */
   private scheduleRestart(ranHealthy: boolean): void {
     if (this.stopped) return;
     if (ranHealthy) this.restartAttempts = 0;
-    if (this.restartAttempts >= this.restartBackoffMs.length) {
-      console.error(`[codescape] gave up after ${this.restartAttempts} restart attempt(s) — codescape serve is DOWN (check LOOM_CODESCAPE_BIN / the codescape install; needs a human)`);
+
+    const now = Date.now();
+    this.restartTimestamps = this.restartTimestamps.filter((t) => now - t < this.restartWindowMs);
+    const backoffExhausted = this.restartAttempts >= this.restartBackoffMs.length;
+    const rateExceeded = this.restartTimestamps.length >= this.maxRestartsPerWindow;
+    if (backoffExhausted || rateExceeded) {
+      const reason = rateExceeded
+        ? `${this.restartTimestamps.length} restarts within ${Math.round(this.restartWindowMs / 1000)}s (rate ceiling — independent of any "healthy run" reset)`
+        : `${this.restartAttempts} restart attempt(s)`;
+      console.error(`[codescape] gave up after ${reason} — codescape serve is DOWN (check LOOM_CODESCAPE_BIN / the codescape install; needs a human)`);
       this.port = null;
       return;
     }
+
+    this.restartTimestamps.push(now);
     const delay = this.restartBackoffMs[this.restartAttempts];
     this.restartAttempts++;
     this.restartTimer = setTimeout(() => { this.restartTimer = null; this.spawnServe(); }, delay);

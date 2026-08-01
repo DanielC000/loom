@@ -72,6 +72,16 @@ function captureWarnings() {
   return { lines, restore: () => { console.warn = original; } };
 }
 
+// Card 4c7a337d: same technique as captureWarnings, for the give-up path's `console.error` — the loud
+// "codescape serve is DOWN … needs a human" diagnostic must be provably REACHABLE for a sustained crash
+// loop, not just inferred from getPort() going null.
+function captureErrors() {
+  const original = console.error;
+  const lines = [];
+  console.error = (...args) => { lines.push(args.join(" ")); original(...args); };
+  return { lines, restore: () => { console.error = original; } };
+}
+
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const fixtureCli = path.join(__dirname, "fixtures", "fake-codescape-cli.mjs");
 
@@ -1026,6 +1036,64 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   warnings.restore();
   sup.stop();
   delete process.env.FAKE_CODESCAPE_HEALTH_500_FILE;
+}
+
+// ===================== (16) card 4c7a337d: a kill cadence LONGER than healthyRunMs — which used to reset
+// restartAttempts to 0 on EVERY death and make the give-up ceiling structurally unreachable — is still
+// eventually caught by an independent, ranHealthy-proof restart-rate ceiling. ============================
+// ⭐ TIMING IS LOAD-BEARING, same principle as scenario (15)'s own header: `healthyRunMs:10` is
+// deliberately far below the real per-cycle kill time (~100-160ms at these intervals — a cycle needs >=2
+// real HTTP round trips, `healthProbeFailureThreshold`(2) apart by `healthProbeIntervalMs`(60ms) each),
+// so on the PRE-FIX mechanism `ranHealthy` reads true on essentially every single kill and
+// `restartAttempts` never survives long enough to reach any backoff ceiling — this is what actually
+// reproduces the card's measured defect (12 -> 30 spawns over 3s, zero give-ups; 92 cycles over 30s, zero
+// give-ups), not merely "didn't die once" (which the card explicitly warns passes on pre-fix code too).
+// `restartBackoffMs` here has 100 entries — structurally impossible to exhaust within this test's
+// timeframe — so if a give-up DOES fire, it can only be the NEW, independent rate ceiling, never a
+// coincidence of the original backoff-exhaustion mechanism.
+{
+  const homeDir = path.join(tmpHome, "unbounded-cadence-home");
+  const wedgeFile = path.join(tmpHome, "unbounded-cadence-flag");
+  fs.writeFileSync(wedgeFile, "1"); // wedged forever — every respawn is wedged too (env inherited by spawn)
+  process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE = wedgeFile;
+
+  const sup = new CodescapeSupervisor({
+    homeDir,
+    restartBackoffMs: Array(100).fill(40), // effectively "never exhausts" within this test's timeframe
+    healthyRunMs: 10, // deliberately far below the real per-cycle kill time — see header
+    healthProbeIntervalMs: 60,
+    healthProbeTimeoutMs: 40,
+    healthProbeFailureThreshold: 2,
+    restartWindowMs: 1500, // test-only seam: short window so the ceiling trips in ~seconds, not a real hour
+    maxRestartsPerWindow: 5, // test-only seam: small ceiling
+  });
+  const warnings = captureWarnings();
+  const errors = captureErrors();
+  await sup.start(["/fake/repo/unbounded-cadence"]);
+
+  // Card 5dd77ba5's own lesson (codescape-supervisor.mjs (bad-bin)): getPort()===null is AMBIGUOUS — it
+  // reads identically whether the supervisor has genuinely given up (permanent) or is merely transiently
+  // down BETWEEN a kill and its already-scheduled restart (temporary, resolves within one backoff delay).
+  // So this waits on the UNAMBIGUOUS signal instead — the give-up diagnostic line itself, which is only
+  // ever printed once, exactly at the moment of a genuine give-up — never on getPort() polling.
+  const giveUpLines = () => errors.lines.filter((l) => l.includes("codescape serve is DOWN") && l.includes("needs a human"));
+  await waitForCompletedCondition(() => giveUpLines().length >= 1, () => sup.getCompletedProbeTickCount());
+  check("(16) the loud give-up diagnostic actually FIRED — reachable for a sustained crash loop, not merely bounded-but-silent",
+    giveUpLines().length === 1);
+  check("(16) the give-up reason names the rate ceiling, not backoff exhaustion (restartAttempts never got anywhere near the 100-entry backoff array)",
+    giveUpLines().some((l) => l.includes("restarts within") && l.includes("rate ceiling")));
+  check("(16) a kill cadence LONGER than healthyRunMs — which used to reset restartAttempts to 0 forever — still eventually gives up (getPort() null, not phantom-alive)",
+    sup.getPort() === null);
+
+  const spawnsAtGiveUp = sup.getSpawnCount();
+  await sleep(500); // several more health-probe intervals' worth — give-up must stay terminal
+  check("(16) give-up STAYS terminal — no further restart / serve spawn, even with the health-probe timer still ticking",
+    sup.getPort() === null && sup.getSpawnCount() === spawnsAtGiveUp);
+
+  warnings.restore();
+  errors.restore();
+  sup.stop();
+  delete process.env.FAKE_CODESCAPE_HEALTH_WEDGE_FILE;
 }
 
 // ===================== cleanup =====================

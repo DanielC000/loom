@@ -111,6 +111,13 @@ const KNOWN_UNAUDITED_WAITS = new Map([
     "a nonexistent LOOM_CLAUDE_BIN leaves the cache null (graceful degrade, not a hang/throw)",
   ]],
   ["codescape-health-probe.mjs", [
+    // Card 4c7a337d, scenario (16): SAME shape and SAME structural reason as every other "stays terminal"
+    // entry below in this file — once give-up sets `alive:false`, probeHealth()'s own early-return guard
+    // (`if (this.stopped || !this.alive || this.probeInFlight) return;`) fires BEFORE the
+    // `try{...}finally{this.completedProbeTicks++}` block, so the probe timer never completes another
+    // tick post-give-up. There is no progress signal left to key a wait off — a genuinely fixed wall-clock
+    // sleep is the only way to observe "stayed terminal", exactly like (2)/(10) just below.
+    "(16) give-up STAYS terminal — no further restart / serve spawn, even with the health-probe timer still ticking",
     "(2) give-up STAYS terminal — no further restart / serve spawn, even with the health-probe timer still ticking",
     "(5) a persisting mismatch against the SAME installed build does NOT loop (still exactly 2 spawns on record)",
     "(6) `build` ABSENT from the health response never triggers a restart",
