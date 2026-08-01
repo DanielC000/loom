@@ -3275,7 +3275,7 @@ async function mergeBranchLocked(
   } catch { /* ls-files failed (e.g. not a repo / no HEAD) ⇒ no residue to clear */ }
 
   // ── Staged-but-not-unmerged residue (card 9e77050f — a SECOND, non-concurrent trigger for the same
-  // corruption `withRepoMergeLock` closes for concurrency: the mutex is in-process, this residue outlives
+  // corruption `withCanonicalIndexLock` closes for concurrency: the mutex is in-process, this residue outlives
   // the process). A `--squash` that stages a diff and then never reaches its commit step (the daemon dying
   // between them — a `daemon_restart`, a supervisor kill, a crash) leaves the canonical index dirty WITHOUT
   // setting MERGE_HEAD and WITHOUT any unmerged entry — the one state the clear above cannot see, because by

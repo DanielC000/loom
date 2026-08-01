@@ -9623,7 +9623,7 @@ export class SessionService {
         // `countCommitsBehind` as its explicit `base`, so the behind-main proof and the captured gate-base
         // sha are pinned to one commit BY CONSTRUCTION — not two independent git spawns ~30-150ms apart
         // that could each observe a different tip if canonical main advances (via a GitWriter REST
-        // commit/checkout, which does not serialize on `withRepoMergeLock`) in between them.
+        // commit/checkout, which does not serialize on `withCanonicalIndexLock`) in between them.
         const freshHead = await resolveGitRef(repoPath, "HEAD", { timeoutMs: this.gitOpMs }) ?? undefined;
         // A HEAD we can't resolve means there is nothing to prove `freshBehindMain` against and nothing
         // to hand `mergeBranch` as a re-check base — fail CLOSED by not reusing at all, rather than

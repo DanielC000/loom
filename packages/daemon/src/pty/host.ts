@@ -6494,7 +6494,13 @@ export class PtyHost {
     // silently never fires for a role stranded in `plan` with ExitPlanMode disallowed) or interleave the
     // heal's own Shift+Tab writes with the kickoff's writeChunked/Enter-retry chain (the frame-splice class
     // of cards 3ce3fa39/78a16dc5). Gating the DELIVERY (not the capture above) on logLandedMode's own
-    // completion callback makes that ordering STRUCTURAL rather than incidental.
+    // completion callback makes that ordering STRUCTURAL rather than incidental — true for 3 of
+    // `runCycleToMode`'s 4 terminal branches (`reached`/`press-cap` fire only once `awaitChange` has
+    // CONFIRMED the footer moved, so the last Shift+Tab is provably consumed; `pty-gone` is moot, nothing
+    // will be pasted). ⚠️ The `footer-unchanged` branch (card c22f6cb8) is the exception: it gives up after
+    // `RESUME_MODE_CHANGE_MAX_POLLS` polls with the just-written Shift+Tab still UNCONFIRMED, then still
+    // calls `onDone` — so on that branch the ordering is best-effort, not structural: a queued Shift+Tab
+    // can in principle still land mid-paste if the engine is stalled precisely across that give-up.
     this.logLandedMode(sessionId, () => { if (kickoff != null) this.scheduleKickoffGuarantee(sessionId, kickoff); });
   }
 

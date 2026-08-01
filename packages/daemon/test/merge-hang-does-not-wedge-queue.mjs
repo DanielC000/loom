@@ -1,7 +1,7 @@
 import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; see _guard.mjs)
 // Board card 44c28799 — `mergeBranchLocked`'s git client was UNBOUNDED (`simpleGit(repoPath)`, no
 // block-timeout, no `withTimeout` race) despite running INSIDE the per-repo merge mutex (card e076d2a2 /
-// commit efeddcd). `withRepoMergeLock` sequences callers via `prior.then(fn, fn)`, which only advances once
+// commit efeddcd). `withCanonicalIndexLock` sequences callers via `prior.then(fn, fn)`, which only advances once
 // `fn`'s promise SETTLES — so a hung git child inside `mergeBranchLocked` (the card's own cited path: a
 // wedged pre-commit/commit-msg hook) never settling meant the WHOLE per-repo merge queue wedged
 // PERMANENTLY, not just the one op: every later merge attempt against that repo would await a promise
@@ -108,7 +108,7 @@ try {
   const op1 = mergeBranch(repo, "loom/hang-a", "Card A title", { timeoutMs: BOUND_MS });
 
   // Op2: fired immediately after, for a DIFFERENT branch of the SAME repo — real git, default deps.
-  // withRepoMergeLock queues this behind op1 (same canonical repo path). By the time op2's OWN commit
+  // withCanonicalIndexLock queues this behind op1 (same canonical repo path). By the time op2's OWN commit
   // step runs (after op1 settles and op2's squash/checks complete), the hook's marker is already written
   // (op1's hook wrote it within milliseconds of starting, long before op1's own bounded timeout elapses),
   // so op2's commit passes the hook instantly and is a normal, unhung merge.

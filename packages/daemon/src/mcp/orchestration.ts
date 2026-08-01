@@ -2882,10 +2882,12 @@ export class OrchestrationMcpRouter {
           "instead of re-escalating on a timer. A HIGHER severity than what's on file for that still-open " +
           "title is NOT deduped — it reuses the same task (no duplicate card) but files a fresh event and a " +
           "fresh Lead nudge, since the severity change is genuinely new information. SCOPE: this dedup is " +
-          "PER-CHANNEL, against THIS tool's own prior escalations by title only — it has no visibility into " +
-          "a card filed by hand (tasks_create) or via peer_message for the SAME underlying finding, so a " +
-          "peer describing one incident in their own words can still land as a second, unlinked card (see " +
-          "tasks_create's own cross-channel duplicate check, card 5b221bf2). Use it for " +
+          "PER-ORIGIN-PROJECT, against THIS PROJECT's own prior escalations by title only — a different " +
+          "project escalating the SAME underlying finding is not deduped against yours and will land as " +
+          "its own card (both are legitimate signals the Lead can triage independently), and it has no " +
+          "visibility into a card filed by hand (tasks_create) or via peer_message for the SAME underlying " +
+          "finding either, so a peer describing one incident in their own words can still land as a second, " +
+          "unlinked card (see tasks_create's own cross-channel duplicate check, card 5b221bf2). Use it for " +
           "platform-level problems (a Loom bug, a confusing tool/skill, friction that " +
           "slowed your workers) or a completion/status update the Lead is waiting on — NOT for your own " +
           "project's task board (use tasks_create there). `detail` is the canonical param; `body` is " +

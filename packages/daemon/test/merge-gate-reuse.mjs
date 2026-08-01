@@ -527,7 +527,7 @@ try {
     check("(L) precondition: the single captured HEAD is main's real current tip", freshHead === mainHeadAtCapture);
 
     // ...then main advances — the EXACT window the old two-separate-reads code was vulnerable to (a
-    // GitWriter REST commit/checkout can land at any time; it does not serialize on withRepoMergeLock).
+    // GitWriter REST commit/checkout can land at any time; it does not serialize on withCanonicalIndexLock).
     fs.writeFileSync(path.join(L.repo, "main-advance-l.txt"), "main moved after the single capture\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m "main advance l"`, { cwd: L.repo });
     const mainHeadAfterAdvance = execSync("git rev-parse HEAD", { cwd: L.repo }).toString().trim();
