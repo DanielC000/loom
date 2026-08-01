@@ -8,7 +8,7 @@
 // spawning it (even to kill it quickly) would nest an entire hermetic test run inside this one test.
 // `discoverHermeticTests`/`auditDiscoveryAgainstGit` in test-daemon-discovery.mjs already establish this
 // import-without-triggering-isMain pattern for this exact file.
-import { classifyCliArgs, KNOWN_CLI_FLAGS } from "../scripts/test-daemon.mjs";
+import { classifyCliArgs, KNOWN_CLI_FLAGS, KNOWN_CLI_VALUE_PREFIXES, resolveSelection } from "../scripts/test-daemon.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -62,6 +62,74 @@ check(
   "KNOWN_CLI_FLAGS is exactly {--count, --list, --help, -h}",
   KNOWN_CLI_FLAGS.size === 4 && ["--count", "--list", "--help", "-h"].every((f) => KNOWN_CLI_FLAGS.has(f)),
 );
+
+// Card 6185fbfc: --only=/--exclude=/--concurrency= — a standalone selection capability, decoupled from
+// any change to the real gate command (this card left the gate command itself unchanged). Value-bearing,
+// so recognized by PREFIX, kept in a SEPARATE export from KNOWN_CLI_FLAGS (exact-match) above.
+{
+  check(
+    "KNOWN_CLI_VALUE_PREFIXES is exactly {--only=, --exclude=, --concurrency=}",
+    KNOWN_CLI_VALUE_PREFIXES.length === 3 && ["--only=", "--exclude=", "--concurrency="].every((p) => KNOWN_CLI_VALUE_PREFIXES.includes(p)),
+  );
+
+  check("--only=a,b classifies as mode:run with only:['a','b']", (() => {
+    const r = classifyCliArgs(["--only=a,b"]);
+    return r.mode === "run" && Array.isArray(r.only) && r.only.length === 2 && r.only[0] === "a" && r.only[1] === "b";
+  })());
+  check("--only= list is trimmed and drops empty entries (a, ,b -> ['a','b'])", (() => {
+    const r = classifyCliArgs(["--only=a, ,b"]);
+    return r.only.length === 2 && r.only[0] === "a" && r.only[1] === "b";
+  })());
+  check("--exclude=x classifies as mode:run with exclude:['x'], only left null", (() => {
+    const r = classifyCliArgs(["--exclude=x"]);
+    return r.mode === "run" && r.only === null && Array.isArray(r.exclude) && r.exclude.length === 1 && r.exclude[0] === "x";
+  })());
+  check("no --only/--exclude/--concurrency given -> all three null (byte-identical default path)", (() => {
+    const r = classifyCliArgs([]);
+    return r.only === null && r.exclude === null && r.concurrency === null;
+  })());
+
+  check("--concurrency=3 classifies as mode:run with concurrency:3", classifyCliArgs(["--concurrency=3"]).concurrency === 3);
+  check("[positive control] --concurrency=abc (not a number) is rejected, not silently defaulted", (() => {
+    const r = classifyCliArgs(["--concurrency=abc"]);
+    return r.mode === "error" && r.unrecognized.some((u) => u.includes("--concurrency=abc"));
+  })());
+  check("[positive control] --concurrency=0 is rejected (must be a POSITIVE integer)", classifyCliArgs(["--concurrency=0"]).mode === "error");
+  check("[positive control] --concurrency=-1 is rejected", classifyCliArgs(["--concurrency=-1"]).mode === "error");
+  check("[positive control] --concurrency=1.5 is rejected (integer only)", classifyCliArgs(["--concurrency=1.5"]).mode === "error");
+  check("--count alongside --only= still classifies as mode:count (--count/--list take priority, unchanged)", classifyCliArgs(["--count", "--only=a"]).mode === "count");
+
+  // resolveSelection: pure selection-resolution logic, exercised directly (no subprocess spawn).
+  const HERM = ["a", "b", "c"];
+  check("no only/exclude -> selected IS the same array reference as the input (default-path proof)", (() => {
+    const r = resolveSelection(HERM, {});
+    return r.error === null && r.selected === HERM;
+  })());
+  check("--only=a,c narrows to exactly those two, in the given order", (() => {
+    const r = resolveSelection(HERM, { only: ["a", "c"] });
+    return r.error === null && r.selected.length === 2 && r.selected[0] === "a" && r.selected[1] === "c";
+  })());
+  check("[positive control] --only names an unknown file -> refused, selected:null", (() => {
+    const r = resolveSelection(HERM, { only: ["a", "nope"] });
+    return r.selected === null && r.error?.includes("nope");
+  })());
+  check("--exclude=b removes exactly b, keeps a and c", (() => {
+    const r = resolveSelection(HERM, { exclude: ["b"] });
+    return r.error === null && r.selected.length === 2 && r.selected.includes("a") && r.selected.includes("c") && !r.selected.includes("b");
+  })());
+  check("[positive control] --exclude names an unknown file -> refused (a typo must not silently no-op)", (() => {
+    const r = resolveSelection(HERM, { exclude: ["nope"] });
+    return r.selected === null && r.error?.includes("nope");
+  })());
+  check("--only=a,b,c + --exclude=b composes: exclude applies on top of only", (() => {
+    const r = resolveSelection(HERM, { only: ["a", "b", "c"], exclude: ["b"] });
+    return r.error === null && r.selected.length === 2 && r.selected.includes("a") && r.selected.includes("c");
+  })());
+  check("[positive control] a selection that empties to zero is refused, not silently reported green", (() => {
+    const r = resolveSelection(HERM, { only: ["a"], exclude: ["a"] });
+    return r.selected === null && r.error?.toLowerCase().includes("zero");
+  })());
+}
 
 console.log(`\n${failures === 0 ? "✅" : "❌"} test-daemon-cli-args: ${failures} check(s) failed.`);
 process.exit(failures === 0 ? 0 : 1);

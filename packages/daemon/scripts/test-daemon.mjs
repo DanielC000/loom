@@ -309,11 +309,88 @@ export function auditDiscoveryAgainstGit(testDir) {
 // for the "no flags" case would nest an entire hermetic-suite run inside a test).
 export const KNOWN_CLI_FLAGS = new Set(["--count", "--list", "--help", "-h"]);
 
+// Card 6185fbfc: a SEPARATE selection capability, decoupled from any change to the real gate command
+// (this card's own resolution left the gate command unchanged — see its body). `--only=`/`--exclude=`
+// name a comma-separated subset of the DISCOVERED hermetic set by bare name; `--concurrency=` overrides
+// the pool size for just this invocation, without touching the env var. Several open measurement cards
+// (f1043732, cfcc0946, 0bafbe35, c062a307) want exactly this: run a named subset at a chosen concurrency
+// without a hand-rolled recipe. Value-bearing, so recognized by PREFIX (the value varies per
+// invocation) rather than exact membership in KNOWN_CLI_FLAGS above — kept as a SEPARATE set so the
+// existing exact-match flags and their own test assertions are untouched by this addition.
+export const KNOWN_CLI_VALUE_PREFIXES = ["--only=", "--exclude=", "--concurrency="];
+
+function parseValueFlag(argv, prefix) {
+  const token = argv.find((a) => a.startsWith(prefix));
+  return token === undefined ? undefined : token.slice(prefix.length);
+}
+
+// A positive integer only — "0", "-1", "abc", "1.5" are all invalid. `undefined` means "flag omitted"
+// (the caller must not confuse that with an invalid value that was actually given).
+function parseConcurrencyValue(raw) {
+  const n = Number(raw);
+  return Number.isInteger(n) && n > 0 ? n : NaN;
+}
+
 export function classifyCliArgs(argv) {
   if (argv.some((a) => a === "--help" || a === "-h")) return { mode: "help" };
-  const unrecognized = argv.filter((a) => !KNOWN_CLI_FLAGS.has(a));
+  const unrecognized = argv.filter(
+    (a) => !KNOWN_CLI_FLAGS.has(a) && !KNOWN_CLI_VALUE_PREFIXES.some((p) => a.startsWith(p)),
+  );
+  const concurrencyRaw = parseValueFlag(argv, "--concurrency=");
+  const concurrency = concurrencyRaw === undefined ? null : parseConcurrencyValue(concurrencyRaw);
+  if (concurrencyRaw !== undefined && Number.isNaN(concurrency)) {
+    // A recognized flag with an unusable value is exactly as dangerous as an unrecognized one (card
+    // 05724a32's own point) — name the whole token so the reader sees exactly what was rejected.
+    unrecognized.push(`--concurrency=${concurrencyRaw} (must be a positive integer)`);
+  }
   if (unrecognized.length) return { mode: "error", unrecognized };
-  return { mode: (argv.includes("--count") || argv.includes("--list")) ? "count" : "run" };
+
+  const onlyRaw = parseValueFlag(argv, "--only=");
+  const excludeRaw = parseValueFlag(argv, "--exclude=");
+  const only = onlyRaw ? onlyRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
+  const exclude = excludeRaw ? excludeRaw.split(",").map((s) => s.trim()).filter(Boolean) : null;
+  return {
+    mode: (argv.includes("--count") || argv.includes("--list")) ? "count" : "run",
+    only,
+    exclude,
+    concurrency,
+  };
+}
+
+// Card 6185fbfc: resolve the actual RUN SET from the discovered `hermetic` list plus an optional
+// --only=/--exclude= selection. Pure + exported so a test can exercise every combination directly,
+// never by spawning this whole script (which for "no selection" would nest a full suite run inside a
+// test — the same reasoning `classifyCliArgs`/`discoverHermeticTests` already established). Returns
+// `{ selected, error }` — `error` is a human-readable refusal reason (an --only/--exclude name that
+// isn't in `hermetic`, or a selection that empties the run set to zero) with `selected: null` in that
+// case; this function never calls `process.exit` itself, so a test can assert the refusal reason
+// without spawning a subprocess. When neither `only` nor `exclude` is given, `selected` is the SAME
+// array reference as `hermetic` (not a copy) — the caller uses that reference equality to decide
+// whether to print a "selection active" line, so the default (no-argv) path never gains one.
+export function resolveSelection(hermetic, { only, exclude } = {}) {
+  const hermeticSet = new Set(hermetic);
+  let selected = hermetic;
+  if (only) {
+    const unknown = only.filter((name) => !hermeticSet.has(name));
+    if (unknown.length) {
+      return { selected: null, error: `--only names ${unknown.length} file(s) not in the discovered hermetic set: ${unknown.join(", ")}` };
+    }
+    selected = only;
+  }
+  if (exclude) {
+    const unknown = exclude.filter((name) => !hermeticSet.has(name));
+    if (unknown.length) {
+      // A typo'd --exclude name would otherwise silently fail to exclude anything — exactly the class
+      // of silent-coverage bug this gate exists to prevent elsewhere (DISCOVERY_VIOLATIONS etc.).
+      return { selected: null, error: `--exclude names ${unknown.length} file(s) not in the discovered hermetic set: ${unknown.join(", ")}` };
+    }
+    const excludeSet = new Set(exclude);
+    selected = selected.filter((name) => !excludeSet.has(name));
+  }
+  if (selected.length === 0) {
+    return { selected: null, error: "--only/--exclude selected ZERO tests — refusing to report a green run that ran nothing" };
+  }
+  return { selected, error: null };
 }
 
 // Card e6e55f7a: a sibling harness (Codescape) prints a whole-run peak-RSS + max-inter-event-gap summary
@@ -576,11 +653,19 @@ if (isMain) {
   if (cliMode.mode === "help") {
     console.log([
       "Usage: node scripts/test-daemon.mjs [--count | --list | --help]",
+      "                                    [--only=name,name] [--exclude=name,name] [--concurrency=N]",
       "",
-      "  (no flags)   run the full hermetic daemon suite",
-      "  --count      print discovery counts only (no tests run)",
-      "  --list       alias for --count",
-      "  --help, -h   print this usage and exit",
+      "  (no flags)       run the full hermetic daemon suite — this is what the merge gate,",
+      "                   package.json's test:daemon, and CI/release all invoke; unaffected by",
+      "                   any flag below unless you actually pass one",
+      "  --count          print discovery counts only (no tests run)",
+      "  --list           alias for --count",
+      "  --only=a,b       run ONLY these discovered hermetic test(s), by bare name",
+      "  --exclude=a,b    run every discovered hermetic test EXCEPT these, by bare name",
+      "  --concurrency=N  override the pool size for just this invocation (still clamped to",
+      "                   the MAX_CONCURRENCY ceiling); LOOM_GATE_TEST_CONCURRENCY still applies",
+      "                   when this is omitted",
+      "  --help, -h       print this usage and exit",
     ].join("\n"));
     process.exit(0);
   }
@@ -680,16 +765,37 @@ if (isMain) {
     console.warn(`⚠ test-daemon.mjs: ${gitAudit.walkedNotInGit.length} .mjs file(s) seen by the discovery walk are untracked by git (fine for a local run; invisible to the merge gate's own tracked-files-only check): ${gitAudit.walkedNotInGit.join(", ")}`);
   }
 
+  // Card 6185fbfc: resolve --only=/--exclude= against the discovered set, fail loudly on an unknown name
+  // or an empty resulting selection (never silently run nothing). `SELECTED` is the SAME array reference
+  // as `HERMETIC` when neither flag is given, so the zero-argv default path — package.json's test:daemon,
+  // ci.yml, release.yml, the merge gate itself — prints no extra line and behaves byte-identically to
+  // before this card.
+  const selectionResult = resolveSelection(HERMETIC, { only: cliMode.only, exclude: cliMode.exclude });
+  if (selectionResult.error) {
+    console.error(`❌ test-daemon.mjs: ${selectionResult.error}`);
+    process.exit(1);
+  }
+  const SELECTED = selectionResult.selected;
+  if (SELECTED !== HERMETIC) {
+    console.log(`ℹ selection active: running ${SELECTED.length}/${HERMETIC.length} discovered hermetic tests (--only/--exclude applied)`);
+  }
+  // Card 6185fbfc: --concurrency=N overrides the pool size for just this invocation (still clamped to
+  // MAX_CONCURRENCY), leaving LOOM_GATE_TEST_CONCURRENCY-derived POOL_SIZE untouched when omitted — so
+  // the zero-argv default path's concurrency is exactly what it was before this card.
+  const EFFECTIVE_POOL_SIZE = cliMode.concurrency != null
+    ? Math.max(1, Math.min(cliMode.concurrency, MAX_CONCURRENCY))
+    : POOL_SIZE;
+
   // Card e6e55f7a: sample only around the actual test run, never during --count/--help/error paths above.
   // `runInstrumentedSuite` seeds the gap series with the run's own start (so a long stall BEFORE the
   // first completion is captured too, not just gaps between completions) and, on a genuine harness crash,
   // prints the two lines itself (labelled partial) before rethrowing — see that function's own comment.
   const RSS_SAMPLE_INTERVAL_MS = 5000;
-  const results = new Array(HERMETIC.length);
+  const results = new Array(SELECTED.length);
   const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
-    const nextIndex = makeCursor(HERMETIC.length);
+    const nextIndex = makeCursor(SELECTED.length);
     await Promise.all(
-      Array.from({ length: Math.min(POOL_SIZE, HERMETIC.length) }, (_, lane) => runLane(lane, HERMETIC, nextIndex, results, completionTimestamps)),
+      Array.from({ length: Math.min(EFFECTIVE_POOL_SIZE, SELECTED.length) }, (_, lane) => runLane(lane, SELECTED, nextIndex, results, completionTimestamps)),
     );
 
     // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
@@ -698,12 +804,12 @@ if (isMain) {
     }
 
     // Card b122c7d4 DoD #1: assert the executed PATH SET against the discovered allowlist, by path, never
-    // by count — a count (e.g. `results.length === HERMETIC.length`) can't distinguish "ran the right
+    // by count — a count (e.g. `results.length === SELECTED.length`) can't distinguish "ran the right
     // files" from "ran the wrong files, same tally" (`runOne`'s own `fs.existsSync` skip path resolves
     // `ok:true` without ever spawning anything). Named, not just counted, so a future divergence is
     // diagnosable from this output alone.
     const executedNames = new Set(results.filter((r) => !r.skipped).map((r) => r.name));
-    const notExecuted = HERMETIC.filter((name) => !executedNames.has(name));
+    const notExecuted = SELECTED.filter((name) => !executedNames.has(name));
     if (notExecuted.length) {
       console.error(`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test(s) were NOT actually executed — naming them: ${notExecuted.join(", ")}`);
       process.exit(1);
@@ -713,7 +819,7 @@ if (isMain) {
   const pass = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok);
 
-  console.log(`\n${pass}/${HERMETIC.length} hermetic daemon tests passed. (pool size ${POOL_SIZE})`);
+  console.log(`\n${pass}/${SELECTED.length} hermetic daemon tests passed. (pool size ${EFFECTIVE_POOL_SIZE})`);
   // Card 12bdea9e: a test excluded here has no owner and no alarm — it decays silently and its decay
   // is invisible until someone happens to run it by hand. Naming the excluded set on EVERY gate run
   // (pass or fail) means the exclusion itself can never again go unnoticed, without paying the cost of
