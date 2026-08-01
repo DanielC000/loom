@@ -58,18 +58,70 @@ export function engineTranscriptPath(cwd: string, engineSessionId: string): stri
  * That's a distinct problem from this card's scope (fixing it means bounding or cleaning the leak
  * sources, not changing this function) but it's a real, measured cost this determination should not be
  * read as dismissing.
+ *
+ * BOUNDING THE COST (card f432cbb8, the third reader to ask this) — this does NOT change the fallback's
+ * existence or its correctness reasoning above; it bounds what the fallback PAYS, same as the manager's
+ * own framing. Measured (project memory `resolve-transcript-file-fallback-scan-cost-measured`): the
+ * worst case (direct miss, target genuinely not found) was ~169–239ms SYNCHRONOUS wall-clock against this
+ * repo's own `~/.claude/projects` (5778 dirs) — and it's synchronous because it HAS to be: the hottest
+ * caller, {@link readContextStats} via `pty/host.ts`'s `deliverHook` Stop-hook handler, runs inside the
+ * M2 busy-gate drain window, which is a documented "DO NOT INTRODUCE AN `await` IN THIS BRANCH" invariant
+ * — an async signature here is not available as an option for that call site.
+ *
+ * `resolvedPathCache` (engine session id -> resolved file path) closes the case that actually dominates
+ * in practice: a REPEAT lookup for an id this function has already found via the fallback scan skips the
+ * scan entirely — a live session's context-stats read re-resolves the SAME id on every Stop. A hit is
+ * revalidated with a single `existsSync` before being trusted (the file could have been removed since
+ * caching); a stale hit is dropped and falls through to a real scan, never returned as-is. This has no
+ * coherence hole: a cache MISS here always falls through to the full scan below, unchanged.
+ *
+ * ⚠️ WHY THERE IS NO CACHE ON THE `readdir` ITSELF (an earlier draft of this fix had one — deliberately
+ * removed, not merely never added): measured separately, `readdirSync` alone costs ~8ms at 5778 entries;
+ * the `existsSync`-per-candidate loop alone costs ~249ms. The `readdir` was measured NOT to be the
+ * bottleneck, so caching it saves ~3% of the worst case at best — and a TTL-cached listing has a
+ * coherence hole a fresh `readdir` cannot: engine session ROTATION (see above) writes a NEW file into an
+ * ALREADY-EXISTING project dir, so any "only re-check dirs new since the cached listing" optimization
+ * silently EXCLUDES the one dir that actually changed, producing a false not-found for a transcript that
+ * genuinely exists (self-healing once the cache would have expired, but still a real regression against
+ * a plain fresh scan). Not a hypothetical: `readContextStats` calls this on every Stop hook specifically
+ * because rotation is the documented reason the fallback exists at all (see `45274e34` above), so the
+ * excluded case is the fallback's OWN primary use case. A bad trade at any TTL — deleted rather than
+ * patched. See `test/transcript-fallback-cache-coherence.mjs` for the regression guard covering
+ * `resolvedPathCache`'s own two failure shapes (a deleted cached file must rescan; a NEW file written
+ * into an already-resolved-once dir must still resolve on the next distinct lookup).
  */
+const RESOLVED_PATH_CACHE_MAX = 500; // mirrors walkState's MAX_TRACKED_WALKS bound in this same file — never grows unbounded
+const resolvedPathCache = new Map<string, string>(); // engineSessionId -> last-resolved fallback-scan hit
+
+function rememberResolvedPath(engineSessionId: string, filePath: string): void {
+  resolvedPathCache.delete(engineSessionId); // re-insert at the end (Map iteration order) as most-recent
+  resolvedPathCache.set(engineSessionId, filePath);
+  if (resolvedPathCache.size > RESOLVED_PATH_CACHE_MAX) {
+    const oldest = resolvedPathCache.keys().next().value;
+    if (oldest !== undefined) resolvedPathCache.delete(oldest);
+  }
+}
+
 export function resolveTranscriptFile(cwd: string, engineSessionId: string): string | null {
   const direct = engineTranscriptPath(cwd, engineSessionId);
   if (fs.existsSync(direct)) return direct;
+
+  const cachedHit = resolvedPathCache.get(engineSessionId);
+  if (cachedHit !== undefined) {
+    if (fs.existsSync(cachedHit)) return cachedHit;
+    resolvedPathCache.delete(engineSessionId); // stale — the file moved/vanished since caching; rescan for real
+  }
+
   const root = path.join(os.homedir(), ".claude", "projects");
+  let found: string | null = null;
   try {
     for (const dir of fs.readdirSync(root)) {
       const f = path.join(root, dir, `${engineSessionId}.jsonl`);
-      if (fs.existsSync(f)) return f;
+      if (fs.existsSync(f)) { found = f; break; }
     }
   } catch { /* projects dir missing — nothing to find */ }
-  return null;
+  if (found !== null) rememberResolvedPath(engineSessionId, found);
+  return found;
 }
 
 /** Whether a session is still resumable (its engine transcript file still exists). */

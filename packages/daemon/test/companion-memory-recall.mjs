@@ -25,7 +25,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
-import { useOwnLoomHome } from "./_tmp-fixture.mjs";
+import { useOwnLoomHome, mkdtempManaged, registerForCleanup } from "./_tmp-fixture.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -33,6 +33,17 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 // Hermetic LOOM_HOME (host.ts opens a per-session log under $LOOM_HOME/logs). Set BEFORE importing dist.
 const tmpHome = useOwnLoomHome("loom-mem-recall-");
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
+
+// Card f432cbb8: simulateResume() below writes real transcript fixtures via engineTranscriptPath, which
+// resolves under os.homedir()/.claude/projects — NOT tmpHome. Left unsandboxed, every run of this file
+// left a never-cleaned directory under the RUNNING USER'S real ~/.claude/projects (measured: this file's
+// `loom-mem-recall-repo-*` prefix alone accounted for 1983 of the 3987 leaked dirs found on this repo's
+// dev box). Sandbox HOME/USERPROFILE to a managed temp dir — cleaned by the SAME guaranteed-cleanup hooks
+// as tmpHome — BEFORE importing dist, so os.homedir() (read at call time by engineTranscriptPath, not
+// cached) resolves inside the sandbox for every call this file makes.
+const sandboxHome = mkdtempManaged("loom-mem-recall-home-");
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
 
 const { Db } = await import("../dist/db.js");
 const { PtyHost } = await import("../dist/pty/host.js");
@@ -193,6 +204,7 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 {
   // A real temp git repo backs the project (cwd must exist for resume()'s cwd guard + a real dir for spawn).
   const repo = path.join(os.tmpdir(), `loom-mem-recall-repo-${Date.now()}`);
+  registerForCleanup(repo); // was never cleaned up before (card f432cbb8) — swept by the same exit hooks now
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# memory-recall test\n");
   execSync(`git init -q && git -c user.email=a@loom -c user.name=a add . && git -c user.email=a@loom -c user.name=a commit -q -m init`, { cwd: repo });

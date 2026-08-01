@@ -19,6 +19,18 @@ import path from "node:path";
 process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ralg-home-${Date.now()}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
+// Card f432cbb8: mkSession() below writes a real transcript fixture via engineTranscriptPath, which
+// resolves under os.homedir()/.claude/projects — NOT LOOM_HOME. Left unsandboxed, every run of this file
+// left a never-cleaned directory under the RUNNING USER'S real ~/.claude/projects (measured: this file's
+// `loom-ralg-cwd-*` prefix alone accounted for 1938 of the 3987 leaked dirs found on this repo's dev
+// box). Sandbox HOME/USERPROFILE to its own temp root — swept in the `finally` below alongside LOOM_HOME
+// and cwd — BEFORE importing dist, so os.homedir() (read at call time by engineTranscriptPath, not
+// cached) resolves inside the sandbox for every call this file makes.
+const sandboxHome = path.join(os.tmpdir(), `loom-ralg-home-real-${Date.now()}`);
+fs.mkdirSync(sandboxHome, { recursive: true });
+process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
+process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
+
 const { Db } = await import("../dist/db.js");
 const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
@@ -94,6 +106,7 @@ try {
   db.close();
   fs.rmSync(process.env.LOOM_HOME, { recursive: true, force: true });
   fs.rmSync(cwd, { recursive: true, force: true });
+  fs.rmSync(sandboxHome, { recursive: true, force: true });
 }
 
 console.log(failures === 0
