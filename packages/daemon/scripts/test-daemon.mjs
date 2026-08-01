@@ -316,6 +316,103 @@ export function classifyCliArgs(argv) {
   return { mode: (argv.includes("--count") || argv.includes("--list")) ? "count" : "run" };
 }
 
+// Card e6e55f7a: a sibling harness (Codescape) prints a whole-run peak-RSS + max-inter-event-gap summary
+// on every gate run, pass or fail — a night was spent hand-reconstructing both numbers because this gate
+// didn't. Observation only (DoD-5: zero change to selection/ordering/concurrency/exit codes) — cheap
+// `process.memoryUsage`-class reads on a timer, no per-test synchronisation, no added subprocess (DoD-6).
+//
+// SCOPE CAVEAT (kickoff-mandated, not decoration): there is no cheap, reliable, cross-platform way to sum
+// a spawned test child's RSS without an added subprocess (no `/proc` on win32; a `tasklist`/`ps` shell-out
+// would itself be the added subprocess DoD-6 forbids). So this tracks the RUNNER process only — this
+// coordinating script, not its spawned test children — and the printed line says so explicitly rather than
+// claiming "process tree" for what is really one process.
+//
+// `readRssBytes` is injectable so a hermetic test can drive this with synthetic readings instead of
+// asserting real, non-deterministic process memory.
+export function createRssTracker(readRssBytes = () => process.memoryUsage().rss) {
+  let sampleCount = 0;
+  let floorBytes = 0;
+  return {
+    sample() {
+      sampleCount++;
+      const rss = readRssBytes();
+      if (rss > floorBytes) floorBytes = rss;
+      return rss;
+    },
+    sampleCount: () => sampleCount,
+    floorBytes: () => floorBytes,
+  };
+}
+
+// Max gap between successive entries of a timestamp series (ms, same unit as `performance.now()`) — the
+// same liveness notion `GATE_EXTEND_IDLE_MS` reasons about (a gate that goes quiet past it is refused its
+// extension). Fewer than 2 timestamps means there's no gap to measure yet — 0, not NaN or a thrown error.
+export function maxGapMs(timestamps) {
+  if (timestamps.length < 2) return 0;
+  let max = 0;
+  for (let i = 1; i < timestamps.length; i++) {
+    const gap = timestamps[i] - timestamps[i - 1];
+    if (gap > max) max = gap;
+  }
+  return Math.round(max);
+}
+
+// Both formatters are exported so a test can assert the qualifier wording survives verbatim — a sampled
+// max that reads like a measured peak is exactly the kind of number this project has been burned by
+// (see the card): "highest OBSERVED, not a proven peak", the sample count + interval, and the scope
+// (runner process only, not the full tree) all belong IN the line, not in a caveat someone can truncate
+// away. `partial` (manager follow-up to the card) marks a number captured on the CRASH path — the harness
+// itself died before the run completed normally, so sampling stopped early and the true floor/gap may be
+// higher than what was actually observed. A crash-path number must never read identically to a clean-path
+// one — a lower-confidence max deserves its own, visibly different label, not the same line reused.
+export function formatRssFloorLine(sampleCount, intervalMs, floorBytes, { partial = false } = {}) {
+  const mb = floorBytes / (1024 * 1024);
+  const partialNote = partial
+    ? " — PARTIAL: sampling stopped before the run completed normally (the harness exited early); the true floor may be higher than this observed value"
+    : "";
+  return `# RSS FLOOR — highest OBSERVED, not a proven peak (runner process only, not the full test-child ` +
+    `tree — no cheap, reliable cross-platform way to sum spawned test-child RSS without an added ` +
+    `subprocess; ${sampleCount} sample(s) @ ${intervalMs}ms): ${mb.toFixed(2)} MB${partialNote}`;
+}
+
+export function formatMaxGapLine(gapMs, { partial = false } = {}) {
+  const partialNote = partial
+    ? " — PARTIAL: the run did not complete normally; a larger gap may have occurred after sampling stopped"
+    : "";
+  return `# max inter-event gap (stall watchdog input): ${gapMs}ms${partialNote}`;
+}
+
+// Card e6e55f7a (manager follow-up, not the card's literal DoD but its PURPOSE): the harness itself
+// dying mid-run — an uncaught exception, a hang killed externally, anything that aborts before the
+// normal summary prints — is the single most opaque rejection mode this instrument exists to illuminate.
+// GATE_EXTEND_IDLE_MS-style stall detection is exactly the case where the max-gap number matters most, and
+// a DoD that covered every case except that one would be a technicality. So: wrap the actual run body.
+// On success, resolve normally — the CALLER prints the two clean-path lines itself (unlabelled,
+// full-confidence), unchanged from before. On failure, print BOTH lines HERE — labelled `partial: true` —
+// then RETHROW THE SAME ERROR UNCHANGED. Never swallowed (this file IS the merge gate for every project on
+// this daemon; a swallowed exception here would silently green a dead harness) and never a different exit
+// code (the caller/Node's own default uncaught-exception handling is what decides that, exactly as it did
+// before this wrapper existed — this function only ever observes and rethrows, never catches-and-exits).
+// `runFn` does the actual test-running work; `log` is injectable so a hermetic test can capture output
+// instead of asserting against real console.log side effects.
+export async function runInstrumentedSuite(runFn, { sampleIntervalMs = 5000, log = console.log } = {}) {
+  const rssTracker = createRssTracker();
+  const completionTimestamps = [performance.now()];
+  rssTracker.sample();
+  const timer = setInterval(() => rssTracker.sample(), sampleIntervalMs);
+  timer.unref?.();
+  try {
+    await runFn(completionTimestamps);
+  } catch (err) {
+    clearInterval(timer);
+    log(formatRssFloorLine(rssTracker.sampleCount(), sampleIntervalMs, rssTracker.floorBytes(), { partial: true }));
+    log(formatMaxGapLine(maxGapMs(completionTimestamps), { partial: true }));
+    throw err;
+  }
+  clearInterval(timer);
+  return { rssTracker, completionTimestamps };
+}
+
 const { hermetic: HERMETIC, violations: DISCOVERY_VIOLATIONS, notHermeticNames: NOT_HERMETIC_NAMES } = discoverHermeticTests(TEST_DIR);
 
 // Ceiling — unchanged. `LOOM_GATE_TEST_CONCURRENCY` may still dial UP to this on a host known to take it.
@@ -424,11 +521,14 @@ function makeCursor(length) {
   return () => (next < length ? next++ : null);
 }
 
-async function runLane(lane, names, nextIndex, results) {
+async function runLane(lane, names, nextIndex, results, completionTimestamps) {
   for (let idx = nextIndex(); idx !== null; idx = nextIndex()) {
     const name = names[idx];
     const result = await runOne(name, lane);
     results[idx] = result;
+    // Card e6e55f7a: this PASS/FAIL line is the observable liveness signal a stall watchdog reads — the
+    // same completion event `maxGapMs` measures gaps between. Recorded regardless of pass/fail.
+    completionTimestamps.push(performance.now());
     console.log(`${result.ok ? "PASS" : "FAIL"}  ${result.name}${result.ok ? "" : `  (exit ${result.status})`}`);
   }
 }
@@ -580,28 +680,35 @@ if (isMain) {
     console.warn(`⚠ test-daemon.mjs: ${gitAudit.walkedNotInGit.length} .mjs file(s) seen by the discovery walk are untracked by git (fine for a local run; invisible to the merge gate's own tracked-files-only check): ${gitAudit.walkedNotInGit.join(", ")}`);
   }
 
+  // Card e6e55f7a: sample only around the actual test run, never during --count/--help/error paths above.
+  // `runInstrumentedSuite` seeds the gap series with the run's own start (so a long stall BEFORE the
+  // first completion is captured too, not just gaps between completions) and, on a genuine harness crash,
+  // prints the two lines itself (labelled partial) before rethrowing — see that function's own comment.
+  const RSS_SAMPLE_INTERVAL_MS = 5000;
   const results = new Array(HERMETIC.length);
-  const nextIndex = makeCursor(HERMETIC.length);
-  await Promise.all(
-    Array.from({ length: Math.min(POOL_SIZE, HERMETIC.length) }, (_, lane) => runLane(lane, HERMETIC, nextIndex, results)),
-  );
+  const { rssTracker, completionTimestamps } = await runInstrumentedSuite(async (completionTimestamps) => {
+    const nextIndex = makeCursor(HERMETIC.length);
+    await Promise.all(
+      Array.from({ length: Math.min(POOL_SIZE, HERMETIC.length) }, (_, lane) => runLane(lane, HERMETIC, nextIndex, results, completionTimestamps)),
+    );
 
-  // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
-  for (const root of tmpRoots) {
-    for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
-  }
+    // Best-effort cleanup of the per-test temp homes (WAL handles may briefly hold a few on Windows).
+    for (const root of tmpRoots) {
+      for (let i = 0; i < 5; i++) { try { fs.rmSync(root, { recursive: true, force: true }); break; } catch { /* retry */ } }
+    }
 
-  // Card b122c7d4 DoD #1: assert the executed PATH SET against the discovered allowlist, by path, never
-  // by count — a count (e.g. `results.length === HERMETIC.length`) can't distinguish "ran the right
-  // files" from "ran the wrong files, same tally" (`runOne`'s own `fs.existsSync` skip path resolves
-  // `ok:true` without ever spawning anything). Named, not just counted, so a future divergence is
-  // diagnosable from this output alone.
-  const executedNames = new Set(results.filter((r) => !r.skipped).map((r) => r.name));
-  const notExecuted = HERMETIC.filter((name) => !executedNames.has(name));
-  if (notExecuted.length) {
-    console.error(`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test(s) were NOT actually executed — naming them: ${notExecuted.join(", ")}`);
-    process.exit(1);
-  }
+    // Card b122c7d4 DoD #1: assert the executed PATH SET against the discovered allowlist, by path, never
+    // by count — a count (e.g. `results.length === HERMETIC.length`) can't distinguish "ran the right
+    // files" from "ran the wrong files, same tally" (`runOne`'s own `fs.existsSync` skip path resolves
+    // `ok:true` without ever spawning anything). Named, not just counted, so a future divergence is
+    // diagnosable from this output alone.
+    const executedNames = new Set(results.filter((r) => !r.skipped).map((r) => r.name));
+    const notExecuted = HERMETIC.filter((name) => !executedNames.has(name));
+    if (notExecuted.length) {
+      console.error(`❌ test-daemon.mjs: ${notExecuted.length} discovered hermetic test(s) were NOT actually executed — naming them: ${notExecuted.join(", ")}`);
+      process.exit(1);
+    }
+  }, { sampleIntervalMs: RSS_SAMPLE_INTERVAL_MS });
 
   const pass = results.filter((r) => r.ok).length;
   const failed = results.filter((r) => !r.ok);
@@ -613,6 +720,10 @@ if (isMain) {
   // actually booting a live daemon here. Run one manually: `node dist/index.js` (some need extra env —
   // see the file's own header), then `node test/<name>.mjs` from packages/daemon.
   console.log(`ℹ NOT_HERMETIC (excluded from this gate — needs a live daemon and/or real claude; run manually, see each file's header): ${[...NOT_HERMETIC].sort().join(", ")}`);
+  // Card e6e55f7a: printed on pass AND fail alike — a rejected run's numbers are as valuable as a passed
+  // run's, arguably more, since rejections are disproportionately the interesting ones.
+  console.log(formatRssFloorLine(rssTracker.sampleCount(), RSS_SAMPLE_INTERVAL_MS, rssTracker.floorBytes()));
+  console.log(formatMaxGapLine(maxGapMs(completionTimestamps)));
   if (failed.length) {
     console.log("FAILURES:");
     // Echo each failed test's FULL captured stdout/stderr (not just the last line) — the individual
