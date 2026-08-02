@@ -29,6 +29,13 @@ import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Card 19fbeede: computeDeployStaleness() degrades to {available:false, reason} on ANY failure (git
+// timeout, no .git checkout, missing dist entry, ...) — a bare `available === true` check discards the
+// one field that explains why it wasn't, so a gate-tail failure names only the symptom, never the cause.
+// Appends " — reason: ..." to the label ONLY when `reason` is actually present (i.e. available was
+// unexpectedly false) — on the healthy/green path (available:true, reason undefined) this is a no-op, so
+// a passing run's output stays byte-unchanged (DoD #2).
+const reasonSuffix = (result) => result?.reason ? ` — reason: ${JSON.stringify(result.reason)}` : "";
 
 const tmpHome = path.join(os.tmpdir(), `loom-svst-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
@@ -105,7 +112,7 @@ const call = async (name, args) => JSON.parse((await client.callTool({ name, arg
 // deterministic either way without hardcoding an assumption about which single file is newest.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const realBuildProbe = computeDeployStaleness();
-check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout", realBuildProbe.available === true);
+check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout" + reasonSuffix(realBuildProbe), realBuildProbe.available === true);
 const realDistMtimeMs = new Date(realBuildProbe.distBuiltAt).getTime();
 // Positive control (DoD 2): dist/index.js's own mtime must NOT equal the directory-wide build clock on
 // a real incremental build — if they coincide, this checkout's dist doesn't exhibit the class of bug this
@@ -146,7 +153,7 @@ try {
   // ===================== (4) deployStaleness, wired end-to-end through the real MCP tool =====================
   process.env.LOOM_REPO_ROOT = stalenessRepo;
   const statusClean = await call("served_status");
-  check("(4) no daemon/src commits after the real dist build ⇒ deployStaleness.available:true, stale:false", statusClean.deployStaleness?.available === true && statusClean.deployStaleness?.stale === false);
+  check("(4) no daemon/src commits after the real dist build ⇒ deployStaleness.available:true, stale:false" + reasonSuffix(statusClean.deployStaleness), statusClean.deployStaleness?.available === true && statusClean.deployStaleness?.stale === false);
   check("(4) clean: commitsBehind is 0", statusClean.deployStaleness?.commitsBehind === 0);
   check("(4) served_status does NOT rely on version/webBundle for this — both stay whatever they already were (DoD #8's own proof point)", typeof statusClean.version === "string" && "webBundle" in statusClean);
 
@@ -154,7 +161,7 @@ try {
   gitStale("add packages/daemon/src/foo.ts");
   gitStale('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add foo"', afterBuild);
   const statusStale = await call("served_status");
-  check("(4) a daemon/src commit AFTER the real dist build ⇒ deployStaleness.stale:true", statusStale.deployStaleness?.available === true && statusStale.deployStaleness?.stale === true);
+  check("(4) a daemon/src commit AFTER the real dist build ⇒ deployStaleness.stale:true" + reasonSuffix(statusStale.deployStaleness), statusStale.deployStaleness?.available === true && statusStale.deployStaleness?.stale === true);
   check("(4) stale: commitsBehind counts the new commit", statusStale.deployStaleness?.commitsBehind === 1);
   check("(4) stale: mainlineHeadSha is a real 40-char sha", /^[0-9a-f]{40}$/.test(statusStale.deployStaleness?.mainlineHeadSha ?? ""));
 

@@ -82,6 +82,10 @@ import { fileURLToPath } from "node:url";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
+// Card 19fbeede: an `available === true` check that fails discards `reason` (the one field explaining
+// WHY computeDeployStaleness degraded) unless the label carries it. No-op when `reason` is absent (the
+// healthy path, available:true) so a passing run's output stays byte-unchanged.
+const reasonSuffix = (result) => result?.reason ? ` — reason: ${JSON.stringify(result.reason)}` : "";
 
 // Card f5421d27: every fixture root is suffixed with process.pid (not just Date.now()) and registered
 // here so the outer finally below can sweep ALL of them unconditionally — a thrown error partway
@@ -148,7 +152,7 @@ try {
   git('-c user.email=t@loom -c user.name=t commit -q -m "feat(daemon): add foo"', "2026-06-02T00:00:00Z"); // AFTER the build
 
   const rStale = computeDeployStaleness(distEntry, repo);
-  check("(1) a daemon/src commit AFTER the dist build ⇒ stale:true", rStale.available === true && rStale.stale === true);
+  check("(1) a daemon/src commit AFTER the dist build ⇒ stale:true" + reasonSuffix(rStale), rStale.available === true && rStale.stale === true);
   check("(1) commitsBehind counts it", rStale.commitsBehind === 1);
   check("(1) mainlineHeadSha is a real 40-char sha", /^[0-9a-f]{40}$/.test(rStale.mainlineHeadSha ?? ""));
   check("(1) mainlineHeadDate is the real HEAD commit's date (June 2, not the dist build date)", (rStale.mainlineHeadDate ?? "").startsWith("2026-06-02"));
@@ -157,7 +161,7 @@ try {
   // ===================== (1n) CLEAN control — SAME repo, rebuild dist AFTER the commit =====================
   buildDistAt("2026-06-03T00:00:00Z"); // dist "rebuilt" after the June 2 commit
   const rClean = computeDeployStaleness(distEntry, repo);
-  check("(1n) dist rebuilt AFTER the relevant commit ⇒ stale:false (the signal goes BOTH ways)", rClean.available === true && rClean.stale === false);
+  check("(1n) dist rebuilt AFTER the relevant commit ⇒ stale:false (the signal goes BOTH ways)" + reasonSuffix(rClean), rClean.available === true && rClean.stale === false);
   check("(1n) commitsBehind is 0 once rebuilt", rClean.commitsBehind === 0);
 
   // ===================== (2) path-scoping negative control (the 637558ca cry-wolf precedent) =====================
@@ -166,7 +170,7 @@ try {
   git("add assets/skills/demo/SKILL.md");
   git('-c user.email=t@loom -c user.name=t commit -q -m "docs(assets): add demo skill"', "2026-06-04T00:00:00Z"); // AFTER the June 3 build
   const rAssetsOnly = computeDeployStaleness(distEntry, repo);
-  check("(2) an assets/**-only commit AFTER the build must NOT count as stale", rAssetsOnly.available === true && rAssetsOnly.stale === false && rAssetsOnly.commitsBehind === 0);
+  check("(2) an assets/**-only commit AFTER the build must NOT count as stale" + reasonSuffix(rAssetsOnly), rAssetsOnly.available === true && rAssetsOnly.stale === false && rAssetsOnly.commitsBehind === 0);
   check("(2) mainlineHeadSha still advances to the real HEAD (the assets commit), even though it's excluded from staleness", (rAssetsOnly.mainlineHeadDate ?? "").startsWith("2026-06-04"));
 
   // ===================== (2b) positive control on the SAME corpus — a shared/src commit DOES count =====================
@@ -174,7 +178,7 @@ try {
   git("add packages/shared/src/bar.ts");
   git('-c user.email=t@loom -c user.name=t commit -q -m "feat(shared): add bar"', "2026-06-05T00:00:00Z"); // AFTER the June 3 build
   const rSharedToo = computeDeployStaleness(distEntry, repo);
-  check("(2b) a packages/shared/src commit in the SAME repo DOES count (proves (2) wasn't a vacuous corpus)", rSharedToo.available === true && rSharedToo.stale === true && rSharedToo.commitsBehind === 1);
+  check("(2b) a packages/shared/src commit in the SAME repo DOES count (proves (2) wasn't a vacuous corpus)" + reasonSuffix(rSharedToo), rSharedToo.available === true && rSharedToo.stale === true && rSharedToo.commitsBehind === 1);
 
   // ===================== (3) multiple relevant commits after the build ⇒ all counted =====================
   fs.writeFileSync(path.join(repo, "packages", "daemon", "src", "baz.ts"), "export const baz = 3;\n");
@@ -218,7 +222,7 @@ try {
   fs.utimesSync(nestedFile, new Date("2026-07-03T00:00:00Z"), new Date("2026-07-03T00:00:00Z")); // AFTER the commit — "this deploy"
 
   const rIncremental = computeDeployStaleness(incDistEntry, incRepo);
-  check("(6) a commit landing BETWEEN index.js's stale mtime and a nested dist file's real rebuild mtime ⇒ stale:false — a single-file (index.js-only) check would have wrongly read stale:true here", rIncremental.available === true && rIncremental.stale === false && rIncremental.commitsBehind === 0);
+  check("(6) a commit landing BETWEEN index.js's stale mtime and a nested dist file's real rebuild mtime ⇒ stale:false — a single-file (index.js-only) check would have wrongly read stale:true here" + reasonSuffix(rIncremental), rIncremental.available === true && rIncremental.stale === false && rIncremental.commitsBehind === 0);
   check("(6) distBuiltAt reflects the NEWEST file in the tree (the nested file, July 3), not index.js's own frozen July 1 mtime", (rIncremental.distBuiltAt ?? "").startsWith("2026-07-03"));
 
   try { fs.rmSync(incRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -257,11 +261,11 @@ try {
   gitSh('-c user.email=t@loom -c user.name=t commit -q -m "feat(shared): add quux"', "2026-08-02T00:00:00Z"); // AFTER both dists
 
   const rBeforeSharedRebuild = computeDeployStaleness(shDaemonDistEntry, shRepo, shSharedDistDir);
-  check("(7-setup) a shared/src commit after BOTH dists were built ⇒ stale:true (sanity check before proving shared/dist is what clears it)", rBeforeSharedRebuild.available === true && rBeforeSharedRebuild.stale === true && rBeforeSharedRebuild.commitsBehind === 1);
+  check("(7-setup) a shared/src commit after BOTH dists were built ⇒ stale:true (sanity check before proving shared/dist is what clears it)" + reasonSuffix(rBeforeSharedRebuild), rBeforeSharedRebuild.available === true && rBeforeSharedRebuild.stale === true && rBeforeSharedRebuild.commitsBehind === 1);
 
   buildShSharedDistAt("2026-08-03T00:00:00Z"); // ONLY shared/dist rebuilt after the commit — daemon dist left untouched at 08-01T12:00
   const rAfterSharedRebuild = computeDeployStaleness(shDaemonDistEntry, shRepo, shSharedDistDir);
-  check("(7) shared/dist alone rebuilt AFTER the shared/src commit ⇒ stale:false, even though daemon dist/index.js is UNCHANGED — proves packages/shared/dist is genuinely scanned, not just accepted as an unused parameter", rAfterSharedRebuild.available === true && rAfterSharedRebuild.stale === false && rAfterSharedRebuild.commitsBehind === 0);
+  check("(7) shared/dist alone rebuilt AFTER the shared/src commit ⇒ stale:false, even though daemon dist/index.js is UNCHANGED — proves packages/shared/dist is genuinely scanned, not just accepted as an unused parameter" + reasonSuffix(rAfterSharedRebuild), rAfterSharedRebuild.available === true && rAfterSharedRebuild.stale === false && rAfterSharedRebuild.commitsBehind === 0);
   check("(7) distBuiltAt reflects the newer shared/dist mtime (Aug 3), not the older, untouched daemon dist/index.js (Aug 1)", (rAfterSharedRebuild.distBuiltAt ?? "").startsWith("2026-08-03"));
 
   try { fs.rmSync(shRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
@@ -332,7 +336,7 @@ try {
   gitWeb('-c user.email=t@loom -c user.name=t commit -q -m "feat(web): tweak App"', "2026-09-02T00:00:00Z"); // AFTER both dists
 
   const rWebOnly = computeDeployStaleness(webDaemonDistEntry, webRepo, undefined, webWebDistDir);
-  check("(9) a web-only commit after both dists were built ⇒ webStale:true, webCommitsBehind:1 (POSITIVE CONTROL — the exact bug this card fixes)",
+  check("(9) a web-only commit after both dists were built ⇒ webStale:true, webCommitsBehind:1 (POSITIVE CONTROL — the exact bug this card fixes)" + reasonSuffix(rWebOnly),
     rWebOnly.available === true && rWebOnly.webStale === true && rWebOnly.webCommitsBehind === 1);
   check("(9) the SAME web-only commit leaves the daemon-restart signal COMPLETELY UNCHANGED: stale:false, commitsBehind:0 (a web-only merge must never advise a daemon_restart)",
     rWebOnly.stale === false && rWebOnly.commitsBehind === 0);
@@ -351,7 +355,7 @@ try {
   // ===================== (9c) WEB SIGNAL — CLEAN control: rebuild web dist AFTER the web commit =====================
   buildWebWebDistAt("2026-09-04T00:00:00Z"); // web dist rebuilt after the Sept 2 web commit; daemon dist left untouched
   const rWebRebuilt = computeDeployStaleness(webDaemonDistEntry, webRepo, undefined, webWebDistDir);
-  check("(9c) web dist rebuilt AFTER the web commit ⇒ webStale:false (the web signal goes BOTH ways)",
+  check("(9c) web dist rebuilt AFTER the web commit ⇒ webStale:false (the web signal goes BOTH ways)" + reasonSuffix(rWebRebuilt),
     rWebRebuilt.available === true && rWebRebuilt.webStale === false && rWebRebuilt.webCommitsBehind === 0);
   check("(9c) the daemon-restart signal is UNCHANGED by a pure web-dist rebuild — still stale:true (the Sept 3 daemon commit is still unbuilt)",
     rWebRebuilt.stale === true && rWebRebuilt.commitsBehind === 1);
@@ -381,7 +385,7 @@ try {
   fs.utimesSync(noWebDaemonDistEntry, new Date("2026-10-03T00:00:00Z"), new Date("2026-10-03T00:00:00Z"));
 
   const rNoWebDist = computeDeployStaleness(noWebDaemonDistEntry, noWebRepo, undefined, noWebDistDir);
-  check("(10) a missing packages/web/dist does NOT make the whole signal unavailable", rNoWebDist.available === true);
+  check("(10) a missing packages/web/dist does NOT make the whole signal unavailable" + reasonSuffix(rNoWebDist), rNoWebDist.available === true);
   check("(10) a missing packages/web/dist ⇒ webDistBuiltAt:null (never built, not epoch-stamped as a fake date)", rNoWebDist.webDistBuiltAt === null);
   check("(10) a missing packages/web/dist ⇒ every web/src commit ever counts as unbuilt (webCommitsBehind:1, webStale:true)",
     rNoWebDist.webCommitsBehind === 1 && rNoWebDist.webStale === true);
@@ -425,7 +429,7 @@ try {
   check("(11) processStartedAt echoes the override (Nov 1 01:00) — the process's own, never-restarted, start", (rProcStale.processStartedAt ?? "").startsWith("2026-11-01T01:00"));
   check("(11) runningCodeBuiltAt is the EARLIER of the two (the process's own start, not the newer on-disk rebuild)", (rProcStale.runningCodeBuiltAt ?? "").startsWith("2026-11-01T01:00"));
   check("(11) distAheadOfProcess:true — the on-disk artifact moved past what this process ever loaded", rProcStale.distAheadOfProcess === true);
-  check("(11) THE FIX: stale:true, commitsBehind:1 — the Nov 2 commit is correctly still-unbuilt-by-this-PROCESS, even though the on-disk dist (Nov 3) is newer than it (the pre-fix, dist-only algorithm would have read this clean)",
+  check("(11) THE FIX: stale:true, commitsBehind:1 — the Nov 2 commit is correctly still-unbuilt-by-this-PROCESS, even though the on-disk dist (Nov 3) is newer than it (the pre-fix, dist-only algorithm would have read this clean)" + reasonSuffix(rProcStale),
     rProcStale.available === true && rProcStale.stale === true && rProcStale.commitsBehind === 1);
 
   // ===================== (11n) CLEAN control, same shape: process started AFTER the rebuild =====================
@@ -433,7 +437,7 @@ try {
   const rProcClean = computeDeployStalenessRaw(procDistEntry, procRepo, undefined, undefined, T4_PROCESS_STARTED_AFTER_REBUILD);
   check("(11n) a process started AFTER the last rebuild ⇒ runningCodeBuiltAt reduces to distBuiltAt (Nov 3)", (rProcClean.runningCodeBuiltAt ?? "").startsWith("2026-11-03"));
   check("(11n) distAheadOfProcess:false — the process's own start is not behind the artifact (the healthy/normal case)", rProcClean.distAheadOfProcess === false);
-  check("(11n) stale:false, commitsBehind:0 — the signal reverts to normal once the process is caught up (goes BOTH ways)",
+  check("(11n) stale:false, commitsBehind:0 — the signal reverts to normal once the process is caught up (goes BOTH ways)" + reasonSuffix(rProcClean),
     rProcClean.available === true && rProcClean.stale === false && rProcClean.commitsBehind === 0);
 
   try { fs.rmSync(procRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
