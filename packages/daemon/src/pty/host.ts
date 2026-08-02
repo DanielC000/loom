@@ -2271,8 +2271,15 @@ export interface PtyHostEvents {
    * 00bd3b4a's incident exposed: a healthy, 35-turn-deep worker whose kickoff confirmed LATE (per pinned
    * memory `engine-confirmation-can-lag-minutes-timeouts-assume-seconds`) got a categorical
    * "nothing began at all" notice with no way for Loom to ever say otherwise once the confirmation caught up.
+   *
+   * Card 7772176d: `kickoffText` (the pristine `live.startupPrompt` this synthetic origin was built from)
+   * is now passed through too — the implementer needs the actual text to give the kickoff the SAME
+   * cross-turn-boundary re-mint an ordinary durable message gets from `handleGiveUpExhausted` before ever
+   * parking (see that method's doc for why park-only, with no retry at all, under-serves a kickoff exactly
+   * as it would any other message). Nothing upstream of `scheduleKickoffGuarantee`'s own closure ever
+   * persisted this text anywhere else this handler could read it back from, so it must ride the event.
    */
-  onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string): void;
+  onKickoffGiveUpExhausted?(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string): void;
   /**
    * §19c: the turn ended in a usage-limit StopFailure. `until` is the ISO resume instant; the
    * pty is left ALIVE (a cap doesn't kill it). Wired to persist the park + record global awareness.
@@ -6608,7 +6615,9 @@ export class PtyHost {
       // only), losing the entire task dispatch with nothing durable or visible surfacing it except the
       // generic idle-watchdog eventually noticing the idle, never-started session — slow and indirect,
       // not a signal at the exact seam that failed. Wired to `events.onKickoffGiveUpExhausted` (DB-agnostic,
-      // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can park + notify.
+      // same layering PtyHost already uses for `onGiveUpConfirmed`) so the higher layer can decide what to
+      // do — card 7772176d: that is now a bounded re-mint before park+notify, not park+notify immediately;
+      // see `SessionService.handleKickoffGiveUpExhausted`'s own doc for the current shape.
       // Card 00bd3b4a: `kickoffMsgId`/`kickoffLogicalId` captured into locals (not inlined twice) so the
       // give-up hook reports the EXACT SAME ids the QueuedMessage itself carries — this is what lets the
       // implementer record a durable "parked" event keyed to the same `rootMsgId` a later content-matched
@@ -6619,7 +6628,7 @@ export class PtyHost {
       this.submit(sessionId, kickoff, undefined, undefined, undefined, undefined, "kickoff-guarantee",
         [{
           id: kickoffMsgId, text: kickoff, source: "system", kind: "agent", logicalId: kickoffLogicalId,
-          onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId),
+          onGiveUpExhausted: () => this.events.onKickoffGiveUpExhausted?.(sessionId, kickoffMsgId, kickoffLogicalId, kickoff),
         }]);
       // Deferred one tick past this function's OWN call site (see this function's own doc) — defense in
       // depth, not load-bearing. Card 0050a17e.

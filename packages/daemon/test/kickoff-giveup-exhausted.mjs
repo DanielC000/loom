@@ -14,11 +14,31 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // THE FIX, two layers (mirrors onGiveUpConfirmed's own PtyHost-is-DB-agnostic layering):
 //   (H) pty/host.ts — the synthetic origin's `onGiveUpExhausted` now fires the new, OPTIONAL
-//       `PtyHostEvents.onKickoffGiveUpExhausted(sessionId)` hook.
+//       `PtyHostEvents.onKickoffGiveUpExhausted(sessionId, msgId, rootMsgId, kickoffText)` hook.
 //   (S) sessions/service.ts — `handleKickoffGiveUpExhausted` (wired via index.ts) decides who spawned this
-//       session and PARKS + NOTIFIES its manager through the SAME durable `enqueueSystemNudge` machinery
-//       every settle-nudge uses (never a bare fire-and-forget `pty.enqueueStdin`), naming the ONE known-good
-//       recovery (worker_stop + fresh worker_spawn) and explicitly ruling out worker_message/worker_merge.
+//       session.
+//
+// Card 7772176d (2026-08-02) — THE ORIGINAL a8f8a8f2 FIX WENT STRAIGHT TO PARK+NOTIFY ON THE FIRST
+// EXHAUSTION. Root-caused as the actual defect behind `f91c8634`'s stuck-turn-1 specimens: an ORDINARY
+// durable message that exhausts its in-session requeue budget gets a further, cross-turn-boundary RE-MINT
+// from `handleGiveUpExhausted` (below `GIVE_UP_REMINT_LIMIT`) before it ever parks; the kickoff had no
+// equivalent. `handleKickoffGiveUpExhausted` now takes a `chainDepth` (default 0, mirrors
+// `handleGiveUpExhausted`'s own pattern exactly): below `GIVE_UP_REMINT_LIMIT`, it RE-MINTS via a fresh,
+// held `enqueueStdin` call (targeting the WORKER itself — a kickoff has no "sender" to notify mid-chain,
+// unlike an ordinary message); at/above the limit, it falls through to the UNCHANGED park+notify path below.
+// The re-mint carries `logicalId: rootMsgId` — the IDENTICAL key `requeueGiveUpOrigin` (pty/host.ts) already
+// seeds into `Live.ambiguousDispatches` for the original write — so a later confirming hook for the ORIGINAL
+// purges this still-queued re-mint through the EXISTING content-match machinery (card 4a0af485), the same
+// protection every ordinary re-mint already relies on. See `kickoff-giveup-remint-purge.mjs` for that race
+// proven against the REAL PtyHost purge, not a stub. HONEST SCOPE: this raises the kickoff to PARITY with
+// `handleGiveUpExhausted`'s own re-mint, which is itself not proven reliable — this is "one more bounded
+// attempt before park," not a guarantee, and it does not close `f91c8634` (whose other specimens are
+// structurally outside `scheduleKickoffGuarantee`).
+//
+// The park+notify terminal branch (unchanged from a8f8a8f2/00bd3b4a) PARKS + NOTIFIES the manager through
+// the SAME durable `enqueueSystemNudge` machinery every settle-nudge uses (never a bare fire-and-forget
+// `pty.enqueueStdin`), naming the ONE known-good recovery (worker_stop + fresh worker_spawn) and explicitly
+// ruling out worker_message/worker_merge.
 //
 // Card 00bd3b4a — this notice fired against a healthy, 35-turn-deep worker in production (Loom's own
 // give-up budget is calibrated in seconds; the engine can confirm a write minutes late under load — pinned
@@ -63,6 +83,19 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //        + EMPTY transcript" — NOT an invented signal): a real, non-empty on-disk transcript alone
 //        suppresses the notice even with hasFirstTurnStarted never set (S9); an EXISTING but EMPTY
 //        transcript does NOT suppress it — proves the check reads turn content, not file presence (S10).
+//   (S1)-(S2), (S5), (S7)-(S10) above all drive `handleKickoffGiveUpExhausted` with an explicit
+//        `chainDepth: TERMINAL_CHAIN_DEPTH` (= the default `GIVE_UP_REMINT_LIMIT`, 1, pinned as a named
+//        local so it can't silently drift from the constant it mirrors) — they test the TERMINAL
+//        park+notify shape + the guards, which are unaffected by the NEW re-mint step; passing the
+//        post-re-mint chainDepth directly exercises that terminal branch without needing every one of
+//        these tests to also drive the re-mint step first.
+//   (S11) Card 7772176d NEW: chainDepth OMITTED (defaults to 0, the REAL production entry point) — the
+//        FIRST exhaustion RE-MINTS, not parks: the manager gets NO notice at all, the worker itself
+//        receives a held `enqueueStdin` carrying the possible-duplicate-tagged kickoff text, and a
+//        `session_message_gave_up` (outcome:"reminted") event is recorded.
+//   (S12) Card 7772176d NEW, continuing (S11): invoking the re-mint's OWN recorded `onGiveUpExhausted`
+//        callback (simulating ITS exhaustion, chainDepth 1) now produces the terminal park+notify —
+//        proving the two-phase chain (re-mint once, THEN park) end to end at the SessionService layer.
 //
 // RUN: pnpm build (from packages/daemon) then `node test/kickoff-giveup-exhausted.mjs`.
 import fs from "node:fs";
@@ -226,6 +259,10 @@ try {
   const { SessionService } = await import("../dist/sessions/service.js");
   const { OrchestrationControl } = await import("../dist/orchestration/control.js");
   const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
+  // (S11) needs to know the EXACT root label `framePossibleDuplicate` embeds in its tag — that label is
+  // `rootMsgId.slice(0,8)` ONLY when it looks hex-ish, else a content hash (see the function's own doc) —
+  // so this imports the REAL function rather than assuming a test-chosen rootMsgId's shape.
+  const { possibleDuplicateRootLabel } = await import("../dist/pty/host.js");
 
   /** Writes a real transcript JSONL to the (sandboxed) `~/.claude/projects/...` path `readTranscript`
    *  resolves — mirrors companion-transcript-read.mjs's own `writeLiveTranscript` fixture helper. */
@@ -240,6 +277,10 @@ try {
   const NOW = new Date();
   const now = NOW.toISOString();
   const sfx = `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  // Card 7772176d: `handleKickoffGiveUpExhausted` no longer parks on the FIRST exhaustion — it re-mints
+  // below `GIVE_UP_REMINT_LIMIT` (default 1, unset here) and only parks once `chainDepth` reaches it. Named
+  // so it's obvious WHY each (S) call below passes it, rather than a bare magic `1`.
+  const TERMINAL_CHAIN_DEPTH = 1;
 
   /** Minimal contract-faithful PtyStub — just enough for enqueueDurableMessage/enqueueSystemNudge's
    *  full enqueueStdin signature (mirrors give-up-exhausted-durable.mjs's own PtyStub). Card 00bd3b4a:
@@ -253,9 +294,14 @@ try {
     hasFirstTurnStarted(id) { return this.firstTurnStarted.has(id); }
     // Card 3f09f9ce: position 11 also accepts the real enqueueStdin's options-object tail overload
     // (production's `enqueueDurableMessage` migrated to it) — discriminate by shape, same as the real impl.
+    // Card 7772176d: `sent` entries now also carry the tail's `onGiveUpExhausted` (when present) — (S12)
+    // needs to retrieve and invoke the RE-MINT's own callback directly, to simulate ITS exhaustion, the
+    // same way the real PtyHost would when that held entry's own give-up budget runs out.
     enqueueStdin(id, text, _source = "system", onDeliver, _route, _kind, _questionId, _ownerText, _proactive, _senderId, tail) {
-      const giveUpHeldUntil = (typeof tail === "object" && tail !== null) ? tail.giveUpHeldUntil : tail;
-      this.sent.push({ id, text });
+      const isTailObject = typeof tail === "object" && tail !== null;
+      const giveUpHeldUntil = isTailObject ? tail.giveUpHeldUntil : tail;
+      const onGiveUpExhausted = isTailObject ? tail.onGiveUpExhausted : undefined;
+      this.sent.push({ id, text, onGiveUpExhausted });
       if (!this.live.has(id)) return { delivered: false, reason: "session-dead", queued: false };
       const stillHeld = giveUpHeldUntil !== undefined && Date.now() < giveUpHeldUntil;
       if (!this.busy.has(id) && !stillHeld) return { delivered: true };
@@ -285,7 +331,7 @@ try {
       pty.setLive(mgr); // idle
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s1-${sfx}`, `root-s1-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s1-${sfx}`, `root-s1-${sfx}`, `kickoff-s1-${sfx}`, TERMINAL_CHAIN_DEPTH);
       const toMgr = pty.sent.filter((s) => s.id === mgr).map((s) => s.text);
       check("(S1) the manager was notified exactly once", toMgr.length === 1);
       const note = toMgr[0];
@@ -318,7 +364,7 @@ try {
       pty.setLive(mgr); pty.setBusy(mgr); // busy manager → the notice must be HELD, not lost
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s2-${sfx}`, `root-s2-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s2-${sfx}`, `root-s2-${sfx}`, `kickoff-s2-${sfx}`, TERMINAL_CHAIN_DEPTH);
       check("(S2) DURABLE: a session_message_queued event was persisted for the held notice",
         db.listEventsForWorker(mgr).some((e) => e.kind === "session_message_queued" && e.detail?.text?.includes("worker-spawn-broken")));
     }
@@ -329,7 +375,7 @@ try {
       mkSession({ id: wkr, role: "worker", parentSessionId: null });
       const pty = new PtyStub();
       const sessions = new SessionService(db, pty, new OrchestrationControl());
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s3-${sfx}`, `root-s3-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s3-${sfx}`, `root-s3-${sfx}`, `kickoff-s3-${sfx}`);
       check("(S3) no parentSessionId → no-op, nothing dispatched", pty.sent.length === 0);
     }
 
@@ -341,7 +387,7 @@ try {
       const pty = new PtyStub();
       pty.setLive(top);
       const sessions = new SessionService(db, pty, new OrchestrationControl());
-      sessions.handleKickoffGiveUpExhausted(child, `msg-s4-${sfx}`, `root-s4-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(child, `msg-s4-${sfx}`, `root-s4-${sfx}`, `kickoff-s4-${sfx}`);
       check("(S4) role scoped exactly like notifyManagerOfIdleWorker: a non-worker/non-null role → no-op", pty.sent.length === 0);
     }
 
@@ -354,7 +400,7 @@ try {
       const pty = new PtyStub();
       pty.setLive(mgr);
       const sessions = new SessionService(db, pty, new OrchestrationControl());
-      sessions.handleKickoffGiveUpExhausted(child, `msg-s5-${sfx}`, `root-s5-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(child, `msg-s5-${sfx}`, `root-s5-${sfx}`, `kickoff-s5-${sfx}`, TERMINAL_CHAIN_DEPTH);
       check("(S5) role-less child (role:null) with a parent IS covered", pty.sent.filter((s) => s.id === mgr).length === 1);
     }
 
@@ -363,7 +409,7 @@ try {
       const pty = new PtyStub();
       const sessions = new SessionService(db, pty, new OrchestrationControl());
       let threw = false;
-      try { sessions.handleKickoffGiveUpExhausted(`does-not-exist-${sfx}`, `msg-s6-${sfx}`, `root-s6-${sfx}`); } catch { threw = true; }
+      try { sessions.handleKickoffGiveUpExhausted(`does-not-exist-${sfx}`, `msg-s6-${sfx}`, `root-s6-${sfx}`, `kickoff-s6-${sfx}`); } catch { threw = true; }
       check("(S6) unknown sessionId: no-op, no throw", !threw && pty.sent.length === 0);
     }
 
@@ -380,7 +426,7 @@ try {
       pty.setFirstTurnStarted(wkr, true); // the discriminator: this session already confirmed a turn
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s7-${sfx}`, `root-s7-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s7-${sfx}`, `root-s7-${sfx}`, `kickoff-s7-${sfx}`);
       check("(S7) DISCRIMINATOR: a session that already confirmed its first turn gets NO worker-spawn-broken notice",
         pty.sent.filter((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")).length === 0);
       check("(S7) nothing dispatched to the manager at all for this (healthy) case", pty.sent.filter((s) => s.id === mgr).length === 0);
@@ -401,7 +447,7 @@ try {
       const sessions = new SessionService(db, pty, new OrchestrationControl());
       const rootMsgId = `root-s8-${sfx}`;
 
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s8-${sfx}`, rootMsgId);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s8-${sfx}`, rootMsgId, `kickoff-s8-${sfx}`, TERMINAL_CHAIN_DEPTH);
       check("(S8) setup: the genuine-exhaustion case still parks + notifies (unchanged behavior)",
         pty.sent.some((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")));
       check("(S8) setup: the park was recorded durably, keyed to this exact rootMsgId",
@@ -438,7 +484,7 @@ try {
       pty.setLive(mgr); // hasFirstTurnStarted NOT set — the transcript alone must carry this
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s9-${sfx}`, `root-s9-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s9-${sfx}`, `root-s9-${sfx}`, `kickoff-s9-${sfx}`);
       check("(S9) TRANSCRIPT DISCRIMINATOR: a non-empty on-disk transcript alone suppresses the notice (hasFirstTurnStarted was never set)",
         pty.sent.filter((s) => s.id === mgr).length === 0);
     }
@@ -454,9 +500,48 @@ try {
       pty.setLive(mgr);
       const sessions = new SessionService(db, pty, new OrchestrationControl());
 
-      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s10-${sfx}`, `root-s10-${sfx}`);
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s10-${sfx}`, `root-s10-${sfx}`, `kickoff-s10-${sfx}`, TERMINAL_CHAIN_DEPTH);
       check("(S10) NEGATIVE CONTROL: an EXISTING but EMPTY transcript does NOT suppress — the genuine-exhaustion notice still fires",
         pty.sent.some((s) => s.id === mgr && s.text.includes("[loom:worker-spawn-broken]")));
+    }
+
+    // (S11) Card 7772176d NEW: chainDepth OMITTED (defaults to 0 — the REAL production entry point). The
+    // FIRST exhaustion must RE-MINT, not park: no manager notice at all, a held enqueueStdin targeting the
+    // WORKER ITSELF carrying the possible-duplicate-tagged kickoff text, and a "reminted" event recorded.
+    // RED against pre-7772176d code (which parked immediately here — this is the exact behavior change).
+    {
+      const mgr = `kge-mgr11-${sfx}`, wkr = `kge-wkr11-${sfx}`;
+      const KICKOFF_TEXT = `orchestrate task tk-kge11-${sfx}`;
+      const rootMsgId = `root-s11-${sfx}`;
+      mkSession({ id: mgr, role: "manager" });
+      mkSession({ id: wkr, role: "worker", parentSessionId: mgr, taskId: `tk-kge11-${sfx}` });
+      const pty = new PtyStub();
+      pty.setLive(mgr); pty.setLive(wkr); // worker itself must be "live" to receive the re-mint's enqueueStdin
+      const sessions = new SessionService(db, pty, new OrchestrationControl());
+
+      sessions.handleKickoffGiveUpExhausted(wkr, `msg-s11-${sfx}`, rootMsgId, KICKOFF_TEXT); // chainDepth omitted → 0
+      check("(S11) THE FIX: the FIRST exhaustion does NOT notify the manager at all", pty.sent.filter((s) => s.id === mgr).length === 0);
+      const toWkr = pty.sent.filter((s) => s.id === wkr);
+      check("(S11) THE FIX: instead, the WORKER ITSELF received exactly one re-mint dispatch", toWkr.length === 1);
+      check("(S11) the re-mint carries the possible-duplicate tag naming the SAME rootMsgId (not a fresh chain)",
+        toWkr[0]?.text?.includes("[loom:possible-duplicate") && toWkr[0].text.includes(possibleDuplicateRootLabel(rootMsgId)));
+      check("(S11) the re-mint still carries the real kickoff content underneath the tag", toWkr[0]?.text?.includes(KICKOFF_TEXT));
+      check("(S11) the re-mint recorded its own onGiveUpExhausted callback (needed to reach S12's terminal park)",
+        typeof toWkr[0]?.onGiveUpExhausted === "function");
+      check("(S11) AUDITABLE: a session_message_gave_up(outcome:reminted) event was recorded, naming the real re-mint msgId",
+        db.listEventsForWorker(wkr).some((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "reminted" && typeof e.detail?.remintedAs === "string"));
+
+      // (S12) continuing (S11): invoke the re-mint's OWN recorded onGiveUpExhausted callback — simulating
+      // the real PtyHost calling it once THIS held entry's own give-up budget also runs out (chainDepth 1,
+      // >= GIVE_UP_REMINT_LIMIT's default of 1) — NOW the terminal park+notify must fire.
+      toWkr[0].onGiveUpExhausted();
+      const toMgrAfter = pty.sent.filter((s) => s.id === mgr).map((s) => s.text);
+      check("(S12) THE CHAIN COMPLETES: the re-mint's own exhaustion NOW notifies the manager", toMgrAfter.length === 1);
+      check("(S12) uses the established [loom:worker-spawn-broken] signal", !!toMgrAfter[0] && toMgrAfter[0].includes("[loom:worker-spawn-broken]"));
+      check("(S12) the terminal park event's chainDepth reached TERMINAL_CHAIN_DEPTH (one re-mint happened, not zero, not two)",
+        db.listEventsForWorker(wkr).some((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId && e.detail?.outcome === "parked" && e.detail?.chainDepth === TERMINAL_CHAIN_DEPTH));
+      check("(S12) exactly ONE reminted + ONE parked event for this rootMsgId (a bounded chain, not a loop)",
+        db.listEventsForWorker(wkr).filter((e) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId).length === 2);
     }
 
     db.close();
@@ -467,6 +552,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands); SessionService.handleKickoffGiveUpExhausted parks + notifies the manager through the SAME durable enqueueSystemNudge machinery every settle-nudge uses (persisted even when the manager is busy), naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge, scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session. Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion now records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10)."
+  ? "\n✅ ALL PASS — card a8f8a8f2: the turn-1 kickoff's synthetic give-up origin now wires onGiveUpExhausted; two forced silent give-ups EXHAUST and fire it exactly once (never on the first, requeue-eligible give-up, and never when the second attempt genuinely lands). Card 00bd3b4a: a session that already confirmed its first turn gets NO destructive notice (S7), a genuine exhaustion (chainDepth at the terminal limit) still records a durable parked event a later content-matched confirmation can retract via a [loom:redelivery-confirmed] follow-up (S8), and the board-specified reference discriminator (card f91c8634 — non-empty on-disk transcript) independently suppresses the notice (S9) while an existing-but-empty transcript does not (S10). Card 7772176d: the FIRST exhaustion (chainDepth 0, the real production entry point) now RE-MINTS instead of parking immediately — no manager notice, a held re-mint dispatched to the worker itself carrying the possible-duplicate tag (S11) — and only the re-mint's OWN subsequent exhaustion produces the terminal [loom:worker-spawn-broken] park+notify, unchanged in shape, naming worker_stop+worker_spawn and explicitly ruling out worker_message/worker_merge (S12), scoped exactly like notifyManagerOfIdleWorker (worker/role-less covered, no-parent and other-role no-op), and never throws for an unknown session."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

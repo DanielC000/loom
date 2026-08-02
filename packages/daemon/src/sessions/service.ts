@@ -5851,13 +5851,51 @@ export class SessionService {
    * this notice, so it's a no-op there — the generic idle-watchdog + the console.error below stay its only
    * signals, unchanged by this card.
    *
-   * Routed through `enqueueSystemNudge` (the SAME durable dispatch every settle-nudge — merge-done,
-   * gate-failed, etc. — already uses) rather than a bare `pty.enqueueStdin`: a fire-and-forget push is lost
-   * outright if the manager isn't live at this exact instant, and this is EXACTLY the "item lost" failure
-   * mode this card exists to close — a bare drop one layer up is not a fix. The durable path persists a
-   * `session_message_queued` row (redriven on the manager's next resume/boot) and gets its OWN
-   * `onGiveUpExhausted` wiring recursively (re-mint, then park to nobody — sender is the `"system"`
-   * sentinel) if IT also can't get through.
+   * Card 7772176d — THE FIX: the ORIGINAL a8f8a8f2 wiring went straight to park+notify on the very first
+   * exhaustion. Root-caused (card c8660ac7) as the actual defect behind `f91c8634`'s stuck-turn-1
+   * specimens: an ORDINARY durable message that exhausts `GIVE_UP_REQUEUE_LIMIT` gets a further,
+   * cross-turn-boundary RE-MINT from `handleGiveUpExhausted` (below `GIVE_UP_REMINT_LIMIT`) before it ever
+   * parks; the kickoff had no equivalent — it went straight from "one requeue" to "park, no further
+   * attempt, ever." This method now gives the kickoff the SAME re-mint step, via its own `chainDepth`
+   * (mirrors `handleGiveUpExhausted`'s own `chainDepth`/`GIVE_UP_REMINT_LIMIT` pattern exactly — not a
+   * parallel, differently-shaped mechanism): below the limit, re-mint via a fresh, held `enqueueStdin`
+   * call; at/above it, fall through to the park+notify path below, unchanged.
+   *
+   * ⚠️ HONEST SCOPE (do not oversell this): this raises the kickoff to PARITY with `handleGiveUpExhausted`'s
+   * own re-mint, which is itself NOT proven reliable — a live specimen (an ordinary, established-session
+   * `worker_message` on the very same re-mint mechanism) parked anyway. This fix converts the kickoff's
+   * terminal state from "zero further attempts once the shared budget is spent, whoever spent it" to "one
+   * bounded further attempt, then park" — the same structure every other durable message gets, not a
+   * guarantee. It does not close `f91c8634` (that card's other specimens — a live manager mid-session, no
+   * kickoff involved — are structurally outside `scheduleKickoffGuarantee` and unverified by this fix).
+   *
+   * DOUBLE-DELIVERY: the re-mint below is dispatched with `logicalId: rootMsgId` — the IDENTICAL key
+   * `requeueGiveUpOrigin` (pty/host.ts) already seeds into `Live.ambiguousDispatches` for the ORIGINAL
+   * kickoff write, UNCONDITIONALLY, even on the exhaustion branch (before the budget check). So if the
+   * original write is ever confirmed by a later hook, `purgeConfirmedGiveUpRequeue`'s existing content-match
+   * purge (card 4a0af485) finds and deletes this still-queued re-mint by that shared `logicalId` — the
+   * IDENTICAL protection every ordinary `handleGiveUpExhausted` re-mint already relies on, not a new or
+   * stronger guarantee invented here. `giveUpHeldUntil` also forces `enqueueStdin`'s HELD branch, so the
+   * re-mint can never immediately re-hammer a session just shown wedged (mirrors `handleGiveUpExhausted`'s
+   * own `giveUpHeldUntil` reasoning, card ccb407eb finding [1]). See `kickoff-giveup-remint-purge.mjs` for
+   * the actual race proven end-to-end against the real PtyHost purge, not just an SessionService-level stub.
+   *
+   * Routed, for the re-mint, through `this.pty.enqueueStdin` directly rather than `enqueueDurableMessage`:
+   * the kickoff's synthetic origin was never durable in the first place (no `session_message_queued` row —
+   * see `scheduleKickoffGuarantee`'s own doc), and `enqueueDurableMessage`'s `onGiveUpExhausted` is hardwired
+   * to the generic `handleGiveUpExhausted` (whose terminal park targets a generic `sender`, not this
+   * method's manager-notify shape) — reusing it here would either invent a fake "sender" for a kickoff
+   * (which has none) or silently drop the manager-visible notice on the re-mint's own eventual exhaustion.
+   * Recursing back into THIS method (with `chainDepth + 1`) keeps the manager-notify terminal behavior
+   * intact regardless of how many re-mints preceded it.
+   *
+   * The terminal (park+notify) branch is routed through `enqueueSystemNudge` (the SAME durable dispatch
+   * every settle-nudge — merge-done, gate-failed, etc. — already uses) rather than a bare `pty.enqueueStdin`:
+   * a fire-and-forget push is lost outright if the manager isn't live at this exact instant, and this is
+   * EXACTLY the "item lost" failure mode this card exists to close — a bare drop one layer up is not a fix.
+   * The durable path persists a `session_message_queued` row (redriven on the manager's next resume/boot)
+   * and gets its OWN `onGiveUpExhausted` wiring recursively (re-mint, then park to nobody — sender is the
+   * `"system"` sentinel) if IT also can't get through.
    *
    * Names the non-destructive verification step FIRST, then the ONE recovery known to work if that
    * verification confirms nothing ever started (worker_stop + fresh worker_spawn), and explicitly rules
@@ -5886,7 +5924,9 @@ export class SessionService {
    *     Also deliberately ONE read, not `f91c8634`'s "≥2 reads": that guard exists for a periodic watchdog
    *     that can race a transcript write within a cold start's first ~50s; this handler fires only AFTER
    *     Loom's own give-up budget has fully exhausted (two submit-retry cycles plus a hold — see
-   *     `requeueGiveUpOrigin`'s own doc — genuinely multiple minutes), well past that race window.
+   *     `requeueGiveUpOrigin`'s own doc — genuinely multiple minutes), well past that race window. This
+   *     discriminator is checked on EVERY call regardless of `chainDepth` — a false-positive give-up must
+   *     get NO dispatch at all, re-mint included, not just no terminal notice.
    *     `this.pty.hasFirstTurnStarted` is kept as an ADDITIONAL (OR'd), zero-I/O pre-check — cheap and
    *     strictly safe to keep since it can only ever suppress MORE eagerly, never less — but it is
    *     downstream of the SAME hook-relay confirmation channel already shown unreliable/delayed in this
@@ -5900,9 +5940,12 @@ export class SessionService {
    *     but before this fix, `handleGiveUpConfirmed`'s lookup found no "parked" event to retract and
    *     silently no-op'd, leaving this notice's claim permanently uncorrected even once the engine's late
    *     confirmation proved it wrong. Recording the event here is what lets that ALREADY-CORRECT retraction
-   *     machinery (card 417cea0a) reach the kickoff path too.
+   *     machinery (card 417cea0a) reach the kickoff path too. The re-mint branch records its OWN
+   *     `outcome:"reminted"` event (mirrors `handleGiveUpExhausted`'s identical vocabulary) — a chain that
+   *     never reaches park correctly leaves `handleGiveUpConfirmed` nothing to retract, same as an ordinary
+   *     reminted-then-confirmed chain (see that method's own negative control).
    */
-  handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string): void {
+  handleKickoffGiveUpExhausted(sessionId: string, msgId: string, rootMsgId: string, kickoffText: string, chainDepth = 0): void {
     const w = this.db.getSession(sessionId);
     if (!w || (w.role !== "worker" && w.role !== null) || !w.parentSessionId) {
       // eslint-disable-next-line no-console
@@ -5915,13 +5958,32 @@ export class SessionService {
       console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, but the session shows real activity (hasFirstTurnStarted=${this.pty.hasFirstTurnStarted(sessionId)} transcriptNonEmpty=${transcriptNonEmpty}) — this was a LATE confirmation, not a dropped kickoff; suppressing the worker-spawn-broken notice`);
       return;
     }
+    if (chainDepth < GIVE_UP_REMINT_LIMIT) {
+      // Card 7772176d: give the kickoff the SAME cross-turn-boundary re-mint an ordinary durable message
+      // gets from `handleGiveUpExhausted` — see this method's own doc, above, for the double-delivery
+      // reasoning (shared `logicalId` -> the existing content-match purge) and for why this recurses back
+      // into THIS method (not the generic handler) on the re-mint's own eventual exhaustion.
+      const remintMsgId = randomUUID();
+      this.pty.enqueueStdin(sessionId, framePossibleDuplicate(kickoffText, rootMsgId), "system", undefined, undefined, "agent", undefined, undefined, undefined, undefined, {
+        giveUpHeldUntil: Date.now() + GIVE_UP_HOLD_MS,
+        onGiveUpExhausted: () => this.handleKickoffGiveUpExhausted(sessionId, remintMsgId, rootMsgId, kickoffText, chainDepth + 1),
+        logicalId: rootMsgId,
+      });
+      // eslint-disable-next-line no-console
+      console.warn(`[give-up] ${sessionId} turn-1 kickoff (root ${rootMsgId}) exhausted its in-session requeue budget with no confirming hook ever arriving — re-minted as ${remintMsgId} (attempt ${chainDepth + 1}/${GIVE_UP_REMINT_LIMIT}) instead of parking immediately`);
+      this.db.appendEvent({
+        id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
+        kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "reminted", remintedAs: remintMsgId },
+      });
+      return;
+    }
     // eslint-disable-next-line no-console
-    console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget — the engine never confirmed receiving it; PARKING and notifying manager ${w.parentSessionId} instead of a bare drop`);
+    console.error(`[give-up] ${sessionId} turn-1 kickoff EXHAUSTED its give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint(s) — the engine never confirmed receiving it; PARKING and notifying manager ${w.parentSessionId} instead of a bare drop`);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: w.parentSessionId, workerSessionId: sessionId, taskId: w.taskId ?? null,
-      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth: 0, outcome: "parked" },
+      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked" },
     });
-    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget without the engine ever confirming it received the kickoff. ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript/worker_list before acting: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Only if that shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
+    const msg = `[loom:worker-spawn-broken] worker ${sessionId}${w.taskId ? ` (task ${w.taskId})` : ""}'s turn-1 kickoff could NOT be confirmed delivered — Loom exhausted its own give-up requeue budget, including ${GIVE_UP_REMINT_LIMIT} automatic re-mint attempt(s), without the engine ever confirming it received the kickoff. ${giveUpConfirmationHedge("the kickoff")} VERIFY FIRST via worker_transcript/worker_list before acting: any turn activity there means this was a late confirmation, not a dropped kickoff, and no action is needed. Only if that shows truly nothing (0 turns, no engine output) is worker_stop + a fresh worker_spawn with the same task direction the right recovery — until you've verified, do NOT worker_message it (it returns a false delivered:true against a session that never started a turn) and do NOT worker_merge it (its branch would be empty).`;
     this.enqueueSystemNudge(w.parentSessionId, msg, { kind: "warning", taskId: w.taskId ?? null });
   }
 
