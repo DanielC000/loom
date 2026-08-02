@@ -225,9 +225,16 @@ export function stripPossibleDuplicateFrame(text: string): string {
  * a fresh successor's, which always restarts at 0, is a unit error — "47 submit generations ago" would
  * be reported against a session that has run at most a handful), so this branch reports the one thing
  * that DOES survive the boundary honestly: an absolute wall-clock mint time, for the recipient to weigh
- * against their own handoff/transcript. Never both branches at once — `mintedAtGen`'s presence alone
- * selects between them, independent of whether `mintedAtWallClock` also happens to be set (it always is,
- * stamped alongside `mintedAtGen` at mint time, but only READ when `mintedAtGen` is absent).
+ * against their own handoff/transcript. `mintedAtGen`'s presence alone still selects WHICH wording leads
+ * (generation-count phrasing for the in-session case, wall-clock-only phrasing for the cross-boundary
+ * case) — but card 2d36337e: the in-session branch now ALSO appends that same absolute wall-clock time
+ * (verified: every current construction path that sets `mintedAtGen` also sets `mintedAtWallClock` in the
+ * SAME call — the paste-recovery mint site stamps both together, and every carry across a boundary either
+ * keeps both or deliberately drops `mintedAtGen` alone, never the reverse — see the grep audit in that
+ * card's history). A relative generation count ("2 submit generations ago") tells the recipient nothing
+ * about whether this predates a SPECIFIC later message they've already read; a directly comparable
+ * absolute timestamp does — that gap (not guard (a) below, which correctly stays quiet only when nothing
+ * has run since mint) is what let a recovered message read as redundant instead of as a missed premise.
  */
 function annotatePasteRecoveryAge(
   text: string, mintedAtGen: number | undefined, currentGen: number, mintedAtWallClock: number | undefined,
@@ -240,7 +247,14 @@ function annotatePasteRecoveryAge(
   let note: string;
   if (mintedAtGen !== undefined) {
     const gensSince = currentGen - mintedAtGen;
-    note = `[this refers to an EARLIER message (${gensSince} submit generation${gensSince === 1 ? "" : "s"} ago), not your most recent one.]`;
+    // Card 2d36337e: append the SAME absolute wall-clock time the cross-boundary branch below uses —
+    // always stamped alongside mintedAtGen at mint time (verified: every mintedAtGen write site also sets
+    // mintedAtWallClock in the same call; see this function's own doc). A relative generation count says
+    // only how OLD this message is, never whether it predates some OTHER message the recipient already
+    // read — the absolute time is what lets the recipient actually check that. Guarded (not assumed) in
+    // case a future caller ever threads mintedAtGen without it.
+    const sentAt = mintedAtWallClock !== undefined ? ` Originally sent at ${new Date(mintedAtWallClock).toISOString()}.` : "";
+    note = `[this refers to an EARLIER message (${gensSince} submit generation${gensSince === 1 ? "" : "s"} ago), not your most recent one.${sentAt}]`;
   } else if (mintedAtWallClock !== undefined) {
     note = `[this refers to a message minted at ${new Date(mintedAtWallClock).toISOString()}, from BEFORE this session began — compare that timestamp against your own handoff/transcript to judge whether it's still current.]`;
   } else {
@@ -1646,9 +1660,13 @@ export type QueuedMessageKind = "warning" | "agent";
  * session-relative, so it is the one piece of age evidence that survives a `worker_recycle` /
  * `daemon_restart` boundary honestly: `carryPendingToSuccessor` and the restart replay both thread THIS
  * field onto the far side (while deliberately leaving `mintedAtGen` behind — see its own doc). Its only
- * consumer is `annotatePasteRecoveryAge`, which uses it EXACTLY when `mintedAtGen` is absent (i.e. the
- * entry just crossed a boundary) to disclose an absolute mint time instead of a now-meaningless
- * generation count — never touched by any other caller, so every existing enqueue stays byte-identical.
+ * consumer is `annotatePasteRecoveryAge`. When `mintedAtGen` is absent (i.e. the entry just crossed a
+ * boundary), this is the ONLY age evidence available, so it stands alone to disclose an absolute mint
+ * time instead of a now-meaningless generation count. Card 2d36337e: when `mintedAtGen` IS present (a
+ * genuinely in-session mint), this field is now ALSO read — appended alongside the generation-count
+ * wording, since a relative count alone can't tell the recipient whether this predates a SPECIFIC later
+ * message they've already read. Never touched by any other caller, so every existing enqueue stays
+ * byte-identical.
  */
 export type QueuedMessage = { id: string; text: string; source: QueueSource; onDeliver?: (reason?: string) => void; route?: TurnRoute; kind: QueuedMessageKind; questionId?: string; ownerText?: string; proactive?: boolean; senderId?: string | null; giveUpRequeues?: number; giveUpGen?: number; giveUpHeldUntil?: number; onGiveUpExhausted?: () => void; logicalId: string; mintedAtGen?: number; mintedAtWallClock?: number };
 /**

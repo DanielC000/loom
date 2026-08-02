@@ -28,8 +28,28 @@
 //     annotation IS PRESENT, states an absolute wall-clock time (not a generation count), and tells the
 //     reader to compare it against their own handoff/transcript.
 // (C) IN-SESSION CONTROL (branch-selection sanity, not the boundary case): when `mintedAtGen` genuinely
-//     reflects an IN-SESSION mint (currentGen > mintedAtGen) and `mintedAtWallClock` is ALSO set, the
-//     existing generation-count wording still wins — the wall-clock branch never masks the in-session one.
+//     reflects an IN-SESSION mint (currentGen > mintedAtGen) and `mintedAtWallClock` is ALSO set, card
+//     2d36337e now discloses BOTH the generation count AND the same absolute wall-clock time — a relative
+//     count alone can't tell the recipient whether this predates a SPECIFIC later message they already
+//     read; the cross-boundary-only "BEFORE this session began" phrasing still stays exclusive to (B).
+//
+// (D) card 2d36337e — ORDERING ANNOTATION under REAL queue mechanics, not a hand-fed generation number:
+//     enqueue an unrelated message B FIRST, then a recovery entry for A SECOND (both held behind an
+//     in-flight setup turn — the same relative order the Stop-hook's own mintedAtGen-capture-before-drain
+//     race produces when B is already queued at collapse-detection time; see host.ts:4304-4308's own
+//     comment). Real `drainPending` then delivers B as its own turn (agent-kind messages drain ONE per
+//     turn), bumping `submitGeneration` for real, before A's recovery gets its own turn. Asserts the
+//     rendered annotation reflects that real intervening turn (a non-zero generation count) AND still
+//     carries A's original absolute send time. ⚠️ SCOPE: this exercises real FIFO ordering + the
+//     annotation logic, NOT the Stop-hook's own collapse-DETECTION code (detectBarePastePlaceholderTripwire
+//     firing off a transcript read, the synchronous mintedAtGen snapshot, the setTimeout(0) mint) — this
+//     hermetic fake-pty harness has no wired transcript to trigger that path, so `mintedAtGen`/
+//     `mintedAtWallClock` are hand-supplied here exactly as the real mint site would have captured them,
+//     to isolate and test what happens DOWNSTREAM of a real detection. The detection path IS covered
+//     end-to-end elsewhere: `paste-placeholder-tripwire.mjs` scenario (m) drives a REAL transcript-backed
+//     collapse detection, a REAL already-queued unrelated message draining ahead of the recovery mint, and
+//     now (card 2d36337e) asserts the SAME "Originally sent at <ISO>" disclosure this scenario checks —
+//     this file's (D) is the narrower, faster-to-read companion for the annotation/ordering logic alone.
 //
 // Run (no daemon needed): node test/paste-recovery-boundary-annotation.mjs
 //   Requires the daemon built first (reads ../dist/*): from packages/daemon run `pnpm build`.
@@ -37,6 +57,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { pollUntil } from "./_timing-guard.mjs";
 
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
@@ -143,8 +164,12 @@ try {
     if (!setup.delivered) throw new Error("test setup: (C) setup turn did not submit immediately");
 
     // mintedAtGen=0 is genuinely IN-SESSION here (this session's own submitGeneration is already several
-    // turns in by (C), so currentGen > 0 at drain time) — mintedAtWallClock is ALSO set, to prove the
-    // generation branch is preferred over the wall-clock one whenever mintedAtGen is present and stale.
+    // turns in by (C), so currentGen > 0 at drain time) — mintedAtWallClock is ALSO set. Card 2d36337e:
+    // this branch now discloses BOTH the generation count AND the same absolute wall-clock time the
+    // cross-boundary branch uses (see annotatePasteRecoveryAge's own doc, host.ts) — a relative count
+    // alone can't tell the recipient whether this predates a SPECIFIC later message they already read.
+    // Still asserts the cross-boundary-only "minted at ... BEFORE this session began" phrasing is ABSENT
+    // — the two branches stay distinguishable, just no longer wall-clock-vs-generation exclusive.
     const inSessionText = buildPasteRecoveryText("content lost within this same session (C)");
     const held = host.enqueueStdin(
       SID, inSessionText, "system", undefined, undefined, "agent",
@@ -159,8 +184,67 @@ try {
     const drained = fake.writes.slice(writesBeforeSetupStop).join("");
     check("(C) setup: the in-session-shape entry is what actually drained (positive signal the wait was sufficient before the negative conjunct below inspects it)",
       drained.includes(PASTE_RECOVERY_TAG) && drained.includes("content lost within this same session (C)"));
-    check("(C) CONTROL: an in-session mint (mintedAtGen present + stale) uses generation wording, not wall-clock wording, even though mintedAtWallClock is also set",
-      /generation(s)? ago/.test(drained) && !/minted at \d{4}-/.test(drained));
+    check("(C) CONTROL: an in-session mint (mintedAtGen present + stale) still uses generation wording",
+      /generation(s)? ago/.test(drained));
+    check("(C) THE WIDENED FIX: the in-session branch now ALSO discloses the absolute original-send time, not just a relative generation count",
+      new RegExp(`Originally sent at ${new Date(MINTED_WALLCLOCK).toISOString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(drained));
+    check("(C) CONTROL: the cross-boundary-only phrasing (\"minted at ... BEFORE this session began\") stays absent — the two branches remain distinguishable",
+      !/minted at \d{4}-.*before this session began/i.test(drained));
+
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
+    host.deliverHook(SID, { hook_event_name: "Stop" });
+  }
+
+  // ===================== (D) card 2d36337e — ORDERING ANNOTATION under REAL queue mechanics =============
+  {
+    const setup = host.enqueueStdin(SID, "[loom:test] setup turn (D)");
+    if (!setup.delivered) throw new Error("test setup: (D) setup turn did not submit immediately");
+
+    // B is enqueued FIRST — real peer traffic already queued when the Stop hook detecting A's collapse
+    // fires, matching the exact race host.ts:4304-4308's own comment names (mintedAtGen is captured
+    // synchronously BEFORE that same Stop hook's own drainPending call can dispatch an already-queued
+    // message).
+    const bText = "[loom:test] message B — queued BEFORE A's recovery is minted (D)";
+    const heldB = host.enqueueStdin(SID, bText, "system", undefined, undefined, "agent");
+    check("(D) setup: B queues behind the in-flight setup turn", heldB.delivered === false && heldB.queued === true);
+
+    // Recovery-A is enqueued SECOND, reproducing the real FIFO consequence of that race — its OWN enqueue
+    // call genuinely happens after B's, not a simulated ordering. mintedAtGen=0 (comfortably stale by this
+    // point in the run, same technique as (C)) stands in for the real mint site's synchronous snapshot.
+    const aOriginalSentAt = Date.now() - 3 * 60_000; // A was "originally sent" 3 minutes before this recovery mint
+    const recoveryAText = buildPasteRecoveryText("content lost — this is message A, recovered (D)");
+    const heldA = host.enqueueStdin(
+      SID, recoveryAText, "system", undefined, undefined, "agent",
+      undefined, undefined, undefined, undefined, undefined, undefined, randomUUID(),
+      0, aOriginalSentAt,
+    );
+    check("(D) setup: A's recovery queues behind B — real FIFO order, not asserted, produced", heldA.delivered === false && heldA.queued === true);
+
+    // "agent"-kind entries drain ONE per turn (host.ts drainPending: `head.kind === "agent" → splice(startIdx, 1)`)
+    // — so B, being first in the FIFO, gets its own turn before A's recovery does. Card 1addef27
+    // (fixed-wait-negative-guard): wait on the OBSERVABLE completion signal (B's write actually landing),
+    // not a fixed clock, before asserting A's absence below — a too-short guessed window would pass the
+    // negative check for the wrong reason (not-yet-drained, not genuinely still-queued).
+    const writesBeforeB = fake.writes.length;
+    host.deliverHook(SID, { hook_event_name: "Stop" }); // settles setup; drains B next
+    const bLanded = await pollUntil(() => fake.writes.length > writesBeforeB, { timeoutMs: 2000, intervalMs: 5 });
+    check("(D) setup: B's write genuinely landed before this scenario inspects it (positive signal the wait was sound before the negative conjunct below relies on it)", bLanded);
+    const bDrained = fake.writes.slice(writesBeforeB).join("");
+    check("(D) B is what actually drained first", bDrained.includes(bText));
+    check("(D) A's recovery has NOT drained yet (still one turn behind)", !bDrained.includes("this is message A, recovered (D)"));
+
+    const writesBeforeA = fake.writes.length;
+    host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
+    host.deliverHook(SID, { hook_event_name: "Stop" }); // settles B's turn; drains A's recovery next
+    const aLanded = await pollUntil(() => fake.writes.length > writesBeforeA, { timeoutMs: 2000, intervalMs: 5 });
+    check("(D) setup: A's recovery write genuinely landed before this scenario inspects it", aLanded);
+    const aDrained = fake.writes.slice(writesBeforeA).join("");
+    check("(D) THE REPRO: A's recovery drains AFTER B, under real queue mechanics (not a hand-fed generation number) — the exact ordering the card describes",
+      aDrained.includes("this is message A, recovered (D)"));
+    check("(D) THE FIX: the delivered recovery discloses that a real turn (B) ran since A was minted",
+      /generation(s)? ago/.test(aDrained));
+    check("(D) THE FIX: the disclosure carries A's own original absolute send time, directly comparable against when the recipient read B",
+      new RegExp(`Originally sent at ${new Date(aOriginalSentAt).toISOString().replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`).test(aDrained));
 
     host.deliverHook(SID, { hook_event_name: "UserPromptSubmit" });
     host.deliverHook(SID, { hook_event_name: "Stop" });
@@ -171,6 +255,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — a carried paste-recovery notice's age evidence renders correctly at the exact boundary shape the fix produces: threading mintedAtGen verbatim across a boundary (the naive-fix trap) is silently inert against a successor's genuinely-low submitGeneration, exactly like the original bug; the actual fix (mintedAtGen omitted, mintedAtWallClock carried) discloses an absolute mint time instead; and a genuinely in-session mint still uses the existing generation-count wording, never masked by the wall-clock branch."
+  ? "\n✅ ALL PASS — a carried paste-recovery notice's age evidence renders correctly at the exact boundary shape the fix produces: threading mintedAtGen verbatim across a boundary (the naive-fix trap) is silently inert against a successor's genuinely-low submitGeneration, exactly like the original bug; the actual fix (mintedAtGen omitted, mintedAtWallClock carried) discloses an absolute mint time instead; a genuinely in-session mint (C) now discloses BOTH generation count and absolute send time (card 2d36337e); and under REAL queue mechanics (D), a recovery enqueued after an unrelated message genuinely drains after it (the ordering defect, reproduced) while still carrying its own original send time for the recipient to compare."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

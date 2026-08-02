@@ -118,7 +118,14 @@ export function isPasteRecoveryAttempt(submittedText: string): boolean {
  * not the claim itself, so the wording now states only what was observed, and hands the recipient the
  * cheap own-artifact check (a reply they sent, a memory write, a turn count) instead of asserting
  * something the notice cannot actually see.
+ *
+ * Card 2d36337e: the "did you already act on that message?" framing this introduced still had a
+ * discriminating-question gap — a real near-miss showed a recipient can truthfully answer "yes, I acted"
+ * about a LATER message that built on this one's content, while never having seen THIS message at all.
+ * "Have I acted?" and "does something I've done SINCE assume this?" are different questions; only the
+ * second one catches a missed premise instead of reading a recovered predecessor as a redundant repeat.
+ * The wording now asks the second one.
  */
 export function buildPasteRecoveryText(originalText: string): string {
-  return `${PASTE_RECOVERY_TAG} The transcript recorded a placeholder instead of your previous message's pasted content — it may not have reached you (a known upstream CLI paste-collapse race; see card eef4883c). If you already saw and acted on that message, ignore this — check your own artifact (a reply you sent, a memory write, a turn count) rather than this notice, since it cannot see what you already did. Otherwise, here is the original content, resent:\n\n${originalText}`;
+  return `${PASTE_RECOVERY_TAG} The transcript recorded a placeholder instead of your previous message's pasted content — it may not have reached you (a known upstream CLI paste-collapse race; see card eef4883c). Before dismissing this as already-handled: does anything you have done SINCE assume this content, not merely resemble something you recall seeing? A later message can be fully acted-on while still having depended on THIS one — check your own artifact (a reply you sent, a memory write, a turn count) for that, not just whether the topic feels familiar. Otherwise, here is the original content, resent:\n\n${originalText}`;
 }

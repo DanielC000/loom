@@ -128,8 +128,10 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
     !recoveryTextSample.toLowerCase().includes("before you could see it"));
   check("recovery: states what was actually OBSERVED (a placeholder in the transcript), not a visibility claim",
     recoveryTextSample.includes("transcript recorded a placeholder"));
-  check("recovery: tells the recipient to check their OWN artifact if they already acted on it (card 4af5aefa)",
-    /already (saw|acted)/i.test(recoveryTextSample) && /ignore/i.test(recoveryTextSample));
+  check("recovery: asks the DISCRIMINATING question — does anything done SINCE assume this content, not merely 'did you already act' (card 2d36337e: a recipient can truthfully answer 'yes I acted' about a LATER message that built on this one, while never having seen this one)",
+    /since.*assume|assume.*since/i.test(recoveryTextSample));
+  check("recovery: still tells the recipient to check their OWN artifact for that answer (card 4af5aefa, wording sharpened by card 2d36337e)",
+    /own artifact/i.test(recoveryTextSample) && /reply you sent|memory write|turn count/i.test(recoveryTextSample));
 
   // --- readContextStats.lastUserText: raw user-turn text extraction, folded into the single-pass scan ---
   const cwd = path.join(os.tmpdir(), `loom-ppt-txt-${Date.now()}`);
@@ -491,6 +493,8 @@ try {
       /1 submit generation ago/.test(recoveryWrite));
     check("(m) THE FIX: the age note names an EARLIER message, not the recipient's most recent one",
       /not your most recent/i.test(recoveryWrite));
+    check("(m) THE FIX (card 2d36337e), under the REAL Stop-hook detection path (not a hand-fed generation number): the delivered recovery ALSO discloses the absolute original-send time — a relative generation count alone can't tell the recipient whether this predates a SPECIFIC later message they've already read",
+      /Originally sent at \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z/.test(recoveryWrite));
 
     // That delivered recovery turn is now in flight (busy). Resolve it CLEANLY (not a further collapse)
     // before the next scenario, or the next enqueue below won't deliver immediately.
