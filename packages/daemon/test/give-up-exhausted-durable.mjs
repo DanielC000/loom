@@ -245,14 +245,25 @@ try {
       !!parkedNote && parkedNote.includes("worker_list/worker_status"));
     check("(417cea0a #1) the impossible-for-everyone-else 'no cross-session read' clause is NOT shown to a sender who actually has one",
       !!parkedNote && !parkedNote.includes("no cross-session"));
-    check("(417cea0a #5a) resend caveat (a) present: framed text embeds the sender's OWN session id, so a recycle breaks the auto-join",
-      !!parkedNote && /framed text/i.test(parkedNote) && /session id/i.test(parkedNote) && /recycled/i.test(parkedNote));
-    check("(417cea0a #5b) resend caveat (b) present: the join window closes the instant Loom confirms the original landed",
-      !!parkedNote && /join window closes/i.test(parkedNote));
-    check("(417cea0a #2) the confirmed-after-park follow-up is HEDGED ('MAY follow up'), never promised",
-      !!parkedNote && /MAY follow up/.test(parkedNote) && !/Loom will (tell you|follow up)/i.test(parkedNote));
-    check("(417cea0a #2) the corollary is stated: no follow-up is NOT evidence the message failed to land",
-      !!parkedNote && /not evidence the message failed/i.test(parkedNote));
+    // Card 085d9422 (DoD-3) RELOCATED these four — content unchanged, no longer inlined into every
+    // single notice (~730 of the ~1,150 measured chars were this exact invariant prose, repeated
+    // identically on every park). The notice itself now carries a short pointer instead; see
+    // redelivery-parked-notice-suppression.mjs (4) for the notice-side assertions (pointer present,
+    // caveats/hedge prose ABSENT from the notice body) and the relocation-destination assertions below.
+    check("(085d9422) the notice body no longer inlines the (a)/(b) resend-join caveat prose (relocated, not deleted — see below)",
+      !!parkedNote && !/framed text.*session id.*recycled/is.test(parkedNote));
+    check("(085d9422) the notice body no longer inlines the confirmed-after-park hedge prose (relocated, not deleted — see below)",
+      !!parkedNote && !/MAY follow up/.test(parkedNote));
+    const orchSrcPath = new URL("../src/mcp/orchestration.ts", import.meta.url);
+    const orchSrc = fs.readFileSync(orchSrcPath, "utf8");
+    check("(417cea0a #5a) resend caveat (a) RELOCATED to worker_message's own tool description: framed text embeds the sender's OWN session id, so a recycle breaks the auto-join",
+      /framed text/i.test(orchSrc) && /session id/i.test(orchSrc) && /recycled/i.test(orchSrc));
+    check("(417cea0a #5b) resend caveat (b) RELOCATED to worker_message's own tool description: the join window closes the instant Loom confirms the original landed",
+      /join window closes/i.test(orchSrc));
+    check("(417cea0a #2) the confirmed-after-park follow-up hedge RELOCATED to worker_list's parkedDirective doc, still HEDGED ('MAY') never promised",
+      /directive\.state.*MAY still resolve/is.test(orchSrc));
+    check("(417cea0a #2) the corollary RELOCATED: its absence is NOT evidence the directive failed",
+      /NOT evidence the directive failed/i.test(orchSrc));
   }
 
   // ===== (5) POPULATION B: a settle-nudge-shaped dispatch (kind:"warning", sentinel "system" sender — the =====
@@ -391,6 +402,13 @@ try {
       !!parkedNote && parkedNote.includes("no cross-session") && parkedNote.includes("transcript/state read available"));
     check("(8) PEER SENDER: the impossible worker_list/worker_status instruction is NEVER offered to a sender who can't act on it",
       !!parkedNote && !parkedNote.includes("worker_list"));
+    // Card 085d9422 CR follow-up: a REAL self-contradiction shipped here — the notice's own UNCONDITIONAL
+    // prefix named `parkedDirective`/`directive.state` (worker_list/worker_status FIELDS — naming them is
+    // naming the tools) one sentence before this SAME "no cross-session read" clause, contradicting it in
+    // two adjacent sentences. The full token sweep the manager asked for (any capability-presuming
+    // instruction a canCheckRecipient===false sender can't act on), run against this REAL rendered notice:
+    check("(085d9422) PEER SENDER: no capability-presuming token leaks into a notice this sender can't act on (worker_list/worker_status/worker_transcript/parkedDirective/directive.state/staleDirective/\"this worker\")",
+      !!parkedNote && !/worker_list|worker_status|worker_transcript|parkedDirective|directive\.state|staleDirective|this worker/.test(parkedNote));
   }
 
   // ===== (9) Card 417cea0a — CONFIRMED-AFTER-PARK: sessions.handleGiveUpConfirmed (wired to PtyHost's new =====

@@ -5726,6 +5726,90 @@ export class SessionService {
    * ("system")` simply returns undefined and the surface step is skipped — the SAME shape
    * `recoverUndeliveredMessagesOnBoot` already documents for a sentinel sender with nobody to nudge.
    */
+  /**
+   * Card 085d9422 — a MOOT `[loom:redelivery-parked]` notice costs far more than its own ~1.1KB: the
+   * owner measured FOUR duplicate/moot notices in one 40-minute window, each forcing a full manager
+   * verification turn (worker_status + worker_transcript + reasoning, ~2-5K tokens) to learn what THIS
+   * check can rule out for free — suppressing one is worth roughly 10x shortening it. Called at the PARK
+   * site, BEFORE the notice is built, so a suppressed case costs nothing beyond this query.
+   *
+   * THREE checks, each a real way this exact notice goes stale before it's even sent — NOT the notice's
+   * OWN re-mint recursion, which this card's own investigation found is already safe (see
+   * give-up-exhausted-durable.mjs scenario (7): the sentinel `"system"` sender never resolves to a live
+   * session, so a notice that itself gives up terminates with zero follow-on dispatch, proven both ways).
+   * That was this card's OWN leading hypothesis for the duplication and it does NOT hold — measured here
+   * instead:
+   *  (1) DUPLICATE PARK FOR THE SAME ROOT — established by this card's own reproduction (see the card body
+   *      for the exact repro): `enqueueDurableMessage`'s auto-join (`hasAmbiguousMatch`, card 4a0af485)
+   *      lets a SECOND, independent dispatch of matching content join an existing chain's `rootMsgId` —
+   *      but the join only shares the LABEL; each dispatch still runs its OWN independent chainDepth
+   *      counter and can reach PARK entirely on its own. Two independently-parking chains sharing one
+   *      rootMsgId produce two BYTE-IDENTICAL notices (neither carrying a possible-duplicate tag, since
+   *      each is a fresh, self-rooted send to the sender, not a re-mint of the other) — exactly the "two
+   *      byte-identical pairs" this card's measured evidence describes. Once any chain has already parked
+   *      this root, a second parking of the SAME root tells the sender nothing new.
+   *  (2) SUPERSEDED BY A NEWER DIRECTIVE — mirrors `staleDirectiveProjection`'s own "latest wins" rule
+   *      (mcp/orchestration.ts): if `sender` has since dispatched ANOTHER `message_worker`/`redirect_worker`
+   *      to this SAME `recipientId` after the one that produced this `rootMsgId`, that newer directive is
+   *      now the one worker_list/worker_status tracks — `parkedDirective` for the OLD root is no longer
+   *      reachable from there either, so a notice about it describes a directive the sender has already
+   *      moved past.
+   *  (3) ALREADY CONFIRMED-AFTER-PARK — a late confirming hook (`handleGiveUpConfirmed`) can resolve this
+   *      exact rootMsgId to `confirmed-after-park` in a narrow race before this PARK branch's own notice
+   *      goes out; that path already sends its own `[loom:redelivery-confirmed]` retraction, so a
+   *      `[loom:redelivery-parked]` notice for a chain already known to have landed would just contradict
+   *      it moments later.
+   *
+   * Deliberately does NOT check "does the recipient's transcript already contain the message" (the
+   * card's third candidate): no cross-session transcript-CONTENT read exists at this layer for the
+   * general sender (see `canCheckRecipient`'s own honesty split in the caller, just below), and (3) above
+   * already covers "already landed" via the durable confirmed-after-park signal for the one case that's
+   * checkable without one. Also deliberately does NOT add a settle-delay before evaluating these checks
+   * (the card floated one, since a late-arriving confirmation can beat a notice sent immediately) — that
+   * would delay reporting a message that is GENUINELY lost, which the card's own DoD calls the
+   * load-bearing half; the (3) check plus `handleGiveUpConfirmed`'s existing retraction already cover the
+   * "landed a little late" case without adding latency to the "actually lost" case.
+   *
+   * Never suppresses a genuinely first, unresolved, un-superseded park — a message that is actually lost
+   * still gets reported, at the same latency as before this card.
+   */
+  private suppressMootParkNotice(recipientId: string, sender: string, rootMsgId: string): string | null {
+    const events = this.db.listEventsForWorker(recipientId);
+    const forThisRoot = (e: OrchestrationEvent) => e.kind === "session_message_gave_up" && e.detail?.rootMsgId === rootMsgId;
+    if (events.some((e) => forThisRoot(e) && e.detail?.outcome === "parked")) return "duplicate-parked";
+    if (events.some((e) => forThisRoot(e) && e.detail?.outcome === "confirmed-after-park")) return "confirmed-after-park";
+    const isDirective = (e: OrchestrationEvent) => e.kind === "message_worker" || e.kind === "redirect_worker";
+    const idOf = (e: OrchestrationEvent) => (e.kind === "message_worker" ? e.detail?.msgId : e.detail?.queuedMsgId) as string | undefined;
+    // A `message_worker`/`redirect_worker` event never stamps its OWN resolved `rootMsgId` — only the
+    // fresh msgId that particular call minted (see `messageWorker`'s own `appendEvent`, above) — so a
+    // RAW msgId comparison against `rootMsgId` here would misclassify an auto-joined RESEND of the SAME
+    // logical chain as "a different, newer directive" the instant `hasAmbiguousMatch` (card 4a0af485)
+    // joined it to this root: this card's own reproduction hit exactly that false positive (a resend
+    // auto-joined to the SAME chain wrongly suppressed the ORIGINAL'S first, otherwise-legitimate park as
+    // "superseded"). Resolve each candidate msgId to the EFFECTIVE root it actually joined — read off the
+    // SAME `session_message_queued`/`session_message_gave_up` event `rootMsgId` this method's own
+    // `forThisRoot` check already reads — before comparing, so two dispatches sharing one auto-joined
+    // root are correctly recognized as the SAME chain (handled by the duplicate-parked check above, never
+    // by this one) rather than as one superseding the other.
+    const effectiveRootOf = (aMsgId: string): string => {
+      const linked = events.find((e) =>
+        (e.kind === "session_message_gave_up" || e.kind === "session_message_queued") && e.detail?.msgId === aMsgId);
+      return (linked?.detail?.rootMsgId as string | undefined) ?? aMsgId;
+    };
+    const thisDirectiveEvent = events.find((e) => {
+      const id = isDirective(e) ? idOf(e) : undefined;
+      return id !== undefined && effectiveRootOf(id) === rootMsgId;
+    });
+    if (thisDirectiveEvent && events.some((e) => {
+      if (!isDirective(e) || e === thisDirectiveEvent || e.managerSessionId !== sender || e.ts <= thisDirectiveEvent.ts) return false;
+      const otherId = idOf(e);
+      return otherId !== undefined && effectiveRootOf(otherId) !== rootMsgId;
+    })) {
+      return "superseded-by-newer-directive";
+    }
+    return null;
+  }
+
   private handleGiveUpExhausted(
     recipientId: string, text: string, msgId: string, rootMsgId: string, chainDepth: number,
     sender: string, taskId: string | null, kind: QueuedMessageKind,
@@ -5755,16 +5839,29 @@ export class SessionService {
     // enqueueStdin call for this message — and make the outcome loud + durable + sender-visible instead.
     // eslint-disable-next-line no-console
     console.error(`[give-up] ${recipientId} message ${msgId} (root ${rootMsgId}, ${text.length} chars, head=${JSON.stringify(text.slice(0, 60))}) PARKED after ${GIVE_UP_REMINT_LIMIT} re-mint attempts — Loom will NOT retry this automatically; surfacing to the sender`);
+    // Card 085d9422: computed BEFORE the durable park event below, so that event's OWN detail can carry
+    // whether the sender-facing notice actually went out — the parked outcome is recorded EITHER way (a
+    // suppressed notice never means a suppressed AUDIT record); only the notice dispatch itself is gated.
+    const mootReason = this.suppressMootParkNotice(recipientId, sender, rootMsgId);
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(), managerSessionId: sender, workerSessionId: recipientId, taskId,
-      kind: "session_message_gave_up", detail: { msgId, rootMsgId, chainDepth, outcome: "parked" },
+      kind: "session_message_gave_up",
+      detail: { msgId, rootMsgId, chainDepth, outcome: "parked", ...(mootReason ? { noticeSuppressed: true, noticeSuppressedReason: mootReason } : {}) },
     });
+    if (mootReason) {
+      // eslint-disable-next-line no-console
+      console.log(`[give-up] ${recipientId} [loom:redelivery-parked] notice for root ${rootMsgId} SUPPRESSED as moot (${mootReason}) — the parked event above is still recorded durably; only the sender-facing notice is skipped`);
+      return;
+    }
     // CR follow-up (card ccb407eb, finding [5]): NOT gated on `processState === "live"` — the notice below
     // goes through enqueueDurableMessage, which already handles a not-currently-live recipient correctly
     // (records the durable row regardless, redriven once that recipient resumes — the same mechanism
     // recoverUndeliveredMessagesOnBoot relies on for every other durable message). Gating on liveness here
-    // would just drop the opportunity to notify a sender who is merely offline right now, not gone. Only
-    // `senderSession` (a real session ROW exists at all) is checked — an entirely nonexistent `sender`
+    // would just drop the opportunity to notify a sender who is merely offline right now, not gone.
+    // Card 085d9422 widened the gating just above this comment (the mootReason early-return) — the
+    // liveness/senderSession discussion below is UNCHANGED by that: it still describes the only checks
+    // that apply once a notice is determined to be worth sending at all. Only `senderSession` (a real
+    // session ROW exists at all) is checked — an entirely nonexistent `sender`
     // would just leave an orphaned record nothing will ever redrive, so that check stays. Dropping the
     // liveness half does not weaken the recursion-termination guarantee (scenario (7)): `db.getSession
     // ("system")` is still falsy regardless — the sentinel has no session ROW, live or not.
@@ -5803,10 +5900,31 @@ export class SessionService {
       //     redelivery attempts" — read literally, that seeds exactly the "the budget is tiny" inference
       //     this card's own (refuted) v1 hypothesis made. Replaced with the real, constant-DERIVED effort
       //     (see `PARK_SUBMIT_CYCLES`'s own doc above this method).
+      //
+      // Card 085d9422 (DoD-3, shorten + relocate — NOT delete): the three-state confirmation hedge
+      // (`giveUpConfirmationHedge`, card 4a0af485's finding above) and the resend-auto-join caveats (a)/(b)
+      // (card 417cea0a's finding (2) above) together made up roughly 730 of this notice's ~1,150 measured
+      // characters, IDENTICAL on every single notice ever sent — the model already carries that doctrine
+      // via the `worker_message`/`worker_list`/`worker_status` tool descriptions it has in context on
+      // every turn, so repeating it per-event was pure duplication of text the reader already has. Their
+      // CONTENT is NOT deleted, only relocated: the hedge now lives on `worker_list`'s `parkedDirective`
+      // doc (mcp/orchestration.ts, the "NOT proof it was never received" / "MAY follow up" / "absence is
+      // NOT evidence it failed" language), and caveats (a)/(b) now live on `worker_message`'s own
+      // description (replacing its prior unqualified "so re-sending is safe" claim with the SAME two
+      // conditions this notice used to spell out per-event). What the reader loses here is the INLINE
+      // repetition, not the information: a sender who has never read those tool descriptions gets a
+      // pointer instead of the full prose; one who has (the common case, every turn) loses nothing.
       const recipient = this.db.getSession(recipientId);
       const canCheckRecipient = recipient?.role === "worker" && recipient.parentSessionId === sender;
+      // Card 085d9422 CR follow-up: the `parkedDirective`/`directive.state` pointer belongs ONLY in the
+      // canCheckRecipient branch — those are worker_list/worker_status FIELDS, so naming them is naming
+      // the tools, and the negative branch already says plainly that no such read exists for this sender.
+      // An earlier draft put that pointer in the notice's UNCONDITIONAL prefix, one sentence before this
+      // clause's own "no read exists" text — a self-contradiction shipped to exactly the peer-sender case
+      // card 417cea0a fixed (the recipient may not even BE a worker — a peer manager reached via
+      // peer_message — so asserting "this worker's" state in text a peer sender reads was ALSO wrong).
       const recipientCheckClause = canCheckRecipient
-        ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status before assuming it's gone.`
+        ? `Check ${recipientId.slice(0, 8)} via worker_list/worker_status (parkedDirective/directive.state) before assuming it's gone.`
         : `Loom has no read you can use to check on ${recipientId.slice(0, 8)} from here — there is no cross-session ` +
           `transcript/state read available to a sender in your position.`;
       // Card 78e4b3f2: the head preview is taken from the tag-STRIPPED text — `text` here may already carry
@@ -5818,11 +5936,8 @@ export class SessionService {
         `${JSON.stringify(stripPossibleDuplicateFrame(text).slice(0, 60))}) has been PARKED — Loom exhausted its own redelivery budget (${PARK_SUBMIT_CYCLES} ` +
         `submission attempts, ~${PARK_ENTER_WRITES} Enter-key writes, across ${PARK_MESSAGE_OBJECTS} independent retry levels, ` +
         `spanning ${PARK_HOLDS} ${GIVE_UP_HOLD_MS / 1000}s hold(s) — at least ${PARK_MIN_HOLD_SECONDS}s) and has STOPPED ` +
-        `retrying it automatically. ${giveUpConfirmationHedge("the message")} ${recipientCheckClause} If you resend the SAME content, Loom usually recognizes and ` +
-        `joins it to this original instead of creating a duplicate turn — but that join is NOT guaranteed: (a) it matches on ` +
-        `the exact framed text, which embeds YOUR OWN session id, so it breaks if you've been recycled since sending; (b) the ` +
-        `join window closes the instant Loom itself confirms the original landed — so if that happens before you resend, your ` +
-        `resend becomes a genuine second turn instead of joining. A reworded resend is always treated as new.`;
+        `retrying it automatically — this is NOT proof it was never received (see worker_message's own docs for the ` +
+        `resend auto-join caveats). ${recipientCheckClause}`;
       // CR follow-up (card ccb407eb): this notice is ITSELF a one-shot terminal signal — by the exact
       // criterion this card applied to the six settle-nudge sites above, it must not be a bare enqueueStdin
       // a give-up could silently swallow one level up. Routed through enqueueDurableMessage exactly like
