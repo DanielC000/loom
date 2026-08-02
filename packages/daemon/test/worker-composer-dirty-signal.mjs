@@ -10,19 +10,22 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 // checking itself) — a synchronous PULL read, never riding submit()/enqueueStdin/drainPending/the pty.
 //
 // THE SHARPEST QUESTION THIS TEST ANSWERS: is the field actually non-zero and READABLE during the
-// window a manager would check it — i.e. AFTER a give-up fires and BEFORE any further write ever
-// arrives (the defining property of a truly stuck session: nothing further arrives)? Traced in
-// pty/host.ts: composerDirtyLen is SET synchronously the moment a give-up/heal-if-stuck fires (line
-// ~5689/5731/5109), and CLEARED only when a SUBSEQUENT submit()'s own defensive clear-prefix goes on to
-// CONFIRM (composerDirtyLenClearedByGen gates the reset, ~line 4007/4183). So with no further submit(),
-// there is nothing to trigger the clear — the value must stay non-zero indefinitely. Scenario (2) below
-// proves this directly with `assertNeverWithControl` (test/_timing-guard.mjs): it drives a genuine
-// give-up (mirroring test/pty-giveup-clear.mjs's technique) on session SID, then DELIBERATELY never
-// calls host.reconcile() / sends any further message to SID, and observes the value across a bounded
-// window — backed by a REQUIRED positive control that proves, on a SEPARATE session/PtyHost instance,
-// that the identical sampling mechanism CAN observe a real clear (drives a redrain + confirms it via a
-// real hook) — so a "the field just happens to look non-zero because nothing tried to clear it" reading
-// is ruled out: the same instrument demonstrably CAN see it flip to 0, and does not, on SID.
+// window a manager would check it — i.e. AFTER a give-up fires and BEFORE anything ever resolves it
+// (the defining property of a truly stuck session: nothing further arrives, and no confirming hook for
+// this generation ever lands either)? Traced in pty/host.ts: composerDirtyLen is SET synchronously the
+// moment a give-up/heal-if-stuck fires (line ~5689/5731/5109). It CLEARS via either of TWO independent,
+// gated paths: (a) a SUBSEQUENT submit()'s own defensive clear-prefix going on to CONFIRM
+// (composerDirtyLenClearedByGen gates the reset, ~line 4014/4191), or (b) card b932558c's
+// `clearComposerDirtyOnConfirm` — a confirming hook for THIS generation resolving through
+// `purgeConfirmedGiveUpRequeue` itself (content-match or its FIFO-position fallback), gated on
+// `composerDirtyMarkedForGen` (see pty-giveup-composerdirty-confirmed-clear.mjs for that path's own
+// coverage). Scenario (2) below exercises NEITHER path — it drives a genuine give-up (mirroring
+// test/pty-giveup-clear.mjs's technique) on session SID, then DELIBERATELY never calls host.reconcile()
+// AND never delivers any confirming hook for SID at all, observing the value across a bounded window —
+// backed by a REQUIRED positive control that proves, on a SEPARATE session/PtyHost instance, that the
+// identical sampling mechanism CAN observe a real clear (drives a redrain + confirms it via a real hook)
+// — so a "the field just happens to look non-zero because nothing tried to clear it" reading is ruled
+// out: the same instrument demonstrably CAN see it flip to 0, and does not, on SID.
 //
 // DISCRIMINATOR (card DoD-4): scenario (1) exercises a HEALTHY, mid-first-turn session (enqueued +
 // CONFIRMED via a real UserPromptSubmit hook, busy genuinely true, nothing ever gives up) and asserts

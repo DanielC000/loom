@@ -6135,6 +6135,51 @@ export class PtyHost {
    * count cap — cleaned up promptly, it commonly WILL stay near-empty, but that is a consequence of the
    * cleanup discipline, not an independent claim about how rarely sessions give up.
    */
+  /**
+   * Card b932558c: a CONFIRMED give-up — this generation's turn genuinely started, proven either by
+   * `purgeConfirmedGiveUpRequeue`'s content-match branch or its FIFO-position fallback — is decisive
+   * proof THIS generation's own composer content was submitted, not stranded. The daemon already acts
+   * on that proof (purging the requeued duplicate right where this is called from); `composerDirtyLen`
+   * contradicting it until some LATER, unrelated submit()'s own defensive clear-prefix happens to
+   * confirm is the bug this closes — previously the ONLY clear path (`composerDirtyLenClearedByGen`,
+   * gated on a fresh submit()'s own confirmation) never fired for a give-up resolved this way, since no
+   * new submit() is involved: the ORIGINAL generation's own late-arriving hook is what confirms it.
+   *
+   * GATED on `composerDirtyMarkedForGen === gen` — only touch what THIS generation actually marked,
+   * same discipline as the sibling clear-prefix gate. WHY A FULL RESET (not a partial subtract) IS SAFE
+   * when the gate matches — NOT because `gen` is the SOLE contributor (`composerDirtyLen` is ADDITIVE
+   * across stacked give-ups — see that field's own doc — so a later gen's mark can sit on top of an
+   * older one's; "sole contributor" would be false on its face): every submit() UNCONDITIONALLY runs
+   * its own defensive clear-prefix for whatever `composerDirtyLen` already held BEFORE its own paste
+   * (see submit()'s own doc) — so `gen`'s OWN submission already attempted to backspace away every
+   * OLDER stacked contribution, in the SAME ordered pty write, immediately ahead of `gen`'s own text.
+   * For the content-match branch specifically, confirming `gen` means the engine's reported prompt is
+   * an EXACT match for `gen`'s OWN pasted text alone — that could only be true if the preceding
+   * clear-prefix genuinely landed: a botched clear would have left stray older text glued onto `gen`'s
+   * paste, making the reported prompt diverge from `gen`'s clean signature, and this content-match
+   * would simply never have fired (see this file's own "stray text glued onto a later submit"
+   * specimens, card 3ce3fa39). So `gen`'s own exact-match confirmation is transitive proof of the
+   * WHOLE preceding write chain, not just `gen`'s own slice — a full reset is correct. The
+   * FIFO-position fallback (content-blind) does NOT carry this same transitive proof — it resolves by
+   * generation position alone, with no verification of what was actually echoed — but that is exactly
+   * the SAME trust level the PRE-EXISTING `composerDirtyLenClearedByGen` gate already accepted (it too
+   * is satisfied by a bare Stop hook with zero content check), not a new gap this fix introduces.
+   *
+   * If a LATER, still-unresolved give-up has since re-marked the field (`composerDirtyMarkedForGen`
+   * now pointing elsewhere), this confirmation is for an OLDER generation whose own clear-prefix chain
+   * a NEWER submission has since superseded — leave `composerDirtyLen` untouched; the newer
+   * generation's own eventual confirmation (following the exact same reasoning above) is what resolves
+   * the rest.
+   */
+  private clearComposerDirtyOnConfirm(sessionId: string, live: Live, gen: number): void {
+    if (live.composerDirtyMarkedForGen === gen) {
+      // eslint-disable-next-line no-console
+      console.log(`[submit] ${sessionId} composerDirtyLen cleared at CONFIRMED (gen=${gen}) — decisive proof this generation's turn actually started, not stranded`);
+      live.composerDirtyLen = 0;
+      live.composerDirtyMarkedForGen = null;
+    }
+  }
+
   private purgeConfirmedGiveUpRequeue(sessionId: string, live: Live, turnEnded: boolean, reportedPrompt?: string): boolean {
     if (typeof reportedPrompt === "string" && reportedPrompt.length > 0 && live.ambiguousDispatches.size > 0) {
       const sig = textSignature(reportedPrompt);
@@ -6169,6 +6214,12 @@ export class PtyHost {
           // see `onGiveUpConfirmed`'s own doc for why PtyHost can't decide here whether it's news.
           this.events.onGiveUpConfirmed?.(sessionId, logicalId, latencyMs);
         }
+        // Card b932558c: this batch's generation is now DECISIVELY confirmed — see clearComposerDirtyOnConfirm's
+        // own doc for why this is the actual fix (the field must not stay dirty until an unrelated later
+        // submit() happens to clear it). `batchIds.size` is exactly 1 here: `matchedLogicalIds.length > 0`
+        // (the `if` this sits inside) guarantees at least one, and the `batchIds.size > 1` branch above
+        // already returned before this point for the only other case — never 0, never more than 1.
+        this.clearComposerDirtyOnConfirm(sessionId, live, [...batchIds][0]!);
         const matchedSet = new Set(matchedLogicalIds);
         for (let i = live.pending.length - 1; i >= 0; i--) {
           if (matchedSet.has(live.pending[i]!.logicalId)) {
@@ -6211,6 +6262,11 @@ export class PtyHost {
           live.ambiguousDispatches.delete(dropped!.logicalId);
         }
       }
+      // Card b932558c: same fix as the content-match branch above — this generation is now decisively
+      // confirmed by the FIFO-position fallback too, so it should not have to wait for an unrelated
+      // later submit() to clear composerDirtyLen (gated on `composerDirtyMarkedForGen` still naming
+      // this gen — see clearComposerDirtyOnConfirm's own doc for why a full reset is safe there).
+      this.clearComposerDirtyOnConfirm(sessionId, live, gen);
     } else {
       // eslint-disable-next-line no-console
       console.log(`[submit] ${sessionId} GIVE-UP RECOVERY: a confirming hook arrived while generation ${gen} is still ambiguous, but generation ${live.submitGeneration} (a fresh, non-ambiguous submit) is now current — leaving generation ${gen}'s requeued entry un-purged rather than risk deleting a genuinely-unconfirmed message; it will still resolve via its own bounded hold`);
@@ -7118,11 +7174,14 @@ export class PtyHost {
   /** Cumulative count of characters possibly still stranded in this session's composer from an earlier
    *  unconfirmed give-up/heal-if-stuck clear (`Live.composerDirtyLen` — see that field's own doc, card
    *  3ce3fa39), or undefined if the session isn't live. SET synchronously the moment a give-up/heal fires
-   *  (no dependency on any later write); CLEARED only when a SUBSEQUENT submit()'s own defensive clear-
-   *  prefix goes on to CONFIRM (`composerDirtyLenClearedByGen` gates the reset) — so in the specific case
-   *  this getter exists to catch (text written, never submitted, nothing further arrives), the value stays
-   *  non-zero and readable indefinitely rather than requiring a later write to become observable. Card
-   *  dcd8659c: surfaced to worker_list/worker_status/my_context as a PULL read — this never touches
+   *  (no dependency on any later write); CLEARED via either of TWO independent, gated paths: a SUBSEQUENT
+   *  submit()'s own defensive clear-prefix going on to CONFIRM (`composerDirtyLenClearedByGen` gates that
+   *  reset), or — card b932558c — `purgeConfirmedGiveUpRequeue` itself proving THIS generation's turn
+   *  actually started (content-match or its FIFO-position fallback; see `clearComposerDirtyOnConfirm`),
+   *  with no new submit() required. So in the specific case this getter exists to catch (text written,
+   *  never submitted, and NEITHER path above ever resolves it), the value stays non-zero and readable
+   *  indefinitely rather than requiring a later write to become observable. Card dcd8659c: surfaced to
+   *  worker_list/worker_status/my_context as a PULL read — this never touches
    *  `submit()`/`enqueueStdin`/`drainPending`/the pty; it only reads the same in-memory field those write. */
   getComposerDirtyLen(sessionId: string): number | undefined {
     return this.live.get(sessionId)?.composerDirtyLen;
