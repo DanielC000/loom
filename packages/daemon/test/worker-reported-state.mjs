@@ -7,10 +7,14 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //
 // The bug this guards: a worker that called worker_report(done) ends its turn at busy:false —
 // indistinguishable in the raw session record from a plain idle-live worker. The projection makes
-// "reported, awaiting review" visible WITHOUT reading the transcript. FRESHNESS (mirrors the
-// busy-worker-watcher's "latest relevant event" test): a report is "current" iff it is the worker's
-// MOST-RECENT orchestration_event — once the worker resumes (manager message_worker → a later event)
-// / is merged / etc., it is no longer awaiting review. A worker_report(progress) is not terminal.
+// "reported, awaiting review" visible WITHOUT reading the transcript.
+//
+// Card 6641c3ab: a worker's latest worker_report(done|blocked) is "current" iff no event in the
+// REPORT_RESOLVED_EVENT_KINDS allowlist (merge_done, message_worker, redirect_worker, recycle_begin,
+// stop_worker) landed after it — NOT "iff it is the worker's chronologically LAST event of ANY kind",
+// which was the pre-fix behavior. That old check went null the instant ANY later worker-keyed row
+// landed, including `merge_request` — fired by a manager merely reviewing the diff (worker_merge)
+// before ever deciding whether to merge — which is what this file's (f)/(g) cases guard against.
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -82,11 +86,33 @@ seedWorker("w-progress", "MGR");
 ev("w-progress", "MGR", "spawn_worker", at(0));
 ev("w-progress", "MGR", "worker_report", at(10), { status: "progress", summary: "halfway" });
 
-// (f) reported DONE then MERGED (merge_request newer) → manager is acting on it → not awaiting.
+// (f) card 6641c3ab, THE BUG: reported DONE then merely REVIEWED (merge_request newer — worker_merge
+//     was called to look at the diff, but no merge decision was ever made) → STILL awaiting review.
+//     Before the fix, `merge_request` alone (fired at review-START, before any decision) wrongly
+//     cleared this — a manager who reviewed a worker's diff and got pulled away before confirming lost
+//     the only signal that this worker was still sitting there awaiting a decision.
+seedWorker("w-reviewed-only", "MGR");
+ev("w-reviewed-only", "MGR", "spawn_worker", at(0));
+ev("w-reviewed-only", "MGR", "worker_report", at(10), { status: "done", summary: "ready" });
+ev("w-reviewed-only", "MGR", "merge_request", at(20), {});
+
+// (g) card 6641c3ab POSITIVE CONTROL: reported DONE, reviewed, then the merge was REJECTED
+//     (merge_request + merge_rejected, no merge_done) → STILL awaiting review. A rejection is a
+//     decision, but not the "merged" the doc promises clears this — the worker still needs the
+//     manager's follow-up (message it with feedback, or re-task), so this must NOT read as resolved.
+seedWorker("w-rejected", "MGR");
+ev("w-rejected", "MGR", "spawn_worker", at(0));
+ev("w-rejected", "MGR", "worker_report", at(10), { status: "done", summary: "ready" });
+ev("w-rejected", "MGR", "merge_request", at(20), {});
+ev("w-rejected", "MGR", "merge_rejected", at(30), { reason: "conflict" });
+
+// (h) reported DONE, reviewed, then actually MERGED (merge_request + merge_done) → a genuine
+//     resolution → not awaiting.
 seedWorker("w-merged", "MGR");
 ev("w-merged", "MGR", "spawn_worker", at(0));
 ev("w-merged", "MGR", "worker_report", at(10), { status: "done", summary: "ready" });
 ev("w-merged", "MGR", "merge_request", at(20), {});
+ev("w-merged", "MGR", "merge_done", at(30), {});
 
 // MGR2's worker — only to keep the scope honest (must not leak into MGR's worker_list).
 seedWorker("w-other", "MGR2");
@@ -134,7 +160,11 @@ check("(d) reported-then-resumed (busy again, later event) → reportedState nul
   byId["w-resumed"]?.busy === true && byId["w-resumed"]?.reportedState === null && byId["w-resumed"]?.awaitingReview === false);
 check("(e) progress-only report → reportedState null + awaitingReview false (not terminal)",
   byId["w-progress"]?.reportedState === null && byId["w-progress"]?.awaitingReview === false);
-check("(f) reported-then-merged (merge_request newer) → reportedState null + awaitingReview false",
+check("(f) reported-then-reviewed-only (merge_request newer, no decision) → STILL 'done' + awaitingReview true",
+  byId["w-reviewed-only"]?.reportedState === "done" && byId["w-reviewed-only"]?.awaitingReview === true);
+check("(g) POSITIVE CONTROL — reported-then-rejected (merge_request + merge_rejected, no merge_done) → STILL 'done' + awaitingReview true",
+  byId["w-rejected"]?.reportedState === "done" && byId["w-rejected"]?.awaitingReview === true);
+check("(h) reported-then-actually-merged (merge_request + merge_done) → reportedState null + awaitingReview false",
   byId["w-merged"]?.reportedState === null && byId["w-merged"]?.awaitingReview === false);
 
 // ============================ worker_status (full record + projection) ============================
@@ -148,6 +178,9 @@ const sBlocked = await status("w-blocked");
 check("worker_status(w-blocked) → reportedState 'blocked' + awaitingReview true", sBlocked.reportedState === "blocked" && sBlocked.awaitingReview === true);
 const sResumed = await status("w-resumed");
 check("worker_status(w-resumed) → reportedState null + awaitingReview false", sResumed.reportedState === null && sResumed.awaitingReview === false);
+const sRejected = await status("w-rejected");
+check("worker_status(w-rejected) POSITIVE CONTROL → reportedState 'done' + awaitingReview true (rejection does not clear it)",
+  sRejected.reportedState === "done" && sRejected.awaitingReview === true);
 
 // cross-manager denial still holds (projection didn't widen the gate).
 const denied = await status("w-other");
@@ -169,6 +202,6 @@ try { db.close(); } catch { /* ignore */ }
 for (const ext of ["", "-wal", "-shm"]) { try { fs.rmSync(dbFile + ext, { force: true }); } catch { /* ignore */ } }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — worker_status/worker_list surface reportedState+awaitingReview: a worker that called worker_report(done|blocked) is shown as awaiting review DISTINCTLY from a plain idle-live worker (both busy:false), and the flag clears once the worker resumes a turn (later event) / is merged / only checkpointed progress."
+  ? "\n✅ ALL PASS — worker_status/worker_list surface reportedState+awaitingReview: a worker that called worker_report(done|blocked) is shown as awaiting review DISTINCTLY from a plain idle-live worker (both busy:false); the flag survives a mere diff review (merge_request) or a merge rejection, and clears only on a real resolution — the worker resumes (message_worker/redirect_worker) or is recycled/stopped/actually merged (merge_done) — or when only a progress checkpoint followed."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
