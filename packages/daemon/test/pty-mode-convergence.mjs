@@ -37,6 +37,12 @@
 //      (which correctly stayed at `acceptEdits`). A resumed `startupModeCycles:0` session now stays at
 //      `acceptEdits` too (scenario 7), while a resumed shipping-default (`startupModeCycles:2`) session that
 //      gets stuck mid-cycle is still healed to `auto` exactly as before (scenario 8 — no regression).
+//   9. NEW (card 2151f1db): scenario 3's manager, left stranded at `plan` with the auto-heal deliberately
+//      NOT firing, now gets a one-time `[loom:mode-unconfirmed]` visibility notice instead of total
+//      silence — it can self-recover (holds ExitPlanMode, unlike a worker), so the actual gap was
+//      NOTICING an unconfirmed landing, not being trapped. Proven role-exclusive against scenario 2's
+//      healed worker (must NOT also get a notice) and against a clean manager landing (must NOT
+//      false-positive) — and proven to add zero extra presses to scenario 3 itself (visibility only).
 //
 // RUN: pnpm build (repo root) then `node test/pty-mode-convergence.mjs` from packages/daemon.
 import fs from "node:fs";
@@ -105,6 +111,21 @@ class TestPtyHost extends createSeamHost(PtyHost) {
 }
 const events = { onEngineSessionId() {}, onBusy() {}, onContextStats() {}, onRateLimited() {}, onExit() {} };
 const host = new TestPtyHost(events);
+
+// Capture logLandedMode's own "kind=... mode=..." diagnostic line (host.ts, printed unconditionally the
+// instant a DEFINITE footer read settles, before either the auto-heal or the new mismatch-notice branch is
+// decided) — a POSITIVE, observable proxy for "the read has genuinely settled for this session", used
+// instead of a fixed sleep to gate scenario 9's negative (no-notice) assertions. Mirrors pty-mode-heal-
+// retry.mjs's identical console.log-capture technique for its own "cycle→" completion lines.
+const landedModeLogLines = [];
+const realLog = console.log;
+console.log = (...args) => {
+  const line = args.join(" ");
+  if (line.includes("kind=")) landedModeLogLines.push(line);
+  realLog(...args);
+};
+const waitForLandedModeRead = (sid, timeoutMs) =>
+  waitUntil(() => landedModeLogLines.some((l) => l.includes(`[resume-mode] ${sid} kind=`)), timeoutMs);
 
 const countShiftTabs = (fake) => fake.writes.filter((w) => w === SHIFT_TAB).length;
 const spawnFresh = (id, role, startupModeCycles = 2) => {
@@ -304,11 +325,59 @@ try {
   await sleep(150);
   check("8: resume converged to auto via the heal (1 corrective press) — the common case is not regressed",
     countShiftTabs(fh) === 3);
+
+  // ============ 9) NEW (card 2151f1db): a manager left stranded (scenario 3, session C) gets a ============
+  // ============    ONE-TIME [loom:mode-unconfirmed] notice instead of total silence. It can self-recover ============
+  // ============    (holds ExitPlanMode, unlike a worker) — its actual gap was NOTICING an unconfirmed ============
+  // ============    landing, not being trapped, so this must NEVER auto-correct (scenario 3 already proves ============
+  // ============    zero extra presses for this exact session) — only add visibility. ============
+  const noticeLanded = (fake, sid) => {
+    const pending = host.getPersistablePendingSnapshot(sid).texts.some((t) => t.includes("[loom:mode-unconfirmed]"));
+    const written = fake.writes.filter((w) => typeof w === "string").join("").includes("[loom:mode-unconfirmed]");
+    return pending || written;
+  };
+  check("9: the manager stranded at plan (scenario 3, session C) received a [loom:mode-unconfirmed] notice",
+    noticeLanded(fc, C));
+  const cText = host.getPersistablePendingSnapshot(C).texts.find((t) => t.includes("[loom:mode-unconfirmed]"))
+    ?? fc.writes.filter((w) => typeof w === "string").join("");
+  check("9: the notice names the actual landed mode (plan) and the configured target (auto)",
+    cText.includes('"plan"') && cText.includes('"auto"'));
+  check("9: scenario 3's press count is STILL unchanged by the notice (visibility only, never auto-correct)",
+    countShiftTabs(fc) === 2);
+
+  // Negative control A: the WORKER stranded at plan (scenario 2, session B) got the REAL auto-heal
+  // correction instead — the two branches are role-exclusive, so it must NOT also get the notice.
+  check("9: a worker that WAS auto-healed (scenario 2, session B) does NOT also get the mismatch notice",
+    !noticeLanded(fb, B));
+
+  // Negative control B: a manager that converges CLEANLY to its own target gets no notice at all — the
+  // `mode !== healTarget` guard (not bare HEALABLE_MODES membership) must not false-positive on a healthy landing.
+  const I = "sess-fresh-manager-clean";
+  const fi = spawnFresh(I, "manager");
+  fi.feed(ACCEPT_EDITS_FOOTER);
+  host.deliverHook(I, { hook_event_name: "SessionStart", session_id: "eng-I" });
+  check("9: clean-manager 1st press issued", await waitUntil(() => countShiftTabs(fi) === 1, 2500));
+  fi.feed(PLAN_FOOTER);
+  await sleep(150);
+  check("9: clean-manager 2nd press issued", countShiftTabs(fi) === 2);
+  fi.feed(AUTO_FOOTER);
+  await sleep(150);
+  check("9: clean-manager converged to its target (auto) in 2 presses", countShiftTabs(fi) === 2);
+  // DETERMINISTIC (not a fixed sleep — see the fixed-wait-negative-guard this replaced): wait on the
+  // POSITIVE, observed proof that logLandedMode's read genuinely settled for THIS session — its own
+  // unconditional "kind=..." diagnostic line — before asserting the negative (no notice). A fixed sleep
+  // here would pass vacuously if the notice would have landed at N+1ms; this instead proves the exact
+  // point where the branch decision (heal / notice / neither) has already been made.
+  check("9: clean-manager's mode-read genuinely settled (observed, not a fixed sleep)",
+    await waitForLandedModeRead(I, 3000));
+  check("9: a manager landed EXACTLY on its target gets NO mismatch notice (no false positive on a healthy landing)",
+    !noticeLanded(fi, I));
 } finally {
+  console.log = realLog;
   for (const s of [
     "sess-fresh-A", "sess-fresh-worker-stuck", "sess-fresh-manager-stuck", "sess-fresh-worker-stuck-start",
     "sess-fresh-worker-default-target", "sess-fresh-worker-unknown",
-    "sess-resume-worker-cycles0", "sess-resume-worker-cycles2-stuck",
+    "sess-resume-worker-cycles0", "sess-resume-worker-cycles2-stuck", "sess-fresh-manager-clean",
   ]) {
     try { host.stop(s, "hard"); } catch { /* ignore */ }
   }

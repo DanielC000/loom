@@ -6712,11 +6712,32 @@ export class PtyHost {
       const snippet = collapseFooter(recent).slice(-160); // short, ANSI-free evidence for the log
       // eslint-disable-next-line no-console
       console.log(`[resume-mode] ${sessionId} kind=${isResume ? "resume" : "fresh"} mode=${mode} matched=${matchedToken ?? "-"} footer=${JSON.stringify(snippet)}`);
-      if (!noCyclingConfigured && healTarget != null && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
+      if (!noCyclingConfigured && healTarget != null && mode !== healTarget && HEALABLE_MODES.has(mode) && l.alive && disallowedToolsForRole(role).includes("ExitPlanMode")) {
         // eslint-disable-next-line no-console
         console.log(`[resume-mode] ${sessionId} auto-heal: role=${role ?? "-"} landed in ${mode} (ExitPlanMode disallowed) — cycling to ${healTarget}`);
         this.cycleToMode(sessionId, healTarget, onSettled);
         return;
+      }
+      // Card 2151f1db (visibility, NOT auto-correct): a role that is NOT excluded from ExitPlanMode —
+      // manager, platform, a plain session — has no backstop above, by design (it may deliberately choose
+      // plan, and it CAN self-exit). But the boot mode-cycle's own footer-read confirmation can fail under
+      // host contention for this role exactly as it can for a healable one (see cycleToMode's doc: a
+      // give-up branch can leave ANY role short of its target) — and unlike a deliberate choice, that
+      // failure is currently silent: the session just discovers it later, indistinguishably from having
+      // chosen the mode itself. `mode !== healTarget` (not just HEALABLE_MODES membership) is the real
+      // mismatch test here, since — unlike a worker/setup/auditor role, whose target is always pinned to
+      // "auto" regardless of project config — a manager/platform target could in principle itself be a
+      // HEALABLE_MODES member (e.g. a project configured to land there deliberately), and that must not
+      // false-positive as a mismatch. One-shot: `live.modeLogged` above already guards this whole function
+      // to fire once per (re)spawn, so this never repeats mid-session.
+      if (!noCyclingConfigured && healTarget != null && mode !== healTarget && HEALABLE_MODES.has(mode) && l.alive && !disallowedToolsForRole(role).includes("ExitPlanMode")) {
+        // eslint-disable-next-line no-console
+        console.log(`[resume-mode] ${sessionId} mode-mismatch-notice: role=${role ?? "-"} landed in ${mode}, configured target is ${healTarget} — notifying (no auto-correct for this role)`);
+        this.enqueueStdin(
+          sessionId,
+          `[loom:mode-unconfirmed] Your permission mode settled at "${mode}" rather than the configured "${healTarget}" after boot — the mode-cycle's confirmation may have been dropped under host load, not necessarily a choice you made. If you're unexpectedly blocked from writes/tools, press Shift+Tab (or call ExitPlanMode) to cycle to your working mode.`,
+          "system", undefined, undefined, "warning",
+        );
       }
       onSettled();
     };
