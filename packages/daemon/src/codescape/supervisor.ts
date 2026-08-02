@@ -599,6 +599,15 @@ export class CodescapeSupervisor {
     return this.versionProbeAttempts;
   }
 
+  /**
+   * Test seam — the RESOLVED ceiling (default or test-overridden) {@link readInstalledBuild}'s retry loop
+   * is actually bounded by, so a test can assert against the real value the code enforces instead of a
+   * hardcoded literal that silently decouples the day the default is retuned.
+   */
+  getVersionProbeMaxAttempts(): number {
+    return this.versionProbeMaxAttempts;
+  }
+
   /** Diagnostic/test seam — see {@link driftCheckState}. `null` before the first probe tick completes. */
   getDriftCheckState(): DriftCheckState | null {
     return this.driftCheckState;

@@ -931,12 +931,26 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
   check("(13) the first probe tick completed", sup.getCompletedProbeTickCount() >= 1);
 
-  // ⭐ Observed ATTEMPT COUNT, never wall-clock (card f0718488's own DoD) — getVersionProbeAttemptCount()
-  // is incremented once per real subprocess spawn inside readInstalledBuild's retry loop. Prints the
-  // OBSERVED count on a mismatch (card 92b0f44e, manager follow-up) — same reasoning as (14): "a completed
-  // tick" alone doesn't discriminate WHICH failure this is.
-  check(`(13) exactly 2 version-probe attempts were made (1 timeout + 1 retry that succeeded)${attemptSuffix(2, sup.getVersionProbeAttemptCount())}`,
-    sup.getVersionProbeAttemptCount() === 2);
+  // Card 15c4dad6: relaxed from an exact-2 count, which conflated two different claims — (a) a timed-out
+  // attempt 1 gets retried [the real invariant this scenario tests] AND (b) that specific real-subprocess
+  // retry (attempt 2) beats versionProbeTimeoutMs on THIS host at THIS moment [pure timing, never a
+  // promise the code makes — attempt 2 legitimately CAN also time out under host load and roll into
+  // attempt 3, still within budget]. The runaway-retry-loop / exhausted-budget boundary is asserted as an
+  // identity question elsewhere — scenario (14), `attempt >= versionProbeMaxAttempts` in
+  // readInstalledBuild's own retry loop (supervisor.ts) — not here. This scenario instead asserts the
+  // EXISTENCE property: a retry genuinely happened, and it converged within the SAME structural ceiling
+  // the code enforces (read via getVersionProbeMaxAttempts(), never a hardcoded literal, so a retuned
+  // default can't silently decouple this from what the code actually bounds). The observed count is
+  // printed UNCONDITIONALLY (not just on a mismatch) — a 3 here is legitimate host-timing variance, not a
+  // defect, and stays visible in every gate log as a datum about host latency instead of vanishing into a
+  // passing assertion (same discipline commit 9242bf16 established for the mismatch case).
+  const versionProbeAttempts = sup.getVersionProbeAttemptCount();
+  const versionProbeMaxAttempts = sup.getVersionProbeMaxAttempts();
+  console.log(`(13) observed version-probe attempts: ${versionProbeAttempts} (ceiling: ${versionProbeMaxAttempts})`);
+  check("(13) the forced timeout on attempt 1 was retried (at least 2 attempts made, never just 1 — the retry path genuinely activated)",
+    versionProbeAttempts >= 2);
+  check(`(13) the retry converged within the structural attempt ceiling of ${versionProbeMaxAttempts} (bounded, never a runaway retry loop — observed count is printed above regardless of outcome)`,
+    versionProbeAttempts <= versionProbeMaxAttempts);
   const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
   check("(13) a transient timeout rescued by a retry never reaches the loud 'cannot read' diagnostic at all",
     diagnosticLines.length === 0);
