@@ -101,17 +101,6 @@ try {
     let freshGateCalls = 0;
     let freshGateEntered;
     const freshGateEnteredSignal = new Promise((resolve) => { freshGateEntered = resolve; });
-    // Bounded (2s), not unbounded — mirrors run-gate-result-consumption.mjs scenario (B)'s own reasoning:
-    // this only runs long enough to comfortably exceed the SessionService's own `syncAttachBudgetMs` (shrunk
-    // to 500ms below, from the 12s production SYNC_ATTACH_BUDGET_MS via the same test-only DI seam
-    // `gateOpRetainMs`/`gateCancelVerifyMs` already use), so the RE-CALL below (after the cancel) degrades to
-    // a pending handle we can directly inspect for attachedToInFlight/opId, instead of settling inline where
-    // those fields wouldn't be present at all. Same logical shape as the real 12s/16s budget/sleep, at a
-    // fraction of the wall-clock cost (card 0faaaa55). 500ms (not something tighter like 100ms) because
-    // THIS SAME budget also bounds the earlier QUEUE-then-CANCEL round trip a few lines below (the target's
-    // own `pTargetRun` must settle INLINE with the cancelled shape, not degrade to pending) — that round trip
-    // (semaphore queue + cancelGateOp's async DB/notify work) measurably exceeded 100ms under this session's
-    // real host contention, so 100ms was too tight for that OTHER purpose sharing this same budget value.
     const sharedGate = async (_gate, cwd) => {
       if (cwd === wtH.worktreePath) { await holderHold; return { passed: true }; }
       freshGateCalls++;
@@ -119,7 +108,39 @@ try {
       await sleep(2000);
       return { passed: true };
     };
-    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: 500 });
+    // ONE shared instance (card a901196c CR follow-up — a prior version of this fix split r1/p2 across TWO
+    // `SessionService` instances, which silently emptied the RETENTION cache the re-call assertions below
+    // depend on: `pendingOps` is `private readonly pendingOps = new PendingOpRegistry()` — a per-instance
+    // field (service.ts), and `PendingOpRegistry.retained` is likewise a per-instance private Map
+    // (pending-ops.ts) — no module-level/shared state. A second instance starts with an EMPTY `retained`
+    // map, so the re-call's own retention-dedupe check (`attach()`'s `this.retained.get(key)`) can never
+    // even SEE `opId1`'s cancelled entry — making the ":164"/"different opId" assertions below vacuously
+    // true regardless of whether `isRetainedResultUsable` (the actual production fix this file exists to
+    // guard) still works. A rig that cannot fail reports zero failures — this file is named
+    // "cancelled-RETENTION"; splitting the registry removed the retention it's meant to test.
+    //
+    // Instead: keep ONE `sessions` instance (one registry, one semaphore) and MUTATE its
+    // `syncAttachBudgetMs` — the same test-only DI seam already exposed via the constructor, just reused
+    // AFTER construction — between the two SEQUENTIAL calls below. Safe because `runWorkerGate` reads
+    // `this.syncAttachBudgetMs` by value at the moment each call reaches `attach()` (not continuously), and
+    // the two calls never overlap: r1/pHolderRun are both issued (and capture the GENEROUS budget) before
+    // any mutation; p2 is issued only after r1 has already settled and the budget has been lowered.
+    //  - GENEROUS (60s) while r1 is in flight: the QUEUE-then-CANCEL round trip it depends on (semaphore
+    //    admission + `cancelGateOp`'s async DB/notify work) is REAL async work, not a mocked delay, so it can
+    //    legitimately take longer than a tight budget under host contention (MEASURED: 500ms false-degraded
+    //    r1 to a PENDING handle under a genuinely contended gate run, crashing this file at the
+    //    then-unguarded `r1.value.opId` read below). Scenario (D)'s own name — "the cancelled settle is
+    //    ran:false, cancelled:true" — is about CANCELLATION SEMANTICS, not about racing host speed, so
+    //    widening the budget for this half is the fix, not a workaround: same technique + magnitude as card
+    //    e082bf4d's `GENEROUS_SYNC_BUDGET_MS` in merge-spawn-tracked.mjs for an identical "must settle
+    //    inline, real async work underneath" need.
+    //  - SMALL (500ms, unchanged from before this fix) once lowered for p2: p2 races only a fully MOCKED
+    //    2000ms sleep in `sharedGate`, not real work, so a small budget racing it stays exactly as robust as
+    //    it always was — the original bug was sharing ONE value for both needs, not this half's own value
+    //    being too small.
+    const GENEROUS_SYNC_BUDGET_MS = 60_000;
+    const SMALL_SYNC_BUDGET_MS = 500;
+    const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: sharedGate, syncAttachBudgetMs: GENEROUS_SYNC_BUDGET_MS });
 
     const pHolderRun = sessions.runWorkerGate(workerH);
     await waitUntil(() => sessions.gateQueueForManager(projH).activeCount === 1);
@@ -134,14 +155,23 @@ try {
 
       const r1 = await pTargetRun;
       check("(D) MEASURED SHAPE: the cancelled settle is ran:false, cancelled:true", r1.settled === true && r1.ok === true && r1.value.ran === false && r1.value.cancelled === true);
-      const opId1 = r1.value.opId;
+      // Guarded (mirrors r2's own guard below): a regression here (e.g. r1 degrading to pending again) must
+      // still report a clean FAIL via the check above, not crash the whole file on an unguarded `.value` read
+      // and lose every assertion after it — including scenario (D2)'s own regression guard.
+      const opId1 = r1.settled && r1.ok ? r1.value.opId : undefined;
 
       // Release the holder so the ONE cap-1 slot is free for the re-call below.
       releaseHolder("go");
       await pHolderRun.catch(() => {});
 
+      // Lower the SAME instance's budget for the re-call — see the shared-instance note above. r1 has
+      // already settled (captured GENEROUS_SYNC_BUDGET_MS at its own call time, unaffected by this), and no
+      // other call is in flight against `sessions` right now, so this is safe.
+      sessions.syncAttachBudgetMs = SMALL_SYNC_BUDGET_MS;
+
       // Immediately re-call — comfortably inside GATE_OP_RETAIN_MS (5s default) — the exact window a re-call
-      // meant to "fetch the result" would land in after a cancel.
+      // meant to "fetch the result" would land in after a cancel. Same instance as r1 — sees the SAME
+      // retention cache r1's settle just wrote into, so this genuinely exercises `isRetainedResultUsable`.
       const p2 = sessions.runWorkerGate(workerX);
       const entered = await Promise.race([
         freshGateEnteredSignal.then(() => true),
