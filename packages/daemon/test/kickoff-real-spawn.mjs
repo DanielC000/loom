@@ -234,47 +234,64 @@ async function verifyRealDelivery(label, sessionId, role, kickoff) {
 const ROLES = process.env.KICKOFF_TEST_ROLES ? process.env.KICKOFF_TEST_ROLES.split(",") : ["worker", "manager", "platform", "setup", "assistant", "auditor"];
 
 try {
-  // ===================== Per-role sweep, realistic size (~7KB) =====================
-  for (const role of ROLES) {
-    const sessionId = `real-${role}`;
-    await verifyRealDelivery(`[${role}]`, sessionId, role, realisticKickoff(role));
-  }
+  try {
+    // ===================== Per-role sweep, realistic size (~7KB) =====================
+    for (const role of ROLES) {
+      const sessionId = `real-${role}`;
+      await verifyRealDelivery(`[${role}]`, sessionId, role, realisticKickoff(role));
+    }
 
-  // ===================== Large-payload section — 10KB and 40KB, DoD #3/#4 scale =====================
-  // The per-role sweep above proves role coverage at realistic size; THIS proves the mechanism doesn't
-  // silently degrade at the actual scale this card's fix exists for (the diagnosed incident's composed
-  // prompt was ~41KB). One role (worker) is enough here — role-to-role differences are in disallowedTools/
-  // mcpServers, already proven independent of payload size by the sweep above.
-  for (const targetSize of [10_000, 40_000]) {
-    const sessionId = `real-large-${targetSize}`;
-    const kickoff = realisticKickoff("worker", targetSize);
-    check(`[large ${targetSize}] fixture is actually built to the target scale`, kickoff.length >= targetSize);
-    await verifyRealDelivery(`[large ${targetSize}]`, sessionId, "worker", kickoff);
-  }
+    // ===================== Large-payload section — 10KB and 40KB, DoD #3/#4 scale =====================
+    // The per-role sweep above proves role coverage at realistic size; THIS proves the mechanism doesn't
+    // silently degrade at the actual scale this card's fix exists for (the diagnosed incident's composed
+    // prompt was ~41KB). One role (worker) is enough here — role-to-role differences are in disallowedTools/
+    // mcpServers, already proven independent of payload size by the sweep above.
+    for (const targetSize of [10_000, 40_000]) {
+      const sessionId = `real-large-${targetSize}`;
+      const kickoff = realisticKickoff("worker", targetSize);
+      check(`[large ${targetSize}] fixture is actually built to the target scale`, kickoff.length >= targetSize);
+      await verifyRealDelivery(`[large ${targetSize}]`, sessionId, "worker", kickoff);
+    }
 
-  // ===================== DoD #5 (Code Review MAJOR finding) — a LATE-booting real child ==================
-  // The fixture documents FIXTURE_READY_DELAY_MS (simulate SessionStart arriving late — the real claude
-  // process takes a while to boot before its TUI is up) but no test ever set it, leaving that documented
-  // seam completely unused. This drives it for real: the real child delays its own FIXTURE_READY line by
-  // 2s, so this harness's own `waitUntil(FIXTURE_READY)` genuinely waits — proving delivery still lands
-  // correctly (once, intact) when readiness itself is slow, not just when it's near-instant like every
-  // other scenario in this file.
-  {
-    process.env.FIXTURE_READY_DELAY_MS = "2000";
-    try {
-      await verifyRealDelivery("[late-ready]", "real-late-ready", "worker", realisticKickoff("worker"));
-    } finally {
-      delete process.env.FIXTURE_READY_DELAY_MS; // reset — every other scenario in this file expects instant readiness
+    // ===================== DoD #5 (Code Review MAJOR finding) — a LATE-booting real child ==================
+    // The fixture documents FIXTURE_READY_DELAY_MS (simulate SessionStart arriving late — the real claude
+    // process takes a while to boot before its TUI is up) but no test ever set it, leaving that documented
+    // seam completely unused. This drives it for real: the real child delays its own FIXTURE_READY line by
+    // 2s, so this harness's own `waitUntil(FIXTURE_READY)` genuinely waits — proving delivery still lands
+    // correctly (once, intact) when readiness itself is slow, not just when it's near-instant like every
+    // other scenario in this file.
+    {
+      process.env.FIXTURE_READY_DELAY_MS = "2000";
+      try {
+        await verifyRealDelivery("[late-ready]", "real-late-ready", "worker", realisticKickoff("worker"));
+      } finally {
+        delete process.env.FIXTURE_READY_DELAY_MS; // reset — every other scenario in this file expects instant readiness
+      }
+    }
+  } finally {
+    // Only a SAFETY NET for a session that never reached its own stop() inside verifyRealDelivery (an
+    // exception mid-run) — see stoppedSessions' own doc for why a double-stop must never happen.
+    const allSessionIds = [...ROLES.map((role) => `real-${role}`), ...[10_000, 40_000].map((n) => `real-large-${n}`), "real-late-ready"];
+    for (const sessionId of allSessionIds) {
+      if (stoppedSessions.has(sessionId)) continue;
+      try { host.stop(sessionId, "hard"); } catch { /* ignore */ }
     }
   }
-} finally {
-  // Only a SAFETY NET for a session that never reached its own stop() inside verifyRealDelivery (an
-  // exception mid-run) — see stoppedSessions' own doc for why a double-stop must never happen.
-  const allSessionIds = [...ROLES.map((role) => `real-${role}`), ...[10_000, 40_000].map((n) => `real-large-${n}`), "real-late-ready"];
-  for (const sessionId of allSessionIds) {
-    if (stoppedSessions.has(sessionId)) continue;
-    try { host.stop(sessionId, "hard"); } catch { /* ignore */ }
-  }
+} catch (err) {
+  // Card 7959b232: an uncaught throw here (e.g. a waitUntil timeout) used to leave this whole PROCESS
+  // hung for ~120s until test-daemon.mjs's own TEST_TIMEOUT_MS externally killed it — arriving mislabelled
+  // "exit timeout" when the real event was this throw, ~95s earlier. See
+  // docs/investigations/0bafbe35-uncaught-throw-blocks-exit/findings.md Stage 2: the safety-net stop()
+  // above measured 11.91ms (fast — nothing was slow), yet the process still never self-terminated; that
+  // investigation left WHY open (candidates: _tmp-fixture.mjs's own beforeExit/exit hooks, a lingering
+  // AttachConsole handle, node-pty itself) and deliberately did not chase it further. Catching the throw
+  // HERE — before it ever reaches Node's own (apparently unreliable, in this file) uncaught-exception path
+  // — and exiting explicitly sidesteps that ambiguity entirely: a genuine regression now fails in
+  // milliseconds instead of ~120s, correctly labelled, without needing the non-exit root-caused.
+  console.error(`\n💥 UNCAUGHT — ${err?.stack || err}`);
+  failures++;
+  console.log(`\n❌ ${failures} FAILURE(S) — including the uncaught exception above.`);
+  await finishAndExit(1);
 }
 
 console.log(failures === 0
