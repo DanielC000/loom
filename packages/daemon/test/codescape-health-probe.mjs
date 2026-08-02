@@ -867,7 +867,26 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
-    versionProbeTimeoutMs: 300, // short — the fixture hang only needs to exceed this to genuinely time out
+    // Card 8bc899ce: raised from 300 to 2000 — 300 made attempt 2 (a REAL `node <fixture-cli> --version`
+    // spawn, not a fixture-forced hang) race actual host spawn latency, so under contention it could ALSO
+    // time out and push the attempt count to 3, flaking this scenario's exact-2 assertion. MEASURED on this
+    // host (same {command,args} pair resolveCodescapeBin produces — `process.execPath <fixtureCli>
+    // --version`): idle n=30 mean 94ms (min 81/max 118); under synthetic 24-busy-spin-process CPU
+    // contention on this 16-core box (same methodology scenario (3)'s comment already cites) n=30 mean
+    // 552ms (min 143/p90 895/max 948); under REAL ambient contention from this host's own live fleet at
+    // measurement time (a concurrent `test:daemon` run plus several other worker worktree test/dev
+    // processes — not synthetic) n=20 mean 379ms (min 168/p90 553/max 689) — already past the OLD 300ms
+    // budget at the median. 2000ms clears every measured worst case here (synthetic and real) with
+    // >=2x margin, and matches what every OTHER scenario in this file already uses for
+    // versionProbeTimeoutMs (see (5)-(11)) — not a new number, the rest of the file's existing choice,
+    // now backed by a measurement.
+    // Attempt 1 stays fixture-forced regardless of this value (FAKE_CODESCAPE_VERSION_HANG_ATTEMPTS=1
+    // below never responds), so raising it removes the attempt-2 race without weakening what this
+    // scenario actually tests — the cost is this scenario's own wall time growing by roughly the delta
+    // (attempt 1 now pays the full budget before timing out, ~1.7s slower than before).
+    versionProbeTimeoutMs: 2000,
+    // Card 8bc899ce: versionProbeRetryDelayMs is unaffected by the above — it only paces the gap BETWEEN
+    // attempts, never raced against a real spawn.
     versionProbeRetryDelayMs: 50, // this card's new retry-backoff test seam
   });
   const warnings = captureWarnings();
@@ -908,6 +927,14 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     healthProbeIntervalMs: 300,
     healthProbeTimeoutMs: 180,
     healthProbeFailureThreshold: 3,
+    // Card 8bc899ce: DELIBERATELY left at 300 — NOT raised to 2000 like scenario (13)'s identical-looking
+    // field. HANG_ATTEMPTS="999" above means every attempt here is fixture-forced to hang, at every
+    // attempt, regardless of this value — there is no real subprocess completing quickly for it to race,
+    // so a short timeout costs nothing in correctness (unlike (13), where a real spawn had to beat it).
+    // Raising it here would only slow the test: this scenario already spends
+    // versionProbeMaxAttempts(3) x versionProbeTimeoutMs(this value) x 2 completed ticks purely waiting
+    // out timeouts, so matching (13)'s 2000 would add roughly (2000-300) x 3 x 2 = ~10.2s of pure wall
+    // time for zero coverage gained. This is the decoupling the card asked for, not an oversight.
     versionProbeTimeoutMs: 300,
     versionProbeMaxAttempts: 3,
     versionProbeRetryDelayMs: 50,
