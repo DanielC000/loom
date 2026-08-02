@@ -7088,6 +7088,19 @@ export class PtyHost {
     return this.live.get(sessionId)?.lastOutputAt;
   }
 
+  /** Cumulative count of characters possibly still stranded in this session's composer from an earlier
+   *  unconfirmed give-up/heal-if-stuck clear (`Live.composerDirtyLen` — see that field's own doc, card
+   *  3ce3fa39), or undefined if the session isn't live. SET synchronously the moment a give-up/heal fires
+   *  (no dependency on any later write); CLEARED only when a SUBSEQUENT submit()'s own defensive clear-
+   *  prefix goes on to CONFIRM (`composerDirtyLenClearedByGen` gates the reset) — so in the specific case
+   *  this getter exists to catch (text written, never submitted, nothing further arrives), the value stays
+   *  non-zero and readable indefinitely rather than requiring a later write to become observable. Card
+   *  dcd8659c: surfaced to worker_list/worker_status/my_context as a PULL read — this never touches
+   *  `submit()`/`enqueueStdin`/`drainPending`/the pty; it only reads the same in-memory field those write. */
+  getComposerDirtyLen(sessionId: string): number | undefined {
+    return this.live.get(sessionId)?.composerDirtyLen;
+  }
+
   /** Whether this session's first real turn has been CONFIRMED (`Live.firstTurnStarted` — flips true on
    *  the first `UserPromptSubmit` hook, see that field's own doc). Card 00bd3b4a: the discriminator
    *  `handleKickoffGiveUpExhausted` (sessions/service.ts) reads before treating an exhausted kickoff
