@@ -61,6 +61,41 @@ async function waitForCompletedCondition(cond, tickCounter, { pollMs = 25, stall
   return true;
 }
 
+// Card 92b0f44e: waits for the SPECIFIC completed probe tick whose OWN version-probe loop reached
+// `minAttempts` — never "any completed tick" (see `getCompletedProbeTickCount()`'s own counter, which
+// increments for EVERY probeHealth() call that runs to completion, including one whose `/graph/health`
+// fetch itself missed `healthProbeTimeoutMs` and returned before ever reaching the version probe at all).
+// Waiting on tick-completion alone is an unsound proxy for "the version probe ran on this tick" — a
+// bailed-at-the-health-stage tick satisfies "a tick completed" while leaving `getVersionProbeAttemptCount()`
+// unchanged from whatever it already was. This detects the tick-completion EDGE (the moment
+// `getCompletedProbeTickCount()` increases) and reads `getVersionProbeAttemptCount()` in that SAME
+// synchronous check — no `await` between the two reads, so nothing else in this single-threaded process
+// can advance the attempt counter in between (the supervisor's own attempt-loop only ever runs inside the
+// probeHealth() call whose completion this just observed, serialized by its `probeInFlight` guard — see
+// supervisor.ts). The observed count is therefore guaranteed to be EXACTLY what that one completed tick's
+// own loop produced, never a later, still-in-progress tick's partial count leaking in early. Keeps
+// checking on every subsequent tick completion until one reaches `minAttempts` (so an earlier bailed tick,
+// or several, are transparently skipped) or genuinely stalls.
+async function waitForTickReachingAttempts(sup, minAttempts, { pollMs = 25, stallTimeoutMs = 8000 } = {}) {
+  let lastTicks = sup.getCompletedProbeTickCount();
+  let lastProgressAt = Date.now();
+  while (true) {
+    await sleep(pollMs);
+    const ticks = sup.getCompletedProbeTickCount();
+    if (ticks !== lastTicks) {
+      lastTicks = ticks;
+      lastProgressAt = Date.now();
+      if (sup.getVersionProbeAttemptCount() >= minAttempts) return true;
+    }
+    if (Date.now() - lastProgressAt > stallTimeoutMs) return false; // genuinely stalled — no probe-tick progress at all
+  }
+}
+
+// Card 92b0f44e, precedent `19fbeede`/served-status.mjs's `reasonSuffix`: appends " — observed: N" to an
+// assertion label ONLY when the observed count actually mismatches the expectation, so a gate rejection
+// names the real value instead of discarding it — and the healthy/green path stays byte-identical (DoD #2).
+const attemptSuffix = (expected, actual) => actual !== expected ? ` — observed: ${actual}` : "";
+
 // Card 90550a97 review follow-up: an unresolvable installed build must warn LOUDLY but only ONCE per
 // distinct reason (never once per ~30s probe tick forever). Intercepts console.warn for the duration of a
 // scenario (still forwarding to the real console, so failures stay visible in test output) and counts
@@ -897,8 +932,10 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   check("(13) the first probe tick completed", sup.getCompletedProbeTickCount() >= 1);
 
   // ⭐ Observed ATTEMPT COUNT, never wall-clock (card f0718488's own DoD) — getVersionProbeAttemptCount()
-  // is incremented once per real subprocess spawn inside readInstalledBuild's retry loop.
-  check("(13) exactly 2 version-probe attempts were made (1 timeout + 1 retry that succeeded)",
+  // is incremented once per real subprocess spawn inside readInstalledBuild's retry loop. Prints the
+  // OBSERVED count on a mismatch (card 92b0f44e, manager follow-up) — same reasoning as (14): "a completed
+  // tick" alone doesn't discriminate WHICH failure this is.
+  check(`(13) exactly 2 version-probe attempts were made (1 timeout + 1 retry that succeeded)${attemptSuffix(2, sup.getVersionProbeAttemptCount())}`,
     sup.getVersionProbeAttemptCount() === 2);
   const diagnosticLines = warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
   check("(13) a transient timeout rescued by a retry never reaches the loud 'cannot read' diagnostic at all",
@@ -934,7 +971,26 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
     // Raising it here would only slow the test: this scenario already spends
     // versionProbeMaxAttempts(3) x versionProbeTimeoutMs(this value) x 2 completed ticks purely waiting
     // out timeouts, so matching (13)'s 2000 would add roughly (2000-300) x 3 x 2 = ~10.2s of pure wall
-    // time for zero coverage gained. This is the decoupling the card asked for, not an oversight.
+    // time for zero coverage gained. This is the decoupling the card asked for, not an oversight — that
+    // reasoning is CORRECT and stands, for the race it names (the subprocess race (13) has and (14) doesn't).
+    //
+    // Card 92b0f44e: that reasoning addressed only ONE of two races on this config block. The SECOND —
+    // this scenario's own probe budget (3 x (300+50) ~= 1050ms) exceeding healthProbeIntervalMs (300ms) —
+    // turned out NOT to be a tick-OVERLAP race: `probeInFlight` (see supervisor.ts) already makes a literal
+    // tick overlap structurally impossible (a `setInterval` firing while a prior probeHealth() call is
+    // still in flight is a no-op, immune from ever making two overlapping calls both walk the version-probe
+    // loop or both increment its counters). The REAL second race is different: `getCompletedProbeTickCount()`
+    // increments for ANY probeHealth() call that runs to completion, including one whose OWN `/graph/health`
+    // fetch (bounded by healthProbeTimeoutMs:180 here) itself misses that bound under host contention and
+    // returns BEFORE ever reaching the version probe at all — "a completed tick" is not the same claim as
+    // "a tick that ran the version probe". Waiting on tick-completion alone as a proxy for "the version
+    // probe genuinely ran" can therefore observe a FEWER-than-expected attempt count (0, from a tick that
+    // never got there), never a leaked/duplicated one from an impossible overlap. Reproduced deterministically
+    // (health-probe wedged for the first ~400ms, then released): the old wait condition read
+    // `getVersionProbeAttemptCount() === 0` where it expected 3. Fixed below by waiting for the specific
+    // tick whose OWN loop reached the expected attempt count (`waitForTickReachingAttempts`), never for "any
+    // completed tick" — see that helper's own doc for why this needs no widening of healthProbeTimeoutMs
+    // and no change to the 300/1050 arithmetic above, both of which stay exactly as this card left them.
     versionProbeTimeoutMs: 300,
     versionProbeMaxAttempts: 3,
     versionProbeRetryDelayMs: 50,
@@ -944,11 +1000,13 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   for (let i = 0; i < 50 && readServeCalls(callsFile).length < 1; i++) await sleep(50);
   const pidBefore = sup.getPid();
 
-  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= 1, () => sup.getCompletedProbeTickCount());
-  check("(14) the first probe tick completed", sup.getCompletedProbeTickCount() >= 1);
+  const firstTickReached = await waitForTickReachingAttempts(sup, 3);
+  check("(14) waitForTickReachingAttempts located the completed tick whose own loop reached the version-probe attempt budget",
+    firstTickReached);
   // ⭐ Observed ATTEMPT COUNT, never wall-clock — EXACTLY the configured max, not fewer (budget genuinely
-  // exhausted) and not more (bounded, no runaway retry).
-  check("(14) EXACTLY the max (3) version-probe attempts were made for the first tick",
+  // exhausted) and not more (bounded, no runaway retry). Prints the OBSERVED count on a mismatch (card
+  // 92b0f44e), never just the expectation, mirroring `19fbeede`/served-status.mjs's `reasonSuffix`.
+  check(`(14) EXACTLY the max (3) version-probe attempts were made${attemptSuffix(3, sup.getVersionProbeAttemptCount())}`,
     sup.getVersionProbeAttemptCount() === 3);
 
   const diagnosticLines = () => warnings.lines.filter((l) => l.includes("cannot read the INSTALLED build id"));
@@ -968,9 +1026,10 @@ for (const installedFailureMode of ["__FAIL__", "__NONJSON__"]) {
   // Drive a second completed tick — the retry budget re-exhausts EVERY tick (never cached: checkBuildDrift
   // calls readInstalledBuild fresh on every probe), but the loud diagnostic must stay latched at exactly
   // one (same reason, unchanged) rather than re-firing per tick, and the fail-safe must hold across ticks.
-  const ticksAtCheckpoint = sup.getCompletedProbeTickCount();
-  await waitForCompletedCondition(() => sup.getCompletedProbeTickCount() >= ticksAtCheckpoint + 1, () => sup.getCompletedProbeTickCount());
-  check("(14) a second completed tick re-spends the full attempt budget too (cumulative: 6 across 2 ticks) — the retry budget is per-tick, never cached",
+  const secondTickReached = await waitForTickReachingAttempts(sup, 6);
+  check("(14) waitForTickReachingAttempts located a second completed tick reaching the cumulative attempt budget (6 across 2 ticks)",
+    secondTickReached);
+  check(`(14) a second completed tick re-spends the full attempt budget too (cumulative: 6 across 2 ticks) — the retry budget is per-tick, never cached${attemptSuffix(6, sup.getVersionProbeAttemptCount())}`,
     sup.getVersionProbeAttemptCount() === 6);
   check("(14) the diagnostic still did not re-fire on the second tick (still exactly ONE, same reason)",
     diagnosticLines().length === 1);
