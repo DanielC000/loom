@@ -375,6 +375,11 @@ try {
         return s?.processState === "live" ? { delivered: true } : { delivered: false, position: 1 };
       },
       getPendingEntries: (id) => pendingBySession.get(id) ?? [],
+      // Card 2281009d: classifyIdleWorker now also consults hasFirstTurnStarted before its broken-spawn
+      // branch. (S2) below is explicitly "engineSessionId SET (a real turn ran)" — stubbing this true
+      // keeps that scenario genuinely representing a real turn; (S1)/(S3)/(S4) use engineSessionId:null,
+      // which returns from the PRE-EXISTING check before this stub is ever consulted.
+      hasFirstTurnStarted: () => true,
     };
     const sessions = new SessionService(db, pty, new OrchestrationControl());
     return { dbFile, db, projId, agentId, enqueued, sessions, pendingBySession };

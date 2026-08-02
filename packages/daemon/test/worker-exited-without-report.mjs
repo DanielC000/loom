@@ -75,6 +75,10 @@ function makeEnv({ projectConfig = {} } = {}) {
       return s?.processState === "live" ? { delivered: true } : { delivered: false, position: 1 };
     },
     getPendingEntries: (id) => pendingBySession.get(id) ?? [],
+    // Card 2281009d: classifyIdleWorker now also consults hasFirstTurnStarted before its broken-spawn
+    // branch — this file's workers are meant to represent ones that genuinely ran (it tests the
+    // exited-without-report path, not broken-spawn detection), so this stubs it true unconditionally.
+    hasFirstTurnStarted: () => true,
   };
   const sessions = new SessionService(db, pty, new OrchestrationControl());
   return { dbFile, db, projId, agentId, enqueued, sessions, pendingBySession };

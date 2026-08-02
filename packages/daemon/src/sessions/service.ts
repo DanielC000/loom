@@ -7492,9 +7492,14 @@ export class SessionService {
    *       with no pending wake falls straight through to the stranded check below.
    * - `broken-spawn` — `busy` fell to false WITHOUT the worker ever running a turn (the fresh-spawn
    *   kickoff race — host.ts's scheduleKickoffGuarantee / the short pre-first-turn healIfStuck window).
-   *   `engineSessionId` is captured ONLY on the engine's own SessionStart hook, so `null` here is
-   *   definitive proof no turn — not even the kickoff — ever started. A DISTINCT failure, not a "did not
-   *   report" stall.
+   *   Two independent proofs feed this, checked in order: `engineSessionId` is captured ONLY on the
+   *   engine's own SessionStart hook, so `null` is definitive proof not even the kickoff ever started.
+   *   But `engineSessionId` being SET is NOT proof a turn ran (card 2281009d) — SessionStart can fire
+   *   while the kickoff sits unsent in the composer forever (card f91c8634's parked-Enter signature), so
+   *   this ALSO checks the same "did a turn actually start" fact `handleKickoffGiveUpExhausted` uses
+   *   (`hasFirstTurnStarted` OR a non-empty transcript) before falling through past this branch — keeping
+   *   both nudge paths agreeing on one fact instead of one keying off session-id presence and the other
+   *   off turn/transcript state. Either way: a DISTINCT failure, not a "did not report" stall.
    * - `parked-ack` — its LATEST `worker_report` (status `progress`, `done`, OR `blocked` — CR fold-in: a
    *   `done` report on a board with no review-role column never moves the task off `active`, so it looks
    *   identical to a progress-park; a `blocked` report is the same shape — the worker correctly stopped
@@ -7619,6 +7624,41 @@ export class SessionService {
     if (!task || task.columnKey !== activeKey) return { kind: "not-stranded" }; // reported/merged, or no active lane
 
     if (!w.engineSessionId) return { kind: "broken-spawn" };
+
+    // Card 2281009d: `engineSessionId` being SET only proves the SessionStart hook fired (an engine
+    // session was established) — it does NOT prove a turn ever actually ran. The genuine spawn-broken
+    // signature (turnSeq 0, empty transcript, kickoff parked unsent in the composer — see card f91c8634)
+    // can leave engineSessionId captured while turn 1 never starts, which used to fall through this
+    // check straight into the report-derived branches below and land on the generic "finished a turn and
+    // is idle" wording — factually false for a session that never ran one, AND directly contradicting the
+    // `[loom:worker-spawn-broken]` notice `handleKickoffGiveUpExhausted` (above) can independently fire
+    // for the identical session, since that path already discriminates the SAME state correctly. Mirror
+    // its exact discriminator (hasFirstTurnStarted OR non-empty transcript) here so both nudge paths agree
+    // on ONE fact instead of two disagreeing ones. ALSO OR'd with "has this worker ever called
+    // worker_report" — a real worker_report event is itself definitive proof a turn ran (an MCP tool call
+    // can only be made from within a live engine turn), which makes it strictly stronger evidence than the
+    // other two signals for a worker whose report already reconciles it as parked-ack/wake/background below;
+    // without this OR, a worker that reported and is legitimately parked would be wrongly reclassified as
+    // broken-spawn.
+    //
+    // ORDER IS DELIBERATE, cheapest-and-most-decisive first — all three reads are side-effect-free, so
+    // reordering this `&&` chain can never change the result, only its cost:
+    //   1. hasFirstTurnStarted — free, in-memory Map read.
+    //   2. listEventsForWorker — a local sqlite query, sub-ms.
+    //   3. readTranscript — SYNCHRONOUS filesystem I/O. For the exact case this branch targets (a worker
+    //      whose transcript genuinely doesn't exist yet), resolveTranscriptFile's fast existsSync path
+    //      always misses by construction, so this hits its full recursive fallback scan every time — that
+    //      function's own doc (sessions/transcript.ts) cites a MEASURED worst case of ~169-239ms on this
+    //      repo's own ~/.claude/projects (5778 dirs; that repo's own historical measurement, not remeasured
+    //      here). Do NOT "tidy" this back into declaration order — that silently reintroduces a sync FS
+    //      scan on a path that a cheap sqlite check would already have skipped.
+    if (
+      !this.pty.hasFirstTurnStarted(workerSessionId) &&
+      !this.db.listEventsForWorker(workerSessionId).some((e) => e.kind === "worker_report") &&
+      readTranscript(w.cwd, w.engineSessionId).length === 0
+    ) {
+      return { kind: "broken-spawn" };
+    }
 
     // Card 78e4b3f2: strip a leading possible-duplicate tag before this prefix match. Unlike an in-session
     // requeue (whose `.text` stays pristine until the moment of actual redrain — see drainPending/

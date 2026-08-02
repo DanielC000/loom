@@ -49,6 +49,12 @@ function makeEnv() {
     },
     getPendingEntries: (id) => pendingBySession.get(id) ?? [],
     purgeQueuedWorkerIdleNudges: () => 0,
+    // Card 2281009d: classifyIdleWorker now also consults hasFirstTurnStarted before its broken-spawn
+    // branch (for TASKED sessions — taskless goes through a separate engineSessionId-only check this
+    // file already exercises in (4) above). Default true so a tasked, turn-having worker in this file
+    // isn't misclassified; any case here that needs the never-started signature sets engineSessionId
+    // null instead, which the pre-existing check already handles.
+    hasFirstTurnStarted: () => true,
   };
   const control = new OrchestrationControl();
   const sessions = new SessionService(db, pty, control);

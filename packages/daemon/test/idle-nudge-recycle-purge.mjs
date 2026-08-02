@@ -164,8 +164,15 @@ try {
   // strand, unrelated to the recycle) — a FRESH, correctly-addressed nudge naming the SUCCESSOR's id must
   // still fire, via the exact same real notifyManagerOfIdleWorker path IdleWatcher's periodic tick calls
   // (idle-watcher.ts tickIdleWorkers -> notifyIdleWorker -> sessions.notifyManagerOfIdleWorker).
+  // Card 2281009d: engineSessionId being SET is no longer sufficient by itself to escape classifyIdleWorker's
+  // broken-spawn branch (that was the exact bug — SessionStart firing is not proof a turn ran) — a REAL
+  // UserPromptSubmit+Stop cycle is needed to genuinely simulate "this worker ran a turn, then went idle
+  // without reporting", mirroring how a real engine proves the same fact. Stop's busy(false) edge fires
+  // notifyManagerOfIdleWorker automatically via this test's own events.onBusy wiring (same as wkrId above),
+  // so the explicit call is no longer needed here.
   db.setEngineSessionId(successor.id, `eng-${successor.id}`); // engine attached (else classifyIdleWorker reads broken-spawn)
-  sessions.notifyManagerOfIdleWorker(successor.id);
+  host.deliverHook(successor.id, { hook_event_name: "UserPromptSubmit" }); // a genuine turn actually starts
+  host.deliverHook(successor.id, { hook_event_name: "Stop" }); // ...and ends, unreported -> busy(false) edge
   const queuedAfterSuccessorIdle = host.getPendingEntries(mgrId);
   const successorNudge = queuedAfterSuccessorIdle.find((e) => e.text.startsWith(`[loom:worker-idle] worker ${successor.id} `));
   check("(2) a genuinely idle-and-unreported SUCCESSOR still produces its OWN correctly-addressed nudge", !!successorNudge);
