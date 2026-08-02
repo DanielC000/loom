@@ -698,8 +698,13 @@ what you checked. Found none? Treat it as live.
    hunt. The binding rules hold whether or not you open it: launch such servers ONLY through the bundled
    helpers (they record the exact child pid); **stop that tracked pid before you request a merge for the
    worktree** (a live process holds the worktree dir open and fails the merge's cleanup on Windows);
-   **never kill by image name (`taskkill /IM node.exe`) and never kill by port** — a host-wide by-name
-   kill has previously taken down the entire self-hosting daemon; and pass screenshot calls an
+   **scope any process match to its WORKTREE PATH and nothing else — not image name (`taskkill /IM
+   node.exe`), not port, not a session id, not a project id.** Image name and port are obviously broad;
+   an id LOOKS precise, which is exactly why it's the dangerous one — a match on a shared session or
+   project id segment can surface every worktree that id has ever touched, not just the one you mean. A
+   host-wide by-name kill has previously taken down the entire self-hosting daemon, and a killed peer
+   process doesn't announce itself as a kill — it reads as an unrelated failure and gets misdiagnosed as
+   one; and pass screenshot calls an
    **ABSOLUTE path under an allowed root** (the per-session scratch dir or the project's vault path) or
    no path at all — never a bare filename, which lands in the repo working tree.
 

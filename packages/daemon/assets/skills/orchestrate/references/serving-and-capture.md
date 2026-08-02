@@ -2,8 +2,9 @@
 
 The operational recipes for eyeballing artifacts and dev servers, printing PDFs, and persisting
 screenshots. The binding safety rules — bundled tracked-pid helpers only, stop the tracked pid before
-requesting a merge, never kill by image name or port, absolute screenshot paths under allowed roots —
-are in the core doctrine (the loop, step 9); this file carries the how.
+requesting a merge, scope any process match to its worktree path and nothing else (not image name, not
+port, not a session or project id), absolute screenshot paths under allowed roots — are in the core
+doctrine (the loop, step 9); this file carries the how.
 
 ## Serving a static on-disk HTML artifact
 
@@ -24,18 +25,24 @@ them reinvent an ephemeral server.
 To eyeball a **live dev server** you launch yourself against a worker's worktree (not a static
 artifact) — never hand-hunt `netstat`/`taskkill` for the listener PID afterward: that output is
 locale-dependent to parse (a non-English OS locale renders different column headers/states), and a
-kill by name or port can reach a process you never spawned — another dev server, an unrelated
-project, or even the self-hosting daemon. Launch it through the **bundled** helper instead — it
-records the EXACT child pid it spawns and tears down only that pid (never a name/port search):
+kill scoped to anything but the worktree path — name, port, session id, or project id — can reach a
+process you never spawned — another dev server, an unrelated project, or even the self-hosting daemon.
+An id looks precise, which is exactly why it's the dangerous one: it matches every worktree that id
+has ever touched, not just the one you mean. Launch it through the **bundled** helper instead — it
+records the EXACT child pid it spawns and tears down only that pid (never a name/port/id search):
 `node .claude/skills/orchestrate/scripts/dev-server.mjs start <worktree-dir> -- <command...>` prints
 the pid and returns immediately (the server keeps running); eyeball via Playwright at whatever URL
 the command itself prints, then
 `node .claude/skills/orchestrate/scripts/dev-server.mjs stop <worktree-dir>` before requesting a
 merge for that worktree. A dev server left running is exactly what makes `worker_merge_confirm`'s
 `git worktree remove` fail on Windows (the live process holds the worktree dir open) — stopping it by
-tracked handle before you request the merge avoids that. **Never kill by image name
-(`taskkill /IM node.exe`) and never kill by port** — a host-wide by-name kill has previously taken
-down the entire self-hosting daemon.
+tracked handle before you request the merge avoids that. **Scope any process match to its worktree
+path and nothing else — not image name (`taskkill /IM node.exe`), not port, not a session id, not a
+project id.** Image name and port are obviously broad; an id looks precise, which is exactly why it's
+the dangerous one — a match on a shared session or project id segment can surface every worktree that
+id has ever touched, not just the one you mean. A host-wide by-name kill has previously taken down the
+entire self-hosting daemon, and a killed peer process doesn't announce itself as a kill — it reads as
+an unrelated failure and gets misdiagnosed as one.
 
 ## Printing served HTML to PDF
 

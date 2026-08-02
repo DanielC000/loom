@@ -236,9 +236,15 @@ defer to the project for the WHAT; grep your diff for project-specific tokens be
    locks on its own `node_modules` (on Windows a live Vite/esbuild binary can't be unlinked), so the merge
    gate's install/build step — and post-merge worktree cleanup — fails with a spurious `EPERM`/lock error
    that looks like a broken gate but is really your process. **If you must find the process to kill it,
-   scope the match STRICTLY to one whose working directory / command line is UNDER YOUR OWN WORKTREE PATH;
-   NEVER kill by bare image name (every `node`/`esbuild`) or by port alone** — that reaches the human's own
-   dev servers, unrelated projects, and even the host daemon (it has already stopped an unrelated process).
+   scope the match to its WORKTREE PATH and nothing else — not bare image name (every `node`/`esbuild`),
+   not port, not a session id, not a project id.** Image name and port are obviously broad, so they're easy
+   to reject; an id LOOKS precise, which is exactly why it's the dangerous one — a match on a shared
+   session or project id segment can surface every worktree that id has ever touched, including a
+   different session's still-running process and long-dead worktrees that happen to share the prefix. The
+   worktree path is the only selector that is actually yours. Getting this wrong reaches the human's own
+   dev servers, unrelated projects, and even the host daemon (it has already stopped an unrelated
+   process) — and a killed peer process doesn't announce itself as a kill, it reads as an unrelated
+   failure, so the victim misdiagnoses its own work instead of catching the real cause.
    And if the project has an
    end-to-end / browser test suite, a **new or changed user-facing feature** ships with (or updates)
    a test in it, run green as part of the DoD — see the project's own testing docs (its `CLAUDE.md`).
