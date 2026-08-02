@@ -614,11 +614,14 @@ export interface PendingMerge {
   /** ISO instant the gate started — drives the live elapsed (M:SS) timer on the Board card. */
   startedAt: string;
   /** Terminal classification, set only once the op has settled (undefined while `state === "running"`):
-   *  "merged" (a successful squash-merge), "rejected" (the gate/stranded-work/empty-stage check resolved
-   *  `merged:false` — no exception, the merge was refused), or "failed" (the confirm itself threw). This
-   *  is what lets the Board distinguish a rejected merge (amber) from a merged one (phosphor) instead of
-   *  both reading as green "merged" via `state === "done"`. */
-  outcome?: "merged" | "rejected" | "failed";
+   *  "merged" (a successful squash-merge), "cancelled" (card 361520a0, Half Four — the confirm was
+   *  withdrawn before it ever ran; NO verdict was reached, the branch was neither merged nor rejected —
+   *  checked BEFORE "rejected" below since a cancelled outcome also carries `merged:false`), "rejected"
+   *  (the gate/stranded-work/empty-stage check resolved `merged:false` with no `cancelled` flag — no
+   *  exception, the merge was refused), or "failed" (the confirm itself threw). This is what lets the
+   *  Board distinguish a rejected merge (amber) from a merged one (phosphor) instead of both reading as
+   *  green "merged" via `state === "done"` — and, since Half Four, from a cancelled one (neither). */
+  outcome?: "merged" | "cancelled" | "rejected" | "failed";
 }
 
 export interface Session {
@@ -825,7 +828,19 @@ export type OrchestrationEventKind =
   // with reason "superseded" (so the done-guard + boot-recovery never re-drive them).
   | "redirect_worker"
   | "recycle_begin" | "recycle_complete" | "merge_request" | "merge_done"
-  | "merge_rejected" | "build_gate" | "kill_switch" | "schedule_fired"
+  | "merge_rejected"
+  // A queued merge-gate confirm was CANCELLED before it was ever admitted (`gate_cancel`, card 8d585277,
+  // or the automatic superseded-by-merge path) — card 361520a0, Half Four. Deliberately DISTINCT from
+  // `merge_rejected`: no verdict was reached, the branch was neither merged nor rejected, so this must
+  // never be read as a rejection. Filed under the confirming MANAGER (managerSessionId = its id);
+  // `detail` carries { cancelled: true, cancelKind, cancelDetail, gateCap, concurrentGates,
+  // concurrentGatesMax } — mirrors `worker_gate`'s own `{cancelled:true}` shape for the analogous
+  // worker-self-check cancel, which stays filed under its OWN kind rather than a failure kind for the
+  // identical reason. Deliberately excluded from `EVENT_TRIGGER_EVENT_KINDS` (a cancel is not something a
+  // user automation should fire on) and from `GATE_HISTORY_KINDS` (mirrors `merge_rejected`, which is
+  // also excluded there).
+  | "merge_cancelled"
+  | "build_gate" | "kill_switch" | "schedule_fired"
   // Merge-gate TRANSIENT-KILL auto-retry (card bcba83a1): `build_gate` failed with a retry-eligible
   // classification (an OOM/SIGKILL, or the daemon's own gateTimeoutMs bound) — `build_gate_retry_attempt`
   // marks that the one auto-retry is about to run (`detail.priorClass`), `build_gate_retry` records its

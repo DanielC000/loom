@@ -580,6 +580,11 @@ try {
     const status = sessions.gateStatus(opId);
     check("(e2e merge verdict fail — THE FIX) gate_status alone reports outcome:\"fail\" for a settled rejected merge, past eviction", status.state === "settled" && status.outcome === "fail");
     check("(e2e merge verdict fail) gateDetail carries the SAME rich diagnosis the [loom:merge-rejected] nudge embeds", status.gateDetail?.failedStep === "pnpm gate" && status.gateDetail?.failingTest === "some_test.mjs" && status.gateDetail?.exitCode === 1);
+    // Card 361520a0, Half Three: `gateDetail.stderrTail`/`.steps` used to be silently dropped here (present
+    // on the SYNC ConfirmMergeResult and in the pty notify text, but never persisted into the durable
+    // verdict payload gate_status/gate_history read) — the exact "carries no tail" gap the card measured.
+    check("(e2e merge verdict fail — HALF THREE) gate_status ALSO carries the stderr tail — previously dropped here", status.gateDetail?.stderrTail === "FAIL  some_test.mjs");
+    check("(e2e merge verdict fail — HALF THREE) gate_status ALSO carries per-step durations — previously dropped here", Array.isArray(status.gateDetail?.steps) && status.gateDetail.steps.length === 1 && status.gateDetail.steps[0].step === "pnpm gate" && status.gateDetail.steps[0].durationMs === 900);
     check("(e2e merge verdict fail) extended is false (spawned, never extended) — NOT undefined (a distinct claim from \"never spawned\", see the negative control below)", status.extended === false);
     check("(e2e merge verdict fail) admittedAt/settledAt/totalDurationMs are ALL present on the fail path too (parity with pass)", typeof status.admittedAt === "string" && typeof status.settledAt === "string" && typeof status.totalDurationMs === "number");
     // Card a1a8c5c4: outputTail is now a TOP-LEVEL field on both outcomes (mirroring the sibling "gate"

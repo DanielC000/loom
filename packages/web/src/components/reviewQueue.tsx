@@ -134,7 +134,12 @@ function ReviewCard({ workerId, worker, analysis, loading, error, onReview }: {
           {merge.isPending ? "Merging…" : "Approve & merge"}
         </Button>
       </div>
-      {merge.data && !merge.data.merged && (
+      {/* `pending` (merged:null, card 361520a0 Half Four) is a still-running gate, NOT a rejection —
+          checked BEFORE the `!merged` branch below, which is a genuine refusal only. */}
+      {merge.data?.pending && (
+        <span style={{ fontFamily: font.mono, fontSize: 11, color: color.cyan }}>still running — {merge.data.reason}</span>
+      )}
+      {merge.data && !merge.data.pending && merge.data.merged === false && (
         <span style={{ fontFamily: font.mono, fontSize: 11, color: color.red }}>rejected — {merge.data.reason}</span>
       )}
     </Panel>

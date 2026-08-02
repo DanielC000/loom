@@ -412,17 +412,20 @@ function workerStatus(w: SessionListItem): { tone: Tone; label: string; glow?: b
 // "RETAINED TERMINAL VIEW" doc), so the terminal fill below has a real chance to render before
 // `pendingMerge` reverts to null and the card falls back to its normal worker-status row. `pm.outcome`
 // (not the raw `pm.state`, which can't tell a merge SUCCESS from a gate REJECTION — both resolve to
-// "done") drives which of the three fills renders: "merged" (phosphor), "rejected" (amber — a distinct
-// solid fill from the RUNNING sweep, which is also amber but animated), or "failed" (red, an unexpected
-// exception during confirm). `outcome` is only absent for a legacy/synthetic "done" with no outcome field
-// (e.g. an older cached row) — that degrades to "merged" for backward compatibility, matching the old
-// done⇒merged reading.
-type MergeState = "running" | "merged" | "rejected" | "failed";
+// "done") drives which of the four fills renders: "merged" (phosphor), "cancelled" (cyan — card
+// 361520a0, Half Four: NO verdict was reached, so this must never render as the same amber "rejected"
+// fill a real refusal gets — checked before "rejected" below since a cancelled outcome also carries
+// `merged:false`), "rejected" (amber — a distinct solid fill from the RUNNING sweep, which is also amber
+// but animated), or "failed" (red, an unexpected exception during confirm). `outcome` is only absent for
+// a legacy/synthetic "done" with no outcome field (e.g. an older cached row) — that degrades to "merged"
+// for backward compatibility, matching the old done⇒merged reading.
+type MergeState = "running" | "merged" | "cancelled" | "rejected" | "failed";
 type MergeDisplay = { state: MergeState; tone: Tone; label: string; startedAt: string };
 function mergeDisplay(pm: PendingMerge | null | undefined): MergeDisplay | null {
   if (!pm) return null;
   if (pm.state === "running") return { state: "running", tone: "amber", label: "merging", startedAt: pm.startedAt };
   if (pm.state === "failed" || pm.outcome === "failed") return { state: "failed", tone: "red", label: "failed", startedAt: pm.startedAt };
+  if (pm.outcome === "cancelled") return { state: "cancelled", tone: "cyan", label: "cancelled", startedAt: pm.startedAt };
   if (pm.outcome === "rejected") return { state: "rejected", tone: "amber", label: "rejected", startedAt: pm.startedAt };
   return { state: "merged", tone: "phosphor", label: "merged", startedAt: pm.startedAt }; // "merged", or a legacy/synthetic "done" with no outcome
 }
@@ -462,12 +465,13 @@ function MergePill({ merge }: { merge: MergeDisplay }) {
 
 // The bottom-edge hairline itself. RUNNING → an amber segment sweeping left↔right (the CSS keyframes
 // degrade to a static amber bar under prefers-reduced-motion); settled → a solid full-width fill —
-// phosphor (merged, with a faint CRT glow), amber (rejected — a solid bar, distinct from the RUNNING
-// sweep's animated one), or red (failed). aria-hidden — the worker-row pill already names the state in
-// text.
+// phosphor (merged, with a faint CRT glow), cyan (cancelled — no verdict reached, deliberately NOT the
+// same amber a real rejection gets), amber (rejected — a solid bar, distinct from the RUNNING sweep's
+// animated one), or red (failed). aria-hidden — the worker-row pill already names the state in text.
 function MergeTrack({ merge }: { merge: MergeDisplay }) {
   const fillStyle: React.CSSProperties =
     merge.state === "merged" ? { background: color.phosphor, boxShadow: `0 0 6px ${color.phosphor}` }
+    : merge.state === "cancelled" ? { background: color.cyan }
     : merge.state === "rejected" ? { background: color.amber }
     : { background: color.red };
   return (

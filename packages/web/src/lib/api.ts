@@ -585,8 +585,12 @@ export const api = {
   // rather than hand-writing the key/fetcher, so the cache entry is genuinely shared.
   workerDiff: (sessionId: string) => get<BranchDiff>(`/api/sessions/${sessionId}/diff`),
   // Human-initiated merge of a worker's branch — runs the daemon's fail-closed build gate then
-  // merges (manager derived from the worker's parentSessionId server-side).
-  mergeWorker: (sessionId: string) => post<{ merged: boolean; reason?: string }>(`/api/sessions/${sessionId}/merge`),
+  // merges (manager derived from the worker's parentSessionId server-side). `merged:null` (card
+  // 361520a0, Half Four) is a THIRD state, distinct from `false` — the bounded wait ceiling was hit
+  // while the gate is STILL genuinely running (`pending:true`, `opId` set); it was NOT rejected. A
+  // consumer must check `pending`/`merged === null` BEFORE reading `!merged` as "rejected" — see the
+  // REST route's own doc for the incident a `false`-only shape caused.
+  mergeWorker: (sessionId: string) => post<{ merged: boolean | null; pending?: boolean; opId?: string; reason?: string }>(`/api/sessions/${sessionId}/merge`),
   // `schedulerEnabled` is the boot-time cron-Scheduler gate (LOOM_SCHEDULER_ENABLED=1 OR resolved
   // orchestration.schedulerEnabled). Read-only; the Schedules page uses it to warn, honestly, when
   // created schedules will NOT fire because the scheduler is off (the default).

@@ -36,7 +36,11 @@ function ReviewPanelInner({ workerId }: { workerId: string }) {
 
   const merge = useMutation({
     mutationFn: () => api.mergeWorker(workerId),
-    onSuccess: (r) => { setResult(r.merged ? "✓ merged to main" : `rejected — ${r.reason}`); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
+    // `pending` (merged:null, card 361520a0 Half Four) means the gate is STILL running — checked BEFORE
+    // `r.merged` below, which used to read the pending case's `false` as a genuine rejection and show
+    // "rejected — …" for a merge that was never actually refused (the exact re-click bait this card's
+    // dedupe exists to prevent).
+    onSuccess: (r) => { setResult(r.pending ? `still running — ${r.reason}` : r.merged ? "✓ merged to main" : `rejected — ${r.reason}`); qc.invalidateQueries({ queryKey: ["allSessions"] }); },
     onError: (e) => setResult(`error — ${(e as Error).message}`),
   });
   const requestChanges = useMutation({

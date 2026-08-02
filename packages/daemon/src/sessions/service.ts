@@ -210,10 +210,13 @@ export interface DanglingWorkerEntry {
  *  completion callback reads it to skip the redundant generic `[loom:merge-done]`/`[loom:merge-failed]`
  *  echo when the manager was already told. Left `undefined` only on the plain GREEN merge return — that
  *  path sends no direct nudge of its own, so the tracked wrapper's generic echo is the sole signal.
- *  `opId` (card 369d8824): the correlation stamp threaded from {@link PendingOpRegistry.attach} (or
- *  minted fresh for a caller outside that registry, e.g. the human REST merge route) — carried on every
- *  return so a manager juggling several concurrent merges can match this outcome back to the specific
- *  `worker_merge_confirm` call that produced it.
+ *  `opId` (card 369d8824): the correlation stamp threaded from {@link PendingOpRegistry.attach} (or minted
+ *  fresh for a caller outside that registry — since card 361520a0's Half One routed the last such caller,
+ *  the human REST merge route, through {@link SessionService.confirmWorkerMergeUntilSettled} /
+ *  {@link SessionService.confirmWorkerMergeTracked}, NO current caller takes this branch; kept as a
+ *  defensive fallback for `confirmWorkerMerge` being called directly again in the future, not a live path
+ *  today) — carried on every return so a manager juggling several concurrent merges can match this outcome
+ *  back to the specific `worker_merge_confirm` call that produced it.
  *  `gateSteps` (card a2873f7e): per-step `{step, durationMs, status}` from the gate that just ran, forwarded
  *  from {@link GateSequentialResult.steps} on the GREEN path — `undefined` when the gate was reused (never
  *  actually spawned, see the reuse-a-green-self-check path) or when there's no gate configured at all.
@@ -293,6 +296,15 @@ type ConfirmMergeResult = {
    *  notify and this field are built from the identical local variable at each site, so they can never
    *  drift apart. `undefined` only for the plain GREEN merge return (there is no rejection detail to carry). */
   detailText?: string;
+  /** Card 361520a0, Half Two: a distinct "no verdict" outcome — mirrors {@link WorkerGateResult.cancelled}.
+   *  `merged` is always `false` alongside this, but this must NEVER be read as a rejection: no gate ever
+   *  ran for this attempt (`gate_cancel` withdrew it while it was still QUEUED, before admission — see
+   *  `GateSemaphore.cancelQueued`'s doc), so there is nothing to diagnose and nothing to hold against the
+   *  branch. `cancelKind` distinguishes an automatic supersede from a manager's explicit `gate_cancel`; see
+   *  {@link GateCancelKind}'s own doc. Only reachable while QUEUED — a RUNNING merge gate still refuses
+   *  cancellation entirely (see `cancelGateOp`'s own doc for why those two phases deliberately differ). */
+  cancelled?: boolean;
+  cancelKind?: GateCancelKind;
 };
 
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
@@ -397,12 +409,20 @@ function deriveWorkerGateVerdict(
  * outcome, because the merge-kind `onSettle` call site never passed a verdict at all before this).
  *   - a thrown exception (`outcome.ok:false`) → `"error"`, `reason` only (nothing else is trustworthy —
  *     the throw could have struck at literally any point, see `ConfirmMergeResult`'s own doc).
+ *   - `outcome.value.cancelled` (card 361520a0, Half Two) → `"cancelled"`, `reason` only — mirrors
+ *     `deriveWorkerGateVerdict`'s own cancelled branch: NOT a failure, no verdict was reached, must never
+ *     be read as `"fail"`. Checked BEFORE `merged` below (a cancelled outcome always carries `merged:false`
+ *     too, but the cancellation is the fact that matters).
  *   - `outcome.value.merged` → `"pass"`, carrying `gateExtended` (renamed `extended` in the payload, same
  *     field every other kind uses) when a gate actually ran for this merge — `undefined` for a gateless
  *     project or a REUSED self-check, never a fabricated `false`.
  *   - otherwise (a RESOLVED rejection — gate failure, merge conflict, stranded work, etc. — never a
  *     throw) → `"fail"`, the same `extended` field PLUS `gateDetail` when this rejection was gate-caused
  *     (every other rejection reason has none to report — `gateDetail` stays `undefined`, not fabricated).
+ *     Card 361520a0, Half Three: `gateDetail` now ALSO carries `stderrTail`/`steps` — previously omitted
+ *     here even though `GateRejectionDetail` always carried both, leaving `gate_history`/`gate_status` (the
+ *     pull-based read path) with strictly LESS diagnostic richness than the push `[loom:merge-rejected]`
+ *     nudge for the identical rejection.
  * Card a1a8c5c4 widens BOTH branches to also carry `outputTail` (the bounded ~4KB last-step tail) —
  * before this card a "merge" row's verdict never persisted ANY gate output, on either outcome, unlike the
  * sibling "gate" (worker self-check) row which has carried it on both outcomes since 4c5bf820. `undefined`
@@ -437,6 +457,9 @@ function deriveMergeGateVerdict(
     };
   }
   const v = outcome.value;
+  if (v.cancelled) {
+    return { kind: "cancelled", payload: { reason: v.reason, settledAt, totalDurationMs } };
+  }
   return {
     kind: v.merged ? "pass" : "fail",
     payload: {
@@ -452,6 +475,12 @@ function deriveMergeGateVerdict(
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
         signal: v.gateDetail.signal ?? undefined, timedOut: v.gateDetail.timedOut,
+        // ⚠️ DELIBERATE DUPLICATION (card 361520a0 CR follow-up) vs. the sibling top-level `outputTail`
+        // field (card a1a8c5c4, main): on a "fail" verdict both this and `outputTail` carry the IDENTICAL
+        // bytes, from the SAME sanitized local in confirmWorkerMerge — independently motivated (that one
+        // covers a PASS too; this one mirrors the rejection's own push-notify text), never two signals to
+        // reconcile against each other. See `PendingGateOpVerdict.gateDetail.stderrTail`'s own doc.
+        stderrTail: v.gateDetail.stderrTail, steps: v.gateDetail.steps,
       } }),
     },
   };
@@ -3026,20 +3055,28 @@ export class SessionService {
    * prefix, via the same `GateSemaphore.findByOpId` resolution `gate_status` uses).
    *
    * QUEUED → zero process risk (see `GateSemaphore.cancelQueued`'s own doc: `fn` was never invoked, there
-   * is nothing to kill) — cancels immediately.
+   * is nothing to kill) — cancels immediately. Supported for `gateType:"worker"` (a worker's own self-check)
+   * AND, since card 361520a0 (Half Two), `gateType:"merge"` — a queued merge gate is JUST as zero-risk as a
+   * queued self-check: nothing has been admitted, so nothing has touched the canonical repo or the worktree
+   * yet. `confirmWorkerMerge` now carries the same `GateCancelledError` catch `runWorkerGate` already had
+   * (see its own doc), which is what makes a withdrawn QUEUED merge settle as a clean `cancelled`
+   * `ConfirmMergeResult` instead of the crash-shaped `[loom:merge-failed] … errored: gate cancelled` a
+   * queued merge cancel used to produce before that catch existed. `gateType:"deploy"` stays refused in
+   * BOTH phases — `deployOwnProject` has NO such catch, so cancelling one would still surface as that same
+   * crash-shaped throw; nothing establishes it's safe to add one on this card, and the card never asked.
    *
-   * BOTH QUEUED AND RUNNING → scoped to `gateType:"worker"` ONLY (a worker's own self-check) (Code Review
-   * finding B2-2 — this used to be asymmetric: the running branch refused a non-worker gate, the queued
-   * branch didn't). `run_gate`'s self-check is the ONLY gateType whose `fn` actually reads/forwards
-   * `cancelSignal` into `runGateStep` (see `runWorkerGate`'s wiring); cancelling a QUEUED merge/deploy gate
-   * is ALSO unsupported, not merely a RUNNING one — a queued merge/deploy gate's `runExclusive` call has NO
-   * catch for the `GateCancelledError` a cancelled QUEUED waiter throws (only `runWorkerGate` catches it),
-   * so cancelling one would surface as `[loom:merge-failed] … errored: gate cancelled` — a deliberate
-   * cancel misreported as a crash, potentially AFTER `mergeMainIntoWorktree` has already mutated the
-   * worktree. Refused honestly in BOTH phases, symmetrically, rather than silently issuing a cancel a
-   * caller might mistake for a supported one.
+   * ⚠️ RUNNING → scoped to `gateType:"worker"` ONLY, still — a QUEUED merge gate is safe to withdraw for the
+   * reason above, but an ALREADY-RUNNING one is NOT, and the two phases are deliberately NOT treated the
+   * same: interrupting a RUNNING merge risks leaving staged residue in the canonical checkout mid-squash,
+   * which fails closed and needs a HUMAN to clear it by hand before ANY further merge on that repo succeeds
+   * (memory `concurrent-squash-merges-lose-work`, trigger 2; `62fb673` refuses rather than absorbing it) —
+   * a risk that simply does not exist for a gate that was never admitted. `run_gate`'s self-check remains
+   * the only gateType whose `fn` actually reads/forwards `cancelSignal` into `runGateStep` (see
+   * `runWorkerGate`'s wiring), so a RUNNING merge or deploy gate is refused in EITHER case: refused honestly
+   * rather than silently issuing a cancel a caller might mistake for a supported one. A later reader must
+   * not "simplify" queued and running merge cancellation into one rule — they differ on purpose.
    *
-   * RUNNING, once past that gate: asks it to stop (`cancelRunning`), then waits UP TO
+   * RUNNING, once past that gate (worker self-checks only): asks it to stop (`cancelRunning`), then waits UP TO
    * `GATE_CANCEL_VERIFY_MS` (the ADMISSION clock the underlying op's own settle races against — never a
    * bare wall-clock guess) for the real settle to land. If it lands in time, the kill was VERIFIED (see
    * `runGateStep`'s `cancelling` doc — a settle can only be tagged `cancelled` after a genuine close/error
@@ -3088,11 +3125,16 @@ export class SessionService {
     if (!caller?.projectId || entry.projectId !== caller.projectId) {
       return { outcome: "refused", reason: "this op belongs to a different project", opId: entry.opId ?? opId };
     }
-    // GATETYPE SCOPE (Code Review finding B2-2) — checked for BOTH phases, before either branch below ever
-    // touches the semaphore. See this method's own doc for why a queued merge/deploy gate is JUST as
-    // unsupported as a running one, not merely the running case.
-    if (entry.gateType !== "worker") {
-      return { outcome: "not_cancelled", reason: `cancelling a ${entry.phase} ${entry.gateType} gate is not supported — only a worker self-check (queued or running) can be cancelled`, opId: entry.opId ?? opId };
+    // GATETYPE SCOPE (Code Review finding B2-2, NARROWED by card 361520a0 Half Two) — checked before either
+    // branch below ever touches the semaphore. `deploy` stays refused in BOTH phases; `merge` is refused
+    // ONLY while running — see this method's own doc for WHY queued and running deliberately differ for a
+    // merge gate (zero process risk vs. real staged-residue risk), a distinction a later reader must not
+    // collapse into one rule.
+    if (entry.gateType === "deploy") {
+      return { outcome: "not_cancelled", reason: `cancelling a ${entry.phase} deploy gate is not supported — only a worker self-check (queued or running) or a QUEUED merge gate can be cancelled`, opId: entry.opId ?? opId };
+    }
+    if (entry.gateType === "merge" && entry.phase === "running") {
+      return { outcome: "not_cancelled", reason: "cancelling a RUNNING merge gate is not supported — interrupting one risks leaving staged residue in the canonical checkout that fails closed and needs a HUMAN to clear it by hand before any further merge on this repo succeeds; a QUEUED merge gate can still be cancelled cleanly (nothing was ever spawned for it)", opId: entry.opId ?? opId };
     }
     const detail = `cancelled by manager ${managerSessionId} via gate_cancel`;
     if (entry.phase === "queued") {
@@ -5026,10 +5068,13 @@ export class SessionService {
    * "fallback wake reaped" assertions failed under `LOOM_GATE_TEST_CONCURRENCY=2` while passing standalone)
    * — closure capture removes that race entirely instead of chasing a more reliable read.
    *
-   * FAIL-SAFE ON UNKNOWN START TIME (kept even though closure capture makes it effectively unreachable
-   * on the 4 tracked sites — see the class doc's fail-safe reasoning below): `opStartedAt` is undefined
-   * only for `confirmWorkerMerge`'s UNTRACKED caller (the human REST merge route, which bypasses
-   * PendingOpRegistry entirely and so has no start instant to capture in the first place). The two
+   * FAIL-SAFE ON UNKNOWN START TIME (kept even though closure capture makes it unreachable on every
+   * current caller — see the class doc's fail-safe reasoning below): `opStartedAt` would be undefined for
+   * a caller of `confirmWorkerMerge` OUTSIDE `PendingOpRegistry` (no start instant to capture in the first
+   * place) — the human REST merge route used to be exactly that caller, until card 361520a0's Half One
+   * routed it through `confirmWorkerMergeUntilSettled`/`confirmWorkerMergeTracked` too. NO current caller
+   * takes this branch; kept purely as a defensive guard against `confirmWorkerMerge` being invoked
+   * directly (bypassing the registry) again in the future, never a live path today. The two
    * failure directions are NOT symmetric: cancelling nothing just leaves a stale wake to fire once more
    * (today's bug, unchanged); cancelling broadly — or from epoch — could destroy a wake the session is
    * genuinely relying on. So an unknown start time cancels NOTHING here — logged, never silent.
@@ -9485,14 +9530,17 @@ export class SessionService {
     // CORRELATION STAMP (card 369d8824): threaded from PendingOpRegistry.attach (the SAME opId a caller
     // routed through confirmWorkerMergeTracked was already handed in its own `{status:"pending",opId}`
     // response) so every `[loom:merge-*]` nudge this call emits can be matched back to the confirm that
-    // produced it. A caller OUTSIDE that registry (the human REST merge route) passes none — mint one
-    // fresh so its signals/return are stamped just as consistently, even though nothing else correlates to it.
+    // produced it. A caller OUTSIDE that registry passes none — mint one fresh so its signals/return are
+    // stamped just as consistently, even though nothing else correlates to it. The human REST merge route
+    // used to be exactly that caller; card 361520a0's Half One routed it through
+    // confirmWorkerMergeUntilSettled/confirmWorkerMergeTracked too, so NO current caller takes this branch
+    // — kept as a defensive fallback for a direct `confirmWorkerMerge` call, not a live path today.
     const thisOpId = opId ?? randomUUID();
     // OP-START CAPTURE (card 9d521792): mirrors `thisOpId` above — threaded from confirmWorkerMergeTracked's
     // own pre-attach() capture (the ONLY place this op's start instant is known unconditionally; see its
-    // doc). A caller OUTSIDE that registry (the human REST merge route) passes none — `autoCancelSettleWakes`
-    // treats `undefined` as "can't determine it" and cancels nothing (its fail-safe), which is correct here:
-    // an untracked call has no PendingOpRegistry entry to speak of anyway.
+    // doc). A caller OUTSIDE that registry passes none — `autoCancelSettleWakes` treats `undefined` as
+    // "can't determine it" and cancels nothing (its fail-safe), which would be correct for an untracked call
+    // (no PendingOpRegistry entry to speak of) — but per the note above, no current caller is untracked.
     const worker = this.db.getSession(workerSessionId);
     if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
     if (!worker.branch) throw new Error("worker has no branch");
@@ -9993,17 +10041,54 @@ export class SessionService {
       // union-merge — not captured here at admission. The gap between the union-merge and this admission
       // is unbounded semaphore queue wait; capturing here instead would leave that whole gap unverified
       // (a real defect found on review of this card's first draft — see `gateBaseMainHead`'s own doc).
-      let gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
-        gateStartedAt = startedAt;
-        concurrentAtStart = this.gateSemaphore.snapshot().active;
-        getConcurrentGatesMax = getMaxConcurrentGates;
-        // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — never a REPLACEMENT
-        // of the semaphore's hook (the live registry's own `entry.extended`, read by gate_queue/gate_status
-        // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
-        // event, not a second independently-computed signal.
-        const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
-        return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
-      }, "high");
+      let gateResult: GateSequentialResult;
+      try {
+        gateResult = reuseResult ?? await this.gateSemaphore.runExclusive(gateCap, gateDescriptor, (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
+          gateStartedAt = startedAt;
+          concurrentAtStart = this.gateSemaphore.snapshot().active;
+          getConcurrentGatesMax = getMaxConcurrentGates;
+          // Card 9f6598dd: mirror the semaphore's own onExtend into `anyExtended` too — never a REPLACEMENT
+          // of the semaphore's hook (the live registry's own `entry.extended`, read by gate_queue/gate_status
+          // while running, must keep updating exactly as before); this is an ADDITIONAL observer of the SAME
+          // event, not a second independently-computed signal.
+          const mirroredHooks: GateLivenessHooks = { ...hooks, onExtend: () => { anyExtended = true; hooks.onExtend?.(); } };
+          return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, undefined, undefined, mirroredHooks);
+        }, "high");
+      } catch (err) {
+        // CANCELLED-WHILE-QUEUED (card 361520a0, Half Two — mirrors runWorkerGate's identical catch): thrown
+        // by GateSemaphore.runExclusive when THIS op was withdrawn (gate_cancel, card 8d585277) before it
+        // was ever admitted — no process was ever spawned, so this is never a real gate/runner exception and
+        // must never fall into the generic thrown-error path (PendingOpRegistry.attach would turn it into an
+        // ordinary `[loom:merge-failed] … errored: gate cancelled` — a deliberate cancel misreported as a
+        // crash, exactly what allowing this cancel was supposed to avoid). Squash phase is never reached
+        // (this throws strictly before the gate even runs), so the CANONICAL REPO is untouched — but the
+        // WORKTREE is NOT necessarily pristine (Code Review, card 361520a0, Half Four): the union-merge
+        // above (`mergeMainIntoWorktree`, unconditional whenever this branch isn't `preLanded`) already ran
+        // and already landed a real `git merge main` commit into the worktree, well before this
+        // `runExclusive` call — a cancel here withdraws the QUEUED GATE, not that already-completed union
+        // merge. Distinct from an ALREADY-RUNNING cancel (see cancelGateOp's own doc for why that phase
+        // stays refused).
+        if (err instanceof GateCancelledError) {
+          // DISTINCT EVENT KIND, NOT merge_rejected (Code Review, card 361520a0, Half Four): a clean cancel
+          // is NOT a rejection — no verdict was reached, the branch was neither merged nor rejected. Reusing
+          // `merge_rejected` fed three real consumers a false signal: companion/attention-push.ts pushed
+          // "merge rejected" to the owner's phone for an ordinary cancel; crash-orphaned-workers.ts treated
+          // it as superseding a prior worker_report(done), sending a "go fix it" nudge at a worker whose
+          // branch was actually done and green; and EventTriggers.tsx's vocabulary let a user automation
+          // fire on a cancel. `merge_cancelled` matches none of those consumers' switches — mirrors
+          // runWorkerGate's own cancelled-while-queued branch (below), which already emits its own
+          // `{cancelled:true}` detail under the "worker_gate" kind rather than reusing a failure kind.
+          // Mirrors the retry catch's identical computation below (Minor finding, card 361520a0): a
+          // never-admitted op leaves `getConcurrentGatesMax` unset, so this falls to `concurrentAtStart`
+          // (also never touched by the callback, still its initial 0) — carried explicitly rather than left
+          // to `concurrentGatesMax`'s own stale initial value, so the two cancel sites stay textually and
+          // behaviorally identical.
+          concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+          evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+          return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
+        }
+        throw err;
+      }
       // Card c6750500: read AFTER `runExclusive` has fully resolved — the getter closes over the entry
       // directly, so the value is already frozen-final by this point (see GateSemaphore.runExclusive's own
       // doc). `?? concurrentAtStart` covers the reuse case (runExclusive never called, getter never set).
@@ -10046,16 +10131,30 @@ export class SessionService {
         let retryStartedAt = 0;
         // No `anyExtended` mirroring needed here (unlike the first attempt above): `allowExtend:false`
         // means gate-runner.ts's own `canExtend` gate never lets `onExtend` fire on a retry at all.
-        gateResult = await this.gateSemaphore.runExclusive(
-          gateCap, gateDescriptor,
-          (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
-            retryStartedAt = startedAt;
-            concurrentAtStart = this.gateSemaphore.snapshot().active;
-            getConcurrentGatesMax = getMaxConcurrentGates;
-            return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
-          },
-          "high",
-        );
+        try {
+          gateResult = await this.gateSemaphore.runExclusive(
+            gateCap, gateDescriptor,
+            (startedAt, _cancelSignal, hooks, getMaxConcurrentGates) => {
+              retryStartedAt = startedAt;
+              concurrentAtStart = this.gateSemaphore.snapshot().active;
+              getConcurrentGatesMax = getMaxConcurrentGates;
+              return runGateSeq(gate, worktreePath, gateTimeoutMs, undefined, undefined, false, undefined, hooks);
+            },
+            "high",
+          );
+        } catch (err) {
+          // Same CANCELLED-WHILE-QUEUED case as the first attempt's own catch above — this retry mints a
+          // BRAND NEW admission cycle (a fresh `runExclusive` call), so it can independently be withdrawn
+          // while it queues even though the first attempt already ran.
+          if (err instanceof GateCancelledError) {
+            // DISTINCT EVENT KIND, NOT merge_rejected — see the first attempt's identical catch above for
+            // the full reasoning (card 361520a0, Half Four).
+            concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
+            evt("merge_cancelled", { cancelled: true, cancelKind: err.kind, cancelDetail: err.detail, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+            return { merged: false, cancelled: true, cancelKind: err.kind, reason: err.detail, opId: thisOpId };
+          }
+          throw err;
+        }
         concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
         evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
         if (gateResult.failedTimedOut) {
@@ -10477,6 +10576,16 @@ export class SessionService {
 
   async confirmWorkerMergeTracked(
     managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
+    opts?: {
+      /** Card 361520a0, Half Four: skip the dead-owner eviction sweep below entirely. Set ONLY by
+       *  {@link confirmWorkerMergeUntilSettled}'s own internal retry loop — see that method's doc for the
+       *  incident this closes (a human Merge click against a since-dead-owner op re-evicted and re-minted
+       *  a genuinely running op on EVERY ~12s retry, each mint driving a real `git merge main` + a real
+       *  queued gate command, exhausting the daemon-global merge lane). Every OTHER caller (the MCP tool,
+       *  the loop's own FIRST call) omits this — the dead-owner check still runs exactly once per external
+       *  call sequence, unchanged from before this option existed. */
+      skipDeadOwnerRecovery?: boolean;
+    },
   ): Promise<AttachResult<ConfirmMergeResult>> {
     const key = `merge:${workerSessionId}`;
     // Unconditional and BEFORE everything else below — see supersedeQueuedSelfCheck's own doc for why this
@@ -10484,7 +10593,10 @@ export class SessionService {
     // manager's own project (Code Review finding B2-1) — this does NOT re-derive "is this actually your
     // worker" (that ownership check still lives, unchanged, inside confirmWorkerMerge below); it only
     // ensures a caller from a DIFFERENT project can never cancel this worker's queued self-check as a side
-    // effect of even attempting a call that's about to be refused for that same reason.
+    // effect of even attempting a call that's about to be refused for that same reason. Runs on EVERY call
+    // including a skipDeadOwnerRecovery retry — it targets a DIFFERENT key (`gate:${workerSessionId}`,
+    // the worker's own self-check) and is a no-op when nothing is queued there, so repeating it costs
+    // nothing and still supersedes a self-check that gets queued mid-loop.
     this.supersedeQueuedSelfCheck(workerSessionId, this.db.getSession(managerSessionId)?.projectId ?? null);
     // DEAD-OWNER RECOVERY (card 27ea069e): an existing RUNNING op for this key whose owning manager
     // session is gone (exited/archived/missing — see isManagerSessionDead) can never settle for a LIVE
@@ -10502,27 +10614,40 @@ export class SessionService {
     // result is a FINISHED answer, not a stuck zombie, so there is nothing to evict; `attach()` below will
     // short-circuit to that cached outcome for ANY caller within the retention window, which is exactly
     // right (the merge already happened; ownership of the op that ran it doesn't change the answer).
-    const existing = this.pendingOps.peek(key);
-    if (existing && this.isManagerSessionDead(existing.managerSessionId)) {
-      // MINOR A (CR finding, card 33172f01): `evictDeadOwner` only ever removes a RUNNING entry (a no-op
-      // for a settled RETAINED view, per the NOTE above) — so only log the "evicting so this confirm can
-      // proceed fresh" claim when it's actually TRUE. Logging it unconditionally used to lie for a
-      // dead-owner'd retained view: nothing gets evicted and this confirm does NOT proceed fresh, it
-      // dedupe-hits the cache instead — a correct outcome, but a misleading operator-facing log line.
-      if (this.pendingOps.evictDeadOwner(key)) {
-        console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
-        // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12, restated by e3e40167): an evicted entry's
-        // eventual settle skips `onSettle`/`onSettledAfterPending` entirely (its identity guard fails — see
-        // pending-ops.ts's class doc), so the durable row would otherwise sit forever at `state:"pending"`
-        // and, if it was ALSO surfaced pending before the eviction, get swept by reconcileOrphanedGateOps at
-        // the NEXT boot and push a FALSE `[loom:merge-failed]` to this now-evicted op's (original,
-        // possibly-resumed-live) manager — the exact inverse of the signal this card exists to get right.
-        // Mark it `evicted-dead-owner` here instead, at the moment the entry itself is force-removed — NOT
-        // `settled` (this op's own `run()` may still be executing, unreachable but uncancellable; there is
-        // no real verdict to report — see the schema doc), and NEVER deleted (this table is a permanent
-        // tombstone — a deleted row here would make this SAME opId look `never_existed` to gate_status,
-        // reintroducing this card's own defect one layer down for the eviction path).
-        this.db.evictPendingGateOpDeadOwner(existing.opId);
+    //
+    // SKIPPED ON A skipDeadOwnerRecovery RETRY (card 361520a0, Half Four): a RUNNING op is never a stuck
+    // zombie from THIS call sequence's own point of view — `confirmWorkerMergeUntilSettled`'s first call
+    // (which never sets this flag) already ran this exact check once, either finding nothing to evict or
+    // evicting a genuine zombie and minting a fresh op. Every retry after that is this SAME caller racing
+    // the SAME op's settlement, regardless of whether the ORIGINAL `managerSessionId` happens to die
+    // mid-wait (a manager recycle/stop is an ordinary event, not an edge case) — re-running the check on
+    // every retry evicted-and-re-minted a genuinely in-flight op on every ~12s poll, each mint driving a
+    // real `git merge main` + a real queued gate command with no cap, the fleet-wide merge-lane DoS this
+    // option closes. A settled (retained) entry is unaffected either way — evictDeadOwner is already a
+    // no-op for it, per the NOTE above.
+    if (!opts?.skipDeadOwnerRecovery) {
+      const existing = this.pendingOps.peek(key);
+      if (existing && this.isManagerSessionDead(existing.managerSessionId)) {
+        // MINOR A (CR finding, card 33172f01): `evictDeadOwner` only ever removes a RUNNING entry (a no-op
+        // for a settled RETAINED view, per the NOTE above) — so only log the "evicting so this confirm can
+        // proceed fresh" claim when it's actually TRUE. Logging it unconditionally used to lie for a
+        // dead-owner'd retained view: nothing gets evicted and this confirm does NOT proceed fresh, it
+        // dedupe-hits the cache instead — a correct outcome, but a misleading operator-facing log line.
+        if (this.pendingOps.evictDeadOwner(key)) {
+          console.warn(`[orchestration] merge op ${existing.opId} (${key}) had a dead owner (manager ${existing.managerSessionId.slice(0, 8)}) — evicting so this confirm can proceed fresh`);
+          // DURABLE-MARKER LEAK FIX (CR follow-up, card edc1ec12, restated by e3e40167): an evicted entry's
+          // eventual settle skips `onSettle`/`onSettledAfterPending` entirely (its identity guard fails — see
+          // pending-ops.ts's class doc), so the durable row would otherwise sit forever at `state:"pending"`
+          // and, if it was ALSO surfaced pending before the eviction, get swept by reconcileOrphanedGateOps at
+          // the NEXT boot and push a FALSE `[loom:merge-failed]` to this now-evicted op's (original,
+          // possibly-resumed-live) manager — the exact inverse of the signal this card exists to get right.
+          // Mark it `evicted-dead-owner` here instead, at the moment the entry itself is force-removed — NOT
+          // `settled` (this op's own `run()` may still be executing, unreachable but uncancellable; there is
+          // no real verdict to report — see the schema doc), and NEVER deleted (this table is a permanent
+          // tombstone — a deleted row here would make this SAME opId look `never_existed` to gate_status,
+          // reintroducing this card's own defect one layer down for the eviction path).
+          this.db.evictPendingGateOpDeadOwner(existing.opId);
+        }
       }
     }
     const taskId = this.db.getSession(workerSessionId)?.taskId ?? null;
@@ -10557,6 +10682,27 @@ export class SessionService {
         // rich path did NOT already announce (`!notified` — either shouldSuppressMergeReject reconciled it
         // away, or an unexpected error means rejectNotify never ran at all) — so the manager still gets
         // exactly one terminal signal per async confirm.
+        // CANCELLED (card 361520a0, Half Two) — mirrors runWorkerGate's identical cancelled branch above:
+        // a distinct "no verdict" settle that must NEVER fall through to the merged/failed branching below,
+        // which would otherwise read as a real (albeit failed) merge attempt. `cancelKind` is always
+        // `"manual"` for a merge op today (the automatic `"superseded-by-merge"` path only ever targets a
+        // worker's own QUEUED self-check — see `supersedeQueuedSelfCheck`'s hardcoded `"worker"` gateType —
+        // never the merge op itself) but the ternary mirrors the worker-gate nudge's own wording anyway so
+        // the two stay textually consistent if that ever changes.
+        if (outcome.ok && outcome.value.cancelled) {
+          const tag = outcome.value.cancelKind === "superseded-by-merge" ? "merge-superseded" : "merge-cancelled";
+          const target = this.resolveSettleNudgeTarget(managerSessionId);
+          try {
+            this.enqueueDurableMessage(
+              target,
+              `[loom:${tag}] ${who(opId)} — this merge confirm was cancelled (${outcome.value.reason ?? "cancelled"}). ` +
+                "This is NOT a failure — no verdict was reached, the branch was NOT merged and NOT rejected; " +
+                "re-run worker_merge_confirm when ready." + this.settleNudgeAttribution(target, managerSessionId),
+              { sender: "system", taskId, kind: "warning" },
+            );
+          } catch { /* manager not live — best-effort, mirrors every other completion nudge */ }
+          return;
+        }
         if (outcome.ok && outcome.value.notified) return;
         // Card a2873f7e: fold the per-step durations onto the GREEN echo, self-labelled diagnostic-only IN
         // THE TEXT (formatGateStepsDiagnostic's own doc) — absent when the gate was reused/gateless
@@ -10611,12 +10757,16 @@ export class SessionService {
       {
         // RETAIN + CLASSIFY (card d1aee5f1 follow-up): keep the settled op briefly `peek()`-able (see
         // PendingOpRegistry's "RETAINED TERMINAL VIEW" doc) with a distinct terminal outcome, so the Board
-        // card's merge-gate hairline can render merged/rejected/failed instead of reverting the instant the
-        // gate settles. `merged:true` → "merged"; a RESOLVED `merged:false` (the gate/stranded-work/empty-
-        // stage rejection paths — none of these throw) → "rejected"; only a genuinely THROWN error (a real
-        // exception, not a rejection result) → "failed". Mirrors `mergeDisplay`'s Board-side classification.
+        // card's merge-gate hairline can render merged/rejected/cancelled/failed instead of reverting the
+        // instant the gate settles. `merged:true` → "merged"; `cancelled:true` (card 361520a0, Half Four —
+        // checked BEFORE the merged/rejected branch below, since a cancelled outcome also carries
+        // `merged:false` and would otherwise misclassify as "rejected", the exact DoD-3 class this card
+        // fixes) → "cancelled"; a RESOLVED `merged:false` with no `cancelled` flag (the gate/stranded-work/
+        // empty-stage rejection paths — none of these throw) → "rejected"; only a genuinely THROWN error (a
+        // real exception, not a rejection result) → "failed". Mirrors `mergeDisplay`'s Board-side
+        // classification.
         retainMs: MERGE_OP_RETAIN_MS,
-        classifyOutcome: (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "merged" : "rejected"),
+        classifyOutcome: (outcome) => (!outcome.ok ? "failed" : outcome.value.cancelled ? "cancelled" : outcome.value.merged ? "merged" : "rejected"),
         // BYPASS THE RETAINED CACHE ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01): the retention-window
         // dedupe (see PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on
         // `workerSessionId`, not on `forceRemoveWorktree` — so without this, a manager that read a
@@ -10654,6 +10804,80 @@ export class SessionService {
         },
       },
     );
+  }
+
+  /** The configured gate timeout for a worker's own merge, or `null` if the worker/project can't be
+   *  resolved at all (in which case {@link confirmWorkerMergeTracked} itself will settle fast with a
+   *  thrown/refused result anyway — see {@link confirmWorkerMergeUntilSettled}'s own doc). Reads the SAME
+   *  `resolveConfig` call {@link confirmWorkerMerge} performs internally on every call (NOT
+   *  `resolveRepoByKey` — this helper never resolves a repo, only the project's configured
+   *  `gateCommandTimeoutMs`) — this does NOT change what confirmWorkerMerge itself resolves, it's a
+   *  read-only preview so a CALLER (the REST merge route) can size its own wait ceiling before the real
+   *  call ever runs. */
+  private resolveMergeGateTimeoutMs(workerSessionId: string): number | null {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker) return null;
+    const project = this.db.getProject(worker.projectId);
+    if (!project) return null;
+    return resolveConfig(project.config, this.db.getPlatformConfig()).orchestration.gateCommandTimeoutMs;
+  }
+
+  /** Fallback wait ceiling for {@link confirmWorkerMergeUntilSettled} when the worker/project can't be
+   *  resolved (so no configured `gateCommandTimeoutMs` exists to size against) — generous enough for any
+   *  real merge (which would fail fast on the same unresolvable-worker/project error anyway), short of
+   *  "forever". */
+  private static readonly DEFAULT_REST_MERGE_CEILING_MS = 300_000;
+
+  /**
+   * REST-ONLY synchronous wrapper (card 361520a0, Half One): `POST /api/sessions/:id/merge` (the Review
+   * panel's "Human-initiated merge") used to call the RAW, untracked `confirmWorkerMerge` directly — no
+   * `PendingOpRegistry` dedupe, no durable `pending_gate_ops` tombstone (see that route's own doc for the
+   * incident this caused: a second, untracked op minted 18 minutes into a first one already running,
+   * costing a full lane AND leaving no row for `gate_status`/`gate_history` to ever find). Routing the REST
+   * handler straight through `confirmWorkerMergeTracked` fixes the dedupe, but that method degrades to a
+   * pending handle after `SYNC_ATTACH_BUDGET_MS` (12s) — far short of this project's own measured 17-25min
+   * gates — so a naive swap would silently truncate the REST route's long-standing "block until the real
+   * outcome is known" contract and make the Review panel misreport a still-running merge as `merged:false`.
+   *
+   * This loops the SAME `confirmWorkerMergeTracked` call: each re-call attaches to the identical already-
+   * running op under the SAME `merge:${workerSessionId}` key (see `PendingOpRegistry.attach`'s own
+   * contract — an existing RUNNING entry is never re-invoked, only raced again) rather than starting a
+   * second confirm, so this preserves the pre-existing synchronous REST contract while fully sharing the
+   * dedupe/tombstone machinery the MCP tool already gets.
+   *
+   * BOUNDED so a genuinely wedged op can't hang the HTTP handler forever: the ceiling is sized off the
+   * project's OWN configured `gateCommandTimeoutMs` (falling back to {@link DEFAULT_REST_MERGE_CEILING_MS}
+   * only when it can't be resolved at all) at 6x — one merge attempt can itself cost up to ~3x
+   * `gateCommandTimeoutMs` (one auto-extend on the first try, plus one un-extended retry — see
+   * `confirmWorkerMerge`'s own `gateRetry` doc), and this op can ALSO sit queued behind roughly one more
+   * gate of the same worst-case size before it is ever admitted — 6x covers both without needing to read
+   * live queue depth. On exceeding the ceiling, returns `{settled:false, opId}` rather than fabricating a
+   * result — the caller must report "still running", NEVER a synthesized "not merged" (a false negative
+   * here would invite exactly the duplicate re-trigger this card exists to prevent).
+   */
+  async confirmWorkerMergeUntilSettled(
+    managerSessionId: string, workerSessionId: string, forceRemoveWorktree?: boolean,
+  ): Promise<AttachResult<ConfirmMergeResult>> {
+    const gateTimeoutMs = this.resolveMergeGateTimeoutMs(workerSessionId);
+    const ceilingMs = gateTimeoutMs != null ? gateTimeoutMs * 6 : SessionService.DEFAULT_REST_MERGE_CEILING_MS;
+    const deadline = Date.now() + ceilingMs;
+    // FIRST call only: no skipDeadOwnerRecovery — this is the one legitimate moment to evict a genuinely
+    // stale zombie op left behind by an EARLIER call sequence (see confirmWorkerMergeTracked's own doc).
+    let r = await this.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree);
+    // EVERY RETRY: skipDeadOwnerRecovery:true (Code Review, card 361520a0, Half Four). `managerSessionId`
+    // here is the REST route's `worker.parentSessionId` — not necessarily the human actually driving this
+    // merge — and can be (or become, via a recycle/stop mid-wait) a dead session. Re-running the dead-owner
+    // check on every retry evicted the RUNNING op THIS SAME call sequence had itself minted moments earlier
+    // and re-minted a genuinely fresh confirmWorkerMerge invocation on every ~syncAttachBudgetMs poll — each
+    // one running a real `git merge main` and queuing a real gate command, with no cap: a human's single
+    // Merge click could drive the daemon-global merge lane into O(ceilingMs / syncAttachBudgetMs) real
+    // invocations. Skipping the check on every retry means this call sequence races the SAME op's
+    // settlement (attach()'s own dedupe — an already-running entry for `key` is never re-invoked) for its
+    // entire lifetime, exactly as intended.
+    while (!r.settled && Date.now() < deadline) {
+      r = await this.confirmWorkerMergeTracked(managerSessionId, workerSessionId, forceRemoveWorktree, { skipDeadOwnerRecovery: true });
+    }
+    return r;
   }
 
   /**

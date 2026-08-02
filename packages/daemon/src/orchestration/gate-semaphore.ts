@@ -405,19 +405,43 @@ export class GateSemaphore {
    *  `false` (no-op) if `id` isn't currently queued — already admitted, already settled, or never existed
    *  — the caller's own `runExclusive` throw/return path is what actually produces the visible outcome.
    *
-   *  ⚠️ `gateType !== "worker"` (Code Review re-review of 8d585277, card 8f58c354): refuses to cancel a
-   *  non-worker (merge/deploy) entry EVEN IF it's found queued — mirroring `SessionService.cancelGateOp`'s
-   *  own caller-side check (a queued merge/deploy gate's `runExclusive` has no `GateCancelledError` catch,
-   *  so cancelling one would surface as a deliberate cancel misreported as a crash). Enforced HERE, at the
-   *  primitive, so a future third caller of this method inherits the guarantee automatically instead of
-   *  having to remember to re-derive it — the existing caller-side guards (`cancelGateOp`,
-   *  `cancelQueuedForSession`'s own `gateType` match) stay in place; this is defence-in-depth, not a
-   *  replacement for them. */
+   *  ⚠️ THE REAL INVARIANT (Code Review re-review of 8d585277, card 8f58c354; RE-STATED, card 361520a0
+   *  Half Two CR follow-up): a `gateType` is cancellable HERE only once its `runExclusive` caller has a
+   *  `GateCancelledError` catch to turn a withdrawn admission into a clean settle instead of a crash-shaped
+   *  throw (see `SessionService.cancelGateOp`'s own doc for the exact failure this prevents) — `worker`
+   *  (`runWorkerGate`) and, since card 361520a0, `merge` (`confirmWorkerMerge`) both have one; `deploy`
+   *  (`deployOwnProject`) does NOT yet. THIS IS DELIBERATELY AN ALLOWLIST, NOT A DENYLIST — a card 361520a0
+   *  CR finding caught an earlier draft written as `gateType === "deploy"`, which flips fail-closed into
+   *  fail-open: a FOURTH `GateType` added later would be silently CANCELLABLE by default (allowed by a
+   *  denylist that never named it) instead of refused until its own caller is proven to have the catch. The
+   *  `switch` below is exhaustive over {@link GateType} — TypeScript raises a COMPILE ERROR at the `never`
+   *  assignment in `default` the moment a new member is added to that union, forcing an explicit decision
+   *  here rather than a silent permission grant. Enforced HERE, at the primitive, so a future third caller
+   *  of this method inherits the SAME fail-closed default automatically instead of having to remember to
+   *  re-derive it — the existing caller-side guards (`cancelGateOp`, `cancelQueuedForSession`'s own
+   *  `gateType` match) stay in place; this is defence-in-depth, not a replacement for them. */
   cancelQueued(id: string, kind: GateCancelKind, detail: string): boolean {
     for (const tier of [this.highWaiters, this.lowWaiters]) {
       const idx = tier.findIndex((w) => w.id === id);
       if (idx !== -1) {
-        if (tier[idx]!.entry.descriptor.gateType !== "worker") return false;
+        const gateType = tier[idx]!.entry.descriptor.gateType;
+        switch (gateType) {
+          case "worker":
+          case "merge":
+            break; // has a GateCancelledError catch — see this method's own doc
+          case "deploy":
+            return false;
+          default: {
+            // UNREACHABLE in correctly-typed code — TypeScript rejects this assignment the moment
+            // GateType grows a member this switch doesn't name (the compile-time enforcement this doc
+            // describes). Falls back to `false` (refuse), never a throw: this method's whole contract is
+            // "returns boolean, never throws" — throwing here would itself BE a crash-shaped failure, the
+            // exact class this guard exists to prevent, over a runtime path that should be unreachable.
+            const exhaustive: never = gateType;
+            void exhaustive;
+            return false;
+          }
+        }
         const [w] = tier.splice(idx, 1);
         w!.cancel(kind, detail);
         return true;

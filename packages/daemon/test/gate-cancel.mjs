@@ -148,12 +148,13 @@ function makeRepo(repo) {
   check("(auto-supersede) registry empty after both settle", sem.snapshot().entries.length === 0);
 }
 
-// ── Card 8f58c354 Half 2: `cancelQueued`'s OWN gateType constraint, exercised DIRECTLY on the primitive —
-//    a synthetic non-worker (merge) entry that IS genuinely queued must still be refused. This proves the
-//    guard lives in cancelQueued itself, not merely in cancelGateOp's caller-side check above it (a third
-//    caller added later would inherit this for free). Positive-controlled: the same entry is later let
-//    through admission for real, so a REFUSED cancel is shown against a control that COULD have cancelled
-//    (this isn't a queue that never advances) — a check that can't fail either way is not evidence.
+// ── Card 8f58c354 Half 2, NARROWED by card 361520a0 Half Two: `cancelQueued`'s OWN gateType constraint,
+//    exercised DIRECTLY on the primitive. A queued `merge` entry is now CANCELLABLE (zero process risk —
+//    nothing was ever spawned, same as a queued worker self-check); a queued `deploy` entry is STILL
+//    refused (deployOwnProject has no GateCancelledError catch yet). Positive-controlled in BOTH
+//    directions: the merge case proves a REAL cancel against a control that could equally have run for
+//    real (the deploy sibling below); the deploy case proves the refusal against a control that DOES let
+//    an identical-shaped entry through when cancel isn't attempted (this block's own merge case).
 {
   const sem = new GateSemaphore();
   let releaseHolder;
@@ -171,14 +172,39 @@ function makeRepo(repo) {
   check("(primitive gateType guard) the synthetic merge entry is queued, not yet admitted", !mergeAdmitted);
   const queuedMerge = sem.snapshot().entries.find((e) => e.gateType === "merge" && e.phase === "queued");
   check("(primitive gateType guard) found the queued merge entry via snapshot", !!queuedMerge);
-  const cancelled = sem.cancelQueued(queuedMerge.id, "manual", "should be refused — not a worker gate");
-  check("(primitive gateType guard) cancelQueued REFUSES a queued non-worker entry", cancelled === false);
-  check("(primitive gateType guard) the merge entry is STILL queued after the refused cancel attempt",
-    sem.snapshot().entries.some((e) => e.id === queuedMerge.id && e.phase === "queued"));
+  const cancelled = sem.cancelQueued(queuedMerge.id, "manual", "queued merge — should now be cancellable");
+  check("(primitive gateType guard) cancelQueued now ALLOWS a queued merge entry (was refused before card 361520a0)", cancelled === true);
+  let mergeCaught;
+  try { await pQueuedMerge; } catch (e) { mergeCaught = e; }
+  check("(primitive gateType guard) the cancelled merge entry REJECTS with GateCancelledError, never runs", mergeCaught instanceof GateCancelledError && !mergeAdmitted);
+  // Checked AFTER awaiting the rejection above, not immediately after cancelQueued() returns: `cancelQueued`
+  // splices the waiter out synchronously, but the REGISTRY map entry (what `snapshot()` reads) is only
+  // deleted in `runExclusive`'s own `finally`, which runs on the NEXT microtask once the thrown
+  // GateCancelledError actually propagates — checking synchronously here would be a timing artifact of
+  // this test, not a real defect.
+  check("(primitive gateType guard) the merge entry is GONE from the queue once the cancel has fully settled",
+    !sem.snapshot().entries.some((e) => e.id === queuedMerge.id));
+
+  // Sibling, same setup shape: a queued `deploy` entry is STILL refused — the negative control that proves
+  // the widened check is scoped to `merge` specifically, not "everything but worker".
+  let deployAdmitted = false;
+  const pQueuedDeploy = sem.runExclusive(
+    1, { gateType: "deploy", projectId: "p", sessionId: "mgr-3" },
+    async () => { deployAdmitted = true; return "deploy-ran-for-real"; },
+    "high",
+  );
+  await sleep(10); // let it genuinely queue (still behind the same holder)
+  const queuedDeploy = sem.snapshot().entries.find((e) => e.gateType === "deploy" && e.phase === "queued");
+  check("(primitive gateType guard) found the queued deploy entry via snapshot", !!queuedDeploy);
+  const deployCancelResult = sem.cancelQueued(queuedDeploy.id, "manual", "should still be refused — deploy has no GateCancelledError catch");
+  check("(primitive gateType guard) cancelQueued STILL REFUSES a queued deploy entry", deployCancelResult === false);
+  check("(primitive gateType guard) the deploy entry is STILL queued after the refused cancel attempt",
+    sem.snapshot().entries.some((e) => e.id === queuedDeploy.id && e.phase === "queued"));
+
   releaseHolder("go");
-  const [holderResult, mergeResult] = await Promise.all([pHolder, pQueuedMerge]);
-  check("(primitive gateType guard) positive control — the never-cancelled entry WAS admitted and ran for real",
-    mergeAdmitted === true && mergeResult === "merge-ran-for-real");
+  const [holderResult, deployResult] = await Promise.all([pHolder, pQueuedDeploy]);
+  check("(primitive gateType guard) positive control — the never-cancelled deploy entry WAS admitted and ran for real",
+    deployAdmitted === true && deployResult === "deploy-ran-for-real");
   check("(primitive gateType guard) the holder completed normally too", holderResult === "holder");
 }
 
@@ -507,12 +533,13 @@ function makeRepo(repo) {
   await pHolderRun.catch(() => {});
 }
 
-// ── Code Review finding B2-2: gate_cancel's QUEUED branch has no gateType guard (unlike the RUNNING
-//    branch, which explicitly refuses non-worker gates) — so a manager can cancel their OWN worker's
-//    QUEUED merge gate, which throws an uncaught GateCancelledError inside confirmWorkerMerge (only
-//    runWorkerGate catches it) and settles as `[loom:merge-failed] … errored: gate cancelled` — a
-//    deliberate cancel misreported as a crash, potentially after mergeMainIntoWorktree already ran.
-//    RED-first: written to demonstrate the bug against UNFIXED code.
+// ── Card 8f58c354 B2-2 origin, INVERTED by card 361520a0 Half Two: gate_cancel's QUEUED branch used to
+//    have no gateType guard for merge, so cancelling a manager's OWN worker's QUEUED merge gate threw an
+//    uncaught GateCancelledError inside confirmWorkerMerge and settled as `[loom:merge-failed] … errored:
+//    gate cancelled` — a deliberate cancel misreported as a crash. Half Two made this an INTENDED,
+//    supported operation: `confirmWorkerMerge` now catches GateCancelledError and settles a clean
+//    `cancelled:true` ConfirmMergeResult instead. This block proves the NEW behavior — negative control
+//    (before this card, `outcome` would have been `not_cancelled`) pasted alongside the positive result.
 {
   const sfx = `b2-2-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   const reposDir = path.join(os.tmpdir(), `loom-gc-b22-${sfx}`);
@@ -552,8 +579,12 @@ function makeRepo(repo) {
 
   let releaseHolder;
   const holderHold = new Promise((res) => { releaseHolder = res; });
+  // Tracks whether the REAL worker's own gate ever actually spawned — a cancelled QUEUED op must never
+  // reach here (fn is never invoked for a withdrawn admission).
+  let realWorkerGateSpawned = false;
   const sharedGate = async (_gate, cwd) => {
     if (cwd === wtHolder.worktreePath) { await holderHold; return { passed: true }; }
+    realWorkerGateSpawned = true;
     return { passed: true };
   };
   const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
@@ -571,15 +602,8 @@ function makeRepo(repo) {
   // assertion failure into a TypeError that killed the whole suite. Skip the dependent assertions instead.
   if (mergeEntry) {
     const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
-    check("(B2-2) cancelling a QUEUED merge gate is refused, never silently succeeds", cancelResult.outcome === "not_cancelled");
-    // Pin the REASON (card 8f58c354): "not_cancelled" also fires from a genuinely DIFFERENT branch — a
-    // "no longer queued" admission/settle race (see the never-settling-kill block below for that reason's
-    // own text). Without pinning which branch produced it, a future race there would produce the SAME
-    // coarse outcome this assertion checks, and this test would keep reading green while no longer
-    // exercising the gateType guard it exists to cover — precisely the false-green shape card 8d585277 was
-    // fixed for, one level up in its own regression coverage.
-    check("(B2-2) the reason names the gateType-scope refusal, not a 'no longer queued' race",
-      /gate is not supported/i.test(cancelResult.reason ?? "") && !/no longer queued/i.test(cancelResult.reason ?? ""));
+    check("(B2-2/361520a0) cancelling a QUEUED merge gate now SUCCEEDS — negative control: before this card outcome would be 'not_cancelled'",
+      cancelResult.outcome === "cancelled" && cancelResult.phase === "queued" && cancelResult.gateType === "merge");
   } else {
     console.log("SKIP  (B2-2) cancel assertions — setup sanity check above already failed");
   }
@@ -588,9 +612,85 @@ function makeRepo(repo) {
   await pHolderRun.catch(() => {});
   const mergeResult = await pMergeConfirm;
   if (mergeEntry) {
-    check("(B2-2) the merge itself is NEVER misreported as 'gate cancelled' — it settles for real",
-      !(mergeResult.ok === false && /gate cancelled/i.test(String(mergeResult.error?.message ?? mergeResult.error))));
-    check("(B2-2) the merge actually completed normally (refused cancel ≠ broken merge)",
+    check("(B2-2/361520a0) the merge settles OK (never a thrown/rejected error) despite the cancel",
+      mergeResult.settled === true && mergeResult.ok === true);
+    check("(B2-2/361520a0) the merge's OWN value reports cancelled, never merged and never a generic rejection",
+      mergeResult.ok && mergeResult.value?.cancelled === true && mergeResult.value?.merged === false);
+    check("(B2-2/361520a0) the cancel is tagged 'manual' (gate_cancel, not an automatic supersede)",
+      mergeResult.ok && mergeResult.value?.cancelKind === "manual");
+    check("(B2-2/361520a0) it is NEVER misreported as a crash-shaped 'gate cancelled' error string",
+      !/errored:.*gate cancelled/i.test(String(mergeResult.value?.reason ?? mergeResult.value?.detailText ?? "")));
+    check("(B2-2/361520a0) the real worker's OWN gate command NEVER actually spawned — the cancel fired before admission",
+      realWorkerGateSpawned === false);
+
+    // DoD-5 (Code Review, card 361520a0): the SYNC `mergeResult.value.cancelled` shape above only proves
+    // the immediate return value — it says nothing about what the DURABLE tombstone (gate_status/
+    // gate_history's own read path) recorded via deriveMergeGateVerdict's cancelled branch. Before this
+    // assertion existed, that branch shipped completely UNEXERCISED by any test: a cancelled MERGE op's
+    // verdict could regress to "fail" (the exact DoD-3 class this card fixes for the async nudge/Board
+    // hairline) with nothing here to catch it.
+    const cancelledStatus = sessions.gateStatus(mergeEntry.opId);
+    check("(B2-2/361520a0 — DoD-5) gate_status reports outcome:\"cancelled\" for the settled tombstone, NEVER \"fail\"",
+      cancelledStatus.state === "settled" && cancelledStatus.outcome === "cancelled" && cancelledStatus.outcome !== "fail");
+    check("(B2-2/361520a0 — DoD-5) gate_status's cancelled:true flag is set, passed is NOT (never a fabricated pass/fail on a cancel)",
+      cancelledStatus.cancelled === true && cancelledStatus.passed === undefined);
+  }
+}
+
+// ── DoD-6, THE LOAD-BEARING TEST (card 361520a0): a RUNNING merge gate must STILL refuse cancellation —
+//    interrupting one risks leaving staged residue in the canonical checkout (memory
+//    concurrent-squash-merges-lose-work, trigger 2), which fails closed and needs a HUMAN to clear it by
+//    hand. Half Two ONLY widened the QUEUED case; this asserts the RUNNING case is untouched. Positive
+//    control: the SAME merge gate is later allowed to complete normally (not a queue that never advances).
+{
+  const sfx = `running-refused-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reposDir = path.join(os.tmpdir(), `loom-gc-run-${sfx}`);
+  const db = new Db();
+  dbs.push(db);
+
+  const mgrId = `gc-run-mgr-${sfx}`;
+  const projId = `gc-run-p-${sfx}`, taskId = `gc-run-t-${sfx}`, workerId = `gc-run-w-${sfx}`;
+  const repo = path.join(reposDir, "worker");
+  makeRepo(repo);
+  db.insertProject({ id: projId, name: "RUN-W", repoPath: repo, vaultPath: repo, config: { orchestration: { gateCommand: "pnpm gate" } }, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `agent-run-m-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertSession({ id: mgrId, projectId: projId, agentId: `agent-run-m-${sfx}`, engineSessionId: null, title: null, cwd: repo, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertAgent({ id: `agent-run-w-${sfx}`, projectId: projId, name: "t", startupPrompt: "", position: 0 });
+  db.insertTask({ id: taskId, projectId: projId, title: "RUN-TASK", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+  const { worktreePath, branch } = await createWorktree(repo, projId, taskId);
+  worktrees.push(worktreePath);
+  fs.writeFileSync(path.join(worktreePath, "feature.txt"), "work\n");
+  execSync(`git add . && git ${GIT_ID} commit -q -m "feature.txt"`, { cwd: worktreePath });
+  db.insertSession({ id: workerId, projectId: projId, agentId: `agent-run-w-${sfx}`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId, worktreePath, branch });
+
+  // Cap default (1) with nothing else queued — the merge gate admits (RUNS) immediately, never queues.
+  let releaseGate;
+  const gateHold = new Promise((res) => { releaseGate = res; });
+  let gateSpawned = false;
+  const ptyStub = { stop() {}, isAlive() { return false; }, enqueueStdin() { return { delivered: true }; }, getPid() { return undefined; } };
+  const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { runGate: async () => { gateSpawned = true; await gateHold; return { passed: true }; } });
+
+  const pMergeConfirm = sessions.confirmWorkerMergeTracked(mgrId, workerId);
+  const mergeEntry = await waitUntil(() => sessions.gateQueueForManager(projId).running.find((e) => e.gateType === "merge"));
+  check("(DoD-6) the MERGE gate is genuinely RUNNING, not queued (setup sanity)", !!mergeEntry && gateSpawned === true);
+
+  if (mergeEntry) {
+    const cancelResult = await sessions.cancelGateOp(mgrId, mergeEntry.opId);
+    check("(DoD-6) cancelling a RUNNING merge gate is REFUSED", cancelResult.outcome === "not_cancelled");
+    check("(DoD-6) the refusal names the RUNNING-merge-specific reason, not a generic/queued one",
+      /RUNNING merge gate is not supported/i.test(cancelResult.reason ?? ""));
+    check("(DoD-6) the gate op is STILL reported running — refusing the cancel never freed the slot",
+      sessions.gateQueueForManager(projId).running.some((e) => e.opId === mergeEntry.opId));
+  } else {
+    console.log("SKIP  (DoD-6) cancel assertions — setup sanity check above already failed");
+  }
+
+  // Positive control: the SAME merge gate, left alone, completes normally — this queue genuinely advances,
+  // so the refusal above was a real decision, not a queue that could never have produced a different result.
+  releaseGate("go");
+  const mergeResult = await pMergeConfirm;
+  if (mergeEntry) {
+    check("(DoD-6) positive control — the never-cancelled RUNNING merge gate completed for real",
       mergeResult.settled === true && mergeResult.ok === true && mergeResult.value?.merged === true);
   }
 }

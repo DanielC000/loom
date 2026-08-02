@@ -1812,6 +1812,25 @@ export interface PendingGateOpVerdict {
     exitCode?: number | null;
     signal?: string | null;
     timedOut?: boolean;
+    /** Card 361520a0, Half Three: a bounded (~4KB) stdout+stderr tail — the SAME diagnostic the push
+     *  `[loom:merge-rejected]` nudge already carries (see `ConfirmMergeResult.detailText`'s own tail block)
+     *  but, until this card, never written here — leaving the pull-based `gate_history`/`gate_status` read
+     *  path with strictly less detail than the push notify for the identical rejection. Populated for a
+     *  "merge" row only (mirrors this whole `gateDetail` sub-object's current scope); a "gate" (worker
+     *  self-check) row keeps carrying its own tail via the top-level `outputTail` field above instead.
+     *  ⚠️ DELIBERATE DUPLICATION vs. the top-level `outputTail` field (card a1a8c5c4): on a settled "merge"
+     *  REJECTION, this field and the top-level `outputTail` carry the IDENTICAL bytes — both derive from
+     *  the SAME sanitized gate-output-tail local in `confirmWorkerMerge`. They are independently motivated
+     *  (`outputTail` exists so a PASS also retains a tail, which this sub-object never covers; this field
+     *  exists to mirror the rejection's own push-notify text 1:1) and MUST NOT be treated as two
+     *  independent signals to cross-check or reconcile — a future "fix" that makes one follow the other
+     *  would silently couple two fields that were never meant to be coupled. */
+    stderrTail?: string;
+    /** Card 361520a0, Half Three: per-step `{step, durationMs, status}` — the SAME shape the top-level
+     *  `steps` field carries for a "gate" row, but for "merge" a rejection's step timings live nested in
+     *  `GateRejectionDetail.steps` instead (see that type's own doc for why), so this mirrors it here rather
+     *  than forcing a rejection to populate the top-level field it was never scoped to. */
+    steps?: { step: string; durationMs: number | null; status: number | null }[];
   };
   /** Card 9f6598dd: the op's own settle instant (ISO), captured at the SAME `settlePendingGateOp` call
    *  that writes this payload — paired with `startedAt` (a top-level PendingGateOp column, already stored

@@ -4878,14 +4878,35 @@ export async function buildServer(deps: GatewayDeps): Promise<FastifyInstance> {
   });
   // Human-initiated merge of a worker's branch (the Review panel / #18c). Runs the daemon's
   // fail-closed build gate then squash-merges (one clean commit); manager is derived from the worker's
-  // parent so the existing ownership check holds. Returns { merged } or { merged:false, reason }.
+  // parent so the existing ownership check holds. Returns { merged } or { merged:false, reason }, or —
+  // on the still-running ceiling path — { merged:null, pending:true, opId, reason } (see below).
+  // ROUTED THROUGH THE TRACKED PATH (card 361520a0, Half One): this used to call the raw, untracked
+  // `confirmWorkerMerge` directly — no PendingOpRegistry dedupe, no durable `pending_gate_ops` tombstone —
+  // so an owner clicking Merge here while a manager's own `worker_merge_confirm` was already running on the
+  // SAME worker minted a genuine second gate run instead of attaching to the first (the incident this card
+  // fixes). `confirmWorkerMergeUntilSettled` shares the same `merge:${id}` dedupe key the MCP tool uses AND
+  // preserves this route's long-standing "block until the real outcome is known" contract (see its own doc
+  // for the bounded-loop mechanics). A `{settled:false}` result means the ceiling was hit while the gate is
+  // STILL genuinely running.
+  //
+  // `merged:null`, NOT `merged:false` (Code Review, card 361520a0, Half Four): a still-running gate used to
+  // report `merged:false` here — the ONLY field either web consumer (reviewQueue.tsx's card, ReviewPanel.tsx)
+  // actually branches on — so a human polling mid-gate saw "rejected — gate/merge still running…" rendered
+  // in the SAME red "rejected" styling a genuine refusal gets. The natural response to a red "rejected" is to
+  // click Merge again — exactly the re-click this card's dedupe exists to prevent, and against a since-dead
+  // manager that re-click is the fleet-wide merge-lane DoS Half Four fixes. `null` is a real third state a
+  // strict `r.merged ? … : …` ternary can't collapse into "rejected" by accident — both consumers below now
+  // check `pending`/`merged === null` FIRST.
   app.post("/api/sessions/:id/merge", async (req, reply) => {
     const { id } = req.params as { id: string };
     const worker = deps.db.getSession(id);
     if (!worker) return reply.code(404).send({ error: "session not found" });
     if (!worker.parentSessionId) return reply.code(400).send({ error: "not a worker (no manager)" });
     try {
-      return reply.send(await deps.sessions.confirmWorkerMerge(worker.parentSessionId, id));
+      const r = await deps.sessions.confirmWorkerMergeUntilSettled(worker.parentSessionId, id);
+      if (!r.settled) return reply.send({ merged: null, pending: true, opId: r.op.opId, reason: "gate/merge still running — it was NOT rejected; re-check shortly instead of re-merging" });
+      if (!r.ok) return reply.code(400).send({ error: r.error instanceof Error ? r.error.message : String(r.error) });
+      return reply.send(r.value);
     } catch (e) {
       return reply.code(400).send({ error: (e as Error).message });
     }
