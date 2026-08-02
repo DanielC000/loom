@@ -531,6 +531,11 @@ try {
     check("(e2e merge verdict pass) settledAt is a real ISO timestamp at/after admittedAt", typeof status.settledAt === "string" && Date.parse(status.settledAt) >= Date.parse(status.admittedAt));
     check("(e2e merge verdict pass) totalDurationMs is a real non-negative number, settledAt - admittedAt", typeof status.totalDurationMs === "number" && status.totalDurationMs >= 0 && status.totalDurationMs === Date.parse(status.settledAt) - Date.parse(status.admittedAt));
     check("(e2e merge verdict pass — THE WIRING) extended:true round-trips through the tombstone, from the SAME onExtend hook gate-runner.ts itself calls", status.extended === true);
+    // Card a1a8c5c4: BEFORE this card a PASSING merge gate's output was persisted NOWHERE — not this
+    // tombstone, not orchestration_events, not even the ephemeral pty text (only a REJECTION ever printed
+    // a tail). `richPassGateExtended` above already stubs `outputTail: "ok"` on its green return — this is
+    // the exact value that used to be silently discarded the moment `confirmWorkerMerge` saw `passed:true`.
+    check("(e2e merge verdict pass — a1a8c5c4 FIX) outputTail round-trips through the tombstone — a passing MERGE gate used to retain NO output of its own before this card", status.outputTail === "ok");
   }
 
   // ── (e2e merge, card 9f6598dd — SETTLED VERDICT, FAIL) the rejection side: outcome:"fail" + gateDetail
@@ -577,6 +582,11 @@ try {
     check("(e2e merge verdict fail) gateDetail carries the SAME rich diagnosis the [loom:merge-rejected] nudge embeds", status.gateDetail?.failedStep === "pnpm gate" && status.gateDetail?.failingTest === "some_test.mjs" && status.gateDetail?.exitCode === 1);
     check("(e2e merge verdict fail) extended is false (spawned, never extended) — NOT undefined (a distinct claim from \"never spawned\", see the negative control below)", status.extended === false);
     check("(e2e merge verdict fail) admittedAt/settledAt/totalDurationMs are ALL present on the fail path too (parity with pass)", typeof status.admittedAt === "string" && typeof status.settledAt === "string" && typeof status.totalDurationMs === "number");
+    // Card a1a8c5c4: outputTail is now a TOP-LEVEL field on both outcomes (mirroring the sibling "gate"
+    // kind since 4c5bf820) — distinct from `gateDetail.stderrTail`, which already carried this same text
+    // on the fail path before this card. The FAIL side isn't the gap this card closes (a rejection already
+    // had SOME durable trace via the pty notify text) — this just proves parity now that PASS has one too.
+    check("(e2e merge verdict fail — a1a8c5c4) outputTail is ALSO present as a top-level field (parity with pass)", status.outputTail === "FAIL  some_test.mjs");
   }
 
   // ── (e2e merge, card 9f6598dd — NEGATIVE CONTROL) a GATELESS project's merge never spawns a gate at
@@ -615,6 +625,9 @@ try {
 
     const status = sessions.gateStatus(opId);
     check("(e2e merge negative control — THE DISCRIMINATOR) gate_status's extended is ALSO undefined here, never a fabricated false, distinguishing \"no gate ran\" from the fail-block's \"ran, never extended\"", status.state === "settled" && status.outcome === "pass" && status.extended === undefined);
+    // Card a1a8c5c4: no gate spawned at all here — outputTail must stay undefined, never a fabricated
+    // empty string, same "nothing to report" discipline `extended` already follows above.
+    check("(e2e merge negative control — a1a8c5c4) outputTail is undefined — no gate ran, nothing to report", status.outputTail === undefined);
   }
 
   // ── (e2e, tombstone terminal states) gate_status maps EVERY pending_gate_ops.state value through —

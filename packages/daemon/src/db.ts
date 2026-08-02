@@ -558,14 +558,17 @@ CREATE TABLE IF NOT EXISTS wakes (
 -- terminal result — pass/fail/error/cancelled + duration + per-step timings + a bounded output tail —
 -- readable via gate_status without the [loom:gate-done]/[loom:gate-failed] nudge being the only carrier.
 -- verdict stays its OWN column (the discriminator gate_status branches on: NULL means "no verdict
--- recorded" — every legacy row, every "merge" row today, or a "gate" row that hasn't settled yet — never
--- fabricate one from a partially-parsed payload). Everything else rides in ONE JSON blob
--- (verdict_payload_json, see PendingGateOpVerdict's own doc, in this file's TS below, for its shape)
--- rather than one column per field: nothing queries these field-by-field (always read whole, by opId), and
--- a payload blob means a FUTURE verdict field (e.g. a mainline/suite sha) is a JSON addition, not another
--- migration. Both columns stay NULL for a "merge" row — that kind's own verdict-surfacing is unchanged by
--- this card (see confirmWorkerMergeTracked's own onSettle, which still calls settlePendingGateOp with no
--- payload).
+-- recorded" — every legacy row, or a "gate"/"merge" row that hasn't settled yet — never fabricate one from
+-- a partially-parsed payload). Everything else rides in ONE JSON blob (verdict_payload_json, see
+-- PendingGateOpVerdict's own doc, in this file's TS below, for its shape) rather than one column per
+-- field: nothing queries these field-by-field (always read whole, by opId), and a payload blob means a
+-- FUTURE verdict field (e.g. a mainline/suite sha) is a JSON addition, not another migration.
+-- STALE AS OF 4c5bf820, FIXED BY 9f6598dd THEN a1a8c5c4 — both columns did NOT stay NULL for a "merge"
+-- row for long: 9f6598dd widened confirmWorkerMergeTracked's own onSettle to also call
+-- settlePendingGateOp with a real verdict (settledAt/totalDurationMs/extended/gateDetail-on-fail), and
+-- a1a8c5c4 further widened that same payload to also carry outputTail (the bounded tail) on BOTH
+-- outcomes — closing the gap where a PASSING gate's output, "gate"-kind or "merge"-kind, was persisted
+-- nowhere at all. Both kinds share one payload shape today; see PendingGateOpVerdict's own doc.
 CREATE TABLE IF NOT EXISTS pending_gate_ops (
   op_id TEXT PRIMARY KEY,
   kind TEXT NOT NULL,             -- "gate" | "merge"
@@ -1759,24 +1762,40 @@ export interface ContextNudgeState {
  *  for what each value means and which call site writes it. Never re-mutated once terminal. */
 export type PendingGateOpState = "pending" | "settled" | "evicted-dead-owner" | "orphaned-by-restart";
 
-/** How a settled "gate" (worker self-check) op actually resolved — the `verdict` column's own value
- *  (card 4c5bf820). `"pass"`/`"fail"` are a real, completed `run_gate` verdict; `"cancelled"` mirrors
- *  {@link WorkerGateResult.cancelled} (a manager's `gate_cancel`, or auto-supersede-on-merge — no verdict
- *  was ever reached, must never be read as a failure); `"error"` means the run() closure itself threw
- *  (an unexpected exception, not an ordinary gate failure). Never written for a "merge" row today (see
- *  the schema doc) — a `null` `verdict` column value is the ONLY thing meaning "no verdict recorded". */
+/** How a settled "gate" (worker self-check) OR "merge" op actually resolved — the `verdict` column's own
+ *  value (card 4c5bf820; widened to "merge" rows by 9f6598dd). `"pass"`/`"fail"` are a real, completed
+ *  `run_gate` verdict (a "gate" row) or a real, completed `confirmWorkerMerge` verdict (a "merge" row);
+ *  `"cancelled"` mirrors {@link WorkerGateResult.cancelled} (a manager's `gate_cancel`, or
+ *  auto-supersede-on-merge — no verdict was ever reached, must never be read as a failure — "gate" rows
+ *  only, a merge is never itself cancelled this way); `"error"` means the run() closure itself threw (an
+ *  unexpected exception, not an ordinary gate failure). A `null` `verdict` column value is the ONLY thing
+ *  meaning "no verdict recorded" — every legacy row (from before 4c5bf820), or either kind's row that
+ *  hasn't settled yet. */
 export type PendingGateOpVerdictKind = "pass" | "fail" | "error" | "cancelled";
 
 /**
- * The `verdict_payload_json` column's parsed shape (card 4c5bf820) — everything about a settled "gate"
- * op's outcome that doesn't need its own queryable column (see the `pending_gate_ops` schema doc for why
- * this is one JSON blob, not one column per field). Every field is optional because which ones are
- * meaningful depends on `verdict`: a `"pass"`/`"fail"` carries `durationMs`/`validatedHead`/`steps`/
- * `outputTail` (mirrors {@link WorkerGateResult}'s own `ran:true` fields); `"fail"` additionally carries
- * `gateDetail` (the SAME rich diagnostic — phase/failedStep/failingTest/exitCode/signal/timedOut — the
- * `[loom:gate-failed]` nudge already embeds); `"cancelled"`/`"error"` carry `reason` only. A row written
- * before this card, or a "merge" row (verdict-population is "gate"-kind only), has NO payload at all —
- * `verdictPayload` reads back `null`, never a fabricated shape.
+ * The `verdict_payload_json` column's parsed shape (card 4c5bf820; widened to "merge" rows by 9f6598dd
+ * and a1a8c5c4) — everything about a settled "gate"/"merge" op's outcome that doesn't need its own
+ * queryable column (see the `pending_gate_ops` schema doc for why this is one JSON blob, not one column
+ * per field). Every field is optional because which ones are meaningful depends on BOTH `verdict` and
+ * which KIND of row this is: a "gate" row's `"pass"`/`"fail"` carries `durationMs`/`validatedHead`/
+ * `steps`/`outputTail` (mirrors {@link WorkerGateResult}'s own `ran:true` fields); a "merge" row's
+ * `"pass"`/`"fail"` instead carries `settledAt`/`totalDurationMs`/`extended`/`outputTail` (see those
+ * fields' own docs) — `durationMs`/`validatedHead`/`steps` stay "gate"-kind only, never populated for a
+ * "merge" row. `outputTail` (a1a8c5c4) is the one field BOTH kinds populate, on BOTH `"pass"` and
+ * `"fail"` — the bounded (~4KB, `OUTPUT_TAIL_BYTES`) last-step tail. For a "gate" row this is
+ * unconditional whenever a gate ran. For a "merge" row it is populated ONLY on the two dominant return
+ * paths — a plain gate-fail rejection and a plain successful merge — and stays `undefined` on every
+ * OTHER path too, not just "no gate spawned": a gateless project, a REUSED self-check, a pre-gate
+ * rejection, AND a rarer post-gate-PASS rejection (`gate_base_invalidated`, a merge conflict, an
+ * orphaned/stage-empty no-op) all read back `undefined` here even though a gate may have genuinely run
+ * and produced output in that last case. ⚠️ A missing `outputTail` on a "merge" row is therefore NOT
+ * proof that no gate spawned — `extended` (`undefined` ONLY when no gate spawned) is the field that
+ * proves that; never infer it from `outputTail`'s absence. `"fail"` additionally carries `gateDetail`
+ * (the SAME rich diagnostic — phase/failedStep/failingTest/exitCode/signal/timedOut — the
+ * `[loom:gate-failed]`/`[loom:merge-rejected]` nudge already embeds); `"cancelled"`/`"error"` carry
+ * `reason` only. A row written before 4c5bf820 (or a "merge" row written before 9f6598dd) has NO payload
+ * at all — `verdictPayload` reads back `null`, never a fabricated shape.
  */
 export interface PendingGateOpVerdict {
   reason?: string;

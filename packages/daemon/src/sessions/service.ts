@@ -260,6 +260,21 @@ type ConfirmMergeResult = {
   merged: boolean; reason?: string; emptyKind?: MergeEmptyKind; hardError?: boolean; reportedState?: "done" | "blocked";
   warning?: string; notified?: boolean; gateDetail?: GateRejectionDetail; opId: string; commitSubject?: string;
   gateRan?: boolean; reusedOpId?: string; gateSteps?: GateStepDuration[];
+  /** Card a1a8c5c4: the merge gate's own bounded last-step tail (`OUTPUT_TAIL_BYTES`, ~4KB — the SAME
+   *  ring `gate-runner.ts` already computes on every outcome, pass or fail). Set on the two DOMINANT
+   *  return paths only — a plain gate-fail rejection and a plain successful merge — NOT on every path
+   *  where a gate genuinely spawned (`gateRan:true`): a rarer post-gate-PASS rejection (`merge.conflict`,
+   *  `gateBaseInvalidated`, an orphaned/stage-empty no-op) still returns `outputTail:undefined` even
+   *  though a gate ran and produced output right before it. ⚠️ So `undefined` here does NOT mean "no gate
+   *  spawned" — it means "no gate spawned, OR one spawned on a path this card didn't wire up"; use
+   *  `gateExtended` (`undefined` ONLY when no gate spawned) to tell those apart, never this field's
+   *  absence. Before this card the merge gate's PASS path discarded this value entirely on EVERY path
+   *  (see `deriveMergeGateVerdict`'s own doc for where it now lands durably) — a passing merge gate left
+   *  NOTHING behind to show for itself, which is the exact absent-channel gap the card measured; closing
+   *  the two dominant paths was judged worth it even leaving the rarer ones as a named, deliberate gap
+   *  (see the card for why: minimal diff, real-world coverage). A FAIL still also carries its own richer
+   *  `gateDetail.stderrTail` (identical bytes) — this field exists so the PASS side has an equivalent. */
+  outputTail?: string;
   /** Card 9f6598dd: whether ANY step of whichever gate run(s) actually spawned for THIS merge ever
    *  consumed its one-time auto-extend — see the `gateExtended`/`anyExtended` locals in confirmWorkerMerge
    *  for how this is derived. `undefined` when no gate actually spawned (gateless project, or a REUSED
@@ -388,6 +403,12 @@ function deriveWorkerGateVerdict(
  *   - otherwise (a RESOLVED rejection — gate failure, merge conflict, stranded work, etc. — never a
  *     throw) → `"fail"`, the same `extended` field PLUS `gateDetail` when this rejection was gate-caused
  *     (every other rejection reason has none to report — `gateDetail` stays `undefined`, not fabricated).
+ * Card a1a8c5c4 widens BOTH branches to also carry `outputTail` (the bounded ~4KB last-step tail) —
+ * before this card a "merge" row's verdict never persisted ANY gate output, on either outcome, unlike the
+ * sibling "gate" (worker self-check) row which has carried it on both outcomes since 4c5bf820. `undefined`
+ * here means "no gate spawned" OR "one spawned on a rarer post-gate-PASS rejection path (merge conflict,
+ * `gateBaseInvalidated`, an orphaned/stage-empty no-op) this card left unwired" — see
+ * `ConfirmMergeResult.outputTail`'s own doc for the exact path list and where `outputTail` IS captured.
  * `settledAt`/`totalDurationMs` are computed HERE, at the one point both the op's own `startedAt` (closed
  * over as `opStartedAt`, see the call site) and "now" are both known — `totalDurationMs` is the REAL op
  * wall time (worktree prep + union-merge + gate + squash), not `Σ(gateSteps)`'s floor (see the card's own
@@ -420,6 +441,13 @@ function deriveMergeGateVerdict(
     kind: v.merged ? "pass" : "fail",
     payload: {
       reason: v.reason, settledAt, totalDurationMs, extended: v.gateExtended,
+      // Card a1a8c5c4: the SAME bounded (~4KB, OUTPUT_TAIL_BYTES) last-step tail a "gate" row's own
+      // deriveWorkerGateVerdict has persisted since 4c5bf820 — set on BOTH "pass" and "fail" (mirroring
+      // that sibling exactly), `undefined` when `ConfirmMergeResult.outputTail` was never set (no gate
+      // spawned: gateless project, a REUSED self-check, or a pre-gate rejection). Before this card a
+      // MERGE-kind row's verdict never carried ANY output at all, on either outcome — this is the fix for
+      // the card's own measured gap (a passing MERGE gate's output was persisted NOWHERE).
+      ...(v.outputTail !== undefined ? { outputTail: v.outputTail } : {}),
       ...(v.merged || !v.gateDetail ? {} : { gateDetail: {
         phase: v.gateDetail.phase, failedStep: v.gateDetail.failedStep, failingTest: v.gateDetail.failingTest,
         failingTestReason: v.gateDetail.failingTestReason, exitCode: v.gateDetail.exitCode,
@@ -9628,6 +9656,11 @@ export class SessionService {
     // onSettle to persist the durable per-op record `gate_status` exposes after settle.
     let anyExtended = false;
     let gateExtended: boolean | undefined;
+    // Card a1a8c5c4: the merge gate's own bounded last-step tail — declared at THIS outer scope for the
+    // SAME reason `gateRan`/`gateStepsResult` are: the plain GREEN return at the bottom of this method
+    // sits OUTSIDE the `if (gate)` block below, where the value is actually computed. `undefined` for a
+    // gateless project, a REUSED gate, or a pre-gate rejection (nothing spawned).
+    let gateOutputTailForRecord: string | undefined;
     // The canonical main sha this merge's GATE-VALIDATED tree is provably based on — threaded into
     // `mergeBranch` as `requireCanonicalHead` so it can re-verify, INSIDE its own merge lock, that main
     // provably hasn't moved since. mergeBranch's own squash re-derives fresh against whatever canonical
@@ -10040,6 +10073,14 @@ export class SessionService {
       // `gateStepsResult`'s own "nothing to report" discipline just above), else whatever `anyExtended`
       // accumulated across whichever attempt(s) actually ran.
       gateExtended = gateRan ? anyExtended : undefined;
+      // Card a1a8c5c4: captured ONCE here, independent of pass/fail, so BOTH the plain gate-fail rejection
+      // below AND the plain merge-success return further down can carry the SAME bounded tail — before
+      // this card only a rejection ever surfaced it (the ephemeral pty tail text / this-call's own
+      // `gateDetail.stderrTail`, neither of them durable), and a PASS discarded it completely the moment
+      // execution fell through this `if`, leaving the merge gate's PASS column with no observable output
+      // at all. `undefined` for a REUSED result (`gateRan:false` — nothing actually spawned), mirroring
+      // `gateStepsResult`'s own "nothing to report" discipline just above.
+      gateOutputTailForRecord = gateRan && gateResult.outputTail ? gateResult.outputTail.replace(CONTROL_CHAR_RE, "") : undefined;
       if (!gateResult.passed) {
         // DIAGNOSTIC DETAIL (card 4b8f2b6e): the old bare "build gate failed" string discarded the
         // failing phase/step, the first failing test/assertion, and the child's own output — a manager
@@ -10154,6 +10195,7 @@ export class SessionService {
           notified: !suppressed,
           opId: thisOpId,
           gateExtended,
+          outputTail: gateOutputTailForRecord,
         };
       }
     }
@@ -10291,8 +10333,8 @@ export class SessionService {
     // shipped without a separate `git log`. `merge.subject` is always set on this success path (mergeBranch
     // only omits it on !ok/noop, both handled above).
     return warning
-      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended }
-      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended };
+      ? { merged: true, opId: thisOpId, warning, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) }
+      : { merged: true, opId: thisOpId, commitSubject: merge.subject, gateRan, ...(reusedOpId ? { reusedOpId } : {}), ...(gateStepsResult ? { gateSteps: gateStepsResult } : {}), gateExtended, ...(gateOutputTailForRecord ? { outputTail: gateOutputTailForRecord } : {}) };
   }
 
   /**
