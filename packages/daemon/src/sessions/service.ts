@@ -11588,7 +11588,20 @@ export class SessionService {
       }
       void this.codescape.reingestMain(codescapeProjectId)
         .then((res) => {
-          if (!res.ok) console.warn(`[codescape] reingest-main failed for project ${projectId} (codescape id ${codescapeProjectId}): ${res.error ?? res.status}`);
+          if (res.ok) return;
+          // Card daaf7fc9: three genuinely different outcomes were all logged as "failed", which is wrong
+          // for two of the three — distinguish them instead of collapsing into one alarming line.
+          if (res.timedOut) {
+            // `res.error` already names our own bound (see CodescapeRequestResult.timedOut's doc) — a
+            // client-side abort, NOT a codescape failure. Their ingest is NOT cancelled by us hanging up
+            // (confirmed server-side, card daaf7fc9): we simply stopped listening before it answered, so
+            // whether it went on to succeed or fail is UNOBSERVED. Never write "the graph updated" here.
+            console.warn(`[codescape] reingest-main client-timeout for project ${projectId} (codescape id ${codescapeProjectId}): ${res.error} — we stopped listening; whether the ingest itself succeeded or failed is unobserved.`);
+          } else if (res.error === "codescape not running") {
+            console.warn(`[codescape] reingest-main skipped for project ${projectId} (codescape id ${codescapeProjectId}): codescape not running.`);
+          } else {
+            console.warn(`[codescape] reingest-main failed for project ${projectId} (codescape id ${codescapeProjectId}): ${res.error ?? res.status}`);
+          }
         })
         .catch((err) => console.warn(`[codescape] reingest-main errored for project ${projectId} (codescape id ${codescapeProjectId}): ${(err as Error).message}`));
     } catch (err) {
@@ -11890,8 +11903,24 @@ export class SessionService {
     // clobber was the bug: a card the manager moved to a non-terminal "ready for owner review" lane got
     // silently reset to the terminal column on the next reconnect/boot reconcile, which then made
     // worker_spawn wrongly refuse it as a terminal-column task.
-    const alreadyFinalized = args.taskId != null &&
-      this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
+    // REPLAY DETECTION (card daaf7fc9): `hadPriorMergeDone` is TRUE the moment ANY earlier finalizeMerge
+    // call for this exact workerSessionId already recorded a merge_done event — independent of `taskId`,
+    // unlike `alreadyFinalized` below (which additionally requires one, since it exists only to gate the
+    // task column-move/ship-state write). A LATER finalizeMerge call for the SAME worker is a REPLAY of a
+    // merge that already landed — a boot-reconcile re-run re-finding the same landed squash
+    // (reconcileOrchestrationOnBoot Pass A), an idempotent worktree-GC retry, or a stale
+    // worker_merge_confirm redelivery landing on finishAlreadyMerged's own finalizeMerge call — never a
+    // call where main just advanced again. See the reingest call site below for what this gates and why.
+    // ONE KNOWN EXCEPTION: `hadPriorMergeDone` can also be satisfied by reconcile Pass A2 (the OTHER
+    // `merge_done` writer besides this method — search this same file for `reconciled: true`), which
+    // infers "landed" from BOARD STATE (the task's terminal column) rather than from git. A task
+    // manually moved to the terminal column, on a worker that filed a merge_request but never actually
+    // merged, would get an A2 merge_done — and a genuine FIRST finalizeMerge for that worker would then
+    // see `hadPriorMergeDone:true` and skip a reingest that was legitimately due. Narrow, pre-existing to
+    // A2, and low-consequence (a best-effort reingest is skipped; the graph is merely stale until the
+    // next merge) — not fixed here.
+    const hadPriorMergeDone = this.db.listEventsForWorker(args.workerSessionId).some((e) => e.kind === "merge_done");
+    const alreadyFinalized = args.taskId != null && hadPriorMergeDone;
     if (args.taskId && !alreadyFinalized) {
       const task = this.db.getTask(args.taskId);
       const landingKey = task
@@ -11917,6 +11946,25 @@ export class SessionService {
         this.db.updateTask(args.taskId, { ...(landingKey ? { columnKey: landingKey } : {}), ...shipPatch });
       }
     }
+    // Left UNCONDITIONAL deliberately (card daaf7fc9's own LEAD, not a finding): a replay finalize still
+    // appends a SECOND merge_done for this worker. The `alreadyFinalized`/`hadPriorMergeDone` guards above
+    // and below use `.some()`, so they stay correct either way. Two DIFFERENT counts matter here — don't
+    // conflate them, and don't trust a hardcoded total for either (a repo-wide grep count drifts with
+    // every edit, including edits to comments like this one that quote the pattern):
+    //   - WRITERS of the merge_done event kind — the number that actually bounds how many merge_done rows
+    //     a replay can produce. Re-derive live (this comment intentionally does NOT literally spell out
+    //     the object-shape pattern, so grepping for it never self-matches this line): search for the
+    //     TypeScript event-literal shape `kind:` immediately followed by the quoted event-kind string, in
+    //     packages/daemon/src/. As of this fix: exactly 2, both in THIS file — this call, and reconcile
+    //     Pass A2 (search for `reconciled: true` a bit further down in this same file).
+    //   - READERS (filter/some()/count consumers of the event) — the population that would need auditing
+    //     before this append could safely be guarded too. Re-derive live: `grep -rln merge_done
+    //     packages/daemon/src/`. As of this fix: this file plus db.ts, mcp/orchestration.ts,
+    //     idle-watcher.ts, companion/attention-push.ts — the overwhelming majority of individual
+    //     mentions live in THIS file, not spread across the other four. None of them, here or there, have
+    //     been audited for a consumer that COUNTS events rather than checking presence.
+    // Audit before guarding this append too; until then, leave it firing on every finalize call, replay
+    // or not.
     this.db.appendEvent({
       id: randomUUID(), ts: new Date().toISOString(),
       managerSessionId: args.managerSessionId, workerSessionId: args.workerSessionId,
@@ -11929,8 +11977,12 @@ export class SessionService {
     // Codescape C3: reingest main's CURRENT working tree AFTER it's been checked out above (both the
     // Green path and the ALREADY_MERGED path converge here) — fire-and-forget, NEVER awaited inline: a
     // big-repo ingest can take up to ~2 minutes, so awaiting it here would hold the merge caller for that
-    // whole window. Best-effort by construction.
-    this.fireCodescapeReingest(args.projectId);
+    // whole window. Best-effort by construction. ONLY on the FIRST finalize for this worker
+    // (`!hadPriorMergeDone`, see its doc above) — a REPLAY finalize means main did not move since the
+    // prior finalize already reingested it, so firing again is exactly the zero-new-commits reingest
+    // burst card daaf7fc9 exists to stop (the boot-reconcile 07:27Z burst: 4 orphaned merges reconciled,
+    // each refiring a full reingest with nothing new behind it).
+    if (!hadPriorMergeDone) this.fireCodescapeReingest(args.projectId);
     // The merged worker's slot is now genuinely, finally free — nothing else claims it afterward (unlike
     // recycleWorker's own predecessor exit), so drain here rather than waiting for the caller's own
     // hard-stop of the merged worker to reach the generic onExit-driven drain. Fire-and-forget; a

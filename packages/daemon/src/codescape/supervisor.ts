@@ -184,6 +184,13 @@ export interface CodescapeRequestResult {
   /** Parsed JSON response body, when the response carried one. Most control-plane calls ignore this
    *  (fire-and-forget); {@link CodescapeSupervisor.registerProject} reads it for the resolved `id`/`mode`. */
   json?: unknown;
+  /** TRUE only when THIS client gave up waiting — the per-call `timeoutMs` bound elapsed and WE aborted
+   *  the fetch (see {@link CodescapeSupervisor.request}'s `controller.signal.aborted` check), never set for
+   *  a real HTTP error response or a network-level failure. Card daaf7fc9: this is what lets a caller tell
+   *  "we stopped listening" apart from "codescape actually failed" — a client-side abort does NOT observe
+   *  whether the request codescape kept processing eventually succeeded or failed server-side; it only
+   *  means our own bound (named in `error`) elapsed first. Never conflate this with `!ok` on its own. */
+  timedOut?: boolean;
 }
 
 /** Result shape of {@link CodescapeSupervisor.ingest}. */
@@ -1225,6 +1232,15 @@ export class CodescapeSupervisor {
       try { json = await res.json(); } catch { /* no/non-JSON body — fine, most callers never read .json */ }
       return { ok: res.ok, status: res.status, json };
     } catch (err) {
+      // `controller.abort()` is called from EXACTLY ONE place — the timer above — so `signal.aborted`
+      // being true here is proof this catch was reached because OUR OWN `timeoutMs` bound elapsed, not a
+      // network-level failure (DNS, ECONNREFUSED, a reset). Card daaf7fc9: distinguishing this from every
+      // other request failure is the whole point — a client-side abort tells you nothing about whether
+      // codescape's own processing (which does NOT get cancelled by us hanging up, confirmed server-side)
+      // went on to succeed or fail; it is a fact about OUR patience, not about codescape.
+      if (controller.signal.aborted) {
+        return { ok: false, error: `client-side abort — no response within our own ${timeoutMs}ms bound`, timedOut: true };
+      }
       return { ok: false, error: (err as Error).message };
     } finally {
       clearTimeout(timer);

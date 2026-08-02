@@ -487,12 +487,17 @@ const t0 = Date.now();
 const deadReg = await deadClient.registerWorktree("p", { worktreeId: "w", path: "/a", baseRef: "main" });
 check("(d) an unreachable server resolves ok:false (never throws)", deadReg.ok === false);
 check("(d) bounded — resolves quickly, doesn't hang past its own timeout", Date.now() - t0 < 5_000);
+// Card daaf7fc9: a real connection-refused is NOT a client-side abort — `timedOut` must stay falsy so a
+// caller can't mistake "the server rejected us instantly" for "we gave up waiting".
+check("(d) card daaf7fc9: an ECONNREFUSED-shaped failure is NOT flagged timedOut", deadReg.timedOut !== true);
 
 // No live port at all (never started) ⇒ immediate ok:false, no fetch attempted.
 const noPortSup = new CodescapeSupervisor({ homeDir: path.join(tmpHome, "never-started") });
 const t1 = Date.now();
 const noPortReg = await noPortSup.registerWorktree("p", { worktreeId: "w", path: "/a", baseRef: "main" });
 check("(d) no live port ⇒ ok:false immediately (no fetch attempted)", noPortReg.ok === false && Date.now() - t1 < 200);
+check("(d) no live port ⇒ the distinguishable 'codescape not running' error text", noPortReg.error === "codescape not running");
+check("(d) card daaf7fc9: 'codescape not running' is NOT flagged timedOut either (a third, distinct outcome)", noPortReg.timedOut !== true);
 
 // ===================== (d-hang) CR fix: prove the AbortController bound actually FIRES =====================
 // The dead-port case above proves "never throws" but resolves via a fast connection-refused error, never
@@ -509,6 +514,12 @@ const hungElapsed = Date.now() - t2;
 check("(d-hang) a connected-but-never-responds server resolves ok:false (the AbortController bound fires)", hungReg.ok === false);
 check(`(d-hang) the abort fires around its OWN timeout (${hungElapsed}ms), not instantly and not way past it`,
   hungElapsed >= HUNG_TIMEOUT_MS - 50 && hungElapsed < HUNG_TIMEOUT_MS + 4_000);
+// Card daaf7fc9: THIS is the one genuine client-side-abort outcome among the three (dead-port, no-port,
+// hung) exercised in this section — `timedOut` must be true here and ONLY here, and the error text must
+// name our own bound rather than reading as a generic/opaque failure a caller could mistake for the
+// server itself having failed.
+check("(d-hang) card daaf7fc9: a genuine client-side abort IS flagged timedOut:true", hungReg.timedOut === true);
+check(`(d-hang) card daaf7fc9: the error names our own bound (${HUNG_TIMEOUT_MS}ms)`, typeof hungReg.error === "string" && hungReg.error.includes(String(HUNG_TIMEOUT_MS)));
 hungServer.closeAllConnections();
 await new Promise((resolve) => hungServer.close(resolve));
 

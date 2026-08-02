@@ -21,10 +21,13 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //       returns null for a null taskId); this is a permanent skip, not an existence-gate.
 //   (1c) a SECOND tasked spawn (its OWN distinct worktree) registers its OWN entry too — register is
 //       PER-WORKTREE now, not a once-per-project existence gate.
-//   (2) reingest-main fires after finalizeMerge succeeds, UNCONDITIONALLY, on BOTH the Green (normal
-//       squash) path and the ALREADY_MERGED (idempotent re-confirm) path — BACKGROUNDED: confirmWorkerMerge
-//       resolves BEFORE the fake's artificial delay elapses, proving it is never awaited inline. NO
-//       Loom-side debounce/scheduling (codescape's own server-side single-flight queue owns that).
+//   (2) reingest-main fires after finalizeMerge succeeds on the Green (normal squash) path — BACKGROUNDED:
+//       confirmWorkerMerge resolves BEFORE the fake's artificial delay elapses, proving it is never
+//       awaited inline. NO Loom-side debounce/scheduling (codescape's own server-side single-flight queue
+//       owns that). (2b) a SUBSEQUENT ALREADY_MERGED re-confirm on the SAME already-finalized worker
+//       converges into the SAME finalizeMerge but does NOT refire reingest (card daaf7fc9: a replay lands
+//       zero new commits, so refiring would be a pointless full-repo reingest burst — see
+//       codescape-reingest-replay-guard.mjs for the boot-reconcile shape of the identical fix).
 //   (3) gcWorktreeDir genuinely removing a worktree fires a REAL drop-worktree call (revives the hook the
 //       old rewrite had left an inert no-op).
 //   (4) recycleWorker RE-FIRES register-worktree under the SAME worktreeId (CR fix, card 088afc94:
@@ -272,13 +275,24 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
     check("(3) drop-worktree: projectId is codescape's OWN manifest-resolved id", dropCall?.projectId === codescapeId);
     check("(3) drop-worktree: worktreeId matches the merged worker's own registration", dropCall?.worktreeId === reg?.worktreeId);
 
-    // --- (2b) ALREADY_MERGED path (a stale re-confirm on the already-fully-merged `worker`) also fires
-    //     reingest — both the Green path (above) and ALREADY_MERGED converge in the SAME finalizeMerge ---
+    // --- (2b) ALREADY_MERGED path (a stale re-confirm on the already-fully-merged `worker`) — both the
+    //     Green path (above) and ALREADY_MERGED converge in the SAME finalizeMerge, but a REPLAY of an
+    //     already-finalized worker (card daaf7fc9) must NOT refire reingest a second time: `worker` was
+    //     already reingested once by the Green-path confirm above, and this re-confirm lands zero new
+    //     commits behind it. Was "reingest fires again" before card daaf7fc9's fix — that was the exact
+    //     zero-new-commits reingest-burst bug (there via a duplicate confirm instead of a boot-reconcile
+    //     replay; see codescape-reingest-replay-guard.mjs for the boot-reconcile shape of the same fix).
     const reingestCountBeforeAM = fake.calls.reingest.length;
     const confirmAgain = await sessions.confirmWorkerMerge(mgr.id, worker.id);
     check("(2b) a stale re-confirm resolves ALREADY_MERGED", confirmAgain.merged === true && confirmAgain.emptyKind === "ALREADY_MERGED");
-    check("(2b) reingest fires again for the ALREADY_MERGED path", await waitFor(() => fake.calls.reingest.length === reingestCountBeforeAM + 1));
-    check("(2b) it settles too", await waitFor(() => fake.reingestInFlightCount() === 0));
+    // NO fixed wait here (deliberately): finishAlreadyMerged `await`s finalizeMerge directly, and
+    // confirmWorkerMerge in turn awaits that whole chain before resolving — so by the time the `await`
+    // above returns, finalizeMerge's own (synchronous) `if (!hadPriorMergeDone) this.fireCodescapeReingest(...)`
+    // guard has ALREADY been evaluated, one way or the other. `reingestMain`'s push into `calls.reingest`
+    // happens synchronously too (before its own artificial delay) — see makeFakeCodescape above — so this
+    // is a checkable FACT the instant confirmWorkerMerge settles, not a race a sleep could paper over.
+    check("(2b) card daaf7fc9: reingest does NOT refire for an already-finalized replay", fake.calls.reingest.length === reingestCountBeforeAM);
+    check("(2b) it settles too (nothing new in flight)", await waitFor(() => fake.reingestInFlightCount() === 0));
 
     // --- (4) CR fix: recycleWorker RE-FIRES register-worktree (same worktreeId — a re-registration, not a
     //     fresh one) but never fires drop (it never creates a NEW worktree, and never calls gcWorktreeDir —
@@ -498,6 +512,6 @@ async function assertRegisterBeforeSpawn(orderLog, label, sliceStart) {
 try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* best-effort */ }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — Codescape lifecycle hooks (P4 rewrite, card 088afc94): register-worktree fires on spawnWorker's create-worktree path for a TASKED spawn (registering codescape's OWN manifest-resolved project id, this worker's own worktree path/branch, keyed by a stable per-task worktreeId) — a taskless spawn never registers at all (no stable id), and a SECOND tasked spawn registers its OWN distinct entry too (per-worktree, not a once-per-project gate); reingest-main fires after finalizeMerge succeeds, unconditionally, on BOTH the Green and ALREADY_MERGED paths, backgrounded (never awaited inline) with no Loom-side debounce; a genuine gcWorktreeDir removal now fires a REAL drop-worktree call (reviving the C1 hook the old rewrite had left an inert no-op) for the merged worker's own worktreeId; recycleWorker RE-FIRES register-worktree under the SAME worktreeId (but never a drop — the worktree is reused, never removed); resume() and forkSession() both re-fire it too, same worktreeId; a code-ordering regression guard (card f11f3aae) confirms register is always ISSUED before pty.spawn across all four lifecycle paths (fresh spawn/resume/fork/recycle — the residual network-timing race that isn't hermetically testable is documented at the guard, not built around); and the negative case (LOOM_DEV off, or the project not opted in) fires zero calls across an otherwise byte-identical spawn/merge/gc lifecycle."
+  ? "\n✅ ALL PASS — Codescape lifecycle hooks (P4 rewrite, card 088afc94): register-worktree fires on spawnWorker's create-worktree path for a TASKED spawn (registering codescape's OWN manifest-resolved project id, this worker's own worktree path/branch, keyed by a stable per-task worktreeId) — a taskless spawn never registers at all (no stable id), and a SECOND tasked spawn registers its OWN distinct entry too (per-worktree, not a once-per-project gate); reingest-main fires after finalizeMerge succeeds on the Green path, backgrounded (never awaited inline) with no Loom-side debounce, but does NOT refire on a subsequent ALREADY_MERGED replay of the SAME already-finalized worker (card daaf7fc9: zero new commits behind a replay); a genuine gcWorktreeDir removal now fires a REAL drop-worktree call (reviving the C1 hook the old rewrite had left an inert no-op) for the merged worker's own worktreeId; recycleWorker RE-FIRES register-worktree under the SAME worktreeId (but never a drop — the worktree is reused, never removed); resume() and forkSession() both re-fire it too, same worktreeId; a code-ordering regression guard (card f11f3aae) confirms register is always ISSUED before pty.spawn across all four lifecycle paths (fresh spawn/resume/fork/recycle — the residual network-timing race that isn't hermetically testable is documented at the guard, not built around); and the negative case (LOOM_DEV off, or the project not opted in) fires zero calls across an otherwise byte-identical spawn/merge/gc lifecycle."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
