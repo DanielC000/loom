@@ -517,9 +517,16 @@ what you checked. Found none? Treat it as live.
      Once you're told the op is pending, go do something else (review another worker, work your queue) and
      wait for the async `[loom:merge-done]` / `[loom:merge-rejected]` / `[loom:merge-failed]` nudge that
      lands the moment the gate/merge actually finishes — it carries the same `opId` you were handed, so if
-     several merges are pending at once you can tell which one just settled. Re-calling `worker_merge_confirm`
-     with the same `workerSessionId` (or reading `worker_list`'s `pendingMerge` field) is a safe fallback if
-     you need the answer sooner, but don't fall back to `git log` guesswork while waiting.
+     several merges are pending at once you can tell which one just settled. If you need the answer sooner,
+     poll the read-only `gate_status(opId)` (never starts a new run) or read `worker_list`'s `pendingMerge`
+     field. Re-calling `worker_merge_confirm` with the same `workerSessionId` is also always safe, at any
+     delay: a re-call at the SAME commit returns the cached verdict; a re-call after new commits on the
+     branch gates them for real — that's a different question, not a silent re-run — but `gate_status`/
+     `worker_list` are read-only and cost nothing, so prefer them for a pure status check. The ONLY way to
+     force a genuine RE-RUN of the SAME commit (e.g. retry a flake, not new commits — those already gate
+     normally on the next re-call) is `forceRemoveWorktree:true` on the re-call — a deliberate, named
+     escalation, never an implicit side effect of just calling again. Don't fall back to `git log`
+     guesswork while waiting.
    - **A gate that never resolves is a defect to diagnose, never a license to merge around it.** Silence
      alone is not evidence the gate is "wedged" or "flaky, not your code" — check its live state (or a
      `gate_status`/`gate_queue` read tool, if your platform exposes one) before concluding that, and never

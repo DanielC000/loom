@@ -101,6 +101,29 @@ interface RetainedView extends PendingOpView {
   rawOutcome: { ok: true; value: unknown } | { ok: false; error: unknown };
 }
 
+/** A settle verdict remembered UNTIL SUPERSEDED — never on a clock — for `opts.retainVerdictUntilSuperseded`
+ *  (card 1555e361, the merge-gate re-call trap). PROCESS-LOCAL, NOT PERSISTED — see the class doc's
+ *  "UNTIL-SUPERSEDED VERDICT CACHE" section for why this is named to avoid the DB-persisted sense
+ *  "durable" carries elsewhere in this same file (e.g. the `pending_gate_ops` tombstone row). Deliberately
+ *  NOT a `RetainedView`: it carries none of the display-facing fields (`peek()`/worker_list's
+ *  `pendingMerge` never reads this map — that surfacing stays on the existing TTL'd `retained` map,
+ *  unchanged, per its own doc), only what `attach()`'s dedupe check needs to hand back a cached answer
+ *  instead of re-invoking `run()`.
+ *
+ *  `identity` (card 1555e361 CR follow-up — the SAME card, caught before merge): "until superseded" alone
+ *  is NOT enough for merge — a plain re-call after the worker pushed a genuine fix must NOT return the
+ *  cached REJECTION for a commit that no longer exists ("my fix didn't work" read by the manager on work
+ *  that changed underneath the cache). `identity` is a caller-supplied opaque string identifying WHAT was
+ *  validated (for merge: the worker branch's HEAD sha at call time) — `attach()` only serves this cached
+ *  verdict when a re-call's OWN freshly-resolved identity matches exactly. A caller that never opts into an
+ *  identity (`opts.verdictIdentity` omitted) leaves this `undefined` — matches only another `undefined`,
+ *  i.e. identity-agnostic, byte-identical to the pre-identity behavior. See `attach()`'s own doc for the
+ *  read-side matching rule. */
+interface UntilSupersededVerdict {
+  rawOutcome: { ok: true; value: unknown } | { ok: false; error: unknown };
+  identity?: string;
+}
+
 /**
  * Daemon-global registry of long-running orchestration ops (worker_spawn / worker_merge_confirm) that
  * can be POLLED and RE-ATTACHED — generalizes the old bare `inFlightSpawnTaskIds` claim Set (a
@@ -179,10 +202,79 @@ interface RetainedView extends PendingOpView {
  * staleness — `run_gate`'s `headCurrent:false` — so a caller already told a specific cached answer is
  * contaminated is never handed that SAME answer again on the very next call. See `attach()`'s own doc for
  * the mechanics; this key point belongs here too since it changes the "unconditional" framing above.
+ *
+ * UNTIL-SUPERSEDED VERDICT CACHE (card 1555e361 — the merge-gate re-call trap): the `retained` dedupe
+ * above is bounded by `retainMs`, and for "merge" that TTL was only 5s (`MERGE_OP_RETAIN_MS`) — a caller
+ * polling for the outcome of a multi-minute gate run will, BY NATURE, usually land its re-call after that
+ * window has closed, at which point the old dedupe found nothing and `attach()` re-invoked `run()` for
+ * real: a "safe poll" that silently became a genuine, unrequested second gate run, and — for a
+ * non-deterministic gate test — could launder a REJECTED branch into a merge with no decision anywhere in
+ * the loop. `opts.retainVerdictUntilSuperseded` closes that: for a `key` that opts in, EVERY settle also
+ * writes into a SEPARATE `untilSupersededVerdicts` map that carries NO expiry timer at all — a re-call
+ * finds it there regardless of how long it waited, and `attach()`'s dedupe hands back that SAME verdict
+ * instead of minting a fresh entry. It is superseded, not expired: the only way to clear it is for a
+ * genuinely fresh op under the same `key` to settle in turn (which overwrites the map entry the same way
+ * `retain()` already overwrites `retained`) — reachable ONLY via `opts.bypassRetained` (today,
+ * `forceRemoveWorktree:true`), an explicit caller-chosen escalation, never a clock.
+ *
+ * ⚠️ NAMED DELIBERATELY, NOT "durable": this map is PROCESS-LOCAL, held ONLY in this registry's own
+ * in-memory `Map` — it is NEVER written to the database and does NOT survive a daemon restart. "Durable"
+ * already has an established, DIFFERENT meaning a few lines below in this same options block (the
+ * `pending_gate_ops` DB tombstone row `onOpMinted`/`onSettle` maintain) — reusing it here for a plain
+ * in-memory cache would mislead a reader into assuming restart-survival this map does not provide. A
+ * re-call whose gap spans a daemon restart finds this map EMPTY and mints a genuinely fresh op, exactly as
+ * it did before this card — the trap this section closes is a same-process TTL cliff, not a persistence
+ * gap, and this fix does not claim to close the latter.
+ *
+ * Deliberately DECOUPLED from `retained`/`retainMs`: the two maps are written together at settle time but
+ * read by different consumers — `peek()` (worker_list/Board display) keeps consulting ONLY the TTL'd
+ * `retained` map and keeps reverting to nothing shown on the SAME schedule as before this existed, while
+ * `attach()`'s own dedupe consults `untilSupersededVerdicts` first. So a settled merge can vanish from
+ * worker_list's `pendingMerge` field after a few seconds (display, cosmetic) while a re-call minutes or
+ * hours later still safely returns the cached verdict instead of re-running the gate (safety, load-bearing)
+ * — the manager's call on card 1555e361: the safety property must never be allowed to depend on the
+ * display window's cadence.
+ *
+ * IDENTITY-GATED SUPERSEDE (card 1555e361, caught at review before merge): "until superseded" via
+ * `opts.bypassRetained` alone is not enough for merge — a manager who fixes a rejected branch and re-calls
+ * PLAINLY (no `forceRemoveWorktree:true`) must NOT be told the cached REJECTION for a commit that no longer
+ * exists; that reads as "my fix didn't work" and is a worse trap than the one this section fixes (silence
+ * vs. a confidently wrong answer). `opts.verdictIdentity` closes this: an opaque, caller-supplied string
+ * (for merge: the branch's HEAD sha, resolved fresh on every call, BEFORE the dedupe decision) recorded
+ * alongside the verdict at settle time. A re-call's dedupe hit requires its OWN freshly-resolved identity to
+ * match the STORED one exactly (`undefined` matches only `undefined` — a caller that never opts into
+ * identity tracking is unaffected). A MISMATCH is treated as a genuine cache MISS, not merely "fall through
+ * to the TTL'd `retained` check instead" — that map was written at the exact same (now-stale) settle and
+ * would silently reproduce the identical wrong answer for its own few-second window, so a verdict-cache-hit
+ * mismatch skips `retained` too and goes straight to a fresh mint. Same-identity re-calls (the actual poll
+ * case this section exists for) are completely unaffected — the trap this section fixes and the one this
+ * paragraph fixes are two different axes (WHEN you ask vs. WHAT you're asking about) and neither one's fix
+ * weakens the other's.
+ *
+ * `opts.identityOptional` (card 1555e361 CR follow-up, ROUND 2 — caught by a regression in the SAME card's
+ * own test suite before merge): strict identity comparison alone over-refuses. For merge specifically, a
+ * SUCCESSFUL confirm deletes the worker's branch as part of its own completion (`finalizeMerge`) — so a
+ * later re-call can never again resolve the SAME sha the cached verdict was validated against, EVEN THOUGH
+ * nothing about the underlying answer changed and no new commit is possible (there is no live worktree left
+ * to commit to). Without an escape hatch, that re-derives a fresh (though still safe — see the previous
+ * paragraph) ALREADY_MERGED result on every poll instead of a pure cache hit, breaking a distinct,
+ * previously-tested invariant ("re-poll after settle returns the EXACT SAME opId"). `identityOptional` lets
+ * the CALLER declare, per call, "I know from context outside what this registry can see that identity
+ * cannot meaningfully differ here" — `confirmWorkerMergeTracked` sets it exactly when the worker's task has
+ * already reached its terminal lane (the SAME authoritative "already finished" signal
+ * `confirmWorkerMerge`'s own early-idempotency check trusts), never merely because a git ref failed to
+ * resolve (a live worktree's ref failing to resolve is usually TRANSIENT and must still fail closed to a
+ * fresh mint — see `verdictIdentity`'s own doc). See `attach()`'s own doc for the mechanics.
  */
 export class PendingOpRegistry {
   private readonly entries = new Map<string, Entry<unknown>>();
   private readonly retained = new Map<string, RetainedView>();
+  /** See the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section. PROCESS-LOCAL, NOT PERSISTED — cleared
+   *  on every daemon restart (see that section's own boundary note). Bounded the same way
+   *  `lastWorkerGateCheck` (SessionService) is: one small entry per `key` that has ever opted in and
+   *  settled at least once, never explicitly purged — an accepted, tiny, long-running-daemon leak, not a
+   *  gap to fix. */
+  private readonly untilSupersededVerdicts = new Map<string, UntilSupersededVerdict>();
 
   /** Read-only, NEVER consumes — for surfacing (worker_list's `pendingMerge` field). Returns a RUNNING
    *  op's view, or — if `key` has no running entry but a not-yet-expired RETAINED terminal view (see the
@@ -344,7 +436,38 @@ export class PendingOpRegistry {
    * settle (ungated by this flag), so a later NON-forced re-confirm within ITS window correctly dedupes
    * against the fresh (forced) outcome, not the stale pre-force one.
    *
-   * `opts.isRetainedResultUsable` (card 79b0ee52 — `run_gate`'s KNOWN-CONTAMINATED re-serve): unlike
+   * `opts.retainVerdictUntilSuperseded` (card 1555e361 — see the class doc's "UNTIL-SUPERSEDED VERDICT
+   * CACHE" section for the full incident/rationale, INCLUDING its process-local/not-persisted boundary):
+   * opts a `key` INTO the separate, never-expiring `untilSupersededVerdicts` dedupe IN ADDITION TO (never
+   * instead of) the ordinary `retainMs`-bounded `retained` check above — both are consulted on a miss
+   * against `entries`, the until-superseded cache first. `opts.bypassRetained` gates BOTH reads identically
+   * (a forceful re-call skips every cached answer, either map, and always mints fresh) — there is no
+   * separate bypass flag for the until-superseded map. Independent of `retainMs`/`classifyOutcome`: a
+   * caller can opt into this dedupe with or without also wanting the TTL'd display view:
+   * `confirmWorkerMergeTracked` wants BOTH (`retainMs` for worker_list's brief terminal fill, this for the
+   * actual safety-critical re-call dedupe). Omit it (every call site except the merge one, today) and
+   * behavior is byte-identical to before this existed.
+   *
+   * `opts.verdictIdentity` (card 1555e361 CR follow-up — see the class doc's "IDENTITY-GATED SUPERSEDE"
+   * section): meaningful ONLY alongside `opts.retainVerdictUntilSuperseded`; ignored otherwise. An opaque
+   * caller-supplied string (for merge: the branch's freshly-resolved HEAD sha) — the cache read above
+   * requires THIS call's identity to match the identity recorded at the cached verdict's OWN settle time; a
+   * mismatch is a MISS (falls through to a fresh mint, bypassing the TTL'd `retained` fallback too — see
+   * the class doc for why). Omit it and the dedupe stays identity-agnostic (`undefined` matches only
+   * `undefined`), exactly as `retainVerdictUntilSuperseded` behaved before this opt existed.
+   *
+   * `opts.identityOptional` (card 1555e361 CR follow-up, Round 2 — the finalized-worker false-mismatch):
+   * a PER-CALL override that skips the identity comparison entirely and trusts the cached verdict
+   * REGARDLESS of `verdictIdentity` (as if it weren't given at all, on this one call). Needed because "the
+   * identity this call can currently resolve" and "the identity the cached verdict was written against" can
+   * genuinely diverge WITHOUT anything new having happened — e.g. for merge, a SUCCESSFUL confirm deletes
+   * the branch as part of its own completion, so a later re-call literally cannot re-derive the SAME sha it
+   * validated; comparing them would misclassify a pure poll as "different input" and mint a wasted (though
+   * still safe — see the class doc) fresh op. The caller decides this PER CALL from context the registry
+   * itself has no way to know (for merge: the worker's task has already reached its terminal lane — see
+   * `confirmWorkerMergeTracked`'s own resolution) — set it ONLY when that context makes a genuine identity
+   * change structurally impossible, never as a blanket escape hatch, or it silently re-opens the exact trap
+   * `verdictIdentity` exists to close.
    * `bypassRetained` (a per-CALL, caller-decided-in-advance escalation), this is a per-VALUE predicate
    * evaluated against the cached `ok:true` outcome itself, at read time. A retention hit whose own settled
    * value already told an earlier caller it was unusable (e.g. `runWorkerGate`'s `headCurrent:false` — the
@@ -392,6 +515,9 @@ export class PendingOpRegistry {
       retainMs?: number;
       classifyOutcome?: (outcome: { ok: true; value: T } | { ok: false; error: unknown }) => PendingOpOutcome;
       bypassRetained?: boolean;
+      retainVerdictUntilSuperseded?: boolean;
+      verdictIdentity?: string;
+      identityOptional?: boolean;
       isRetainedResultUsable?: (value: T) => boolean;
       onSurfacedPending?: (op: PendingOpView, opId: string) => void;
       /** Fires SYNCHRONOUSLY, exactly once per genuinely fresh entry — right after it's minted (registered
@@ -429,7 +555,41 @@ export class PendingOpRegistry {
       // nudge. Bounded by the SAME `retainMs` timer that already governs the Board-facing retained view:
       // once it expires (and self-evicts), this check finds nothing and falls through to the normal
       // fresh-op path below exactly as before — a genuine retry after the window still runs for real.
-      const retainedHit = this.retained.get(key);
+      //
+      // UNTIL-SUPERSEDED DEDUPE, CHECKED FIRST (card 1555e361 — see the class doc's "UNTIL-SUPERSEDED
+      // VERDICT CACHE" section, INCLUDING its process-local/not-persisted boundary): for a `key` that
+      // opted into `opts.retainVerdictUntilSuperseded`, a settle verdict never ages out of
+      // `untilSupersededVerdicts` on its own — so this check alone is what makes a re-call landing AFTER
+      // `retainMs` has already lapsed still safe, instead of falling through to the fresh-mint path below
+      // and re-invoking `run()` for real. `opts.bypassRetained` gates this read identically to the TTL'd
+      // one just below — a forceful re-call skips both. No usability-predicate gate here (unlike the TTL'd
+      // check below): today's one consumer (merge) has no analogous "known contaminated" self-declaration,
+      // mirroring why `isRetainedResultUsable` was never offered for it either — see this method's own doc
+      // for that precedent.
+      //
+      // IDENTITY-GATED (card 1555e361 CR follow-up — see the class doc's "IDENTITY-GATED SUPERSEDE"
+      // section): a cache hit only counts as a HIT when THIS call's `opts.verdictIdentity` matches the
+      // identity recorded at the cached verdict's OWN settle time (`undefined === undefined` for a caller
+      // that never opts into identity tracking — unaffected), OR `opts.identityOptional` says the
+      // comparison doesn't apply to this call at all (see that opt's own doc — the finalized-worker
+      // false-mismatch this ROUND 2 fixes). A genuine mismatch is a MISS: `untilSupersededMiss` below ALSO
+      // skips the TTL'd `retained` fallback just past this block, because that map was written at the exact
+      // same (now-stale) settle and would otherwise silently serve the identical wrong answer for its own
+      // few-second window — a mismatch here must fall all the way through to a fresh mint, not merely to
+      // the next cache.
+      let untilSupersededMiss = false;
+      if (opts?.retainVerdictUntilSuperseded && !opts?.bypassRetained) {
+        const verdictHit = this.untilSupersededVerdicts.get(key);
+        if (verdictHit) {
+          if (opts.identityOptional || verdictHit.identity === opts.verdictIdentity) {
+            return verdictHit.rawOutcome.ok
+              ? { settled: true, ok: true, value: verdictHit.rawOutcome.value as T }
+              : { settled: true, ok: false, error: verdictHit.rawOutcome.error };
+          }
+          untilSupersededMiss = true;
+        }
+      }
+      const retainedHit = untilSupersededMiss ? undefined : this.retained.get(key);
       if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt) {
         // USABILITY GATE (card 79b0ee52): an `ok:false` hit, or an `ok:true` hit with no
         // `isRetainedResultUsable` opt, is unconditionally usable — byte-identical to before this opt
@@ -476,6 +636,17 @@ export class PendingOpRegistry {
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: true, value });
+            // UNTIL-SUPERSEDED WRITE (card 1555e361): same identity-guarded branch as the TTL'd retain()
+            // above, same reason (an evicted dead-owner op's late settle must never resurrect/overwrite a
+            // live successor's verdict) — see the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section
+            // (PROCESS-LOCAL, NOT PERSISTED — a daemon restart clears this map). A genuinely fresh op
+            // settling later under the same key (reachable via opts.bypassRetained, OR — card 1555e361 CR
+            // follow-up — via a mismatched opts.verdictIdentity, see "IDENTITY-GATED SUPERSEDE") reaches
+            // this SAME line again and its `.set()` naturally supersedes this entry — no separate eviction
+            // path needed. `opts` here is the MINTING call's own closure (a retry that merely attached never
+            // re-registers this callback), so the identity stamped is exactly what was fresh at the moment
+            // this specific run() was actually kicked off, never a later re-poller's.
+            if (opts?.retainVerdictUntilSuperseded) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: true, value }, identity: opts.verdictIdentity });
             opts?.onSettle?.({ ok: true, value }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
           }
@@ -486,6 +657,8 @@ export class PendingOpRegistry {
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err });
+            // UNTIL-SUPERSEDED WRITE — mirrors the `ok:true` branch above, same doc.
+            if (opts?.retainVerdictUntilSuperseded) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: false, error: err }, identity: opts.verdictIdentity });
             opts?.onSettle?.({ ok: false, error: err }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
           }

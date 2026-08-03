@@ -372,6 +372,51 @@ try {
     check("(merge force-retain) the worktree is NOW actually removed — the force flag was honored, not silently swallowed by the cache", !fs.existsSync(worktreePath));
     check("(merge force-retain) NO nested-repo warning on the forced result (override skipped the guard)", !/nested/i.test(rForced.value.warning ?? ""));
   }
+
+  // === MERGE (9): a PLAIN re-confirm after NEW commits gates them for real — card 1555e361 CR follow-up ===
+  // The trap the manager caught before merge: identity-agnostic "until superseded" alone would return the
+  // CACHED REJECTION for a commit that no longer exists once the worker pushed a real fix — read by the
+  // manager as "my fix didn't work." Proves the REAL resolveGitRef-based verdictIdentity wiring (not just
+  // the hermetic hand-supplied string identity in pending-ops-registry.mjs) actually detects the branch's
+  // moved HEAD and reruns the gate for real, WITHOUT forceRemoveWorktree — a same-commit re-call (test 7
+  // above) still dedupe-hits; this is the DIFFERENT-commit case that must NOT.
+  {
+    const P = "mst-merge-new-commit", repo = makeRepo();
+    const { worktreePath, branch } = await createWorktree(repo, P, "t9");
+    fs.writeFileSync(path.join(worktreePath, "feat9.txt"), "work\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat9`, { cwd: worktreePath });
+    // A gate that fails until a marker file (created below, between the two confirms) exists — simulates a
+    // real gate rejecting a genuine defect, then passing once it's fixed.
+    // Path threaded via env var (mirrors test 7's LOOM_MST_MARKER pattern) rather than inlined into the
+    // command string — an inlined absolute Windows path double-quoted via JSON.stringify collides with the
+    // shell's own `-e "..."` quoting and corrupts the command (a test-authoring bug caught while wiring
+    // this up, not a defect in the fix itself).
+    const passMarker = path.join(os.tmpdir(), `loom-mst-passmarker9-${Date.now()}.flag`);
+    try { fs.rmSync(passMarker, { force: true }); } catch { /* best-effort */ }
+    process.env.LOOM_MST_PASS_MARKER = passMarker;
+    seedProject(P, repo, `node -e "process.exit(require('fs').existsSync(process.env.LOOM_MST_PASS_MARKER) ? 0 : 1)"`);
+    const workerId = `${P}-wkr`;
+    db.insertTask({ id: "t9", projectId: P, title: "t9", body: "", columnKey: "in_progress", position: 1, createdAt: now, updatedAt: now });
+    db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: worktreePath, processState: "exited", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: `${P}-mgr1`, taskId: "t9", worktreePath, branch });
+
+    const r1 = await svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId);
+    check("(merge new-commit) first confirm is REJECTED by the (deliberately failing) gate", r1.settled === true && r1.ok === true && r1.value.merged === false);
+    check("(merge new-commit) worktree RETAINED after a rejection (fail-closed)", fs.existsSync(worktreePath));
+
+    // The worker fixes the code — a REAL new commit moves the branch's HEAD — and the fix also flips the
+    // gate to passing (the marker file), mirroring a genuine "the defect is now fixed" state.
+    fs.writeFileSync(path.join(worktreePath, "feat9-fix.txt"), "the fix\n");
+    execSync(`git add . && git ${GIT_ID} commit -q -m feat9-fix`, { cwd: worktreePath });
+    fs.writeFileSync(passMarker, "go\n");
+
+    // The manager re-calls PLAINLY — no forceRemoveWorktree — exactly as an unsuspecting manager would.
+    const r2 = await svc.confirmWorkerMergeTracked(`${P}-mgr1`, workerId);
+    check("(merge new-commit) a PLAIN re-confirm after new commits does NOT return the cached rejection AND is a genuinely fresh op", r2.settled === true && r2.ok === true && r2.value.opId !== r1.value.opId);
+    check("(merge new-commit) it runs a genuinely FRESH gate and MERGES — never serves the stale rejection for a commit that no longer exists", r2.ok && r2.value.merged === true);
+    check("(merge new-commit) BOTH commits (the original work and the fix) landed in the single squash merge", git(repo, "show HEAD:feat9.txt") === "work" && git(repo, "show HEAD:feat9-fix.txt") === "the fix");
+    delete process.env.LOOM_MST_PASS_MARKER;
+    try { fs.rmSync(passMarker, { force: true }); } catch { /* best-effort */ }
+  }
 } finally {
   for (const [repo, wt] of worktrees) { if (wt) { try { await removeWorktree(repo, wt); } catch { /* best-effort */ } } }
   db.close();
@@ -379,6 +424,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — spawnWorkerTracked/confirmWorkerMergeTracked: fast path matches today's exact shape, two concurrent calls on the same key attach to ONE real invocation (no double-spawn, gate runs exactly once), a post-eviction stale retry safely falls through to the underlying method's OWN idempotency (live-worker guard / ALREADY_MERGED) instead of double-creating, card 33172f01: a merge re-confirm landing genuinely AFTER the first settled but still within the retention window dedupe-attaches to the cached result (same opId, gate runs exactly once) instead of starting a second real merge attempt, CR BLOCKER 1: forceRemoveWorktree:true on such a re-confirm bypasses the cache and re-runs for real against a nested-repo worktree instead of silently swallowing the escalation, and card 4032ba4d: a genuinely REJECTED concurrent call reports a clean, named FAIL with its reason printed — never an uncaught TypeError — with every later assertion in the file still running."
+  ? "\n✅ ALL PASS — spawnWorkerTracked/confirmWorkerMergeTracked: fast path matches today's exact shape, two concurrent calls on the same key attach to ONE real invocation (no double-spawn, gate runs exactly once), a post-eviction stale retry safely falls through to the underlying method's OWN idempotency (live-worker guard / ALREADY_MERGED) instead of double-creating, card 33172f01: a merge re-confirm landing genuinely AFTER the first settled but still within the retention window dedupe-attaches to the cached result (same opId, gate runs exactly once) instead of starting a second real merge attempt, CR BLOCKER 1: forceRemoveWorktree:true on such a re-confirm bypasses the cache and re-runs for real against a nested-repo worktree instead of silently swallowing the escalation, card 4032ba4d: a genuinely REJECTED concurrent call reports a clean, named FAIL with its reason printed — never an uncaught TypeError — with every later assertion in the file still running, and card 1555e361's CR follow-up: a plain re-confirm after a REAL new commit (moved branch HEAD, via the real resolveGitRef-based verdictIdentity wiring, not a hand-supplied test identity) reruns the gate for real and merges BOTH commits instead of silently returning the stale cached rejection for a commit that no longer exists."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

@@ -310,7 +310,15 @@ type ConfirmMergeResult = {
 /** How long a settled merge op stays `peek()`-able (as a RETAINED terminal view — see
  *  PendingOpRegistry's doc) after {@link SessionService.confirmWorkerMergeTracked} settles it — long
  *  enough for the Board's polling `/api/sessions` fetch to catch the terminal fill at least once before
- *  it reverts, short enough that a stale merged/rejected/failed card doesn't linger. */
+ *  it reverts, short enough that a stale merged/rejected/failed card doesn't linger.
+ *
+ *  DISPLAY-ONLY as of card 1555e361: this constant no longer has any bearing on whether a re-call of
+ *  `worker_merge_confirm` is safe — that safety property is now carried by the SEPARATE, never-expiring
+ *  `retainVerdictUntilSuperseded` dedupe (PROCESS-LOCAL, NOT PERSISTED — a daemon restart clears it, same
+ *  as before this card; see PendingOpRegistry's "UNTIL-SUPERSEDED VERDICT CACHE" class doc). This constant
+ *  purely bounds how long worker_list's `pendingMerge` field / the Board's
+ *  merge-gate hairline keep SHOWING the terminal result before reverting to nothing — a cosmetic window,
+ *  tunable independent of the dedupe safety net, deliberately kept short so a stale card doesn't linger. */
 const MERGE_OP_RETAIN_MS = 5_000;
 
 /** {@link SessionService.runWorkerGate}'s result (card 7f96aa09 — structural fix B for d5c5ccdf: route the
@@ -10666,6 +10674,53 @@ export class SessionService {
     // same synchronous tick as this capture — the two timestamps are never separated by an await.
     const inFlight = this.pendingOps.peek(key);
     const opStartedAt = inFlight?.state === "running" ? inFlight.startedAt : new Date().toISOString();
+    // VERDICT IDENTITY (card 1555e361 CR follow-up — the cached-verdict-vs-moved-branch trap): resolved
+    // BEFORE the dedupe decision so a plain re-call after the worker pushed new commits gates them for
+    // real instead of returning the cached verdict for a commit that no longer exists (see
+    // PendingOpRegistry's "IDENTITY-GATED SUPERSEDE" class doc). Best-effort / FAIL-SAFE to `undefined` on
+    // ANY resolution issue (worker/project/repo gone, git error/timeout) — `undefined` never dedupe-hits
+    // against a cached entry that itself carries a real identity (see attach()'s exact-match rule), so an
+    // unresolvable identity here means "don't trust the cache," the safe direction, never "trust it
+    // anyway." This is a READ-ONLY pre-check purely for cache-identity purposes — the real worker/branch/
+    // project existence checks still live inside confirmWorkerMerge itself and fire normally on an actual
+    // mint, so a resolution failure here never masks a genuine error, it only costs a redundant gate run in
+    // the rare case it's wrong (the ORIGINAL trap this card fixes, not a new one).
+    //
+    // ALREADY-FINISHED SHORT-CIRCUIT (card 1555e361 CR follow-up, ROUND 2 — a regression caught by this
+    // SAME card's own test suite before merge): a SUCCESSFUL confirm deletes the branch as part of its own
+    // completion (`finalizeMerge`'s `deleteBranch`, unconditional — runs even when the worktree itself is
+    // RETAINED for the nested-repo-guard case), so a re-call for an ALREADY-FINISHED worker can never again
+    // resolve the SAME sha the cached verdict was validated against — comparing them would misclassify a
+    // pure poll as "different input," breaking the pre-existing "re-poll returns the EXACT SAME opId"
+    // invariant (card 33172f01) with a wasted (though still safe) extra ALREADY_MERGED re-derive. Detected
+    // via the SAME TWO-PART formula `confirmWorkerMerge`'s own early-idempotency check trusts as its
+    // authoritative "already finished" signal — worktree gone OR task already terminal (see that method's
+    // `taskAlreadyTerminal`) — rather than either alone: task-terminal alone misses a TASKLESS worker (no
+    // task to check), and worktree-existence alone misses the nested-repo-guard case (worktree RETAINED,
+    // branch still deleted). When either holds, skip git resolution entirely (nothing to gain — the branch
+    // is presumed gone) and mark the identity check itself as OPTIONAL for this call (see
+    // `identityOptional`'s own doc) rather than forcing a match against `undefined`, which would
+    // (correctly, but wastefully) still treat it as a miss.
+    const worker = this.db.getSession(workerSessionId);
+    const taskAlreadyTerminal = taskId != null && (() => {
+      const task = this.db.getTask(taskId);
+      const terminalKey = task ? this.columnKeyForProjectRole(task.projectId, "terminal") : undefined;
+      return !!task && !!terminalKey && task.columnKey === terminalKey;
+    })();
+    const worktreeGone = !(worker?.worktreePath ?? worker?.cwd) || !fs.existsSync((worker.worktreePath ?? worker.cwd)!);
+    const alreadyFinished = worktreeGone || taskAlreadyTerminal;
+    let verdictIdentity: string | undefined;
+    if (!alreadyFinished) {
+      try {
+        if (worker?.branch) {
+          const project = this.db.getProject(worker.projectId);
+          if (project) {
+            const repo = resolveRepoByKey(project, worker.repoKey);
+            verdictIdentity = (await resolveGitRef(repo.path, worker.branch, { timeoutMs: this.gitOpMs })) ?? undefined;
+          }
+        }
+      } catch { /* fail-safe: undefined identity never dedupe-hits, see doc above */ }
+    }
     return this.pendingOps.attach<ConfirmMergeResult>(
       key, "merge", managerSessionId, this.syncAttachBudgetMs,
       (opId) => this.confirmWorkerMerge(managerSessionId, workerSessionId, opId, forceRemoveWorktree, opStartedAt),
@@ -10766,15 +10821,43 @@ export class SessionService {
         // real exception, not a rejection result) → "failed". Mirrors `mergeDisplay`'s Board-side
         // classification.
         retainMs: MERGE_OP_RETAIN_MS,
+        // UNTIL-SUPERSEDED RE-CALL DEDUPE (card 1555e361 — the merge-gate re-call trap): DECOUPLED from
+        // `retainMs` above on purpose. `retainMs` only governs the brief, cosmetic worker_list/Board display
+        // window; this governs SAFETY — whether a re-call can ever silently start a second real gate run.
+        // Without this, a poll landing more than `MERGE_OP_RETAIN_MS` (5s) after settle — which a poll, by
+        // nature, usually does — fell through to a fresh mint and reran the WHOLE gate for real; on a
+        // non-deterministic gate test that could launder a REJECTED branch into a merge with no decision
+        // anywhere in the loop (the incident this card fixes). See PendingOpRegistry's "UNTIL-SUPERSEDED
+        // VERDICT CACHE" class doc for the mechanism — PROCESS-LOCAL, NOT PERSISTED: a daemon restart clears
+        // this cache and a re-call spanning one mints a genuinely fresh gate run, exactly as it did before
+        // this card. That is the honest boundary of this fix, not a gap it claims to close.
+        retainVerdictUntilSuperseded: true,
+        // IDENTITY-GATED (card 1555e361 CR follow-up, caught before merge): "until superseded" alone let a
+        // plain re-call return the cached REJECTION for a branch the worker had already fixed — a manager
+        // reading that reasonably concludes "my fix didn't work," on work that changed underneath the
+        // cache. `verdictIdentity` (resolved fresh, above, before this attach() call) makes the cache hit
+        // conditional on the branch's HEAD being UNCHANGED since the cached verdict's own settle: same head
+        // → still the same question, cached verdict stands; new commits → a genuinely different question,
+        // gates for real. See PendingOpRegistry's "IDENTITY-GATED SUPERSEDE" class doc.
+        verdictIdentity,
+        // ALREADY-FINISHED OVERRIDE (card 1555e361 CR follow-up, ROUND 2): for an already-finished worker
+        // (see the ALREADY-FINISHED SHORT-CIRCUIT doc above) `verdictIdentity` is `undefined` by
+        // construction (git resolution was skipped, not merely failed) — comparing it against a real stored
+        // identity would ALWAYS mismatch and mint a wasted extra ALREADY_MERGED re-derive on every poll,
+        // breaking the pre-existing "re-poll returns the EXACT SAME opId" invariant. `identityOptional`
+        // tells attach() to trust the cached verdict regardless in exactly (and only) this case.
+        identityOptional: alreadyFinished,
         classifyOutcome: (outcome) => (!outcome.ok ? "failed" : outcome.value.cancelled ? "cancelled" : outcome.value.merged ? "merged" : "rejected"),
-        // BYPASS THE RETAINED CACHE ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01): the retention-window
-        // dedupe (see PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on
-        // `workerSessionId`, not on `forceRemoveWorktree` — so without this, a manager that read a
-        // nested-repo-guard warning telling it to "re-run worker_merge_confirm with forceRemoveWorktree:true"
-        // and did EXACTLY that within the retention window would get back the IDENTICAL cached (unforced)
-        // warning, `confirmWorkerMerge` never re-entered, the worktree never actually removed, and no signal
-        // that the flag was silently ignored. `forceRemoveWorktree` is an explicit one-shot escalation from
-        // the caller — it must never be served from a cache built by an earlier, non-forced call.
+        // BYPASS BOTH CACHES ON AN EXPLICIT FORCE (CR BLOCKER 1, card 33172f01; extended by card 1555e361 to
+        // also cover the new until-superseded dedupe above — same reasoning, same flag): the dedupe (see
+        // PendingOpRegistry.attach's `opts.bypassRetained` doc) is keyed ONLY on `workerSessionId`, not on
+        // `forceRemoveWorktree` — so without this, a manager that read a nested-repo-guard warning telling it
+        // to "re-run worker_merge_confirm with forceRemoveWorktree:true" and did EXACTLY that would get back
+        // the IDENTICAL cached (unforced) warning, `confirmWorkerMerge` never re-entered, the worktree never
+        // actually removed, and no signal that the flag was silently ignored. `forceRemoveWorktree` is the
+        // ONE explicit, named escalation that genuinely re-runs a settled merge — it must never be served
+        // from a cache built by an earlier, non-forced call, no matter which of the two caches that cache hit
+        // came from.
         bypassRetained: forceRemoveWorktree === true,
         // DURABLE TOMBSTONE (card edc1ec12, generalized by e3e40167): mints the row the MOMENT this op is
         // created — see runWorkerGate's identical `onOpMinted` doc for why this must cover the fast path
