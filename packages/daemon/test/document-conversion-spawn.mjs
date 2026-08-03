@@ -109,7 +109,7 @@ check("(a) documentConversion works for a role-null session too (orthogonal to r
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-dc-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-dc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# document-conversion-spawn test\n");
 execSync(`git init -q && git add . && git -c user.email=dc@loom -c user.name=dc commit -q -m init`, { cwd: repo });

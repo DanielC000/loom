@@ -45,8 +45,10 @@ const { buildServer } = await import("../dist/gateway/server.js");
 // --- Real temp git repos: a primary + two distinct reference repos (different commit messages, so a
 // log mix-up between them is directly observable), plus a real dir that is NOT a git repo. ---
 const mkRepo = (tag, msg) => {
-  const r = path.join(os.tmpdir(), `loom-refrepos-gitlog-${tag}-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(r, { recursive: true });
+  // fs.mkdtempSync (not Date.now()-${process.pid}): mkRepo runs multiple times PER PROCESS, so pid
+  // (constant across those calls) can't discriminate two calls landing in the same millisecond — only
+  // an OS-atomic unique dir does (card 11a25f10).
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), `loom-refrepos-gitlog-${tag}-`));
   fs.writeFileSync(path.join(r, "README.md"), `# ${tag}\n`);
   execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m "${msg}"`, { cwd: r });
   return r;

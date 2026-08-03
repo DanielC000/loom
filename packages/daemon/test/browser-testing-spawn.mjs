@@ -221,7 +221,7 @@ check("(disallow-assistant) all flags off ⇒ byte-identical to disallowedToolsF
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-bt-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-bt-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# browser-testing-spawn test\n");
 execSync(`git init -q && git add . && git -c user.email=bt@loom -c user.name=bt commit -q -m init`, { cwd: repo });

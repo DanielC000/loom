@@ -32,7 +32,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { resolveConfig } = await import("@loom/shared");
 
 // A real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off.
-const repo = path.join(os.tmpdir(), `loom-allowbl-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-allowbl-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# allow-baseline test\n");
 execSync(`git init -q && git add . && git -c user.email=ab@loom -c user.name=ab commit -q -m init`, { cwd: repo });

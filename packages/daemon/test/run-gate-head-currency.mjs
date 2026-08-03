@@ -45,7 +45,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rghc-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rghc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");
@@ -77,8 +77,10 @@ const worktrees = [];
 const dbs = [];
 
 async function seedWorkerInDb(db, sfx) {
-  const repo = path.join(os.tmpdir(), `loom-rghc-repo-${sfx}-${Date.now()}`);
-  fs.mkdirSync(repo, { recursive: true });
+  // fs.mkdtempSync (not Date.now()-suffixed): this fn runs multiple times PER PROCESS with caller-chosen
+  // `sfx` values, so a suffix that only varies cross-process (pid) can't discriminate two same-process
+  // calls landing in the same millisecond — only an OS-atomic unique dir does (card 11a25f10).
+  const repo = fs.mkdtempSync(path.join(os.tmpdir(), `loom-rghc-repo-${sfx}-`));
   fs.writeFileSync(path.join(repo, "README.md"), "# rghc\n");
   execSync(`git init -q && git config user.email rghc@loom && git config user.name rghc && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });
 

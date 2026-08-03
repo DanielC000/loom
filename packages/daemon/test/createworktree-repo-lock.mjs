@@ -71,7 +71,7 @@ const GIT_ID = "-c user.email=cwlock@loom -c user.name=cwlock";
 const HOOK_SLEEP_S = 2; // long enough that two concurrent `worktree add` windows unambiguously either
                          // overlap (pre-fix) or don't (post-fix), short enough to keep the test fast.
 
-const repo = path.join(os.tmpdir(), `loom-cwlock-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-cwlock-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 // A `package-lock.json` marker so provisionWorktreeDeps' `detectPackageManager` picks "npm" and actually
 // invokes the injectable `deps.provision` seam below (constraint 1's own test needs a REAL install phase

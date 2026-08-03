@@ -19,8 +19,8 @@ const post = async (u, b) => (await fetch(BASE + u, { method: "POST", headers: b
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const home = path.join(os.tmpdir(), `loom-skills-e2e-home-${Date.now()}`);
-const repo = path.join(os.tmpdir(), `loom-skills-e2e-repo-${Date.now()}`);
+const home = path.join(os.tmpdir(), `loom-skills-e2e-home-${Date.now()}-${process.pid}`);
+const repo = path.join(os.tmpdir(), `loom-skills-e2e-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(home, "skills", "loom-e2e-marker"), { recursive: true });
 fs.writeFileSync(path.join(home, "skills", "loom-e2e-marker", "SKILL.md"), "---\nname: loom-e2e-marker\ndescription: e2e marker\n---\nmarker");
 fs.mkdirSync(repo, { recursive: true });

@@ -23,7 +23,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wdc-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wdc-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const {
@@ -42,7 +42,7 @@ const commitInto = (dir, file, body, msg) => {
 // internal constant — a test that imported the exact TTL value would just be restating the implementation.
 const PAST_TTL_MS = 60_000;
 
-const repo = path.join(os.tmpdir(), `loom-wdc-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wdc-repo-${Date.now()}-${process.pid}`);
 
 try {
   fs.mkdirSync(repo, { recursive: true });

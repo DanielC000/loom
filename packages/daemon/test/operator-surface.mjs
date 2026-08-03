@@ -71,19 +71,19 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo (project P1's repoPath) + a real bare "origin" remote (local, no network) ---
-const repo = path.join(os.tmpdir(), `loom-operator-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-operator-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# operator test repo\n");
 // PERSISTED (not just -c per-invocation) repo-local identity — git_commit reuses GitWriter.commit()
 // VERBATIM (no -c overrides, per the project convention), so it needs the repo's OWN configured identity.
 execSync(`git init -q && git config user.email o@loom && git config user.name o && git add . && git commit -q -m init`, { cwd: repo });
-const bareRemote = path.join(os.tmpdir(), `loom-operator-remote-${Date.now()}.git`);
+const bareRemote = path.join(os.tmpdir(), `loom-operator-remote-${Date.now()}-${process.pid}.git`);
 execSync(`git init -q --bare "${bareRemote}"`);
 execSync(`git remote add origin "${bareRemote}"`, { cwd: repo });
 execSync(`git push -q -u origin HEAD:refs/heads/main`, { cwd: repo });
 
 // A second project's repo — used ONLY to prove an extra `projectId` in a call's args can't redirect a write.
-const otherRepo = path.join(os.tmpdir(), `loom-operator-otherrepo-${Date.now()}`);
+const otherRepo = path.join(os.tmpdir(), `loom-operator-otherrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(otherRepo, { recursive: true });
 fs.writeFileSync(path.join(otherRepo, "README.md"), "# other repo\n");
 execSync(`git init -q && git add . && git -c user.email=o@loom -c user.name=o commit -q -m init`, { cwd: otherRepo });

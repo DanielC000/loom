@@ -35,16 +35,16 @@ const { Db } = await import("../dist/db.js");
 const { getProjectTask, listProjectTasks, createProjectTask } = await import("../dist/mcp/tasks.js");
 const { taskKey } = await import("../dist/git/worktrees.js");
 
-const repo = path.join(os.tmpdir(), `loom-merged-state-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-merged-state-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 const git = (cmd) => execSync(`git ${cmd}`, { cwd: repo }).toString();
 git("init -q");
 git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m init`);
 const defaultBranch = git("rev-parse --abbrev-ref HEAD").trim();
 
-const noRepoDir = path.join(os.tmpdir(), `loom-merged-state-no-repo-${Date.now()}`);
+const noRepoDir = path.join(os.tmpdir(), `loom-merged-state-no-repo-${Date.now()}-${process.pid}`);
 
-const file = path.join(os.tmpdir(), `loom-merged-state-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-merged-state-${Date.now()}-${process.pid}.db`);
 const db = new Db(file);
 const now = new Date().toISOString();
 

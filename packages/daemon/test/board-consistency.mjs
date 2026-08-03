@@ -27,7 +27,7 @@ fs.mkdirSync(LOOM_HOME, { recursive: true });
 
 // The project's repo/vault dir — separate from LOOM_HOME; also the spawned agent's cwd. POST
 // /api/projects validates repoPath is a real git repo, so this must be git-init'd.
-const dir = path.join(os.tmpdir(), `loom-board-${Date.now()}`);
+const dir = path.join(os.tmpdir(), `loom-board-${Date.now()}-${process.pid}`);
 fs.mkdirSync(dir, { recursive: true });
 fs.writeFileSync(path.join(dir, "README.md"), "# board-consistency test\n");
 execSync(`git init -q && git add . && git -c user.email=board@loom -c user.name=board commit -q -m init`, { cwd: dir });

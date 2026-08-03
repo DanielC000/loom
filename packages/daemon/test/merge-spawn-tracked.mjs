@@ -212,7 +212,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, "t5");
     fs.writeFileSync(path.join(worktreePath, "feat5.txt"), "work\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m feat5`, { cwd: worktreePath });
-    const marker = path.join(os.tmpdir(), `loom-mst-marker-${Date.now()}.log`);
+    const marker = path.join(os.tmpdir(), `loom-mst-marker-${Date.now()}-${process.pid}.log`);
     process.env.LOOM_MST_MARKER = marker;
     seedProject(P, repo, `node -e "require('fs').appendFileSync(process.env.LOOM_MST_MARKER, 'x')"`);
     const workerId = `${P}-wkr`;
@@ -312,7 +312,7 @@ try {
     const { worktreePath, branch } = await createWorktree(repo, P, "t7");
     fs.writeFileSync(path.join(worktreePath, "feat7.txt"), "work\n");
     execSync(`git add . && git ${GIT_ID} commit -q -m feat7`, { cwd: worktreePath });
-    const marker = path.join(os.tmpdir(), `loom-mst-marker7-${Date.now()}.log`);
+    const marker = path.join(os.tmpdir(), `loom-mst-marker7-${Date.now()}-${process.pid}.log`);
     process.env.LOOM_MST_MARKER = marker;
     seedProject(P, repo, `node -e "require('fs').appendFileSync(process.env.LOOM_MST_MARKER, 'x')"`);
     const workerId = `${P}-wkr`;
@@ -391,7 +391,7 @@ try {
     // command string — an inlined absolute Windows path double-quoted via JSON.stringify collides with the
     // shell's own `-e "..."` quoting and corrupts the command (a test-authoring bug caught while wiring
     // this up, not a defect in the fix itself).
-    const passMarker = path.join(os.tmpdir(), `loom-mst-passmarker9-${Date.now()}.flag`);
+    const passMarker = path.join(os.tmpdir(), `loom-mst-passmarker9-${Date.now()}-${process.pid}.flag`);
     try { fs.rmSync(passMarker, { force: true }); } catch { /* best-effort */ }
     process.env.LOOM_MST_PASS_MARKER = passMarker;
     seedProject(P, repo, `node -e "process.exit(require('fs').existsSync(process.env.LOOM_MST_PASS_MARKER) ? 0 : 1)"`);

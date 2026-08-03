@@ -86,7 +86,7 @@ injectSkills(cwdAll, "sAll", null, "worker");
 check("(U) null subset + worker role → ALL store skills (force-include is a no-op here)", sameSet(namesIn(cwdAll), STORE_SKILLS));
 
 // ===================== seam fixtures: a NON-default profile pins model + allowDelta + an omitting subset =====================
-const repo = path.join(os.tmpdir(), `loom-rpa-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-rpa-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# respawn-profile-attrs test\n");
 execSync(`git init -q && git add . && git -c user.email=rpa@loom -c user.name=rpa commit -q -m init`, { cwd: repo });

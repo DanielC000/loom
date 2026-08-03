@@ -39,7 +39,7 @@ const { archivedTranscriptPath } = await import("../dist/sessions/transcript.js"
 
 // --- a real temp git repo with a committed file, so createRunSnapshot (git read-tree/checkout-index)
 //     has a HEAD to extract and we can verify the snapshot carries committed content ---
-const repo = path.join(os.tmpdir(), `loom-runs-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-runs-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(repo, "src"), { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# agent-runs test\n");
 fs.writeFileSync(path.join(repo, "src", "code.js"), "export const TRACKED = 1;\n");

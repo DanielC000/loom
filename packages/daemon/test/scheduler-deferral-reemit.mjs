@@ -20,7 +20,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 import { requireHermeticEnv } from "./_guard.mjs";
-if (!process.env.LOOM_HOME) process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-defreemit-home-${Date.now()}`);
+if (!process.env.LOOM_HOME) process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-defreemit-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 requireHermeticEnv();
 

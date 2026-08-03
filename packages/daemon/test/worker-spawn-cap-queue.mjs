@@ -162,7 +162,7 @@ const parse = (res) => JSON.parse(res.content[0].text);
 const call = async (nameArgs, args) => parse(await client.callTool({ name: nameArgs, arguments: args ?? {} }));
 
 // --- project: cap=1, so the SECOND concurrent spawn always hits the cap ---
-const repo = path.join(os.tmpdir(), `loom-wscq-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wscq-repo-${Date.now()}-${process.pid}`);
 initRepo(repo);
 db.insertProject({ id: "pQ", name: "Q", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 1 } }, createdAt: now, archivedAt: null });
 db.insertAgent({ id: "agentMgr", projectId: "pQ", name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
@@ -255,7 +255,7 @@ try {
 // ===================== Section C (card 81b7e346): the REAL queue — auto-fire + cancellation =====================
 // Own project/manager/repo — isolated from Section A's "pQ"/"mgr1" so the two sections can't interfere.
 {
-  const repoC = path.join(os.tmpdir(), `loom-wscq-repoC-${Date.now()}`);
+  const repoC = path.join(os.tmpdir(), `loom-wscq-repoC-${Date.now()}-${process.pid}`);
   initRepo(repoC);
   const worktreesC = [];
   try {
@@ -425,7 +425,7 @@ try {
 // swap never creates room for anything else, so this needs a SECOND, independently-freed slot to prove the
 // finally's catch-up drain claims real leftover headroom once the swap settles) + manager "mgr3".
 {
-  const repoD = path.join(os.tmpdir(), `loom-wscq-repoD-${Date.now()}`);
+  const repoD = path.join(os.tmpdir(), `loom-wscq-repoD-${Date.now()}-${process.pid}`);
   initRepo(repoD);
   const worktreesD = [];
   try {

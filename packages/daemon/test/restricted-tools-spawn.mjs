@@ -150,7 +150,7 @@ check("(B) a profile with restrictedTools:true ⇒ true (passthrough)", resolveP
 }
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
-const repo = path.join(os.tmpdir(), `loom-rt-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-rt-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# restricted-tools-spawn test\n");
 execSync(`git init -q && git add . && git -c user.email=rt@loom -c user.name=rt commit -q -m init`, { cwd: repo });

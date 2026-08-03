@@ -345,7 +345,7 @@ check("(a) ON adds exactly the codescape key (everything else unchanged)",
 }
 
 // ===================== end-to-end threading through SessionService (seam-captured opts) =====================
-const repo = path.join(os.tmpdir(), `loom-cs-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-cs-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# codescape-mcp-spawn test\n");
 execSync(`git init -q && git add . && git -c user.email=cs@loom -c user.name=cs commit -q -m init`, { cwd: repo });

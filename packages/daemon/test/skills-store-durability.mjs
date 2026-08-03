@@ -12,7 +12,7 @@ import path from "node:path";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = path.join(os.tmpdir(), `loom-skills-durability-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-skills-durability-${Date.now()}-${process.pid}`);
 const home = path.join(root, "loomhome");
 const skillsDir = path.join(home, "skills");
 const cwd = path.join(root, "repo");

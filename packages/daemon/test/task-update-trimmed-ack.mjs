@@ -17,7 +17,7 @@ import { createProjectTask, updateProjectTask } from "../dist/mcp/tasks.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const file = path.join(os.tmpdir(), `loom-task-update-trimmed-ack-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-task-update-trimmed-ack-${Date.now()}-${process.pid}.db`);
 const now = new Date().toISOString();
 
 try {

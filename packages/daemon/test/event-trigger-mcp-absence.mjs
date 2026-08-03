@@ -58,7 +58,7 @@ const { OrchestrationMcpRouter } = await import("../dist/mcp/orchestration.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
-const repo = path.join(os.tmpdir(), `loom-evtrig-mcpabs-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-evtrig-mcpabs-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# fixture repo\n");
 execSync(`git init -q && git add . && git -c user.email=t@loom -c user.name=t commit -q -m init`, { cwd: repo });

@@ -43,7 +43,7 @@ const { composeWorkerStartupPrompt } = await import("../dist/sessions/worker-pro
 const { removeWorktree } = await import("../dist/git/worktrees.js");
 
 // --- a real temp git repo so worktree git (real) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-wprompt-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wprompt-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-prompt test\n");
 execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repo });
@@ -187,11 +187,11 @@ try {
 
   // ===================== (4) reference-repos epic Phase 3: a project WITH referenceRepos injects the =====
   // 'Also referenced (read-only)' block into REAL worker spawn AND recycle (not just the pure function).
-  const refRepoA = path.join(os.tmpdir(), `loom-wprompt-refA-${Date.now()}`);
-  const refRepoB = path.join(os.tmpdir(), `loom-wprompt-refB-${Date.now()}`);
+  const refRepoA = path.join(os.tmpdir(), `loom-wprompt-refA-${Date.now()}-${process.pid}`);
+  const refRepoB = path.join(os.tmpdir(), `loom-wprompt-refB-${Date.now()}-${process.pid}`);
   fs.mkdirSync(refRepoA, { recursive: true });
   fs.mkdirSync(refRepoB, { recursive: true });
-  repoR = path.join(os.tmpdir(), `loom-wprompt-repoR-${Date.now()}`);
+  repoR = path.join(os.tmpdir(), `loom-wprompt-repoR-${Date.now()}-${process.pid}`);
   fs.mkdirSync(repoR, { recursive: true });
   fs.writeFileSync(path.join(repoR, "README.md"), "# ref-repos worker test\n");
   execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repoR });
@@ -296,7 +296,7 @@ try {
   // branch+sha reaches its kickoff mechanically (no manager hand-typing, the bdc05c55 failure mode).
   // A fresh isolated project (generous cap) so this section's bookkeeping never interacts with the cap
   // arithmetic the earlier sections already manage carefully.
-  const repoRev = path.join(os.tmpdir(), `loom-wprompt-repoRev-${Date.now()}`);
+  const repoRev = path.join(os.tmpdir(), `loom-wprompt-repoRev-${Date.now()}-${process.pid}`);
   fs.mkdirSync(repoRev, { recursive: true });
   fs.writeFileSync(path.join(repoRev, "README.md"), "# review-spawn test — mainline\n");
   execSync(`git init -q && git add . && git -c user.email=wp@loom -c user.name=wp commit -q -m init`, { cwd: repoRev });

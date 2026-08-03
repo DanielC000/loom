@@ -56,7 +56,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-lead-recycle-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-lead-recycle-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform lead self-recycle test repo\n");
 execSync(`git init -q && git add . && git -c user.email=lr@loom -c user.name=lr commit -q -m init`, { cwd: repo });

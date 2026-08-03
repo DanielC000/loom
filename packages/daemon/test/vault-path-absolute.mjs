@@ -54,8 +54,10 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 const mkRepo = (tag) => {
-  const r = path.join(os.tmpdir(), `loom-vaultpath-${tag}-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(r, { recursive: true });
+  // fs.mkdtempSync (not Date.now()-${process.pid}): mkRepo is a reusable per-tag helper — only called
+  // once today, but pid (constant per process) wouldn't discriminate a second same-millisecond call if
+  // one is ever added; an OS-atomic unique dir closes that regardless of call count (card 11a25f10).
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), `loom-vaultpath-${tag}-`));
   fs.writeFileSync(path.join(r, "README.md"), `# ${tag}\n`);
   execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: r });
   return r;

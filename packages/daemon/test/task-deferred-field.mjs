@@ -30,7 +30,7 @@ process.env.LOOM_HOME = tmpHome;
 
 const { Db } = await import("../dist/db.js");
 
-const file = path.join(os.tmpdir(), `loom-task-deferred-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-task-deferred-${Date.now()}-${process.pid}.db`);
 const now = new Date().toISOString();
 
 try {

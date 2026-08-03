@@ -33,7 +33,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { waitUntil } from "./_wait.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdo-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mdo-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

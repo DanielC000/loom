@@ -38,7 +38,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ncr-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ncr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // Shrink the bounded wait-for-idle (real default 25s) so the (F) fallback-timeout scenario below
 // doesn't have to wait out the real bound — read once at module load, so this MUST be set before

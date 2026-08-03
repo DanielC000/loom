@@ -21,7 +21,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bgi-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bgi-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { buildDaemon, deployBuildSteps } = await import("../dist/orchestration/restart.js");

@@ -9,7 +9,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wd-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { createWorktree, removeWorktree, deleteBranch, mergeBranch, diffBranch, workerDiff } =
@@ -22,7 +22,7 @@ const commitInto = (dir, file, body, msg) => {
   execSync(`git add . && git -c user.email=wd@loom -c user.name=wd commit -qm "${msg}"`, { cwd: dir });
 };
 
-const repo = path.join(os.tmpdir(), `loom-wd-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wd-repo-${Date.now()}-${process.pid}`);
 
 try {
   // a real repo with one commit (a tracked README we can later edit uncommitted). Configure a git identity

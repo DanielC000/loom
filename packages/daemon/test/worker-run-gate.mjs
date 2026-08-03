@@ -17,7 +17,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { performance } from "node:perf_hooks";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

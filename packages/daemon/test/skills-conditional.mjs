@@ -21,7 +21,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // The real shipped fragment, exactly as inject.ts reads it (paths.ts: <daemon>/assets/skill-fragments/…).
 const FRAGMENT = fs.readFileSync(path.join(__dirname, "..", "assets", "skill-fragments", "obsidian-preflight.md"), "utf8");
 
-const root = path.join(os.tmpdir(), `loom-cond-test-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-cond-test-${Date.now()}-${process.pid}`);
 const home = path.join(root, "loomhome");
 const skillsDir = path.join(home, "skills");
 

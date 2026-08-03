@@ -96,7 +96,7 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
   // --- readContextStats.lastAssistantText: text-only extraction (tool_use/tool_result excluded),
   // last-wins, missing → null. Folded into readContextStats's existing single-pass scan (review) rather
   // than a second parse — every fixture needs a `usage` block or the WHOLE stats object reads null.
-  const cwd = path.join(os.tmpdir(), `loom-wls-txt-${Date.now()}`);
+  const cwd = path.join(os.tmpdir(), `loom-wls-txt-${Date.now()}-${process.pid}`);
   const dir = path.dirname(engineTranscriptPath(cwd, "seed"));
   fs.mkdirSync(dir, { recursive: true });
   const writeFixture = (id, lines) =>
@@ -158,7 +158,7 @@ const events = {
 const host = new TestPtyHost(events);
 const SID = "sess-wls";
 const ENGINE_ID = "engine-wls-1";
-const cwd = path.join(os.tmpdir(), `loom-wls-cwd-${Date.now()}`);
+const cwd = path.join(os.tmpdir(), `loom-wls-cwd-${Date.now()}-${process.pid}`);
 const transcriptDir = path.dirname(engineTranscriptPath(cwd, ENGINE_ID));
 fs.mkdirSync(transcriptDir, { recursive: true });
 const writeTranscript = (lines) =>

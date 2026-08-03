@@ -124,7 +124,7 @@ for (const skill of ["platform-lead", "platform-audit"]) {
 
 // ===================== (d) THE INVARIANT — no agent/MCP path mints a platform session =====================
 // A real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off.
-const repo = path.join(os.tmpdir(), `loom-ph-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-ph-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform-home test\n");
 execSync(`git init -q && git add . && git -c user.email=ph@loom -c user.name=ph commit -q -m init`, { cwd: repo });

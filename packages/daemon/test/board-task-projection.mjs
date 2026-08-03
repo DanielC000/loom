@@ -18,7 +18,7 @@ import { resolveConfig, columnKeyForRole } from "@loom/shared";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const file = path.join(os.tmpdir(), `loom-board-task-projection-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-board-task-projection-${Date.now()}-${process.pid}.db`);
 const db = new Db(file);
 const now = new Date().toISOString();
 

@@ -43,7 +43,7 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 
 // A real temp git repo so ship-state reads (getTaskMergedInfo) have a valid cwd to scan (bounded git log,
 // resolves cleanly to "no match" for an unmerged branch — never throws on a real repo with no such branch).
-const repo = path.join(os.tmpdir(), `loom-stale-repokey-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-stale-repokey-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# stale repoKey test repo\n");
 execSync(`git init -q && git add . && git -c user.email=x@loom -c user.name=x commit -q -m init`, { cwd: repo });

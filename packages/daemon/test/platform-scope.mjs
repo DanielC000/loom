@@ -55,9 +55,9 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- temp dirs for the repo guardrail: one real git repo, one plain (non-git) dir ---
-const gitRepo = path.join(os.tmpdir(), `loom-plat-repo-${Date.now()}`);
-const nonGit = path.join(os.tmpdir(), `loom-plat-nongit-${Date.now()}`);
-const missing = path.join(os.tmpdir(), `loom-plat-missing-${Date.now()}`); // never created
+const gitRepo = path.join(os.tmpdir(), `loom-plat-repo-${Date.now()}-${process.pid}`);
+const nonGit = path.join(os.tmpdir(), `loom-plat-nongit-${Date.now()}-${process.pid}`);
+const missing = path.join(os.tmpdir(), `loom-plat-missing-${Date.now()}-${process.pid}`); // never created
 fs.mkdirSync(gitRepo, { recursive: true });
 fs.writeFileSync(path.join(gitRepo, "README.md"), "# platform test repo\n");
 execSync(`git init -q && git add . && git -c user.email=p@loom -c user.name=p commit -q -m "init"`, { cwd: gitRepo });

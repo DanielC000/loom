@@ -47,7 +47,7 @@ const { composeWorkerSessionName } = await import("../dist/pty/session-name.js")
 const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-wsnc-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wsnc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-session-name-collision test\n");
 execSync(`git init -q && git add . && git -c user.email=wsnc@loom -c user.name=wsnc commit -q -m init`, { cwd: repo });

@@ -58,7 +58,7 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo so any spawn has a valid cwd (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-peer-msg-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-peer-msg-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# peer_message test repo\n");
 execSync(`git init -q && git add . && git -c user.email=peer@loom -c user.name=peer commit -q -m init`, { cwd: repo });

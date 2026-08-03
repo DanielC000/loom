@@ -14,7 +14,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgrd-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgrd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 process.env.LOOM_GATE_RETRY_ENABLED = "0";
 
@@ -43,7 +43,7 @@ const sessions = new SessionService(db, ptyStub, new OrchestrationControl(), { r
 
 const p = {
   projId: "mgrd-proj", agentId: "mgrd-agent", taskId: "mgrd-task", mgrId: "mgrd-mgr", workerId: "mgrd-wkr",
-  repo: path.join(os.tmpdir(), `loom-mgrd-repo-${Date.now()}`), file: "feature.txt",
+  repo: path.join(os.tmpdir(), `loom-mgrd-repo-${Date.now()}-${process.pid}`), file: "feature.txt",
 };
 
 try {

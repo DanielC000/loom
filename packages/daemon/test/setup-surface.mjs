@@ -95,11 +95,11 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo so project_create has a valid repoPath (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-setup-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-setup-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# setup test repo\n");
 execSync(`git init -q && git add . && git -c user.email=s@loom -c user.name=s commit -q -m init`, { cwd: repo });
-const nonGit = path.join(os.tmpdir(), `loom-setup-nongit-${Date.now()}`);
+const nonGit = path.join(os.tmpdir(), `loom-setup-nongit-${Date.now()}-${process.pid}`);
 fs.mkdirSync(nonGit, { recursive: true });
 
 const now = new Date().toISOString();
@@ -212,7 +212,7 @@ try {
   // root is SCAFFOLDED at create time, so the project's vault is writable immediately with no manual
   // mkdir (the bug this fixes: an uncreated vaultPath used to misdirect vault_write into a misleading
   // 'traversal' error on its first write).
-  const freshVault = path.join(os.tmpdir(), `loom-setup-fresh-vault-${Date.now()}`);
+  const freshVault = path.join(os.tmpdir(), `loom-setup-fresh-vault-${Date.now()}-${process.pid}`);
   check("(c) fresh vaultPath does not exist yet", !fs.existsSync(freshVault));
   const createdFreshVault = await call("project_create", { name: "FreshVaultProj", repoPath: repo, vaultPath: freshVault });
   check("(c) project_create: a distinct non-existent vaultPath is ACCEPTED (not rejected like the vault-only case below)",

@@ -14,7 +14,7 @@ import { listProjectTasks, getProjectTask } from "../dist/mcp/tasks.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const file = path.join(os.tmpdir(), `loom-tasks-filter-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-tasks-filter-${Date.now()}-${process.pid}.db`);
 const db = new Db(file);
 const now = new Date().toISOString();
 

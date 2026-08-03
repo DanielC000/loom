@@ -50,7 +50,7 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const { listProjectTasks, updateProjectTask, DEFAULT_TASK_SUMMARY_CAP } = await import("../dist/mcp/tasks.js");
 
 // --- a real temp git repo so a spawn (never reached here) would have a valid cwd; createPty is faked ---
-const repo = path.join(os.tmpdir(), `loom-xtask-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-xtask-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# cross-project task test repo\n");
 execSync(`git init -q && git add . && git -c user.email=x@loom -c user.name=x commit -q -m init`, { cwd: repo });

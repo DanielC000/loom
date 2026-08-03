@@ -34,7 +34,7 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 import { simpleGit } from "simple-git";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bbl-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-bbl-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

@@ -59,8 +59,10 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 
 // --- git repo fixtures ---
 const mkRepo = (suffix) => {
-  const r = path.join(os.tmpdir(), `loom-bindid-${suffix}-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(r, { recursive: true });
+  // fs.mkdtempSync (not Date.now()-${process.pid}): mkRepo runs multiple times PER PROCESS, so pid
+  // (constant across those calls) can't discriminate two calls landing in the same millisecond — only
+  // an OS-atomic unique dir does (card 11a25f10).
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), `loom-bindid-${suffix}-`));
   execSync("git init -q", { cwd: r });
   return r;
 };

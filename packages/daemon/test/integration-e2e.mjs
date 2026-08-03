@@ -35,7 +35,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- a real git repo with docs, used as both repo + vault ---
-const dir = path.join(os.tmpdir(), `loom-e2e-${Date.now()}`);
+const dir = path.join(os.tmpdir(), `loom-e2e-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(dir, "docs"), { recursive: true });
 fs.writeFileSync(path.join(dir, "README.md"), "# E2E Project\nIntegrated phase-1 pass.\n");
 fs.writeFileSync(path.join(dir, "docs", "note.md"), "# Note\nhello vault\n");

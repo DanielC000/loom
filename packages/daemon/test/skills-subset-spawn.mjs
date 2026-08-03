@@ -126,7 +126,7 @@ check("(d) Y→all does not strip X's gamma", namesIn(shared).includes("gamma"))
 check("(d) Y→all delivers the full store", STORE_SKILLS.every((n) => namesIn(shared).includes(n)));
 
 // ===================== (C) the pinned subset survives resume / fork / boot (row + threading) =====================
-const repo = path.join(os.tmpdir(), `loom-ss-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-ss-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# skills-subset-spawn test\n");
 execSync(`git init -q && git add . && git -c user.email=ss@loom -c user.name=ss commit -q -m init`, { cwd: repo });

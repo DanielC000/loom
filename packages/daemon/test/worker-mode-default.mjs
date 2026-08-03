@@ -57,7 +57,7 @@ check("(setup) cyclesToReachFromAcceptEdits('acceptEdits') is 0 (the gate-free b
 
 // --- a real temp git repo, with a PROJECT config that deliberately sets startupModeCycles:0 — proving
 // the worker override is independent of this shared knob, not merely coincidental with today's default(2). ---
-const repo = path.join(os.tmpdir(), `loom-wmd-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wmd-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-mode-default test\n");
 execSync(`git init -q && git add . && git -c user.email=wmd@loom -c user.name=wmd commit -q -m init`, { cwd: repo });

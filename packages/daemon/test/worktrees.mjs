@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync, spawn } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-wt-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { createWorktree, removeWorktree, deleteBranch, mergeBranch, isBranchMerged, findLandedSquashCommit, toConventionalSubject, killableRemoveDir } = await import("../dist/git/worktrees.js");
@@ -27,7 +27,7 @@ const commitInto = (dir, file, body, msg) => {
   execSync(`git add . && git -c user.email=wt@loom -c user.name=wt commit -qm "${msg}"`, { cwd: dir });
 };
 
-const repo = path.join(os.tmpdir(), `loom-wt-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wt-repo-${Date.now()}-${process.pid}`);
 const taskId = "abcd1234-ef56-7890";
 
 try {

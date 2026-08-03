@@ -29,7 +29,7 @@ const trusted = (cfgPath, key) => {
   return e?.hasTrustDialogAccepted === true && e?.hasCompletedProjectOnboarding === true;
 };
 
-const root = path.join(os.tmpdir(), `loom-trust-lock-test-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-trust-lock-test-${Date.now()}-${process.pid}`);
 fs.mkdirSync(root, { recursive: true });
 
 // Hermetic from the user's REAL home for the whole test. ensureTrusted (and

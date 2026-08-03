@@ -55,7 +55,7 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo so any spawn has a valid cwd (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-notify-lead-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-notify-lead-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# notify_lead test repo\n");
 execSync(`git init -q && git add . && git -c user.email=nl@loom -c user.name=nl commit -q -m init`, { cwd: repo });

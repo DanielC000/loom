@@ -128,7 +128,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 
 // ============================ PART 2 — per-session manual clear route ============================
 {
-  process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rlevents-gw-${Date.now()}`);
+  process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rlevents-gw-${Date.now()}-${process.pid}`);
   fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
   const { requireHermeticEnv } = await import("./_guard.mjs");
   requireHermeticEnv();

@@ -53,7 +53,7 @@ const GIT_ID = "-c user.email=wssm@loom -c user.name=wssm";
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 
 // --- a real temp git repo so spawnWorker's createWorktree AND the shipped-match log read have real history ---
-const repo = path.join(os.tmpdir(), `loom-wssm-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wssm-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-spawn-shipped-match test\n");
 execSync(`git init -q && git config user.email wssm@loom && git config user.name wssm && git add . && git ${GIT_ID} commit -q -m init`, { cwd: repo });

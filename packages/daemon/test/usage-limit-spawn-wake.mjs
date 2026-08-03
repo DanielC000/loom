@@ -49,7 +49,7 @@ const { recordClaudeRateLimit, clearClaudeRateLimit, getClaudeUsageLimitRetryAft
   await import("../dist/orchestration/usage-awareness.js");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-ulsw-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-ulsw-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# usage-limit-spawn-wake test\n");
 execSync(`git init -q && git add . && git -c user.email=ws@loom -c user.name=ws commit -q -m init`, { cwd: repo });

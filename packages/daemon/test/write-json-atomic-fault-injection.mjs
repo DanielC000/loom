@@ -29,7 +29,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const transientErr = (code) => { const e = new Error(`${code}: simulated transient fs error`); e.code = code; return e; };
 const persistentErr = () => { const e = new Error("ENOENT: simulated non-transient fs error"); e.code = "ENOENT"; return e; };
 
-const root = path.join(os.tmpdir(), `loom-write-json-atomic-fault-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-write-json-atomic-fault-${Date.now()}-${process.pid}`);
 fs.mkdirSync(root, { recursive: true });
 
 const savedLimit = process.env.LOOM_TRANSIENT_FS_RETRY_LIMIT;

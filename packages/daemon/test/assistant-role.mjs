@@ -40,7 +40,7 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 
 // A real temp git repo backs the project (cwd must exist for resume()'s cwd guard + a real dir for spawn).
-const repo = path.join(os.tmpdir(), `loom-asst-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-asst-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# assistant-role test\n");
 execSync(`git init -q && git -c user.email=a@loom -c user.name=a add . && git -c user.email=a@loom -c user.name=a commit -q -m init`, { cwd: repo });

@@ -41,7 +41,7 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 const { resolveConfig } = await import("@loom/shared");
 
 // --- a real temp git repo so the source/fork sessions have a real cwd/HEAD (fork needs no worktree) ---
-const repo = path.join(os.tmpdir(), `loom-forkbl-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-forkbl-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# fork-allow-baseline test\n");
 execSync(`git init -q && git add . && git -c user.email=fb@loom -c user.name=fb commit -q -m init`, { cwd: repo });

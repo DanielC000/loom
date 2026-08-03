@@ -125,7 +125,7 @@ if (realIndexJsMtimeMs === realDistMtimeMs) {
 }
 const beforeBuild = new Date(realDistMtimeMs - 60_000).toISOString();
 const afterBuild = new Date(realDistMtimeMs + 60_000).toISOString();
-const stalenessRepo = path.join(os.tmpdir(), `loom-svst-stalenessrepo-${Date.now()}`);
+const stalenessRepo = path.join(os.tmpdir(), `loom-svst-stalenessrepo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(path.join(stalenessRepo, "packages", "daemon", "src"), { recursive: true });
 const gitStale = (args, dateIso) => execSync(`git ${args}`, {
   cwd: stalenessRepo,

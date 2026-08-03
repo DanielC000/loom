@@ -34,7 +34,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-recut-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-recut-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { createWorktree, mayRecutOntoMain } = await import("../dist/git/worktrees.js");
@@ -74,7 +74,7 @@ const isAncestor = (cwd, ancestorSha, ref) => {
 // even when the content itself is untouched; irrelevant to what these checks prove.
 const readNorm = (file) => fs.readFileSync(file, "utf8").replace(/\r\n/g, "\n");
 
-const repo = path.join(os.tmpdir(), `loom-recut-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-recut-repo-${Date.now()}-${process.pid}`);
 const PROJ = "projRecut";
 
 try {

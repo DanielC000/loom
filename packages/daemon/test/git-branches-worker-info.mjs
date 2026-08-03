@@ -47,7 +47,7 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const { taskKey } = await import("../dist/git/worktrees.js");
 const { createProjectTask } = await import("../dist/mcp/tasks.js");
 
-const repo = path.join(os.tmpdir(), `loom-git-branches-worker-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-git-branches-worker-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 const git = (cmd) => execSync(`git ${cmd}`, { cwd: repo }).toString();
 git("init -q");

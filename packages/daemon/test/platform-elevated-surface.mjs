@@ -50,8 +50,8 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 // --- a real temp git repo (the project repoPath) + a LOCAL bare remote so git_push has somewhere real-
 // but-local to push (NEVER a real remote). Persistent user.name/email so GitWriter.commit (which passes
 // NO -c identity override) has an identity to commit under. ---
-const repo = path.join(os.tmpdir(), `loom-p3-repo-${Date.now()}`);
-const bare = path.join(os.tmpdir(), `loom-p3-bare-${Date.now()}.git`);
+const repo = path.join(os.tmpdir(), `loom-p3-repo-${Date.now()}-${process.pid}`);
+const bare = path.join(os.tmpdir(), `loom-p3-bare-${Date.now()}-${process.pid}.git`);
 fs.mkdirSync(repo, { recursive: true });
 execSync("git init -q", { cwd: repo });
 execSync("git config user.email p3@loom && git config user.name p3", { cwd: repo });
@@ -62,8 +62,8 @@ execSync(`git remote add origin "${bare}"`, { cwd: repo }); // local bare remote
 
 // --- a SECOND real temp git repo (a registered `repos` entry, key "api") + its own local bare remote —
 // proves repoKey (card a0dff493) actually retargets the git writers instead of always hitting primary.
-const repo2 = path.join(os.tmpdir(), `loom-p3-repo2-${Date.now()}`);
-const bare2 = path.join(os.tmpdir(), `loom-p3-bare2-${Date.now()}.git`);
+const repo2 = path.join(os.tmpdir(), `loom-p3-repo2-${Date.now()}-${process.pid}`);
+const bare2 = path.join(os.tmpdir(), `loom-p3-bare2-${Date.now()}-${process.pid}.git`);
 fs.mkdirSync(repo2, { recursive: true });
 execSync("git init -q", { cwd: repo2 });
 execSync("git config user.email p3@loom && git config user.name p3", { cwd: repo2 });
@@ -75,9 +75,9 @@ const branchExists = (dir, branch) => { try { execSync(`git rev-parse --verify r
 const remoteBranchExists = (bareDir, branch) => { try { execSync(`git --git-dir="${bareDir}" rev-parse --verify refs/heads/${branch}`, { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }); return true; } catch { return false; } };
 
 // --- a real temp VAULT dir (the project vaultPath), git-init'd so vault_write's commit path is exercised.
-const vault = path.join(os.tmpdir(), `loom-p3-vault-${Date.now()}`);
-const outside = path.join(os.tmpdir(), `loom-p3-outside-${Date.now()}`); // path-escape target (must stay empty)
-const freshVault = path.join(os.tmpdir(), `loom-p3-fresh-vault-${Date.now()}`); // (c2) — deliberately NOT created here
+const vault = path.join(os.tmpdir(), `loom-p3-vault-${Date.now()}-${process.pid}`);
+const outside = path.join(os.tmpdir(), `loom-p3-outside-${Date.now()}-${process.pid}`); // path-escape target (must stay empty)
+const freshVault = path.join(os.tmpdir(), `loom-p3-fresh-vault-${Date.now()}-${process.pid}`); // (c2) — deliberately NOT created here
 fs.mkdirSync(vault, { recursive: true });
 fs.mkdirSync(outside, { recursive: true });
 execSync("git init -q && git config user.email p3@loom && git config user.name p3", { cwd: vault });

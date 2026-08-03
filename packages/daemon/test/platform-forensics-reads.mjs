@@ -56,7 +56,7 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 const { searchAgentPrompts, DEFAULT_PROMPT_SEARCH_CAP, MAX_PROMPT_SEARCH_CAP } = await import("../dist/mcp/promptSearch.js");
 
 // --- a real temp git repo so a spawn (never reached here) would have a valid cwd; createPty is faked ---
-const repo = path.join(os.tmpdir(), `loom-forensics-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-forensics-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# forensics-reads test repo\n");
 execSync(`git init -q && git add . && git -c user.email=x@loom -c user.name=x commit -q -m init`, { cwd: repo });

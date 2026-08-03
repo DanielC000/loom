@@ -122,7 +122,7 @@ const call = async (nameArgs, args) => parse(await client.callTool({ name: nameA
 // derive from the SAME 6h constant off the SAME instant and land within ms of each other.
 db.setPlatformConfig({ rateLimit: { recencyWindowMs: 10 * 60_000 } }); // park ~10min out; deadline stays default ~6h
 
-const repo = path.join(os.tmpdir(), `loom-rlcqd-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-rlcqd-repo-${Date.now()}-${process.pid}`);
 initRepo(repo);
 db.insertProject({ id: "pR", name: "R", repoPath: repo, vaultPath: repo, config: { orchestration: { maxConcurrentWorkers: 1 } }, createdAt: now, archivedAt: null });
 db.insertAgent({ id: "agentMgrR", projectId: "pR", name: "MgrR", startupPrompt: "MGR", position: 0, profileId: null });

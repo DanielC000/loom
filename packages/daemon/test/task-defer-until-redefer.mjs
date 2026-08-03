@@ -28,7 +28,7 @@ const { Db } = await import("../dist/db.js");
 const { getProjectTask, listProjectTasks, createProjectTask, updateProjectTask } = await import("../dist/mcp/tasks.js");
 const { taskKey } = await import("../dist/git/worktrees.js");
 
-const repo = path.join(os.tmpdir(), `loom-defer-redefer-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-defer-redefer-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 const git = (cmd) => execSync(`git ${cmd}`, { cwd: repo }).toString();
 git("init -q");
@@ -39,7 +39,7 @@ const landBlocker = (blockerId, msg) => {
   git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m "${msg}" -m "Loom-Worker-Branch: ${branch}"`);
 };
 
-const file = path.join(os.tmpdir(), `loom-defer-redefer-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-defer-redefer-${Date.now()}-${process.pid}.db`);
 const db = new Db(file);
 const now = new Date().toISOString();
 

@@ -134,7 +134,7 @@ const USAGE = { input_tokens: 100, output_tokens: 10 };
     /own artifact/i.test(recoveryTextSample) && /reply you sent|memory write|turn count/i.test(recoveryTextSample));
 
   // --- readContextStats.lastUserText: raw user-turn text extraction, folded into the single-pass scan ---
-  const cwd = path.join(os.tmpdir(), `loom-ppt-txt-${Date.now()}`);
+  const cwd = path.join(os.tmpdir(), `loom-ppt-txt-${Date.now()}-${process.pid}`);
   const dir = path.dirname(engineTranscriptPath(cwd, "seed"));
   fs.mkdirSync(dir, { recursive: true });
   const writeFixture = (id, lines) =>
@@ -202,7 +202,7 @@ const events = {
 const host = new TestPtyHost(events);
 const SID = "sess-ppt";
 const ENGINE_ID = "engine-ppt-1";
-const cwd = path.join(os.tmpdir(), `loom-ppt-cwd-${Date.now()}`);
+const cwd = path.join(os.tmpdir(), `loom-ppt-cwd-${Date.now()}-${process.pid}`);
 const transcriptDir = path.dirname(engineTranscriptPath(cwd, ENGINE_ID));
 fs.mkdirSync(transcriptDir, { recursive: true });
 const writeTranscript = (lines) =>

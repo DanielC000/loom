@@ -19,8 +19,8 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // --- a temp vault with one resolvable note + a dir OUTSIDE the vault ---
-const VAULT = path.join(os.tmpdir(), `loom-vault-${Date.now()}`);
-const OUTSIDE = path.join(os.tmpdir(), `loom-outside-${Date.now()}`);
+const VAULT = path.join(os.tmpdir(), `loom-vault-${Date.now()}-${process.pid}`);
+const OUTSIDE = path.join(os.tmpdir(), `loom-outside-${Date.now()}-${process.pid}`);
 fs.mkdirSync(VAULT, { recursive: true });
 fs.mkdirSync(OUTSIDE, { recursive: true });
 fs.writeFileSync(path.join(VAULT, "Existing.md"), "# Existing\n\nA real note.\n");

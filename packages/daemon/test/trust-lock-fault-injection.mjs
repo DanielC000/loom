@@ -29,7 +29,7 @@ const trusted = (cfgPath, key) => {
 };
 const transientErr = (code) => { const e = new Error(`${code}: simulated transient fs error`); e.code = code; return e; };
 
-const root = path.join(os.tmpdir(), `loom-trust-lock-fault-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-trust-lock-fault-${Date.now()}-${process.pid}`);
 fs.mkdirSync(root, { recursive: true });
 
 // Isolate from the real $HOME the same way trust-lock.mjs does: discoverProjectMcpServerNames and

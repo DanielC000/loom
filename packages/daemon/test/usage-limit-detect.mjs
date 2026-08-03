@@ -158,7 +158,7 @@ async function waitForSession(sessionId, pred, timeoutMs, intervalMs = 250) {
   return last;
 }
 
-const dir = path.join(os.tmpdir(), `loom-rl-live-${Date.now()}`);
+const dir = path.join(os.tmpdir(), `loom-rl-live-${Date.now()}-${process.pid}`);
 fs.mkdirSync(dir, { recursive: true });
 fs.writeFileSync(path.join(dir, "README.md"), "# usage-limit live test\n");
 execSync(`git init -q && git add . && git -c user.email=rl@loom -c user.name=rl commit -q -m "init"`, { cwd: dir });

@@ -69,7 +69,7 @@ const {
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude); it also
 // stands in for the reserved platform project's "home" (repoPath === vaultPath, per platform/seed.ts). ---
-const repo = path.join(os.tmpdir(), `loom-lead-resumedoc-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-lead-resumedoc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform lead resume-doc lineage test repo\n");
 execSync(`git init -q && git add . && git -c user.email=rd@loom -c user.name=rd commit -q -m init`, { cwd: repo });
@@ -120,7 +120,7 @@ try {
   check("(1) a dangling recycledFrom (missing predecessor) breaks cleanly and returns the last VALID id", lineageRootId(db, db.getSession("childValid")) === "midValid");
 
   // ============================ (2) IMPURE resolvePlatformLeadResumeDocPath =========================
-  const home2 = path.join(os.tmpdir(), `loom-lead-resumedoc-home2-${Date.now()}`);
+  const home2 = path.join(os.tmpdir(), `loom-lead-resumedoc-home2-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home2, { recursive: true });
   const basePath2 = platformLeadBaseResumeDocPath(home2);
 
@@ -151,7 +151,7 @@ try {
   // marker is GLOBAL per Db (there is only ever ONE real platform home in production) — reset it so this
   // independently-scoped scenario starts fresh, sharing the one Db instance like the rest of this file.
   db.deleteMeta(PRIMARY_LINEAGE_META_KEY);
-  const home3 = path.join(os.tmpdir(), `loom-lead-resumedoc-home3-${Date.now()}`);
+  const home3 = path.join(os.tmpdir(), `loom-lead-resumedoc-home3-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home3, { recursive: true });
   const q1 = resolvePlatformLeadResumeDocPath(db, home3, "onlyLineage"); // claims primary (base) — no file needed to exist
   check("(2) with an empty home, the first lineage still resolves to the base path", q1 === platformLeadBaseResumeDocPath(home3));
@@ -190,7 +190,7 @@ try {
   check("(3) Lead B's successor resolves to the SAME per-lineage file as its predecessor (not the base, not lineage A's)", succPromptB.includes(lineageBPath) && !succPromptB.includes(basePathE2E));
 
   // ==================== (4) composeResumeDocOperationalNotes — size + staleness warnings ====================
-  const home4 = path.join(os.tmpdir(), `loom-lead-resumedoc-home4-${Date.now()}`);
+  const home4 = path.join(os.tmpdir(), `loom-lead-resumedoc-home4-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home4, { recursive: true });
   const doc4 = platformLeadBaseResumeDocPath(home4);
 
@@ -232,7 +232,7 @@ try {
 
   // ==================== (5) END-TO-END: the notes ride along in the injected startupPrompt ====================
   db.deleteMeta(PRIMARY_LINEAGE_META_KEY);
-  const home5 = path.join(os.tmpdir(), `loom-lead-resumedoc-home5-${Date.now()}`);
+  const home5 = path.join(os.tmpdir(), `loom-lead-resumedoc-home5-${Date.now()}-${process.pid}`);
   fs.mkdirSync(home5, { recursive: true });
   db.insertProject({ id: "pHome5", name: "Loom Platform 5", repoPath: repo, vaultPath: home5, config: {}, createdAt: now, archivedAt: null, reserved: true });
   db.insertAgent({ id: "agentLead5", projectId: "pHome5", name: "Platform", startupPrompt: "LEAD5 WARMUP", position: 0, profileId: null });

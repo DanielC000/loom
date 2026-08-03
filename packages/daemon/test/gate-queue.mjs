@@ -71,7 +71,7 @@ async function waitUntil(cond, label, timeoutMs = 5000, intervalMs = 25) {
   throw new Error(`${label}: condition not met within ${timeoutMs}ms`);
 }
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gq-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gq-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

@@ -137,7 +137,7 @@ const { InAppChannel } = await import("../dist/companion/in-app.js");
   const inApp = new InAppChannel({
     record: (sessionId, author, text, proactive, viaVoice) => { recorded.push({ sessionId, author, text, proactive, viaVoice }); },
   });
-  const audioFile = path.join(os.tmpdir(), `loom-inapp-voice-${Date.now()}.ogg`);
+  const audioFile = path.join(os.tmpdir(), `loom-inapp-voice-${Date.now()}-${process.pid}.ogg`);
   fs.writeFileSync(audioFile, Buffer.from([0, 1, 2, 3]));
   try {
     await inApp.adapter.send("sessX", "typed in-app reply");

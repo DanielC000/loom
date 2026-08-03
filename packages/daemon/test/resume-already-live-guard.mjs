@@ -16,7 +16,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ralg-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ralg-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 // Card f432cbb8: mkSession() below writes a real transcript fixture via engineTranscriptPath, which
@@ -26,7 +26,7 @@ fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // box). Sandbox HOME/USERPROFILE to its own temp root — swept in the `finally` below alongside LOOM_HOME
 // and cwd — BEFORE importing dist, so os.homedir() (read at call time by engineTranscriptPath, not
 // cached) resolves inside the sandbox for every call this file makes.
-const sandboxHome = path.join(os.tmpdir(), `loom-ralg-home-real-${Date.now()}`);
+const sandboxHome = path.join(os.tmpdir(), `loom-ralg-home-real-${Date.now()}-${process.pid}`);
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME

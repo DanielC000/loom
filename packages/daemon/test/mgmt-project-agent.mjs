@@ -50,7 +50,7 @@ const mkSchedule = (id, agentId) => ({ id, agentId, cron: "0 * * * *", enabled: 
 const mkTask = (id, projectId) => ({ id, projectId, title: id, body: "", columnKey: "todo", position: 0, priority: "p2", createdAt: now, updatedAt: now });
 
 // ── transcript fixture for the snapshot-cascade assertion (unique cwd → unique encoded dir) ──
-const fakeCwd = path.join(os.tmpdir(), `loom-mgmt-cwd-${Date.now()}`);
+const fakeCwd = path.join(os.tmpdir(), `loom-mgmt-cwd-${Date.now()}-${process.pid}`);
 const engineId = `mgmt-engine-${Date.now()}`;
 const claudeDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(fakeCwd));
 const claudeFile = path.join(claudeDir, `${engineId}.jsonl`);

@@ -34,7 +34,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgr-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mgr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 // Drive the settle delay near-zero (env-overridable — sweep G3: read LIVE inside resolveConfig on every
 // confirmWorkerMerge call, no longer at gate-runner.js's first import) so this test doesn't burn real

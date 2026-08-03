@@ -203,7 +203,7 @@ const { engineTranscriptPath } = await import("../dist/sessions/transcript.js");
 // =========================================================================================================
 {
   // A real temp git repo backs the project (cwd must exist for resume()'s cwd guard + a real dir for spawn).
-  const repo = path.join(os.tmpdir(), `loom-mem-recall-repo-${Date.now()}`);
+  const repo = path.join(os.tmpdir(), `loom-mem-recall-repo-${Date.now()}-${process.pid}`);
   registerForCleanup(repo); // was never cleaned up before (card f432cbb8) — swept by the same exit hooks now
   fs.mkdirSync(repo, { recursive: true });
   fs.writeFileSync(path.join(repo, "README.md"), "# memory-recall test\n");

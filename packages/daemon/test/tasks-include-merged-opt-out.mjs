@@ -44,13 +44,13 @@ async function connect(server) {
 }
 const call = async (client, name, args) => JSON.parse((await client.callTool({ name, arguments: args })).content[0].text);
 
-const repo = path.join(os.tmpdir(), `loom-include-merged-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-include-merged-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 const git = (cmd) => execSync(`git ${cmd}`, { cwd: repo }).toString();
 git("init -q");
 git(`-c user.email=x@loom -c user.name=x commit --allow-empty -q -m init`);
 
-const file = path.join(os.tmpdir(), `loom-include-merged-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-include-merged-${Date.now()}-${process.pid}.db`);
 const db = new Db(file);
 const now = new Date().toISOString();
 

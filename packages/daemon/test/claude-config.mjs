@@ -28,7 +28,7 @@ const trusted = (cfgPath, key) => {
 };
 const noTmpLeft = (dir) => fs.readdirSync(dir).every((f) => !f.includes(".loom.tmp"));
 
-const root = path.join(os.tmpdir(), `loom-claude-config-test-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-claude-config-test-${Date.now()}-${process.pid}`);
 fs.mkdirSync(root, { recursive: true });
 
 // Snapshot the real ~/.claude.json (captured with the REAL homedir, before any env tweaks)

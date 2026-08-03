@@ -56,8 +56,10 @@ const { createSeamHost } = await import("./_seam-host-fixture.mjs");
 
 // --- Real temp git repos: valid registry targets. ---
 const mkRepo = (tag) => {
-  const r = path.join(os.tmpdir(), `loom-reponotify-${tag}-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(r, { recursive: true });
+  // fs.mkdtempSync (not Date.now()-${process.pid}): mkRepo runs multiple times PER PROCESS, so pid
+  // (constant across those calls) can't discriminate two calls landing in the same millisecond — only
+  // an OS-atomic unique dir does (card 11a25f10).
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), `loom-reponotify-${tag}-`));
   fs.writeFileSync(path.join(r, "README.md"), `# ${tag}\n`);
   execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: r });
   return r;

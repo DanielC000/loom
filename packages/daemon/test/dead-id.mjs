@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-deadid-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-deadid-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

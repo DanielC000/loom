@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 import { requireHermeticEnv } from "./_guard.mjs";
 import { gracefulShutdownRegion } from "./_graceful-region.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-periodic-snap-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-periodic-snap-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
 
@@ -28,7 +28,7 @@ requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the 
 // audit measured). Sandbox HOME/USERPROFILE to its own temp root — cleaned up in the `finally` below —
 // BEFORE importing dist, so os.homedir() (read at call time, not cached) resolves inside the sandbox for
 // every call this file makes.
-const sandboxHome = path.join(os.tmpdir(), `loom-periodic-snap-home-${Date.now()}`);
+const sandboxHome = path.join(os.tmpdir(), `loom-periodic-snap-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(sandboxHome, { recursive: true });
 process.env.USERPROFILE = sandboxHome; // Windows: os.homedir() reads USERPROFILE
 process.env.HOME = sandboxHome;        // POSIX: os.homedir() reads HOME
@@ -50,7 +50,7 @@ const mkSession = (id, over = {}) => ({
   createdAt: now, lastActivity: now, lastError: null, ...over,
 });
 
-const fakeCwd = path.join(os.tmpdir(), `loom-periodic-snap-cwd-${Date.now()}`);
+const fakeCwd = path.join(os.tmpdir(), `loom-periodic-snap-cwd-${Date.now()}-${process.pid}`);
 const claudeDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(fakeCwd));
 const engineA = `periodic-engine-A-${Date.now()}`;
 const engineB = `periodic-engine-B-${Date.now()}`;

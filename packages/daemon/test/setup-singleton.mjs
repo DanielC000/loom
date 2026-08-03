@@ -52,7 +52,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-setup-singleton-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-setup-singleton-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# setup singleton test repo\n");
 execSync(`git init -q && git add . && git -c user.email=ss@loom -c user.name=ss commit -q -m init`, { cwd: repo });

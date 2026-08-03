@@ -54,7 +54,7 @@ const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const q = (p) => `"${p}"`; // quote a path for both cmd.exe and posix sh
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gil-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gil-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

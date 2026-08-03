@@ -17,7 +17,7 @@ import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rlclear-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rlclear-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
 

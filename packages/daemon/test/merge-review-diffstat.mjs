@@ -11,7 +11,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrd-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-mrd-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { createWorktree, removeWorktree, deleteBranch, diffBranch } =
@@ -20,7 +20,7 @@ const { createWorktree, removeWorktree, deleteBranch, diffBranch } =
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const repo = path.join(os.tmpdir(), `loom-mrd-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-mrd-repo-${Date.now()}-${process.pid}`);
 
 try {
   fs.mkdirSync(repo, { recursive: true });

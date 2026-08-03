@@ -62,7 +62,7 @@ const repos = [];
 try {
   // ============================ (M) MERGE PATH ============================
   {
-    const repo = path.join(os.tmpdir(), `loom-sss-merge-repo-${Date.now()}`);
+    const repo = path.join(os.tmpdir(), `loom-sss-merge-repo-${Date.now()}-${process.pid}`);
     repos.push(repo);
     fs.mkdirSync(repo, { recursive: true });
     fs.writeFileSync(path.join(repo, "README.md"), "# sibling-sweep merge test\n");
@@ -98,9 +98,9 @@ try {
   // ============================ (R) RECYCLE PATH ============================
   {
     // recycleWorker does no git itself (it REUSES the worktree), so a plain temp dir as the cwd suffices.
-    const wt = path.join(os.tmpdir(), `loom-sss-recycle-wt-${Date.now()}`);
+    const wt = path.join(os.tmpdir(), `loom-sss-recycle-wt-${Date.now()}-${process.pid}`);
     fs.mkdirSync(wt, { recursive: true });
-    const repo = path.join(os.tmpdir(), `loom-sss-recycle-repo-${Date.now()}`);
+    const repo = path.join(os.tmpdir(), `loom-sss-recycle-repo-${Date.now()}-${process.pid}`);
     repos.push(repo); worktrees.push(wt);
     fs.mkdirSync(repo, { recursive: true });
 

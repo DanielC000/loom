@@ -21,7 +21,7 @@ import { randomUUID } from "node:crypto";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gh-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gh-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");

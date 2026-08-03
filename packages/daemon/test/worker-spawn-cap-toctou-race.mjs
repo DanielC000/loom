@@ -53,7 +53,7 @@ const { SessionService } = await import("../dist/sessions/service.js");
 const { OrchestrationControl } = await import("../dist/orchestration/control.js");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-wcap-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-wcap-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# worker-spawn-cap-toctou-race test\n");
 execSync(`git init -q && git add . && git -c user.email=ws@loom -c user.name=ws commit -q -m init`, { cwd: repo });

@@ -57,7 +57,7 @@ check("(setup) the default config's fresh target mode is auto (the owner's requi
   FRESH_TARGET_MODE === "auto");
 
 // --- a real temp git repo so a manager session has a real cwd/HEAD (no worktree needed for resume) ---
-const repo = path.join(os.tmpdir(), `loom-rmc-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-rmc-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# resume-mode-cycles test\n");
 execSync(`git init -q && git add . && git -c user.email=rmc@loom -c user.name=rmc commit -q -m init`, { cwd: repo });

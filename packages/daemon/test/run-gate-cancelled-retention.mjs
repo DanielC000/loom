@@ -29,7 +29,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gcr-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gcr-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { Db } = await import("../dist/db.js");
@@ -201,7 +201,7 @@ try {
   // ── (D2) REGRESSION GUARD: a FAILING verdict (not just a passing one) is still served from the retention
   //     cache — pins `typeof value.passed === "boolean"`, not `value.passed === true` ─────────────────────
   {
-    const repo = path.join(os.tmpdir(), `loom-gcr-d2-repo-${Date.now()}`);
+    const repo = path.join(os.tmpdir(), `loom-gcr-d2-repo-${Date.now()}-${process.pid}`);
     makeRepo(repo);
 
     const db = new Db();

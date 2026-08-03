@@ -19,7 +19,7 @@ import { prioritySchema } from "../dist/mcp/server.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const file = path.join(os.tmpdir(), `loom-tasks-priority-${Date.now()}.db`);
+const file = path.join(os.tmpdir(), `loom-tasks-priority-${Date.now()}-${process.pid}.db`);
 const now = new Date().toISOString();
 
 try {

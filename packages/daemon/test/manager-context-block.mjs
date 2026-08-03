@@ -53,11 +53,11 @@ const { RESUME_DOC_WARN_BYTES, resolveResumeDocPath } = await import("../dist/se
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off, and a
 //     SEPARATE vault dir so we can prove BOTH absolute roots land in the block (not one path twice) ---
-const repo = path.join(os.tmpdir(), `loom-mctxblk-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-mctxblk-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# manager-context-block test\n");
 execSync(`git init -q && git add . && git -c user.email=mc@loom -c user.name=mc commit -q -m init`, { cwd: repo });
-const vault = path.join(os.tmpdir(), `loom-mctxblk-vault-${Date.now()}`);
+const vault = path.join(os.tmpdir(), `loom-mctxblk-vault-${Date.now()}-${process.pid}`);
 fs.mkdirSync(vault, { recursive: true });
 
 const now = new Date().toISOString();
@@ -176,7 +176,7 @@ try {
   // vaultPath is ALREADY the project's vault dir (e.g. ".../Obsidian Vault/Projects/Fire Studio") — it is
   // NOT the vault root, so the resume doc must NOT re-append "Projects/<name>" on top of it.
   const spaceProjectName = "Fire Studio"; // a project name that ALSO contains a space
-  const spaceVaultDir = path.join(os.tmpdir(), `loom-mctxblk-spacevault-${Date.now()}`, "Obsidian Vault", "Projects", spaceProjectName);
+  const spaceVaultDir = path.join(os.tmpdir(), `loom-mctxblk-spacevault-${Date.now()}-${process.pid}`, "Obsidian Vault", "Projects", spaceProjectName);
   const realResumeDoc = path.join(spaceVaultDir, "Orchestrator Log.md");
   fs.mkdirSync(spaceVaultDir, { recursive: true });
   fs.writeFileSync(realResumeDoc, "# Orchestrator Log\n");
@@ -188,7 +188,7 @@ try {
 
   // ===================== (3e) card 809cc4b5: an oversized resume doc ⇒ the size-warning note fires
   // (SPAWN-time half of the proactive nudge; ResumeDocWatcher covers the mid-session half separately) =====
-  const sizeVault = path.join(os.tmpdir(), `loom-mctxblk-sizevault-${Date.now()}`);
+  const sizeVault = path.join(os.tmpdir(), `loom-mctxblk-sizevault-${Date.now()}-${process.pid}`);
   fs.mkdirSync(sizeVault, { recursive: true });
   const sizeResumeDoc = path.join(sizeVault, "Orchestrator Log.md");
 
@@ -267,7 +267,7 @@ try {
 
   // ===================== (1e) card c1f2f095: an end-to-end manager spawn for a project whose config
   // sets orchestration.resumeDocFilename picks up the CUSTOM path, not the hardcoded default =====================
-  const vaultCustom = path.join(os.tmpdir(), `loom-mctxblk-vaultcustom-${Date.now()}`);
+  const vaultCustom = path.join(os.tmpdir(), `loom-mctxblk-vaultcustom-${Date.now()}-${process.pid}`);
   fs.mkdirSync(vaultCustom, { recursive: true });
   db.insertProject({
     id: "pCustom", name: "CustomProj", repoPath: repo, vaultPath: vaultCustom,
@@ -317,15 +317,15 @@ try {
 
   // ===================== (1d) reference-repos epic Phase 3: a project WITH referenceRepos injects the =====
   // 'Also referenced (read-only)' block into a real manager spawn (not just the pure function above).
-  const refRepoA = path.join(os.tmpdir(), `loom-mctxblk-refA-${Date.now()}`);
-  const refRepoB = path.join(os.tmpdir(), `loom-mctxblk-refB-${Date.now()}`);
+  const refRepoA = path.join(os.tmpdir(), `loom-mctxblk-refA-${Date.now()}-${process.pid}`);
+  const refRepoB = path.join(os.tmpdir(), `loom-mctxblk-refB-${Date.now()}-${process.pid}`);
   fs.mkdirSync(refRepoA, { recursive: true });
   fs.mkdirSync(refRepoB, { recursive: true });
-  const repoR = path.join(os.tmpdir(), `loom-mctxblk-repoR-${Date.now()}`);
+  const repoR = path.join(os.tmpdir(), `loom-mctxblk-repoR-${Date.now()}-${process.pid}`);
   fs.mkdirSync(repoR, { recursive: true });
   fs.writeFileSync(path.join(repoR, "README.md"), "# ref-repos manager test\n");
   execSync(`git init -q && git add . && git -c user.email=mc@loom -c user.name=mc commit -q -m init`, { cwd: repoR });
-  const vaultR = path.join(os.tmpdir(), `loom-mctxblk-vaultR-${Date.now()}`);
+  const vaultR = path.join(os.tmpdir(), `loom-mctxblk-vaultR-${Date.now()}-${process.pid}`);
   fs.mkdirSync(vaultR, { recursive: true });
   db.insertProject({ id: "pR", name: "RefProj", repoPath: repoR, vaultPath: vaultR, config: {}, createdAt: now, archivedAt: null, referenceRepos: [refRepoA, refRepoB] });
   db.insertAgent({ id: "agentMgrRef", projectId: "pR", name: "Orchestrator", startupPrompt: "AGENT_MGR_REF_DOCTRINE", position: 0, profileId: null });

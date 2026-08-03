@@ -23,7 +23,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rdln-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-rdln-home-${Date.now()}-${process.pid}`);
 // PART A spawns real PtyHost sessions (host.spawn()), which open a per-session log under
 // $LOOM_HOME/logs (see pty/host.ts) — production always has this dir (index.ts's boot-time
 // ensureDirs()), but a hermetic test never runs that, so it must create it itself (mirrors

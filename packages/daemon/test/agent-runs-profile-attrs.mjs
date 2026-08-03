@@ -40,7 +40,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { runSnapshotDir } = await import("../dist/runs/snapshot.js");
 
 // --- a real temp git repo with a committed file so createRunSnapshot has a HEAD to extract ---
-const repo = path.join(os.tmpdir(), `loom-runs-pa-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-runs-pa-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# agent-runs profile-attrs test\n");
 execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: repo });

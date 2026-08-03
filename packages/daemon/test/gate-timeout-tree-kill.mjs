@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync, spawn as spawnProcess } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gtk-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-gtk-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 
 const { runGateStep } = await import("../dist/orchestration/gate-runner.js");

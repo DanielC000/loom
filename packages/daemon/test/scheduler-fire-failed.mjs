@@ -20,7 +20,7 @@ import path from "node:path";
 
 import { requireHermeticEnv } from "./_guard.mjs";
 // Set a temp LOOM_HOME so the prod-guard is satisfied even though this test opens its OWN temp db.
-if (!process.env.LOOM_HOME) process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-firefail-home-${Date.now()}`);
+if (!process.env.LOOM_HOME) process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-firefail-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 requireHermeticEnv();
 

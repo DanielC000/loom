@@ -55,7 +55,7 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-p5-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-p5-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform P5 test repo\n");
 execSync(`git init -q && git add . && git -c user.email=p5@loom -c user.name=p5 commit -q -m init`, { cwd: repo });
@@ -415,13 +415,13 @@ try {
   // A fixture "Loom source" tree the auditor reads; LOOM_REPO_ROOT points loomRepoRoot() at it (the test
   // seam). The DoD: the reads work, SKIP node_modules, honour the glob filter, and are CONFINED to the root
   // (a `..`/absolute escape to a sibling secret is refused — the Auditor can't read an arbitrary host file).
-  const fixtureRoot = path.join(os.tmpdir(), `loom-p5-src-${Date.now()}`);
+  const fixtureRoot = path.join(os.tmpdir(), `loom-p5-src-${Date.now()}-${process.pid}`);
   fs.mkdirSync(path.join(fixtureRoot, "packages", "daemon", "src", "mcp"), { recursive: true });
   fs.mkdirSync(path.join(fixtureRoot, "node_modules", "junk"), { recursive: true });
   fs.writeFileSync(path.join(fixtureRoot, "packages", "daemon", "src", "mcp", "audit.ts"), "export const MARKER = 1;\n// second line\nconst x = 2;\n");
   fs.writeFileSync(path.join(fixtureRoot, "README.md"), "# fixture\nNEEDLE_TOKEN here\n");
   fs.writeFileSync(path.join(fixtureRoot, "node_modules", "junk", "skip.ts"), "NEEDLE_TOKEN and MARKER should be skipped\n");
-  const outsideSecret = path.join(os.tmpdir(), `loom-p5-secret-${Date.now()}.txt`);
+  const outsideSecret = path.join(os.tmpdir(), `loom-p5-secret-${Date.now()}-${process.pid}.txt`);
   fs.writeFileSync(outsideSecret, "TOPSECRET\n");
   process.env.LOOM_REPO_ROOT = fixtureRoot; // loomRepoRoot() reads this at CALL time
 

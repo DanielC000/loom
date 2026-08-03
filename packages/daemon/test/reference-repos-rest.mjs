@@ -54,8 +54,10 @@ const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.j
 
 // --- Real temp git repos: two valid reference targets, plus a real dir that is NOT a git repo. ---
 const mkRepo = (tag) => {
-  const r = path.join(os.tmpdir(), `loom-refrepos-${tag}-${Date.now()}-${process.pid}`);
-  fs.mkdirSync(r, { recursive: true });
+  // fs.mkdtempSync (not Date.now()-${process.pid}): mkRepo runs multiple times PER PROCESS, so pid
+  // (constant across those calls) can't discriminate two calls landing in the same millisecond — only
+  // an OS-atomic unique dir does (card 11a25f10).
+  const r = fs.mkdtempSync(path.join(os.tmpdir(), `loom-refrepos-${tag}-`));
   fs.writeFileSync(path.join(r, "README.md"), `# ${tag}\n`);
   execSync(`git init -q && git add . && git -c user.email=r@loom -c user.name=r commit -q -m init`, { cwd: r });
   return r;

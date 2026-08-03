@@ -12,7 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import Database from "better-sqlite3";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-orch-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-orch-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 const DB_FILE = path.join(process.env.LOOM_HOME, "loom.db");
 const now = new Date().toISOString();

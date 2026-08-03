@@ -45,7 +45,7 @@ const { buildServer } = await import("../dist/gateway/server.js");
 const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
-const repo = path.join(os.tmpdir(), `loom-platform-qi-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-platform-qi-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform question-inbox test repo\n");
 execSync(`git init -q && git add . && git -c user.email=qi@loom -c user.name=qi commit -q -m init`, { cwd: repo });

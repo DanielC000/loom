@@ -22,7 +22,7 @@ import os from "node:os";
 import path from "node:path";
 import { execSync } from "node:child_process";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ri-home-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-ri-home-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 delete process.env.LOOM_SUPERVISED; // ensure the unsupervised-refusal test is deterministic
 

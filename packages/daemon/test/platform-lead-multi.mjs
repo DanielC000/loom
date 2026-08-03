@@ -52,7 +52,7 @@ const { OrchestrationControl } = await import("../dist/orchestration/control.js"
 const { encodeProjectDir } = await import("../dist/sessions/transcript.js");
 
 // --- a real temp git repo so a spawn has a valid cwd (createPty is faked → no real claude) ---
-const repo = path.join(os.tmpdir(), `loom-lead-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-lead-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# platform lead multi test repo\n");
 execSync(`git init -q && git add . && git -c user.email=ls@loom -c user.name=ls commit -q -m init`, { cwd: repo });

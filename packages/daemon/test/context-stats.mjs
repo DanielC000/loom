@@ -13,7 +13,7 @@ let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
 // Unique temp cwd → collision-free transcript dir under the real ~/.claude/projects.
-const cwd = path.join(os.tmpdir(), `loom-ctx-${Date.now()}`);
+const cwd = path.join(os.tmpdir(), `loom-ctx-${Date.now()}-${process.pid}`);
 const dir = path.dirname(engineTranscriptPath(cwd, "seed"));
 fs.mkdirSync(dir, { recursive: true });
 const writeFixture = (id, lines) =>
@@ -69,7 +69,7 @@ try {
   // engine session id is a globally-unique UUID, so readContextStats must still find and read it via
   // the scan fallback, proving a wrong COMPUTED path no longer means a silently-frozen counter.
   const driftId = "drifted-session-id";
-  const wrongCwd = path.join(os.tmpdir(), `loom-ctx-WRONG-${Date.now()}`);
+  const wrongCwd = path.join(os.tmpdir(), `loom-ctx-WRONG-${Date.now()}-${process.pid}`);
   const wrongDir = path.dirname(engineTranscriptPath(wrongCwd, driftId));
   fs.mkdirSync(wrongDir, { recursive: true });
   fs.writeFileSync(

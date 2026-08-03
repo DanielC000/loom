@@ -9,7 +9,7 @@ import { readVaultFile } from "../dist/vault/browser.js";
 let failures = 0;
 const check = (label, cond) => { console.log(`${cond ? "PASS" : "FAIL"}  ${label}`); if (!cond) failures++; };
 
-const root = path.join(os.tmpdir(), `loom-vault-test-${Date.now()}`);
+const root = path.join(os.tmpdir(), `loom-vault-test-${Date.now()}-${process.pid}`);
 const vault = path.join(root, "vault");
 const outside = path.join(root, "outside");
 fs.mkdirSync(vault, { recursive: true });

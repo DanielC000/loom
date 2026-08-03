@@ -57,7 +57,7 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo so spawnWorker's createWorktree (real git) has a HEAD to branch off ---
-const repo = path.join(os.tmpdir(), `loom-idp-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-idp-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# agent-id-prefix test\n");
 execSync(`git init -q && git add . && git -c user.email=idp@loom -c user.name=idp commit -q -m init`, { cwd: repo });

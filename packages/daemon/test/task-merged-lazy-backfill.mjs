@@ -46,13 +46,13 @@ const stub = {};
 const now = new Date().toISOString();
 const git = (cwd, args) => execSync(`git ${args}`, { cwd }).toString().trim();
 
-const repo = path.join(os.tmpdir(), `loom-lazy-backfill-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-lazy-backfill-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 execSync("git init -q && git -c user.email=x@loom -c user.name=x commit --allow-empty -q -m init", { cwd: repo });
 
 const db = new Db(path.join(tmpHome, "test.db"));
 db.insertProject({ id: "pRepo", name: "Repo Project", repoPath: repo, vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
-db.insertProject({ id: "pGone", name: "Moved Repo Project", repoPath: path.join(os.tmpdir(), `loom-lazy-backfill-gone-${Date.now()}`), vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
+db.insertProject({ id: "pGone", name: "Moved Repo Project", repoPath: path.join(os.tmpdir(), `loom-lazy-backfill-gone-${Date.now()}-${process.pid}`), vaultPath: repo, config: {}, createdAt: now, archivedAt: null });
 
 try {
   const app = await buildServer({ db, pty: stub, sessions: stub, mcp: stub, orchMcp: stub, platformMcp: stub, auditMcp: stub, control: stub, usageStatus: stub });

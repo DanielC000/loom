@@ -46,7 +46,7 @@ const { Client } = await import("@modelcontextprotocol/sdk/client/index.js");
 const { InMemoryTransport } = await import("@modelcontextprotocol/sdk/inMemory.js");
 
 // --- a real temp git repo (never spawned into here, but insertProject expects a real repoPath) ---
-const repo = path.join(os.tmpdir(), `loom-ptip-repo-${Date.now()}`);
+const repo = path.join(os.tmpdir(), `loom-ptip-repo-${Date.now()}-${process.pid}`);
 fs.mkdirSync(repo, { recursive: true });
 fs.writeFileSync(path.join(repo, "README.md"), "# project-task-id-prefix test\n");
 execSync(`git init -q && git add . && git -c user.email=ptip@loom -c user.name=ptip commit -q -m init`, { cwd: repo });

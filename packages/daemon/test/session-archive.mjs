@@ -30,7 +30,7 @@ import os from "node:os";
 import path from "node:path";
 import { requireHermeticEnv } from "./_guard.mjs";
 
-process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-archive-${Date.now()}`);
+process.env.LOOM_HOME = path.join(os.tmpdir(), `loom-archive-${Date.now()}-${process.pid}`);
 fs.mkdirSync(process.env.LOOM_HOME, { recursive: true });
 requireHermeticEnv(); // confirm LOOM_HOME is the throwaway temp dir, never the real ~/.loom
 
@@ -68,7 +68,7 @@ const driveExit = (db, id) => {
 // ── ~/.claude transcript fixtures (unique cwd → unique encoded dir). Shared by the resume test (C)
 // (engineTranscriptExists must be true) and the snapshot tests (D). fakeCwd must exist on disk too —
 // resume() guards on fs.existsSync(cwd). ──
-const fakeCwd = path.join(os.tmpdir(), `loom-arch-cwd-${Date.now()}`);
+const fakeCwd = path.join(os.tmpdir(), `loom-arch-cwd-${Date.now()}-${process.pid}`);
 const engineId = `arch-engine-${Date.now()}`;
 const claudeDir = path.join(os.homedir(), ".claude", "projects", encodeProjectDir(fakeCwd));
 const claudeFile = path.join(claudeDir, `${engineId}.jsonl`);
