@@ -395,6 +395,18 @@ const GIVE_UP_CONFIRM_SETTLE_POLL_MS = Number(process.env.LOOM_GIVE_UP_CONFIRM_S
 const GIVE_UP_CONFIRM_SETTLE_MAX_POLLS = Number(process.env.LOOM_GIVE_UP_CONFIRM_SETTLE_MAX_POLLS) || 20;
 
 /**
+ * Card 3e76ecad: bounded, OBSERVED wait `flushComposer` (the manager-facing submit-only affordance) uses
+ * to report whether its Enter actually confirmed, so the MCP call it backs always resolves instead of
+ * hanging on a promise nothing ever settles. Sized to comfortably outlast `fireEnterAndVerify`'s own
+ * worst-case retry ladder (`SUBMIT_MAX_ATTEMPTS` attempts × `SUBMIT_VERIFY_TIMEOUT_MS`, plus its
+ * `awaitReassertSettle`/`awaitGiveUpConfirmSettle` settle windows) at PRODUCTION defaults — at
+ * 100ms×50=5000ms this covers the ~4.2s worst case with margin; env-overridable so a test with a
+ * shrunk ladder isn't stuck waiting out the production-sized bound.
+ */
+const FLUSH_CONFIRM_POLL_MS = Number(process.env.LOOM_FLUSH_CONFIRM_POLL_MS) || 100;
+const FLUSH_CONFIRM_MAX_POLLS = Number(process.env.LOOM_FLUSH_CONFIRM_MAX_POLLS) || 50;
+
+/**
  * Card 73d5c34a: how long a GIVE-UP-requeued entry stays INELIGIBLE for `drainPending` after
  * `requeueGiveUpOrigin` puts it back on `live.pending`, giving a late confirming hook a fair window to
  * `purgeConfirmedGiveUpRequeue` it before anything can resubmit it a second time — see that method's doc
@@ -5963,6 +5975,99 @@ export class PtyHost {
         });
       }
     }, SUBMIT_VERIFY_TIMEOUT_MS);
+  }
+
+  /**
+   * Card 3e76ecad — the manager-facing SUBMIT-ONLY affordance: press Enter on this worker's OWN composer
+   * without writing any new text, the daemon-driven analogue of what a human does at the raw terminal
+   * when a stranded turn just needs re-confirming (the parent card b9b8f8db's evidence: the owner
+   * recovered a session that had sat "apparently dead" for ~29 minutes by pressing Enter — no new text,
+   * just the confirming keystroke). Until this existed, a manager's only two documented options for a
+   * stranded worker were `worker_message` (APPENDS — compounds an already-oversized buffer) or
+   * `worker_stop` + respawn (DISCARDS whatever the worker had accumulated); this is the third option.
+   *
+   * GENUINELY NON-WRITING (DoD-2): writes ONLY a zero-length bracket-paste reassert pair
+   * (`BRACKET_PASTE_START + BRACKET_PASTE_END` — closes any dangling open paste marker, no body bytes
+   * in between — the SAME reassert `submit()`'s own isGiveUpRedelivery branch writes when it retries an
+   * Enter without re-pasting) plus the Enter keystroke itself. Neither write adds a single character to
+   * the composer's visible content, so its byte count is unchanged by this call — unlike `worker_message`,
+   * which always writes `text`.
+   *
+   * NO-OP ON AN EMPTY COMPOSER (DoD-3): `live.enterConfirmed` true is checked FIRST and is SUFFICIENT ON
+   * ITS OWN — `live.busy`/`live.composerDirtyLen` are never even consulted once it's true. This is
+   * deliberate, not an approximation of a three-way AND: `enterConfirmed` flips true only when a
+   * confirming hook (UserPromptSubmit/Stop/StopFailure) actually lands, which is proof the engine is alive
+   * and reading — and `submit()` unconditionally resets it to false as the FIRST thing any new
+   * Loom-originated write does (see `submit()`'s own `live.enterConfirmed = false`), so there is no window
+   * in which genuinely fresh stranded content can exist while it still reads true: writing that content is
+   * what would have reset it. `live.composerDirtyLen` CAN still read nonzero here (see below), but that is
+   * never evidence of something currently sitting unconfirmed once `enterConfirmed` is true — see the note
+   * on the SUPPRESSED give-up path just below for why. `busy`/`composerDirtyLen` are consulted ONLY in the
+   * `enterConfirmed:false` case, to tell an outstanding retry/give-up worth flushing apart from a session
+   * that has simply never submitted anything yet (both default to `false`/`0`, matching a fresh spawn).
+   * Reports `{ok:false, reason:"composer-empty"}` when `enterConfirmed` is true, rather than firing a
+   * stray bare Enter that could start an empty turn.
+   *
+   * ⚠️ WHY `composerDirtyLen` CAN LAG `enterConfirmed` (traced during review, card 3e76ecad): a GIVE-UP
+   * SUPPRESSED mark (`fireEnterAndVerify`'s "engine produced output after the final Enter write" branch)
+   * stamps `composerDirtyMarkedForGen` directly and returns WITHOUT calling `requeueGiveUpOrigin` — so
+   * neither `live.giveUpConfirmQueue` nor `live.ambiguousDispatches` ever gets an entry for that mark, and
+   * `clearComposerDirtyOnConfirm` (reached only via those two, from `purgeConfirmedGiveUpRequeue`) can
+   * never fire for it. The ONLY thing that can still clear a SUPPRESSED-only mark is the inline
+   * `composerDirtyLenClearedByGen === live.submitGeneration` gate on a LATER, fresh submit() — so
+   * `composerDirtyLen` can sit nonzero indefinitely even after the suppressed turn's own later Stop hook
+   * sets `enterConfirmed` true. This is real, PRE-EXISTING staleness in that field's own bookkeeping (not
+   * introduced here) — but it is harmless to this guard specifically, because by the time that Stop hook
+   * fires the turn has already genuinely completed; there is nothing left in the composer to flush either
+   * way, so declining is still the correct call, just for a slightly different reason than a bare read of
+   * `composerDirtyLen` alone would suggest.
+   *
+   * A REMEDY TO TRY, NOT A GUARANTEED RECOVERY (DoD-4): this reuses `awaitReassertSettle` +
+   * `fireEnterAndVerify`'s own bounded verify-and-retry ladder (the exact mechanism `submit()` uses for a
+   * give-up redelivery) under the worker's CURRENT `submitGeneration` — so a stranded Enter can still fail
+   * to confirm here exactly as it did the first time, and this call reports that honestly
+   * (`confirmed:false`) rather than claiming success. `composerDirtyLenClearedByGen` is stamped the same
+   * way `submit()`'s own dirty-branch stamps it, so a genuine confirmation correctly clears
+   * `composerDirtyLen` through the SAME gated path every other clear in this file uses — this call does
+   * not invent a new clear mechanism.
+   *
+   * Does NOT generalize into "this always recovers a stranded worker" (DoD-5) — it is exactly the
+   * press-Enter remedy, nothing more; a worker whose composer holds genuinely lost/corrupted state is
+   * outside what pressing Enter can fix.
+   */
+  flushComposer(sessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean }> {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) return Promise.resolve({ ok: false, reason: "session-dead" });
+    const stranded = !live.enterConfirmed && (live.busy || live.composerDirtyLen > 0);
+    if (!stranded) return Promise.resolve({ ok: false, reason: "composer-empty" });
+    const gen = live.submitGeneration;
+    // Mirrors submit()'s own dirty-branch stamp — see that call site's comment: this generation is the
+    // one attempting to resolve any outstanding dirty residue, so the confirming hook's existing
+    // `composerDirtyLenClearedByGen === live.submitGeneration` gate clears it correctly on confirm.
+    live.composerDirtyLenClearedByGen = gen;
+    // eslint-disable-next-line no-console
+    console.log(`[flush-composer] ${sessionId} submit-only flush attempted (card 3e76ecad) — busy=${live.busy} composerDirtyLen=${live.composerDirtyLen} gen=${gen}`);
+    const reassertWrittenAt = Date.now();
+    this.ptyWrite(sessionId, live, BRACKET_PASTE_START + BRACKET_PASTE_END, "reassert-paste");
+    this.awaitReassertSettle(sessionId, gen, reassertWrittenAt, 0, () => this.fireEnterAndVerify(sessionId, 1, gen));
+    return new Promise((resolve) => {
+      this.awaitFlushConfirmSettle(sessionId, 0, (confirmed) => resolve({ ok: true, confirmed }));
+    });
+  }
+
+  /**
+   * Bounded, observed wait for `enterConfirmed` to flip true after `flushComposer` — ALWAYS calls back
+   * (unlike `awaitGiveUpConfirmSettle`/`awaitReassertSettle`, which bail SILENTLY on a dead session or a
+   * superseded generation because their internal caller doesn't need to know). `flushComposer` returns a
+   * Promise straight to its MCP caller and must resolve it on every path, dead-session and superseded-
+   * generation included, or the tool call hangs forever.
+   */
+  private awaitFlushConfirmSettle(sessionId: string, polls: number, onSettled: (confirmed: boolean) => void): void {
+    const live = this.live.get(sessionId);
+    if (!live?.alive) { onSettled(false); return; }
+    if (live.enterConfirmed) { onSettled(true); return; }
+    if (polls >= FLUSH_CONFIRM_MAX_POLLS) { onSettled(false); return; }
+    setTimeout(() => this.awaitFlushConfirmSettle(sessionId, polls + 1, onSettled), FLUSH_CONFIRM_POLL_MS);
   }
 
   /**

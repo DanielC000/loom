@@ -1044,6 +1044,13 @@ export type OrchestrationEventKind =
   // { target, landed } — the requested mode and the feedback-VERIFIED mode the cycle actually settled on
   // (may differ from target if the cycle gave up early). Filed under the owning MANAGER.
   | "set_worker_mode"
+  // Manager-driven SUBMIT-ONLY/flush affordance (orchestration `worker_flush`, card 3e76ecad) — press
+  // Enter on a worker's own composer without writing any new text, for a stranded composer that just
+  // needs re-confirming (the third option alongside `message_worker`'s APPEND and `stop_worker`+respawn's
+  // DISCARD). Parent-scoped exactly like set_worker_mode. `detail` carries { ok, reason?, confirmed?,
+  // resumability } — see `pty.flushComposer`'s own doc for what each field means. Filed under the
+  // owning MANAGER.
+  | "flush_worker_composer"
   // ── Poll-job triggers (agent-tooling epic P3, PollService) ─────────────────────────────────────────
   // A poll job's fetch surfaced item(s) not present in the previous poll's snapshot, and they were
   // delivered as a (wake or spawn) kickoff. Filed under the TRIGGERED session (managerSessionId — the

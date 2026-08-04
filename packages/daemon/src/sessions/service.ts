@@ -5793,6 +5793,29 @@ export class SessionService {
   }
 
   /**
+   * Card 3e76ecad — the manager-facing submit-only/flush affordance: press Enter on one of your workers'
+   * OWN composer without writing any new text. See `pty.flushComposer`'s own doc for the mechanics
+   * (genuinely non-writing, no-ops on an empty composer, a remedy to TRY not a guaranteed recovery, reuses
+   * the existing give-up-redelivery Enter-retry ladder). This wrapper only adds the "not your worker"
+   * ownership gate (mirrors setWorkerMode/reapWorkerStrays above) and appends `worker.resumability` —
+   * `dead` vs `resumable`/`unknown` — as a SECOND discriminator alongside the flush outcome: a `dead`
+   * session (its process/transcript already confirmed gone) makes a submit-only retry moot regardless of
+   * what `ok`/`confirmed` report. The parent card (b9b8f8db) flagged this as possibly useful but left it
+   * unverified — surfaced here as an ADDITIONAL signal, not a replacement for `ok`/`reason`/`confirmed`.
+   */
+  async flushWorkerComposer(managerSessionId: string, workerSessionId: string): Promise<{ ok: boolean; reason?: string; confirmed?: boolean; resumability: string }> {
+    const worker = this.db.getSession(workerSessionId);
+    if (!worker || worker.parentSessionId !== managerSessionId) throw new Error("not your worker");
+    const result = await this.pty.flushComposer(workerSessionId);
+    this.db.appendEvent({
+      id: randomUUID(), ts: new Date().toISOString(),
+      managerSessionId, workerSessionId, taskId: worker.taskId ?? null, kind: "flush_worker_composer",
+      detail: { ...result },
+    });
+    return { ...result, resumability: worker.resumability };
+  }
+
+  /**
    * Durable down/cross-tree message send (card 2ca18433). Wraps pty.enqueueStdin: if the recipient is
    * idle the message goes out as a turn now (delivered:true, nothing persisted — it's already live); if
    * it's BUSY the message is HELD in the recipient's in-memory FIFO (delivered:false) AND persisted as a

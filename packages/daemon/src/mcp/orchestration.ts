@@ -2326,6 +2326,49 @@ export class OrchestrationMcpRouter {
     );
 
     server.registerTool(
+      "worker_flush",
+      {
+        description:
+          "The SUBMIT-ONLY affordance for a stranded worker composer (card 3e76ecad) — press Enter on " +
+          "this worker's OWN composer, WRITING NOTHING NEW. Reach for this when a worker looks stuck and " +
+          "you suspect it's holding an already-written turn that just never got confirmed (a paste landed " +
+          "but the Enter never registered) — the daemon-driven analogue of what a human does at the raw " +
+          "terminal in exactly that situation, which has recovered a session that sat apparently dead for " +
+          "~29 minutes with nothing more than pressing Enter. This is your THIRD option alongside " +
+          "`worker_message` (which APPENDS — compounding an already-oversized buffer if the worker is " +
+          "already holding a large unconfirmed payload) and `worker_stop` + respawn (which DISCARDS " +
+          "whatever the worker had accumulated): neither of those is a submit, and until this tool existed " +
+          "there was no way to just submit what's already there. " +
+          "GENUINELY NON-WRITING: this never appends so much as an empty string or a newline to the " +
+          "composer — it only reasserts the paste boundary (zero body bytes) and sends the Enter keystroke " +
+          "itself, so the composer's own byte count is unchanged by this call, unlike worker_message. " +
+          "NO-OP ON A CLEAN COMPOSER: if the worker's composer looks genuinely empty (nothing outstanding, " +
+          "no possibly-stranded residue), this is a documented no-op — `{ok:false, reason:\"composer-empty\"}` " +
+          "— never a stray bare Enter that could start an empty turn. " +
+          "⚠️ A REMEDY TO TRY, NOT A GUARANTEED RECOVERY: the Enter can succeed, OR it can fail to confirm " +
+          "exactly as it did the first time — `confirmed` reports which, honestly, after a bounded wait; a " +
+          "`confirmed:false` result means this attempt didn't land, not that nothing can be done (you still " +
+          "have worker_message/worker_stop as escalations). This tool alone does NOT prove a worker is " +
+          "recoverable in general — respawning is a SEPARATE, more destructive escalation with its own " +
+          "tradeoffs (see worker_stop's own docs), not something this tool's success or failure should be " +
+          "read as evidence for or against. " +
+          "Also returns `resumability` (\"dead\"|\"resumable\"|\"unknown\") as a SECOND, independent " +
+          "discriminator alongside the flush outcome — a \"dead\" worker's process/transcript is already " +
+          "confirmed gone, which makes a submit-only retry moot regardless of what `ok`/`confirmed` say; " +
+          "read the two together, not `confirmed` alone, before deciding what to do next.",
+        inputSchema: strictShape({ workerSessionId: z.string() }),
+      },
+      async ({ workerSessionId }) => {
+        try {
+          selfHealWorkerLink(workerSessionId, "worker_flush");
+          return ok(await sessions.flushWorkerComposer(managerSessionId, workerSessionId));
+        } catch (e) {
+          return ok({ error: (e as Error).message });
+        }
+      },
+    );
+
+    server.registerTool(
       "worker_message",
       {
         description: "Send a message to one of your workers. `text` is the canonical param; `message` is accepted as an ALIAS for it — pass either one (if both, text wins). Submitted as a turn if the worker is idle; queued FIFO and delivered on its next turn boundary if it's mid-turn. By DEFAULT each queued message is delivered ALONE as its own turn — one-per-turn, so distinct directives are never mashed together — even if several stack up while the worker is busy; the legacy full-COALESCE-into-one-turn behavior (FIFO order, newest last) only applies when the human has turned on the daemon-global `coalesceAgentMessages` setting (off by default). `delivered` NEVER changes meaning (true = HANDED OFF as a turn now); on `delivered:false`, `reason` tells you which: \"held\" (queued, will land) vs \"session-dead\" (the worker is gone — DROPPED, not queued; re-dispatch or recycle instead of waiting). A `\"held\"` result is a SUCCESS, not a failure — it ALSO carries `queued:true`, `landsAt:\"next-turn-boundary\"`, `position` (1-based queue position), `busyForMs` (how long the worker has been mid-turn, when known), and `msgId` (to correlate with a later durable record), so you can read the outcome as the honest queue-and-will-land it is instead of inferring that from a bare `false`. ⚠️ `delivered:true` is NOT proof the worker ever saw it: it only means the text was handed to the engine as a turn attempt. `deliveryState` (always present, `\"handed-off\"|\"queued\"|\"dropped\"`, one-to-one with the actual outcome) spells that out explicitly instead of leaving it to be inferred from `delivered`/`reason`/`queued` — on `delivered:true` it reads `\"handed-off\"`, a REMINDER that the engine's own confirmation is asynchronous and can still GIVE UP after this call already returned (this happened in production — a `delivered:true` message never reached the worker's transcript and it sat idle for 26 minutes with no signal anything was wrong). To find out what actually happened, poll `worker_list`/`worker_status` and check this `msgId` against `directive`/`staleDirective` (delivered but unacknowledged after several of the worker's own turns) or `parkedDirective` (Loom stopped auto-retrying it — see its own `state` for what that does and doesn't prove; a resend of the SAME content is automatically recognized and joined to the original even if you don't pass `resendOf` — but that auto-join is NOT unconditional (card 085d9422, relocated from the `[loom:redelivery-parked]` notice, which used to spell this out per-event): (a) it matches on the exact FRAMED text, which embeds YOUR OWN session id, so it breaks if you've been recycled since the original send; (b) the join window closes the instant Loom itself confirms the original landed — resend AFTER that and it becomes a genuine second turn instead of joining. A reworded resend is always treated as new either way). `resendOf` is an OPTIONAL explicit disambiguator — the exact `msgId`/`rootMsgId` of an earlier directive this message re-sends — for when you know it; it does not change whether (a)/(b) apply, only removes the guesswork of which chain you mean.",
