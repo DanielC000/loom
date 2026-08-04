@@ -193,8 +193,10 @@ Error: AttachConsole failed
 ```
 Both failing copies crashed on their **9th (final, late-ready) spawn** — they completed all 8 earlier
 real-pty spawns cleanly first. **This ordinal pattern turned out to be load-bearing, not incidental — see
-Experiment 4 below, which shows the failure needs BOTH high cross-process concurrency AND this per-copy
-depth together, not concurrency alone.** Both crashes are `exit 1` (not a timeout) at ~45.7s/45.8s — the
+Experiment 4 below, which shows the conjunction of high cross-process concurrency AND this per-copy
+depth together reliably triggers the failure, at a rate concurrency alone does not (see also the
+counter-evidence subsection further down: the conjunction is a demonstrated sufficient trigger, not shown
+to be a necessary one).** Both crashes are `exit 1` (not a timeout) at ~45.7s/45.8s — the
 same SHAPE as instance (5)'s run 2 (`real exit 1 at 24938ms`, well under `TEST_TIMEOUT_MS`), not run 1's
 shape (a 120061ms hard timeout). One crashed copy's stderr shows the AttachConsole error firing (at
 minimum) twice in the same process, followed by an unrelated-looking `Error: write EAGAIN` on a Socket
@@ -202,14 +204,24 @@ minimum) twice in the same process, followed by an unrelated-looking `Error: wri
 (which node-pty spawns internally to enumerate a shell's attached console processes) takes down
 output-stream handling with it, not merely failing its own narrow call.
 
-**Mechanism, named (refined by Experiment 4 into a conjunction — read that section for the deciding
-evidence):** node-pty's `conpty_console_list_agent.js` helper — a small Node subprocess node-pty spawns
-per real pty session to call the Win32 `AttachConsole()` API — fails under the CONJUNCTION of high
-cross-process concurrency AND high per-copy sequential spawn depth; concurrency alone (Experiment 4) was
-shown insufficient. The failure is an **uncaught exception in that helper subprocess**, not a graceful
-assertion failure, so it kills the parent test process outright (`exit 1`) rather than reporting a normal
-`check()` failure. This reaches a separate-process, hermetic test exactly as DoD-2 asks (confirmed via a
-real, forced, repeatable crash — not inferred).
+**Mechanism, named (refined by Experiment 4 — read that section for the depth-vs-concurrency deciding
+evidence; and see "Counter-evidence: the conjunction is sufficient, not necessary" below, which narrows
+this from a necessity claim to a sufficiency claim):** node-pty's `conpty_console_list_agent.js` helper —
+a small Node subprocess node-pty spawns per real pty session to call the Win32 `AttachConsole()` API —
+reliably fails under the CONJUNCTION of high cross-process concurrency AND high per-copy sequential spawn
+depth demonstrated here; concurrency alone (Experiment 4) was shown insufficient to trigger it at this
+rate. **This conjunction is a demonstrated SUFFICIENT condition that substantially raises the failure
+rate — it is NOT a necessary one.** Four separately-observed sub-threshold crashes (depth 1, concurrency
+~0-2, far below this experiment's depth≥9/concurrency~7-8) carry the identical `AttachConsole failed`
+signature; see the counter-evidence subsection below for the specimens. Both can be true at once: the
+conjunction substantially raising the rate, and a cheaper depth-1 path also triggering the same failure —
+read as complementary findings, not alternatives. The failure is an **uncaught exception in that helper
+subprocess**, not a graceful assertion failure. **Observed parent-process exit shapes vary and are not a
+single universal** — the two Experiment 1 crashes below both exited `1`, but other observed specimens
+exited `0` (parent survived) and `3221225477` (`0xC0000005`, ACCESS_VIOLATION); see the counter-evidence
+subsection for the full range and do not assume `exit 1` when characterizing a future occurrence. This
+reaches a separate-process, hermetic test exactly as DoD-2 asks (confirmed via a real, forced, repeatable
+crash — not inferred).
 
 **Measured correlate (sampler, 1s interval, `data/stage2-samples.ndjson`, condition "SOLE GATE, NO
 DECLARED THIRD-PARTY LOAD (Stage 2 forced experiment: 8 concurrent copies...)"):**
@@ -333,6 +345,52 @@ spawns in one file), so even a lane running that ONE file alone, with no cross-f
 still carries the depth half of the conjunction; only the peak-concurrency half would be addressed by
 per-file sharding.
 
+## Counter-evidence: the conjunction is SUFFICIENT, not NECESSARY (four sub-threshold crashes)
+
+**Added after this document's original write-up, from card `6a016f9d` / escalation `ed61e277` (three
+specimens) plus a fourth observed live in the merge gate on 2026-08-04.** Four separately-observed crashes
+carry the exact same `AttachConsole failed` signature at depth 1 and minimal-to-zero concurrency — far
+below this document's depth≥9/concurrency~7-8 threshold:
+
+| specimen | shape | concurrency | exit |
+|---|---|---|---|
+| Stage 1 (escalation `ed61e277`) | `host.stop(…,"hard")` → next `host.spawn()` | 1 kill + 1 spawn, ambient 2 gates | `exit 0`, parent survived, printed a summary |
+| Stage 1, 2nd run (escalation `ed61e277`) | same shape | same | `exit 0`, parent survived, printed a summary |
+| Stage 2 (escalation `ed61e277`) | 1 spawn + 1 stop | `gate_queue` `activeCount=0` at launch | `exit 0`, parent survived, printed a summary |
+| `kickoff-real-spawn` (live merge gate, 2026-08-04) | stop()/spawn()-adjacent | `concurrentGates:1` on both failing runs, one at `concurrentGatesMax:1`; the one run that PASSED was the MORE-contended condition (`concurrentGates:2`) | `exit 3221225477` (`0xC0000005`, ACCESS_VIOLATION), `timedOut:false`; stack tail `conpty_console_list_agent.js:13` › `getConsoleProcessList` › `AttachConsole failed` ×3 |
+
+All four sit at depth 1 — a single kill→spawn or spawn→stop cycle, not `kickoff-real-spawn`'s full
+9-sequential-spawn sequence — against the depth≥9 Experiment 4 needed to cross the threshold at N=8. The
+fourth specimen additionally excludes host/gate contention as the explanation three separate ways: both
+its failing runs were the LESS-contended condition, and the one run that passed was the MORE-contended
+one — the opposite of what a load-explanation would predict. **This should not be recorded as host load.**
+
+**What this does and does not change.** The conjunction (high peak concurrency + high per-copy depth) is a
+real, demonstrated SUFFICIENT condition that substantially raises the failure rate — Experiment 4's 2/8 at
+depth 9 vs. 0/8 at depth 4, same N=8, stands unchanged and is not being re-litigated here (no additional
+campaign was run to "re-confirm" it; a single sub-threshold crash already establishes non-necessity, and
+there are four). What is corrected is the earlier claim, above, that the conjunction is REQUIRED: it
+evidently is not, since all four specimens above crash the same helper at depth 1 with negligible
+concurrency. Whatever the depth-1 trigger is — plausibly the `stop()`-adjacent kill/spawn transition
+itself, since all four specimens share that shape — remains unnamed (see "What remains open" below); a
+single controlled test isolating the kill path specifically (not a campaign) would be the cheapest next
+probe, and was not run as part of this correction.
+
+**Observed parent-process exit shapes are a range, not a single value.** This document originally asserted
+the crash "kills the parent test process outright (`exit 1`)," generalized from Experiment 1's two
+`exit 1` observations. The full observed range across all known specimens is: `exit 1` (Experiment 1
+above, N=8/depth=9), `exit 0` with the parent surviving (the first three counter-evidence specimens
+above), and `exit 3221225477` / ACCESS_VIOLATION (the fourth). Do not assume any one of these when
+characterizing a future occurrence — check the actual exit code.
+
+**A caution this raises, not acted on here.** If the crashed process sometimes does not exit promptly (see
+the "does not self-terminate at all" observation reported alongside this investigation on card `6a016f9d`),
+a suite-level timeout can be masking this same uncaught-throw-blocks-exit path rather than a genuinely slow
+test — which bears directly on `TEST_TIMEOUT_OVERRIDES`. A prior attempt to raise an override ceiling on
+exactly this reasoning had to be retracted: raising a ceiling converts a loud crash into a rare silent one,
+which is worse than the loud crash it was meant to fix. This is recorded here as a caution only — no
+override is touched by this edit.
+
 ## DoD-3 — one mechanism or two? **At least two, and they are not the same shape.**
 
 Instance (5)'s two gate rejections were already flagged in the card as having **different shapes**:
@@ -345,19 +403,28 @@ Instance (5)'s two gate rejections were already flagged in the card as having **
 
 **This investigation reproduced and named run 2's shape** (the crash) with a real, forced, repeatable
 trigger: the CONJUNCTION of peak concurrent real-pty session count AND per-copy sequential spawn depth
-(Experiment 4) — not peak concurrency alone. **It did NOT reproduce run 1's shape** (the hang/give-up/
+(Experiment 4) reliably raising the failure rate — not peak concurrency alone. (This conjunction is a
+demonstrated SUFFICIENT trigger, not a necessary one — see "Counter-evidence" above for four sub-threshold
+crashes with the same signature at depth 1.) **It did NOT reproduce run 1's shape** (the hang/give-up/
 timeout) — that remains a distinct, unnamed mechanism. Forcing it would need a genuinely different
 experiment (CPU starvation stretching the submit-confirmation loop specifically, not just concurrent pty
 creation) that this investigation did not attempt. Per DoD-3's instruction to "report the split honestly
 rather than forcing one story": **two mechanisms, one named with forced evidence (AttachConsole /
-console-attach contention, needing both high peak concurrency AND high per-copy spawn depth together),
-one still unnamed (the give-up/confirmation-lag hang).**
+console-attach contention — the peak-concurrency+depth conjunction is a demonstrated sufficient trigger
+that substantially raises the rate, not a shown-necessary one), one still unnamed (the give-up/
+confirmation-lag hang).**
 
 ## Why this reaches a real gate running at poolSize:2
 
-Experiments 1-4 show the AttachConsole mechanism needs the CONJUNCTION of roughly **7-8 concurrent,
-sustained real-pty sessions** AND **high per-copy sequential spawn depth** (≥9 in the one file tested;
-depth 4 at the same N=8 concurrency did not crash) — not concurrency in isolation. `kickoff-real-spawn.mjs`
+Experiments 1-4 show the AttachConsole mechanism is reliably, and at a substantially elevated rate,
+triggered by the CONJUNCTION of roughly **7-8 concurrent, sustained real-pty sessions** AND **high
+per-copy sequential spawn depth** (≥9 in the one file tested; depth 4 at the same N=8 concurrency did not
+crash) — not concurrency in isolation. **This conjunction is not shown to be required** — see
+"Counter-evidence: the conjunction is SUFFICIENT, not NECESSARY" above for four depth-1, low-concurrency
+crashes with the identical signature — so the argument below (that the real gate's own two lanes cannot
+reach the conjunction threshold by themselves) explains why the conjunction path is unlikely to be the
+gate's exposure, not why the gate is safe from this failure altogether: a depth-1 trigger, still unnamed,
+remains possible at the gate's own concurrency. `kickoff-real-spawn.mjs`
 itself already supplies the depth half (9 sequential spawns, unconditionally, inside one file) every time
 it runs. The real class's own membership (2 files) cannot supply the CONCURRENCY half by itself even
 scheduled together in the gate's own two lanes. The gate's own two lanes are not the only real-pty
@@ -397,3 +464,9 @@ plausibility argument.
 6. Per DoD-4, no remedy is proposed here — a node-pty version bump, retry-wrapping the console-list-agent
    call, or reducing real-pty test concurrency are all plausible directions but are OUT OF SCOPE for this
    investigation and were not evaluated.
+7. The depth-1, low-concurrency trigger behind the four sub-threshold crashes (see "Counter-evidence"
+   above) is unnamed. All four specimens share a `stop()`-adjacent shape (a kill→spawn or spawn→stop
+   transition), which is a plausible lead — the kill path specifically, rather than spawn depth, may be
+   what's firing it — but this is unverified. A single controlled test isolating the kill path (not a
+   campaign) would be the cheapest next probe; it was not run as part of this correction, since a
+   docs-only card is not the place to run test code.
