@@ -421,6 +421,95 @@ const verdictUpgradeDbFile = path.join(tmpHome, "verdict-upgrade.db");
   db.close();
 }
 
+// ===== (3b) card 7d492f8b — DURABLE-HISTORY RECOVERY: a row whose OWN settle-callback never flipped its
+// tombstone to state='settled' before a simulated crash, but whose durable audit trail (orchestration_events,
+// stamped with the SAME opId) already recorded the real outcome — this is the actual reported incident (op
+// 80e5f631 / gate_history row 887cd81c: a merge gate REJECTED ~17 minutes before the daemon's own crash, yet
+// was reported afterward as "daemon restart killed this run"). This is the pre-restart snapshot this fix must
+// be exercised against — a FRESH db (no orchestration_events at all) is structurally blind to this bug, as a
+// fresh DB in general is blind to any bug that depends on cross-table pre-existing state (project memory
+// verify-schema-change-against-upgraded-db, generalized: applies to any state invariant, not just schema). =====
+{
+  const P = "pgo-recover";
+  const db = new Db(path.join(tmpHome, "recover.db"));
+  const host = new SpyHost({
+    onEngineSessionId(id, eng) { db.setEngineSessionId(id, eng); },
+    onBusy(id, busy) { db.setBusy(id, busy); },
+    onContextStats() {}, onRateLimited() {},
+    onExit(id) { db.setProcessState(id, "exited"); db.setBusy(id, false); },
+  });
+  const sessions = new SessionService(db, host, new OrchestrationControl());
+
+  db.insertProject({ id: P, name: "PGO-RECOVER", repoPath: tmpHome, vaultPath: tmpHome, config: {}, createdAt: now, archivedAt: null });
+  db.insertAgent({ id: `${P}-mgr`, projectId: P, name: "Mgr", startupPrompt: "MGR", position: 0, profileId: null });
+  db.insertAgent({ id: `${P}-dev`, projectId: P, name: "Dev", startupPrompt: "DEV", position: 1, profileId: null });
+  const mgrId = `${P}-mgr1`, workerId = `${P}-wkr`;
+  db.insertSession({ id: mgrId, projectId: P, agentId: `${P}-mgr`, engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "manager" });
+  db.insertSession({ id: workerId, projectId: P, agentId: `${P}-dev`, engineSessionId: null, title: null, cwd: tmpHome, processState: "live", resumability: "unknown", busy: false, createdAt: now, lastActivity: now, lastError: null, role: "worker", parentSessionId: mgrId, taskId: null });
+
+  // --- SCENARIO 1 (the actual reported incident): a MERGE op whose gate REJECTED — a real `build_gate`
+  // audit event (passed:false) was durably written, but the crash landed before the richer
+  // `merge_rejected` event (and before the tombstone's own settle callback) ever ran. Recoverable as
+  // "fail" from the bare build_gate event alone (see recoverGateOpVerdict's own doc for why that's safe).
+  db.insertPendingGateOp({ opId: "merge-recoverable-reject", kind: "merge", key: `merge:${workerId}-r1`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  db.appendEvent({ id: "evt-build-gate-1", ts: now, managerSessionId: mgrId, workerSessionId: workerId, taskId: null, kind: "build_gate", detail: { passed: false, durationMs: 1060553, gateCap: 1, concurrentGates: 1, concurrentGatesMax: 1, opId: "merge-recoverable-reject" } });
+
+  // --- SCENARIO 2: a MERGE op whose gate REJECTED, and this time the richer `merge_rejected` event ALSO
+  // landed durably before the crash — recovers with full diagnostic detail (failingTest/phase), not just
+  // the bare "build gate failed".
+  db.insertPendingGateOp({ opId: "merge-recoverable-reject-rich", kind: "merge", key: `merge:${workerId}-r2`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  db.appendEvent({ id: "evt-build-gate-2", ts: now, managerSessionId: mgrId, workerSessionId: workerId, taskId: null, kind: "build_gate", detail: { passed: false, durationMs: 4200, opId: "merge-recoverable-reject-rich" } });
+  db.appendEvent({ id: "evt-merge-rejected-2", ts: now, managerSessionId: mgrId, workerSessionId: workerId, taskId: null, kind: "merge_rejected", detail: { reason: "gate", phase: "test", failedStep: "pnpm test", failingTest: "daemon/test/foo.mjs", exitCode: 1, timedOut: false, opId: "merge-recoverable-reject-rich" } });
+
+  // --- SCENARIO 3 (the conservative NON-recovery case): a MERGE op whose gate PASSED, with NO subsequent
+  // merge_rejected/merge_cancelled — the squash-merge step that follows a passing gate is never itself
+  // logged, so this must NOT be recovered as a "pass" (the crash could have struck during the unlogged
+  // squash). Falls through to the ordinary "outcome could not be recovered" path, same as a true orphan.
+  db.insertPendingGateOp({ opId: "merge-unrecoverable-pass", kind: "merge", key: `merge:${workerId}-r3`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  db.appendEvent({ id: "evt-build-gate-3", ts: now, managerSessionId: mgrId, workerSessionId: workerId, taskId: null, kind: "build_gate", detail: { passed: true, durationMs: 3000, opId: "merge-unrecoverable-pass" } });
+
+  // --- SCENARIO 4: a GATE (worker self-check) op that PASSED — unlike "merge", a single `worker_gate`
+  // event IS the op's own terminal signal (nothing follows it), so a PASS here IS safely recoverable.
+  db.insertPendingGateOp({ opId: "gate-recoverable-pass", kind: "gate", key: `gate:${workerId}-r4`, ownerSessionId: workerId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  db.appendEvent({ id: "evt-worker-gate-4", ts: now, managerSessionId: workerId, workerSessionId: workerId, taskId: null, kind: "worker_gate", detail: { passed: true, durationMs: 2500, opId: "gate-recoverable-pass" } });
+
+  // --- SCENARIO 5: a MERGE op that was CANCELLED — recovered as "cancelled", never conflated with a fail.
+  db.insertPendingGateOp({ opId: "merge-recoverable-cancelled", kind: "merge", key: `merge:${workerId}-r5`, ownerSessionId: mgrId, projectId: P, taskId: null, branch: null, startedAt: now, state: "pending", surfacedPending: true });
+  db.appendEvent({ id: "evt-merge-cancelled-5", ts: now, managerSessionId: mgrId, workerSessionId: workerId, taskId: null, kind: "merge_cancelled", detail: { cancelled: true, cancelKind: "manual", cancelDetail: "cancelled by manager while running", opId: "merge-recoverable-cancelled" } });
+
+  const cleared = sessions.reconcileOrphanedGateOps();
+  check("(3b) reconcileOrphanedGateOps reports all 5 rows reconciled (4 recovered + 1 genuinely unrecoverable)", cleared === 5);
+
+  const rowsAfter = db.listPendingGateOps();
+  const byId = (id) => rowsAfter.find((r) => r.opId === id);
+
+  check("(3b-1) the bare-build_gate rejection is RECOVERED — state='settled', NEVER 'orphaned-by-restart'", byId("merge-recoverable-reject").state === "settled");
+  check("(3b-1) ...with the REAL recorded verdict, verdict='fail'", byId("merge-recoverable-reject").verdict === "fail");
+  const nudge1 = host.enqueueCalls.find((c) => c.text.includes("merge-recoverable-reject") && !c.text.includes("merge-recoverable-reject-rich"));
+  check("(3b-1) the pushed nudge is tagged [loom:merge-failed]", nudge1 && nudge1.text.includes("[loom:merge-failed]"));
+  check("(3b-1) it states this is a RECOVERY, never asserting an unverified restart-killed-it cause", nudge1 && /recovered from durable gate history/.test(nudge1.text) && !/daemon restart killed this run/.test(nudge1.text));
+  check("(3b-1) it honestly notes the minimal-audit-record gap (no failingTest was ever logged for this op)", nudge1 && /minimal audit record/.test(nudge1.text));
+
+  check("(3b-2) the rich rejection is ALSO recovered — state='settled'", byId("merge-recoverable-reject-rich").state === "settled" && byId("merge-recoverable-reject-rich").verdict === "fail");
+  const nudge2 = host.enqueueCalls.find((c) => c.text.includes("merge-recoverable-reject-rich"));
+  check("(3b-2) ...and carries the REAL failingTest recovered from the richer merge_rejected event", nudge2 && /failing: daemon\/test\/foo\.mjs/.test(nudge2.text));
+  check("(3b-2) no false 'minimal audit record' gap note when the rich detail WAS actually recovered", nudge2 && !/minimal audit record/.test(nudge2.text));
+
+  check("(3b-3) a PASSING merge gate with no subsequent rejection/cancel is NOT fabricated as recovered — still marked 'orphaned-by-restart'", byId("merge-unrecoverable-pass").state === "orphaned-by-restart");
+  const nudge3 = host.enqueueCalls.find((c) => c.text.includes("merge-unrecoverable-pass"));
+  check("(3b-3) its nudge states the outcome could not be recovered — never asserts the unverified 'daemon restart killed this run' mechanism", nudge3 && /could not be recovered/.test(nudge3.text) && !/daemon restart killed this run/.test(nudge3.text));
+
+  check("(3b-4) a PASSING gate (worker self-check) IS recovered — state='settled', verdict='pass'", byId("gate-recoverable-pass").state === "settled" && byId("gate-recoverable-pass").verdict === "pass");
+  const nudge4 = host.enqueueCalls.find((c) => c.text.includes("gate-recoverable-pass"));
+  check("(3b-4) tagged [loom:gate-done], never [loom:gate-failed], for a recovered PASS", nudge4 && nudge4.text.includes("[loom:gate-done]") && !nudge4.text.includes("[loom:gate-failed]"));
+
+  check("(3b-5) a CANCELLED merge op is recovered as 'cancelled', never 'fail'", byId("merge-recoverable-cancelled").state === "settled" && byId("merge-recoverable-cancelled").verdict === "cancelled");
+  const nudge5 = host.enqueueCalls.find((c) => c.text.includes("merge-recoverable-cancelled"));
+  check("(3b-5) tagged [loom:merge-cancelled] and states this is NOT a failure", nudge5 && nudge5.text.includes("[loom:merge-cancelled]") && /NOT a failure/.test(nudge5.text));
+
+  db.close();
+}
+
 // ===== (4) END-TO-END via the REAL runWorkerGate: the row exists (state 'pending') while pending, and
 // moves to state='settled' (never deleted) on normal settle =====
 const worktrees = [];

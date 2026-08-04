@@ -543,6 +543,176 @@ function deriveMergeGateVerdict(
 }
 
 /**
+ * Card 7d492f8b: recover a genuinely-settled gate/merge op's REAL verdict from its own durable audit
+ * events ({@link Db.findGateOpEventsByOpId}, keyed off the `opId` every `evt()` closure now stamps onto
+ * its detail) — the fix for `SessionService.reconcileOrphanedGateOps` misreporting a settled op as
+ * `orphaned-by-restart` purely because its `pending_gate_ops` tombstone row never reached
+ * `state:'settled'` before a crash. A crash can land in the (normally millisecond-wide) gap between the
+ * op's own `evt()` write — unconditional, happens the moment the run genuinely finishes — and the LATER
+ * `PendingOpRegistry.attach()` settle callback that flips the tombstone (`onSettle` → `settlePendingGateOp`);
+ * that gap is not always millisecond-wide in practice (e.g. confirmWorkerMerge still awaits `rejectNotify`
+ * after its `build_gate` write but before `merge_rejected`), so the durable audit trail can be strictly
+ * more complete than the tombstone — this recovers from it instead of discarding it.
+ *
+ * "gate" (a worker's own `run_gate` self-check): the SINGLE `worker_gate` event IS the op's own terminal
+ * signal — nothing follows it in `runWorkerGate` — so whichever one is found is fully recoverable
+ * (pass/fail/cancelled), mirroring {@link deriveWorkerGateVerdict}'s own field mapping off the identical
+ * detail shape that function's live caller populates. `undefined` only for an "error" audit write (the
+ * AUDIT-ON-ERROR site in `runWorkerGate`, `evt({passed:false, error, ...})`) — that shape carries no
+ * `phase`/`failedStep`/etc. to recover, so it is intentionally left unrecovered rather than fabricating
+ * a fail with false diagnostic fields.
+ *
+ * "merge": deliberately MORE CONSERVATIVE than "gate", because a passing gate is NOT the end of a merge —
+ * it is followed by the actual git squash-merge, a step this audit trail never logs at all.
+ *   - A `merge_cancelled` or `merge_rejected` event is a genuine terminal signal: `confirmWorkerMerge`
+ *     returns immediately after logging either one (see its own cancel/rejection branches) — squash is
+ *     never reached on either path. `merge_rejected`'s richer detail (failingTest/phase/etc., logged only
+ *     for a `reason:"gate"` rejection) is preferred whenever both it and a bare `build_gate` fail exist
+ *     for the same opId.
+ *   - A bare `build_gate`/`build_gate_retry` event with `passed:false` and NO rejection/cancel event is
+ *     ALSO safely recoverable as a FAIL (with less detail): the code path that logs it can only go on to
+ *     the rejection branch next (the squash is only reachable once the gate has PASSED), so the verdict
+ *     was already decided the instant this event was written — the crash (if any) struck only the
+ *     richer notify/evt calls that were ABOUT to follow, never the outcome itself.
+ *   - A PASSING `build_gate`/`build_gate_retry` with no subsequent rejection/cancel is the one shape this
+ *     deliberately does NOT recover: "the gate passed" is not proof "the merge landed" — the crash could
+ *     have struck during the unlogged squash step. Falls through to `undefined`, which the caller must
+ *     treat as "outcome genuinely unrecoverable," never as license to fabricate a pass.
+ *
+ * `events` is expected in the chronological order {@link Db.findGateOpEventsByOpId} already returns
+ * (`seq ASC`); this function does not itself depend on that order beyond documenting intent (a `.find`/
+ * `.reverse().find` over an out-of-order array would still return A match, just not necessarily the
+ * newest one for the bare-fail fallback — keep the caller passing chronological order).
+ */
+function recoverGateOpVerdict(
+  kind: "gate" | "merge", events: OrchestrationEvent[],
+): { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict } | undefined {
+  if (kind === "gate") {
+    const e = events.find((ev) => ev.kind === "worker_gate");
+    const d = e?.detail;
+    if (!d) return undefined;
+    if (d.cancelled === true) {
+      return { kind: "cancelled", payload: { reason: typeof d.cancelDetail === "string" ? d.cancelDetail : undefined } };
+    }
+    if (d.passed === true) {
+      return {
+        kind: "pass",
+        payload: { durationMs: typeof d.durationMs === "number" ? d.durationMs : undefined },
+      };
+    }
+    if (d.passed === false && typeof d.error !== "string") {
+      return {
+        kind: "fail",
+        payload: {
+          durationMs: typeof d.durationMs === "number" ? d.durationMs : undefined,
+          outputTail: typeof d.outputTail === "string" ? d.outputTail : undefined,
+          gateDetail: {
+            phase: typeof d.phase === "string" ? d.phase : undefined,
+            failedStep: typeof d.failedStep === "string" ? d.failedStep : undefined,
+            failingTest: typeof d.failingTest === "string" ? d.failingTest : undefined,
+            failingTestReason: typeof d.failingTestReason === "string" ? d.failingTestReason : undefined,
+            exitCode: typeof d.exitCode === "number" ? d.exitCode : undefined,
+            signal: typeof d.signal === "string" ? d.signal : undefined,
+            timedOut: typeof d.timedOut === "boolean" ? d.timedOut : undefined,
+          },
+        },
+      };
+    }
+    return undefined; // the AUDIT-ON-ERROR shape (`error` present) — nothing trustworthy to recover
+  }
+
+  const cancelled = events.find((ev) => ev.kind === "merge_cancelled");
+  if (cancelled) {
+    const d = cancelled.detail ?? {};
+    return { kind: "cancelled", payload: { reason: typeof d.cancelDetail === "string" ? d.cancelDetail : undefined } };
+  }
+  const rejected = events.find((ev) => ev.kind === "merge_rejected");
+  if (rejected) {
+    const d = rejected.detail ?? {};
+    return {
+      kind: "fail",
+      payload: {
+        reason: typeof d.reason === "string" ? d.reason : undefined,
+        ...(d.reason === "gate" ? {
+          gateDetail: {
+            phase: typeof d.phase === "string" ? d.phase : undefined,
+            failedStep: typeof d.failedStep === "string" ? d.failedStep : undefined,
+            failingTest: typeof d.failingTest === "string" ? d.failingTest : undefined,
+            failingTestReason: typeof d.failingTestReason === "string" ? d.failingTestReason : undefined,
+            exitCode: typeof d.exitCode === "number" ? d.exitCode : undefined,
+            signal: typeof d.signal === "string" ? d.signal : undefined,
+            timedOut: typeof d.timedOut === "boolean" ? d.timedOut : undefined,
+          },
+        } : {}),
+      },
+    };
+  }
+  // No definitive rejection/cancel — a bare build_gate/build_gate_retry FAIL is still safely recoverable
+  // (see this function's own doc); a PASS is not. `[...events].reverse()` so the MOST RECENT bare-gate
+  // event wins (a retry's own event supersedes the first attempt's).
+  const bareGateFail = [...events].reverse().find(
+    (ev) => (ev.kind === "build_gate" || ev.kind === "build_gate_retry") && ev.detail?.passed === false,
+  );
+  if (bareGateFail) {
+    const d = bareGateFail.detail ?? {};
+    return {
+      kind: "fail",
+      payload: { reason: "build gate failed", durationMs: typeof d.durationMs === "number" ? d.durationMs : undefined },
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Card 7d492f8b: nudge text for an op {@link recoverGateOpVerdict} recovered from durable history —
+ * mirrors the vocabulary/tags the LIVE settle paths use (`[loom:gate-done]`/`[loom:gate-failed]`/
+ * `[loom:gate-cancelled]`, `[loom:merge-failed]`/`[loom:merge-cancelled]`, see confirmWorkerMergeTracked's
+ * generic echo and runWorkerGate's own onSettledAfterPending callback for those exact tags) so a session
+ * reading this reacts to it exactly like an ordinary terminal signal — but states plainly that this is a
+ * RECOVERY (this op's OWN tombstone record was lost to the restart; only its audit trail survived),
+ * rather than silently passing off a recovered result as an ordinary live settle. Names the honest gap
+ * when one exists: a "fail" recovered from a bare `build_gate`/`build_gate_retry` event (no matching
+ * `merge_rejected`, see `recoverGateOpVerdict`'s own doc) carries no failingTest/phase diagnosis at all —
+ * says so, rather than a bare "gate did not pass" that reads as if nothing more was ever known (card
+ * 3aec1df6 is the companion card tracking the underlying gap in what the audit trail itself records).
+ */
+function formatRecoveredGateOpNudge(
+  isMerge: boolean, opId: string, recovered: { kind: PendingGateOpVerdictKind; payload?: PendingGateOpVerdict },
+): string {
+  const preface = "recovered from durable gate history after a daemon restart (this op's own tombstone record was lost, but its audit trail was not)";
+  if (recovered.kind === "cancelled") {
+    const tag = isMerge ? "merge-cancelled" : "gate-cancelled";
+    const reRun = isMerge ? "`worker_merge_confirm`" : "`run_gate`";
+    return `[loom:${tag}] op ${opId} — ${preface}: this run was cancelled (${recovered.payload?.reason ?? "cancelled"}). This is NOT a failure — no verdict was reached; re-run ${reRun} if you still need one.`;
+  }
+  if (recovered.kind === "pass") {
+    // Only reachable for "gate" — recoverGateOpVerdict never returns "pass" for "merge" (see its own doc:
+    // a passing gate is not proof the unlogged squash-merge step afterward also succeeded).
+    return `[loom:gate-done] op ${opId} — ${preface}: gate passed.`;
+  }
+  // "fail" (recoverGateOpVerdict never returns "error" for a recovered row — see its own doc)
+  const tag = isMerge ? "merge-failed" : "gate-failed";
+  const gd = recovered.payload?.gateDetail;
+  const detailBits = gd ? [
+    gd.phase ? `phase: ${gd.phase}` : undefined,
+    gd.failedStep ? `step: ${gd.failedStep}` : undefined,
+    gd.failingTest ? `failing: ${gd.failingTest}` : (gd.failingTestReason ? `failing test: unknown (${gd.failingTestReason})` : undefined),
+  ].filter(Boolean).join("; ") : "";
+  const reason = recovered.payload?.reason === "gate" || recovered.payload?.reason === "build gate failed"
+    ? "build gate failed"
+    : (recovered.payload?.reason ?? "gate did not pass");
+  // Only note the gap for the specific shape that HAS one: a gate-caused rejection recovered from the bare
+  // build_gate fallback (reason literally "build gate failed" — see recoverGateOpVerdict's own doc). A
+  // non-gate rejection (stranded/stage_empty/gate_base_invalidated/etc.) never carried a test/phase
+  // diagnosis to begin with — noting a "gap" there would misleadingly imply a missing test diagnosis for a
+  // rejection that was never about a failing test at all.
+  const gap = !gd && reason === "build gate failed"
+    ? " (recovered from a minimal audit record — no failing-test/phase diagnosis was captured for this rejection; card 3aec1df6 tracks closing that gap)"
+    : "";
+  return `[loom:${tag}] op ${opId} — ${preface}: ${reason}${detailBits ? ` (${detailBits})` : ""}.${gap}`;
+}
+
+/**
  * A worker's most recent SETTLED `run_gate` self-check outcome (card e50600d2 — reuse a green
  * self-check instead of re-running the identical gate at merge). Recorded by {@link
  * SessionService.runWorkerGate} on EVERY settled (`ran:true`) outcome, pass OR fail — overwriting
@@ -5317,22 +5487,39 @@ export class SessionService {
    * surviving row" would now also include every FAST op that settled cleanly seconds before the crash —
    * pushing a FALSE `[loom:gate-failed]`/`[loom:merge-failed]` for a run that actually passed. Only a row
    * that was BOTH told "pending" to some caller AND never reached a real settle (still `state:'pending'`)
-   * is a genuine restart orphan. For each such row, push a synthetic terminal nudge to its owning session
-   * (the worker for "gate", the manager for "merge") — the exact `[loom:gate-failed]`/`[loom:merge-failed]`
-   * vocabulary those callbacks use on an ordinary failure, so a waiting session reacts to this exactly like
-   * any other terminal signal instead of needing special-case handling — then mark the row
-   * `orphaned-by-restart` (never deleted — this table is a permanent tombstone, see the schema doc).
-   * Best-effort per row (one push failure must never block the rest) + never throws; returns the count
-   * reconciled for a boot-log line. Runs AFTER the fleet-resume passes (mirrors reconcileDeadOwnerMergeOps's
-   * own placement) so a resumed owning session is live to receive the push rather than queuing into a
-   * session that isn't there yet.
+   * is a CANDIDATE restart orphan.
+   *
+   * DURABLE-HISTORY RECOVERY FIRST (card 7d492f8b — a settled op that SETTLED before a crash is reported
+   * afterwards as orphaned, discarding its real verdict): a candidate row's `state` staying `'pending'`
+   * does NOT by itself mean the underlying run never finished — `PendingOpRegistry.attach()`'s settle
+   * callback (the thing that flips this row to `state:'settled'`) fires strictly AFTER the op's own
+   * `evt()` audit write, and a crash can land in that gap (confirmWorkerMerge still `await`s
+   * `rejectNotify` between its `build_gate` write and its `merge_rejected` write, for instance). So
+   * BEFORE assuming a candidate is a genuine orphan, this looks up its own durable audit trail
+   * ({@link Db.findGateOpEventsByOpId}) and tries to recover a real verdict from it ({@link
+   * recoverGateOpVerdict} — see its own doc for exactly what is and isn't safely recoverable: a definitive
+   * fail/cancel is always recovered; a definitive pass is recovered for "gate" only, never fabricated for
+   * "merge" since a passing gate is not proof the unlogged squash-merge step that follows it succeeded).
+   * A recovered row is durably marked `state:'settled'` with that REAL verdict (never `'orphaned-by-restart'`)
+   * and pushed the SAME `[loom:gate-done]`/`[loom:gate-failed]`/`[loom:gate-cancelled]`/`[loom:merge-failed]`/
+   * `[loom:merge-cancelled]` vocabulary a live settle would have used, prefixed with an honest "recovered
+   * after a restart" note rather than asserting a cause the daemon never verified.
+   *
+   * Only a row with NO recoverable audit trail at all falls through to the ORIGINAL behavior: push a
+   * synthetic terminal nudge to its owning session (the worker for "gate", the manager for "merge") and
+   * mark the row `orphaned-by-restart` (never deleted — this table is a permanent tombstone, see the
+   * schema doc) — but the nudge text no longer asserts "daemon restart killed this run" (an unverified
+   * mechanism this daemon never actually confirmed): it states plainly that the outcome could not be
+   * recovered, and invites a re-run. Best-effort per row (one push failure must never block the rest) +
+   * never throws; returns the count reconciled for a boot-log line (recovered + genuinely-orphaned rows
+   * both count). Runs AFTER the fleet-resume passes (mirrors reconcileDeadOwnerMergeOps's own placement)
+   * so a resumed owning session is live to receive the push rather than queuing into a session that isn't
+   * there yet.
    */
   reconcileOrphanedGateOps(): number {
     let cleared = 0;
     for (const row of this.db.listSurfacedPendingGateOps()) {
       const isMerge = row.kind === "merge";
-      const tag = isMerge ? "[loom:merge-failed]" : "[loom:gate-failed]";
-      const verb = isMerge ? "re-run `worker_merge_confirm`" : "re-run `run_gate`";
       // LINEAGE-RESOLVED (card 05c36bf4, CR Major 2): row.ownerSessionId is the raw id captured when the
       // op was surfaced pending — if that owner recycled before the daemon restart that orphaned this row,
       // pushing at it directly reaches a dead predecessor that will never be resumed (it wasn't live at
@@ -5340,10 +5527,35 @@ export class SessionService {
       // live successor that's actually waiting on this merge/gate. Resolve through the same lineage helper
       // every other settle push uses.
       const target = this.resolveSettleNudgeTarget(row.ownerSessionId);
-      const msg = `${tag} op ${row.opId} — daemon restart killed this run before it could finish (reason: restart) — ${verb}.` + this.settleNudgeAttribution(target, row.ownerSessionId);
+      const attribution = this.settleNudgeAttribution(target, row.ownerSessionId);
+
+      // DURABLE-HISTORY RECOVERY (card 7d492f8b) — see this method's own doc above.
+      const events = this.db.findGateOpEventsByOpId(row.opId);
+      const recovered = events.length ? recoverGateOpVerdict(row.kind, events) : undefined;
+
+      if (recovered) {
+        this.db.settlePendingGateOp(row.opId, recovered);
+        const msg = formatRecoveredGateOpNudge(isMerge, row.opId, recovered) + attribution;
+        try {
+          // Card ccb407eb: a one-shot TERMINAL signal (this row is cleared right below regardless of
+          // outcome — never re-sent), so it's durable like every other settle nudge.
+          const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
+          if (r.delivered) this.autoCancelSettleWakes(target, row.startedAt, row.opId);
+        } catch {
+          /* owning session not live — best-effort, mirrors every other completion nudge; wakes deliberately left untouched */
+        }
+        cleared++;
+        console.warn(`[orchestration] ${row.kind} op ${row.opId} (${row.key}) was stuck at state:'pending' after a daemon restart — RECOVERED its real verdict (${recovered.kind}) from durable gate history, NOT marked orphaned`);
+        continue;
+      }
+
+      const tag = isMerge ? "[loom:merge-failed]" : "[loom:gate-failed]";
+      const verb = isMerge ? "re-run `worker_merge_confirm`" : "re-run `run_gate`";
+      // Card 7d492f8b: no longer asserts "daemon restart killed this run" — this daemon never actually
+      // verified that mechanism (see recoverGateOpVerdict's own doc for what WAS checked: its own durable
+      // audit trail, found empty). States the honest limit instead.
+      const msg = `${tag} op ${row.opId} — this op's outcome could not be recovered after a daemon restart (no durable settle record was found for it) — ${verb} to re-derive it.` + attribution;
       try {
-        // Card ccb407eb: a restart-orphan resurfacing is a ONE-SHOT TERMINAL signal (this row is cleared
-        // right below regardless of outcome — never re-sent), so it's durable like every other settle nudge.
         const r = this.enqueueDurableMessage(target, msg, { sender: "system", taskId: row.taskId, kind: "warning" });
         // AUTO-CANCEL-ON-NUDGE (card 9d521792): only after a successful delivery — if the target isn't
         // live, the fallback wake IS the session's real recovery path; reaping it here would strand the
@@ -9992,8 +10204,14 @@ export class SessionService {
       }
     }
 
+    // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b): merged in here — not at each call site — so no
+    // future evt() call can forget it. Gives `Db.findGateOpEventsByOpId` an exact join key back to this
+    // op's `pending_gate_ops` tombstone row, so a boot-time reconcile can recover this op's REAL recorded
+    // outcome instead of misreporting a genuinely-settled op as `orphaned-by-restart` (see
+    // `recoverGateOpVerdict`'s own doc).
     const evt = (kind: OrchestrationEvent["kind"], detail?: Record<string, unknown>) => this.db.appendEvent({
-      id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind, detail,
+      id: randomUUID(), ts: new Date().toISOString(), managerSessionId, workerSessionId, taskId, kind,
+      detail: { ...detail, opId: thisOpId },
     });
     // kind:"agent" — a merge-rejection result names a specific worker/task and requires distinct manager
     // action (recover a commit, re-task, rebase); it must never be mashed with an unrelated turn.
@@ -10606,13 +10824,16 @@ export class SessionService {
       // directly, so the value is already frozen-final by this point (see GateSemaphore.runExclusive's own
       // doc). `?? concurrentAtStart` covers the reuse case (runExclusive never called, getter never set).
       concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-      // Card 3aec1df6: stamp `opId` on the durable event (here and on the retry sibling below) so a
-      // `gate_history` row can name the SAME op `gate_status(opId)` would return full diagnostics for —
-      // this event's own detail never carries `failingTest`/`outputTail` (see the rejection block below,
-      // which records those on the SEPARATE `merge_rejected` event `GATE_HISTORY_KINDS` excludes), so
-      // `opId` is the only reachability path `gate_history` has to that detail.
+      // Card 3aec1df6: a `gate_history` row can name the SAME op `gate_status(opId)` would return full
+      // diagnostics for — this event's own detail never carries `failingTest`/`outputTail` (see the
+      // rejection block below, which records those on the SEPARATE `merge_rejected` event
+      // `GATE_HISTORY_KINDS` excludes), so `opId` is the only reachability path `gate_history` has to
+      // that detail. Card 7d492f8b: `opId` is stamped by the `evt` CLOSURE above (`detail: { ...detail,
+      // opId: thisOpId }`), not per call site — do NOT re-add `opId: thisOpId` here, it would silently
+      // double-stamp with the identical value and contradict the closure's own "no future evt() call can
+      // forget it" comment.
       evt("build_gate", {
-        opId: thisOpId, passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
+        passed: gateResult.passed, durationMs: Date.now() - gateStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax,
         ...(gateRan ? {} : { reused: true, reusedOpId }),
       });
       if (gateRan) {
@@ -10695,7 +10916,9 @@ export class SessionService {
           throw err;
         }
         concurrentGatesMax = getConcurrentGatesMax?.() ?? concurrentAtStart;
-        evt("build_gate_retry", { opId: thisOpId, passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
+        // Card 7d492f8b: `opId` comes from the `evt` closure, not stamped here — see the sibling
+        // `build_gate` call site's identical comment above.
+        evt("build_gate_retry", { passed: gateResult.passed, durationMs: Date.now() - retryStartedAt, gateCap, concurrentGates: concurrentAtStart, concurrentGatesMax });
         if (gateResult.failedTimedOut) {
           try { await reap(worktreePath, { excludePids: workerPid == null ? [] : [workerPid] }); } catch { /* best-effort */ }
         }
@@ -11741,9 +11964,11 @@ export class SessionService {
         const startStamp = await computeWorktreeGateStamp(worktreePath, { timeoutMs: this.gitOpMs });
         this.gateStartStamps.set(key, startStamp);
         try {
+          // OP-ID STAMPED ONTO EVERY EVENT (card 7d492f8b) — see confirmWorkerMerge's identical `evt`
+          // closure for the full rationale (findGateOpEventsByOpId's join key / recoverGateOpVerdict).
           const evt = (detail: Record<string, unknown>) => this.db.appendEvent({
             id: randomUUID(), ts: new Date().toISOString(), managerSessionId: workerSessionId, workerSessionId,
-            taskId: worker.taskId ?? null, kind: "worker_gate", detail,
+            taskId: worker.taskId ?? null, kind: "worker_gate", detail: { ...detail, opId },
           });
           let gateResult: GateSequentialResult;
           // Card a1c86452: the descriptor surfaces this worker self-check on the Gates page's active lane;

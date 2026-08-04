@@ -5262,6 +5262,26 @@ export class Db {
       .all(workerSessionId) as Row[]).map(toOrchestrationEvent);
   }
   /**
+   * Card 7d492f8b: every durable audit event stamped with a given gate/merge op's `opId` (see
+   * confirmWorkerMerge's/runWorkerGate's own `evt` closures, which now merge `opId` into every emitted
+   * `detail` unconditionally) — the join `SessionService.reconcileOrphanedGateOps` needs to recover a
+   * genuinely-settled op's REAL outcome from durable history instead of misreporting it as
+   * `orphaned-by-restart` purely because its `pending_gate_ops` tombstone row never reached
+   * `state:'settled'` before a crash. `opId` is a UUID minted once per op (`PendingOpRegistry.attach`'s
+   * `onOpMinted`), so an exact `json_extract` match is unambiguous — no `kind` filter needed; a "merge" op
+   * can log more than one event under the same opId (e.g. `build_gate` then `merge_rejected`), so this
+   * returns ALL of them, ordered `seq ASC` (chronological, the never-reused monotonic sequence — see its
+   * own schema doc) so a caller reading them in event order sees them in the order they actually happened.
+   * Unindexed `json_extract` scan over the whole table — accepted: this is called ONLY from a boot-time
+   * sweep, only for the (normally zero, always small) set of rows still `state:'pending'` after a restart,
+   * never a hot path (mirrors `listScheduleHistory`'s own precedent for an unindexed `json_extract` filter).
+   */
+  findGateOpEventsByOpId(opId: string): OrchestrationEvent[] {
+    return (this.db.prepare(
+      "SELECT * FROM orchestration_events WHERE json_extract(detail_json, '$.opId') = ? ORDER BY seq ASC",
+    ).all(opId) as Row[]).map(toOrchestrationEvent);
+  }
+  /**
    * DISTINCT worker_session_id values that have EVER recorded an event of one of the given kinds — ONE
    * indexed query (idx_orch_events_kind) in place of walking every candidate session's own full event
    * history just to learn whether it has one. Card bf0b902c: the crash-recovery watcher's per-tick
