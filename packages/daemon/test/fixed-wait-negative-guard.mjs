@@ -81,6 +81,11 @@ const IDIOM_A = /\bsleep\(\s*[^)]+\)/;
 const IDIOM_B = /new Promise\(\s*\(?\s*[a-zA-Z_$][\w$]*\s*\)?\s*=>\s*setTimeout\(\s*[a-zA-Z_$][\w$]*\s*,\s*[^)]+\)/;
 const NEG_KEYWORDS = /\b(never|not\b|no\s|zero|absent|unaffected|unchanged|stops advancing|stayed|stays|frozen|didn.?t|doesn.?t|hasn.?t|won.?t|refuse|omit)/i;
 const EXEMPT_RE = /TIMING-GUARD-SAFE:\s*([a-z-]+)/;
+// Card a14717af: every check()/assert() call in a wait's window, not just the textually-first one — a
+// non-global `.match()` silently drops every match after the first, which is how a genuinely-negative
+// site sharing a window with an earlier positive-polarity check went unreported entirely (found 1 where
+// two candidates existed). Matches check()/assert() in the order they appear in the window.
+const CHECK_OR_ASSERT_RE = /(?:check|assert)\(\s*(["'`])((?:(?!\1).)*)\1/g;
 
 // file -> Set(assertion label text). EXCLUDING the 4 retrofitted files (no longer match the raw idiom at
 // all — a regression there is a NEW flag, not a baseline hit) and the 2 files exempted via inline comment
@@ -327,6 +332,139 @@ function baselineHas(file, label) {
   return KNOWN_UNAUDITED_WAITS.get(file)?.includes(label) ?? false;
 }
 
+// Card a14717af: the pre-`ecf4e391` matcher scanned each wait's 5-line window with a non-global
+// `.match()`, which silently returns only the FIRST check()/assert() found in that window — any further
+// check()/assert() sharing the same window was never examined, regardless of its own polarity. Fixing
+// that (via `matchAll`, see CHECK_OR_ASSERT_RE + scanFile below) surfaced 51 distinct (file, label) pairs
+// that were STRUCTURALLY INVISIBLE to every prior run of this guard — not missed by an auditor, never
+// even offered to one. THESE ARE UNAUDITED for actual timing-safety, exactly like KNOWN_UNAUDITED_WAITS
+// above (same UNEXAMINED posture — see that constant's own header) — kept as a SEPARATE, explicitly-named
+// list rather than folded into KNOWN_UNAUDITED_WAITS so the provenance ("never previously visible to this
+// guard in any form, in ANY prior run") stays distinguishable from the older baseline's "already scanned
+// by some earlier version of this matcher" posture. Folding them together would be indistinguishable from
+// regenerating the baseline — the exact operation card a14717af's own header forbids, because it silently
+// absorbs genuine new violations; keeping them apart is what makes this NOT that.
+// Do NOT audit or fix a site from this list as part of maintaining this file — that work is tracked on
+// separate follow-up cards card a14717af filed. This list exists ONLY to keep the guard green while these
+// 51 sites stay visible, attributed, and gated (a NEW hit outside BOTH lists still fails the guard).
+const NEWLY_VISIBLE_UNAUDITED_WAITS = new Map([
+  ["agent-runs-rest.mjs", [
+    "B3 the run still finalized terminally despite the refused webhook",
+    "B3 the refused delivery WAS attempted (then swallowed)",
+  ]],
+  ["capability-registry.mjs", [
+    "(venv) a LATER call resolves the now-warm binary (no re-provisioning)",
+  ]],
+  ["codescape-health-probe.mjs", [
+    "(7) drift-check state also reads not-checked:running-absent for a running `build:null`",
+    "(8c) an HONEST installed build:null is SILENT — it is a real answer, not a couldn't-read failure",
+    "(12) the exhausted-restart guard itself is UNCHANGED — still no second restart while the SAME installed build persists",
+    "(12) recovery did not trigger a restart (still exactly 2 spawns on record)",
+  ]],
+  ["codescape-lifecycle-hooks.mjs", [
+    "(4) recycled worker's worktree still exists on disk (reused, not removed)",
+  ]],
+  ["codescape-mcp-spawn.mjs", [
+    "(e2e) it registered under codescape's OWN manifest-resolved id (not Loom's project.id)",
+  ]],
+  ["codescape-supervisor.mjs", [
+    "(dbPath) getPort() is live — the DB-path-only configuration reached spawnServe, not just the gate check",
+    "(bad-bin) getPid() is null too (no live child left dangling)",
+  ]],
+  ["companion-mirror.mjs", [
+    "A: the in-app adapter itself was never sent the mirror (only the OTHER bound channel)",
+    "failed-mirror: the original turn was still submitted (mirror failure doesn't block the turn)",
+    "failed-mirror: the failure is LOGGED (visible, not silently swallowed)",
+  ]],
+  ["gate-cancel.mjs", [
+    "(primitive gateType guard) cancelQueued STILL REFUSES a queued deploy entry",
+  ]],
+  ["graceful-stop.mjs", [
+    "idle: NOT hard-killed (escalation never fired)",
+    "idle: exactly the original two Ctrl-Cs were written (byte-for-byte unchanged)",
+  ]],
+  ["mcp-ready-gate.mjs", [
+    "7: nudge lands in the pending FIFO promptly once markMcpSeen fires (session not ready yet)",
+  ]],
+  ["merge-confirm-completion-nudge.mjs", [
+    "(5) NO generic [loom:merge-done] echo for the SAME completion — THE double-fire this card fixes (187f5b76)",
+    "(6) it names the worker + TIMEOUT wording (not a plain 'build gate failed')",
+  ]],
+  ["paste-placeholder-tripwire.mjs", [
+    "RECOVERY (k): that warning is the ESCALATION, not a normal detection re-log",
+    "(l) THE FIX: a MARKED recovery text's own collapse is recognized as a recovery attempt — ESCALATES, never treated as a fresh loss",
+    "(m) the recovery notice is NOT part of that same write (it was minted too late to join it)",
+    "(m) THE FIX: the delivered recovery still carries the ORIGINAL lost content (annotation never drops it)",
+  ]],
+  ["paste-recovery-boundary-annotation.mjs", [
+    "(A) THE TRAP: with mintedAtGen=47 carried verbatim against a successor at submitGeneration=1 (1 <= 47), the annotation is ABSENT — silently inert, the SAME bug one call deeper",
+    "(B) THE FIX: with mintedAtGen absent, the annotation IS PRESENT — an absolute wall-clock disclosure, not silence",
+  ]],
+  ["pending-ops-registry.mjs", [
+    "(evict-on-settle) peek shows NOTHING immediately after settle — no stale 'running' op lingers",
+    "(failed slow) once failed, it is EVICTED — not stuck showing 'running' forever",
+    "(nudge slow-ok) callback has not fired yet — op still running",
+    "(clobber guard) run_A's own completion nudge does NOT spuriously fire against the successor",
+    "(durable dedupe) a re-call LONG AFTER retainMs still does NOT mint a fresh op — no second gate run",
+    "(durable dedupe) the re-call returns the ORIGINAL cached verdict, not a fresh one",
+  ]],
+  ["periodic-snapshot.mjs", [
+    "(2) snapshot NOT re-copied on unchanged ticks (mtime stable)",
+  ]],
+  ["pty-giveup-clear.mjs", [
+    "(1) DEFERRED CLEAR: exactly ${TEXT.length} backspaces were written — by the REDRAIN, not by give-up itself",
+  ]],
+  ["pty-giveup-hold-until-confirmed.mjs", [
+    "(3) THE BACKSTOP: the body was written a second time (actually re-delivered, not just re-counted)",
+    "(4) THE DELIVERY: TEXT1's body was written a second time — actually delivered, not lost",
+  ]],
+  ["pty-giveup-requeue.mjs", [
+    "(3) SUPPRESSED: nothing was ever requeued — pending stays empty",
+    "(6) the kickoff was actually RE-DELIVERED (written to the pty a second time), not just re-queued",
+  ]],
+  ["pty-healifstuck-clear.mjs", [
+    "(3) busy stayed false throughout (healIfStuck never re-triggered on the settled session)",
+  ]],
+  ["pty-log-stream-error.mjs", [
+    "logBroken stays true (no spurious reset)",
+  ]],
+  ["pty-mode-convergence.mjs", [
+    "6: NO auto-heal press fires for an unreadable footer — HEALABLE_MODES excludes 'unknown' by construction",
+  ]],
+  ["pty-mode-heal-retry.mjs", [
+    "the heal's cycle has NOT given up yet — still polling, not a second finish",
+  ]],
+  ["pty-resume-readiness.mjs", [
+    "8: exactly one Down and one Up — never a second correction attempt",
+  ]],
+  ["pty-submit-verify-retry.mjs", [
+    "(5) busy was NOT wrongly cleared by B's stale chain — C's turn is still presumed in flight",
+  ]],
+  ["pty-writechunked-done-on-death.mjs", [
+    "card 3ce3fa39: no backspace yet — give-up itself never writes the burst",
+    "sanity: killing NOW is genuinely mid-burst, not after completion",
+  ]],
+  ["restart-giveup-hold.mjs", [
+    "(4) THE DELIVERY: it was actually written — delivered, not silently lost",
+  ]],
+  ["task-defer-until.mjs", [
+    "(3) getProjectTask second read performs NO further write — updatedAt unchanged",
+  ]],
+  ["wake.mjs", [
+    "start-reconcile: it was consumed (no lingering row)",
+  ]],
+  ["worker-stop-reap.mjs", [
+    "(B) exactly two reap calls were made (the live manager was never swept)",
+  ]],
+  ["_probe-composer-dirty.mjs", [
+    "3) the queue is now empty (held turn drained, not stranded)",
+  ]],
+]);
+
+function newlyVisibleHas(file, label) {
+  return NEWLY_VISIBLE_UNAUDITED_WAITS.get(file)?.includes(label) ?? false;
+}
+
 // The 4 files card 1addef27 retrofitted to assertNeverWithControl — a raw fixed-wait-then-negative-check
 // hit in ANY of these is a REGRESSION (the guard rejects it as a fresh flag, never silently re-baselines
 // it), not new/unrelated debt.
@@ -359,9 +497,13 @@ function scanFile(file) {
     const line = lines[i];
     if (!IDIOM_A.test(line) && !IDIOM_B.test(line)) continue;
     const window = lines.slice(i, i + 5).join("\n");
-    const checkMatch = window.match(/check\(\s*(["'`])((?:(?!\1).)*)\1/) || window.match(/assert\(\s*(["'`])((?:(?!\1).)*)\1/);
-    if (!checkMatch || !NEG_KEYWORDS.test(checkMatch[2])) continue;
-    hits.push({ file, lineNo: i + 1, label: checkMatch[2], exempt: exemptionReasonFor(lines, i) });
+    // Scan EVERY check()/assert() in the window (matchAll, not the first match only) — a single wait can
+    // guard more than one assertion, and dropping anything past the first is a silent under-report.
+    for (const m of window.matchAll(CHECK_OR_ASSERT_RE)) {
+      const label = m[2];
+      if (!NEG_KEYWORDS.test(label)) continue;
+      hits.push({ file, lineNo: i + 1, label, exempt: exemptionReasonFor(lines, i) });
+    }
   }
   return hits;
 }
@@ -380,6 +522,7 @@ for (const file of files) {
     }
     if (RETROFITTED_FILES.has(file)) { regressions.push({ ...hit, key }); continue; }
     if (baselineHas(file, hit.label)) continue; // baselined debt, not clearance — see header
+    if (newlyVisibleHas(file, hit.label)) continue; // card a14717af: surfaced by the matcher fix, unaudited — see header
     newViolations.push({ ...hit, key });
   }
 }
