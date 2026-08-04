@@ -209,13 +209,31 @@ interface UntilSupersededVerdict {
  * window has closed, at which point the old dedupe found nothing and `attach()` re-invoked `run()` for
  * real: a "safe poll" that silently became a genuine, unrequested second gate run, and — for a
  * non-deterministic gate test — could launder a REJECTED branch into a merge with no decision anywhere in
- * the loop. `opts.retainVerdictUntilSuperseded` closes that: for a `key` that opts in, EVERY settle also
+ * the loop. `opts.retainVerdictUntilSuperseded` closes that: for a `key` that opts in, every settle whose
+ * classified `outcome` (see `opts.classifyOutcome` below) is NOT the sentinel string `"cancelled"` also
  * writes into a SEPARATE `untilSupersededVerdicts` map that carries NO expiry timer at all — a re-call
  * finds it there regardless of how long it waited, and `attach()`'s dedupe hands back that SAME verdict
  * instead of minting a fresh entry. It is superseded, not expired: the only way to clear it is for a
  * genuinely fresh op under the same `key` to settle in turn (which overwrites the map entry the same way
  * `retain()` already overwrites `retained`) — reachable ONLY via `opts.bypassRetained` (today,
  * `forceRemoveWorktree:true`), an explicit caller-chosen escalation, never a clock.
+ *
+ * ⚠️ THE ONE HARDCODED EXCEPTION (card 171297dc — the gate_cancel-replayed-forever trap): a CANCELLED
+ * settle (`gate_cancel` withdrew a QUEUED merge confirm — `confirmWorkerMergeTracked`'s own
+ * `classifyOutcome` maps that shape to exactly the string `"cancelled"`, unchanged by this card) is NOT a
+ * verdict — no gate ever ran, nothing was validated — so there is nothing here for a later plain re-call
+ * to safely reuse, unlike a real PASS/REJECTION (this section's actual safety property, otherwise left
+ * completely untouched). Before this card, the write above was truly unconditional: a cancelled outcome
+ * got cached exactly like a real one and replayed to every future re-call FOREVER (this map has no expiry)
+ * — a manager re-calling per the tool's own documented retry contract kept being handed back the SAME
+ * stale "cancelled by manager … via gate_cancel" reason, tens of minutes after the fact, with no new op
+ * ever minted. `attach()` now checks the classified outcome string directly (both at this write and at
+ * the TTL'd `retained` read a few lines below) rather than adding a new per-call opt for it: `outcome` is
+ * ordinarily caller-chosen, vocabulary-agnostic prose (see this file's own `PendingOpOutcome` doc) with no
+ * meaning to this registry — `"cancelled"` is the ONE deliberate, narrowly-scoped exception, because it is
+ * ALSO the exact string every "no verdict reached" settle across this codebase already converges on
+ * (`ConfirmMergeResult.cancelled`/`WorkerGateResult.cancelled`, `gate_status`'s own `outcome` field) — see
+ * `opts.classifyOutcome`'s own doc for why this doesn't need a new service-layer opt-in to take effect.
  *
  * ⚠️ NAMED DELIBERATELY, NOT "durable": this map is PROCESS-LOCAL, held ONLY in this registry's own
  * in-memory `Map` — it is NEVER written to the database and does NOT survive a daemon restart. "Durable"
@@ -422,6 +440,14 @@ export class PendingOpRegistry {
    * (identity check already fails) never classifies or retains either. `classifyOutcome` alone (no
    * `retainMs`) just stamps `outcome` on the terminal `AttachResult` value this call itself returns/awaits
    * — harmless but pointless without retention, since nothing else would ever observe it once evicted.
+   * `outcome` is ordinarily just caller-chosen display vocabulary this registry never reasons about — see
+   * `PendingOpOutcome`'s own doc — with ONE hardcoded exception (card 171297dc): a classified outcome of
+   * exactly `"cancelled"` also gates BOTH `retainVerdictUntilSuperseded`'s write and the TTL'd `retained`
+   * map's dedupe-serve (see the class doc's "UNTIL-SUPERSEDED VERDICT CACHE" section) — a cancellation is
+   * never a verdict worth replaying to a later re-call. Every existing caller whose `classifyOutcome`
+   * never returns that exact string (or omits it) is unaffected; `confirmWorkerMergeTracked`'s own
+   * `classifyOutcome` already maps a cancelled merge confirm to `"cancelled"` (predates this card,
+   * unchanged), so this closes the trap with no caller-side change at all.
    *
    * `opts.bypassRetained` (card 33172f01 CR finding): the retention-window dedupe below is arg-agnostic BY
    * DESIGN — `key` alone decides it, deliberately NOT widened to include `run`'s actual arguments (that
@@ -562,10 +588,10 @@ export class PendingOpRegistry {
       // `untilSupersededVerdicts` on its own — so this check alone is what makes a re-call landing AFTER
       // `retainMs` has already lapsed still safe, instead of falling through to the fresh-mint path below
       // and re-invoking `run()` for real. `opts.bypassRetained` gates this read identically to the TTL'd
-      // one just below — a forceful re-call skips both. No usability-predicate gate here (unlike the TTL'd
-      // check below): today's one consumer (merge) has no analogous "known contaminated" self-declaration,
-      // mirroring why `isRetainedResultUsable` was never offered for it either — see this method's own doc
-      // for that precedent.
+      // one just below — a forceful re-call skips both. No usability-predicate gate ON THIS READ: a
+      // CANCELLED settle (card 171297dc) never reaches this map in the first place — the write below is
+      // itself gated on the classified `outcome` (see the class doc's hardcoded `"cancelled"` exception) —
+      // so there is nothing left here for a read-side gate to filter out.
       //
       // IDENTITY-GATED (card 1555e361 CR follow-up — see the class doc's "IDENTITY-GATED SUPERSEDE"
       // section): a cache hit only counts as a HIT when THIS call's `opts.verdictIdentity` matches the
@@ -590,7 +616,12 @@ export class PendingOpRegistry {
         }
       }
       const retainedHit = untilSupersededMiss ? undefined : this.retained.get(key);
-      if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt) {
+      // CANCELLED SENTINEL (card 171297dc — mirrors the untilSupersededVerdicts write gate above, same
+      // "cancelled" string, same reasoning): a cancellation is not a verdict, so a plain re-call landing
+      // INSIDE this short TTL window must not replay it either — checked unconditionally, ahead of (and
+      // regardless of) `isRetainedResultUsable` below, since this applies independent of whether a caller
+      // ever opted into that predicate at all.
+      if (!opts?.bypassRetained && retainedHit && Date.now() < retainedHit.expiresAt && retainedHit.outcome !== "cancelled") {
         // USABILITY GATE (card 79b0ee52): an `ok:false` hit, or an `ok:true` hit with no
         // `isRetainedResultUsable` opt, is unconditionally usable — byte-identical to before this opt
         // existed. The `ok:false` half is a DELIBERATE, pre-existing contract from card 33172f01 (predates
@@ -646,7 +677,11 @@ export class PendingOpRegistry {
             // path needed. `opts` here is the MINTING call's own closure (a retry that merely attached never
             // re-registers this callback), so the identity stamped is exactly what was fresh at the moment
             // this specific run() was actually kicked off, never a later re-poller's.
-            if (opts?.retainVerdictUntilSuperseded) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: true, value }, identity: opts.verdictIdentity });
+            // CANCELLED SENTINEL (card 171297dc): `fresh.outcome === "cancelled"` (set two lines above, from
+            // this SAME call's `classifyOutcome`) vetoes this write — see the class doc's "ONE HARDCODED
+            // EXCEPTION" note. Every other classified outcome (or no classifyOutcome at all) is unaffected —
+            // byte-identical to the unconditional write this line used to be.
+            if (opts?.retainVerdictUntilSuperseded && fresh.outcome !== "cancelled") this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: true, value }, identity: opts.verdictIdentity });
             opts?.onSettle?.({ ok: true, value }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: true, value }, fresh.opId);
           }
@@ -657,8 +692,9 @@ export class PendingOpRegistry {
           if (this.entries.get(key) === fresh) {
             this.entries.delete(key);
             if (opts?.retainMs) this.retain(key, projectView(fresh), opts.retainMs, { ok: false, error: err });
-            // UNTIL-SUPERSEDED WRITE — mirrors the `ok:true` branch above, same doc.
-            if (opts?.retainVerdictUntilSuperseded) this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: false, error: err }, identity: opts.verdictIdentity });
+            // UNTIL-SUPERSEDED WRITE — mirrors the `ok:true` branch above, same doc, same "cancelled" veto
+            // (a thrown error has no analogous cancelled shape today, so this is unaffected in practice).
+            if (opts?.retainVerdictUntilSuperseded && fresh.outcome !== "cancelled") this.untilSupersededVerdicts.set(key, { rawOutcome: { ok: false, error: err }, identity: opts.verdictIdentity });
             opts?.onSettle?.({ ok: false, error: err }, fresh.opId);
             if (fresh.surfacedPending) onSettledAfterPending?.({ ok: false, error: err }, fresh.opId);
           }

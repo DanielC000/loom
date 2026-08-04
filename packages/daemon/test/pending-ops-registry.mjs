@@ -759,6 +759,82 @@ const classify = (outcome) => (!outcome.ok ? "failed" : outcome.value.merged ? "
   check("(identity omitted, backward compat) no verdictIdentity on either call still dedupe-hits — undefined matches undefined", calls === 1 && r2.value.opId === "op-1");
 }
 
+// --- NEVER CACHE A CANCELLED VERDICT (card 171297dc — the gate_cancel-replayed-forever trap): a
+// cancellation is NOT a verdict (no gate ran, nothing was validated), so `retainVerdictUntilSuperseded`
+// must never let it be replayed to a later plain re-call the way a real PASS/REJECTION correctly is. The
+// fix lives ENTIRELY inside attach() itself, keyed off the classified `outcome` string it already
+// computes from `opts.classifyOutcome` — NO new per-call opt was added, so every block below passes the
+// SAME `classifyWithCancel` shape `confirmWorkerMergeTracked` already used before this card (unchanged),
+// and the fix takes effect with no service-layer change at all. `classifyWithCancel` adds the "cancelled"
+// branch the shared `classify` helper above deliberately doesn't have, since every OTHER block in this
+// file predates cancellation as a settle shape. ---
+const classifyWithCancel = (outcome) => (!outcome.ok ? "failed" : outcome.value.cancelled ? "cancelled" : outcome.value.merged ? "merged" : "rejected");
+
+// THE HAZARD / RED-GREEN PROOF: a cancelled settle, classified "cancelled" via classifyOutcome exactly as
+// confirmWorkerMergeTracked already does, opted into retainVerdictUntilSuperseded exactly as it already
+// does. On PRE-FIX `pending-ops.js` (which writes to `untilSupersededVerdicts` unconditionally on every
+// settle, never consulting `fresh.outcome`) a plain re-call long after the display window replays the
+// SAME opId and the SAME stale "cancelled by manager … via gate_cancel" reason — the exact live incident
+// (mgr #113, 2026-08-04) — so the check below FAILS. Only once `attach()` actually checks the classified
+// outcome before writing does the re-call mint a genuinely fresh op instead.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const cancelOutcome = { merged: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager mgr1 via gate_cancel", opId: "op-1" };
+  const opts = { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classifyWithCancel };
+  const r1 = await reg.attach("cv1", "merge", "mgr1", 200, async () => { calls++; return cancelOutcome; }, undefined, opts);
+  check("(cancel-not-cached) the cancelled op settled once", calls === 1 && r1.value.cancelled === true);
+  await waitUntil(() => reg.peek("cv1") === undefined, { label: "cv1 TTL'd display view expired" });
+  const r2 = await reg.attach("cv1", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, opts);
+  check("(cancel-not-cached) a plain re-call LONG AFTER the display window mints a GENUINELY FRESH op — no replayed cancellation (card 171297dc fix)", calls === 2 && r2.value.opId === "op-2" && r2.value.merged === true);
+}
+
+// THE 5s TTL WINDOW HAS THE SAME SHAPE (card 171297dc DoD 1, second half — "also check retained/retainMs"):
+// the never-expiring `untilSupersededVerdicts` fix above only stops the LONG-TERM replay. The SEPARATE
+// `retained` map (retainMs, written unconditionally for Board display regardless of outcome) is consulted
+// FIRST and could still dedupe-serve a cancelled outcome inside its own short window if its read weren't
+// ALSO gated on the same classified "cancelled" string — reproduced here well within the window, on
+// PRE-FIX code this check also fails for the same reason as above.
+{
+  const reg = new PendingOpRegistry();
+  let calls = 0;
+  const cancelOutcome = { merged: false, cancelled: true, cancelKind: "manual", reason: "cancelled by manager mgr1 via gate_cancel", opId: "op-1" };
+  const opts = { retainMs: 500, retainVerdictUntilSuperseded: true, classifyOutcome: classifyWithCancel };
+  await reg.attach("cv2", "merge", "mgr1", 200, async () => { calls++; return cancelOutcome; }, undefined, opts);
+  // STILL WELL WITHIN the 500ms retainMs window — exactly where the 5s-window trap the card's DoD-1
+  // calls out would replay the stale cancellation if the retained-map read weren't also gated.
+  const r2 = await reg.attach("cv2", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, opts);
+  check("(5s-window fix) a re-call INSIDE the TTL window mints a fresh op instead of replaying the cancellation", calls === 2 && r2.value.opId === "op-2" && r2.value.merged === true);
+}
+
+// DoD 3 — card 1555e361's real safety property is UNCHANGED: a genuine PASS and a genuine REJECTION must
+// still be cached and still be served to a plain re-call, with the SAME classifyWithCancel in play — the
+// "cancelled" sentinel must discriminate cancellation from merged/rejected, not widen into "don't cache
+// anything unusual."
+{
+  const mergeOpts = { retainMs: 30, retainVerdictUntilSuperseded: true, classifyOutcome: classifyWithCancel };
+  // A genuine REJECTION (merged:false, no cancelled flag) still dedupes past the display window.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r1 = await reg.attach("cv4", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "build gate failed", opId: "op-1" }; }, undefined, mergeOpts);
+    check("(safety property unchanged: rejection) first op ran once, rejected", calls === 1 && r1.value.merged === false);
+    await waitUntil(() => reg.peek("cv4") === undefined, { label: "cv4 TTL'd display view expired" });
+    const r2 = await reg.attach("cv4", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-2" }; }, undefined, mergeOpts);
+    check("(safety property unchanged: rejection) a plain re-call LONG AFTER the display window still returns the cached REJECTION — no second gate run", calls === 1 && r2.value.opId === "op-1" && r2.value.merged === false);
+  }
+  // A genuine PASS (merged:true) still dedupes past the display window.
+  {
+    const reg = new PendingOpRegistry();
+    let calls = 0;
+    const r1 = await reg.attach("cv5", "merge", "mgr1", 200, async () => { calls++; return { merged: true, opId: "op-1" }; }, undefined, mergeOpts);
+    check("(safety property unchanged: pass) first op ran once, merged", calls === 1 && r1.value.merged === true);
+    await waitUntil(() => reg.peek("cv5") === undefined, { label: "cv5 TTL'd display view expired" });
+    const r2 = await reg.attach("cv5", "merge", "mgr1", 200, async () => { calls++; return { merged: false, reason: "should not run", opId: "op-2" }; }, undefined, mergeOpts);
+    check("(safety property unchanged: pass) a plain re-call LONG AFTER the display window still returns the cached PASS — no second gate run", calls === 1 && r2.value.opId === "op-1" && r2.value.merged === true);
+  }
+}
+
 console.log(failures === 0
   ? "\n✅ ALL PASS — PendingOpRegistry: fast ops resolve synchronously (today's shape), slow ops degrade to a pending handle, a retry (sequential OR genuinely concurrent) attaches to the SAME in-flight op (run() invoked exactly once), a settled op is EVICTED the moment it settles (no stale placeholder, no leak, a failed slow op is retrievable rather than stuck 'running' forever), error identity (subclass + fields) survives the settle path, onSettledAfterPending pushes a completion callback exactly once for a genuinely-pending op (never for the fast path, never twice on retry), onSurfacedPending (card edc1ec12) fires synchronously and strictly BEFORE any possible settle for the same op — even under the tightest possible race — fires once per call that observes 'still pending', and never fires on the fast path, an orphaned op evicted by evictDeadOwner() can never clobber the successor started under its old key when its own late settle eventually fires, opts.retainMs/classifyOutcome retain+classify a settled op's terminal view for a brief window (distinguishing a resolved rejection from a thrown failure), card 33172f01: a re-call landing WITHIN that window (merged, resolved-rejected, or thrown-failed) dedupe-attaches to the cached outcome instead of starting a second real op or re-firing the completion nudge, strictly bounded by retainMs (never refreshed by a dedupe hit) so a genuine retry after the window still runs for real, opts.bypassRetained lets an explicit one-shot escalation always run for real (never served from cache) while still updating the cache for later unflagged callers, (card 79b0ee52) opts.isRetainedResultUsable rejects a retained value the predicate marks unusable (mints a genuinely fresh op instead of re-serving it) while still serving a USABLE retained value with no second invocation and never letting two concurrent rejecting callers mint two concurrent real ops for the same key, and (card e3e40167) opts.onOpMinted fires exactly once per genuinely fresh entry — fast OR slow path, BEFORE run() ever executes, never on a retry or a retained-cache hit — while opts.onSettle fires for EVERY genuine settle (fast or surfaced-pending, unlike onSettledAfterPending which is surfaced-pending-only), strictly BEFORE onSettledAfterPending in the same callback, with the same identity-guard protection against a clobbered/evicted op's late settle."
   : `\n❌ ${failures} FAILURE(S).`);
