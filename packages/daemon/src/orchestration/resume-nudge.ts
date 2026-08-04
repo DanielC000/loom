@@ -50,9 +50,12 @@ export const RESUME_NUDGE_TAIL =
  * incl. the queued-while-busy/`drainPending` timing companion messages actually use) and it still holds on
  * claude 2.1.215. A real production incident (3 pastes on session 5db71873, all pinned to claude 2.1.212,
  * with zero recurrence across 8 later versions of continued use on the SAME session) showed a submitted
- * companion paste CAN collapse to a bare placeholder with no recoverable text — but that was a transient
- * upstream CLI race around Stop-hook timing, not a Loom defect, and does not reproduce on current tooling.
- * If pastes-losing-content resurfaces, suspect a CLI regression before Loom's write path. The ONE genuine gap
+ * companion paste CAN collapse to a bare placeholder with no recoverable text — traced to a transient
+ * upstream CLI race around Stop-hook timing, not a Loom defect. CORRECTED (card 94721f95, 2026-08-04): the
+ * "does not reproduce on current tooling" claim this comment used to make here is FALSE — card 94721f95
+ * measured 53 paste-tripwire recurrences at claudeVersion=2.1.220 across the daemon's own rotated logs, so
+ * the upstream race is recurring across engine versions, not a closed incident. If pastes-losing-content
+ * resurfaces, suspect this same recurring CLI race, not a NEW Loom write-path regression. The ONE genuine gap
  * this note is actually about is a draft that was pasted/typed but never
  * submitted (Enter not yet pressed) at the moment of the restart: it lives only in the now-dead pty's (and
  * engine's) in-memory composer, commonly collapsed on-screen to a "[Pasted text #N]" placeholder, and is
