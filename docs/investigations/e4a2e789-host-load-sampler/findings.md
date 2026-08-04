@@ -371,10 +371,10 @@ depth 9 vs. 0/8 at depth 4, same N=8, stands unchanged and is not being re-litig
 campaign was run to "re-confirm" it; a single sub-threshold crash already establishes non-necessity, and
 there are four). What is corrected is the earlier claim, above, that the conjunction is REQUIRED: it
 evidently is not, since all four specimens above crash the same helper at depth 1 with negligible
-concurrency. Whatever the depth-1 trigger is — plausibly the `stop()`-adjacent kill/spawn transition
-itself, since all four specimens share that shape — remains unnamed (see "What remains open" below); a
-single controlled test isolating the kill path specifically (not a campaign) would be the cheapest next
-probe, and was not run as part of this correction.
+concurrency. **The depth-1 trigger is now named (card `d915ef71` — see "What remains open" item 7):** the
+`.kill()` call itself — node-pty forks its `AttachConsole`-calling helper from exactly one site, inside
+`kill()`, never from spawn — confirmed both from that source location and by a depth-1/concurrency-1
+isolated spawn+stop reproducing the identical failure twice.
 
 **Observed parent-process exit shapes are a range, not a single value.** This document originally asserted
 the crash "kills the parent test process outright (`exit 1`)," generalized from Experiment 1's two
@@ -423,10 +423,12 @@ crash) — not concurrency in isolation. **This conjunction is not shown to be r
 "Counter-evidence: the conjunction is SUFFICIENT, not NECESSARY" above for four depth-1, low-concurrency
 crashes with the identical signature — so the argument below (that the real gate's own two lanes cannot
 reach the conjunction threshold by themselves) explains why the conjunction path is unlikely to be the
-gate's exposure, not why the gate is safe from this failure altogether: a depth-1 trigger, still unnamed,
-remains possible at the gate's own concurrency. `kickoff-real-spawn.mjs`
-itself already supplies the depth half (9 sequential spawns, unconditionally, inside one file) every time
-it runs. The real class's own membership (2 files) cannot supply the CONCURRENCY half by itself even
+gate's exposure, not why the gate is safe from this failure altogether: the depth-1 trigger (now named —
+see "What remains open" item 7 — every `.kill()` call, at concurrency 1, is independently sufficient)
+remains fully live at the gate's own concurrency regardless of whether the conjunction is ever reached.
+`kickoff-real-spawn.mjs` itself already supplies the depth half (9 sequential spawns, unconditionally,
+inside one file) every time it runs — and, per the depth-1 finding, each one of those 9 kills alone is
+already enough exposure, not merely a contributor to a higher-order conjunction. The real class's own membership (2 files) cannot supply the CONCURRENCY half by itself even
 scheduled together in the gate's own two lanes. The gate's own two lanes are not the only real-pty
 activity on the host at gate time, though — per this card's own kickoff, **three sibling workers plus a
 live merge gate were on this box at once** during earlier instances, and per Stage 1's instrument, ambient
@@ -464,9 +466,69 @@ plausibility argument.
 6. Per DoD-4, no remedy is proposed here — a node-pty version bump, retry-wrapping the console-list-agent
    call, or reducing real-pty test concurrency are all plausible directions but are OUT OF SCOPE for this
    investigation and were not evaluated.
-7. The depth-1, low-concurrency trigger behind the four sub-threshold crashes (see "Counter-evidence"
-   above) is unnamed. All four specimens share a `stop()`-adjacent shape (a kill→spawn or spawn→stop
-   transition), which is a plausible lead — the kill path specifically, rather than spawn depth, may be
-   what's firing it — but this is unverified. A single controlled test isolating the kill path (not a
-   campaign) would be the cheapest next probe; it was not run as part of this correction, since a
-   docs-only card is not the place to run test code.
+7. **RESOLVED (card `d915ef71`, single controlled test, not a campaign).** The depth-1, low-concurrency
+   trigger behind the four sub-threshold crashes is the KILL call itself, confirmed two ways:
+   - **Source-level (decisive, no test needed to establish this half):** node-pty's own
+     `windowsPtyAgent.js`, `WindowsPtyAgent.prototype.kill`, forks `conpty_console_list_agent.js` (the
+     helper whose `getConsoleProcessList(shellPid)` call is the exact site that throws `AttachConsole
+     failed`) from **exactly one call site** — inside `kill()`'s `useConpty && !useConptyDll` branch —
+     and nowhere else in the file. `spawn`/`connect`/`resize`/`clear` never touch this helper. So any
+     path that reaches this crash must pass through a `.kill()` call; there is no spawn-depth-only route
+     to it at all.
+   - **Empirical, 2/2:** a single isolated PtyHost session — one real ConPTY spawn, `FIXTURE_READY`
+     awaited, then exactly one `host.stop(sessionId, "hard")`, no concurrency, no other real-pty activity
+     in the process — reproduced `Error: AttachConsole failed` at
+     `conpty_console_list_agent.js:13` on both of two runs. **The parent process survived both times
+     (exit 0)** — matching the three existing `exit 0` sub-threshold specimens above, not this card's own
+     `exit 3221225477` ACCESS_VIOLATION specimen; what (if anything) additionally pushes an occurrence
+     from "helper crashes, parent survives" to "parent itself corrupted" remains unnamed. Depth 1,
+     concurrency 1 is sufficient — no conjunction, and no other real-pty activity, is required to trigger
+     the underlying helper failure.
+   - **Mitigation lead, identified but NOT implemented:** node-pty's `kill()` has a second branch, taken
+     when `useConptyDll: true` is passed at spawn time — it skips `_getConsoleProcessList()` (the
+     forking call) entirely, going straight to `this._ptyNative.kill(...)`. This would structurally avoid
+     the crash surface. **Not wired through `PtyHost.createPty()`** (`packages/daemon/src/pty/host.ts`'s
+     `spawn(bin, args, {name, cols, rows, cwd, env})` call passes no such option today), and plumbing it
+     — even gated to fire only under a test-only env var, never changing the production default — still
+     touches the load-bearing spawn recipe `CLAUDE.md` calls out as validated-in-the-spike/do-not-regress,
+     and `useConptyDll`'s own behavioral differences (a dynamically loaded DLL, different cleanup timing)
+     are unverified on this host. Left for review rather than landed unilaterally — see card `d915ef71`'s
+     worker report.
+
+8. **A level-confusion correction, and a live hang-vs-slow-timeout hypothesis (card `d915ef71`, mgr
+   correction).** `3221225477` (this doc's own ACCESS_VIOLATION specimen) is the TEST FILE's own child
+   exit code — correct at that level, per this doc's existing framing — but the GATE step that runs the
+   whole suite always exits `1` on any in-suite failure; `3221225477` survives only as free text inside
+   the gate's `failingTest` field, never as the gate's own `exitCode`. **Consequence: at the gate level, an
+   in-suite CRASH is byte-indistinguishable from an ordinary assertion failure** (`exitCode:1,
+   timedOut:false, killClass:"genuine"` either way) — do not attempt to screen/detect this failure class by
+   gate-level exit code.
+   Separately, the project's merge-gate history for this test (n=11, measured by the manager against
+   `loom.db`) breaks down as 7 `timeout`, 2 `exit 1`, 2 `exit 3221225477` — i.e. the crash chased above is
+   2 of 11, and **the dominant recorded shape is a timeout.** Live hypothesis, NOT YET established: most/all
+   of those 7 timeouts are this SAME AttachConsole crash escalating into a hang rather than a genuinely
+   slow run. Two things support it without (yet) proving it:
+   - `kickoff-real-spawn.mjs`'s own header comment (near its `stoppedSessions` tracking) already records,
+     from this file's OWN development history, that "an uncaught async exception from node-pty's
+     console-list-agent helper" — this exact crash — **is capable of hanging the whole process past its
+     own success banner**, first discovered via a double-`host.stop()` call on an already-dead session
+     (which is why that tracking exists). This is first-party, in-repo evidence the escalation mechanism
+     is real, though the ORIGINAL trigger (a double-stop) is the one path this file's current
+     `stoppedSessions` guard already closes — so if hangs are still occurring today, either a different,
+     single-stop path to the same hang exists, or that guard has a gap not yet found.
+   - Structurally (read from `gate-runner.ts` + `scripts/test-daemon.mjs`, not run): `test-daemon.mjs`
+     spawns each test file itself and only surfaces that file's captured stdout/stderr once ITS OWN
+     per-file promise resolves (a real `close`, or its own 120s-default timeout branch, both requiring
+     the child to actually respond to `child.kill()`). If a post-crash process fails to terminate
+     promptly under `child.kill()`, that file's buffered output — including any `AttachConsole failed`
+     text — is trapped inside a promise that never resolves and never reaches the outer gate step's own
+     captured stream, so the gate-level `outputTail`/`failingTest` genuinely cannot show it. This matches
+     the observed `failingTest: null` on all 7 timeout rows, and means **the 7 already-recorded historical
+     timeouts cannot be retroactively reclassified** — the raw per-file output they'd need was never
+     persisted. "We cannot classify these" is the honest, correct read of the existing 7, not a gap in
+     analysis effort.
+   **Not attempted:** forcing an actual hang (as opposed to the "helper crashes, parent survives, exit 0"
+   shape reproduced twice above) locally. Doing so needs either a genuine double-stop repro (which the
+   current guard should prevent) or finding a different single-stop trigger — open-ended enough that
+   chasing it further here would cross from "one controlled test" into a campaign. Flagged as the
+   highest-value next probe, not resolved.
