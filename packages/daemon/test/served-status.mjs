@@ -114,6 +114,14 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const realBuildProbe = computeDeployStaleness();
 check("(4-setup) real-tree probe: this checkout's own daemon dist is a real source checkout" + reasonSuffix(realBuildProbe), realBuildProbe.available === true);
 const realDistMtimeMs = new Date(realBuildProbe.distBuiltAt).getTime();
+// Card c241d54b — SECONDARY hardening (the production fix is in deploy-staleness.ts itself): refuse an
+// implausible distBuiltAt LOUDLY here rather than silently deriving a pre-1970 GIT_AUTHOR_DATE below and
+// letting git's own opaque "invalid date format" rejection be the first sign anything was wrong — that
+// exact opaque failure is what let deploy-staleness.ts's `?? 0` epoch-coercion (now fixed) pass this suite
+// undetected. This is a sanity check on THIS test's own fixture derivation, not a substitute for the fix.
+if (!(realDistMtimeMs > Date.parse("2020-01-01T00:00:00Z"))) {
+  throw new Error(`(4-setup) real-tree probe returned an implausible distBuiltAt (${realBuildProbe.distBuiltAt}) — refusing to derive GIT_AUTHOR_DATE fixture dates from it`);
+}
 // Positive control (DoD 2): dist/index.js's own mtime must NOT equal the directory-wide build clock on
 // a real incremental build — if they coincide, this checkout's dist doesn't exhibit the class of bug this
 // card fixes, and comparing a fixture to a fixture (the old test's blind spot) would be all we could prove.

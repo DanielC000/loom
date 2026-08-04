@@ -59,6 +59,20 @@ import "./_guard.mjs"; // prod-guard: arms the Db backstop (sets LOOM_TEST=1; se
 //   (11n) CLEAN control, same shape: process started AFTER the last rebuild (the healthy case) — reads
 //        exactly like before this card (runningCodeBuiltAt reduces to distBuiltAt, distAheadOfProcess:false).
 //
+// Card c241d54b — `newestMtimeMs(distDir)` returning null used to be coerced by `?? 0` into epoch, a
+// different fact from "very old", when distDir was CONFIRMED to exist moments earlier (a build racing this
+// read, not a legitimately-absent dir like packages/shared/dist). That epoch then fed an invalid pre-1970
+// date into served-status.mjs's (4-setup) GIT_AUTHOR_DATE probe — the exact observed gate failure.
+//   (12a) newestMtimeMs itself, DIRECTLY: a missing dir (the card's own "easy fixture") returns null, not 0
+//        or a throw; a populated dir returns a real number (negative control — not an always-null instrument).
+//   (12b) INTEGRATION-LEVEL, both directions, on computeDeployStaleness itself: distIndex is a real, plain
+//        file (an unmocked statSync confirms it), and fs.readdirSync is patched to throw ENOENT for its
+//        specific containing dir only — reproducing "distIndex exists, yet the dist-dir scan returns null"
+//        deterministically, without racing an actual build (same monkeypatch technique already used by
+//        test/transcript-fallback-cache-coherence.mjs's (C) section). Shows the PRE-FIX arithmetic on these
+//        exact inputs collapses to epoch 0 / the byte-identical invalid date, and the POST-FIX result is
+//        available:false with no epoch/invalid-date leaking anywhere.
+//
 // Card c3ce92ea — the WEB signal (webStale/webCommitsBehind), independent of the above:
 //   (9) POSITIVE CONTROL, reproducing the exact bug this card fixes: a web-only commit landing after
 //       BOTH dists were built must flip webStale:true while leaving stale/commitsBehind COMPLETELY
@@ -99,7 +113,7 @@ const tmpHome = trackDir(path.join(os.tmpdir(), `loom-dpstl-${Date.now()}-${proc
 fs.mkdirSync(path.join(tmpHome, "logs"), { recursive: true });
 process.env.LOOM_HOME = tmpHome;
 
-const { computeDeployStaleness: computeDeployStalenessRaw } = await import("../dist/deploy-staleness.js");
+const { computeDeployStaleness: computeDeployStalenessRaw, newestMtimeMs: newestMtimeMsRaw } = await import("../dist/deploy-staleness.js");
 // Card 8ff7ccde: the new 5th param (processStartedAtOverride) lets a test control the "since when has the
 // CURRENTLY RUNNING code been in effect" clock independently of `distBuiltAt`. No section BEFORE (11)
 // intends to exercise that axis — left to the real default (derived from this test process's own
@@ -442,6 +456,63 @@ try {
 
   try { fs.rmSync(procRepo, { recursive: true, force: true }); } catch { /* best-effort */ }
   try { fs.rmSync(procDistDir, { recursive: true, force: true }); } catch { /* best-effort */ }
+
+  // ===================== (12a) newestMtimeMs DIRECTLY: null-for-missing-dir + non-null negative control ====
+  const missingDir = path.join(os.tmpdir(), `loom-dpstl-missing-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`); // never created
+  check("(12a) newestMtimeMs on a directory that doesn't exist ⇒ null (the card's own 'easy fixture'), not 0 and not a throw", newestMtimeMsRaw(missingDir) === null);
+  const populatedDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-populated-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(populatedDir, { recursive: true });
+  fs.writeFileSync(path.join(populatedDir, "f.txt"), "x");
+  check("(12a-negative-control) newestMtimeMs on a directory WITH a file ⇒ a real number, not null (the instrument isn't always-null)", typeof newestMtimeMsRaw(populatedDir) === "number");
+
+  // ===================== (12b) THE ACTUAL DEFECT, both directions (card c241d54b) =====================
+  // distIndex is a real, plain file (a normal, unmocked fs.statSync confirms it exists), then
+  // fs.readdirSync is patched so its call against THIS SPECIFIC dist dir throws ENOENT — reproducing "the
+  // tree vanished in the window between the existence check and the scan" deterministically, without
+  // racing an actual build. Same technique as test/transcript-fallback-cache-coherence.mjs's (C) section
+  // (a precedent for monkeypatching fs.readdirSync in this suite); scoped to the exact dir path and
+  // delegating to the real implementation for everything else (incl. sharedDistDir's own scan), and
+  // restored in a finally so no other section is affected.
+  const raceDir = trackDir(path.join(os.tmpdir(), `loom-dpstl-racedir-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`));
+  fs.mkdirSync(raceDir, { recursive: true });
+  const raceDistIndex = path.join(raceDir, "index.js");
+  fs.writeFileSync(raceDistIndex, "// fixture dist entry, confirmed to exist by a plain, unmocked statSync\n");
+  check("(12b-setup) the fixture distIndex passes a plain, unmocked existence check (mirrors 'confirmed to exist a moment ago')", fs.statSync(raceDistIndex).isFile());
+
+  const resolvedRaceDir = path.resolve(raceDir);
+  const originalReaddirSync = fs.readdirSync;
+  let racePatchFired = false;
+  fs.readdirSync = function patchedReaddirSync(dir, ...rest) {
+    if (path.resolve(String(dir)) === resolvedRaceDir) {
+      racePatchFired = true;
+      const err = new Error(`ENOENT: no such file or directory, scandir '${dir}'`);
+      err.code = "ENOENT";
+      throw err;
+    }
+    return originalReaddirSync.call(fs, dir, ...rest);
+  };
+
+  let rDistUnreadable;
+  try {
+    check("(12b-setup) newestMtimeMs(distDir) returns null once the scan is forced to throw, even though distIndex demonstrably exists", newestMtimeMsRaw(raceDir) === null);
+
+    // (12-before) what the PRE-FIX arithmetic (`Math.max(newestMtimeMs(distDir) ?? 0, ...)`) would have
+    // produced from these exact same inputs — reproduced directly, without reverting the fix.
+    const preFixBuildMaxMs = Math.max(newestMtimeMsRaw(raceDir) ?? 0, 0);
+    check("(12-before) PRE-FIX arithmetic on these inputs collapses to epoch 0", preFixBuildMaxMs === 0);
+    check("(12-before) that epoch 0, offset by -60s exactly as served-status.mjs's (4-setup) amplifier does, renders as the BYTE-IDENTICAL invalid date git rejected in the observed failure", new Date(preFixBuildMaxMs - 60_000).toISOString() === "1969-12-31T23:59:00.000Z");
+    console.log(`     (12-before, for reference) pre-fix distBuiltAt would have been: ${new Date(preFixBuildMaxMs).toISOString()}`);
+
+    // (12-after) the actual fixed function, called end-to-end on the same fixture.
+    rDistUnreadable = computeDeployStalenessRaw(raceDistIndex, repo);
+  } finally {
+    fs.readdirSync = originalReaddirSync; // never leave the global fs module patched
+  }
+  check("(12b self-check) the readdirSync patch actually fired (positive control — a never-fired patch proves nothing)", racePatchFired === true);
+  check("(12-after) THE FIX: distIndex exists but its dist dir is unreadable ⇒ available:false, never a false epoch-0 answer" + reasonSuffix(rDistUnreadable), rDistUnreadable.available === false && typeof rDistUnreadable.reason === "string");
+  check("(12-after) the unavailable reason names the dist directory specifically, not a generic message", /dist directory/.test(rDistUnreadable.reason ?? ""));
+  check("(12-after) unavailable ⇒ stale:false, commitsBehind:0 (never a false-positive OR false-negative claim)", rDistUnreadable.stale === false && rDistUnreadable.commitsBehind === 0);
+  check("(12-after) unavailable ⇒ distBuiltAt/runningCodeBuiltAt are null, never an epoch/invalid-date string", rDistUnreadable.distBuiltAt === null && rDistUnreadable.runningCodeBuiltAt === null);
 } finally {
   // Sweeps EVERY fixture root registered via trackDir() above, not just this section's own —
   // the per-section rmSync calls above only run on the happy path; a thrown error anywhere in the
@@ -453,6 +524,6 @@ try {
 }
 
 console.log(failures === 0
-  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, and (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, and degrades gracefully when packages/web/dist is entirely missing."
+  ? "\n✅ ALL PASS — computeDeployStaleness reads STALE and CLEAN correctly (both directions), excludes assets/docs-only commits (path-scoped, proven against a corpus that could have produced a false negative), counts multiple relevant commits, degrades gracefully (never throws) when unavailable, is derived fresh on every call with no cross-call caching, derives its build clock from the NEWEST mtime across the whole dist tree (daemon + shared) rather than one file (c1072385), that class of bug is demonstrated both on a controlled fixture and (when this checkout's own dist isn't uniformly-timed) on the real tree, (card c3ce92ea) the independent webStale/webCommitsBehind signal correctly flags a web-only commit as needing a rebuild WITHOUT ever perturbing the daemon-restart signal, in both directions, degrades gracefully when packages/web/dist is entirely missing, and (card c241d54b) a dist dir that becomes unreadable after its own entry file was confirmed to exist ⇒ available:false, never a coerced epoch-0/invalid-date answer."
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);

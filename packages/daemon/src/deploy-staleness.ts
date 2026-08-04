@@ -212,8 +212,17 @@ function countCommitsAfter(log: string, sinceMs: number): number {
  * some checkouts, and that must not make the whole signal unavailable). Never throws: an unreadable
  * directory or a file that vanishes between listing and stat (a build racing this read) is skipped, not
  * fatal — this best-effort scan only ever needs to find the max mtime, not certify every file.
+ *
+ * ⚠️ Card c241d54b — a `null` return is ambiguous on ITS OWN: it means "this dir has no files right now",
+ * which covers both "legitimately never built" AND "existed moments ago but vanished/emptied mid-scan
+ * (a build racing this read)". This function cannot and does not disambiguate those — the guard above
+ * only covers an individual FILE vanishing between listing and stat, not the whole tree being transiently
+ * unreadable across two separate calls into this module. A CALLER that already confirmed the dir's
+ * presence moments earlier must treat a `null` here as "unreadable now", never coerce it to a default
+ * "very old" value — see `computeDeployStaleness`'s handling of `distDir` for the caller that got this
+ * wrong once already.
  */
-function newestMtimeMs(dir: string): number | null {
+export function newestMtimeMs(dir: string): number | null {
   let max: number | null = null;
   const stack: string[] = [dir];
   while (stack.length > 0) {
@@ -271,9 +280,23 @@ export function computeDeployStaleness(
   }
 
   const sharedDistDir = sharedDistOverride ?? path.join(repoRoot, "packages", "shared", "dist");
-  // distDir always contributes at least distIndex's own mtime (just confirmed to exist above);
-  // sharedDistDir may legitimately be absent (newestMtimeMs ⇒ null) without making the signal unavailable.
-  const buildMaxMs = Math.max(newestMtimeMs(distDir) ?? 0, newestMtimeMs(sharedDistDir) ?? 0);
+  // Card c241d54b — distDir was just confirmed to exist via the statSync on distIndex above, so a null
+  // return from newestMtimeMs(distDir) here means the tree became unreadable/vanished in the window
+  // between that check and this scan (a build racing this read), NOT "very old". The prior code coerced
+  // that null to `?? 0` (epoch) alongside sharedDistDir's — but unlike sharedDistDir below, distDir is NOT
+  // "legitimately absent" at this point, and "unreadable right now" is a different fact than "very old":
+  // coercing it to epoch silently corrupted every downstream reader of this clock (commitsBehind counted
+  // almost every restart-relevant commit ever, since runningCodeBuiltAt clamps to the same epoch; a test
+  // then fed the resulting epoch-derived date into GIT_AUTHOR_DATE, which git rejected outright). Surface
+  // it as unavailable instead of guessing.
+  const distMaxMs = newestMtimeMs(distDir);
+  if (distMaxMs === null) {
+    return unavailable("this daemon's own dist directory became unreadable while deriving its build clock (a build likely raced this read) — cannot derive a build time");
+  }
+  // sharedDistDir may legitimately be absent (newestMtimeMs ⇒ null) without making the signal unavailable —
+  // distDir above already guarantees a real contribution, so a missing shared dist safely defaults to 0 in
+  // the max (it can never be the one that wins).
+  const buildMaxMs = Math.max(distMaxMs, newestMtimeMs(sharedDistDir) ?? 0);
   const distBuiltAt = new Date(buildMaxMs).toISOString();
 
   // Card 8ff7ccde: when this process itself started (i.e. when its OWN currently-loaded code was read off
