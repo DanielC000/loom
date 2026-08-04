@@ -260,6 +260,21 @@ export function isUsagePollerSuppressed(): boolean {
 }
 
 /**
+ * Opt-in gate (`LOOM_PTY_USE_CONPTY_DLL=1`, default OFF), same family as {@link isLoomDev}. Card
+ * 03016805: node-pty's `WindowsPtyAgent.prototype.kill` forks `conpty_console_list_agent` (the
+ * `AttachConsole`-calling helper — the single confirmed trigger of the recurring `AttachConsole failed`
+ * crash) ONLY in its `useConpty && !useConptyDll` branch; passing `useConptyDll:true` at spawn time takes
+ * the other branch and skips that fork entirely. node-pty's own typings mark `useConptyDll`
+ * "(EXPERIMENTAL) ... Defaults to false" — this flag exists so Loom can opt a spawn into it WITHOUT
+ * touching the load-bearing default spawn recipe (CLAUDE.md "do not regress"). Landing this capability and
+ * flipping the production default are two separate decisions; this flag is only the first. Read at CALL
+ * TIME (like `isLoomDev`) so a single test process can exercise both states.
+ */
+export function isPtyUseConptyDllEnabled(): boolean {
+  return process.env.LOOM_PTY_USE_CONPTY_DLL === "1";
+}
+
+/**
  * Card C1 (Codescape fleet-daemon wiring epic `369dde3c`, LOOM_DEV-gated): the ONE shared working
  * directory BOTH `codescape ingest` and `codescape serve` must be spawned from — both commands resolve
  * their `.codescape` state dir relative to `process.cwd()`, so ingest and serve sharing this exact cwd is

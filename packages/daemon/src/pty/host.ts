@@ -17,7 +17,7 @@ import { readContextStats, type ContextStats } from "../sessions/context.js";
 import { engineTranscriptExists, engineTranscriptPath } from "../sessions/transcript.js";
 import { detectUsageLimit, isWeeklyUsageLimitSentinel, rateLimitedUntil } from "../orchestration/usage-limit.js";
 import { detectBarePastePlaceholderTripwire, isPasteRecoveryAttempt, buildPasteRecoveryText, PASTE_RECOVERY_TAG, detectPastePlaceholderLengthLoss, PASTE_LOSS_CALIBRATED_BYTES_PER_LINE, PASTE_LOSS_EXPLAIN_WINDOW, computeWrittenLineCounts, type PasteLengthLossCandidate, type WrittenLineCountEntry } from "../orchestration/paste-tripwire.js";
-import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled } from "../paths.js";
+import { PORT, LOGS_DIR, ENSURE_OBSIDIAN_SCRIPT, sessionScratchDir, isLoomDev, isCodescapeSupervisorEnabled, isPtyUseConptyDllEnabled } from "../paths.js";
 import { loomVenvBin, ensurePythonPackageAsync } from "../python/venv.js";
 import type { EnsurePythonPackageOpts, EnsurePythonResult, ProvisionOutcome } from "../python/venv.js";
 import { resolveCapabilityServer, type CapabilityDefRow } from "../capabilities/registry.js";
@@ -3863,12 +3863,15 @@ export class PtyHost {
     for (const [k, v] of Object.entries(process.env)) if (v !== undefined) env[k] = v;
     // eslint-disable-next-line no-console
     console.log(`[pty] spawnShell ${opts.id} bin=${bin} cwd=${opts.cwd}`);
+    // Card 03016805: useConptyDll is a NO-OP on non-Windows and, on Windows, a no-op unless
+    // LOOM_PTY_USE_CONPTY_DLL=1 (default OFF) — see isPtyUseConptyDllEnabled's own doc.
     return spawn(bin, opts.args, {
       name: "xterm-256color",
       cols: opts.geometry.cols,
       rows: opts.geometry.rows,
       cwd: opts.cwd,
       env,
+      useConptyDll: isPtyUseConptyDllEnabled(),
     });
   }
 
@@ -4045,12 +4048,17 @@ export class PtyHost {
     const argsLog = capabilitySecrets.length ? redactSecrets(JSON.stringify(args), capabilitySecrets) : JSON.stringify(args);
     // eslint-disable-next-line no-console
     console.log(`[pty] spawn ${opts.sessionId} bin=${bin} cwd=${opts.cwd} resume=${opts.resumeId ?? "none"} args=${argsLog}`);
+    // Card 03016805: useConptyDll is a NO-OP on non-Windows and, on Windows, a no-op unless
+    // LOOM_PTY_USE_CONPTY_DLL=1 (default OFF) — see isPtyUseConptyDllEnabled's own doc. When on, node-pty's
+    // WindowsPtyAgent.kill() takes the branch that skips forking conpty_console_list_agent (the confirmed
+    // AttachConsole-failed trigger) entirely — this does NOT flip the production default.
     const pty = spawn(bin, args, {
       name: "xterm-256color",
       cols: opts.geometry.cols,
       rows: opts.geometry.rows,
       cwd: opts.cwd,
       env,
+      useConptyDll: isPtyUseConptyDllEnabled(),
     });
     return pty;
   }
