@@ -116,12 +116,33 @@ const PID_RE = /\$\{\s*process\.pid\s*\}/;
 const RANDOM_RE = /Math\.random\(\)|randomUUID\(/;
 
 // The 6 pre-existing bare sites, as of this card. NOT part of 11a25f10's fix scope (that sweep was
-// page-capped and never claimed exhaustiveness — see its own "100+ sites — a FLOOR" framing) and NOT fixed
-// by this card either (DoD-5: "do not re-sweep"). Two of the four worktrees.mjs sites build a path used only
-// to assert non-existence (a collision there would not change the assertion's outcome), which is why they
-// were not urgent enough to have been caught by 11a25f10 — recorded here as a fact about the corpus, not a
-// safety claim; nobody has audited whether the other two (inbox-pull.mjs's two db-file sites) are actually
-// benign.
+// page-capped and never claimed exhaustiveness — see its own "100+ sites — a FLOOR" framing).
+//
+// worktrees.mjs (4 sites, NOT FIXED — DoD-5 of card fd849a45: no action expected, defensible as-is): every
+// one builds a path whose test outcome is governed by an INJECTED fake (gitFactory/removeDir) or by the
+// path's own asserted absence, never by real disk contents found AT that literal path — `ghostPath` (grep
+// `const ghostPath`) is asserted "not on disk → fs.rm no-ops"; `stuckPath` (grep `const stuckPath`) drives a
+// stubbed gitFactory plus a never-resolving removeDir, so the literal path value never reaches real fs/git at
+// all; `goneTarget` (grep `const goneTarget`) and `noRepoPath` (grep `const noRepoPath`) are asserted-absent
+// by construction (an already-gone removal target / a nonexistent repo path). A collision between two
+// evaluations of any of these would not change the assertion's outcome — recorded here as a fact about the
+// corpus, not a safety claim, so a future reader doesn't re-triage them from scratch.
+//
+// inbox-pull.mjs (2 sites, AUDITED 2026-08-04 by card fd849a45, left AS-IS — no fix needed): the `dbFile`
+// assigned from `` `svc-${Date.now()}.db` `` (grep "svc-\${Date.now()}") and the one assigned from
+// `` `surface-${Date.now()}.db` `` (grep "surface-\${Date.now()}") each sit inside their own bare top-level
+// `{ }` scoping block — (S) and (T) respectively — that this standalone script executes LINEARLY,
+// TOP-TO-BOTTOM, EXACTLY ONCE per process — no wrapping function, loop, or hook, and the file is never
+// imported by anything else (verified: a repo-wide grep for "inbox-pull" turns up only comment references in
+// gate-queue.mjs/gate-history.mjs/orchestration.ts, never an import); it runs ONLY as a fresh child process
+// spawned per invocation (test-daemon.mjs's `runOne`, or a direct `node test/inbox-pull.mjs`). So each
+// `Date.now()` call here fires exactly once per process — the same-process axis Tier B actually collides on
+// is structurally absent, despite the indentation making PROXY 1 flag these as Tier-B-shaped. Cross-process:
+// the enclosing `tmpHome` (grep `const tmpHome = path.join(os.tmpdir()`, near the top of the file, before the
+// (H)/(S)/(T) blocks) is `` `loom-inbox-${Date.now()}-${process.pid}` `` — ALREADY pid-qualified — so two
+// concurrently-running processes can never share a `tmpHome`, and therefore never share the resulting
+// `dbFile` path either, regardless of the inner literal's own missing pid suffix. Both axes closed by
+// construction; no fix needed.
 const KNOWN_BARE_DEBT = new Map([
   ["inbox-pull.mjs", [
     "const dbFile = path.join(tmpHome, `svc-${Date.now()}.db`);",
@@ -302,7 +323,7 @@ for (const file of files) {
 check("sanity: merge-spawn-tracked.mjs's current (fixed) passMarker9 line is present in KNOWN_TIER_B_DEBT",
   baselineHas(KNOWN_TIER_B_DEBT, "merge-spawn-tracked.mjs", "const passMarker = path.join(os.tmpdir(), `loom-mst-passmarker9-${Date.now()}-${process.pid}.flag`);"));
 
-check(`no NEW bare clock-derived-path sites outside the baseline (found ${newBareViolations.length}; ${knownBareDebtSeen} known-debt sites carried forward, unaudited)`,
+check(`no NEW bare clock-derived-path sites outside the baseline (found ${newBareViolations.length}; ${knownBareDebtSeen} known-debt sites carried forward — see the KNOWN_BARE_DEBT header for per-site audit status, not all 6 unaudited)`,
   newBareViolations.length === 0);
 for (const v of newBareViolations) console.log(`  NEW-BARE  ${v.file}:${v.lineNo}  ${v.text}`);
 
@@ -311,6 +332,6 @@ check(`no NEW indented/fn-def pid-only (Tier-B-candidate) clock-derived-path sit
 for (const v of newTierBViolations) console.log(`  NEW-TIER-B  ${v.file}:${v.lineNo}  ${v.text}`);
 
 console.log(failures === 0
-  ? `\n✅ ALL PASS — no new/regressed clock-derived-filesystem-path sites. NOT a completed census: ${knownBareDebtSeen} bare + ${knownTierBDebtSeen} Tier-B-candidate sites above are UNAUDITED debt carried forward from before this guard existed, not cleared code. This guard also does not see a clock token joined into a path on a LATER line than where it's derived (see header) — a green run here is not proof no such site exists.`
+  ? `\n✅ ALL PASS — no new/regressed clock-derived-filesystem-path sites. NOT a completed census: ${knownBareDebtSeen} bare sites carried forward (2 AUDITED benign by card fd849a45, 4 defensible-as-is via injected-fake/non-existence — see the KNOWN_BARE_DEBT header) + ${knownTierBDebtSeen} Tier-B-candidate sites (still UNAUDITED debt, not cleared code) above. This guard also does not see a clock token joined into a path on a LATER line than where it's derived (see header) — a green run here is not proof no such site exists.`
   : `\n❌ ${failures} FAILURE(S).`);
 process.exit(failures === 0 ? 0 : 1);
