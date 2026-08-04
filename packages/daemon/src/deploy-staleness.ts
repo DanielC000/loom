@@ -52,8 +52,13 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * 3×`GIT_TIMEOUT_MS` of the event loop fully blocked (this is a synchronous `execFileSync`, unlike the
  * async claude-version cache — see the call-site doc at `manager-prompt.ts` for why that's an acceptable
  * tradeoff here) PLUS the (cheap, synchronous `fs`) dist scans. Manager spawns can BURST (boot-reconcile
- * resumes every manager across every project at once), so keep the git timeout constant small — a local
- * `git log` is normally tens of ms; the timeout only matters when something is already wrong. NEVER
+ * resumes every manager across every project at once), so keep the git timeout constant small. Card
+ * c6e7ebe7 measured this call directly on Windows: 147–275ms at IDLE, 220–465ms at 3× CPU
+ * oversubscription — NOT the "tens of ms" this comment used to claim (a real 15–27% of the 1s budget
+ * consumed at idle alone). Still a comfortable ~4× margin, and no observed in-flight call — idle or
+ * oversubscribed — has ever come close to the timeout (see that card for the full data); a *different*
+ * tail shows up only in the outer node process's own scheduling latency under heavy oversubscription,
+ * which is not a git-call tail and must not be conflated with one. NEVER
  * throws — any failure (not a git checkout, e.g. a packaged `loomctl` install; git unavailable; dist not
  * built; a timeout) degrades to `{available:false, reason}`, never a false stale/clean verdict — and this
  * applies uniformly to BOTH the restart signal and the web signal: a failure computing either degrades
@@ -83,6 +88,20 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
  * This does NOT apply to the web signal (`webStale`/`webCommitsBehind`/`webDistBuiltAt`) — the daemon
  * serves `packages/web/dist` live from disk on every request (see the module doc above), so there is no
  * "loaded at process start" gap for web assets to fall into; `webBuildMaxMs` alone stays correct.
+ *
+ * Card c6e7ebe7 — investigated the `GIT_TIMEOUT_MS` margin above and considered, then REJECTED, two
+ * further changes. (b) Distinguishing a TIMEOUT specifically from every other `unavailable()` cause (no
+ * `.git`, no HEAD commit, git not installed) was considered because a timed-out call degrades to the same
+ * `{available:false, reason}` shape as any other unreadable-repo case. But the one consumer that treats
+ * `available:false` as silent — `composeManagerStartupPrompt` in `manager-prompt.ts` — already does so
+ * DELIBERATELY and UNIFORMLY for every `available:false` reason, not just a timeout (see that call site's
+ * own doc: this is the DoD #2 cry-wolf precedent, not an oversight). Singling out timeouts there would be
+ * inconsistent with that existing, considered policy, not a fix to it; anyone who wants "unavailable"
+ * itself surfaced already can — `served_status` returns the raw `available`/`reason` fields uncollapsed.
+ * (c) Raising or retrying the timeout was rejected for lack of evidence: no observed git call, idle or at
+ * up to 9× CPU oversubscription, has ever approached this budget (see the card for the full measurement).
+ * Widening a timeout with no observed stall to justify it is exactly the kind of change this project has
+ * a standing rule against.
  *
  * ⚠️ KNOWN LIMITATION — this is a DATE comparison, not an ANCESTRY computation, for BOTH signals.
  * `commitsBehind`/`webCommitsBehind` count commits whose COMMITTER DATE is later than the relevant dist's
